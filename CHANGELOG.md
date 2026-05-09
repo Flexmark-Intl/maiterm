@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.10.5
+
+- Move scheduled backup timer from the webview to a Rust background task — backups now keep firing even if the main window's frontend hangs (which previously stopped the setInterval that drove them)
+- Persist the diagnostics memory trend to disk (`aiterm-memory-trend.json`) and sample RSS every 60 seconds in the background, capped at 12 hours of history; the buffer is reseeded from disk on startup so post-mortem analysis after a freeze still has the RSS curve leading up to it
+- Stop mutating the memory trend ring buffer as a side effect of `getDiagnostics` — reads are now pure and don't perturb the data being analyzed
+
 ## v1.10.4
 
 - Guard state save against stale/zombie aiTerm processes overwriting newer data — disk mtime is checked before every save, and conflicting writes are preserved as `aiterm-state.conflict-<ms>.json` instead of clobbering the live state
