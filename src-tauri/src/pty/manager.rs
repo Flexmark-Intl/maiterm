@@ -605,28 +605,20 @@ fn is_ssh_command(cmd: &str) -> bool {
     matches!(basename, "ssh" | "mosh" | "autossh")
 }
 
-/// Check if a command is a non-interactive program that spawns ssh internally
-/// (scp, rsync, git, sftp, etc.). SSH children of these should not be treated
-/// as interactive SSH sessions for MCP bridge purposes.
-#[cfg(unix)]
-fn is_ssh_wrapper(cmd: &str) -> bool {
-    let base = cmd.split_whitespace().next().unwrap_or("");
-    let basename = std::path::Path::new(base)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(base);
-    matches!(basename, "scp" | "rsync" | "git" | "sftp" | "git-remote-ssh")
-}
-
 /// Get the foreground process command via ps (Unix)
+///
+/// We rely on the tty's foreground process group (tpgid) instead of "any ssh
+/// descendant of the shell": a subprocess that the foreground app happens to
+/// spawn (e.g. Claude running ssh as a worker for one of its Bash tool calls)
+/// must NOT make the shell look remote. Only the actual foreground job counts.
 #[cfg(unix)]
 fn get_foreground_command(shell_pid: u32) -> Option<String> {
     // macOS BSD ps uses -x (show processes without controlling terminal)
     // Linux procps uses -e (select all processes) for equivalent behavior
     #[cfg(target_os = "macos")]
-    let args: &[&str] = &["-o", "pid=,ppid=,command=", "-x"];
+    let args: &[&str] = &["-o", "pid=,pgid=,tpgid=,command=", "-x"];
     #[cfg(target_os = "linux")]
-    let args: &[&str] = &["-e", "-o", "pid=,ppid=,command="];
+    let args: &[&str] = &["-e", "-o", "pid=,pgid=,tpgid=,command="];
 
     let output = std::process::Command::new("ps")
         .args(args)
@@ -635,64 +627,59 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let mut children: std::collections::HashMap<u32, Vec<(u32, String)>> =
-        std::collections::HashMap::new();
+    struct Row {
+        pid: u32,
+        pgid: u32,
+        tpgid: i32,
+        cmd: String,
+    }
 
+    let mut rows: Vec<Row> = Vec::new();
     for line in stdout.lines() {
         let trimmed = line.trim();
         // split_whitespace collapses multiple spaces — critical because ps
-        // right-justifies PID/PPID columns with variable-width padding.
+        // right-justifies the numeric columns with variable-width padding.
         let mut iter = trimmed.split_whitespace();
         let pid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
         };
-        let ppid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
+        let pgid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
         };
-        // Remainder is the command — rejoin with spaces (split_whitespace
-        // consumed whitespace between tokens, but command args are space-separated)
+        let tpgid: i32 = match iter.next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
         let cmd: String = iter.collect::<Vec<&str>>().join(" ");
         if cmd.is_empty() {
             continue;
         }
-        children.entry(ppid).or_default().push((pid, cmd));
+        rows.push(Row { pid, pgid, tpgid, cmd });
     }
 
-    let mut current_pid = shell_pid;
-    let mut ssh_cmd: Option<String> = None;
-    let mut parent_cmd: Option<String> = None;
+    let shell_row = rows.iter().find(|r| r.pid == shell_pid)?;
 
-    loop {
-        if let Some(kids) = children.get(&current_pid) {
-            if kids.is_empty() {
-                break;
-            }
-            // Prefer the SSH child if one exists (shell may have background jobs)
-            let chosen = kids
-                .iter()
-                .find(|(_, cmd)| is_ssh_command(cmd))
-                .or_else(|| kids.first());
-            if let Some((kid_pid, kid_cmd)) = chosen {
-                if is_ssh_command(kid_cmd) {
-                    // Don't count ssh children of non-interactive wrappers (scp, rsync, git, sftp)
-                    let is_wrapper_child = parent_cmd.as_ref().map_or(false, |p| is_ssh_wrapper(p));
-                    if !is_wrapper_child {
-                        ssh_cmd = Some(kid_cmd.clone());
-                    }
-                }
-                parent_cmd = Some(kid_cmd.clone());
-                current_pid = *kid_pid;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
+    // tpgid <= 0 → no controlling-tty foreground pgid (rare for an interactive
+    // shell, but treat as "no foreground command").
+    // tpgid == shell pgid → the shell itself is the foreground job (sitting at
+    // its prompt), so any ssh elsewhere in the tree is a background/worker job.
+    if shell_row.tpgid <= 0 || (shell_row.tpgid as u32) == shell_row.pgid {
+        return None;
     }
 
-    ssh_cmd
+    let tpgid = shell_row.tpgid as u32;
+    let leader = rows.iter().find(|r| r.pid == tpgid)?;
+
+    // Only report ssh when the foreground job leader itself is ssh. Subprocesses
+    // an app spawns under the hood share its pgid but aren't what the user is
+    // interacting with.
+    if is_ssh_command(&leader.cmd) {
+        Some(leader.cmd.clone())
+    } else {
+        None
+    }
 }
 
 #[cfg(windows)]
