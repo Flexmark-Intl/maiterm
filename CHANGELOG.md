@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.10.8
+
+- Drop the `/aiterm init` slash-command argument from the default Claude auto-resume command — recent Claude Code releases became unreliable about running the slash command on `--resume`, which is the dominant use case. The SessionStart hook (local and SSH) already tells Claude to call `initSession` on every new, resumed, forked, or compacted session, so the extra argument was redundant. Existing tabs with the old template form (including the legacy `claude --resume <interpolated-uuid> "/aiterm init"` variant from older releases) are auto-migrated to the new form on startup and on archived-tab restore
+
 ## v1.10.7
 
 - Fix QuickOpen (double-Alt) trying to list files over SSH on a local terminal that had merely *used* ssh earlier in the session (e.g. Claude Code running ssh via its Bash tool). SSH-vs-local detection now reads the controlling tty's foreground process group (tpgid) and only reports ssh when the pgid leader at that pid is itself an ssh/mosh/autossh process — subprocesses inherit the foreground app's pgid but aren't what the user is interacting with. Side note: `sudo ssh host` and `bash -c "ssh host"` are no longer auto-detected (leader is sudo/bash, not ssh)
