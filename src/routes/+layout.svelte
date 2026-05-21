@@ -240,6 +240,16 @@
       updaterStore.checkForUpdates(false);
     }).then(unlisten => { unlistenCheckUpdates = unlisten; });
 
+    // Periodic silent update check — the startup check only runs once, so a
+    // long-running window would otherwise never notice a new release. Re-reads
+    // the preference each tick so toggling auto-check off stops further checks.
+    const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+    const updateCheckTimer = setInterval(() => {
+      if (preferencesStore.autoCheckUpdates) {
+        updaterStore.checkForUpdates(true).catch(() => {});
+      }
+    }, UPDATE_CHECK_INTERVAL_MS);
+
     // Window > Clear Back/Forward History menu event
     let unlistenClearNavHistory: (() => void) | undefined;
     listen('clear-nav-history', () => {
@@ -808,6 +818,7 @@
       unlistenMove?.();
       clearTimeout(geometryTimer);
       clearInterval(monitorPollTimer);
+      clearInterval(updateCheckTimer);
       if (closeConfirmTimer) clearTimeout(closeConfirmTimer);
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
