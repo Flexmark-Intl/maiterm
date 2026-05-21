@@ -8,6 +8,7 @@
   import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete';
   import { search, searchKeymap, highlightSelectionMatches, getSearchQuery } from '@codemirror/search';
   import { ViewPlugin } from '@codemirror/view';
+  import { contentSmartQuoteFix } from '$lib/utils/smartQuotes';
   import type { EditorFileInfo } from '$lib/tauri/types';
   import { readFile, readFileBase64, writeFile, scpReadFile, scpReadFileBase64, scpWriteFile, watchFile, unwatchFile, getFileMtime, watchRemoteFile, unwatchRemoteFile, getRemoteFileMtime } from '$lib/tauri/commands';
   import { loadLanguageExtension, detectLanguageFromContent, isImageFile, getImageMimeType, isPdfFile, isMarkdownFile } from '$lib/utils/languageDetect';
@@ -549,6 +550,7 @@
             highlightSelectionMatches(),
             wrapCompartment.of([]),
             search({ top: true }),
+            contentSmartQuoteFix,
             keymap.of([
               ...closeBracketsKeymap,
               ...defaultKeymap,
@@ -860,6 +862,7 @@
         b: {
           doc: editorContent,
           extensions: [
+            contentSmartQuoteFix,
             lineNumbers(),
             highlightSpecialChars(),
             highlightActiveLine(),
@@ -1017,6 +1020,7 @@
           highlightSelectionMatches(),
           wrapCompartment.of([]),
           search({ top: true }),
+          contentSmartQuoteFix,
           // No-results indicator: toggle class on editor wrapper when search has no matches
           ViewPlugin.define((view) => {
             let prevNoResults = false;

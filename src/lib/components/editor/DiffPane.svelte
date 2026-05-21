@@ -7,6 +7,7 @@
   import * as commands from '$lib/tauri/commands';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { buildEditorExtension } from '$lib/utils/editorTheme';
+  import { contentSmartQuoteFix } from '$lib/utils/smartQuotes';
   import { getTheme } from '$lib/themes';
   import { dispatch as dispatchToast } from '$lib/stores/notificationDispatch';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -77,7 +78,7 @@
       b: {
         doc: diffContext.new_content,
         extensions: [
-          ...(readOnly ? [EditorState.readOnly.of(true)] : []),
+          ...(readOnly ? [EditorState.readOnly.of(true)] : [contentSmartQuoteFix]),
           lineNumbers(),
           highlightSpecialChars(),
           highlightActiveLine(),

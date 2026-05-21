@@ -25,6 +25,7 @@
   import { isModKey, isMac, modSymbol } from '$lib/utils/platform';
   import { open as dialogOpen, save as dialogSave } from '@tauri-apps/plugin-dialog';
   import { openFileFromTerminal } from '$lib/utils/openFile';
+  import { installGlobalSmartQuoteFix } from '$lib/utils/smartQuotes';
   import QuickOpen from '$lib/components/QuickOpen.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
@@ -135,6 +136,11 @@
       e.preventDefault();
     }, true);
 
+    // Strip macOS smart-quote substitution from all text inputs/textareas
+    // app-wide, so straight quotes typed into search/rename/notes/preferences
+    // fields aren't silently turned into curly quotes that break code search.
+    const cleanupSmartQuotes = installGlobalSmartQuoteFix();
+
     // Load preferences and clean up stale default triggers
     preferencesStore.load().then(() => {
       const seeded = seedDefaultTriggers(preferencesStore.triggers, preferencesStore.hiddenDefaultTriggers);
@@ -159,6 +165,7 @@
       return () => {
         window.removeEventListener('error', onWindowError);
         window.removeEventListener('unhandledrejection', onUnhandledRejection);
+        cleanupSmartQuotes();
         unlistenPrefs?.();
         detachConsole?.();
       };
@@ -822,6 +829,7 @@
       if (closeConfirmTimer) clearTimeout(closeConfirmTimer);
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
+      cleanupSmartQuotes();
       unlistenPrefs?.();
       detachConsole?.();
     };
