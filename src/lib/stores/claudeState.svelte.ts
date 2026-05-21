@@ -30,7 +30,14 @@ export interface ClaudeTabSession {
   toolName?: string;
   /** Human-readable summary of what the tool is doing */
   toolDetail?: string;
+  /** Only meaningful while idle: false once Claude finishes (unread), true after
+   *  the user has viewed the tab. Reset on each fresh transition into idle. */
+  read?: boolean;
 }
+
+/** Workspace-level rollup of Claude state across a set of tabs. `idle` is split
+ *  into unread/read so the sidebar can show a filled vs hollow "done" dot. */
+export type WorkspaceClaudeState = 'permission' | 'active' | 'idle-unread' | 'idle-read';
 
 /** Build a human-readable action string from tool name + input. */
 function buildActionString(toolName: string, toolInput: Record<string, unknown> | null): string {
@@ -83,8 +90,10 @@ function createClaudeStateStore() {
   function setState(tabId: string, sessionId: string, state: ClaudeState, toolName?: string, toolDetail?: string) {
     const current = sessions.get(tabId);
     if (current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
+    // Entering idle fresh = unread; staying idle preserves whatever read flag we had.
+    const read = state === 'idle' ? (current?.state === 'idle' ? current.read : false) : undefined;
     sessions = new Map(sessions);
-    sessions.set(tabId, { sessionId, state, toolName, toolDetail });
+    sessions.set(tabId, { sessionId, state, toolName, toolDetail, read });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
     // Clear alert when leaving permission state (but only if we set it).
@@ -167,20 +176,36 @@ function createClaudeStateStore() {
 
     /** Highest-priority Claude state across the given tabs, or null.
      *  Priority: permission > active > idle. Lets the workspace sidebar
-     *  mirror the per-tab indicators (blue = working, green = done). */
-    getWorkspaceClaudeState(tabIds: string[]): ClaudeState | null {
+     *  mirror the per-tab indicators (blue = working, green = done). Idle is
+     *  split into unread/read: an unread "done" outranks a read one, so the
+     *  workspace dot stays filled until every finished agent has been seen. */
+    getWorkspaceClaudeState(tabIds: string[]): WorkspaceClaudeState | null {
       let hasActiveTab = false;
-      let hasIdleTab = false;
+      let hasIdleUnread = false;
+      let hasIdleRead = false;
       for (const id of tabIds) {
         const s = sessions.get(id);
         if (!s) continue;
         if (s.state === 'permission') return 'permission';
         if (s.state === 'active') hasActiveTab = true;
-        else if (s.state === 'idle') hasIdleTab = true;
+        else if (s.state === 'idle') {
+          if (s.read) hasIdleRead = true;
+          else hasIdleUnread = true;
+        }
       }
       if (hasActiveTab) return 'active';
-      if (hasIdleTab) return 'idle';
+      if (hasIdleUnread) return 'idle-unread';
+      if (hasIdleRead) return 'idle-read';
       return null;
+    },
+
+    /** Mark a finished (idle) Claude result as read — called when the user
+     *  views the tab. No-op unless the tab is currently idle and still unread. */
+    markRead(tabId: string) {
+      const s = sessions.get(tabId);
+      if (!s || s.state !== 'idle' || s.read) return;
+      sessions = new Map(sessions);
+      sessions.set(tabId, { ...s, read: true });
     },
 
     async init() {

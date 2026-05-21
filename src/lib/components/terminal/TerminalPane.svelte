@@ -1040,6 +1040,15 @@
     }
   });
 
+  // Mark a finished Claude result as "read" once its tab is the visible one —
+  // whether the user switched to it, or it finished while already in view.
+  $effect(() => {
+    const cs = claudeStateStore.getState(tabId);
+    if (visible && cs?.state === 'idle' && !cs.read) {
+      untrack(() => claudeStateStore.markRead(tabId));
+    }
+  });
+
   // WebGL renderer: load when visible, dispose when hidden to stay within
   // the browser's WebGL context limit (~8-16 per page).
   $effect(() => {

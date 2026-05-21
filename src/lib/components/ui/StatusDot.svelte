@@ -5,17 +5,18 @@
     color?: 'accent' | 'green' | 'red' | 'yellow' | 'dim';
     tooltip?: string;
     pulse?: boolean;
+    hollow?: boolean;
   }
 
-  let { color = 'accent', tooltip, pulse = false }: Props = $props();
+  let { color = 'accent', tooltip, pulse = false, hollow = false }: Props = $props();
 </script>
 
 {#if tooltip}
   <Tooltip text={tooltip}>
-    <span class="status-dot {color}" class:pulse></span>
+    <span class="status-dot {color}" class:pulse class:hollow></span>
   </Tooltip>
 {:else}
-  <span class="status-dot {color}" class:pulse></span>
+  <span class="status-dot {color}" class:pulse class:hollow></span>
 {/if}
 
 <style>
@@ -24,6 +25,7 @@
     height: 6px;
     border-radius: 50%;
     flex-shrink: 0;
+    box-sizing: border-box;
   }
 
   .accent { background: var(--accent); }
@@ -31,6 +33,14 @@
   .red { background: var(--red); }
   .yellow { background: var(--yellow); }
   .dim { background: var(--fg-dim); }
+
+  /* Hollow: ring instead of filled dot (e.g. a "done & seen" agent). */
+  .hollow { background: transparent; border-width: 1.5px; border-style: solid; }
+  .hollow.accent { border-color: var(--accent); }
+  .hollow.green { border-color: var(--green); }
+  .hollow.red { border-color: var(--red); }
+  .hollow.yellow { border-color: var(--yellow); }
+  .hollow.dim { border-color: var(--fg-dim); }
 
   .pulse {
     animation: status-dot-pulse 1.5s ease-in-out infinite;

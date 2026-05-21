@@ -4,7 +4,7 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
-  import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { claudeStateStore, type WorkspaceClaudeState } from '$lib/stores/claudeState.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import * as commands from '$lib/tauri/commands';
   import { modSymbol } from '$lib/utils/platform';
@@ -111,7 +111,7 @@
     return activityStore.getWorkspaceTabState(tabIds);
   }
 
-  function workspaceClaudeState(workspaceId: string): 'active' | 'idle' | 'permission' | null {
+  function workspaceClaudeState(workspaceId: string): WorkspaceClaudeState | null {
     if (workspaceId === workspacesStore.activeWorkspaceId) return null;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return null;
@@ -480,7 +480,7 @@
           {@const wsClaude = workspaceClaudeState(workspace.id)}
           {@const wsActivity = workspaceHasActivity(workspace.id)}
           {#if preferencesStore.showWorkspaceTabCount}
-            <span class="tab-count-badge" class:active={workspace.id === workspacesStore.activeWorkspaceId} class:status-alert={wsTabState === 'alert'} class:status-question={wsTabState === 'question'} class:status-claude-active={!wsTabState && wsClaude === 'active'} class:status-claude-idle={!wsTabState && wsClaude === 'idle'} class:status-activity={!wsTabState && !wsClaude && wsActivity}>{workspace.panes.reduce((sum, p) => sum + p.tabs.length, 0)}</span>
+            <span class="tab-count-badge" class:active={workspace.id === workspacesStore.activeWorkspaceId} class:status-alert={wsTabState === 'alert'} class:status-question={wsTabState === 'question'} class:status-claude-active={!wsTabState && wsClaude === 'active'} class:status-claude-idle={!wsTabState && wsClaude === 'idle-unread'} class:status-claude-idle-read={!wsTabState && wsClaude === 'idle-read'} class:status-activity={!wsTabState && !wsClaude && wsActivity}>{workspace.panes.reduce((sum, p) => sum + p.tabs.length, 0)}</span>
           {:else}
             <span class="workspace-indicator">
               {#if wsTabState === 'alert'}
@@ -489,8 +489,10 @@
                 <span class="state-emoji">&#x2753;</span>
               {:else if wsClaude === 'active'}
                 <StatusDot color="accent" pulse tooltip="Claude is working" />
-              {:else if wsClaude === 'idle'}
+              {:else if wsClaude === 'idle-unread'}
                 <StatusDot color="green" tooltip="Claude finished" />
+              {:else if wsClaude === 'idle-read'}
+                <StatusDot color="green" hollow tooltip="Claude finished (seen)" />
               {:else if workspace.id === workspacesStore.activeWorkspaceId}
                 >
               {:else if wsActivity}
@@ -785,6 +787,10 @@
 
   .tab-count-badge.status-claude-idle {
     border-color: var(--green);
+  }
+
+  .tab-count-badge.status-claude-idle-read {
+    border-color: color-mix(in srgb, var(--green) 45%, transparent);
   }
 
   .tab-count-badge.status-activity {
