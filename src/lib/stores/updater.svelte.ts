@@ -1,7 +1,10 @@
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
+import { invoke } from '@tauri-apps/api/core';
 import { toastStore } from './toasts.svelte';
+import { terminalsStore } from './terminals.svelte';
+import * as commands from '$lib/tauri/commands';
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
 
@@ -139,7 +142,21 @@ function createUpdaterStore() {
     dismissed = true;
   }
 
-  function restart() {
+  /**
+   * Flush state to disk, then relaunch. relaunch() hard-kills the process
+   * without firing onCloseRequested/quit-requested, so the normal shutdown
+   * save path never runs — we must mirror it here or recently-changed state
+   * (tab names, scrollback, geometry) is lost across the update.
+   */
+  async function restart() {
+    try {
+      const monitorCount = await commands.getMonitorCount().catch(() => 1);
+      await commands.saveWindowGeometry(monitorCount).catch(() => {});
+      await terminalsStore.saveAllScrollback();
+      await invoke('sync_state');
+    } catch (e) {
+      logError(`Pre-relaunch state flush failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     relaunch();
   }
 

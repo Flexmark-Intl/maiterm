@@ -403,6 +403,12 @@ pub fn rename_tab(
             }
         }
     }
+    // Persist eagerly: renames otherwise live only in memory until some other
+    // command triggers save_state() or a clean shutdown runs sync_state. An
+    // updater relaunch (or any uncatchable exit) would lose the rename.
+    let data_clone = app_data.clone();
+    drop(app_data);
+    let _ = save_state(&data_clone);
     Ok(())
 }
 
