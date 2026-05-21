@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.12.0
+
+- Add a read/unread state to the Claude agent-done indicators. When an agent finishes, its tab shows a filled green dot (unread); once you view the tab it becomes a hollow green ring (seen). This is rolled up to the workspace sidebar too — the workspace dot stays a filled green dot until *every* finished agent in it has been seen, then goes hollow. Lets you tell at a glance which completed agents you still need to look at
+- Add an hourly background check for app updates so a long-running window notices new releases without a restart. The check is silent (only surfaces the update banner/toast if one is found) and respects the "automatically check for updates" preference
+
 ## v1.11.0
 
 - Add a workspace-level agent-state indicator to the sidebar, driven by Claude Code hooks (#2). The rolled-up workspace dot now mirrors the per-tab indicators — blue pulse while any agent is working, green once every agent in the workspace is done (waiting for input), and ❗ when an agent needs permission. Generic terminal output is demoted to a dim dot so a finished agent is no longer indistinguishable from any other line of output. Aggregation uses batch semantics (`permission > active > idle`): the dot only turns green when the whole workspace has settled, so green unambiguously means "done"
