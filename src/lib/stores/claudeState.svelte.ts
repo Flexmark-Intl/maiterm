@@ -199,6 +199,30 @@ function createClaudeStateStore() {
       return null;
     },
 
+    /** Global rollup across ALL Claude sessions in every workspace. Returns the
+     *  highest-priority state, a representative tabId to jump to, and how many
+     *  agents are in that state. Priority: permission > active > idle-unread >
+     *  idle-read. Returns null when no Claude sessions exist anywhere. Powers
+     *  the always-visible "global agent" dot in the sidebar footer. */
+    getGlobalClaudeState(): { state: WorkspaceClaudeState; tabId: string; count: number } | null {
+      let permTab: string | undefined, activeTab: string | undefined;
+      let unreadTab: string | undefined, readTab: string | undefined;
+      let perm = 0, active = 0, unread = 0, read = 0;
+      for (const [tabId, s] of sessions) {
+        if (s.state === 'permission') { perm++; permTab ??= tabId; }
+        else if (s.state === 'active') { active++; activeTab ??= tabId; }
+        else if (s.state === 'idle') {
+          if (s.read) { read++; readTab ??= tabId; }
+          else { unread++; unreadTab ??= tabId; }
+        }
+      }
+      if (permTab) return { state: 'permission', tabId: permTab, count: perm };
+      if (activeTab) return { state: 'active', tabId: activeTab, count: active };
+      if (unreadTab) return { state: 'idle-unread', tabId: unreadTab, count: unread };
+      if (readTab) return { state: 'idle-read', tabId: readTab, count: read };
+      return null;
+    },
+
     /** Mark a finished (idle) Claude result as read — called when the user
      *  views the tab. No-op unless the tab is currently idle and still unread. */
     markRead(tabId: string) {

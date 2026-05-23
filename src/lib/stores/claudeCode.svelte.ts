@@ -190,7 +190,7 @@ function createClaudeCodeStore() {
     // Backend diagnostics: version, PTY count, orphans, state file, process stats
     const backend = await commands.getAppDiagnostics();
 
-    // Frontend diagnostics: terminal instances, WebGL state
+    // Frontend diagnostics: terminal instances, renderer state
     const instances = terminalsStore.instances;
     const terminalDetails: Record<string, unknown>[] = [];
     for (const [tabId, inst] of instances) {
@@ -201,7 +201,7 @@ function createClaudeCodeStore() {
       terminalDetails.push({
         tabId,
         ptyId: inst.ptyId,
-        webgl: terminalsStore.isWebgl(tabId),
+        canvasRenderer: terminalsStore.isCanvasRenderer(tabId),
         bufferLines: scrollInfo?.total_lines ?? 0,
         viewportRows: scrollInfo?.viewport_rows ?? 0,
         altBufferActive: inst.terminal.buffer.active === inst.terminal.buffer.alternate,
@@ -244,7 +244,7 @@ function createClaudeCodeStore() {
       ...backend,
       frontend: {
         terminal_instances: instances.size,
-        webgl_active: terminalDetails.filter(t => t.webgl).length,
+        canvas_renderer_active: terminalDetails.filter(t => t.canvasRenderer).length,
         terminals: terminalDetails,
         trigger_engine: triggerStats,
         render_fps: fps,

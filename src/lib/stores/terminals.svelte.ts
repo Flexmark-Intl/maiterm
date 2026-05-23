@@ -46,7 +46,7 @@ function createTerminalsStore() {
   /** Bumped on register/unregister so external $derived can track instance set changes. */
   let instanceVersion = $state(0);
   let searchVisibleFor = $state<string | null>(null);
-  let webglTabs = $state(new Set<string>());
+  let canvasTabs = $state(new Set<string>());
   let _shuttingDown = false;
   const splitContexts = new Map<string, SplitContext>();
   // PTY IDs that should NOT be killed on component destroy (e.g. tab moving between workspaces)
@@ -69,14 +69,14 @@ function createTerminalsStore() {
     get instances() { return instances; },
     get shuttingDown() { return _shuttingDown; },
     get searchVisibleFor() { return searchVisibleFor; },
-    isWebgl(tabId: string) { return webglTabs.has(tabId); },
+    isCanvasRenderer(tabId: string) { return canvasTabs.has(tabId); },
     markDirty(tabId: string) { dirtyTabs.add(tabId); },
     isDirty(tabId: string) { return dirtyTabs.has(tabId); },
     clearDirty(tabId: string) { dirtyTabs.delete(tabId); },
     markSpawning(tabId: string) { spawningTabs = new Set(spawningTabs).add(tabId); },
     isSpawning(tabId: string) { return spawningTabs.has(tabId); },
-    webglLoaded(tabId: string) { webglTabs = new Set(webglTabs).add(tabId); },
-    webglUnloaded(tabId: string) { const s = new Set(webglTabs); s.delete(tabId); webglTabs = s; },
+    canvasRendererLoaded(tabId: string) { canvasTabs = new Set(canvasTabs).add(tabId); },
+    canvasRendererUnloaded(tabId: string) { const s = new Set(canvasTabs); s.delete(tabId); canvasTabs = s; },
 
     preservePty(ptyId: string) {
       preservedPtyIds.add(ptyId);
@@ -146,7 +146,7 @@ function createTerminalsStore() {
     getInternalSizes() {
       return {
         instances: instances.size,
-        webgl_tabs: webglTabs.size,
+        canvas_renderer_tabs: canvasTabs.size,
         spawning_tabs: spawningTabs.size,
         split_contexts: splitContexts.size,
         preserved_pty_ids: preservedPtyIds.size,

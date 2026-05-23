@@ -6,7 +6,7 @@
   import { Terminal } from '@xterm/xterm';
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
-  import { WebglAddon } from '@xterm/addon-webgl';
+  import { CanvasAddon } from '@xterm/addon-canvas';
   import '@xterm/xterm/css/xterm.css';
   import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, scpUploadFiles, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
@@ -73,7 +73,7 @@
   let resizeObserver: ResizeObserver;
   let filePathLinkDisposable: { dispose: () => void } | null = null;
   let initialized = $state(false);
-  let webglAddon: WebglAddon | null = null;
+  let canvasAddon: CanvasAddon | null = null;
   let trackActivity = false;
   let visibilityGraceUntil = 0; // timestamp — suppress activity until this time
   let isAutoResume = $state(false);
@@ -1049,30 +1049,32 @@
     }
   });
 
-  // WebGL renderer: load when visible, dispose when hidden to stay within
-  // the browser's WebGL context limit (~8-16 per page).
+  // Canvas (2D) renderer: load when visible, dispose when hidden. Falls back to
+  // xterm's built-in DOM renderer if the addon throws. We previously used the
+  // WebGL renderer, but its backbuffer is alpha-blended (alpha:true,
+  // premultipliedAlpha:true) even though the terminal is opaque — so redrawn
+  // cells composited over the previous frame instead of opaquely replacing it,
+  // leaving ghost glyphs on animated/styled text (Claude Code spinners, diffs).
+  // The canvas renderer clears each cell opaquely before drawing, so it can't
+  // ghost; aiTerm renders only one bounded viewport (scrollback:0), so WebGL's
+  // scroll-perf advantage didn't apply here anyway.
   $effect(() => {
     if (!initialized || !terminal) return;
     if (visible) {
-      if (!webglAddon) {
+      if (!canvasAddon) {
         try {
-          webglAddon = new WebglAddon();
-          webglAddon.onContextLoss(() => {
-            webglAddon?.dispose();
-            webglAddon = null;
-            terminalsStore.webglUnloaded(tabId);
-          });
-          terminal.loadAddon(webglAddon);
-          terminalsStore.webglLoaded(tabId);
+          canvasAddon = new CanvasAddon();
+          terminal.loadAddon(canvasAddon);
+          terminalsStore.canvasRendererLoaded(tabId);
         } catch {
-          webglAddon = null;
+          canvasAddon = null;
         }
       }
     } else {
-      if (webglAddon) {
-        webglAddon.dispose();
-        webglAddon = null;
-        terminalsStore.webglUnloaded(tabId);
+      if (canvasAddon) {
+        canvasAddon.dispose();
+        canvasAddon = null;
+        terminalsStore.canvasRendererUnloaded(tabId);
       }
     }
   });

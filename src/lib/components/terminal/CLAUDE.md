@@ -78,9 +78,9 @@ Dragging a terminal tab to another workspace preserves the running PTY instead o
 ## xterm.js Notes
 
 - Terminal created with `new Terminal({ scrollback: 0, ... })` — Rust manages all scrollback
-- Required addons: FitAddon (resize), WebLinksAddon (clickable links), WebglAddon (GPU rendering)
+- Required addons: FitAddon (resize), WebLinksAddon (clickable links), CanvasAddon (renderer)
 - **No SerializeAddon or SearchAddon** — these are replaced by Rust commands
-- **WebGL renderer**: `@xterm/addon-webgl` provides GPU-accelerated rendering. Managed per-terminal visibility — loaded when tab becomes visible, disposed when hidden. Browsers cap WebGL contexts at ~8-16 per page, so only visible terminals hold contexts.
+- **Canvas renderer**: `@xterm/addon-canvas` (canvas 2D) is the renderer. Managed per-terminal visibility — loaded when tab becomes visible, disposed when hidden; falls back to xterm's built-in DOM renderer if the addon throws. **We do NOT use `@xterm/addon-webgl`**: its backbuffer is alpha-blended (`alpha:true, premultipliedAlpha:true`) even with an opaque terminal, so redrawn cells composite over the prior frame instead of opaquely replacing it — leaving ghost glyphs on animated/styled text (Claude Code spinners, diffs). The canvas renderer clears each cell opaquely, so it can't ghost. aiTerm renders only one bounded viewport (`scrollback:0`), so WebGL's scroll-perf advantage never applied.
 - Call `fitAddon.fit()` after container resize or font changes
 - Options can be updated at runtime via `terminal.options.propertyName`
 
@@ -168,7 +168,7 @@ When creating a new tab (Cmd+T / + button), the workspace's dominant CWD or SSH 
 
 - **TUI redraws cause false triggers and activity**: Detect redraws via `\e[A`, `\e[H`, `\e[J` in raw PTY data. In triggers: replace buffer instead of appending. In activity: skip `markActive()`.
 - **OSC 133 replayed from scrollback**: Gate the OSC 133 handler on `trackActivity` flag (delayed 2s after mount) to ignore stale sequences.
-- **WebGL context limits**: Browsers cap WebGL contexts at ~8-16 per page. Only load WebGL addon on visible terminals, dispose when hidden.
+- **Renderer ghosting (why not WebGL)**: `@xterm/addon-webgl`'s alpha-blended backbuffer leaves ghost glyphs on redrawn styled/animated cells (only foreground-changed cells ghost; plain text stays clean; a refit clears it). Use `@xterm/addon-canvas` instead. Renderer addon is still loaded only on visible terminals and disposed when hidden (memory hygiene).
 - **Hover state cleared before context menu interaction**: Use a plain (non-reactive) variable for the snapshot, set it at open time.
 - **Single quotes prevent ~ expansion**: `cd '~/path'` fails on remote. Use `cd ~/'path'` instead.
 - **Shell escaping layers**: JS → local shell → SSH → remote shell. `$SHELL` must not be escaped.

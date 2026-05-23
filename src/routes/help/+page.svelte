@@ -291,7 +291,7 @@
             <div class="tool-list">
               <div class="tool"><code>getPreferences</code> <span>Read aiTerm preferences</span></div>
               <div class="tool"><code>setPreference</code> <span>Update an aiTerm preference</span></div>
-              <div class="tool"><code>getDiagnostics</code> <span>App diagnostics &mdash; version, PTY stats, memory, WebGL state</span></div>
+              <div class="tool"><code>getDiagnostics</code> <span>App diagnostics &mdash; version, PTY stats, memory, renderer state</span></div>
               <div class="tool"><code>readLogs</code> <span>Tail the log file with level filter and search</span></div>
               <div class="tool"><code>createBackup</code> <span>Create a state backup on demand</span></div>
               <div class="tool"><code>sendNotification</code> <span>Send a toast or OS notification</span></div>

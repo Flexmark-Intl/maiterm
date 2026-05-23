@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
-  import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
   import { claudeStateStore, type WorkspaceClaudeState } from '$lib/stores/claudeState.svelte';
@@ -13,6 +13,7 @@
   import { openPreferencesWindow } from '$lib/tauri/commands';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { untrack } from 'svelte';
@@ -94,7 +95,28 @@
     }
   }
 
-  const activeTabWebgl = $derived(workspacesStore.activeTab ? terminalsStore.isWebgl(workspacesStore.activeTab.id) : false);
+  // Global Claude-agent rollup for the always-visible footer dot. Aggregates
+  // every agent across all workspaces so "does anything need me?" is glanceable
+  // even with the sidebar collapsed or workspaces below the fold. Click jumps to
+  // a representative tab of the dominant state.
+  const agentDot = $derived.by((): { color: 'accent' | 'green' | 'red' | 'dim'; pulse: boolean; hollow: boolean; tooltip: string; target: string | null } => {
+    const g = claudeStateStore.getGlobalClaudeState();
+    if (!g) return { color: 'dim', pulse: false, hollow: false, tooltip: 'No active agents', target: null };
+    const n = g.count;
+    switch (g.state) {
+      case 'permission':
+        return { color: 'red', pulse: true, hollow: false, target: g.tabId,
+          tooltip: n === 1 ? '1 agent needs permission — click to open' : `${n} agents need permission — click to open` };
+      case 'active':
+        return { color: 'accent', pulse: true, hollow: false, target: g.tabId,
+          tooltip: n === 1 ? '1 agent working — click to view' : `${n} agents working — click to view` };
+      case 'idle-unread':
+        return { color: 'green', pulse: false, hollow: false, target: g.tabId,
+          tooltip: n === 1 ? '1 agent finished — click to review' : `${n} agents finished — click to review` };
+      case 'idle-read':
+        return { color: 'green', pulse: false, hollow: true, tooltip: 'All agents idle', target: g.tabId };
+    }
+  });
 
   function workspaceHasActivity(workspaceId: string): boolean {
     if (workspaceId === workspacesStore.activeWorkspaceId) return false;
@@ -552,7 +574,15 @@
     <IconButton tooltip="Report Bug" size={24} style="border-radius:4px" onclick={() => shellOpen('https://github.com/Flexmark-Intl/aiterm/issues/new?labels=bug&type=bug')}><Icon name="bug" size={14} /></IconButton>
     <IconButton tooltip="Feature Request" size={24} style="border-radius:4px" onclick={() => shellOpen('https://github.com/Flexmark-Intl/aiterm/issues/new?type=feature')}><Icon name="lightbulb" size={14} /></IconButton>
     <span style="flex:1"></span>
-    <StatusDot color={activeTabWebgl ? 'green' : 'yellow'} tooltip={activeTabWebgl ? 'Rendering: WebGL' : 'Rendering: DOM'} />
+    <Tooltip text={agentDot.tooltip}>
+      <button
+        class="footer-agent-dot"
+        class:clickable={!!agentDot.target}
+        onclick={() => agentDot.target && navigateToTab(agentDot.target)}
+      >
+        <StatusDot color={agentDot.color} pulse={agentDot.pulse} hollow={agentDot.hollow} />
+      </button>
+    </Tooltip>
     <span style="flex:1"></span>
     <IconButton tooltip="Preferences ({modSymbol},)" size={24} style="border-radius:4px" onclick={openPreferencesWindow}><Icon name="settings" size={14} /></IconButton>
     <IconButton tooltip="Help ({modSymbol}/)" size={24} style="border-radius:4px" onclick={onhelp}><Icon name="help" size={14} /></IconButton>
@@ -911,6 +941,29 @@
     display: flex;
     justify-content: flex-end;
     gap: 4px;
+  }
+
+  /* Wrapper that gives the global-agent dot a comfortable click target (sized
+     to match the adjacent icon buttons) while keeping it visually a bare dot. */
+  .footer-agent-dot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    margin: 0;
+    padding: 0;
+    border-radius: 4px;
+    cursor: default;
+  }
+  .footer-agent-dot.clickable {
+    cursor: pointer;
+  }
+  .footer-agent-dot.clickable:hover {
+    background: var(--bg-light);
   }
 
 </style>
