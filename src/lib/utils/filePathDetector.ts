@@ -106,10 +106,18 @@ export function createFilePathLinkProvider(
       let match: RegExpExecArray | null;
 
       while ((match = COMBINED_PATTERN.exec(text)) !== null) {
-        const filePath = match[1];
+        const rawPath = match[1];
+        if (!rawPath) continue;
+
+        // Prose and LLM output routinely end a sentence right after a path
+        // ("Saved to /opt/foo/bar.md."). The path char class needs '.' for
+        // extensions, so it greedily swallows the trailing sentence period.
+        // Strip trailing dots so the link (and its underline range) stop at
+        // the real filename. Almost no real file ends in a dot.
+        const filePath = rawPath.replace(/\.+$/, '');
         if (!filePath || !isLikelyFile(filePath)) continue;
 
-        const startIndex = match.index + match[0].indexOf(filePath);
+        const startIndex = match.index + match[0].indexOf(rawPath);
         const key = `${startIndex}:${filePath.length}`;
         if (seen.has(key)) continue;
         seen.add(key);
