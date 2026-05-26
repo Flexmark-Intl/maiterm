@@ -967,8 +967,19 @@
   onDestroy(() => {
     destroyed = true;
 
-    // Detach SSH MCP bridge (fire-and-forget, non-blocking)
-    disableBridge(tabId).catch(() => {});
+    // Whether the PTY (and its live SSH/Claude session) is being handed off to a
+    // new TerminalPane (e.g. tab moving between workspaces). Consumed once here so
+    // both the bridge teardown and the kill-vs-dispose decision below agree.
+    const ptyPreserved = !!ptyId && terminalsStore.consumePreserve(ptyId);
+
+    // Detach SSH MCP bridge (fire-and-forget, non-blocking) — but NOT when the PTY
+    // is being preserved. The bridge is keyed by tabId (unchanged across a move),
+    // so the reattaching pane keeps using it. Tearing it down here would drop the
+    // bridge state, and the new pane's title handler would then re-enable it,
+    // re-injecting `export AITERM_TAB_ID=…` into the live session.
+    if (!ptyPreserved) {
+      disableBridge(tabId).catch(() => {});
+    }
 
     window.removeEventListener('terminal-slot-ready', handleSlotReady);
     window.removeEventListener('mousemove', onSelectionMouseMove);
@@ -988,7 +999,7 @@
     clearTimeout(resizePtyTimeout);
     if (resizeObserver) resizeObserver.disconnect();
     if (filePathLinkDisposable) filePathLinkDisposable.dispose();
-    if (ptyId && terminalsStore.consumePreserve(ptyId)) {
+    if (ptyPreserved) {
       // PTY is being preserved (e.g. tab moving between workspaces).
       // Don't kill the PTY — the new TerminalPane will reattach.
       if (terminal) terminal.dispose();
