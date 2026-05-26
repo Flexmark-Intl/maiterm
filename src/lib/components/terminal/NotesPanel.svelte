@@ -572,6 +572,10 @@
     background: var(--bg-dark);
     color: var(--fg);
     line-height: 1.6;
+    /* Override the global `user-select: none` so rendered notes can be selected/copied */
+    -webkit-user-select: text;
+    user-select: text;
+    cursor: text;
   }
 
   .notes-render :global(h1),
