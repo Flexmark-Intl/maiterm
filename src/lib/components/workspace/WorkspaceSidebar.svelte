@@ -98,25 +98,39 @@
   // Global Claude-agent rollup for the always-visible footer dot. Aggregates
   // every agent across all workspaces so "does anything need me?" is glanceable
   // even with the sidebar collapsed or workspaces below the fold. Click jumps to
-  // a representative tab of the dominant state.
-  const agentDot = $derived.by((): { color: 'accent' | 'green' | 'red' | 'dim'; pulse: boolean; hollow: boolean; tooltip: string; target: string | null } => {
+  // a tab of the dominant state; with more than one, repeated clicks cycle
+  // through them (see cycleToAgent).
+  const agentDot = $derived.by((): { color: 'accent' | 'green' | 'red' | 'dim'; pulse: boolean; hollow: boolean; tooltip: string; targets: string[] } => {
     const g = claudeStateStore.getGlobalClaudeState();
-    if (!g) return { color: 'dim', pulse: false, hollow: false, tooltip: 'No active agents', target: null };
+    if (!g) return { color: 'dim', pulse: false, hollow: false, tooltip: 'No active agents', targets: [] };
     const n = g.count;
+    const cycleHint = n > 1 ? ' (click to cycle)' : '';
     switch (g.state) {
       case 'permission':
-        return { color: 'red', pulse: true, hollow: false, target: g.tabId,
-          tooltip: n === 1 ? '1 agent needs permission — click to open' : `${n} agents need permission — click to open` };
+        return { color: 'red', pulse: true, hollow: false, targets: g.tabIds,
+          tooltip: n === 1 ? '1 agent needs permission — click to open' : `${n} agents need permission — click to open${cycleHint}` };
       case 'active':
-        return { color: 'accent', pulse: true, hollow: false, target: g.tabId,
-          tooltip: n === 1 ? '1 agent working — click to view' : `${n} agents working — click to view` };
+        return { color: 'accent', pulse: true, hollow: false, targets: g.tabIds,
+          tooltip: n === 1 ? '1 agent working — click to view' : `${n} agents working — click to view${cycleHint}` };
       case 'idle-unread':
-        return { color: 'green', pulse: false, hollow: false, target: g.tabId,
-          tooltip: n === 1 ? '1 agent finished — click to review' : `${n} agents finished — click to review` };
+        return { color: 'green', pulse: false, hollow: false, targets: g.tabIds,
+          tooltip: n === 1 ? '1 agent finished — click to review' : `${n} agents finished — click to review${cycleHint}` };
       case 'idle-read':
-        return { color: 'green', pulse: false, hollow: true, tooltip: 'All agents idle', target: g.tabId };
+        return { color: 'green', pulse: false, hollow: true, targets: g.tabIds, tooltip: 'All agents idle' };
     }
   });
+
+  // Cycle the footer dot through every agent in the dominant state. Anchored on
+  // the currently-viewed tab: if it's one of the targets, advance to the next
+  // (wrapping); otherwise jump to the first. Stateless, so it self-corrects when
+  // the target list shifts as agents change state.
+  function cycleToAgent() {
+    const targets = agentDot.targets;
+    if (targets.length === 0) return;
+    const currentIdx = targets.indexOf(workspacesStore.activeTab?.id ?? '');
+    const next = currentIdx === -1 ? targets[0] : targets[(currentIdx + 1) % targets.length];
+    navigateToTab(next);
+  }
 
   function workspaceHasActivity(workspaceId: string): boolean {
     if (workspaceId === workspacesStore.activeWorkspaceId) return false;
@@ -577,8 +591,8 @@
     <Tooltip text={agentDot.tooltip}>
       <button
         class="footer-agent-dot"
-        class:clickable={!!agentDot.target}
-        onclick={() => agentDot.target && navigateToTab(agentDot.target)}
+        class:clickable={agentDot.targets.length > 0}
+        onclick={cycleToAgent}
       >
         <StatusDot color={agentDot.color} pulse={agentDot.pulse} hollow={agentDot.hollow} />
       </button>

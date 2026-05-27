@@ -200,26 +200,24 @@ function createClaudeStateStore() {
     },
 
     /** Global rollup across ALL Claude sessions in every workspace. Returns the
-     *  highest-priority state, a representative tabId to jump to, and how many
-     *  agents are in that state. Priority: permission > active > idle-unread >
-     *  idle-read. Returns null when no Claude sessions exist anywhere. Powers
-     *  the always-visible "global agent" dot in the sidebar footer. */
-    getGlobalClaudeState(): { state: WorkspaceClaudeState; tabId: string; count: number } | null {
-      let permTab: string | undefined, activeTab: string | undefined;
-      let unreadTab: string | undefined, readTab: string | undefined;
-      let perm = 0, active = 0, unread = 0, read = 0;
+     *  highest-priority state, the ordered list of every tab in that state (so the
+     *  footer dot can cycle through them on repeated clicks), and how many agents
+     *  are in that state. `tabId` is the first/representative tab. Priority:
+     *  permission > active > idle-unread > idle-read. Returns null when no Claude
+     *  sessions exist anywhere. Powers the always-visible "global agent" dot in
+     *  the sidebar footer. */
+    getGlobalClaudeState(): { state: WorkspaceClaudeState; tabId: string; tabIds: string[]; count: number } | null {
+      const permTabs: string[] = [], activeTabs: string[] = [];
+      const unreadTabs: string[] = [], readTabs: string[] = [];
       for (const [tabId, s] of sessions) {
-        if (s.state === 'permission') { perm++; permTab ??= tabId; }
-        else if (s.state === 'active') { active++; activeTab ??= tabId; }
-        else if (s.state === 'idle') {
-          if (s.read) { read++; readTab ??= tabId; }
-          else { unread++; unreadTab ??= tabId; }
-        }
+        if (s.state === 'permission') permTabs.push(tabId);
+        else if (s.state === 'active') activeTabs.push(tabId);
+        else if (s.state === 'idle') (s.read ? readTabs : unreadTabs).push(tabId);
       }
-      if (permTab) return { state: 'permission', tabId: permTab, count: perm };
-      if (activeTab) return { state: 'active', tabId: activeTab, count: active };
-      if (unreadTab) return { state: 'idle-unread', tabId: unreadTab, count: unread };
-      if (readTab) return { state: 'idle-read', tabId: readTab, count: read };
+      if (permTabs.length) return { state: 'permission', tabId: permTabs[0], tabIds: permTabs, count: permTabs.length };
+      if (activeTabs.length) return { state: 'active', tabId: activeTabs[0], tabIds: activeTabs, count: activeTabs.length };
+      if (unreadTabs.length) return { state: 'idle-unread', tabId: unreadTabs[0], tabIds: unreadTabs, count: unreadTabs.length };
+      if (readTabs.length) return { state: 'idle-read', tabId: readTabs[0], tabIds: readTabs, count: readTabs.length };
       return null;
     },
 
