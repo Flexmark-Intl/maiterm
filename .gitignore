@@ -5,6 +5,9 @@ node_modules/
 /build/
 /.svelte-kit/
 
+# Release artifact (updater manifest — generated during release, uploaded to GitHub release)
+/latest.json
+
 # Rust / Tauri
 src-tauri/target/
 src-tauri/gen/
