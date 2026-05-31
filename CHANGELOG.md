@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.12.4
+
+- Fix Claude Code's IDE tools (notes, diagnostics, session tracking — the whole `aiterm` MCP toolset) silently breaking partway through a long session. aiTerm registers its MCP server in `~/.claude.json` at startup, but that file is co-owned by the `claude` CLI, which rewrites the whole file on its own events — a long-lived CLI session holding a stale in-memory copy could clobber aiTerm's entry, leaving Claude Code dialing a dead port for the rest of the session (MCP tool calls would hang, then error). aiTerm now re-asserts its entry on a 30s timer, so a clobber self-heals within one tick. The check is read-only and idempotent — it only rewrites the file when the entry has actually drifted, so there's no added disk churn. Also replaced a stale-tab-ID error that could bounce a session in circles between the dev and prod instances with a deterministic recovery path
+
 ## v1.12.3
 
 - Make the global Claude-agent footer dot cycle through agents. When more than one agent is in the dominant state (e.g. "3 agents working"), clicking the dot used to always jump to the same representative tab. It now advances to the next matching agent on each click — anchored on the tab you're currently viewing and wrapping around — so repeated clicks walk through every agent. The tooltip gains a "(click to cycle)" hint when more than one is listed
