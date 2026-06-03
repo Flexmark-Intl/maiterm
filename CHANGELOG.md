@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.12.6
+
+- Fix terminal rendering artifacts that showed up under heavy output from Claude Code: red diff-line backgrounds smearing across unrelated rows, and a staircase of half-typed or duplicated input (along with stray text from earlier) when typing while an agent was streaming. The v1.12.2 WebGL→Canvas switch fixed glyph ghosting, but the Canvas renderer turned out to ghost too under aiTerm's workload — the backend streams a full-viewport repaint (clear-screen + full content) ~60 times a second, and the GPU-backed backbuffer doesn't fully overwrite the previous frame, so stale cells linger until enough repaints accumulate. The underlying terminal grid was always correct; only the renderer was wrong, which is why the mess eventually cleared itself up. Switched the default to xterm's built-in DOM renderer, which replaces each cell outright and so can't ghost — aiTerm only ever renders a single bounded viewport (scrollback:0), so the GPU renderers' throughput advantage never applied here anyway
+- Add a **Terminal → Rendering** preference to choose the renderer (DOM or Canvas). DOM is the new default; Canvas remains available for side-by-side comparison. Changing it applies immediately to visible terminals
+
 ## v1.12.5
 
 - Fix the global "X agents working" footer dot doing nothing when clicked if the dominant agent lived in a *different* window. The dot rolled up Claude sessions globally, but Claude-hook events broadcast to every window — so each window's session map held agents from all windows, while click-to-cycle only searches the current window's tabs and silently fell through when the target lived elsewhere. Every window also showed the same global count instead of its own agents. The rollup is now scoped to the current window's tabs, so each window's dot is independent and every cycle target is reachable
