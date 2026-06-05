@@ -723,7 +723,11 @@ function createWorkspacesStore() {
       const tab = await commands.createTab(workspaceId, paneId, name, afterTabId);
 
       // Open new tab at the most common CWD (and SSH setup) among sibling
-      // terminal tabs. On ties, the active tab's setup wins.
+      // LIVE terminal tabs. On ties, the active tab's setup wins. Suspended
+      // tabs are excluded — their persisted restore_* cwd is stale and, in a
+      // workspace that has accumulated many suspended tabs, would dominate the
+      // tally and pin every new tab to that majority directory regardless of
+      // which tab the user is actually on.
       const ws = workspaces.find(w => w.id === workspaceId);
       if (ws) {
         const activePane = ws.panes.find(p => p.id === paneId);
@@ -750,6 +754,10 @@ function createWorkspacesStore() {
         for (const p of ws.panes) {
           for (const t of p.tabs) {
             if (t.tab_type !== 'terminal') continue;
+            // Only count tabs with a live PTY. Suspended tabs are unregistered
+            // from the terminals store, so their (stale) restore_* cwd never
+            // skews the tally.
+            if (!terminalsStore.get(t.id)) continue;
             // Use live PTY info for the active tab, persisted fields for others
             let ssh: string | null;
             let remoteCwd: string | null;
@@ -769,7 +777,12 @@ function createWorkspacesStore() {
               localCwd = liveCwd;
             } else {
               ssh = t.auto_resume_ssh_command || t.restore_ssh_command || null;
-              remoteCwd = t.auto_resume_remote_cwd || t.restore_remote_cwd || null;
+              // For live SSH tabs the real remote cwd lives in OSC promptCwd
+              // (the PTY only reports the local cwd); fall back to persisted.
+              const oscState = ssh ? terminalsStore.getOsc(t.id) : null;
+              remoteCwd = ssh
+                ? (oscState?.promptCwd ?? t.auto_resume_remote_cwd ?? t.restore_remote_cwd ?? null)
+                : null;
               localCwd = t.last_cwd;
             }
             if (!ssh && !localCwd) continue;
