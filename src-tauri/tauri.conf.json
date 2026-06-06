@@ -63,6 +63,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
+        "https://updates.maiterm.dev/latest.json?v={{current_version}}&t={{target}}&a={{arch}}",
         "https://github.com/Flexmark-Intl/aiterm/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCNEZDRjQxRDBDMzZDRTYKUldUbWJNUFFRYzlQYTJSTEJWT1g1a3hrUTRPL0JyT3NmM3JqNUVhWjQ3Y1k3TnhwSHZhK3F4S2gK"

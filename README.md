@@ -365,3 +365,25 @@ Default: Tokyo Night. 10 built-in themes + custom theme support.
 --fg-dim:    #565f89   /* secondary text */
 --accent:    #7aa2f7   /* interactive elements */
 ```
+
+## Privacy
+
+aiTerm checks for updates on launch and hourly while running. Those checks pass
+through `updates.maiterm.dev`, which counts them so we can estimate how many
+people use aiTerm.
+
+What's counted is deliberately minimal and anonymous:
+
+- **No** IP address, hostname, username, cookie, or device identifier is stored.
+- To turn the hourly checks into a unique-users-per-day figure without keeping
+  any identifier, the count uses the [Plausible](https://plausible.io/data-policy)
+  approach: a one-way hash of `daily_secret_salt + IP + user-agent`. The salt is
+  random, rotates every day, and is discarded — so a hash can't be reversed to an
+  IP or linked across days.
+- Only the date, app version, and OS/arch are retained, in aggregate.
+
+**Opt out:** disable **Preferences → Updates → Automatically check for updates**.
+No update check means no ping, and nothing is counted.
+
+The counter is a small Cloudflare Worker; its full source is in
+[`update-worker/`](update-worker/).

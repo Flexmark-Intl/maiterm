@@ -1,0 +1,33 @@
+name = "aiterm-updates"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = false
+# account_id is intentionally omitted from this public repo. Supply it at deploy:
+#   export CLOUDFLARE_ACCOUNT_ID=...   (the project's Cloudflare account)
+# A single-account API token also lets wrangler infer it automatically.
+
+# Bind updates.maiterm.dev directly to this Worker (zone is in the same account).
+# Wrangler provisions the DNS record + managed TLS cert on deploy.
+routes = [
+  { pattern = "updates.maiterm.dev", custom_domain = true }
+]
+
+# Canonical latest.json (the real updater manifest). The Worker proxies this
+# byte-for-byte; if it can't, it returns non-2XX so Tauri falls back to GitHub.
+[vars]
+UPSTREAM = "https://github.com/Flexmark-Intl/aiterm/releases/latest/download/latest.json"
+
+# STATS_KEY is a secret, not stored here. Set it with:
+#   wrangler secret put STATS_KEY
+
+[[d1_databases]]
+binding = "DB"
+database_name = "aiterm_stats"
+database_id = "ec170a19-62f8-474d-8c67-d3fa67320c5a"
+
+# Daily prune of raw rows + rotated salts (privacy: keep only what's needed).
+[triggers]
+crons = ["17 4 * * *"]
+
+[observability]
+enabled = true
