@@ -5,7 +5,7 @@ description: Built-in CodeMirror 6 editor with click-to-open, remote file suppor
 
 aiTerm includes a full-featured code editor built on CodeMirror 6, living alongside your terminal tabs.
 
-![Editor tab](/aiterm/screenshots/editor-tab.png)
+![Editor tab](/screenshots/editor-tab.png)
 
 ## Features
 

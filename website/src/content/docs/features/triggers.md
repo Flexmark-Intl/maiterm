@@ -3,7 +3,7 @@ title: Triggers & Automation
 description: Regex triggers that watch terminal output and fire actions — notifications, commands, and variable capture.
 ---
 
-Triggers watch your terminal output for patterns and fire actions automatically. Claude Code tracking has moved to [hooks](/aiterm/features/claude-code/#claude-code-hooks), but the trigger engine is fully available for your own custom automation.
+Triggers watch your terminal output for patterns and fire actions automatically. Claude Code tracking has moved to [hooks](/features/claude-code/#claude-code-hooks), but the trigger engine is fully available for your own custom automation.
 
 ## How Triggers Work
 
@@ -53,7 +53,7 @@ Capture groups in regex patterns can be mapped to named variables:
 
 ## Use Cases
 
-With Claude Code tracking now handled by [hooks](/aiterm/features/claude-code/#claude-code-hooks), triggers are best used for your own custom automation:
+With Claude Code tracking now handled by [hooks](/features/claude-code/#claude-code-hooks), triggers are best used for your own custom automation:
 
 - Watch for build failures and send a notification
 - Detect SSH disconnects and auto-reconnect

@@ -2,8 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://flexmark-intl.github.io',
-  base: '/aiterm',
+  site: 'https://maiterm.dev',
   integrations: [
     starlight({
       title: 'aiTerm',

@@ -7,7 +7,7 @@ description: Organize terminals by project with independent pane layouts and con
 
 Group your terminals by project. Each workspace has its own pane layout, tabs, and context. Switch between "ACME Project" and "Production Server" without losing your place in either.
 
-![Workspaces and tabs](/aiterm/screenshots/workspaces-tabs.png)
+![Workspaces and tabs](/screenshots/workspaces-tabs.png)
 
 ### Features
 
@@ -36,7 +36,7 @@ Panes are the containers within a workspace. Each pane holds one or more tabs (t
 
 Each tab has its own markdown notes panel. Track TODOs, paste connection strings, jot down what you're debugging — right next to the terminal doing the work.
 
-![Notes panel](/aiterm/screenshots/notes-panel.png)
+![Notes panel](/screenshots/notes-panel.png)
 
 - **Markdown or plain text** — your choice per tab
 - **Interactive checkboxes** — rendered in preview mode
