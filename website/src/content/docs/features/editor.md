@@ -20,6 +20,20 @@ aiTerm includes a full-featured code editor built on CodeMirror 6, living alongs
 - **File watching** — editor tabs detect external changes on both local files (fs events) and remote files over SSH (stat polling). Clean buffers auto-reload; dirty buffers show a conflict banner with Reload, Overwrite, Dismiss, or Merge
 - **Merge conflicts** — when a file changes while you have unsaved edits, open an inline MergeView to reconcile: disk content on the left (read-only), your edits on the right (editable). Apply puts the merged result back without saving
 
+## Quick Open
+
+Jump to any file without touching the mouse. Double-press `Opt` (or `Cmd+P`) to bring up the Quick Open palette:
+
+- **Fuzzy matching** — type a few characters and results rank by relevance
+- **Glob patterns** — narrow the list with patterns like `src/**/*.ts`
+- **Directory navigation** — `Tab` to step into a folder, `Backspace` to go back, with a toggle for showing dotfiles
+- **Smart ordering** — recently-opened files surface first, then the rest sorted by modification time
+- **`.gitignore` aware** — ignored files are hidden by default; toggle them back on when you need them
+- **Remote support** — over SSH, Quick Open lists files on the remote host
+- **Draggable** — reposition the palette anywhere in the window
+
+Picking a file opens it in an editor tab — local or remote via SCP.
+
 ## Diff Review
 
 Side-by-side diff tabs using CodeMirror's MergeView. Created by Claude Code's `openDiff` tool.

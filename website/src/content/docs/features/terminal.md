@@ -38,6 +38,10 @@ Duplicate a tab and get *everything*: scrollback history, CWD, SSH session, Clau
 
 Done with a session but not ready to lose it? Archive the tab. It disappears from your tab bar but preserves everything — scrollback, notes, trigger state. Restore it later and resume right where you left off.
 
+## Suspend a Tab
+
+Park a single session without closing it. Suspending a tab kills its PTY to free memory and CPU, but keeps the tab — and its scrollback — visible in the tab bar. Click a suspended tab and aiTerm prompts you to resume, spinning the shell back up. Handy for an idle SSH session or a finished build you want to keep around without it holding resources.
+
 ## Workspace Suspend & Resume
 
 Suspend inactive workspaces to free resources — PTYs are killed and memory is released, but scrollback, CWD, SSH info, and all state are preserved. Click a suspended workspace to resume it instantly. Suspend individually, suspend all others, or configure auto-suspend after a timeout (15/30/60 min of inactivity).

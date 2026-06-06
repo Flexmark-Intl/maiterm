@@ -42,6 +42,7 @@ description: Complete list of aiTerm keyboard shortcuts.
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+O` | Open file |
+| `Cmd+P` | Quick Open file search (or double-press `Opt`) |
 | `Cmd+E` | Toggle notes panel |
 | `Cmd+B` | Toggle sidebar |
 | `Cmd+F` | Find in terminal |

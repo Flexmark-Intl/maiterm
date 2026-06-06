@@ -86,10 +86,22 @@ aiTerm integrates with Claude Code's hook system for real-time session awareness
 
 - **Session lifecycle** — tracks session start, end, and compaction events
 - **Active tool overlay** — see what Claude is doing right now (editing files, running bash, etc.) in the terminal corner
-- **Permission alerts** — workspace sidebar shows an alert indicator when Claude needs permission approval
+- **Agent state indicators** — per-tab, per-workspace, and a global footer dot show whether each agent is working, waiting for permission, or done — see [Agent State Indicators](#agent-state-indicators) below
 - **Auto-resume** — automatically captures session IDs and reconnects on tab restore
 - **Multi-agent awareness** — `getClaudeSessions` tool lets any Claude session discover all other active sessions across tabs for coordination
 - **Compaction notifications** — alerts during and after context compaction
+
+## Agent State Indicators
+
+aiTerm surfaces what every Claude agent is doing at three levels, all driven by hooks — no terminal-output guessing:
+
+- **Per tab** — each tab's indicator reflects its agent: a pulse while working, ❗ when it needs permission, and a green dot when it's done and waiting for input. Ordinary terminal output stays a dim dot, so a finished agent is never mistaken for a stray line of output.
+- **Per workspace** — the sidebar rolls a workspace's tabs into one dot using batch semantics (`permission > working > done`). It turns green only once *every* agent in the workspace has settled, so green unambiguously means "all done."
+- **Global footer dot** — rolls up every agent in the current window: red pulse = needs permission, accent pulse = working, green = finished, dim = no agents. Click it to jump straight to an agent's tab; when several agents share the dominant state, each click cycles to the next.
+
+### Read vs. unread
+
+A finished agent shows a **filled** green dot (unread); once you view its tab it relaxes to a **hollow** green ring (seen). This rolls up too — a workspace dot stays filled until every finished agent inside it has been seen, then goes hollow — so you can tell at a glance which completed agents still need a look.
 
 ## File Drop & Image Paste
 

@@ -48,10 +48,13 @@ Other terminals give you tabs and splits. aiTerm gives you a system for managing
     Group terminals by project. Each workspace has its own pane layout, tabs, and context. Suspend inactive workspaces to free resources — they resume instantly with full state when you need them.
   </Card>
   <Card title="Claude Code Integration" icon="puzzle">
-    30+ MCP tools let Claude Code navigate your workspaces, manage notes, control preferences, review diffs, and discover what's running in your tabs. Real-time hooks track what Claude is doing — see the active tool, permission requests, and compaction state. Works over SSH too via reverse tunnel.
+    30+ MCP tools let Claude Code navigate your workspaces, manage notes, control preferences, review diffs, and discover what's running in your tabs. Real-time hooks track what Claude is doing — see the active tool, permission requests, and compaction state. Per-tab, per-workspace, and a global footer dot roll up every agent's state — working, waiting for permission, or done — so you can see at a glance which ones need you. Works over SSH too via reverse tunnel.
   </Card>
   <Card title="Built-in Editor" icon="document">
     Click any file path in terminal output to open it in an editor tab. Works over SSH too — remote files load transparently via SCP. 50+ languages, auto-reload on external changes, and inline merge view when files change while you have unsaved edits.
+  </Card>
+  <Card title="Quick Open anything" icon="magnifier">
+    Double-press `Opt` (or `Cmd+P`) for a fuzzy file finder with glob patterns, directory navigation, and recently-opened ordering. It even lists files on the remote host when you're SSH'd in.
   </Card>
   <Card title="Smart Triggers" icon="setting">
     Regex triggers watch terminal output for patterns and fire actions — notifications, commands, variable capture. Scope triggers to specific tabs or fire them globally. Build your own automation for builds, deploys, SSH sessions, and more.
