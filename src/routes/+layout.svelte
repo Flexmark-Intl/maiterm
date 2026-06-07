@@ -19,6 +19,7 @@
   import type { ImportPreview } from '$lib/tauri/commands';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
@@ -27,6 +28,7 @@
   import { openFileFromTerminal } from '$lib/utils/openFile';
   import { installGlobalSmartQuoteFix } from '$lib/utils/smartQuotes';
   import QuickOpen from '$lib/components/QuickOpen.svelte';
+  import AgentLinkPicker from '$lib/components/AgentLinkPicker.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
   import type { EditorFileInfo } from '$lib/tauri/types';
@@ -43,6 +45,8 @@
   let importPreview = $state<ImportPreview | null>(null);
   let importFilePath = $state('');
   let showQuickOpen = $state(false);
+  let showAgentLinkPicker = $state(false);
+  let agentLinkCallerTabId = $state<string | null>(null);
 
   // Cmd+W two-press confirmation: first press arms closeConfirmTabId for 2s,
   // a second press while armed (on the same tab) actually closes.
@@ -319,6 +323,9 @@
     // Claude Code state tracking (hook events → per-tab Claude state)
     claudeStateStore.init();
 
+    // Agent Link (hook events → cross-agent message delivery)
+    agentLinkStore.init();
+
     // OS notification click → deep-link to workspace+tab.
     // NOTE: onAction only fires on mobile (iOS/Android). On desktop (macOS/Linux/Windows),
     // tauri-plugin-notification uses notify_rust which is fire-and-forget with no click
@@ -564,6 +571,16 @@
         return;
       }
 
+      // Cmd+Shift+L - Link this agent to another (Agent Link)
+      if (isMeta && e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        e.stopPropagation();
+        const tab = workspacesStore.activeTab;
+        agentLinkCallerTabId = tab?.tab_type === 'terminal' ? tab.id : null;
+        if (!showAgentLinkPicker) showAgentLinkPicker = true;
+        return;
+      }
+
       // Cmd+O - Open file in editor tab
       if (isMeta && !e.shiftKey && e.key.toLowerCase() === 'o') {
         e.preventDefault();
@@ -800,11 +817,20 @@
       altPressClean = true;
     }
 
+    // Agent Link picker opened from the terminal context menu ("Link to Agent…")
+    const onOpenAgentLinkPicker = (e: Event) => {
+      const tabId = (e as CustomEvent<{ tabId: string }>).detail?.tabId ?? null;
+      agentLinkCallerTabId = tabId;
+      if (!showAgentLinkPicker) showAgentLinkPicker = true;
+    };
+    window.addEventListener('open-agent-link-picker', onOpenAgentLinkPicker);
+
     window.addEventListener('keydown', handleKeydown, true);
     window.addEventListener('keydown', handleKeydownAlt, true);
     window.addEventListener('keyup', handleKeyupAlt, true);
 
     return () => {
+      window.removeEventListener('open-agent-link-picker', onOpenAgentLinkPicker);
       window.removeEventListener('keydown', handleKeydown, true);
       window.removeEventListener('keydown', handleKeydownAlt, true);
       window.removeEventListener('keyup', handleKeyupAlt, true);
@@ -819,6 +845,7 @@
       unlistenClaudeTool?.();
       unlistenClaudeConnection?.();
       claudeStateStore.destroy();
+      agentLinkStore.destroy();
       unlistenNotificationAction?.unregister();
       unlistenFocus?.();
       unlistenResize?.();
@@ -866,6 +893,15 @@
         openFileFromTerminal(ws.id, pane.id, termTab.id, filePath);
       }
     }
+  }}
+/>
+<AgentLinkPicker
+  open={showAgentLinkPicker}
+  callerTabId={agentLinkCallerTabId}
+  onclose={() => {
+    showAgentLinkPicker = false;
+    const tab = workspacesStore.activeTab;
+    if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
   }}
 />
 <Toast />

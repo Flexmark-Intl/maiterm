@@ -534,6 +534,61 @@ function createWorkspacesStore() {
       return pane;
     },
 
+    /**
+     * Split a pane and boot a *forked* Claude session into the new tab — the core
+     * spawn for Agent Link. The new tab auto-resumes `claude --resume <sessionId>
+     * --fork-session` in the target's cwd (and SSH context if remote), giving an
+     * isolated peer with the target session's full context without disturbing the
+     * original. Returns { newPaneId, newTabId } so the caller can register the link.
+     *
+     * Ordering matters: the split context + auto-resume command must be set on the
+     * backend BEFORE the reactive `workspaces` array updates (which mounts the new
+     * TerminalPane and consumes the context). So we use the low-level
+     * `commands.splitPane` and refresh the store last — mirroring
+     * `splitPaneWithScrollback`.
+     */
+    async forkSessionIntoSplit(
+      workspaceId: string,
+      sourcePaneId: string,
+      target: { sessionId: string; cwd: string | null; sshCommand: string | null; remoteCwd: string | null },
+      tabName: string,
+      direction: SplitDirection = 'horizontal',
+    ): Promise<{ newPaneId: string; newTabId: string } | null> {
+      const newPane = await commands.splitPane(workspaceId, sourcePaneId, direction);
+      const newTabId = newPane.tabs[0]?.id;
+      if (!newTabId) return null;
+
+      await commands.renameTab(workspaceId, newPane.id, newTabId, tabName, true);
+
+      const forkCommand = `claude --resume ${target.sessionId} --fork-session`;
+      await commands.setTabAutoResumeContext(
+        workspaceId, newPane.id, newTabId,
+        target.cwd, target.sshCommand, target.remoteCwd,
+        forkCommand, false,
+      );
+      // setTabAutoResumeContext stores the command but may not flip the enabled
+      // flag; do it explicitly so TerminalPane fires the fork command on mount.
+      await commands.setTabAutoResumeEnabled(workspaceId, newPane.id, newTabId, true);
+
+      // Make the new TerminalPane run the fork command when it mounts (the split
+      // context's fireAutoResume gate — see TerminalPane onMount).
+      terminalsStore.setSplitContext(newTabId, {
+        cwd: target.cwd,
+        sshCommand: target.sshCommand,
+        remoteCwd: target.remoteCwd,
+        fireAutoResume: true,
+      });
+
+      // Refresh store LAST → mounts the new pane with context already in place.
+      const data = await commands.getWindowData();
+      const freshWs = data.workspaces.find(w => w.id === workspaceId);
+      if (freshWs) {
+        const idx = workspaces.findIndex(w => w.id === workspaceId);
+        if (idx >= 0) workspaces[idx] = freshWs;
+      }
+      return { newPaneId: newPane.id, newTabId };
+    },
+
     async splitPaneWithContext(workspaceId: string, sourcePaneId: string, sourceTabId: string, direction: SplitDirection) {
       // Look up source tab to determine its type
       const ws_current = workspaces.find(w => w.id === workspaceId);

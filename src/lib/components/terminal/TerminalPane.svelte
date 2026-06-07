@@ -17,6 +17,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
   import { getTheme } from '$lib/themes';
   import { getCompiledPatterns } from '$lib/utils/promptPattern';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -1609,6 +1610,18 @@
         {
           label: 'Auto-resume + Claude\u2026',
           action: () => { claudeSetupModal = true; },
+        },
+      ]),
+      { label: '', separator: true, action: () => {} },
+      ...(agentLinkStore.isLinked(tabId) ? [
+        {
+          label: 'Unlink Agent',
+          action: () => agentLinkStore.unlink(tabId),
+        },
+      ] : [
+        {
+          label: 'Link to Agent\u2026',
+          action: () => window.dispatchEvent(new CustomEvent('open-agent-link-picker', { detail: { tabId } })),
         },
       ]),
       { label: '', separator: true, action: () => {} },

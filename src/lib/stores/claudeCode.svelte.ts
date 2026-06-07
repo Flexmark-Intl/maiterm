@@ -8,6 +8,7 @@ import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch as dispatchNotification } from '$lib/stores/notificationDispatch';
 import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+import { agentLinkStore } from '$lib/stores/agentLink.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -174,6 +175,12 @@ function createClaudeCodeStore() {
           break;
         case 'restoreArchivedTab':
           result = await handleRestoreArchivedTab(args as { workspaceId?: string; tabId: string });
+          break;
+        case 'sendToLinkedAgent':
+          result = await handleSendToLinkedAgent(args as { tabId?: string; message: string });
+          break;
+        case 'getLinkedAgent':
+          result = handleGetLinkedAgent(args as { tabId?: string });
           break;
         // getPreferences, setPreference, createBackup, listWindows handled directly on backend
         default:
@@ -1073,6 +1080,20 @@ function createClaudeCodeStore() {
         ...(claude ? { claudeState: claude.state, claudeTool: claude.toolName } : {}),
       },
     };
+  }
+
+  // --- Agent Link tools ---
+
+  async function handleSendToLinkedAgent(args: { tabId?: string; message: string }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    return agentLinkStore.sendFromTab(loc.tab.id, args.message);
+  }
+
+  function handleGetLinkedAgent(args: { tabId?: string }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    return agentLinkStore.getLinkInfo(loc.tab.id);
   }
 
   // --- Trigger variable tools ---

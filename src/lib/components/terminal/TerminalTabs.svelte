@@ -12,6 +12,7 @@
   import { isEditorDirty } from '$lib/stores/editorRegistry.svelte';
   import { getBridgeStatus } from '$lib/stores/sshMcpBridge.svelte';
   import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import { isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import Icon from '$lib/components/Icon.svelte';
@@ -841,6 +842,9 @@
               : `Auto-resume: ${tab.auto_resume_cwd ?? 'enabled'}`
           }><span class="auto-resume-indicator"><Icon name="resume" size={12} /></span></Tooltip>
         {/if}
+        {#if !isEditor && agentLinkStore.isLinked(tab.id)}
+          <Tooltip text={`Linked to ${agentLinkStore.getPartnerLabel(tab.id) ?? 'an agent'} — they can message this agent`}><span class="agent-link-indicator">⇄</span></Tooltip>
+        {/if}
         <span class="tab-name">{displayName(tab)}</span>
         {@const hasRunningPty = !isEditor && !isDiff && !!terminalsStore.get(tab.id)}
         <div class="tab-actions" class:always-visible={preferencesStore.tabButtonStyle === 'always'} class:modifier-only={preferencesStore.tabButtonStyle === 'modifier'} class:modifier-active={preferencesStore.tabButtonStyle === 'modifier' && modHeld} class:never-visible={preferencesStore.tabButtonStyle === 'never'} class:single-action={false} class:double-action={isEditor || isDiff} class:triple-action={!isEditor && !isDiff && !hasRunningPty} class:quadruple-action={hasRunningPty}>
@@ -1102,6 +1106,17 @@
     display: flex;
     align-items: center;
     transform: rotate(-45deg);
+  }
+
+  .agent-link-indicator {
+    flex-shrink: 0;
+    margin-right: 3px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    font-size: 0.8rem;
+    color: var(--accent);
+    opacity: 0.85;
   }
 
   .bridge-indicator {

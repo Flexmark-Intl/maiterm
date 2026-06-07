@@ -64,6 +64,42 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getClaudeSessions | All active Claude sessions across tabs (state, tool, model, cwd) — multi-agent coordination |
 | listArchivedTabs | List archived (suspended) tabs with names, dates, restore context |
 | restoreArchivedTab | Restore an archived tab back into the active workspace |
+| sendToLinkedAgent | Send a message to the peer agent this tab is linked with (Agent Link). Async — reply arrives as a new prompt turn |
+| getLinkedAgent | Report whether this tab is linked and, if so, the partner's label/cwd |
+
+## Agent Link (agent-to-agent bridge)
+
+Lets two running Claude agents in different panes talk to each other. The human links
+the active tab to another running Claude session via the **Agent Link picker**
+(`Cmd+Shift+L`, or terminal context menu → "Link to Agent…"). aiTerm **forks** the
+target session (`claude --resume <id> --fork-session`) into a split pane beside the
+caller — an isolated peer with the target's full context that doesn't disturb the
+original. The agents then converse asynchronously via the `sendToLinkedAgent` tool;
+each message is injected as a real terminal turn in the recipient's pane, so the human
+watches the whole exchange and can interrupt with Esc.
+
+**Key files:**
+- `src/lib/stores/agentLink.svelte.ts` — link registry (keyed by tab_id, symmetric),
+  `establishLink()` (fork orchestration + handshake), delivery gating, identity envelopes
+- `src/lib/stores/workspaces.svelte.ts` → `forkSessionIntoSplit()` — splits the caller's
+  pane and boots the forked partner (reuses the clone/auto-resume spawn path with
+  `setSplitContext({ fireAutoResume: true })`)
+- `src/lib/components/AgentLinkPicker.svelte` — session picker modal
+- `claudeCode.svelte.ts` → `handleSendToLinkedAgent` / `handleGetLinkedAgent` dispatch
+
+**Design decisions (v1):** async-only (no blocking RPC); fork-only (the fork *is* the
+target, isolated); loop control = framing + human Esc (no circuit breaker); identity is
+stamped by aiTerm from the registry (tamper-proof — recipient can't mistake a peer for
+the human); link keyed by tab_id (survives the fork's new session id).
+
+**Delivery readiness model** (decoupled from `claudeState`, since a freshly-forked agent
+fires `SessionStart`→active but no `Stop` on boot): per-tab `ready` (caller immediate;
+forked partner SETTLE_MS after its SessionStart), `busy` (set on inject, cleared on
+that tab's `Stop`), `hasCompletedTurn` (once true, `claudeState` active/idle is
+trusted). Messages to a busy tab queue and flush on its next `Stop`.
+
+**Injection:** bracketed paste (`ESC[200~ … ESC[201~`) + a deferred `\r` so multi-line
+messages stay one prompt and submit cleanly into Claude's TUI.
 
 ## Claude Code Hooks Integration
 
