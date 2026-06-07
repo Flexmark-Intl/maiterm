@@ -199,7 +199,7 @@
   <div class="app-body">
     {#if loading}
       <div class="loading">
-        <img src="/logo-light.png" alt="aiTerm" class="loading-logo" />
+        <div class="loading-logo" role="img" aria-label="maiTerm"></div>
       </div>
     {:else}
       <div
@@ -362,7 +362,9 @@
 
   .loading-logo {
     height: 48px;
+    aspect-ratio: 600 / 128;
     opacity: 0.5;
+    background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
 
   .sidebar-wrapper {

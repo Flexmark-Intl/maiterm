@@ -543,7 +543,11 @@ export function applyUiTheme(ui: UiColors): void {
   root.style.setProperty('--tab-border-active', ui.tab_border_active);
   root.style.setProperty('--tab-border-activity', ui.tab_border_activity);
 
-  // Logo adapts to background brightness: dark on light themes, unchanged on dark
+  // Logo adapts to theme: black "mai" wordmark on light themes, white on dark.
+  // Two real assets (the wordmark is two-tone — "Term" stays periwinkle — so a
+  // brightness() filter can't recolor it correctly).
   const isLight = luminance(ui.bg_dark) > 0.2;
-  root.style.setProperty('--logo-brightness', isLight ? '0' : '1');
+  root.style.setProperty('--logo-url', isLight ? 'url(/logo-dark.png)' : 'url(/logo-light.png)');
+  // Compact "m" mark (sidebar) — monochrome, so a matching black/white asset per theme.
+  root.style.setProperty('--logo-mark-url', isLight ? 'url(/logo-mark-dark.png)' : 'url(/logo-mark-light.png)');
 }

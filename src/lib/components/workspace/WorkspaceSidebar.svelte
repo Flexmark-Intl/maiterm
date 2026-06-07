@@ -455,7 +455,7 @@
 
 <aside class="sidebar" style="width: {width}px">
   <div class="sidebar-titlebar">
-    <img src="/logo-light.png" alt="aiTerm" class="sidebar-logo" />
+    <div class="sidebar-logo" role="img" aria-label="maiTerm"></div>
     {#if import.meta.env.DEV}
       <span class="dev-badge">DEV</span>
     {/if}
@@ -647,10 +647,11 @@
   }
 
   .sidebar-logo {
-    height: 14px;
+    height: 20px;
+    aspect-ratio: 720 / 432;
     opacity: 0.7;
     pointer-events: none;
-    filter: brightness(var(--logo-brightness, 1));
+    background: var(--logo-mark-url, url(/logo-mark-light.png)) center / contain no-repeat;
   }
 
   .dev-badge {

@@ -153,7 +153,7 @@
     </div>
   {:else}
     <div class="empty-pane">
-      <img src="/logo-light.png" alt="aiTerm" class="empty-logo" />
+      <div class="empty-logo" role="img" aria-label="maiTerm"></div>
       <button class="new-terminal-btn" onclick={handleNewTerminal}>
         New Terminal
       </button>
@@ -272,7 +272,9 @@
 
   .empty-logo {
     height: 48px;
+    aspect-ratio: 600 / 128;
     opacity: 0.3;
+    background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
 
   .new-terminal-btn {
