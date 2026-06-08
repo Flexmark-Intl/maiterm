@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import WorkspaceSidebar from '$lib/components/workspace/WorkspaceSidebar.svelte';
@@ -162,6 +163,8 @@
       if (ws && pane?.active_tab_id) {
         navHistoryStore.push({ workspaceId: ws.id, paneId: pane.id, tabId: pane.active_tab_id });
       }
+      // Rebuild Agent Links from persisted state (after workspaces are loaded).
+      agentLinkStore.rehydrate();
     });
 
     // Listen for tab deactivation requests (e.g. "Suspend Other Tabs")

@@ -80,23 +80,43 @@ watches the whole exchange and can interrupt with Esc.
 
 **Key files:**
 - `src/lib/stores/agentLink.svelte.ts` — link registry (keyed by tab_id, symmetric),
-  `establishLink()` (fork orchestration + handshake), delivery gating, identity envelopes
+  `establishLink()` (fork orchestration + handshake), `primeFork()` (auto-init directive),
+  `rehydrate()` (rebuild from persisted state), delivery gating, identity envelopes
 - `src/lib/stores/workspaces.svelte.ts` → `forkSessionIntoSplit()` — splits the caller's
   pane and boots the forked partner (reuses the clone/auto-resume spawn path with
   `setSplitContext({ fireAutoResume: true })`)
 - `src/lib/components/AgentLinkPicker.svelte` — session picker modal
 - `claudeCode.svelte.ts` → `handleSendToLinkedAgent` / `handleGetLinkedAgent` dispatch
+- Persistence: `Tab.agent_link` (Rust `AgentLink` struct) via the `set_tab_agent_link`
+  command — durable pairing written both sides
 
 **Design decisions (v1):** async-only (no blocking RPC); fork-only (the fork *is* the
 target, isolated); loop control = framing + human Esc (no circuit breaker); identity is
 stamped by aiTerm from the registry (tamper-proof — recipient can't mistake a peer for
 the human); link keyed by tab_id (survives the fork's new session id).
 
-**Delivery readiness model** (decoupled from `claudeState`, since a freshly-forked agent
-fires `SessionStart`→active but no `Stop` on boot): per-tab `ready` (caller immediate;
-forked partner SETTLE_MS after its SessionStart), `busy` (set on inject, cleared on
-that tab's `Stop`), `hasCompletedTurn` (once true, `claudeState` active/idle is
-trusted). Messages to a busy tab queue and flush on its next `Stop`.
+**Handshake (tight, routing-proof):** a forked session resumes the target's transcript,
+so it inherits the target's `initSession` and won't re-bind its new MCP connection. After
+the fork's Claude boots, `primeFork()` injects a directive forcing it to re-`initSession`
+as its OWN tab; that tab's real `claude-init-session` event is the handshake trigger
+(proves it's up, on this instance, tool-capable) — not a flaky `SessionStart` hook.
+
+**Delivery readiness model:** per-tab `ready` (caller immediate; fork once its
+`initSession` lands), `busy` (set on inject, cleared on that tab's `Stop`),
+`hasCompletedTurn` (once true, `claudeState` active/idle is trusted — and a live session
+is required, so a dormant/resuming partner queues instead of injecting into a shell).
+Messages to a busy/dormant tab queue and flush on its next `Stop`/re-init.
+
+**Persistence & resume (hardening):** the pairing is persisted on both tabs (`Tab.agent_link`),
+so a link survives an app restart. On load, `rehydrate()` rebuilds the in-memory registry
+for any pair where both tabs still exist and reciprocally reference each other (orphans
+cleared). `session-end` only **suspends** the in-memory link (keeps the durable pairing) —
+the agent may auto-resume and re-bind; only an explicit unlink or a closed tab tears it
+down. Because `claude --resume` can mint a new session id, the recorded `partner_session_id`
+is refreshed when a partner re-inits (`claude-init-session`), and a send-time id mismatch
+**re-binds** rather than breaking. The fork's auto-resume command is *not* `--fork-session`
+(that would re-fork on every resume) — once the fork has its own id, `handleEnableAutoResume`
+drops the fork flag so it resumes its own conversation like any Claude tab.
 
 **Injection:** bracketed paste (`ESC[200~ … ESC[201~`) + a deferred `\r` so multi-line
 messages stay one prompt and submit cleanly into Claude's TUI.

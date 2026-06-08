@@ -185,6 +185,27 @@ pub struct EditorFileInfo {
     pub language: Option<String>,
 }
 
+/// Agent Link: a durable pairing between two Claude tabs that can message each
+/// other. Persisted on both tabs (symmetric) so the link survives app restart and
+/// is rebuilt by the frontend once both tabs + their resumed sessions are back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLink {
+    /// The tab this one is linked to.
+    pub partner_tab_id: String,
+    /// Human-readable label of the partner (for the agent's own awareness).
+    pub partner_label: String,
+    /// Partner's last-known Claude session id — refreshed when the partner
+    /// re-initializes after a resume; used to detect/re-bind a drifted session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partner_session_id: Option<String>,
+    /// "caller" (initiated the link) or "fork" (the forked peer).
+    #[serde(default)]
+    pub role: String,
+    /// Conversation turn counter (messages this tab has sent).
+    #[serde(default)]
+    pub turn: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tab {
     pub id: String,
@@ -256,6 +277,9 @@ pub struct Tab {
     pub editor_file: Option<EditorFileInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_context: Option<DiffContext>,
+    /// Agent Link pairing (persisted both sides) — see AgentLink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_link: Option<AgentLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -887,6 +911,7 @@ impl Tab {
             last_cwd: None,
             diff_context: None,
             import_highlight: false,
+            agent_link: None,
         }
     }
 
@@ -918,6 +943,7 @@ impl Tab {
             last_cwd: None,
             diff_context: None,
             import_highlight: false,
+            agent_link: None,
         }
     }
 
@@ -949,6 +975,7 @@ impl Tab {
             last_cwd: None,
             diff_context: Some(diff_context),
             import_highlight: false,
+            agent_link: None,
         }
     }
 }

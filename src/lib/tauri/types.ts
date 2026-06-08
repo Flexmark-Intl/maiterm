@@ -16,6 +16,15 @@ export interface DiffContext {
   tab_name: string;
 }
 
+export interface AgentLink {
+  partner_tab_id: string;
+  partner_label: string;
+  partner_session_id?: string | null;
+  /** "caller" | "fork" */
+  role: string;
+  turn: number;
+}
+
 export interface Tab {
   id: string;
   name: string;
@@ -43,6 +52,7 @@ export interface Tab {
   editor_file: EditorFileInfo | null;
   diff_context: DiffContext | null;
   import_highlight?: boolean;
+  agent_link?: AgentLink | null;
 }
 
 export interface Pane {

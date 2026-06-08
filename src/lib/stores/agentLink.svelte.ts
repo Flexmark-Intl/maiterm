@@ -1,5 +1,6 @@
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import * as commands from '$lib/tauri/commands';
+import type { AgentLink } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/claudeState.svelte';
@@ -44,6 +45,8 @@ const FORK_BOOT_TIMEOUT_MS = 15_000; // cap on waiting for the fork to boot befo
 const FORK_SETTLE_MS = 1500;         // extra settle after the fork registers, so its TUI accepts input
 const FORK_INIT_TIMEOUT_MS = 25_000; // if the fork never re-inits on this instance, tell the caller
 
+type LinkRole = 'caller' | 'fork';
+
 interface LinkEntry {
   /** The tab this agent is linked to. */
   partnerTabId: string;
@@ -51,10 +54,12 @@ interface LinkEntry {
   partnerLabel: string;
   /** Conversation turn counter (incremented on each message this tab sends). */
   turn: number;
-  /** Partner's Claude session id at link time — if it changes/disappears, the link
-   *  is stale (peer restarted or died) and must be broken. Set for the caller once
-   *  the fork initializes; set up front for the fork (it knows the caller). */
+  /** Partner's last-known Claude session id. Refreshed when the partner re-inits
+   *  after a resume; used to detect a drifted session and re-bind (NOT to break —
+   *  the persisted link is authoritative, so a new id means "it resumed"). */
   partnerSessionId?: string;
+  /** Whether this tab initiated the link or is the forked peer. */
+  role: LinkRole;
 }
 
 interface DeliveryState {
@@ -110,6 +115,29 @@ function createAgentLinkStore() {
     return osc?.cwd ?? osc?.promptCwd ?? cwdHint.get(tabId) ?? null;
   }
 
+  /** Persist this tab's link to the backend (or clear it if the in-memory entry is
+   *  gone), so the pairing survives an app restart and can be rehydrated. The live
+   *  routing stays in memory; only the durable pairing is written here. */
+  async function persistLink(tabId: string) {
+    const loc = resolveTab(tabId);
+    if (!loc) return; // tab gone — nothing to persist to
+    const link = links.get(tabId);
+    const payload = link
+      ? {
+          partner_tab_id: link.partnerTabId,
+          partner_label: link.partnerLabel,
+          partner_session_id: link.partnerSessionId ?? null,
+          role: link.role,
+          turn: link.turn,
+        }
+      : null;
+    try {
+      await commands.setTabAgentLink(loc.ws.id, loc.pane.id, tabId, payload);
+    } catch (e) {
+      logError(`agentLink: failed to persist link for tab ${tabId.slice(0, 8)}: ${e}`);
+    }
+  }
+
   // ─── Injection ──────────────────────────────────────────────────────────────
 
   /** Write a prompt into a tab's PTY as a bracketed paste, then submit with CR.
@@ -137,8 +165,13 @@ function createAgentLinkStore() {
   function deliverable(tabId: string): boolean {
     const d = delivery.get(tabId);
     if (!d || !d.ready || d.busy) return false;
-    // Post-boot: claudeState is trustworthy. Boot window: trust `ready`.
-    if (d.hasCompletedTurn) return claudeStateStore.getState(tabId)?.state !== 'active';
+    // Post-boot: claudeState is trustworthy — require a LIVE, idle session. No live
+    // state means the partner is dormant/resuming, so queue (don't inject into a
+    // shell). Boot window (pre first Stop): trust `ready`.
+    if (d.hasCompletedTurn) {
+      const st = claudeStateStore.getState(tabId);
+      return !!st && st.state !== 'active';
+    }
     return true;
   }
 
@@ -335,10 +368,10 @@ function createAgentLinkStore() {
       const callerLabel = `${label(callerTabId)}`;
       const callerSessionId = claudeStateStore.getState(callerTabId)?.sessionId;
 
-      links.set(callerTabId, { partnerTabId, partnerLabel, turn: 0 });
+      links.set(callerTabId, { partnerTabId, partnerLabel, turn: 0, role: 'caller' });
       // The fork's entry knows the caller's session id up front; the caller learns
       // the fork's session id when the fork initializes (see init() handler).
-      links.set(partnerTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: 0, partnerSessionId: callerSessionId });
+      links.set(partnerTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: 0, partnerSessionId: callerSessionId, role: 'fork' });
       // Caller is an established agent (past its boot window) → trust claudeState
       // immediately (hasCompletedTurn) so the opener can't inject mid-turn. The
       // forked partner becomes ready when its initSession lands.
@@ -350,6 +383,9 @@ function createAgentLinkStore() {
       // The opener fires when the fork actually initializes; primeFork forces that init.
       pendingOpeners.set(partnerTabId, { callerTabId });
       bump();
+      // Persist both sides so the link survives a restart (rehydrate rebuilds it).
+      void persistLink(callerTabId);
+      void persistLink(partnerTabId);
       void primeFork(partnerTabId);
 
       logInfo(`agentLink: linked ${callerTabId.slice(0, 8)} ⇄ ${partnerTabId.slice(0, 8)} (fork of ${target.sessionId.slice(0, 8)})`);
@@ -367,26 +403,20 @@ function createAgentLinkStore() {
         this.unlink(senderTabId);
         return { ok: false, error: 'The linked agent is no longer available (its tab was closed). Link closed.' };
       }
-      // Self-healing: once we know the partner's session id, it must still be live
-      // and unchanged. A missing session = the peer ended; a different id = it
-      // restarted. Either way the link is stale — break it instead of injecting into
-      // a dead/wrong target. (Before the fork inits, partnerSessionId is unset, so we
-      // don't false-negative during establishment.)
-      if (link.partnerSessionId) {
-        const recipState = claudeStateStore.getState(recipient);
-        if (!recipState) {
-          this.unlink(senderTabId);
-          return { ok: false, error: 'The linked agent is no longer running (its session ended). Link closed.' };
-        }
-        if (recipState.sessionId !== link.partnerSessionId) {
-          this.unlink(senderTabId);
-          return { ok: false, error: 'The linked agent restarted with a new session, so the link is stale. Ask the human to relink.' };
-        }
-      }
       if (!message || !message.trim()) {
         return { ok: false, error: 'Message is empty.' };
       }
+      // The persisted link is authoritative, so a session-id change means the partner
+      // RESUMED (not "a stranger") — re-bind to its new id rather than breaking. If
+      // the partner has no live session it's dormant/resuming: deliver() will queue.
+      const recipState = claudeStateStore.getState(recipient);
+      if (recipState && link.partnerSessionId && recipState.sessionId !== link.partnerSessionId) {
+        link.partnerSessionId = recipState.sessionId;
+        void persistLink(senderTabId);
+        logInfo(`agentLink: re-bound ${senderTabId.slice(0, 8)}'s partner to resumed session ${recipState.sessionId.slice(0, 8)}`);
+      }
       link.turn += 1;
+      void persistLink(senderTabId); // keep the turn counter durable
       const text = buildEnvelope(senderTabId, message, link.turn);
       const status = await deliver(recipient, text);
       const recipName = link.partnerLabel;
@@ -394,12 +424,18 @@ function createAgentLinkStore() {
         return { ok: true, delivered: true, recipient: recipName, note: `Delivered to ${recipName}. Their reply will arrive as a new prompt — finish your turn now.` };
       }
       if (status === 'queued') {
-        return { ok: true, delivered: false, queued: true, recipient: recipName, note: `${recipName} is busy; your message is queued and will be delivered when they're free.` };
+        const offline = !claudeStateStore.getState(recipient);
+        const note = offline
+          ? `${recipName} is currently offline (its session isn't running). Your message is queued and will be delivered when it resumes.`
+          : `${recipName} is busy; your message is queued and will be delivered when they're free.`;
+        return { ok: true, delivered: false, queued: true, recipient: recipName, note };
       }
       return { ok: false, error: 'Delivery failed (could not write to the linked terminal).' };
     },
 
-    /** Break the link from either side and notify the survivor. */
+    /** Break the link from either side and notify the survivor. This is a permanent
+     *  teardown (user-initiated or tab closed) — it clears the persisted pairing too,
+     *  unlike a session-end which only suspends. */
     unlink(tabId: string) {
       const link = links.get(tabId);
       if (!link) return;
@@ -407,6 +443,10 @@ function createAgentLinkStore() {
       cleanup(tabId);
       cleanup(partner);
       bump();
+      // Clear the durable pairing on both tabs (persistLink writes null when the
+      // in-memory entry is gone). For a closed tab resolveTab fails and it's skipped.
+      void persistLink(tabId);
+      void persistLink(partner);
       // Best-effort notice to the survivor (if it exists and isn't mid-turn).
       if (tabExists(partner) && claudeStateStore.getState(partner)?.state !== 'active') {
         void injectPrompt(partner, '⟦AGENT-LINK⟧ The agent you were linked with has disconnected. The link is closed.');
@@ -415,44 +455,123 @@ function createAgentLinkStore() {
     },
 
     async init() {
-      // The fork's initSession landing is the handshake trigger: it proves the fork
-      // is up, on THIS instance, and tool-capable. Mark it ready and send the opener
-      // to the caller. (primeFork forces this init for resumed/forked sessions.)
+      // claude-init-session lands in two situations we care about:
+      //   1. A fresh fork completing its handshake (primeFork forced the init).
+      //   2. An already-linked tab re-initializing after a resume (or a rehydrated
+      //      link coming back online) — re-bind it.
       const u1 = await listen<{ tab_id: string | null; session_id: string }>('claude-init-session', (e) => {
         const { tab_id, session_id } = e.payload;
         if (!tab_id) return;
+
+        // Case 1: fork handshake. Proves the fork is up, on THIS instance, and
+        // tool-capable. Record its session id on the caller, mark it ready, send the
+        // opener to the caller.
         const po = pendingOpeners.get(tab_id);
-        if (!po) return; // not a fork awaiting handshake
-        pendingOpeners.delete(tab_id);
-        // Record the fork's session id on the caller's entry (for staleness checks).
-        const callerLink = links.get(po.callerTabId);
-        if (callerLink) callerLink.partnerSessionId = session_id;
-        const d = delivery.get(tab_id);
-        if (d) { d.ready = true; void flush(tab_id); }
-        if (tabExists(po.callerTabId)) void deliver(po.callerTabId, buildOpener(po.callerTabId, tab_id));
-        logInfo(`agentLink: fork ${tab_id.slice(0, 8)} initialized → opener to caller ${po.callerTabId.slice(0, 8)}`);
+        if (po) {
+          pendingOpeners.delete(tab_id);
+          const callerLink = links.get(po.callerTabId);
+          if (callerLink) { callerLink.partnerSessionId = session_id; void persistLink(po.callerTabId); }
+          const d = delivery.get(tab_id);
+          if (d) { d.ready = true; void flush(tab_id); }
+          if (tabExists(po.callerTabId)) void deliver(po.callerTabId, buildOpener(po.callerTabId, tab_id));
+          logInfo(`agentLink: fork ${tab_id.slice(0, 8)} initialized → opener to caller ${po.callerTabId.slice(0, 8)}`);
+          return;
+        }
+
+        // Case 2: a linked tab resumed. Refresh the PARTNER's record of this tab's
+        // (possibly new) session id so the partner's self-healing send re-binds, and
+        // mark this tab deliverable again so any queued messages flush.
+        const link = links.get(tab_id);
+        if (link) {
+          const partner = links.get(link.partnerTabId);
+          if (partner && partner.partnerSessionId !== session_id) {
+            partner.partnerSessionId = session_id;
+            void persistLink(link.partnerTabId);
+          }
+          const d = delivery.get(tab_id);
+          if (d) {
+            d.ready = true;
+            d.busy = false;
+            if (d.busyTimer) { clearTimeout(d.busyTimer); d.busyTimer = undefined; }
+          } else {
+            delivery.set(tab_id, { ready: true, busy: false, hasCompletedTurn: true, queue: [] });
+          }
+          bump();
+          void flush(tab_id);
+          logInfo(`agentLink: ${tab_id.slice(0, 8)} re-initialized → link re-bound`);
+        }
       });
       unlisteners.push(u1);
 
-      // A turn finished → that tab is idle again. Clear busy, flush its queue.
+      // A turn finished → that tab is idle and alive again. Clear busy, (re)enable
+      // delivery (a Stop proves liveness, e.g. after a webview reload), flush queue.
       const u2 = await listen<{ session_id: string; tab_id: string | null }>('claude-hook-stop', (e) => {
         const tabId = e.payload.tab_id;
         if (!tabId) return;
         const d = delivery.get(tabId);
         if (!d) return;
         d.hasCompletedTurn = true;
+        d.ready = true;
         d.busy = false;
         if (d.busyTimer) { clearTimeout(d.busyTimer); d.busyTimer = undefined; }
         void flush(tabId);
       });
       unlisteners.push(u2);
 
-      // Session ended (process exit) → tear down any link on that tab.
+      // Session ended (process exit). DON'T tear the link down — the agent may resume
+      // (app-restart auto-resume or a manual resume) and re-bind via Case 2 above.
+      // Just suspend live delivery; the durable pairing is kept so it can come back.
+      // Only an explicit unlink or a closed tab removes the link permanently.
       const u3 = await listen<{ session_id: string; tab_id: string | null }>('claude-hook-session-end', (e) => {
         const tabId = e.payload.tab_id;
-        if (tabId && links.has(tabId)) this.unlink(tabId);
+        if (!tabId || !links.has(tabId)) return;
+        const d = delivery.get(tabId);
+        if (d) {
+          d.ready = false;
+          d.busy = false;
+          if (d.busyTimer) { clearTimeout(d.busyTimer); d.busyTimer = undefined; }
+        }
+        bump();
+        logInfo(`agentLink: ${tabId.slice(0, 8)} session ended → link dormant (awaiting resume)`);
       });
       unlisteners.push(u3);
+    },
+
+    /** Rebuild in-memory links from persisted agent_link fields. Call once after
+     *  workspaces load. Only restores a pair when both tabs exist and reciprocally
+     *  reference each other; orphans are cleared. Last-known session ids are refreshed
+     *  as each agent re-inits (Case 2 above). */
+    rehydrate() {
+      const persisted = new Map<string, AgentLink>();
+      for (const ws of workspacesStore.workspaces)
+        for (const pane of ws.panes)
+          for (const tab of pane.tabs)
+            if (tab.agent_link) persisted.set(tab.id, tab.agent_link);
+
+      let restored = 0;
+      for (const [tabId, al] of persisted) {
+        if (links.has(tabId)) continue; // already live this session
+        const partnerAl = persisted.get(al.partner_tab_id);
+        // Require a reciprocal pairing (both tabs present, pointing at each other).
+        if (!partnerAl || partnerAl.partner_tab_id !== tabId) {
+          void persistLink(tabId); // orphan → clear (no in-memory entry → writes null)
+          continue;
+        }
+        links.set(tabId, {
+          partnerTabId: al.partner_tab_id,
+          partnerLabel: al.partner_label,
+          turn: al.turn ?? 0,
+          partnerSessionId: al.partner_session_id ?? undefined,
+          role: al.role === 'fork' ? 'fork' : 'caller',
+        });
+        // Deliverable only once this tab's Claude is live. On a cold restart it isn't
+        // up yet → ready=false; the init handler flips it on resume. If already live
+        // (e.g. webview reload), start ready.
+        const live = !!claudeStateStore.getState(tabId);
+        delivery.set(tabId, { ready: live, busy: false, hasCompletedTurn: true, queue: [] });
+        restored++;
+      }
+      if (restored) { bump(); logInfo(`agentLink: rehydrated ${restored / 2} link(s) from persisted state`); }
     },
 
     destroy() {

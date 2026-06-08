@@ -466,6 +466,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 last_cwd: tab.last_cwd.clone(),
                 diff_context: tab.diff_context.clone(),
                 import_highlight: false,
+                // Tab ids are remapped for the new window, so an Agent Link (which
+                // references the partner by tab id) can't carry over — drop it.
+                agent_link: None,
             }
         }).collect();
 
