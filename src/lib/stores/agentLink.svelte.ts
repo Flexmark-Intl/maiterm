@@ -266,7 +266,7 @@ function createAgentLinkStore() {
           sshCommand: target.sshCommand ?? null,
           remoteCwd: target.remoteCwd ?? null,
         },
-        `⇄ ${target.tabName}`,
+        target.tabName,
       );
       if (!res) return { ok: false, error: 'Failed to spawn the forked partner pane.' };
 
