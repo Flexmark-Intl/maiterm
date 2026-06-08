@@ -52,14 +52,14 @@ jobs:
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v7
         with:
-          name: aiterm-${{ steps.version.outputs.version }}-linux-deb
+          name: maiterm-${{ steps.version.outputs.version }}-linux-deb
           path: src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
 
       - name: Upload updater artifact
         uses: actions/upload-artifact@v7
         with:
-          name: aiterm-${{ steps.version.outputs.version }}-linux-updater
+          name: maiterm-${{ steps.version.outputs.version }}-linux-updater
           path: |
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/appimage/*.AppImage.sig

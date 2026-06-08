@@ -31,6 +31,7 @@ jobs:
 
       - name: Get version
         id: version
+        shell: bash
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Build Tauri app
@@ -42,14 +43,14 @@ jobs:
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v7
         with:
-          name: aiterm-${{ steps.version.outputs.version }}-windows-nsis
+          name: maiterm-${{ steps.version.outputs.version }}-windows-nsis
           path: src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
       - name: Upload updater artifact
         uses: actions/upload-artifact@v7
         with:
-          name: aiterm-${{ steps.version.outputs.version }}-windows-updater
+          name: maiterm-${{ steps.version.outputs.version }}-windows-updater
           path: |
             src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: warn
