@@ -1,19 +1,19 @@
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import * as commands from '$lib/tauri/commands';
-import type { AgentLink } from '$lib/tauri/types';
+import type { AgentBridge } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/claudeState.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
- * Agent Link — a bridge between two running Claude agents in different aiTerm panes.
+ * Agent Bridge — a bridge between two running Claude agents in different aiTerm panes.
  *
- * The human links the current tab to another running Claude session (picked from
+ * The human bridges the current tab to another running Claude session (picked from
  * any workspace). aiTerm FORKS that session (`claude --resume <id> --fork-session`)
  * into a fresh split pane beside the caller — an isolated peer with the target's
  * full context. The two agents then converse asynchronously via the
- * `sendToLinkedAgent` MCP tool; every message is injected as a real terminal turn
+ * `sendToBridgedAgent` MCP tool; every message is injected as a real terminal turn
  * in the recipient's pane, so the human watches (and can interrupt with Esc).
  *
  * Identity is stamped by aiTerm (not self-asserted), so the recipient always knows
@@ -33,9 +33,9 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
  * mid-turn double-injection), `hasCompletedTurn` (after a Stop, claudeState's
  * active/idle is trustworthy and we defer to it).
  *
- * Links are self-healing: at send time the recipient must still have a live Claude
- * session with the same session id recorded at link time; otherwise the link is
- * broken cleanly instead of routing into a dead/wrong target.
+ * Bridges are self-healing: at send time the recipient must still have a live Claude
+ * session; if its session id drifted (it resumed) the bridge re-binds rather than
+ * breaking, and a closed tab tears the bridge down cleanly.
  */
 
 const INJECT_GAP_MS = 120;           // gap between bracketed-paste and the submitting CR
@@ -45,10 +45,10 @@ const FORK_BOOT_TIMEOUT_MS = 15_000; // cap on waiting for the fork to boot befo
 const FORK_SETTLE_MS = 1500;         // extra settle after the fork registers, so its TUI accepts input
 const FORK_INIT_TIMEOUT_MS = 25_000; // if the fork never re-inits on this instance, tell the caller
 
-type LinkRole = 'caller' | 'fork' | 'peer';
+type BridgeRole = 'caller' | 'fork' | 'peer';
 
-interface LinkEntry {
-  /** The tab this agent is linked to. */
+interface BridgeEntry {
+  /** The tab this agent is bridged to. */
   partnerTabId: string;
   /** Human-readable label of the partner (for the agent's own awareness). */
   partnerLabel: string;
@@ -56,10 +56,10 @@ interface LinkEntry {
   turn: number;
   /** Partner's last-known Claude session id. Refreshed when the partner re-inits
    *  after a resume; used to detect a drifted session and re-bind (NOT to break —
-   *  the persisted link is authoritative, so a new id means "it resumed"). */
+   *  the persisted bridge is authoritative, so a new id means "it resumed"). */
   partnerSessionId?: string;
-  /** Whether this tab initiated the link or is the forked peer. */
-  role: LinkRole;
+  /** Whether this tab initiated the bridge or is the forked peer. */
+  role: BridgeRole;
   /** Human-written description of the PARTNER (what it's expert on / how to use it),
    *  fed into this tab's opener. In-memory only (one-time, not persisted). */
   purpose?: string;
@@ -77,16 +77,16 @@ interface DeliveryState {
 const enc = (s: string) => Array.from(new TextEncoder().encode(s));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-function createAgentLinkStore() {
-  // Both tabs of a link get an entry pointing at each other (symmetric).
-  const links = new Map<string, LinkEntry>();
+function createAgentBridgeStore() {
+  // Both tabs of a bridge get an entry pointing at each other (symmetric).
+  const bridges = new Map<string, BridgeEntry>();
   // Delivery state is keyed by the RECIPIENT tab.
   const delivery = new Map<string, DeliveryState>();
   // Forked partners awaiting init → opener-into-caller (keyed by fork tab id).
   const pendingOpeners = new Map<string, { callerTabId: string }>();
   // Best-effort cwd label when live OSC cwd isn't available yet.
   const cwdHint = new Map<string, string>();
-  // Reactive version bump so UI ($derived) can react to link changes.
+  // Reactive version bump so UI ($derived) can react to bridge changes.
   let version = $state(0);
   const unlisteners: (() => void)[] = [];
 
@@ -106,7 +106,7 @@ function createAgentLinkStore() {
     return resolveTab(tabId) !== null;
   }
 
-  /** Clean display name for identity envelopes (strips link glyphs). */
+  /** Clean display name for identity envelopes (strips bridge glyphs). */
   function label(tabId: string): string {
     const loc = resolveTab(tabId);
     if (!loc) return 'unknown agent';
@@ -118,26 +118,26 @@ function createAgentLinkStore() {
     return osc?.cwd ?? osc?.promptCwd ?? cwdHint.get(tabId) ?? null;
   }
 
-  /** Persist this tab's link to the backend (or clear it if the in-memory entry is
+  /** Persist this tab's bridge to the backend (or clear it if the in-memory entry is
    *  gone), so the pairing survives an app restart and can be rehydrated. The live
    *  routing stays in memory; only the durable pairing is written here. */
-  async function persistLink(tabId: string) {
+  async function persistBridge(tabId: string) {
     const loc = resolveTab(tabId);
     if (!loc) return; // tab gone — nothing to persist to
-    const link = links.get(tabId);
-    const payload = link
+    const bridge = bridges.get(tabId);
+    const payload = bridge
       ? {
-          partner_tab_id: link.partnerTabId,
-          partner_label: link.partnerLabel,
-          partner_session_id: link.partnerSessionId ?? null,
-          role: link.role,
-          turn: link.turn,
+          partner_tab_id: bridge.partnerTabId,
+          partner_label: bridge.partnerLabel,
+          partner_session_id: bridge.partnerSessionId ?? null,
+          role: bridge.role,
+          turn: bridge.turn,
         }
       : null;
     try {
-      await commands.setTabAgentLink(loc.ws.id, loc.pane.id, tabId, payload);
+      await commands.setTabAgentBridge(loc.ws.id, loc.pane.id, tabId, payload);
     } catch (e) {
-      logError(`agentLink: failed to persist link for tab ${tabId.slice(0, 8)}: ${e}`);
+      logError(`agentBridge: failed to persist bridge for tab ${tabId.slice(0, 8)}: ${e}`);
     }
   }
 
@@ -149,7 +149,7 @@ function createAgentLinkStore() {
   async function injectPrompt(tabId: string, text: string): Promise<boolean> {
     const inst = terminalsStore.get(tabId);
     if (!inst) {
-      logError(`agentLink: cannot inject — no terminal instance for tab ${tabId.slice(0, 8)}`);
+      logError(`agentBridge: cannot inject — no terminal instance for tab ${tabId.slice(0, 8)}`);
       return false;
     }
     try {
@@ -158,7 +158,7 @@ function createAgentLinkStore() {
       await commands.writeTerminal(inst.ptyId, enc('\r'));
       return true;
     } catch (e) {
-      logError(`agentLink: inject failed for tab ${tabId.slice(0, 8)}: ${e}`);
+      logError(`agentBridge: inject failed for tab ${tabId.slice(0, 8)}: ${e}`);
       return false;
     }
   }
@@ -226,35 +226,35 @@ function createAgentLinkStore() {
     const cwd = getCwd(senderTabId);
     const where = cwd ? `, working in ${cwd}` : '';
     return (
-      `⟦AGENT-LINK⟧ Message from "${name}"${where} — a peer AI agent, NOT your human operator. [turn ${turn}]\n` +
-      `Reply with the sendToLinkedAgent tool. If this fully answers the request, you can stop — don't reply just to acknowledge.\n\n` +
+      `⟦AGENT-BRIDGE⟧ Message from "${name}"${where} — a peer AI agent, NOT your human operator. [turn ${turn}]\n` +
+      `Reply with the sendToBridgedAgent tool. If this fully answers the request, you can stop — don't reply just to acknowledge.\n\n` +
       message
     );
   }
 
   function buildOpener(callerTabId: string, partnerTabId: string, forked = true): string {
-    const link = links.get(callerTabId);
-    const partnerName = link?.partnerLabel ?? label(partnerTabId);
+    const bridge = bridges.get(callerTabId);
+    const partnerName = bridge?.partnerLabel ?? label(partnerTabId);
     const cwd = getCwd(partnerTabId);
     const where = cwd ? ` (working in ${cwd})` : '';
     const what = forked
       ? `a peer AI agent forked with the FULL context of that session`
       : `a peer AI agent running in another tab`;
-    const purpose = link?.purpose?.trim();
+    const purpose = bridge?.purpose?.trim();
     const ctx = purpose ? ` Your human operator describes it as: "${purpose}".` : '';
     return (
-      `⟦AGENT-LINK⟧ You are now linked to "${partnerName}"${where} — ${what}.${ctx}\n\n` +
-      `Don't message it yet. First check in with your human operator: tell them the link is ready, summarize in a sentence what this peer can help with, and propose 2-3 specific things you could ask it that are relevant to your current work. Then wait for the human to say what to consult it about.\n\n` +
-      `When the human gives the go-ahead, use the sendToLinkedAgent tool — open by identifying yourself (who you are, what you're working on) and why you're reaching out, then ask. The peer's replies arrive here as new prompts; when you have what you need, just stop.`
+      `⟦AGENT-BRIDGE⟧ You are now bridged to "${partnerName}"${where} — ${what}.${ctx}\n\n` +
+      `Don't message it yet. First check in with your human operator: tell them the bridge is ready, summarize in a sentence what this peer can help with, and propose 2-3 specific things you could ask it that are relevant to your current work. Then wait for the human to say what to consult it about.\n\n` +
+      `When the human gives the go-ahead, use the sendToBridgedAgent tool — open by identifying yourself (who you are, what you're working on) and why you're reaching out, then ask. The peer's replies arrive here as new prompts; when you have what you need, just stop.`
     );
   }
 
-  /** Heads-up delivered to an EXISTING tab that the human just linked into (it didn't
+  /** Heads-up delivered to an EXISTING tab that the human just bridged into (it didn't
    *  initiate and isn't a fork, so prime it like primeFork primes a fork). */
-  function buildExistingLinkNotice(peerLabel: string): string {
+  function buildExistingBridgeNotice(peerLabel: string): string {
     return (
-      `⟦AGENT-LINK⟧ You have been linked to a peer AI agent ("${peerLabel}") via aiTerm Agent Link — a peer agent in another tab, NOT your human operator. ` +
-      `It may reach out to consult you; its messages arrive here as new prompts. Reply with the sendToLinkedAgent tool. ` +
+      `⟦AGENT-BRIDGE⟧ You have been bridged to a peer AI agent ("${peerLabel}") via aiTerm Agent Bridge — a peer agent in another tab, NOT your human operator. ` +
+      `It may reach out to consult you; its messages arrive here as new prompts. Reply with the sendToBridgedAgent tool. ` +
       `There's nothing to do until its message arrives — carry on with your work.`
     );
   }
@@ -264,19 +264,19 @@ function createAgentLinkStore() {
    *  re-binds its new MCP connection, so its aiTerm tools stay unusable). */
   function buildForkInitDirective(forkTabId: string, peerLabel: string): string {
     return (
-      `⟦AGENT-LINK⟧ You are now a FORKED peer agent in a NEW aiTerm tab (id ${forkTabId}). ` +
+      `⟦AGENT-BRIDGE⟧ You are now a FORKED peer agent in a NEW aiTerm tab (id ${forkTabId}). ` +
       `This is a fresh tab with a fresh MCP connection, so you must re-initialize: call your aiterm initSession tool with tabId "${forkTabId}" right now. ` +
       `Disregard any tab id mentioned earlier in this conversation — you are "${forkTabId}" now.\n\n` +
-      `You have been linked to a peer AI agent ("${peerLabel}") via aiTerm Agent Link. ` +
+      `You have been bridged to a peer AI agent ("${peerLabel}") via aiTerm Agent Bridge. ` +
       `After initializing, reply with a one-line readiness note, then wait — the peer's message will arrive as a new prompt.`
     );
   }
 
   /** Sent to the caller if the fork never re-initializes on this instance. */
-  function buildLinkFailedNote(forkTabId: string): string {
+  function buildBridgeFailedNote(forkTabId: string): string {
     return (
-      `⟦AGENT-LINK⟧ The link to "${label(forkTabId)}" could not be completed — the forked agent did not initialize on this aiTerm instance ` +
-      `(it may have connected to a different one). You can run /maiterm init in the new pane and retry, or unlink and link again.`
+      `⟦AGENT-BRIDGE⟧ The bridge to "${label(forkTabId)}" could not be completed — the forked agent did not initialize on this aiTerm instance ` +
+      `(it may have connected to a different one). You can run /maiterm init in the new pane and retry, or disconnect and bridge again.`
     );
   }
 
@@ -287,17 +287,17 @@ function createAgentLinkStore() {
    *  hanging. */
   async function primeFork(forkTabId: string) {
     for (let waited = 0; waited < FORK_BOOT_TIMEOUT_MS; waited += FORK_BOOT_POLL_MS) {
-      if (!pendingOpeners.has(forkTabId)) return;            // already handshaked / unlinked
+      if (!pendingOpeners.has(forkTabId)) return;            // already handshaked / disconnected
       if (claudeStateStore.getState(forkTabId)) break;        // fork's Claude is up on this instance
       await sleep(FORK_BOOT_POLL_MS);
     }
     await sleep(FORK_SETTLE_MS);
     if (!pendingOpeners.has(forkTabId)) return;
 
-    const peerLabel = links.get(forkTabId)?.partnerLabel ?? 'your linked peer';
+    const peerLabel = bridges.get(forkTabId)?.partnerLabel ?? 'your bridged peer';
     const ok = await injectPrompt(forkTabId, buildForkInitDirective(forkTabId, peerLabel));
     if (!ok) {
-      logError(`agentLink: failed to prime fork ${forkTabId.slice(0, 8)}`);
+      logError(`agentBridge: failed to prime fork ${forkTabId.slice(0, 8)}`);
       return;
     }
     // Backstop: if the fork doesn't re-init on this instance, don't leave the caller waiting.
@@ -305,17 +305,17 @@ function createAgentLinkStore() {
       const po = pendingOpeners.get(forkTabId);
       if (!po) return;                                        // handshake completed
       pendingOpeners.delete(forkTabId);
-      if (tabExists(po.callerTabId)) void deliver(po.callerTabId, buildLinkFailedNote(forkTabId));
+      if (tabExists(po.callerTabId)) void deliver(po.callerTabId, buildBridgeFailedNote(forkTabId));
     }, FORK_INIT_TIMEOUT_MS);
   }
 
-  // ─── Lifecycle: link / unlink ────────────────────────────────────────────────
+  // ─── Lifecycle: bridge / disconnect ────────────────────────────────────────────────
 
   function cleanup(tabId: string) {
     const d = delivery.get(tabId);
     if (d?.busyTimer) clearTimeout(d.busyTimer);
     delivery.delete(tabId);
-    links.delete(tabId);
+    bridges.delete(tabId);
     pendingOpeners.delete(tabId);
     cwdHint.delete(tabId);
   }
@@ -324,50 +324,50 @@ function createAgentLinkStore() {
     get version() { return version; },
 
     getInternalSizes() {
-      return { links: links.size, delivery: delivery.size, pending_openers: pendingOpeners.size };
+      return { bridges: bridges.size, delivery: delivery.size, pending_openers: pendingOpeners.size };
     },
 
-    isLinked(tabId: string): boolean {
+    isBridged(tabId: string): boolean {
       void version;
-      return links.has(tabId);
+      return bridges.has(tabId);
     },
 
     getPartnerTabId(tabId: string): string | null {
-      return links.get(tabId)?.partnerTabId ?? null;
+      return bridges.get(tabId)?.partnerTabId ?? null;
     },
 
     getPartnerLabel(tabId: string): string | null {
       void version;
-      return links.get(tabId)?.partnerLabel ?? null;
+      return bridges.get(tabId)?.partnerLabel ?? null;
     },
 
-    /** For the getLinkedAgent MCP tool. */
-    getLinkInfo(tabId: string) {
-      const link = links.get(tabId);
-      if (!link) return { linked: false };
+    /** For the getBridgedAgent MCP tool. */
+    getBridgeInfo(tabId: string) {
+      const bridge = bridges.get(tabId);
+      if (!bridge) return { bridged: false };
       return {
-        linked: true,
+        bridged: true,
         partner: {
-          tabId: link.partnerTabId,
-          label: link.partnerLabel,
-          cwd: getCwd(link.partnerTabId),
-          available: tabExists(link.partnerTabId),
+          tabId: bridge.partnerTabId,
+          label: bridge.partnerLabel,
+          cwd: getCwd(bridge.partnerTabId),
+          available: tabExists(bridge.partnerTabId),
         },
       };
     },
 
     /**
-     * Fork `target`'s session into a split beside `callerTabId` and link the two.
+     * Fork `target`'s session into a split beside `callerTabId` and bridge the two.
      * `target` comes from the picker (getClaudeSessions / claudeState).
      */
-    async establishLink(
+    async establishBridge(
       callerTabId: string,
       target: { sessionId: string; tabName: string; workspaceName: string; cwd: string | null; sshCommand?: string | null; remoteCwd?: string | null },
       purpose?: string,
     ): Promise<{ ok: true; partnerTabId: string; partnerLabel: string } | { ok: false; error: string }> {
       const loc = resolveTab(callerTabId);
       if (!loc) return { ok: false, error: 'Caller tab not found.' };
-      if (links.has(callerTabId)) return { ok: false, error: 'This tab is already linked. Unlink it first.' };
+      if (bridges.has(callerTabId)) return { ok: false, error: 'This tab is already bridged. Disconnect it first.' };
 
       const partnerLabel = `${target.tabName} · ${target.workspaceName}`;
       const res = await workspacesStore.forkSessionIntoSplit(
@@ -387,10 +387,10 @@ function createAgentLinkStore() {
       const callerLabel = `${label(callerTabId)}`;
       const callerSessionId = claudeStateStore.getState(callerTabId)?.sessionId;
 
-      links.set(callerTabId, { partnerTabId, partnerLabel, turn: 0, role: 'caller', purpose: purpose?.trim() || undefined });
+      bridges.set(callerTabId, { partnerTabId, partnerLabel, turn: 0, role: 'caller', purpose: purpose?.trim() || undefined });
       // The fork's entry knows the caller's session id up front; the caller learns
       // the fork's session id when the fork initializes (see init() handler).
-      links.set(partnerTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: 0, partnerSessionId: callerSessionId, role: 'fork' });
+      bridges.set(partnerTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: 0, partnerSessionId: callerSessionId, role: 'fork' });
       // Caller is an established agent (past its boot window) → trust claudeState
       // immediately (hasCompletedTurn) so the opener can't inject mid-turn. The
       // forked partner becomes ready when its initSession lands.
@@ -402,26 +402,26 @@ function createAgentLinkStore() {
       // The opener fires when the fork actually initializes; primeFork forces that init.
       pendingOpeners.set(partnerTabId, { callerTabId });
       bump();
-      // Persist both sides so the link survives a restart (rehydrate rebuilds it).
-      void persistLink(callerTabId);
-      void persistLink(partnerTabId);
+      // Persist both sides so the bridge survives a restart (rehydrate rebuilds it).
+      void persistBridge(callerTabId);
+      void persistBridge(partnerTabId);
       void primeFork(partnerTabId);
 
-      logInfo(`agentLink: linked ${callerTabId.slice(0, 8)} ⇄ ${partnerTabId.slice(0, 8)} (fork of ${target.sessionId.slice(0, 8)})`);
+      logInfo(`agentBridge: bridged ${callerTabId.slice(0, 8)} ⇄ ${partnerTabId.slice(0, 8)} (fork of ${target.sessionId.slice(0, 8)})`);
       return { ok: true, partnerTabId, partnerLabel };
     },
 
     /**
-     * Link `callerTabId` to an ALREADY-RUNNING Claude tab — no fork, no new pane.
-     * For when the split is already set up (e.g. auto-relink failed but both agents
+     * Bridge `callerTabId` to an ALREADY-RUNNING Claude tab — no fork, no new pane.
+     * For when the split is already set up (e.g. auto-reconnect failed but both agents
      * are still live) and the human just wants to re-establish the bridge.
      */
-    async linkExistingTab(
+    async bridgeExistingTab(
       callerTabId: string,
       targetTabId: string,
       purpose?: string,
     ): Promise<{ ok: true; partnerTabId: string; partnerLabel: string } | { ok: false; error: string }> {
-      if (callerTabId === targetTabId) return { ok: false, error: 'Cannot link a tab to itself.' };
+      if (callerTabId === targetTabId) return { ok: false, error: 'Cannot bridge a tab to itself.' };
       const callerLoc = resolveTab(callerTabId);
       const targetLoc = resolveTab(targetTabId);
       if (!callerLoc) return { ok: false, error: 'Caller tab not found.' };
@@ -434,74 +434,74 @@ function createAgentLinkStore() {
       const callerLabel = label(callerTabId);
       const targetLabel = `${targetLoc.tab.name} · ${targetLoc.ws.name}`;
 
-      // Don't hijack a link the target already has with a DIFFERENT agent.
-      const targetPartner = links.get(targetTabId)?.partnerTabId;
+      // Don't hijack a bridge the target already has with a DIFFERENT agent.
+      const targetPartner = bridges.get(targetTabId)?.partnerTabId;
       if (targetPartner && targetPartner !== callerTabId) {
-        return { ok: false, error: `"${targetLabel}" is already linked to another agent. Unlink it there first.` };
+        return { ok: false, error: `"${targetLabel}" is already bridged to another agent. Disconnect it there first.` };
       }
-      // Abandon any stale link the caller has with a DIFFERENT agent (notify it).
-      const callerPartner = links.get(callerTabId)?.partnerTabId;
-      if (callerPartner && callerPartner !== targetTabId) this.unlink(callerTabId);
+      // Abandon any stale bridge the caller has with a DIFFERENT agent (notify it).
+      const callerPartner = bridges.get(callerTabId)?.partnerTabId;
+      if (callerPartner && callerPartner !== targetTabId) this.disconnect(callerTabId);
 
-      // Repairing an existing caller<->target pair (e.g. a failed auto-relink) →
+      // Repairing an existing caller<->target pair (e.g. a failed auto-reconnect) →
       // reconnect in place without re-introducing an ongoing conversation. Otherwise
-      // it's a fresh link → run the full intro flow.
-      const repairing = links.get(callerTabId)?.partnerTabId === targetTabId;
-      const callerTurn = links.get(callerTabId)?.turn ?? 0;
-      const targetTurn = links.get(targetTabId)?.turn ?? 0;
+      // it's a fresh bridge → run the full intro flow.
+      const repairing = bridges.get(callerTabId)?.partnerTabId === targetTabId;
+      const callerTurn = bridges.get(callerTabId)?.turn ?? 0;
+      const targetTurn = bridges.get(targetTabId)?.turn ?? 0;
 
-      // Symmetric link between two established agents — both ready, both trust
+      // Symmetric bridge between two established agents — both ready, both trust
       // claudeState immediately, each records the other's live session id.
-      links.set(callerTabId, { partnerTabId: targetTabId, partnerLabel: targetLabel, turn: callerTurn, partnerSessionId: targetState.sessionId, role: 'caller', purpose: purpose?.trim() || undefined });
-      links.set(targetTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: targetTurn, partnerSessionId: callerState?.sessionId, role: 'peer' });
+      bridges.set(callerTabId, { partnerTabId: targetTabId, partnerLabel: targetLabel, turn: callerTurn, partnerSessionId: targetState.sessionId, role: 'caller', purpose: purpose?.trim() || undefined });
+      bridges.set(targetTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: targetTurn, partnerSessionId: callerState?.sessionId, role: 'peer' });
       delivery.set(callerTabId, { ready: true, busy: false, hasCompletedTurn: true, queue: [] });
       delivery.set(targetTabId, { ready: true, busy: false, hasCompletedTurn: true, queue: [] });
       const callerCwd = getCwd(callerTabId); if (callerCwd) cwdHint.set(callerTabId, callerCwd);
       const targetCwd = getCwd(targetTabId); if (targetCwd) cwdHint.set(targetTabId, targetCwd);
 
       bump();
-      void persistLink(callerTabId);
-      void persistLink(targetTabId);
+      void persistBridge(callerTabId);
+      void persistBridge(targetTabId);
 
       if (repairing) {
-        logInfo(`agentLink: repaired existing link ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)}`);
+        logInfo(`agentBridge: repaired existing bridge ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)}`);
       } else {
         // Prime the target (it didn't initiate) and have the caller introduce itself.
-        void deliver(targetTabId, buildExistingLinkNotice(callerLabel));
+        void deliver(targetTabId, buildExistingBridgeNotice(callerLabel));
         void deliver(callerTabId, buildOpener(callerTabId, targetTabId, false));
-        logInfo(`agentLink: linked existing ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)} (no fork)`);
+        logInfo(`agentBridge: bridged existing ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)} (no fork)`);
       }
       return { ok: true, partnerTabId: targetTabId, partnerLabel: targetLabel };
     },
 
-    /** Handle a sendToLinkedAgent tool call from `senderTabId`. */
+    /** Handle a sendToBridgedAgent tool call from `senderTabId`. */
     async sendFromTab(senderTabId: string, message: string) {
-      const link = links.get(senderTabId);
-      if (!link) {
-        return { ok: false, error: 'You are not linked to any agent. Ask the human to link a session via the Agent Link picker.' };
+      const bridge = bridges.get(senderTabId);
+      if (!bridge) {
+        return { ok: false, error: 'You are not bridged to any agent. Ask the human to bridge a session via the Agent Bridge picker.' };
       }
-      const recipient = link.partnerTabId;
+      const recipient = bridge.partnerTabId;
       if (!tabExists(recipient)) {
-        this.unlink(senderTabId);
-        return { ok: false, error: 'The linked agent is no longer available (its tab was closed). Link closed.' };
+        this.disconnect(senderTabId);
+        return { ok: false, error: 'The bridged agent is no longer available (its tab was closed). Bridge closed.' };
       }
       if (!message || !message.trim()) {
         return { ok: false, error: 'Message is empty.' };
       }
-      // The persisted link is authoritative, so a session-id change means the partner
+      // The persisted bridge is authoritative, so a session-id change means the partner
       // RESUMED (not "a stranger") — re-bind to its new id rather than breaking. If
       // the partner has no live session it's dormant/resuming: deliver() will queue.
       const recipState = claudeStateStore.getState(recipient);
-      if (recipState && link.partnerSessionId && recipState.sessionId !== link.partnerSessionId) {
-        link.partnerSessionId = recipState.sessionId;
-        void persistLink(senderTabId);
-        logInfo(`agentLink: re-bound ${senderTabId.slice(0, 8)}'s partner to resumed session ${recipState.sessionId.slice(0, 8)}`);
+      if (recipState && bridge.partnerSessionId && recipState.sessionId !== bridge.partnerSessionId) {
+        bridge.partnerSessionId = recipState.sessionId;
+        void persistBridge(senderTabId);
+        logInfo(`agentBridge: re-bound ${senderTabId.slice(0, 8)}'s partner to resumed session ${recipState.sessionId.slice(0, 8)}`);
       }
-      link.turn += 1;
-      void persistLink(senderTabId); // keep the turn counter durable
-      const text = buildEnvelope(senderTabId, message, link.turn);
+      bridge.turn += 1;
+      void persistBridge(senderTabId); // keep the turn counter durable
+      const text = buildEnvelope(senderTabId, message, bridge.turn);
       const status = await deliver(recipient, text);
-      const recipName = link.partnerLabel;
+      const recipName = bridge.partnerLabel;
       if (status === 'delivered') {
         return { ok: true, delivered: true, recipient: recipName, note: `Delivered to ${recipName}. Their reply will arrive as a new prompt — finish your turn now.` };
       }
@@ -512,35 +512,35 @@ function createAgentLinkStore() {
           : `${recipName} is busy; your message is queued and will be delivered when they're free.`;
         return { ok: true, delivered: false, queued: true, recipient: recipName, note };
       }
-      return { ok: false, error: 'Delivery failed (could not write to the linked terminal).' };
+      return { ok: false, error: 'Delivery failed (could not write to the bridged terminal).' };
     },
 
-    /** Break the link from either side and notify the survivor. This is a permanent
+    /** Break the bridge from either side and notify the survivor. This is a permanent
      *  teardown (user-initiated or tab closed) — it clears the persisted pairing too,
      *  unlike a session-end which only suspends. */
-    unlink(tabId: string) {
-      const link = links.get(tabId);
-      if (!link) return;
-      const partner = link.partnerTabId;
+    disconnect(tabId: string) {
+      const bridge = bridges.get(tabId);
+      if (!bridge) return;
+      const partner = bridge.partnerTabId;
       cleanup(tabId);
       cleanup(partner);
       bump();
-      // Clear the durable pairing on both tabs (persistLink writes null when the
+      // Clear the durable pairing on both tabs (persistBridge writes null when the
       // in-memory entry is gone). For a closed tab resolveTab fails and it's skipped.
-      void persistLink(tabId);
-      void persistLink(partner);
+      void persistBridge(tabId);
+      void persistBridge(partner);
       // Best-effort notice to the survivor (if it exists and isn't mid-turn).
       if (tabExists(partner) && claudeStateStore.getState(partner)?.state !== 'active') {
-        void injectPrompt(partner, '⟦AGENT-LINK⟧ The agent you were linked with has disconnected. The link is closed.');
+        void injectPrompt(partner, '⟦AGENT-BRIDGE⟧ The agent you were bridged with has disconnected. The bridge is closed.');
       }
-      logInfo(`agentLink: unlinked ${tabId.slice(0, 8)} ⇄ ${partner.slice(0, 8)}`);
+      logInfo(`agentBridge: disconnected ${tabId.slice(0, 8)} ⇄ ${partner.slice(0, 8)}`);
     },
 
     async init() {
       // claude-init-session lands in two situations we care about:
       //   1. A fresh fork completing its handshake (primeFork forced the init).
-      //   2. An already-linked tab re-initializing after a resume (or a rehydrated
-      //      link coming back online) — re-bind it.
+      //   2. An already-bridged tab re-initializing after a resume (or a rehydrated
+      //      bridge coming back online) — re-bind it.
       const u1 = await listen<{ tab_id: string | null; session_id: string }>('claude-init-session', (e) => {
         const { tab_id, session_id } = e.payload;
         if (!tab_id) return;
@@ -551,24 +551,24 @@ function createAgentLinkStore() {
         const po = pendingOpeners.get(tab_id);
         if (po) {
           pendingOpeners.delete(tab_id);
-          const callerLink = links.get(po.callerTabId);
-          if (callerLink) { callerLink.partnerSessionId = session_id; void persistLink(po.callerTabId); }
+          const callerBridge = bridges.get(po.callerTabId);
+          if (callerBridge) { callerBridge.partnerSessionId = session_id; void persistBridge(po.callerTabId); }
           const d = delivery.get(tab_id);
           if (d) { d.ready = true; void flush(tab_id); }
           if (tabExists(po.callerTabId)) void deliver(po.callerTabId, buildOpener(po.callerTabId, tab_id));
-          logInfo(`agentLink: fork ${tab_id.slice(0, 8)} initialized → opener to caller ${po.callerTabId.slice(0, 8)}`);
+          logInfo(`agentBridge: fork ${tab_id.slice(0, 8)} initialized → opener to caller ${po.callerTabId.slice(0, 8)}`);
           return;
         }
 
-        // Case 2: a linked tab resumed. Refresh the PARTNER's record of this tab's
+        // Case 2: a bridged tab resumed. Refresh the PARTNER's record of this tab's
         // (possibly new) session id so the partner's self-healing send re-binds, and
         // mark this tab deliverable again so any queued messages flush.
-        const link = links.get(tab_id);
-        if (link) {
-          const partner = links.get(link.partnerTabId);
+        const bridge = bridges.get(tab_id);
+        if (bridge) {
+          const partner = bridges.get(bridge.partnerTabId);
           if (partner && partner.partnerSessionId !== session_id) {
             partner.partnerSessionId = session_id;
-            void persistLink(link.partnerTabId);
+            void persistBridge(bridge.partnerTabId);
           }
           const d = delivery.get(tab_id);
           if (d) {
@@ -580,7 +580,7 @@ function createAgentLinkStore() {
           }
           bump();
           void flush(tab_id);
-          logInfo(`agentLink: ${tab_id.slice(0, 8)} re-initialized → link re-bound`);
+          logInfo(`agentBridge: ${tab_id.slice(0, 8)} re-initialized → bridge re-bound`);
         }
       });
       unlisteners.push(u1);
@@ -600,13 +600,13 @@ function createAgentLinkStore() {
       });
       unlisteners.push(u2);
 
-      // Session ended (process exit). DON'T tear the link down — the agent may resume
+      // Session ended (process exit). DON'T tear the bridge down — the agent may resume
       // (app-restart auto-resume or a manual resume) and re-bind via Case 2 above.
       // Just suspend live delivery; the durable pairing is kept so it can come back.
-      // Only an explicit unlink or a closed tab removes the link permanently.
+      // Only an explicit disconnect or a closed tab removes the bridge permanently.
       const u3 = await listen<{ session_id: string; tab_id: string | null }>('claude-hook-session-end', (e) => {
         const tabId = e.payload.tab_id;
-        if (!tabId || !links.has(tabId)) return;
+        if (!tabId || !bridges.has(tabId)) return;
         const d = delivery.get(tabId);
         if (d) {
           d.ready = false;
@@ -614,32 +614,32 @@ function createAgentLinkStore() {
           if (d.busyTimer) { clearTimeout(d.busyTimer); d.busyTimer = undefined; }
         }
         bump();
-        logInfo(`agentLink: ${tabId.slice(0, 8)} session ended → link dormant (awaiting resume)`);
+        logInfo(`agentBridge: ${tabId.slice(0, 8)} session ended → bridge dormant (awaiting resume)`);
       });
       unlisteners.push(u3);
     },
 
-    /** Rebuild in-memory links from persisted agent_link fields. Call once after
+    /** Rebuild in-memory bridges from persisted agent_bridge fields. Call once after
      *  workspaces load. Only restores a pair when both tabs exist and reciprocally
      *  reference each other; orphans are cleared. Last-known session ids are refreshed
      *  as each agent re-inits (Case 2 above). */
     rehydrate() {
-      const persisted = new Map<string, AgentLink>();
+      const persisted = new Map<string, AgentBridge>();
       for (const ws of workspacesStore.workspaces)
         for (const pane of ws.panes)
           for (const tab of pane.tabs)
-            if (tab.agent_link) persisted.set(tab.id, tab.agent_link);
+            if (tab.agent_bridge) persisted.set(tab.id, tab.agent_bridge);
 
       let restored = 0;
       for (const [tabId, al] of persisted) {
-        if (links.has(tabId)) continue; // already live this session
+        if (bridges.has(tabId)) continue; // already live this session
         const partnerAl = persisted.get(al.partner_tab_id);
         // Require a reciprocal pairing (both tabs present, pointing at each other).
         if (!partnerAl || partnerAl.partner_tab_id !== tabId) {
-          void persistLink(tabId); // orphan → clear (no in-memory entry → writes null)
+          void persistBridge(tabId); // orphan → clear (no in-memory entry → writes null)
           continue;
         }
-        links.set(tabId, {
+        bridges.set(tabId, {
           partnerTabId: al.partner_tab_id,
           partnerLabel: al.partner_label,
           turn: al.turn ?? 0,
@@ -653,14 +653,14 @@ function createAgentLinkStore() {
         delivery.set(tabId, { ready: live, busy: false, hasCompletedTurn: true, queue: [] });
         restored++;
       }
-      if (restored) { bump(); logInfo(`agentLink: rehydrated ${restored / 2} link(s) from persisted state`); }
+      if (restored) { bump(); logInfo(`agentBridge: rehydrated ${restored / 2} bridge(s) from persisted state`); }
     },
 
     destroy() {
       for (const u of unlisteners) u();
       unlisteners.length = 0;
       for (const d of delivery.values()) if (d.busyTimer) clearTimeout(d.busyTimer);
-      links.clear();
+      bridges.clear();
       delivery.clear();
       pendingOpeners.clear();
       cwdHint.clear();
@@ -668,4 +668,4 @@ function createAgentLinkStore() {
   };
 }
 
-export const agentLinkStore = createAgentLinkStore();
+export const agentBridgeStore = createAgentBridgeStore();

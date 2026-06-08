@@ -19,7 +19,7 @@
   import type { ImportPreview } from '$lib/tauri/commands';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { claudeStateStore } from '$lib/stores/claudeState.svelte';
-  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
+  import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
@@ -28,7 +28,7 @@
   import { openFileFromTerminal } from '$lib/utils/openFile';
   import { installGlobalSmartQuoteFix } from '$lib/utils/smartQuotes';
   import QuickOpen from '$lib/components/QuickOpen.svelte';
-  import AgentLinkPicker from '$lib/components/AgentLinkPicker.svelte';
+  import AgentBridgePicker from '$lib/components/AgentBridgePicker.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
   import type { EditorFileInfo } from '$lib/tauri/types';
@@ -45,8 +45,8 @@
   let importPreview = $state<ImportPreview | null>(null);
   let importFilePath = $state('');
   let showQuickOpen = $state(false);
-  let showAgentLinkPicker = $state(false);
-  let agentLinkCallerTabId = $state<string | null>(null);
+  let showAgentBridgePicker = $state(false);
+  let agentBridgeCallerTabId = $state<string | null>(null);
 
   // Cmd+W two-press confirmation: first press arms closeConfirmTabId for 2s,
   // a second press while armed (on the same tab) actually closes.
@@ -323,8 +323,8 @@
     // Claude Code state tracking (hook events → per-tab Claude state)
     claudeStateStore.init();
 
-    // Agent Link (hook events → cross-agent message delivery)
-    agentLinkStore.init();
+    // Agent Bridge (hook events → cross-agent message delivery)
+    agentBridgeStore.init();
 
     // OS notification click → deep-link to workspace+tab.
     // NOTE: onAction only fires on mobile (iOS/Android). On desktop (macOS/Linux/Windows),
@@ -571,13 +571,13 @@
         return;
       }
 
-      // Cmd+Shift+L - Link this agent to another (Agent Link)
+      // Cmd+Shift+L - Connect this agent to another (Agent Bridge)
       if (isMeta && e.shiftKey && e.key.toLowerCase() === 'l') {
         e.preventDefault();
         e.stopPropagation();
         const tab = workspacesStore.activeTab;
-        agentLinkCallerTabId = tab?.tab_type === 'terminal' ? tab.id : null;
-        if (!showAgentLinkPicker) showAgentLinkPicker = true;
+        agentBridgeCallerTabId = tab?.tab_type === 'terminal' ? tab.id : null;
+        if (!showAgentBridgePicker) showAgentBridgePicker = true;
         return;
       }
 
@@ -817,20 +817,20 @@
       altPressClean = true;
     }
 
-    // Agent Link picker opened from the terminal context menu ("Link to Agent…")
-    const onOpenAgentLinkPicker = (e: Event) => {
+    // Agent Bridge picker opened from the terminal context menu ("Connect to Agent…")
+    const onOpenAgentBridgePicker = (e: Event) => {
       const tabId = (e as CustomEvent<{ tabId: string }>).detail?.tabId ?? null;
-      agentLinkCallerTabId = tabId;
-      if (!showAgentLinkPicker) showAgentLinkPicker = true;
+      agentBridgeCallerTabId = tabId;
+      if (!showAgentBridgePicker) showAgentBridgePicker = true;
     };
-    window.addEventListener('open-agent-link-picker', onOpenAgentLinkPicker);
+    window.addEventListener('open-agent-bridge-picker', onOpenAgentBridgePicker);
 
     window.addEventListener('keydown', handleKeydown, true);
     window.addEventListener('keydown', handleKeydownAlt, true);
     window.addEventListener('keyup', handleKeyupAlt, true);
 
     return () => {
-      window.removeEventListener('open-agent-link-picker', onOpenAgentLinkPicker);
+      window.removeEventListener('open-agent-bridge-picker', onOpenAgentBridgePicker);
       window.removeEventListener('keydown', handleKeydown, true);
       window.removeEventListener('keydown', handleKeydownAlt, true);
       window.removeEventListener('keyup', handleKeyupAlt, true);
@@ -845,7 +845,7 @@
       unlistenClaudeTool?.();
       unlistenClaudeConnection?.();
       claudeStateStore.destroy();
-      agentLinkStore.destroy();
+      agentBridgeStore.destroy();
       unlistenNotificationAction?.unregister();
       unlistenFocus?.();
       unlistenResize?.();
@@ -895,11 +895,11 @@
     }
   }}
 />
-<AgentLinkPicker
-  open={showAgentLinkPicker}
-  callerTabId={agentLinkCallerTabId}
+<AgentBridgePicker
+  open={showAgentBridgePicker}
+  callerTabId={agentBridgeCallerTabId}
   onclose={() => {
-    showAgentLinkPicker = false;
+    showAgentBridgePicker = false;
     const tab = workspacesStore.activeTab;
     if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
   }}

@@ -453,7 +453,7 @@ pub fn run() {
             commands::workspace::set_tab_last_cwd,
             commands::workspace::set_tab_auto_resume_context,
             commands::workspace::set_tab_auto_resume_enabled,
-            commands::workspace::set_tab_agent_link,
+            commands::workspace::set_tab_agent_bridge,
             commands::workspace::set_tab_trigger_variables,
             commands::workspace::get_all_workspaces,
             commands::workspace::get_all_tabs,

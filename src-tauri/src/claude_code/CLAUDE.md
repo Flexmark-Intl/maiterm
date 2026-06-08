@@ -64,51 +64,51 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getClaudeSessions | All active Claude sessions across tabs (state, tool, model, cwd) — multi-agent coordination |
 | listArchivedTabs | List archived (suspended) tabs with names, dates, restore context |
 | restoreArchivedTab | Restore an archived tab back into the active workspace |
-| sendToLinkedAgent | Send a message to the peer agent this tab is linked with (Agent Link). Async — reply arrives as a new prompt turn |
-| getLinkedAgent | Report whether this tab is linked and, if so, the partner's label/cwd |
+| sendToBridgedAgent | Send a message to the peer agent this tab is bridged with (Agent Bridge). Async — reply arrives as a new prompt turn |
+| getBridgedAgent | Report whether this tab is bridged and, if so, the partner's label/cwd |
 
-## Agent Link (agent-to-agent bridge)
+## Agent Bridge (agent-to-agent bridge)
 
-Lets two running Claude agents in different panes talk to each other. The human links
-the active tab to another running Claude session via the **Agent Link picker**
-(`Cmd+Shift+L`, or terminal context menu → "Link to Agent…"). The agents then converse
-asynchronously via the `sendToLinkedAgent` tool; each message is injected as a real
+Lets two running Claude agents in different panes talk to each other. The human bridges
+the active tab to another running Claude session via the **Agent Bridge picker**
+(`Cmd+Shift+L`, or terminal context menu → "Connect to Agent…"). The agents then converse
+asynchronously via the `sendToBridgedAgent` tool; each message is injected as a real
 terminal turn in the recipient's pane, so the human watches the whole exchange and can
 interrupt with Esc.
 
-**Two link modes (picker toggle):**
-- **Fork into new pane** (default) — `establishLink()` forks the target session
+**Two bridge modes (picker toggle):**
+- **Fork into new pane** (default) — `establishBridge()` forks the target session
   (`claude --resume <id> --fork-session`) into a split pane beside the caller: an
   isolated peer with the target's full context that doesn't disturb the original.
-- **Link existing tab** — `linkExistingTab()` links two already-running Claude tabs
+- **Connect existing tab** — `bridgeExistingTab()` bridges two already-running Claude tabs
   directly, no fork/new pane (for when the split already exists, e.g. a failed
-  auto-relink). Idempotent: re-selecting the caller's own partner *repairs* a broken
-  link in place; it refuses to hijack a tab linked to a third agent.
+  auto-reconnect). Idempotent: re-selecting the caller's own partner *repairs* a broken
+  bridge in place; it refuses to hijack a tab bridged to a third agent.
 
 **Human-guided opener:** the picker has an optional textarea where the human describes
 the peer (what it's expert on / how to use it). The opener fed to the calling agent does
 NOT fire questions immediately — it tells the agent to check in with the human first
 (summarize what the peer offers, propose a few things it could ask) and wait for
-direction before using `sendToLinkedAgent`. The description is in-memory (one-time, not
+direction before using `sendToBridgedAgent`. The description is in-memory (one-time, not
 persisted).
 
 **Key files:**
-- `src/lib/stores/agentLink.svelte.ts` — link registry (keyed by tab_id, symmetric),
-  `establishLink()` (fork + handshake), `linkExistingTab()` (no-fork link/repair),
+- `src/lib/stores/agentBridge.svelte.ts` — bridge registry (keyed by tab_id, symmetric),
+  `establishBridge()` (fork + handshake), `bridgeExistingTab()` (no-fork bridge/repair),
   `primeFork()` (auto-init directive), `rehydrate()` (rebuild from persisted state),
   delivery gating, identity envelopes
 - `src/lib/stores/workspaces.svelte.ts` → `forkSessionIntoSplit()` — splits the caller's
   pane and boots the forked partner (reuses the clone/auto-resume spawn path with
   `setSplitContext({ fireAutoResume: true })`)
-- `src/lib/components/AgentLinkPicker.svelte` — session picker modal (mode toggle + purpose textarea)
-- `claudeCode.svelte.ts` → `handleSendToLinkedAgent` / `handleGetLinkedAgent` dispatch
-- Persistence: `Tab.agent_link` (Rust `AgentLink` struct) via the `set_tab_agent_link`
+- `src/lib/components/AgentBridgePicker.svelte` — session picker modal (mode toggle + purpose textarea)
+- `claudeCode.svelte.ts` → `handleSendToBridgedAgent` / `handleGetBridgedAgent` dispatch
+- Persistence: `Tab.agent_bridge` (Rust `AgentBridge` struct) via the `set_tab_agent_bridge`
   command — durable pairing written both sides
 
 **Design decisions (v1):** async-only (no blocking RPC); fork-only (the fork *is* the
 target, isolated); loop control = framing + human Esc (no circuit breaker); identity is
 stamped by aiTerm from the registry (tamper-proof — recipient can't mistake a peer for
-the human); link keyed by tab_id (survives the fork's new session id).
+the human); bridge keyed by tab_id (survives the fork's new session id).
 
 **Handshake (tight, routing-proof):** a forked session resumes the target's transcript,
 so it inherits the target's `initSession` and won't re-bind its new MCP connection. After
@@ -122,11 +122,11 @@ as its OWN tab; that tab's real `claude-init-session` event is the handshake tri
 is required, so a dormant/resuming partner queues instead of injecting into a shell).
 Messages to a busy/dormant tab queue and flush on its next `Stop`/re-init.
 
-**Persistence & resume (hardening):** the pairing is persisted on both tabs (`Tab.agent_link`),
-so a link survives an app restart. On load, `rehydrate()` rebuilds the in-memory registry
+**Persistence & resume (hardening):** the pairing is persisted on both tabs (`Tab.agent_bridge`),
+so a bridge survives an app restart. On load, `rehydrate()` rebuilds the in-memory registry
 for any pair where both tabs still exist and reciprocally reference each other (orphans
-cleared). `session-end` only **suspends** the in-memory link (keeps the durable pairing) —
-the agent may auto-resume and re-bind; only an explicit unlink or a closed tab tears it
+cleared). `session-end` only **suspends** the in-memory bridge (keeps the durable pairing) —
+the agent may auto-resume and re-bind; only an explicit disconnect or a closed tab tears it
 down. Because `claude --resume` can mint a new session id, the recorded `partner_session_id`
 is refreshed when a partner re-inits (`claude-init-session`), and a send-time id mismatch
 **re-binds** rather than breaking. The fork's auto-resume command is *not* `--fork-session`

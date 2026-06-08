@@ -2,13 +2,13 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { claudeStateStore } from '$lib/stores/claudeState.svelte';
-  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
+  import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { getPtyInfo } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
 
   interface Props {
     open: boolean;
-    /** The tab initiating the link (the active terminal). */
+    /** The tab initiating the bridge (the active terminal). */
     callerTabId: string | null;
     onclose: () => void;
   }
@@ -27,7 +27,7 @@
   let selectedIndex = $state(0);
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
-  // 'fork' = fork the chosen session into a new split (default). 'existing' = link
+  // 'fork' = fork the chosen session into a new split (default). 'existing' = bridge
   // directly to the chosen running tab, no new pane (for when the split already exists).
   let mode = $state<'fork' | 'existing'>('fork');
   // Human-written context about the peer, fed into the calling agent's opener so it
@@ -35,21 +35,21 @@
   let purpose = $state('');
 
   // Enumerate every terminal tab that has a live Claude session, except the
-  // caller itself and any tab already in a link.
+  // caller itself and any tab already in a bridge.
   const candidates = $derived.by((): Candidate[] => {
-    void agentLinkStore.version; // re-evaluate when links change
+    void agentBridgeStore.version; // re-evaluate when bridges change
     const out: Candidate[] = [];
     for (const ws of workspacesStore.workspaces) {
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
           if (tab.tab_type !== 'terminal') continue;
           if (tab.id === callerTabId) continue;
-          if (agentLinkStore.isLinked(tab.id)) {
-            // Fork mode: never fork an already-linked tab. Existing mode: allow
-            // re-selecting the caller's OWN partner (to repair a failed relink), but
-            // not a tab linked to a third agent.
+          if (agentBridgeStore.isBridged(tab.id)) {
+            // Fork mode: never fork an already-bridged tab. Existing mode: allow
+            // re-selecting the caller's OWN partner (to repair a failed reconnect), but
+            // not a tab bridged to a third agent.
             if (mode === 'fork') continue;
-            if (agentLinkStore.getPartnerTabId(tab.id) !== callerTabId) continue;
+            if (agentBridgeStore.getPartnerTabId(tab.id) !== callerTabId) continue;
           }
           const cs = claudeStateStore.getState(tab.id);
           if (!cs) continue;
@@ -98,9 +98,9 @@
     busy = true;
     errorMsg = null;
     try {
-      // Link directly to the existing tab — no fork, no new pane.
+      // Connect directly to the existing tab — no fork, no new pane.
       if (mode === 'existing') {
-        const res = await agentLinkStore.linkExistingTab(callerTabId, c.tabId, purpose);
+        const res = await agentBridgeStore.bridgeExistingTab(callerTabId, c.tabId, purpose);
         if (!res.ok) { errorMsg = res.error; busy = false; return; }
         onclose();
         return;
@@ -122,7 +122,7 @@
         } catch { /* pty gone; fall through local */ }
       }
 
-      const res = await agentLinkStore.establishLink(callerTabId, {
+      const res = await agentBridgeStore.establishBridge(callerTabId, {
         sessionId: c.sessionId,
         tabName: c.tabName,
         workspaceName: c.workspaceName,
@@ -137,7 +137,7 @@
       }
       onclose();
     } catch (e) {
-      logError(`AgentLinkPicker: ${e}`);
+      logError(`AgentBridgePicker: ${e}`);
       errorMsg = String(e);
       busy = false;
     }
@@ -150,7 +150,7 @@
       return;
     }
     // While typing the description, let the textarea own arrows/Enter (newlines);
-    // Cmd/Ctrl+Enter still links the current selection.
+    // Cmd/Ctrl+Enter still bridges the current selection.
     if ((e.target as HTMLElement)?.tagName === 'TEXTAREA') {
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -199,17 +199,17 @@
   >
     <div class="palette">
       <div class="header">
-        <div class="title">Link to Agent</div>
+        <div class="title">Agent Bridge</div>
         <div class="subtitle">
           {#if mode === 'fork'}
             Fork another Claude session into a split beside
           {:else}
-            Link an already-running tab directly to
+            Connect an already-running tab directly to
           {/if}
           {#if callerName}<strong>{callerName}</strong>{:else}this tab{/if}.
           The two agents can then talk to each other.
         </div>
-        <div class="mode-toggle" role="radiogroup" aria-label="Link mode">
+        <div class="mode-toggle" role="radiogroup" aria-label="Bridge mode">
           <button
             class="mode-btn"
             class:active={mode === 'fork'}
@@ -225,7 +225,7 @@
             aria-checked={mode === 'existing'}
             disabled={busy}
             onclick={() => { mode = 'existing'; }}
-          >Link existing tab</button>
+          >Connect existing tab</button>
         </div>
       </div>
 
@@ -272,8 +272,8 @@
       </div>
 
       <div class="footer">
-        <span class="hint">↑↓ navigate · ↵ link · esc close</span>
-        {#if busy}<span class="hint">{mode === 'fork' ? 'forking session…' : 'linking…'}</span>{/if}
+        <span class="hint">↑↓ navigate · ↵ connect · esc close</span>
+        {#if busy}<span class="hint">{mode === 'fork' ? 'forking session…' : 'connecting…'}</span>{/if}
       </div>
     </div>
   </div>

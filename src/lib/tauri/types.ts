@@ -16,7 +16,7 @@ export interface DiffContext {
   tab_name: string;
 }
 
-export interface AgentLink {
+export interface AgentBridge {
   partner_tab_id: string;
   partner_label: string;
   partner_session_id?: string | null;
@@ -52,7 +52,7 @@ export interface Tab {
   editor_file: EditorFileInfo | null;
   diff_context: DiffContext | null;
   import_highlight?: boolean;
-  agent_link?: AgentLink | null;
+  agent_bridge?: AgentBridge | null;
 }
 
 export interface Pane {

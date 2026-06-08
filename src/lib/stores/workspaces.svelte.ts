@@ -536,10 +536,10 @@ function createWorkspacesStore() {
 
     /**
      * Split a pane and boot a *forked* Claude session into the new tab — the core
-     * spawn for Agent Link. The new tab auto-resumes `claude --resume <sessionId>
+     * spawn for Agent Bridge. The new tab auto-resumes `claude --resume <sessionId>
      * --fork-session` in the target's cwd (and SSH context if remote), giving an
      * isolated peer with the target session's full context without disturbing the
-     * original. Returns { newPaneId, newTabId } so the caller can register the link.
+     * original. Returns { newPaneId, newTabId } so the caller can register the bridge.
      *
      * Ordering matters: the split context + auto-resume command must be set on the
      * backend BEFORE the reactive `workspaces` array updates (which mounts the new

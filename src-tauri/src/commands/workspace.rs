@@ -845,16 +845,16 @@ pub fn set_tab_auto_resume_enabled(
     Ok(())
 }
 
-/// Persist (or clear) the Agent Link pairing on a tab. The frontend keeps the live
+/// Persist (or clear) the Agent Bridge pairing on a tab. The frontend keeps the live
 /// routing in memory and writes the durable pairing here so it survives restart.
 #[tauri::command]
-pub fn set_tab_agent_link(
+pub fn set_tab_agent_bridge(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     pane_id: String,
     tab_id: String,
-    link: Option<crate::state::AgentLink>,
+    bridge: Option<crate::state::AgentBridge>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
     let mut app_data = state.app_data.write();
@@ -862,7 +862,7 @@ pub fn set_tab_agent_link(
     if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
         if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
             if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == tab_id) {
-                tab.agent_link = link;
+                tab.agent_bridge = bridge;
             }
         }
     }

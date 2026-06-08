@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentLink, AppData, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -386,13 +386,13 @@ export async function setTabAutoResumeEnabled(
   return invoke('set_tab_auto_resume_enabled', { workspaceId, paneId, tabId, enabled });
 }
 
-export async function setTabAgentLink(
+export async function setTabAgentBridge(
   workspaceId: string,
   paneId: string,
   tabId: string,
-  link: AgentLink | null,
+  bridge: AgentBridge | null,
 ): Promise<void> {
-  return invoke('set_tab_agent_link', { workspaceId, paneId, tabId, link });
+  return invoke('set_tab_agent_bridge', { workspaceId, paneId, tabId, bridge });
 }
 
 // Workspace note commands

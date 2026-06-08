@@ -490,19 +490,19 @@ pub fn tool_list_response() -> Value {
             }
         },
         {
-            "name": "sendToLinkedAgent",
-            "description": "Send a message to the peer AI agent you are linked with (running in another aiTerm pane, e.g. an expert on a related codebase). Use this to ask questions, request research, or share context. The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. aiTerm automatically stamps your identity (tab, workspace, cwd) on the message so the recipient knows it's from you, a peer agent, NOT from a human operator. Only works once a link has been established (the human links two sessions via the Agent Link picker). If your conversation is complete, simply stop sending — do not reply just to acknowledge.",
+            "name": "sendToBridgedAgent",
+            "description": "Send a message to the peer AI agent you are bridged with (running in another aiTerm pane, e.g. an expert on a related codebase). Use this to ask questions, request research, or share context. The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. aiTerm automatically stamps your identity (tab, workspace, cwd) on the message so the recipient knows it's from you, a peer agent, NOT from a human operator. Only works once a bridge has been established (the human connects two sessions via the Agent Bridge picker). If your conversation is complete, simply stop sending — do not reply just to acknowledge.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "message": { "type": "string", "description": "The message to send to the linked agent. Be explicit: state who you are and why you're asking on first contact, then your question or information." }
+                    "message": { "type": "string", "description": "The message to send to the bridged agent. Be explicit: state who you are and why you're asking on first contact, then your question or information." }
                 },
                 "required": ["message"]
             }
         },
         {
-            "name": "getLinkedAgent",
-            "description": "Check whether you are currently linked to a peer AI agent and, if so, who. Returns the linked agent's tab name, workspace, and working directory, or indicates that no link is active. Use this to discover the context of the agent you can reach via sendToLinkedAgent.",
+            "name": "getBridgedAgent",
+            "description": "Check whether you are currently bridged to a peer AI agent and, if so, who. Returns the bridged agent's tab name, workspace, and working directory, or indicates that no bridge is active. Use this to discover the context of the agent you can reach via sendToBridgedAgent.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]).as_array().unwrap().clone());

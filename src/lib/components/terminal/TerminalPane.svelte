@@ -17,7 +17,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
-  import { agentLinkStore } from '$lib/stores/agentLink.svelte';
+  import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { getTheme } from '$lib/themes';
   import { getCompiledPatterns } from '$lib/utils/promptPattern';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -1613,15 +1613,15 @@
         },
       ]),
       { label: '', separator: true, action: () => {} },
-      ...(agentLinkStore.isLinked(tabId) ? [
+      ...(agentBridgeStore.isBridged(tabId) ? [
         {
-          label: 'Unlink Agent',
-          action: () => agentLinkStore.unlink(tabId),
+          label: 'Disconnect Agent',
+          action: () => agentBridgeStore.disconnect(tabId),
         },
       ] : [
         {
-          label: 'Link to Agent\u2026',
-          action: () => window.dispatchEvent(new CustomEvent('open-agent-link-picker', { detail: { tabId } })),
+          label: 'Connect to Agent\u2026',
+          action: () => window.dispatchEvent(new CustomEvent('open-agent-bridge-picker', { detail: { tabId } })),
         },
       ]),
       { label: '', separator: true, action: () => {} },

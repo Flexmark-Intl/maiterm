@@ -6,4 +6,4 @@ pub mod workspace;
 pub use app_state::{AppState, FileWatcherHandle, PtyCommand, PtyHandle, PtyStats, RemoteFileWatch};
 pub use persistence::{load_state, save_state};
 pub use scrollback_db::ScrollbackDb;
-pub use workspace::{AgentLink, AppData, DiffContext, EditorFileInfo, Pane, Preferences, Tab, WindowData, WindowGeometry, Workspace};
+pub use workspace::{AgentBridge, AppData, DiffContext, EditorFileInfo, Pane, Preferences, Tab, WindowData, WindowGeometry, Workspace};

@@ -185,12 +185,12 @@ pub struct EditorFileInfo {
     pub language: Option<String>,
 }
 
-/// Agent Link: a durable pairing between two Claude tabs that can message each
-/// other. Persisted on both tabs (symmetric) so the link survives app restart and
+/// Agent Bridge: a durable pairing between two Claude tabs that can message each
+/// other. Persisted on both tabs (symmetric) so the bridge survives app restart and
 /// is rebuilt by the frontend once both tabs + their resumed sessions are back.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentLink {
-    /// The tab this one is linked to.
+pub struct AgentBridge {
+    /// The tab this one is bridged to.
     pub partner_tab_id: String,
     /// Human-readable label of the partner (for the agent's own awareness).
     pub partner_label: String,
@@ -198,7 +198,8 @@ pub struct AgentLink {
     /// re-initializes after a resume; used to detect/re-bind a drifted session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partner_session_id: Option<String>,
-    /// "caller" (initiated the link) or "fork" (the forked peer).
+    /// "caller" (initiated the bridge), "fork" (the forked peer), or "peer"
+    /// (an existing tab connected without forking).
     #[serde(default)]
     pub role: String,
     /// Conversation turn counter (messages this tab has sent).
@@ -277,9 +278,10 @@ pub struct Tab {
     pub editor_file: Option<EditorFileInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_context: Option<DiffContext>,
-    /// Agent Link pairing (persisted both sides) — see AgentLink.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_link: Option<AgentLink>,
+    /// Agent Bridge pairing (persisted both sides) — see AgentBridge. The `agent_link`
+    /// alias migrates state written before the link→bridge rename.
+    #[serde(default, alias = "agent_link", skip_serializing_if = "Option::is_none")]
+    pub agent_bridge: Option<AgentBridge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -911,7 +913,7 @@ impl Tab {
             last_cwd: None,
             diff_context: None,
             import_highlight: false,
-            agent_link: None,
+            agent_bridge: None,
         }
     }
 
@@ -943,7 +945,7 @@ impl Tab {
             last_cwd: None,
             diff_context: None,
             import_highlight: false,
-            agent_link: None,
+            agent_bridge: None,
         }
     }
 
@@ -975,7 +977,7 @@ impl Tab {
             last_cwd: None,
             diff_context: Some(diff_context),
             import_highlight: false,
-            agent_link: None,
+            agent_bridge: None,
         }
     }
 }
