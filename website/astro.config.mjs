@@ -9,6 +9,7 @@ export default defineConfig({
       logo: {
         src: './src/assets/icon.png',
       },
+      favicon: '/favicon.png',
       social: {
         github: 'https://github.com/Flexmark-Intl/maiterm',
       },
