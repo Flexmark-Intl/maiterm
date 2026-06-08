@@ -163,10 +163,15 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
 - MCP instructions specify server name (`aiterm` vs `aiterm-dev`)
 
 **`/maiterm` skill (auto-installed):**
-- Written to `~/.claude/skills/maiterm/SKILL.md` on startup, removed on exit
+- Written to `~/.claude/skills/maiterm/SKILL.md` on startup, removed on exit (`write_aiterm_skill` / `remove_aiterm_skill` in `lockfile.rs`)
 - Provides fast slash-command access: `/maiterm notes`, `/maiterm diag`, `/maiterm tabs`, etc.
 - Reduces LLM inference by giving explicit tool→parameter mappings
-- Uses `mcp_server_key()` to reference correct MCP server (aiterm vs aiterm-dev)
+- **`init` fast-path** lives at the top of the SKILL.md: it tells the agent the exact deferred-tool lookup (`ToolSearch select:mcp__aiterm__initSession,mcp__aiterm-dev__initSession`) instead of a broad keyword search across every connected MCP server — this is what keeps `/maiterm init` cheap. Build-agnostic (covers both dev and prod keys), so no interpolation.
+- **`statusline` subcommand** is the one entry that is NOT an MCP tool — it installs the maiTerm status line by running bundled helper scripts under `~/.claude/skills/maiterm/bin/`:
+  - `setup-statusline.sh` — renders a colored example, then either installs (exit 0) or reports missing `jq` (exit 3, prints `JQ_MISSING:<cmd>`, writes nothing). Idempotent: only touches `~/.claude/statusline-command.sh` + the `statusLine` key in `~/.claude/settings.json`.
+  - `statusline-command.sh` — the status line itself (host · cwd · git branch · model · effort · context %).
+  - **Single source:** both scripts live in `src-tauri/resources/maiterm-skill/bin/`, baked into the binary via `include_str!` (`STATUSLINE_SETUP_SCRIPT` / `STATUSLINE_PAYLOAD_SCRIPT`) and exposed to the frontend via the `get_maiterm_skill_scripts` command so the remote (SSH) install reuses the exact same bytes.
+- ⚠️ **Two SKILL.md copies must stay in sync:** the raw string in `lockfile.rs::write_aiterm_skill` (local install) and the heredoc in `sshMcpBridge.svelte.ts::buildSetupScript` (remote install). Edit both when changing skill text.
 
 **Stale hook cleanup:** On startup, `write_hook_settings()` sweeps hooks whose port has no live lockfile. `cleanup_stale_lockfiles()` also removes hooks for dead servers by auth token. Port extraction handles both URL format (`127.0.0.1:NNNNN`) and legacy env var format (`AITERM_PORT = "NNNNN"`).
 
@@ -193,7 +198,7 @@ Remote Claude Code → discovers ~/.claude/ide/{port}.lock → connects through 
 
 **Auto-enable:** SSH sessions detected reactively via terminal title changes — when a title change fires, `getPtyInfo()` checks for a foreground SSH command and enables/disables the bridge accordingly. For restore/clone SSH: polls `getPtyInfo()` every 500ms until SSH is detected (max 15s). `enableBridge` sets a `'pending'` state immediately to prevent race conditions from concurrent title-change calls.
 
-**Remote setup:** Lockfile, `~/.claude.json`, hooks (`~/.claude/settings.json`), skill (`~/.claude/skills/maiterm/SKILL.md`), and `~/.aiterm` env file are written via a separate background SSH connection (`ssh_run_setup`), **not** through the user's interactive PTY. This prevents command injection into running programs (e.g. Claude Code). The setup script uses shell variables for JSON data to avoid nested quoting issues, and pipes JSON to python3/jq via stdin. After setup, `AITERM_TAB_ID` and `AITERM_PORT` env vars are injected into the remote shell via PTY write (leading space suppresses shell history).
+**Remote setup:** Lockfile, `~/.claude.json`, hooks (`~/.claude/settings.json`), skill (`~/.claude/skills/maiterm/SKILL.md` + `bin/` statusline helper scripts, fetched via `get_maiterm_skill_scripts`), and `~/.aiterm` env file are written via a separate background SSH connection (`ssh_run_setup`), **not** through the user's interactive PTY. This prevents command injection into running programs (e.g. Claude Code). The setup script uses shell variables for JSON data to avoid nested quoting issues, and pipes JSON to python3/jq via stdin. After setup, `AITERM_TAB_ID` and `AITERM_PORT` env vars are injected into the remote shell via PTY write (leading space suppresses shell history).
 
 **`~/.aiterm` env file:** Written during bridge setup with `export AITERM_TAB_ID=... AITERM_PORT=...`. Sourced as a fallback by the SessionStart hook when `$AITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. Overwritten on each bridge connect — self-correcting for stale values.
 

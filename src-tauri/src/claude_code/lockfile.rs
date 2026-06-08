@@ -1,6 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 
+/// Helper scripts for the `/maiterm statusline` subcommand, bundled into the
+/// binary at build time from the canonical sources in `src-tauri/resources/`.
+/// Shared with the remote (SSH) install path via `get_maiterm_skill_scripts`.
+pub const STATUSLINE_SETUP_SCRIPT: &str =
+    include_str!("../../resources/maiterm-skill/bin/setup-statusline.sh");
+pub const STATUSLINE_PAYLOAD_SCRIPT: &str =
+    include_str!("../../resources/maiterm-skill/bin/statusline-command.sh");
+
 fn mcp_server_key() -> &'static str {
     if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" }
 }
@@ -607,6 +615,14 @@ name: maiterm
 description: Quick maiTerm terminal operations — /maiterm notes, /maiterm diag, /maiterm tabs, etc.
 ---
 
+## Fast path: `init`
+
+If the argument is `init`, do ONLY this and stop — do NOT read the command table below and do NOT keyword-search across MCP servers:
+1. Load the tool with one targeted lookup: ToolSearch `select:mcp__aiterm__initSession,mcp__aiterm-dev__initSession`
+2. Call whichever of those exists (this maiTerm build registers exactly one) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.
+
+Always re-run this when asked, even if you think you already initialized — resume/fork/compact require re-init.
+
 Execute the maiTerm MCP tool for the requested operation. Use whichever aiterm MCP server you already called initSession on (aiterm or aiterm-dev). If you haven't initialized yet, call initSession first.
 
 ## Command reference
@@ -643,12 +659,49 @@ Execute the maiTerm MCP tool for the requested operation. Use whichever aiterm M
 Call the exact MCP tool listed above with the specified parameters. Do not ask for clarification — just execute.
 For `init`: read tabId from $AITERM_TAB_ID env var and sessionId from your SessionStart hook context. IMPORTANT: Always call initSession when requested, even if you believe it was already called earlier in the session. Session resume, fork, and compact events require re-initialization to pick up state changes.
 
+## statusline — install the maiTerm status line
+
+`statusline` is the one subcommand that is NOT an MCP tool. It installs the maiTerm-recommended Claude Code status line (host · cwd · git branch · model · effort · context-used %) on THIS machine. Be fast and minimal:
+
+1. Run: `bash ~/.claude/skills/maiterm/bin/setup-statusline.sh`
+2. The script prints a real colored example, then signals via its exit code:
+   - exit 0 → installed. In one short sentence, tell the user it's active in new Claude Code sessions and stop. Do not re-echo the example.
+   - exit 3 → jq is missing (needed to parse Claude's JSON and merge settings). The script printed a line `JQ_MISSING:<install command>`. Show that command and ask whether to run it; if yes, run it then re-run the setup script; if no, stop and explain it can't install without jq.
+   - any other non-zero → show the script's output and stop.
+
+The install is idempotent — it only writes `~/.claude/statusline-command.sh` and sets the `statusLine` key in `~/.claude/settings.json`, preserving other keys.
+
 $ARGUMENTS
 "#;
 
     let path = dir.join("SKILL.md");
     fs::write(&path, skill).map_err(|e| format!("Failed to write skill: {}", e))?;
     log::info!("Wrote /maiterm skill at {:?}", path);
+
+    // Bundle the helper scripts for `/maiterm statusline` into bin/.
+    let bin_dir = dir.join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create skill bin dir: {}", e))?;
+    write_executable(
+        &bin_dir.join("setup-statusline.sh"),
+        STATUSLINE_SETUP_SCRIPT,
+    )?;
+    write_executable(
+        &bin_dir.join("statusline-command.sh"),
+        STATUSLINE_PAYLOAD_SCRIPT,
+    )?;
+
+    Ok(())
+}
+
+/// Write a file and mark it executable (no-op chmod on non-unix).
+fn write_executable(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    fs::write(path, contents).map_err(|e| format!("Failed to write {:?}: {}", path, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("Failed to chmod {:?}: {}", path, e))?;
+    }
     Ok(())
 }
 

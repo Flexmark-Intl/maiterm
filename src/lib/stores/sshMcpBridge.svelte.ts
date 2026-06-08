@@ -120,7 +120,12 @@ export function isInteractiveSshSession(cmd: string): boolean {
  * This runs as a non-interactive command, not through the user's PTY.
  * Sets up: lockfile, MCP entry in ~/.claude.json, hooks in ~/.claude/settings.json.
  */
-function buildSetupScript(remotePort: number, authToken: string, tabId: string): string {
+function buildSetupScript(
+  remotePort: number,
+  authToken: string,
+  tabId: string,
+  scripts: commands.MaitermSkillScripts,
+): string {
   const lockContent = JSON.stringify({
     pid: 0,  // Background SSH — no persistent PID on remote
     transport: 'ws',
@@ -252,6 +257,14 @@ function buildSetupScript(remotePort: number, authToken: string, tabId: string):
     'description: Quick maiTerm terminal operations — /maiterm notes, /maiterm diag, /maiterm tabs, etc.\n' +
     '---\n' +
     '\n' +
+    '## Fast path: `init`\n' +
+    '\n' +
+    'If the argument is `init`, do ONLY this and stop — do NOT read the command table below and do NOT keyword-search across MCP servers:\n' +
+    '1. Load the tool with one targeted lookup: ToolSearch `select:mcp__aiterm__initSession,mcp__aiterm-dev__initSession`\n' +
+    '2. Call whichever of those exists (this maiTerm build registers exactly one) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.\n' +
+    '\n' +
+    'Always re-run this when asked, even if you think you already initialized — resume/fork/compact require re-init.\n' +
+    '\n' +
     'Execute the maiTerm MCP tool for the requested operation. Use the aiterm MCP server. If you have not initialized yet, call initSession first.\n' +
     '\n' +
     '## Command reference\n' +
@@ -279,8 +292,30 @@ function buildSetupScript(remotePort: number, authToken: string, tabId: string):
     'Call the exact MCP tool listed above with the specified parameters. Do not ask for clarification — just execute.\n' +
     'For `init`: read tabId from $AITERM_TAB_ID env var and sessionId from your SessionStart hook context. IMPORTANT: Always call initSession when requested, even if you believe it was already called earlier in the session. Session resume, fork, and compact events require re-initialization to pick up state changes.\n' +
     '\n' +
+    '## statusline — install the maiTerm status line\n' +
+    '\n' +
+    '`statusline` is the one subcommand that is NOT an MCP tool. It installs the maiTerm-recommended Claude Code status line on THIS machine. Be fast:\n' +
+    '\n' +
+    '1. Run: `bash ~/.claude/skills/maiterm/bin/setup-statusline.sh`\n' +
+    '2. The script prints a colored example, then signals via exit code:\n' +
+    '   - exit 0 → installed; tell the user in one sentence it is active in new Claude Code sessions and stop.\n' +
+    '   - exit 3 → jq is missing; the script printed `JQ_MISSING:<install command>`. Show it, ask whether to run it; if yes run it then re-run the setup script; if no, stop.\n' +
+    '   - any other non-zero → show the output and stop.\n' +
+    '\n' +
+    'It is idempotent — only writes ~/.claude/statusline-command.sh and the statusLine key in ~/.claude/settings.json.\n' +
+    '\n' +
     '$ARGUMENTS\n' +
     'SKILLEOF',
+    // Bundle the /maiterm statusline helper scripts on the remote too, so
+    // `/maiterm statusline` works in remote (SSH-bridged) Claude sessions.
+    'mkdir -p ~/.claude/skills/maiterm/bin',
+    "cat > ~/.claude/skills/maiterm/bin/setup-statusline.sh << 'MAITERMSETUPEOF'",
+    scripts.setup_statusline,
+    'MAITERMSETUPEOF',
+    "cat > ~/.claude/skills/maiterm/bin/statusline-command.sh << 'MAITERMPAYLOADEOF'",
+    scripts.statusline_command,
+    'MAITERMPAYLOADEOF',
+    'chmod +x ~/.claude/skills/maiterm/bin/setup-statusline.sh ~/.claude/skills/maiterm/bin/statusline-command.sh',
   ];
 
   return script.join('\n');
@@ -327,7 +362,8 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
     // with env-var injection below. The injection only needs remote_port, which
     // we already have — awaiting setup first delays the export landing in the
     // remote shell by ~0.5-2s, which collides with the user's first keystrokes.
-    const setupScript = buildSetupScript(tunnelInfo.remote_port, authToken, tabId);
+    const skillScripts = await commands.getMaitermSkillScripts();
+    const setupScript = buildSetupScript(tunnelInfo.remote_port, authToken, tabId, skillScripts);
     const setupPromise = commands.sshRunSetup(sshArgs, setupScript);
 
     // Set trigger variables so auto-resume commands can interpolate them.
@@ -441,5 +477,6 @@ export async function buildUserSetupScript(tabId: string): Promise<string | null
   const authToken = await commands.getMcpAuth();
   if (!authToken) return null;
 
-  return buildSetupScript(bridge.remotePort, authToken, tabId);
+  const skillScripts = await commands.getMaitermSkillScripts();
+  return buildSetupScript(bridge.remotePort, authToken, tabId, skillScripts);
 }

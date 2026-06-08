@@ -203,6 +203,23 @@ pub fn get_mcp_auth(state: tauri::State<'_, Arc<AppState>>) -> Option<String> {
     state.claude_code_auth.read().clone()
 }
 
+/// The `/maiterm statusline` helper scripts, served from the same bundled
+/// source the local install uses. The frontend embeds these in the remote
+/// (SSH) skill setup so `/maiterm statusline` works on remote hosts too.
+#[derive(serde::Serialize)]
+pub struct MaitermSkillScripts {
+    pub setup_statusline: String,
+    pub statusline_command: String,
+}
+
+#[tauri::command]
+pub fn get_maiterm_skill_scripts() -> MaitermSkillScripts {
+    MaitermSkillScripts {
+        setup_statusline: crate::claude_code::lockfile::STATUSLINE_SETUP_SCRIPT.to_string(),
+        statusline_command: crate::claude_code::lockfile::STATUSLINE_PAYLOAD_SCRIPT.to_string(),
+    }
+}
+
 /// Run setup commands on a remote host via a separate background SSH connection.
 /// This avoids injecting commands into the user's interactive PTY.
 /// Spawns `ssh {ssh_args} 'setup_script'` and waits for completion.

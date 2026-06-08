@@ -502,6 +502,7 @@ pub fn run() {
             commands::ssh_tunnel::get_ssh_tunnel,
             commands::ssh_tunnel::get_mcp_port,
             commands::ssh_tunnel::get_mcp_auth,
+            commands::ssh_tunnel::get_maiterm_skill_scripts,
             commands::ssh_tunnel::ssh_run_setup,
             commands::workspace::create_diff_tab,
             commands::workspace::archive_tab,

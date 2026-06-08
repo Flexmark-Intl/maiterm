@@ -705,6 +705,11 @@ export interface SshTunnelInfo {
   host_key: string;
 }
 
+export interface MaitermSkillScripts {
+  setup_statusline: string;
+  statusline_command: string;
+}
+
 export async function startSshTunnel(sshArgs: string, hostKey: string, tabId: string, localPort: number): Promise<SshTunnelInfo> {
   return invoke('start_ssh_tunnel', { sshArgs, hostKey, tabId, localPort });
 }
@@ -727,6 +732,10 @@ export async function getMcpAuth(): Promise<string | null> {
 
 export async function sshRunSetup(sshArgs: string, setupScript: string): Promise<void> {
   return invoke('ssh_run_setup', { sshArgs, setupScript });
+}
+
+export async function getMaitermSkillScripts(): Promise<MaitermSkillScripts> {
+  return invoke('get_maiterm_skill_scripts');
 }
 
 export async function checkFullDiskAccess(): Promise<boolean> {
