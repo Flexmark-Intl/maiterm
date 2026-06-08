@@ -1,4 +1,4 @@
-# aiTerm
+# maiTerm
 
 A Tauri-based terminal emulator with workspace organization, built with Svelte 5 and Rust.
 
@@ -273,7 +273,7 @@ Check `~/Library/Application Support/com.aiterm.dev/aiterm-state.json` (dev) or 
 
 The same data dir holds `aiterm-running.marker`, refreshed each minute by the memory sampler and deleted by `exit_app`. If it survives to the next launch, the previous run died uncleanly — surfaced as `previous_run.crashed` + `previous_run.marker_mtime_secs` (upper bound on time-of-death) in `getDiagnostics`.
 
-Also in `getDiagnostics`: `crash_reports` — newest 20 entries from `~/Library/Logs/DiagnosticReports/` (and `Retired/`) within the last 30 days, filtered to `aiTerm*` and `com.apple.WebKit.WebContent*` `.ips`/`.crash` files. Each entry has `mtime_secs`, `process`, `exception_type`, `termination_reason`. May require Full Disk Access on macOS to read; silently empty on permission failure (`check_full_disk_access` is wired into the UI).
+Also in `getDiagnostics`: `crash_reports` — newest 20 entries from `~/Library/Logs/DiagnosticReports/` (and `Retired/`) within the last 30 days, filtered to `maiTerm*` and `com.apple.WebKit.WebContent*` `.ips`/`.crash` files. Each entry has `mtime_secs`, `process`, `exception_type`, `termination_reason`. May require Full Disk Access on macOS to read; silently empty on permission failure (`check_full_disk_access` is wired into the UI).
 
 Memory trend (`aiterm-memory-trend.json`) is reseeded into the in-memory ring buffer at startup so RSS history survives a restart — see the Logging note about `[WEBVIEW_ERROR]` for the JS-side complement.
 

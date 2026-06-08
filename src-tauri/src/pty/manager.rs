@@ -64,7 +64,7 @@ pub fn spawn_pty(
         // Expose tab ID so processes (e.g. Claude Code) can identify their terminal
         cmd.env("AITERM_TAB_ID", tab_id);
 
-        // Expose MCP server port so hooks can scope to this aiTerm instance
+        // Expose MCP server port so hooks can scope to this maiTerm instance
         // (prevents dev/prod cross-talk when both are running)
         if let Some(port) = state.claude_code_port.read().as_ref() {
             cmd.env("AITERM_PORT", port.to_string());
@@ -826,7 +826,7 @@ fn setup_zsh_integration(title: bool, shell_integration: bool) -> Result<std::pa
     let zsh_dir = data_dir.join(app_data_slug()).join("shell-integration").join("zsh");
     std::fs::create_dir_all(&zsh_dir).map_err(|e| e.to_string())?;
 
-    let zshenv_content = r#"# aiTerm shell integration - do not edit
+    let zshenv_content = r#"# maiTerm shell integration - do not edit
 if [[ -n "$AITERM_REAL_ZDOTDIR" ]]; then
   [[ -f "$AITERM_REAL_ZDOTDIR/.zshenv" ]] && source "$AITERM_REAL_ZDOTDIR/.zshenv"
 else
@@ -835,7 +835,7 @@ fi
 "#;
 
     let mut hooks = String::new();
-    hooks.push_str("# aiTerm shell integration - do not edit\n");
+    hooks.push_str("# maiTerm shell integration - do not edit\n");
     hooks.push_str("if [[ -n \"$AITERM_REAL_ZDOTDIR\" ]]; then\n");
     hooks.push_str("  ZDOTDIR=\"$AITERM_REAL_ZDOTDIR\"\n");
     hooks.push_str("  [[ -f \"$ZDOTDIR/.zshrc\" ]] && source \"$ZDOTDIR/.zshrc\"\n");
@@ -884,7 +884,7 @@ fn write_ls_function() -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(&integration_dir).map_err(|e| e.to_string())?;
 
     let path = integration_dir.join("l_function.sh");
-    let content = r#"# aiTerm: ls with clickable file links (OSC 8 hyperlinks)
+    let content = r#"# maiTerm: ls with clickable file links (OSC 8 hyperlinks)
 unalias l 2>/dev/null
 if ls --hyperlink=auto / >/dev/null 2>&1; then
   # GNU ls supports hyperlinks natively

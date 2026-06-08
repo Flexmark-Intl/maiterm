@@ -882,7 +882,7 @@ async fn process_message(
                         // stale in BOTH instances (each blamed the other). Give a
                         // deterministic recovery path instead: getActiveTab → retry.
                         let msg = format!(
-                            "Tab '{}' was not found in this aiTerm instance ({}). This almost always means your \
+                            "Tab '{}' was not found in this maiTerm instance ({}). This almost always means your \
                              $AITERM_TAB_ID is stale (the shell outlived the tab it was created under, or was \
                              started under a different tab). To recover: call getActiveTab to get your real tab \
                              ID, then call initSession again with that tabId. \
@@ -1087,7 +1087,7 @@ async fn process_message(
                         let other_server = if cfg!(debug_assertions) { "aiterm" } else { "aiterm-dev" };
                         let this_server = if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" };
                         let err_msg = format!(
-                            "Tab '{}' does not exist in this aiTerm instance ({}). \
+                            "Tab '{}' does not exist in this maiTerm instance ({}). \
                              You may be calling the wrong MCP server. Use '{}' tools instead.",
                             tab_id, this_server, other_server
                         );

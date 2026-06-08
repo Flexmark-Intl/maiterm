@@ -7,22 +7,22 @@ import { claudeStateStore } from '$lib/stores/claudeState.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
- * Agent Bridge — a bridge between two running Claude agents in different aiTerm panes.
+ * Agent Bridge — a bridge between two running Claude agents in different maiTerm panes.
  *
  * The human bridges the current tab to another running Claude session (picked from
- * any workspace). aiTerm FORKS that session (`claude --resume <id> --fork-session`)
+ * any workspace). maiTerm FORKS that session (`claude --resume <id> --fork-session`)
  * into a fresh split pane beside the caller — an isolated peer with the target's
  * full context. The two agents then converse asynchronously via the
  * `sendToBridgedAgent` MCP tool; every message is injected as a real terminal turn
  * in the recipient's pane, so the human watches (and can interrupt with Esc).
  *
- * Identity is stamped by aiTerm (not self-asserted), so the recipient always knows
+ * Identity is stamped by maiTerm (not self-asserted), so the recipient always knows
  * a message is from a peer agent — never confused for the human operator.
  *
  * Handshake (tight + routing-proof): a forked session resumes the target's
  * transcript, which already contains the target's `initSession` — so the fork
  * believes it is already initialized (as the wrong tab) and never re-binds its new
- * MCP connection, leaving its aiTerm tools unusable. So after the fork's Claude
+ * MCP connection, leaving its maiTerm tools unusable. So after the fork's Claude
  * comes up we inject a directive forcing it to re-`initSession` as ITS OWN tab. The
  * opener (caller → "introduce yourself") then fires off the fork's real
  * `claude-init-session` event, which proves the fork is up, on THIS instance, and
@@ -219,7 +219,7 @@ function createAgentBridgeStore() {
     else d.queue.unshift(next);
   }
 
-  // ─── Envelopes (identity stamped by aiTerm) ──────────────────────────────────
+  // ─── Envelopes (identity stamped by maiTerm) ──────────────────────────────────
 
   function buildEnvelope(senderTabId: string, message: string, turn: number): string {
     const name = label(senderTabId);
@@ -253,7 +253,7 @@ function createAgentBridgeStore() {
    *  initiate and isn't a fork, so prime it like primeFork primes a fork). */
   function buildExistingBridgeNotice(peerLabel: string): string {
     return (
-      `⟦AGENT-BRIDGE⟧ You have been bridged to a peer AI agent ("${peerLabel}") via aiTerm Agent Bridge — a peer agent in another tab, NOT your human operator. ` +
+      `⟦AGENT-BRIDGE⟧ You have been bridged to a peer AI agent ("${peerLabel}") via maiTerm Agent Bridge — a peer agent in another tab, NOT your human operator. ` +
       `It may reach out to consult you; its messages arrive here as new prompts. Reply with the sendToBridgedAgent tool. ` +
       `There's nothing to do until its message arrives — carry on with your work.`
     );
@@ -261,13 +261,13 @@ function createAgentBridgeStore() {
 
   /** Directive injected into the fork to force it to re-initialize as its OWN tab
    *  (a resumed/forked session otherwise inherits the target's initSession and never
-   *  re-binds its new MCP connection, so its aiTerm tools stay unusable). */
+   *  re-binds its new MCP connection, so its maiTerm tools stay unusable). */
   function buildForkInitDirective(forkTabId: string, peerLabel: string): string {
     return (
-      `⟦AGENT-BRIDGE⟧ You are now a FORKED peer agent in a NEW aiTerm tab (id ${forkTabId}). ` +
+      `⟦AGENT-BRIDGE⟧ You are now a FORKED peer agent in a NEW maiTerm tab (id ${forkTabId}). ` +
       `This is a fresh tab with a fresh MCP connection, so you must re-initialize: call your aiterm initSession tool with tabId "${forkTabId}" right now. ` +
       `Disregard any tab id mentioned earlier in this conversation — you are "${forkTabId}" now.\n\n` +
-      `You have been bridged to a peer AI agent ("${peerLabel}") via aiTerm Agent Bridge. ` +
+      `You have been bridged to a peer AI agent ("${peerLabel}") via maiTerm Agent Bridge. ` +
       `After initializing, reply with a one-line readiness note, then wait — the peer's message will arrive as a new prompt.`
     );
   }
@@ -275,7 +275,7 @@ function createAgentBridgeStore() {
   /** Sent to the caller if the fork never re-initializes on this instance. */
   function buildBridgeFailedNote(forkTabId: string): string {
     return (
-      `⟦AGENT-BRIDGE⟧ The bridge to "${label(forkTabId)}" could not be completed — the forked agent did not initialize on this aiTerm instance ` +
+      `⟦AGENT-BRIDGE⟧ The bridge to "${label(forkTabId)}" could not be completed — the forked agent did not initialize on this maiTerm instance ` +
       `(it may have connected to a different one). You can run /maiterm init in the new pane and retry, or disconnect and bridge again.`
     );
   }

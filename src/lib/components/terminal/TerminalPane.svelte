@@ -1149,7 +1149,7 @@
   // overwrite the previous frame, so diff backgrounds and rapid input redraws
   // smear across rows until enough repaints accumulate (the red-stripe and
   // staircased-input ghosting). The DOM renderer replaces each cell outright, so
-  // it's correct; aiTerm renders only one bounded viewport (scrollback:0), so the
+  // it's correct; maiTerm renders only one bounded viewport (scrollback:0), so the
   // canvas/webgl throughput advantage never applied here anyway.
   //
   // Canvas stays available as an opt-in for side-by-side comparison. It loads

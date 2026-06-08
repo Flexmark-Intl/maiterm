@@ -251,7 +251,7 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
         "{{ [ \"$AITERM_PORT\" = \"{port}\" ] || [ -z \"$AITERM_PORT\" ]; }} && \
          [ -n \"$AITERM_TAB_ID\" ] && \
          AITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && \
-         echo 'Your aiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. \
+         echo 'Your maiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. \
 You MUST immediately call the {mcp_key} initSession tool with this tabId and sessionId before responding to the user. This is required for correct tab targeting.' || true",
         port = port,
         mcp_key = mcp_key,
@@ -302,7 +302,7 @@ You MUST immediately call the {mcp_key} initSession tool with this tabId and ses
         "PreCompact": http_hook(&hooks_url)
     });
 
-    // Sweep: remove any aiTerm hook entries whose port has no live lockfile.
+    // Sweep: remove any maiTerm hook entries whose port has no live lockfile.
     // This catches orphans from crashes where cleanup never ran.
     let live_ports = collect_live_lockfile_ports();
     if let Some(hooks_map) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
@@ -310,10 +310,10 @@ You MUST immediately call the {mcp_key} initSession tool with this tabId and ses
             if let Some(arr) = entries.as_array_mut() {
                 let before = arr.len();
                 arr.retain(|entry| {
-                    // Only filter aiTerm hook entries (contain 127.0.0.1:{port}/hooks)
+                    // Only filter maiTerm hook entries (contain 127.0.0.1:{port}/hooks)
                     match extract_hook_port(entry) {
                         Some(p) => live_ports.contains(&p) || p == port,
-                        None => true, // Not an aiTerm hook — keep it
+                        None => true, // Not an maiTerm hook — keep it
                     }
                 });
                 if arr.len() != before {
@@ -353,7 +353,7 @@ You MUST immediately call the {mcp_key} initSession tool with this tabId and ses
                     .or_insert(serde_json::json!([]));
 
                 if let Some(arr) = event_array.as_array_mut() {
-                    // Remove any existing aiTerm hook entries (by matching our URL pattern)
+                    // Remove any existing maiTerm hook entries (by matching our URL pattern)
                     arr.retain(|entry| {
                         !entry_matches_url(entry, &hooks_url)
                     });
@@ -420,7 +420,7 @@ fn collect_live_lockfile_ports() -> Vec<u16> {
     ports
 }
 
-/// Extract the port number from an aiTerm hook entry's URL/command.
+/// Extract the port number from an maiTerm hook entry's URL/command.
 fn extract_hook_port(entry: &serde_json::Value) -> Option<u16> {
     if let Some(hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
         for hook in hooks {

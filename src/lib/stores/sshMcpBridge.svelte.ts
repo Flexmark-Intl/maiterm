@@ -91,7 +91,7 @@ const SSH_FLAGS_WITH_ARG = new Set([
  *
  * Returns true when:
  *   - ssh has no trailing remote command (pure interactive), OR
- *   - trailing command contains `exec $SHELL` (aiTerm's split/restore reconnect pattern)
+ *   - trailing command contains `exec $SHELL` (maiTerm's split/restore reconnect pattern)
  */
 export function isInteractiveSshSession(cmd: string): boolean {
   const tokens = cmd.replace(/^ssh\s+/, '').split(/\s+/).filter(Boolean);
@@ -163,7 +163,7 @@ function buildSetupScript(
     "{ [ \"$AITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$AITERM_PORT\" ]; } && " +
     "[ -n \"$AITERM_TAB_ID\" ] && " +
     "AITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && " +
-    "echo 'Your aiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. " +
+    "echo 'Your maiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. " +
     "You MUST immediately call the aiterm initSession tool with this tabId and sessionId before responding to the user. This is required for correct tab targeting.' || true";
 
   const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
@@ -188,7 +188,7 @@ function buildSetupScript(
   const escapedHooksData = hooksData.replace(/'/g, "'\\''");
 
   // Python script to merge hooks into ~/.claude/settings.json.
-  // Removes ALL aiTerm-related hook entries (stale or current), then adds only ours.
+  // Removes ALL maiTerm-related hook entries (stale or current), then adds only ours.
   // Stale hooks from dead tunnels (kept alive by ControlMaster) cause errors otherwise.
   // Also cleans up stale allowedHttpHookUrls from dead ports.
   // No single quotes in the python code (shell wraps it in single quotes).

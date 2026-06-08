@@ -287,7 +287,7 @@ pub fn run() {
             // + skill BEFORE setup() returns. The frontend doesn't load (and
             // therefore no PTY can spawn or fire auto-resume) until we're
             // done here, which eliminates the race where `claude --resume`
-            // read a stale MCP port from a prior aiTerm instance.
+            // read a stale MCP port from a prior maiTerm instance.
             if let Some(setup) = claude_code::server::prepare_server(&app_state) {
                 let server_state = app_state.clone();
                 let server_handle = app.handle().clone();

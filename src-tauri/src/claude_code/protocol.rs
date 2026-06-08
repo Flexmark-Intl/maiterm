@@ -54,11 +54,11 @@ pub fn tool_list_response() -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "initSession",
-            "description": "Call this tool once at the start of every session (new, resume, fork, compact). Registers your terminal tab ID and session ID so all subsequent tool calls automatically target your tab. Read your tab ID from the SessionStart hook context ('Your aiTerm tab ID is ...') or from the $AITERM_TAB_ID environment variable.",
+            "description": "Call this tool once at the start of every session (new, resume, fork, compact). Registers your terminal tab ID and session ID so all subsequent tool calls automatically target your tab. Read your tab ID from the SessionStart hook context ('Your maiTerm tab ID is ...') or from the $AITERM_TAB_ID environment variable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tabId": { "type": "string", "description": "Your aiTerm tab ID (from SessionStart hook context or $AITERM_TAB_ID env var)" },
+                    "tabId": { "type": "string", "description": "Your maiTerm tab ID (from SessionStart hook context or $AITERM_TAB_ID env var)" },
                     "sessionId": { "type": "string", "description": "Your Claude session ID (optional, for session tracking)" }
                 },
                 "required": ["tabId"]
@@ -66,17 +66,17 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "getOpenEditors",
-            "description": "Get a list of all currently open editor tabs in the aiTerm IDE. Returns file paths, active state, language, and dirty (unsaved changes) status.",
+            "description": "Get a list of all currently open editor tabs in the maiTerm IDE. Returns file paths, active state, language, and dirty (unsaved changes) status.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "getWorkspaceFolders",
-            "description": "Get the workspace folder paths currently open in aiTerm. Returns root paths for each workspace.",
+            "description": "Get the workspace folder paths currently open in maiTerm. Returns root paths for each workspace.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "getDiagnostics",
-            "description": "Get app diagnostics: version, tab/PTY counts, suspended tabs (inactive workspaces with stale pty_ids — normal, not a bug), uninitialized tabs (never had a PTY), orphaned PTYs (actual leaks), WebGL status, buffer sizes, state file size, PTY throughput, state save timing, trigger engine stats, render FPS, process memory/CPU, memory trend. Use this to investigate performance issues or health of the running aiTerm instance. Note: FPS probe takes ~1 second to measure.",
+            "description": "Get app diagnostics: version, tab/PTY counts, suspended tabs (inactive workspaces with stale pty_ids — normal, not a bug), uninitialized tabs (never had a PTY), orphaned PTYs (actual leaks), WebGL status, buffer sizes, state file size, PTY throughput, state save timing, trigger engine stats, render FPS, process memory/CPU, memory trend. Use this to investigate performance issues or health of the running maiTerm instance. Note: FPS probe takes ~1 second to measure.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
@@ -94,7 +94,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "readLogs",
-            "description": "Read recent log entries from the aiTerm log file. Returns the last N lines, optionally filtered by log level or search string. Use this to investigate errors, warnings, or trace application behavior.",
+            "description": "Read recent log entries from the maiTerm log file. Returns the last N lines, optionally filtered by log level or search string. Use this to investigate errors, warnings, or trace application behavior.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -107,22 +107,22 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "checkDocumentDirty",
-            "description": "Check whether a document open in the aiTerm editor has unsaved changes.",
+            "description": "Check whether a document open in the maiTerm editor has unsaved changes.",
             "inputSchema": { "type": "object", "properties": { "filePath": { "type": "string" } }, "required": ["filePath"] }
         },
         {
             "name": "saveDocument",
-            "description": "Save a document that is open in the aiTerm editor to disk.",
+            "description": "Save a document that is open in the maiTerm editor to disk.",
             "inputSchema": { "type": "object", "properties": { "filePath": { "type": "string" } }, "required": ["filePath"] }
         },
         {
             "name": "getCurrentSelection",
-            "description": "Get the currently selected text and cursor position in the active aiTerm editor tab.",
+            "description": "Get the currently selected text and cursor position in the active maiTerm editor tab.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "getLatestSelection",
-            "description": "Get the most recent text selection made in any aiTerm editor tab.",
+            "description": "Get the most recent text selection made in any maiTerm editor tab.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]).as_array().unwrap().clone());
@@ -131,7 +131,7 @@ pub fn tool_list_response() -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "openFile",
-            "description": "Open a file in the aiTerm IDE editor tab. Use this tool whenever you need to show the user a file — do NOT use shell 'open' or other OS commands. Supports optional line range or text range selection to highlight a specific section. Returns the tabId of the opened tab. To update an existing tab with a new file (e.g. iteratively showing screenshots, test results, or build output in the same tab), pass the returned tabId back as targetTabId — this replaces the tab content in-place without opening a new tab.",
+            "description": "Open a file in the maiTerm IDE editor tab. Use this tool whenever you need to show the user a file — do NOT use shell 'open' or other OS commands. Supports optional line range or text range selection to highlight a specific section. Returns the tabId of the opened tab. To update an existing tab with a new file (e.g. iteratively showing screenshots, test results, or build output in the same tab), pass the returned tabId back as targetTabId — this replaces the tab content in-place without opening a new tab.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -147,7 +147,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "openDiff",
-            "description": "Show a diff of proposed file changes in the aiTerm IDE for the user to review, accept, or reject. Use this tool instead of directly writing files when you want the user to review changes. This is a blocking call — it waits for the user to accept or reject before returning.",
+            "description": "Show a diff of proposed file changes in the maiTerm IDE for the user to review, accept, or reject. Use this tool instead of directly writing files when you want the user to review changes. This is a blocking call — it waits for the user to accept or reject before returning.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -173,17 +173,17 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "closeAllDiffTabs",
-            "description": "Close all open diff review tabs in the aiTerm IDE, rejecting any pending changes.",
+            "description": "Close all open diff review tabs in the maiTerm IDE, rejecting any pending changes.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "listWindows",
-            "description": "List all aiTerm windows with their IDs, labels, and workspace summaries. Use this to discover windows before querying a specific window's workspaces via listWorkspaces with a windowId.",
+            "description": "List all maiTerm windows with their IDs, labels, and workspace summaries. Use this to discover windows before querying a specific window's workspaces via listWorkspaces with a windowId.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {
             "name": "listWorkspaces",
-            "description": "List all workspaces with their panes and tabs. Returns windowId, windowLabel, workspace IDs, names, pane structure, tab IDs, interpolated display names, tab types, active states, and notes indicators. Use this to discover tabs for switchTab or notes operations. Each aiTerm window has its own set of workspaces; pass windowId to query a specific window.",
+            "description": "List all workspaces with their panes and tabs. Returns windowId, windowLabel, workspace IDs, names, pane structure, tab IDs, interpolated display names, tab types, active states, and notes indicators. Use this to discover tabs for switchTab or notes operations. Each maiTerm window has its own set of workspaces; pass windowId to query a specific window.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -429,7 +429,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "getPreferences",
-            "description": "Get aiTerm preferences (settings). Returns current values with metadata (description, type, valid values). Optionally filter by query string to find relevant settings.",
+            "description": "Get maiTerm preferences (settings). Returns current values with metadata (description, type, valid values). Optionally filter by query string to find relevant settings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -440,7 +440,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "setPreference",
-            "description": "Update a single aiTerm preference by key. Use getPreferences first to discover available keys, their types, and valid values.",
+            "description": "Update a single maiTerm preference by key. Use getPreferences first to discover available keys, their types, and valid values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -452,7 +452,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "createBackup",
-            "description": "Create a gzip-compressed backup of the entire aiTerm state (workspaces, tabs, notes, preferences). Returns the path to the created backup file.",
+            "description": "Create a gzip-compressed backup of the entire maiTerm state (workspaces, tabs, notes, preferences). Returns the path to the created backup file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -491,7 +491,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "sendToBridgedAgent",
-            "description": "Send a message to the peer AI agent you are bridged with (running in another aiTerm pane, e.g. an expert on a related codebase). Use this to ask questions, request research, or share context. The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. aiTerm automatically stamps your identity (tab, workspace, cwd) on the message so the recipient knows it's from you, a peer agent, NOT from a human operator. Only works once a bridge has been established (the human connects two sessions via the Agent Bridge picker). If your conversation is complete, simply stop sending — do not reply just to acknowledge.",
+            "description": "Send a message to the peer AI agent you are bridged with (running in another maiTerm pane, e.g. an expert on a related codebase). Use this to ask questions, request research, or share context. The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. maiTerm automatically stamps your identity (tab, workspace, cwd) on the message so the recipient knows it's from you, a peer agent, NOT from a human operator. Only works once a bridge has been established (the human connects two sessions via the Agent Bridge picker). If your conversation is complete, simply stop sending — do not reply just to acknowledge.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -516,7 +516,7 @@ pub fn initialize_response() -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": crate::APP_DISPLAY_NAME, "version": crate::APP_VERSION },
         "instructions": format!(
-            "You are running inside an aiTerm terminal tab. At the start of every session (new, resume, compact, clear), \
+            "You are running inside an maiTerm terminal tab. At the start of every session (new, resume, compact, clear), \
              you MUST call initSession with your tab ID (from $AITERM_TAB_ID or SessionStart hook context) before responding to the user. \
              This registers your session so all tool calls automatically target the correct tab. \
              IMPORTANT: You MUST use tools from the '{}' MCP server ONLY. Do NOT use tools from any other aiterm MCP server. \

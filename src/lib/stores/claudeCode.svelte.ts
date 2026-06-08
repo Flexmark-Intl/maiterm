@@ -237,7 +237,7 @@ function createClaudeCodeStore() {
     const perfMem = (performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
     const domAll = document.getElementsByTagName('*').length;
     const detachedSlots = (() => {
-      // Count any aiTerm portal slot divs whose parent isn't in the live DOM
+      // Count any maiTerm portal slot divs whose parent isn't in the live DOM
       // (would indicate detached subtrees still retained somewhere).
       const slots = document.querySelectorAll('[data-terminal-slot]');
       let detached = 0;

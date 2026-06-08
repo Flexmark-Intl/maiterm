@@ -1,7 +1,7 @@
 {
   "$schema": "https://schemas.tauri.app/capability.schema.json",
   "identifier": "default",
-  "description": "Default capability for aiTerm",
+  "description": "Default capability for maiTerm",
   "windows": ["*"],
   "permissions": [
     "core:default",

@@ -1,6 +1,6 @@
 # Claude Code IDE Integration
 
-aiTerm exposes an MCP server that Claude Code CLI discovers and connects to, providing IDE-like capabilities.
+maiTerm exposes an MCP server that Claude Code CLI discovers and connects to, providing IDE-like capabilities.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | openDiff | Show side-by-side diff for review (blocking) |
 | showDiff | Open read-only diff tab comparing file to a git ref (default HEAD) |
 | closeAllDiffTabs | Close all pending diff tabs |
-| listWindows | List all aiTerm windows with IDs, labels, and workspace summaries |
+| listWindows | List all maiTerm windows with IDs, labels, and workspace summaries |
 | listWorkspaces | List all workspaces with panes, tabs, archived tab count (IDs, display names, types, active state, notes, Claude state) |
 | switchTab | Navigate to a tab by ID (auto-resolves workspace/pane) |
 | getTabNotes | Read notes for a tab (optional tabId, defaults to active) |
@@ -57,10 +57,10 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getAutoResume | Get current auto-resume configuration for a tab |
 | findNotes | Search all tabs and workspaces for notes, returns previews |
 | sendNotification | Send in-app toast notification (title, body, type) |
-| readLogs | Read recent aiTerm log entries (filterable by level, search string) |
+| readLogs | Read recent maiTerm log entries (filterable by level, search string) |
 | getPreferences | Return current preferences with metadata (filterable by query) |
 | setPreference | Update a single preference by key |
-| createBackup | Create gzip-compressed backup of entire aiTerm state |
+| createBackup | Create gzip-compressed backup of entire maiTerm state |
 | getClaudeSessions | All active Claude sessions across tabs (state, tool, model, cwd) — multi-agent coordination |
 | listArchivedTabs | List archived (suspended) tabs with names, dates, restore context |
 | restoreArchivedTab | Restore an archived tab back into the active workspace |
@@ -107,7 +107,7 @@ persisted).
 
 **Design decisions (v1):** async-only (no blocking RPC); fork-only (the fork *is* the
 target, isolated); loop control = framing + human Esc (no circuit breaker); identity is
-stamped by aiTerm from the registry (tamper-proof — recipient can't mistake a peer for
+stamped by maiTerm from the registry (tamper-proof — recipient can't mistake a peer for
 the human); bridge keyed by tab_id (survives the fork's new session id).
 
 **Handshake (tight, routing-proof):** a forked session resumes the target's transcript,
@@ -183,7 +183,7 @@ Exposes local MCP tools to Claude Code running on remote servers via SSH reverse
 
 **Architecture:**
 ```
-Local aiTerm → SSH reverse tunnel (-R 0:127.0.0.1:{mcp_port}) → Remote :allocated_port
+Local maiTerm → SSH reverse tunnel (-R 0:127.0.0.1:{mcp_port}) → Remote :allocated_port
                Background SSH → writes lockfile + ~/.claude.json on remote
 Remote Claude Code → discovers ~/.claude/ide/{port}.lock → connects through tunnel → local MCP server
 ```
@@ -203,7 +203,7 @@ Remote Claude Code → discovers ~/.claude/ide/{port}.lock → connects through 
 **`~/.aiterm` env file:** Written during bridge setup with `export AITERM_TAB_ID=... AITERM_PORT=...`. Sourced as a fallback by the SessionStart hook when `$AITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. Overwritten on each bridge connect — self-correcting for stale values.
 
 **Context menu items (SSH tabs with active bridge):**
-- "Inject aiTerm Env Vars" — re-writes `export AITERM_TAB_ID=... AITERM_PORT=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
+- "Inject maiTerm Env Vars" — re-writes `export AITERM_TAB_ID=... AITERM_PORT=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
 **Remote hooks:** All hook events (SessionStart, SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact) are registered on the remote with HTTP hooks pointing to `127.0.0.1:{remotePort}/hooks`. These tunnel back through the SSH reverse tunnel to the local MCP server's hooks handler. A command hook on SessionStart reads `$AITERM_TAB_ID` (from env var injection) and echoes the tab ID into Claude's context. Hooks require python3 on the remote for the settings.json merge.

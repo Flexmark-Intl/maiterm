@@ -1,5 +1,5 @@
 /// Events extracted from OSC sequences in raw PTY output.
-/// These are aiTerm-specific features that alacritty_terminal doesn't handle natively.
+/// These are maiTerm-specific features that alacritty_terminal doesn't handle natively.
 #[derive(Debug, Clone)]
 pub enum OscEvent {
     /// OSC 7: CWD report — file://host/path

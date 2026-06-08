@@ -12,7 +12,7 @@ static LOADED_SUCCESSFULLY: AtomicBool = AtomicBool::new(false);
 /// Last mtime we observed on the main state file (millis since epoch).
 /// Updated on successful load and after every successful save. Used by save_state()
 /// to detect when another process has written to the file since we last touched it
-/// (e.g. a stale/zombie aiTerm process), and abort rather than clobber newer data.
+/// (e.g. a stale/zombie maiTerm process), and abort rather than clobber newer data.
 /// Zero means "no baseline yet" — the guard is skipped on first save after a
 /// fresh launch with no existing state file.
 static LAST_KNOWN_DISK_MTIME: AtomicU64 = AtomicU64::new(0);
@@ -384,7 +384,7 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
     }
 
     // Conflict guard: if the on-disk file's mtime is newer than what we last
-    // recorded, another process (e.g. a stale/zombie aiTerm) wrote since we
+    // recorded, another process (e.g. a stale/zombie maiTerm) wrote since we
     // loaded or last saved. Refuse to clobber it; instead persist our in-memory
     // state to a timestamped conflict file so the user can investigate.
     let known_mtime = LAST_KNOWN_DISK_MTIME.load(Ordering::Relaxed);
@@ -415,7 +415,7 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
                 fs::write(&conflict_path, &json)
                     .map_err(|e| format!("Failed to write conflict file: {}", e))?;
                 log::error!(
-                    "State save aborted: disk mtime {} > known {}. Another aiTerm process likely wrote since this one loaded. In-memory state preserved at {:?}.",
+                    "State save aborted: disk mtime {} > known {}. Another maiTerm process likely wrote since this one loaded. In-memory state preserved at {:?}.",
                     disk_mtime,
                     known_mtime,
                     conflict_path

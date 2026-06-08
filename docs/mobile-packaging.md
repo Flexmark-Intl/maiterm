@@ -8,7 +8,7 @@
 - **Tauri 2 gives us the mobile build pipeline almost for free** — one codebase
   (Svelte 5 + xterm.js + CodeMirror frontend, `alacritty_terminal` Rust core) can
   target macOS, Windows, Linux, **iOS, and Android** from the same repo.
-- **The wall is the backend process model.** Everything that makes aiTerm a
+- **The wall is the backend process model.** Everything that makes maiTerm a
   *terminal* spawns local child processes (`portable-pty` → `/bin/bash`; even
   "SSH" shells out to the system `ssh` binary). Mobile sandboxes restrict or
   forbid that.
@@ -32,7 +32,7 @@ is that the whole terminal *model* is local-process-based:
 | "SSH" sessions | detection of user-typed `ssh`/`mosh` in a local PTY (`is_ssh_command`) | relies on a local PTY + system `ssh` binary |
 | MCP reverse tunnel | `commands/ssh_tunnel.rs:68` → `tokio::process::Command::new("ssh")` | shells out to system `ssh`; no such binary on iOS |
 
-**Key insight:** aiTerm does **not** contain an SSH *implementation* today — it
+**Key insight:** maiTerm does **not** contain an SSH *implementation* today — it
 detects and wraps the OS `ssh` binary. None of that transfers to mobile. Mobile
 needs a real in-process SSH client.
 
@@ -47,7 +47,7 @@ A straight lift-and-shift = beautiful UI with a **dead terminal** on iOS.
 
 ## 3. Recommended path — Path A: SSH-first remote client
 
-The unlocking decision is **product, not technical**: mobile aiTerm = SSH client,
+The unlocking decision is **product, not technical**: mobile maiTerm = SSH client,
 not local shell. Then one codebase serves all platforms.
 
 ### Shared vs. platform-conditional
@@ -101,7 +101,7 @@ specifically.
 
 ### Why this is also the better *product*
 
-aiTerm already has the Claude Code hooks integration, multi-session awareness
+maiTerm already has the Claude Code hooks integration, multi-session awareness
 (`getClaudeSessions`), and notifications. The SSH-client framing turns mobile into
 a **remote command center for your agents** — watch Claude sessions running on
 dev boxes from your phone, get Stop-hook notifications, jump in to approve a

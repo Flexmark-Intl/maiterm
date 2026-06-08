@@ -109,7 +109,7 @@ function buildCssVarEditorTheme(isDark: boolean): Extension {
 }
 
 /**
- * Build a CodeMirror 6 theme + syntax highlighting from an aiTerm Theme.
+ * Build a CodeMirror 6 theme + syntax highlighting from an maiTerm Theme.
  *
  * The editor chrome (backgrounds, gutters, selection) uses CSS variables so it
  * automatically updates when the theme changes via applyUiTheme().

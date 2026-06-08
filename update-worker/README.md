@@ -1,4 +1,4 @@
-# aiTerm update-counter
+# maiTerm update-counter
 
 A small Cloudflare Worker that fronts the Tauri updater manifest (`latest.json`)
 and counts update checks as anonymous active users.
