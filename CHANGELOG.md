@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.13.2
+
+- **New macOS 26 "Liquid Glass" app icon.** On macOS Tahoe (26), the dock and Finder icon now use Apple's adaptive Liquid Glass treatment — a periwinkle glass tile with the maiTerm "m" that the system renders for the light, dark, tinted, and clear appearances automatically. On earlier macOS, Windows, and Linux the existing icon is unchanged. The documentation site's logo and favicon now match the new icon as well
+
 ## v1.13.1
 
 - **Install the recommended Claude Code status line with `/maiterm statusline`.** One command sets up a compact status line showing host · current directory · git branch · model · reasoning effort · context-used %, so you get the same at-a-glance Claude Code context line we use. It's idempotent (safe to re-run) and works both locally and on SSH-bridged hosts. `/maiterm init` is also faster now — it uses a targeted tool lookup instead of scanning every connected MCP server
