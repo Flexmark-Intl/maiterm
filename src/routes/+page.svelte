@@ -193,8 +193,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="titlebar" onmousedown={handleTitlebarMouseDown}>
     <span class="titlebar-text">
-      maiTerm{#if workspacesStore.activeWorkspace} | {workspacesStore.activeWorkspace.name}{/if}
+      {#if workspacesStore.activeWorkspace}{workspacesStore.activeWorkspace.name}{/if}
     </span>
+    <div class="titlebar-logo" role="img" aria-label="maiTerm"></div>
   </div>
   <div class="app-body">
     {#if loading}
@@ -332,6 +333,7 @@
   }
 
   .titlebar {
+    position: relative;
     height: 36px;
     flex-shrink: 0;
     display: flex;
@@ -345,6 +347,18 @@
     font-size: 0.923rem;
     color: var(--fg);
     pointer-events: none;
+  }
+
+  .titlebar-logo {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 16px;
+    aspect-ratio: 2745 / 489;
+    opacity: 0.8;
+    pointer-events: none;
+    background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
 
   .app-body {
