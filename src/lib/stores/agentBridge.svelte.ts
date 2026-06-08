@@ -481,6 +481,11 @@ function createAgentBridgeStore() {
         return { ok: false, error: 'You are not bridged to any agent. Ask the human to bridge a session via the Agent Bridge picker.' };
       }
       const recipient = bridge.partnerTabId;
+      if (recipient === senderTabId) {
+        // Corrupt/misrouted bridge (partner points at self) — never inject into the
+        // sender's own terminal. Surface it rather than acting on bad routing.
+        return { ok: false, error: 'Bridge routing error: this tab appears bridged to itself. Ask the human to reconnect the bridge.' };
+      }
       if (!tabExists(recipient)) {
         this.disconnect(senderTabId);
         return { ok: false, error: 'The bridged agent is no longer available (its tab was closed). Bridge closed.' };
@@ -633,6 +638,12 @@ function createAgentBridgeStore() {
       let restored = 0;
       for (const [tabId, al] of persisted) {
         if (bridges.has(tabId)) continue; // already live this session
+        // A bridge must point at a DIFFERENT tab. A self-reference is corrupt data —
+        // never restore it (it would make the agent its own bridged peer).
+        if (al.partner_tab_id === tabId) {
+          void persistBridge(tabId); // clear the bad entry
+          continue;
+        }
         const partnerAl = persisted.get(al.partner_tab_id);
         // Require a reciprocal pairing (both tabs present, pointing at each other).
         if (!partnerAl || partnerAl.partner_tab_id !== tabId) {

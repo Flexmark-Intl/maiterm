@@ -1115,8 +1115,9 @@
     display: flex;
     align-items: center;
     font-size: 0.8rem;
-    color: var(--accent);
-    opacity: 0.85;
+    /* Warm/amber, not the blue accent — a bridge is a distinct, attention-worthy state. */
+    color: var(--yellow);
+    opacity: 0.95;
   }
 
   .bridge-indicator {

@@ -999,33 +999,34 @@ async fn process_message(
                     let sessions = state.claude_sessions.read();
                     let ct = connection_tabs.read();
 
-                    // Find sessions whose connection was cleaned up (orphaned)
-                    let orphaned_tabs: Vec<String> = sessions.values()
-                        .filter(|info| {
-                            info.connection_id.as_ref()
-                                .map_or(false, |cid| !ct.contains_key(cid))
-                        })
+                    // Unique tabs that currently have a live Claude session.
+                    let active_tabs: Vec<String> = sessions.values()
                         .map(|info| info.tab_id.clone())
                         .collect::<std::collections::HashSet<_>>()
                         .into_iter()
                         .collect();
 
-                    let recovered = if orphaned_tabs.len() == 1 {
-                        Some(orphaned_tabs.into_iter().next().unwrap())
+                    // Recover affinity ONLY when we can name the caller unambiguously.
+                    // With one active agent, any unbound call must be from it. With
+                    // MULTIPLE active agents (e.g. an Agent Bridge — two bridged Claudes),
+                    // guessing which tab an unbound connection belongs to can bind agent
+                    // A's call to agent B's tab, corrupting cross-agent routing (a
+                    // sendToBridgedAgent/getBridgedAgent from A would target B). So when
+                    // 2+ agents are live, recover only if exactly ONE of them currently
+                    // lacks a live connection affinity (the sole reconnecting one);
+                    // otherwise refuse and make the caller re-initSession.
+                    let recovered = if active_tabs.len() == 1 {
+                        Some(active_tabs[0].clone())
                     } else {
-                        // Fallback: if no connection_ids stored yet, use unique active tabs
-                        let active_tabs: Vec<String> = sessions.values()
-                            .map(|info| info.tab_id.clone())
-                            .collect::<std::collections::HashSet<_>>()
-                            .into_iter()
+                        let bound: std::collections::HashSet<&str> =
+                            ct.values().map(|s| s.as_str()).collect();
+                        let unbound: Vec<&String> = active_tabs.iter()
+                            .filter(|t| !bound.contains(t.as_str()))
                             .collect();
-                        if active_tabs.len() == 1 {
-                            Some(active_tabs.into_iter().next().unwrap())
-                        } else {
-                            None
-                        }
+                        if unbound.len() == 1 { Some(unbound[0].clone()) } else { None }
                     };
 
+                    let active_count = active_tabs.len();
                     drop(ct);
                     drop(sessions);
 
@@ -1038,9 +1039,12 @@ async fn process_message(
                                 info.connection_id = Some(connection_id.to_string());
                             }
                         }
-                        log::debug!("Restored connection affinity from orphaned session for {}",
-                            &connection_id[..connection_id.len().min(11)]);
+                        log::debug!("Restored connection affinity for {} (sole unbound of {} active agent(s))",
+                            &connection_id[..connection_id.len().min(11)], active_count);
                         affinity_tab = Some(tab_id);
+                    } else if active_count > 1 {
+                        log::debug!("Affinity recovery declined for {}: {} active agents, ambiguous — requiring initSession",
+                            &connection_id[..connection_id.len().min(11)], active_count);
                     }
                 }
 
