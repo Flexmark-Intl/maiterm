@@ -907,8 +907,8 @@ async fn process_message(
 
                     // Verify tab exists in this instance.
                     if find_window_for_tab(state, &tab_id).is_none() {
-                        let this_server = if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" };
-                        let other_server = if cfg!(debug_assertions) { "aiterm" } else { "aiterm-dev" };
+                        let this_server = if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" };
+                        let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
                         // A tabId unknown to this instance is usually a *stale*
                         // $AITERM_TAB_ID (the shell outlived the tab it was spawned
                         // under), not a wrong-instance call. The old "use the other
@@ -1118,8 +1118,8 @@ async fn process_message(
                 // Prevents cross-talk when both dev and prod are running.
                 if let Some(tab_id) = arguments.get("tabId").and_then(|v| v.as_str()) {
                     if !tab_id.is_empty() && find_window_for_tab(state, tab_id).is_none() {
-                        let other_server = if cfg!(debug_assertions) { "aiterm" } else { "aiterm-dev" };
-                        let this_server = if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" };
+                        let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
+                        let this_server = if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" };
                         let err_msg = format!(
                             "Tab '{}' does not exist in this maiTerm instance ({}). \
                              You may be calling the wrong MCP server. Use '{}' tools instead.",

@@ -164,7 +164,7 @@ function buildSetupScript(
     "[ -n \"$AITERM_TAB_ID\" ] && " +
     "AITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && " +
     "echo 'Your maiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. " +
-    "You MUST immediately call the aiterm initSession tool with this tabId and sessionId before responding to the user. This is required for correct tab targeting.' || true";
+    "You MUST immediately call the maiterm initSession tool with this tabId and sessionId before responding to the user. This is required for correct tab targeting.' || true";
 
   const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
 
@@ -238,11 +238,11 @@ function buildSetupScript(
     `printf '%s' "$__lock" > ~/.claude/ide/${remotePort}.lock`,
     // Register MCP in ~/.claude.json + hooks in ~/.claude/settings.json
     'if command -v python3 >/dev/null 2>&1; then',
-    'printf \'%s\' "$__mcp" | python3 -c \'import json,sys,os; e=json.load(sys.stdin); p=os.path.expanduser("~/.claude.json"); d=json.load(open(p)) if os.path.exists(p) else {}; d.setdefault("mcpServers",{})["aiterm"]=e; open(p,"w").write(json.dumps(d,indent=2))\'',
+    'printf \'%s\' "$__mcp" | python3 -c \'import json,sys,os; e=json.load(sys.stdin); p=os.path.expanduser("~/.claude.json"); d=json.load(open(p)) if os.path.exists(p) else {}; m=d.setdefault("mcpServers",{}); m["maiterm"]=e; m.pop("aiterm",None); open(p,"w").write(json.dumps(d,indent=2))\'',
     "printf '%s' \"$__hooks\" | python3 -c '" + pythonHooks + "'",
     'elif command -v jq >/dev/null 2>&1; then',
     '[ -f ~/.claude.json ] || echo \'{}\' > ~/.claude.json',
-    'jq --argjson entry "$__mcp" \'.mcpServers.aiterm = $entry\' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json',
+    'jq --argjson entry "$__mcp" \'.mcpServers.maiterm = $entry | del(.mcpServers.aiterm)\' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json',
     'else',
     '[ -f ~/.claude.json ] || echo \'{}\' > ~/.claude.json',
     'fi',
@@ -260,12 +260,12 @@ function buildSetupScript(
     '## Fast path: `init`\n' +
     '\n' +
     'If the argument is `init`, do ONLY this and stop — do NOT read the command table below and do NOT keyword-search across MCP servers:\n' +
-    '1. Load the tool with one targeted lookup: ToolSearch `select:mcp__aiterm__initSession,mcp__aiterm-dev__initSession`\n' +
-    '2. Call whichever of those exists (this maiTerm build registers exactly one) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.\n' +
+    '1. Load the tool with one targeted lookup: ToolSearch `select:mcp__maiterm__initSession,mcp__maiterm-dev__initSession,mcp__aiterm__initSession,mcp__aiterm-dev__initSession`\n' +
+    '2. Call the one named in your SessionStart hook context (this build registers exactly one of maiterm/maiterm-dev; the aiterm/aiterm-dev names are legacy fallbacks) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.\n' +
     '\n' +
     'Always re-run this when asked, even if you think you already initialized — resume/fork/compact require re-init.\n' +
     '\n' +
-    'Execute the maiTerm MCP tool for the requested operation. Use the aiterm MCP server. If you have not initialized yet, call initSession first.\n' +
+    'Execute the maiTerm MCP tool for the requested operation. Use the maiterm MCP server. If you have not initialized yet, call initSession first.\n' +
     '\n' +
     '## Command reference\n' +
     '\n' +

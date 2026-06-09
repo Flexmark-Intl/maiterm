@@ -312,7 +312,7 @@ function createAgentBridgeStore() {
   function buildForkInitDirective(forkTabId: string, peerLabel: string): string {
     return (
       `⟦AGENT-BRIDGE⟧ You are now a FORKED peer agent in a NEW maiTerm tab (id ${forkTabId}). ` +
-      `This is a fresh tab with a fresh MCP connection, so you must re-initialize: call your aiterm initSession tool with tabId "${forkTabId}" right now. ` +
+      `This is a fresh tab with a fresh MCP connection, so you must re-initialize: call your maiterm initSession tool with tabId "${forkTabId}" right now. ` +
       `Disregard any tab id mentioned earlier in this conversation — you are "${forkTabId}" now.\n\n` +
       `You have been bridged to a peer AI agent ("${peerLabel}") via maiTerm Agent Bridge. ` +
       `After initializing, reply with a one-line readiness note, then wait — the peer's message will arrive as a new prompt.`

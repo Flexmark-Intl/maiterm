@@ -516,13 +516,13 @@ pub fn initialize_response() -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": crate::APP_DISPLAY_NAME, "version": crate::APP_VERSION },
         "instructions": format!(
-            "You are running inside an maiTerm terminal tab. At the start of every session (new, resume, compact, clear), \
+            "You are running inside a maiTerm terminal tab. At the start of every session (new, resume, compact, clear), \
              you MUST call initSession with your tab ID (from $AITERM_TAB_ID or SessionStart hook context) before responding to the user. \
              This registers your session so all tool calls automatically target the correct tab. \
-             IMPORTANT: You MUST use tools from the '{}' MCP server ONLY. Do NOT use tools from any other aiterm MCP server. \
+             IMPORTANT: You MUST use tools from the '{}' MCP server ONLY. Do NOT use tools from any other maiterm MCP server. \
              IMPORTANT: Always call initSession when requested via /maiterm init, even if you believe it was already called. \
              Resume, fork, and compact events require re-initialization to pick up state changes.",
-            if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" }
+            if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" }
         )
     })
 }

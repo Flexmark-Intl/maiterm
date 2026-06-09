@@ -11,7 +11,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
 - `protocol.rs` — JSON-RPC request/response types, `tool_list_response()` (42 tools), `initialize_response()`
-- `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.aiterm` (or `aiterm-dev`) in `~/.claude.json`, registers hooks in `~/.claude/settings.json`
+- `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
 - Listens for `claude-code-tool` Tauri events
@@ -174,13 +174,13 @@ key; mint a per-request id instead so distinct agents can't merge.
 - PTY env vars: `AITERM_TAB_ID` (tab ID), `AITERM_PORT` (server port) — set at spawn in `pty/manager.rs`
 - Command hook gates on `$AITERM_PORT` match
 - MCP tool guard in `server.rs` rejects `tabId` that doesn't exist in this instance
-- MCP instructions specify server name (`aiterm` vs `aiterm-dev`)
+- MCP instructions specify server name (`maiterm` vs `maiterm-dev`)
 
 **`/maiterm` skill (auto-installed):**
 - Written to `~/.claude/skills/maiterm/SKILL.md` on startup, removed on exit (`write_aiterm_skill` / `remove_aiterm_skill` in `lockfile.rs`)
 - Provides fast slash-command access: `/maiterm notes`, `/maiterm diag`, `/maiterm tabs`, etc.
 - Reduces LLM inference by giving explicit tool→parameter mappings
-- **`init` fast-path** lives at the top of the SKILL.md: it tells the agent the exact deferred-tool lookup (`ToolSearch select:mcp__aiterm__initSession,mcp__aiterm-dev__initSession`) instead of a broad keyword search across every connected MCP server — this is what keeps `/maiterm init` cheap. Build-agnostic (covers both dev and prod keys), so no interpolation.
+- **`init` fast-path** lives at the top of the SKILL.md: it tells the agent the exact deferred-tool lookup (`ToolSearch select:mcp__maiterm__initSession,mcp__maiterm-dev__initSession,mcp__aiterm__initSession,mcp__aiterm-dev__initSession`) instead of a broad keyword search across every connected MCP server — this is what keeps `/maiterm init` cheap. Build-agnostic (covers both dev and prod keys; the `aiterm`/`aiterm-dev` names are legacy fallbacks kept during the rename rollout), so no interpolation.
 - **`statusline` subcommand** is the one entry that is NOT an MCP tool — it installs the maiTerm status line by running bundled helper scripts under `~/.claude/skills/maiterm/bin/`:
   - `setup-statusline.sh` — renders a colored example, then either installs (exit 0) or reports missing `jq` (exit 3, prints `JQ_MISSING:<cmd>`, writes nothing). Idempotent: only touches `~/.claude/statusline-command.sh` + the `statusLine` key in `~/.claude/settings.json`.
   - `statusline-command.sh` — the status line itself (host · cwd · git branch · model · effort · context %).

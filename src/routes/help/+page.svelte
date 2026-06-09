@@ -56,7 +56,7 @@
   let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
   function copyTipCommand() {
-    navigator.clipboard.writeText('remember at user level: always use subagent haiku for MCP tool calls (aiterm tools like notes, tabs, workspaces, editor)');
+    navigator.clipboard.writeText('remember at user level: always use subagent haiku for MCP tool calls (maiterm tools like notes, tabs, workspaces, editor)');
     copied = true;
     if (copyTimer) clearTimeout(copyTimer);
     copyTimer = setTimeout(() => { copied = false; }, 2000);
@@ -330,7 +330,7 @@
             <div class="tip-box">
               <strong>Tip:</strong> These tools are simple operations that don't need a large model. Paste this into Claude Code once to permanently use the faster, cheaper Haiku model for all MCP tool calls:
               <div class="tip-command-wrap">
-                <code class="tip-command">remember at user level: always use subagent haiku for MCP tool calls (aiterm tools like notes, tabs, workspaces, editor)</code>
+                <code class="tip-command">remember at user level: always use subagent haiku for MCP tool calls (maiterm tools like notes, tabs, workspaces, editor)</code>
                 <button class="copy-btn" onclick={copyTipCommand} title="Copy to clipboard">
                   {copied ? 'Copied!' : 'Copy'}
                 </button>

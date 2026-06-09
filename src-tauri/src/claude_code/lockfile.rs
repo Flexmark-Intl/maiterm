@@ -10,6 +10,15 @@ pub const STATUSLINE_PAYLOAD_SCRIPT: &str =
     include_str!("../../resources/maiterm-skill/bin/statusline-command.sh");
 
 fn mcp_server_key() -> &'static str {
+    if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" }
+}
+
+/// The pre-rebrand server key for THIS build flavor. We strip it from
+/// `~/.claude.json` whenever we (re)write our own entry, so updating across the
+/// aiterm→maiterm rename leaves no dead duplicate server dialing a stale port.
+/// Flavor-specific on purpose: prod removes only `aiterm`, dev only `aiterm-dev`,
+/// so the two never clobber each other's registration.
+fn legacy_mcp_server_key() -> &'static str {
     if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" }
 }
 
@@ -132,6 +141,11 @@ fn put_mcp_entry(path: &PathBuf, entry: serde_json::Value) -> Result<(), String>
         .or_insert(serde_json::json!({}));
 
     mcp_servers[mcp_server_key()] = entry;
+    // Rebrand migration: drop the legacy aiterm/aiterm-dev key for this flavor so
+    // the rename doesn't leave a stale duplicate server behind in ~/.claude.json.
+    if let Some(obj) = mcp_servers.as_object_mut() {
+        obj.remove(legacy_mcp_server_key());
+    }
 
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     // Atomic write
@@ -199,6 +213,8 @@ fn remove_mcp_settings() -> Result<(), String> {
 
     if let Some(mcp_servers) = settings.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
         mcp_servers.remove(mcp_server_key());
+        // Also strip the legacy aiterm/aiterm-dev key (rebrand migration).
+        mcp_servers.remove(legacy_mcp_server_key());
         // Remove the mcpServers key entirely if now empty
         if mcp_servers.is_empty() {
             settings.as_object_mut().unwrap().remove("mcpServers");
@@ -246,7 +262,7 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
     // SessionStart command hook: reads session_id from stdin JSON, echoes tab ID + session ID
     // into Claude's context so Claude passes both to initSession.
     // Gate on $AITERM_PORT matching our port to prevent dev/prod cross-talk.
-    let mcp_key = if cfg!(debug_assertions) { "aiterm-dev" } else { "aiterm" };
+    let mcp_key = mcp_server_key();
     let session_start_cmd = format!(
         "{{ [ \"$AITERM_PORT\" = \"{port}\" ] || [ -z \"$AITERM_PORT\" ]; }} && \
          [ -n \"$AITERM_TAB_ID\" ] && \
@@ -618,12 +634,12 @@ description: Quick maiTerm terminal operations — /maiterm notes, /maiterm diag
 ## Fast path: `init`
 
 If the argument is `init`, do ONLY this and stop — do NOT read the command table below and do NOT keyword-search across MCP servers:
-1. Load the tool with one targeted lookup: ToolSearch `select:mcp__aiterm__initSession,mcp__aiterm-dev__initSession`
-2. Call whichever of those exists (this maiTerm build registers exactly one) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.
+1. Load the tool with one targeted lookup: ToolSearch `select:mcp__maiterm__initSession,mcp__maiterm-dev__initSession,mcp__aiterm__initSession,mcp__aiterm-dev__initSession`
+2. Call the one named in your SessionStart hook context (this build registers exactly one of maiterm/maiterm-dev; the aiterm/aiterm-dev names are legacy fallbacks) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.
 
 Always re-run this when asked, even if you think you already initialized — resume/fork/compact require re-init.
 
-Execute the maiTerm MCP tool for the requested operation. Use whichever aiterm MCP server you already called initSession on (aiterm or aiterm-dev). If you haven't initialized yet, call initSession first.
+Execute the maiTerm MCP tool for the requested operation. Use whichever maiterm MCP server you already called initSession on (maiterm or maiterm-dev). If you haven't initialized yet, call initSession first.
 
 ## Command reference
 
