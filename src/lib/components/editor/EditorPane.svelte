@@ -39,6 +39,14 @@
 
   let { workspaceId, paneId, tabId, visible, editorFile }: Props = $props();
 
+  // Clicking anywhere in this editor focuses its pane, so pane-targeted actions
+  // (Cmd+T, Cmd+D split, etc.) operate on the pane the user is looking at.
+  function focusPane() {
+    if (workspacesStore.activeWorkspace?.active_pane_id !== paneId) {
+      workspacesStore.setActivePane(workspaceId, paneId);
+    }
+  }
+
   let containerRef: HTMLDivElement;
   let editorView: EditorView | null = null;
   let dirty = $state(false);
@@ -1302,10 +1310,12 @@
   });
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="editor-container"
   class:hidden={!visible}
   bind:this={containerRef}
+  onmousedowncapture={focusPane}
 >
   {#if loading}
     <div class="editor-loading">Loading...</div>

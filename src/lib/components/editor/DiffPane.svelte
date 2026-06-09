@@ -24,6 +24,14 @@
 
   let { workspaceId, paneId, tabId, visible, diffContext }: Props = $props();
 
+  // Clicking anywhere in this diff focuses its pane, so pane-targeted actions
+  // (Cmd+T, Cmd+D split, etc.) operate on the pane the user is looking at.
+  function focusPane() {
+    if (workspacesStore.activeWorkspace?.active_pane_id !== paneId) {
+      workspacesStore.setActivePane(workspaceId, paneId);
+    }
+  }
+
   let containerRef: HTMLDivElement;
   let mergeView: MergeView | null = null;
   let accepting = $state(false);
@@ -129,10 +137,12 @@
   }
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="diff-pane"
   class:hidden={!visible}
   bind:this={containerRef}
+  onmousedowncapture={focusPane}
 >
   <div class="diff-toolbar">
     <span class="diff-file-path">{diffContext.file_path}</span>

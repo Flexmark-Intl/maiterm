@@ -890,6 +890,11 @@
     // Only intercept plain left-clicks for selection — let everything else
     // (right-click, Cmd+click for links, alt-screen) pass through to xterm.js.
     containerRef.addEventListener('mousedown', (e) => {
+      // Any click into this terminal focuses its pane, so pane-targeted actions
+      // (Cmd+T, Cmd+D split, etc.) operate on the pane the user is looking at.
+      if (workspacesStore.activeWorkspace?.active_pane_id !== paneId) {
+        workspacesStore.setActivePane(workspaceId, paneId);
+      }
       // Let xterm.js handle non-selection clicks normally
       if (e.button !== 0 || lastFrameAlternateScreen) return;
       if ((e.target as HTMLElement)?.closest('.scrollbar-track, .auto-resume-prompt, .context-menu')) return;
