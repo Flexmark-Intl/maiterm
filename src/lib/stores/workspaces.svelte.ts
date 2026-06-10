@@ -1817,6 +1817,44 @@ function createWorkspacesStore() {
       return notesVisible.has(tabId);
     },
 
+    /** Effective composer open state: explicit per-tab value, else the default-open preference. */
+    isComposerOpen(tabId: string): boolean {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) return tab.composer_open ?? preferencesStore.composerDefaultOpen;
+        }
+      }
+      return false;
+    },
+
+    toggleComposer(tabId: string) {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) {
+            const isOpen = !(tab.composer_open ?? preferencesStore.composerDefaultOpen);
+            tab.composer_open = isOpen;
+            commands.setTabComposerOpen(ws.id, pane.id, tabId, isOpen);
+            return;
+          }
+        }
+      }
+    },
+
+    setComposerDraft(tabId: string, draft: string | null) {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) {
+            tab.composer_draft = draft;
+            commands.setTabComposerDraft(ws.id, pane.id, tabId, draft);
+            return;
+          }
+        }
+      }
+    },
+
 
     async setTabNotes(workspaceId: string, paneId: string, tabId: string, notes: string | null) {
       await commands.setTabNotes(workspaceId, paneId, tabId, notes);

@@ -130,6 +130,10 @@ export async function searchTerminal(ptyId: string, query: string, caseSensitive
   return invoke('search_terminal', { ptyId, query, caseSensitive });
 }
 
+export async function terminalBracketedPaste(ptyId: string): Promise<boolean> {
+  return invoke('terminal_bracketed_paste', { ptyId });
+}
+
 export async function serializeTerminal(ptyId: string): Promise<number[]> {
   return invoke('serialize_terminal', { ptyId });
 }
@@ -297,6 +301,14 @@ export async function setTabNotesOpen(workspaceId: string, paneId: string, tabId
 
 export async function setTabNotesMode(workspaceId: string, paneId: string, tabId: string, notesMode: string | null): Promise<void> {
   return invoke('set_tab_notes_mode', { workspaceId, paneId, tabId, notesMode });
+}
+
+export async function setTabComposerOpen(workspaceId: string, paneId: string, tabId: string, open: boolean | null): Promise<void> {
+  return invoke('set_tab_composer_open', { workspaceId, paneId, tabId, open });
+}
+
+export async function setTabComposerDraft(workspaceId: string, paneId: string, tabId: string, draft: string | null): Promise<void> {
+  return invoke('set_tab_composer_draft', { workspaceId, paneId, tabId, draft });
 }
 
 export async function reorderTabs(workspaceId: string, paneId: string, tabIds: string[]): Promise<void> {

@@ -5,6 +5,7 @@
   import TerminalTabs from '$lib/components/terminal/TerminalTabs.svelte';
   import SearchBar from '$lib/components/terminal/SearchBar.svelte';
   import NotesPanel from '$lib/components/terminal/NotesPanel.svelte';
+  import ComposerDock from '$lib/components/terminal/ComposerDock.svelte';
   import { pendingResumePanes, resumePane } from '$lib/stores/resumeGate.svelte';
   import { modLabel } from '$lib/utils/platform';
 
@@ -110,26 +111,39 @@
 
   {#if pane.tabs.length > 0}
     <div class="terminal-with-notes">
-      <div class="terminal-area">
+      <div class="terminal-column">
+        <div class="terminal-area">
+          {#if pane.active_tab_id}
+            <SearchBar tabId={pane.active_tab_id} />
+          {/if}
+          {#each pane.tabs as tab (tab.id)}
+            <div
+              class="terminal-slot"
+              class:hidden-tab={tab.id !== pane.active_tab_id}
+              data-terminal-slot={tab.id}
+            ></div>
+          {/each}
+          {#if pendingResumePanes.has(pane.id)}
+            {@const activeTab = pane.tabs.find(t => t.id === pane.active_tab_id)}
+            <div class="resume-overlay">
+              <p>This tab is suspended</p>
+              <button class="resume-btn" onclick={() => resumePane(pane.id)}>
+                Resume{activeTab ? ` "${activeTab.custom_name ? activeTab.name : 'terminal'}"` : ''}
+              </button>
+              <p class="resume-hint">or click any tab to resume it</p>
+            </div>
+          {/if}
+        </div>
         {#if pane.active_tab_id}
-          <SearchBar tabId={pane.active_tab_id} />
-        {/if}
-        {#each pane.tabs as tab (tab.id)}
-          <div
-            class="terminal-slot"
-            class:hidden-tab={tab.id !== pane.active_tab_id}
-            data-terminal-slot={tab.id}
-          ></div>
-        {/each}
-        {#if pendingResumePanes.has(pane.id)}
-          {@const activeTab = pane.tabs.find(t => t.id === pane.active_tab_id)}
-          <div class="resume-overlay">
-            <p>This tab is suspended</p>
-            <button class="resume-btn" onclick={() => resumePane(pane.id)}>
-              Resume{activeTab ? ` "${activeTab.custom_name ? activeTab.name : 'terminal'}"` : ''}
-            </button>
-            <p class="resume-hint">or click any tab to resume it</p>
-          </div>
+          {@const composerTab = pane.tabs.find(t => t.id === pane.active_tab_id)}
+          {#if composerTab && composerTab.tab_type === 'terminal'}
+            {#key composerTab.id}
+              <ComposerDock
+                tabId={composerTab.id}
+                draft={composerTab.composer_draft ?? null}
+              />
+            {/key}
+          {/if}
         {/if}
       </div>
 
@@ -231,6 +245,15 @@
     display: flex;
     min-height: 0;
     overflow: hidden;
+  }
+
+  .terminal-column {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    position: relative;
   }
 
   .terminal-area {

@@ -44,6 +44,10 @@ export interface Tab {
   notes: string | null;
   notes_mode: string | null;
   notes_open: boolean;
+  /** Composer dock open state: null/absent = inherit composer_default_open pref. */
+  composer_open?: boolean | null;
+  /** Persisted in-progress composer draft text. */
+  composer_draft?: string | null;
   trigger_variables: Record<string, string>;
   last_cwd: string | null;
   archived_name: string | null;
@@ -188,6 +192,7 @@ export interface Preferences {
   claude_code_ide_ssh: boolean;
   claude_code_hooks: boolean;
   claude_code_auto_resume: boolean;
+  composer_default_open: boolean;
   windows_shell: string;
   file_link_action: string;
   backup_directory: string | null;

@@ -252,6 +252,22 @@ pub fn get_terminal_scrollback_info(
     })
 }
 
+/// Whether the foreground app has enabled bracketed paste mode (DECSET 2004).
+/// Used by the composer dock to decide between paste-wrapping multi-line text
+/// (Claude Code, modern readline) and sending raw lines (e.g. macOS bash 3.2).
+#[tauri::command]
+pub fn terminal_bracketed_paste(
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+) -> Result<bool, String> {
+    let registry = state.terminal_registry.read();
+    let handle = registry.get(&pty_id).ok_or("Terminal not found")?;
+    Ok(handle
+        .term
+        .mode()
+        .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE))
+}
+
 /// Search the terminal buffer.
 #[tauri::command]
 pub fn search_terminal(

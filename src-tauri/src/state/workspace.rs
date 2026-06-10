@@ -260,6 +260,13 @@ pub struct Tab {
     /// Whether the notes panel is open for this tab.
     #[serde(default)]
     pub notes_open: bool,
+    /// Whether the composer dock is open for this tab.
+    /// `None` = inherit `composer_default_open` preference; `Some(x)` = user explicitly toggled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_open: Option<bool>,
+    /// Persisted in-progress composer draft text for this tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_draft: Option<String>,
     /// Trigger-extracted variables (persisted across restarts).
     #[serde(default)]
     pub trigger_variables: HashMap<String, String>,
@@ -782,6 +789,9 @@ pub struct Preferences {
     /// Enable hooks-based auto-resume (initSession sets session ID, auto-configures resume).
     #[serde(default = "default_true")]
     pub claude_code_auto_resume: bool,
+    /// Default open state for the composer dock on tabs that haven't been explicitly toggled.
+    #[serde(default = "default_true")]
+    pub composer_default_open: bool,
     /// Windows shell preference: "powershell", "pwsh", "cmd", "gitbash", "wsl"
     #[serde(default = "default_windows_shell")]
     pub windows_shell: String,
@@ -878,6 +888,7 @@ impl Default for Preferences {
             claude_code_ide_ssh: true,
             claude_code_hooks: true,
             claude_code_auto_resume: true,
+            composer_default_open: true,
             windows_shell: default_windows_shell(),
             file_link_action: default_file_link_action(),
             backup_directory: None,
@@ -916,6 +927,8 @@ impl Tab {
             notes: None,
             notes_mode: None,
             notes_open: false,
+            composer_open: None,
+            composer_draft: None,
             trigger_variables: HashMap::new(),
             archived_name: None,
             archived_at: None,
@@ -949,6 +962,8 @@ impl Tab {
             notes: None,
             notes_mode: None,
             notes_open: false,
+            composer_open: None,
+            composer_draft: None,
             trigger_variables: HashMap::new(),
             archived_name: None,
             archived_at: None,
@@ -982,6 +997,8 @@ impl Tab {
             notes: None,
             notes_mode: None,
             notes_open: false,
+            composer_open: None,
+            composer_draft: None,
             trigger_variables: HashMap::new(),
             archived_name: None,
             archived_at: None,

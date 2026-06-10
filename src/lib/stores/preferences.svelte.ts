@@ -53,6 +53,7 @@ function createPreferencesStore() {
   let claudeCodeIdeSsh = $state(true);
   let claudeCodeHooks = $state(true);
   let claudeCodeAutoResume = $state(true);
+  let composerDefaultOpen = $state(true);
   let windowsShell = $state('powershell');
   let fileLinkAction = $state('modifier_click');
   let backupDirectory = $state<string | null>(null);
@@ -115,6 +116,7 @@ function createPreferencesStore() {
     get claudeCodeIdeSsh() { return claudeCodeIdeSsh; },
     get claudeCodeHooks() { return claudeCodeHooks; },
     get claudeCodeAutoResume() { return claudeCodeAutoResume; },
+    get composerDefaultOpen() { return composerDefaultOpen; },
     get windowsShell() { return windowsShell; },
     get fileLinkAction() { return fileLinkAction; },
     get backupDirectory() { return backupDirectory; },
@@ -187,6 +189,7 @@ function createPreferencesStore() {
       claudeCodeIdeSsh = prefs.claude_code_ide_ssh ?? true;
       claudeCodeHooks = prefs.claude_code_hooks ?? true;
       claudeCodeAutoResume = prefs.claude_code_auto_resume ?? true;
+      composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
       backupDirectory = prefs.backup_directory ?? null;
@@ -415,6 +418,10 @@ function createPreferencesStore() {
       claudeCodeAutoResume = value;
       await this.save();
     },
+    async setComposerDefaultOpen(value: boolean) {
+      composerDefaultOpen = value;
+      await this.save();
+    },
     async setClaudeCodeIde(value: boolean) {
       claudeCodeIde = value;
       await this.save();
@@ -554,6 +561,7 @@ function createPreferencesStore() {
       claudeCodeIdeSsh = prefs.claude_code_ide_ssh ?? true;
       claudeCodeHooks = prefs.claude_code_hooks ?? true;
       claudeCodeAutoResume = prefs.claude_code_auto_resume ?? true;
+      composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
       backupDirectory = prefs.backup_directory ?? null;
@@ -617,6 +625,7 @@ function createPreferencesStore() {
         claude_code_ide_ssh: claudeCodeIdeSsh,
         claude_code_hooks: claudeCodeHooks,
         claude_code_auto_resume: claudeCodeAutoResume,
+        composer_default_open: composerDefaultOpen,
         windows_shell: windowsShell,
         file_link_action: fileLinkAction,
         backup_directory: backupDirectory,
