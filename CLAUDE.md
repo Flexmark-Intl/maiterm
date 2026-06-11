@@ -206,11 +206,13 @@ Controlled by `cfg!(debug_assertions)` in `state/persistence.rs` → `app_data_s
 | Cmd+Shift+T | Duplicate tab |
 | Cmd+Shift+R | Reload tab (duplicate + close original) |
 | Cmd+D | Split pane (duplicate current tab) |
-| Cmd+N | New workspace |
+| Cmd+N | New window |
+| Cmd+Shift+N | Duplicate window |
 | Cmd+O | Open file in editor tab |
 | Cmd+S | Save file (editor tabs only) |
 | Cmd+F | Find/replace (editor tabs) / terminal search |
-| Cmd+Shift+N | Toggle notes panel |
+| Cmd+G | Goto line (editor tabs; find-next while search panel is open) |
+| Cmd+E | Toggle notes panel |
 | Cmd+Shift+C | Toggle composer dock |
 | Cmd+, | Preferences |
 | Cmd+/ | Help |
