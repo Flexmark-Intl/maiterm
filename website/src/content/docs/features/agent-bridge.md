@@ -17,7 +17,7 @@ Two related codebases, two agents that each know their own half deeply — Agent
 
 ## Bridging two agents
 
-From a terminal tab running Claude Code, press `Cmd+Shift+L` — or right-click and choose **Connect to Agent…** — to open the **Agent Bridge** picker. Pick another running Claude session, and the two are bridged.
+From a terminal tab running Claude Code, press `Cmd+Shift+L` — or right-click and choose **Create Agent Bridge…** — to open the **Agent Bridge** picker. Pick another running Claude session, and the two are bridged. Candidates are sorted by most recent activity, and a search box filters by tab name, workspace, or working directory — so finding the right peer stays quick even with a fleet of agents running.
 
 The picker offers two modes:
 
@@ -43,7 +43,7 @@ The agents are kept fully aware of the situation they're in:
 
 A bridge is durable. The pairing is saved on both tabs, so it survives quitting and reopening maiTerm. On the next launch the bridge is rebuilt automatically, and because an agent can pick up a fresh session id when it auto-resumes, maiTerm re-binds the pair instead of dropping the link. If one side ends its session, the bridge is suspended rather than torn down — when that agent resumes, it reconnects. Only an explicit disconnect or closing the tab removes a bridge for good.
 
-Bridged tabs show a small link badge in the tab bar so you can see which sessions are paired at a glance. To break a bridge, right-click the tab and choose **Disconnect Agent**.
+Bridged tabs show a small link badge in the tab bar so you can see which sessions are paired at a glance. To break a bridge, right-click the tab and choose **Disconnect Agent Bridge**.
 
 :::note
 Agent Bridge is part of maiTerm's [Claude Code integration](/features/claude-code/). It needs Claude Code running in both tabs, and works over SSH through the same reverse-tunnel MCP bridge that powers the rest of the integration.

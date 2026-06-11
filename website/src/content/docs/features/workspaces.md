@@ -43,5 +43,6 @@ Your Claude Code agent shares the same panel. Ask it to write down what it just 
 - **Markdown or plain text** — your choice per tab
 - **Claude-maintained** — ask your agent to write, update, and tidy your notes via MCP tools
 - **Interactive checkboxes** — rendered in preview mode
+- **Editable tables** — click any table cell in preview mode to edit it in place; `Tab` moves between cells
 - **Edit and preview modes** — state persisted per tab
 - **Configurable** — font size, font family, panel width

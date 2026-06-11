@@ -44,6 +44,7 @@ description: Complete list of maiTerm keyboard shortcuts.
 | `Cmd+O` | Open file |
 | `Cmd+P` | Quick Open file search (or double-press `Opt`) |
 | `Cmd+Shift+L` | Connect this agent to another ([Agent Bridge](/features/agent-bridge/)) |
+| `Cmd+Shift+C` | Toggle composer dock |
 | `Cmd+E` | Toggle notes panel |
 | `Cmd+B` | Toggle sidebar |
 | `Cmd+F` | Find in terminal |
@@ -98,7 +99,7 @@ When an editor tab is active, these shortcuts override terminal shortcuts.
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+F` | Find / replace |
-| `Cmd+G` | Find next |
+| `Cmd+G` | Go to line (find next while the search panel is open) |
 | `Cmd+Shift+G` | Find previous |
 
 ### File
