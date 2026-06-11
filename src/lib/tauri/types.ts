@@ -248,6 +248,7 @@ export interface ScrollInfo {
   display_offset: number;
   total_lines: number;
   viewport_rows: number;
+  viewport_cols: number;
 }
 
 export interface SearchMatch {

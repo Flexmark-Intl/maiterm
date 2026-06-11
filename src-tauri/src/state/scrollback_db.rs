@@ -25,18 +25,53 @@ impl ScrollbackDb {
              );"
         ).map_err(|e| format!("Failed to initialize scrollback DB: {}", e))?;
 
+        // Migration: terminal size at save time, so background tabs can spawn
+        // at their real dimensions instead of 80×24 (errors = columns exist).
+        let _ = conn.execute("ALTER TABLE scrollback ADD COLUMN cols INTEGER", []);
+        let _ = conn.execute("ALTER TABLE scrollback ADD COLUMN rows INTEGER", []);
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    pub fn save(&self, tab_id: &str, data: &str) -> Result<(), String> {
+    /// Save scrollback. `size` is the terminal grid (cols, rows) at save time;
+    /// pass None when no live terminal exists — the previously saved size is
+    /// then preserved rather than nulled.
+    pub fn save(&self, tab_id: &str, data: &str, size: Option<(u16, u16)>) -> Result<(), String> {
         let conn = self.conn.lock();
+        let (cols, rows) = match size {
+            Some((c, r)) => (Some(c), Some(r)),
+            None => (None, None),
+        };
         conn.execute(
-            "INSERT OR REPLACE INTO scrollback (tab_id, data, updated_at) VALUES (?1, ?2, datetime('now'))",
-            rusqlite::params![tab_id, data],
+            "INSERT INTO scrollback (tab_id, data, updated_at, cols, rows)
+             VALUES (?1, ?2, datetime('now'), ?3, ?4)
+             ON CONFLICT(tab_id) DO UPDATE SET
+                 data = excluded.data,
+                 updated_at = excluded.updated_at,
+                 cols = COALESCE(excluded.cols, scrollback.cols),
+                 rows = COALESCE(excluded.rows, scrollback.rows)",
+            rusqlite::params![tab_id, data, cols, rows],
         ).map_err(|e| format!("Failed to save scrollback: {}", e))?;
         Ok(())
+    }
+
+    /// Terminal size (cols, rows) recorded with the last scrollback save.
+    pub fn saved_size(&self, tab_id: &str) -> Result<Option<(u16, u16)>, String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT cols, rows FROM scrollback WHERE tab_id = ?1")
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+        let result = stmt
+            .query_row(rusqlite::params![tab_id], |row| {
+                let cols: Option<u16> = row.get(0)?;
+                let rows: Option<u16> = row.get(1)?;
+                Ok(cols.zip(rows))
+            })
+            .ok()
+            .flatten();
+        Ok(result)
     }
 
     pub fn load(&self, tab_id: &str) -> Result<Option<String>, String> {

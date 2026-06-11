@@ -416,6 +416,7 @@ pub fn run() {
             commands::terminal::restore_terminal_from_saved,
             commands::terminal::has_saved_scrollback,
             commands::terminal::get_saved_scrollback_text,
+            commands::terminal::get_saved_terminal_size,
             commands::workspace::get_app_data,
             commands::workspace::create_workspace,
             commands::workspace::delete_workspace,

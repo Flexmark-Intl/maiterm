@@ -501,7 +501,7 @@ pub fn migrate_scrollback_to_db(data: &mut AppData, db: &super::scrollback_db::S
                 for tab in &mut pane.tabs {
                     if let Some(ref scrollback) = tab.scrollback {
                         if !scrollback.is_empty() {
-                            if let Err(e) = db.save(&tab.id, scrollback) {
+                            if let Err(e) = db.save(&tab.id, scrollback, None) {
                                 log::error!("Failed to migrate scrollback for tab {}: {}", tab.id, e);
                             } else {
                                 migrated += 1;
@@ -514,7 +514,7 @@ pub fn migrate_scrollback_to_db(data: &mut AppData, db: &super::scrollback_db::S
             for tab in &mut ws.archived_tabs {
                 if let Some(ref scrollback) = tab.scrollback {
                     if !scrollback.is_empty() {
-                        if let Err(e) = db.save(&tab.id, scrollback) {
+                        if let Err(e) = db.save(&tab.id, scrollback, None) {
                             log::error!("Failed to migrate archived scrollback for tab {}: {}", tab.id, e);
                         } else {
                             migrated += 1;

@@ -8,7 +8,7 @@
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { CanvasAddon } from '@xterm/addon-canvas';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { uploadWithProgress } from '$lib/utils/scpUpload';
   import { readText as clipboardReadText, writeText as clipboardWriteText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
@@ -398,6 +398,22 @@
     await new Promise(resolve => setTimeout(resolve, 100)); // Extra delay for layout
     fitWithPadding();
 
+    // Hidden tabs can't be measured (no slot / zero-size container), so fit
+    // falls through and they'd spawn at xterm's 80×24 default. Use the size
+    // recorded with the last scrollback save instead — the layout is restored
+    // with the window, so it's the size the tab will have when shown. This
+    // avoids an 80×24→fitted width jump on first view, which makes a running
+    // TUI (Claude Code) re-render its transcript into scrollback as permanent
+    // duplicate blocks.
+    if (!visible && !reattaching) {
+      try {
+        const saved = await getSavedTerminalSize(tabId);
+        if (saved && saved[0] >= 10 && saved[1] >= 2) {
+          terminal.resize(saved[0], saved[1]);
+        }
+      } catch { /* no saved size — keep defaults */ }
+    }
+
     let { cols, rows } = terminal;
 
     // Ensure minimum dimensions
@@ -630,10 +646,16 @@
       }
       await workspacesStore.setTabPtyId(workspaceId, paneId, tabId, ptyId);
     } else {
-      // Reattaching: force a PTY resize after container is laid out so TUI apps
-      // redraw at the correct terminal dimensions.
-      // TODO: TUI apps (Claude Code/Ink) may still render at wrong size after
-      // a tab move — the resize signal doesn't always trigger a full redraw.
+      // Reattaching: sync the new xterm instance to the live grid first so the
+      // running TUI never sees an 80×24 transient, then refit once the new pane
+      // is laid out. The PTY resize is a no-op in Rust when the fitted size
+      // matches the grid, so an unchanged layout sends no SIGWINCH at all.
+      try {
+        const info = await getTerminalScrollbackInfo(ptyId);
+        if (info.viewport_cols >= 10 && info.viewport_rows >= 2) {
+          terminal.resize(info.viewport_cols, info.viewport_rows);
+        }
+      } catch { /* grid unavailable — the refit below corrects it */ }
       setTimeout(() => {
         if (destroyed) return;
         fitWithPadding();

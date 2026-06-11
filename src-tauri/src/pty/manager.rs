@@ -264,6 +264,7 @@ pub fn spawn_pty(
         stats.insert(pty_id.to_string(), PtyStats {
             bytes_written: AtomicU64::new(0),
             bytes_read: AtomicU64::new(0),
+            last_read_ms: AtomicU64::new(0),
         });
     }
 
@@ -358,12 +359,13 @@ pub fn spawn_pty(
                     break;
                 }
                 Ok(n) => {
-                    // Track bytes read for diagnostics
+                    // Track bytes read for diagnostics + resize coalescing
                     {
                         use std::sync::atomic::Ordering;
                         let stats = state_reader.pty_stats.read();
                         if let Some(s) = stats.get(&pty_id_clone) {
                             s.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
+                            s.last_read_ms.store(epoch_millis(), Ordering::Relaxed);
                         }
                     }
                     let data = &buf[..n];
@@ -491,13 +493,134 @@ pub fn write_pty(state: &Arc<AppState>, pty_id: &str, data: &[u8]) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
+/// Output within this window means a TUI is actively drawing — resizes are
+/// then coalesced instead of applied per-event. Streaming output arrives in
+/// bursts with gaps of several hundred ms, so this must comfortably exceed a
+/// burst gap; an active TUI's spinner keeps output well inside one second.
+const RESIZE_OUTPUT_HOT_MS: u64 = 1000;
+/// Trailing debounce for deferred resizes: apply once requests stop arriving
+/// for this long. One gesture (window drag, panel toggle storm) = one SIGWINCH.
+const RESIZE_DEBOUNCE_MS: u64 = 250;
+
+pub fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Resize the PTY + alacritty grid together.
+///
+/// TUIs (Claude Code/Ink) re-render their retained transcript on every width
+/// change; mid-stream, the previous rendering has already scrolled into
+/// history where it can't be erased, so each SIGWINCH leaves a permanent
+/// duplicate block in scrollback. To minimize that, resize requests that
+/// arrive while the PTY is actively streaming are coalesced with a trailing
+/// debounce and only the final size is applied — and not at all if it matches
+/// the current grid (e.g. an 80×24→fitted flap during tab reattach).
 pub fn resize_pty(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> Result<(), String> {
-    let registry = state.pty_registry.read();
-    let handle = registry.get(pty_id).ok_or("PTY not found")?;
-    handle
-        .sender
-        .send(PtyCommand::Resize { cols, rows })
-        .map_err(|e| e.to_string())?;
+    if !state.pty_registry.read().contains_key(pty_id) {
+        return Err("PTY not found".to_string());
+    }
+
+    let pending_exists = {
+        let mut pending = state.pending_resizes.write();
+        match pending.get_mut(pty_id) {
+            Some(entry) => {
+                // An applier is already waiting — just update the target size.
+                entry.cols = cols;
+                entry.rows = rows;
+                entry.last_request = std::time::Instant::now();
+                true
+            }
+            None => false,
+        }
+    };
+    if pending_exists {
+        return Ok(());
+    }
+
+    // No-op resizes never reach the PTY.
+    if state.live_grid_size(pty_id) == Some((cols, rows)) {
+        return Ok(());
+    }
+
+    let output_hot = {
+        use std::sync::atomic::Ordering;
+        let stats = state.pty_stats.read();
+        stats
+            .get(pty_id)
+            .map(|s| epoch_millis().saturating_sub(s.last_read_ms.load(Ordering::Relaxed)) < RESIZE_OUTPUT_HOT_MS)
+            .unwrap_or(false)
+    };
+
+    if !output_hot {
+        return apply_resize(state, pty_id, cols, rows);
+    }
+
+    state.pending_resizes.write().insert(
+        pty_id.to_string(),
+        crate::state::PendingResize { cols, rows, last_request: std::time::Instant::now() },
+    );
+    spawn_resize_applier(Arc::clone(state), pty_id.to_string());
+    Ok(())
+}
+
+/// Waits out the trailing debounce, then applies the latest pending size.
+fn spawn_resize_applier(state: Arc<AppState>, pty_id: String) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_millis(50));
+
+            if !state.pty_registry.read().contains_key(&pty_id) {
+                state.pending_resizes.write().remove(&pty_id);
+                return;
+            }
+
+            let ready = {
+                let pending = state.pending_resizes.read();
+                match pending.get(&pty_id) {
+                    None => return, // already applied/cleared
+                    Some(e) => e.last_request.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS),
+                }
+            };
+            if !ready {
+                continue;
+            }
+
+            let (cols, rows, snapshot) = {
+                let pending = state.pending_resizes.read();
+                match pending.get(&pty_id) {
+                    None => return,
+                    Some(e) => (e.cols, e.rows, e.last_request),
+                }
+            };
+
+            if state.live_grid_size(&pty_id) != Some((cols, rows)) {
+                let _ = apply_resize(&state, &pty_id, cols, rows);
+            }
+
+            // Remove the entry only if no newer request landed while applying;
+            // otherwise loop and debounce the newer one too.
+            let mut pending = state.pending_resizes.write();
+            if pending.get(&pty_id).map(|e| e.last_request == snapshot).unwrap_or(false) {
+                pending.remove(&pty_id);
+                return;
+            }
+        }
+    });
+}
+
+/// Immediately resize the kernel PTY and the alacritty grid.
+fn apply_resize(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> Result<(), String> {
+    {
+        let registry = state.pty_registry.read();
+        let handle = registry.get(pty_id).ok_or("PTY not found")?;
+        handle
+            .sender
+            .send(PtyCommand::Resize { cols, rows })
+            .map_err(|e| e.to_string())?;
+    }
 
     // Also resize the alacritty_terminal instance
     {
@@ -523,6 +646,9 @@ pub fn kill_pty(state: &Arc<AppState>, pty_id: &str) -> Result<(), String> {
 
     // Clean up terminal registry
     state.terminal_registry.write().remove(pty_id);
+
+    // Drop any resize still waiting on the debounce
+    state.pending_resizes.write().remove(pty_id);
 
     // Clean up tab → pty mapping (reverse lookup)
     {

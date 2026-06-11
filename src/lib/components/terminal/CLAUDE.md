@@ -41,6 +41,10 @@ Frontend (xterm.js scrollback=0):
 - `term-clipboard-{ptyId}` — clipboard set (OSC 52)
 - `term-bell-{ptyId}` — terminal bell
 
+**Resize coalescing (`pty/manager.rs::resize_pty`)**: TUIs (Claude Code/Ink) re-render their retained transcript on every *width* change; mid-stream, the previous rendering has already scrolled into history where it can't be erased, so each SIGWINCH leaves a permanent duplicate block in scrollback (rows-only changes don't re-wrap and are harmless). `resize_pty` therefore: (1) skips resizes that match the current grid; (2) while output is hot (last PTY read < 1s — an active TUI's spinner keeps this true), defers the resize with a 250ms trailing debounce and applies only the final size — an A→B→A flap nets zero SIGWINCHes. Idle resizes apply immediately. PTY and alacritty grid are always resized together.
+
+**Background tab sizing**: hidden tabs can't be measured at mount, so they'd spawn at xterm's 80×24 default and take a width jump on first view (→ TUI re-render → scrollback duplication). `save_terminal_scrollback` records the grid size (cols/rows columns in the SQLite scrollback DB); a hidden fresh spawn applies `getSavedTerminalSize(tabId)` before spawning, so the later fit is a no-op when the restored layout matches.
+
 **Scrollback lifecycle**:
 - Serialization: `serializeTerminal(ptyId)` calls Rust to serialize full buffer as ANSI string
 - Restore: `restoreTerminalScrollback(ptyId, scrollback)` feeds ANSI through VTE parser into Term
@@ -73,7 +77,7 @@ Dragging a terminal tab to another workspace preserves the running PTY instead o
 - **`existingPtyId` prop** — `+page.svelte` passes `tab.pty_id` only when `terminalsStore.get(tab.id)` is truthy (avoids reattach on app restart with stale PTY IDs)
 - **New TerminalPane reattach** — when `existingPtyId` is set, skips `spawnTerminal`, SSH replay, and auto-resume; sets up fresh event listeners and registers with the store
 
-**Known issue**: TUI apps (Claude Code/Ink) may render at the wrong size after a tab move. The new xterm instance starts at default 80×24 and a resize is sent to the PTY, but the SIGWINCH doesn't always trigger a full TUI redraw. A manual window resize or toggling the notes panel forces a refit and fixes it.
+**Reattach sizing**: the new xterm instance is synced to the live alacritty grid size (`getTerminalScrollbackInfo().viewport_cols/rows`) before the refit, so the running TUI never sees an 80×24 transient. The post-layout `resizeTerminal` is a no-op in Rust when the fitted size matches the grid — an unchanged layout sends no SIGWINCH at all.
 
 ## xterm.js Notes
 

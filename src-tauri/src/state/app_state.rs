@@ -28,6 +28,19 @@ pub struct FileWatcherHandle {
 pub struct PtyStats {
     pub bytes_written: AtomicU64,
     pub bytes_read: AtomicU64,
+    /// Millis since UNIX_EPOCH of the last PTY read. Used to detect an
+    /// actively-drawing TUI so resizes can be coalesced (see resize_pty).
+    pub last_read_ms: AtomicU64,
+}
+
+/// A resize waiting for the trailing debounce while the PTY is streaming.
+/// Coalescing rapid resize requests into one SIGWINCH matters because TUIs
+/// (Claude Code) re-render retained content on every width change — each one
+/// mid-stream leaves a permanent duplicate in scrollback.
+pub struct PendingResize {
+    pub cols: u16,
+    pub rows: u16,
+    pub last_request: Instant,
 }
 
 /// Ring buffer cap for memory_samples. 720 samples × 60s cadence = 12h of history.
@@ -105,6 +118,8 @@ pub struct AppState {
     // Remote file watchers (SSH stat polling): keyed by tab_id
     pub remote_file_watchers: RwLock<HashMap<String, RemoteFileWatch>>,
     pub remote_watcher_running: std::sync::atomic::AtomicBool,
+    // Resizes deferred while the PTY is actively streaming (keyed by pty_id)
+    pub pending_resizes: RwLock<HashMap<String, PendingResize>>,
     // Diagnostics
     pub pty_stats: RwLock<HashMap<String, PtyStats>>,
     pub memory_samples: RwLock<Vec<MemorySample>>,
@@ -140,10 +155,19 @@ impl AppState {
             ssh_tunnels: RwLock::new(HashMap::new()),
             remote_file_watchers: RwLock::new(HashMap::new()),
             remote_watcher_running: std::sync::atomic::AtomicBool::new(false),
+            pending_resizes: RwLock::new(HashMap::new()),
             pty_stats: RwLock::new(HashMap::new()),
             memory_samples: RwLock::new(Vec::new()),
             claude_sessions: RwLock::new(HashMap::new()),
             pending_hook_sessions: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Current alacritty grid size for a live PTY, if one exists.
+    pub fn live_grid_size(&self, pty_id: &str) -> Option<(u16, u16)> {
+        use alacritty_terminal::grid::Dimensions;
+        let registry = self.terminal_registry.read();
+        let handle = registry.get(pty_id)?;
+        Some((handle.term.columns() as u16, handle.term.screen_lines() as u16))
     }
 }

@@ -198,6 +198,10 @@ export async function getSavedScrollbackText(tabId: string, lineCount: number): 
   return invoke('get_saved_scrollback_text', { tabId, lineCount });
 }
 
+export async function getSavedTerminalSize(tabId: string): Promise<[number, number] | null> {
+  return invoke('get_saved_terminal_size', { tabId });
+}
+
 // Workspace commands
 export async function getAppData(): Promise<AppData> {
   return invoke('get_app_data');

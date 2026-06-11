@@ -96,7 +96,7 @@ pub fn duplicate_window(
             for pane in &mut ws.panes {
                 for tab in &mut pane.tabs {
                     if let Some(ref sb) = tab.scrollback {
-                        let _ = state.scrollback_db.save(&tab.id, sb);
+                        let _ = state.scrollback_db.save(&tab.id, sb, None);
                         tab.scrollback = None;
                     }
                 }

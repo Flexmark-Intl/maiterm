@@ -18,14 +18,14 @@ fn migrate_imported_scrollback(data: &mut crate::state::AppData, db: &Scrollback
             for pane in &mut ws.panes {
                 for tab in &mut pane.tabs {
                     if let Some(ref sb) = tab.scrollback {
-                        let _ = db.save(&tab.id, sb);
+                        let _ = db.save(&tab.id, sb, None);
                         tab.scrollback = None;
                     }
                 }
             }
             for tab in &mut ws.archived_tabs {
                 if let Some(ref sb) = tab.scrollback {
-                    let _ = db.save(&tab.id, sb);
+                    let _ = db.save(&tab.id, sb, None);
                     tab.scrollback = None;
                 }
             }
@@ -180,7 +180,7 @@ pub fn split_pane(
     };
     if let Some(ref sb) = scrollback {
         if let Some(tab) = new_pane.tabs.first() {
-            let _ = state.scrollback_db.save(&tab.id, sb);
+            let _ = state.scrollback_db.save(&tab.id, sb, None);
         }
     }
     let data_clone = {
@@ -617,7 +617,17 @@ pub fn set_tab_scrollback(
     scrollback: Option<String>,
 ) -> Result<(), String> {
     match scrollback {
-        Some(ref data) => state.scrollback_db.save(&tab_id, data),
+        Some(ref data) => {
+            // Record the live grid size when this tab has a running terminal,
+            // so background spawns after restart use real dimensions.
+            let size = state
+                .tab_pty_map
+                .read()
+                .get(&tab_id)
+                .cloned()
+                .and_then(|pty_id| state.live_grid_size(&pty_id));
+            state.scrollback_db.save(&tab_id, data, size)
+        }
         None => state.scrollback_db.delete(&tab_id),
     }
 }
@@ -971,7 +981,7 @@ pub fn duplicate_workspace(
         for pane in &mut cloned.panes {
             for tab in &mut pane.tabs {
                 if let Some(ref sb) = tab.scrollback {
-                    let _ = state.scrollback_db.save(&tab.id, sb);
+                    let _ = state.scrollback_db.save(&tab.id, sb, None);
                     tab.scrollback = None;
                 }
             }
@@ -1414,7 +1424,7 @@ pub fn archive_tab(
         tab.pty_id = None;
         // Write scrollback to SQLite, not the JSON state
         if let Some(ref sb) = scrollback {
-            let _ = state.scrollback_db.save(&tab.id, sb);
+            let _ = state.scrollback_db.save(&tab.id, sb, None);
         }
         tab.scrollback = None;
         tab.restore_cwd = cwd;

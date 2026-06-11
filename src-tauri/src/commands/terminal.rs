@@ -235,6 +235,7 @@ pub struct ScrollInfo {
     pub display_offset: usize,
     pub total_lines: usize,
     pub viewport_rows: usize,
+    pub viewport_cols: usize,
 }
 
 /// Get scrollback metadata.
@@ -249,6 +250,7 @@ pub fn get_terminal_scrollback_info(
         display_offset: handle.term.grid().display_offset(),
         total_lines: handle.term.grid().total_lines(),
         viewport_rows: handle.term.screen_lines(),
+        viewport_cols: handle.term.columns(),
     })
 }
 
@@ -320,16 +322,29 @@ pub fn save_terminal_scrollback(
     pty_id: String,
     tab_id: String,
 ) -> Result<(), String> {
-    let scrollback = {
+    let (scrollback, size) = {
         let registry = state.terminal_registry.read();
         let handle = registry.get(&pty_id).ok_or("Terminal not found")?;
         if handle.term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
             return Err("Alternate screen active".to_string());
         }
-        serialize::serialize_buffer(&handle.term)
+        let size = (handle.term.columns() as u16, handle.term.screen_lines() as u16);
+        (serialize::serialize_buffer(&handle.term), size)
     };
 
-    state.scrollback_db.save(&tab_id, &scrollback)
+    state.scrollback_db.save(&tab_id, &scrollback, Some(size))
+}
+
+/// Terminal size (cols, rows) recorded with the tab's last scrollback save.
+/// Lets background tabs spawn at their real dimensions instead of 80×24 —
+/// the later 80×24→fitted width jump makes a running TUI (Claude Code)
+/// re-render its transcript into scrollback, leaving permanent duplicates.
+#[tauri::command]
+pub fn get_saved_terminal_size(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<(u16, u16)>, String> {
+    state.scrollback_db.saved_size(&tab_id)
 }
 
 /// Restore scrollback from SQLite into the terminal buffer.
