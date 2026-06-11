@@ -1203,14 +1203,18 @@ function createWorkspacesStore() {
     /**
      * When group-active-tabs is enabled, a just-resumed tab visually jumps into
      * the active group (which renders ahead of suspended tabs) but keeps its old
-     * storage position. Move it in storage too — to the end of the active group,
-     * i.e. just before the first still-suspended terminal tab — so the visible
-     * order is the real order. That makes drag-reordering within the active group
-     * meaningful and lets the most-recently-used tabs settle at the front, so
-     * once everything is suspended they stay where they were (front/left).
+     * storage position. Move it in storage too, so the visible order is the real
+     * order. Placement: when the resume was a click and the tab the user came
+     * from (`anchorTabId`) is still in the active group, land right after that
+     * anchor — the resumed tab appears next to where the user just was. Otherwise
+     * (workspace resume, auto-resume, no live anchor) fall back to the end of the
+     * active group, i.e. just before the first still-suspended terminal tab.
+     * That makes drag-reordering within the active group meaningful and lets the
+     * most-recently-used tabs settle at the front, so once everything is
+     * suspended they stay where they were (front/left).
      * No-op when grouping is off (storage order already equals display order).
      */
-    promoteResumedTab(workspaceId: string, paneId: string, tabId: string) {
+    promoteResumedTab(workspaceId: string, paneId: string, tabId: string, anchorTabId: string | null = null) {
       if (!preferencesStore.groupActiveTabs) return;
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);
@@ -1226,13 +1230,22 @@ function createWorkspacesStore() {
         !terminalsStore.get(t.id) && !terminalsStore.isSpawning(t.id);
 
       const without = pane.tabs.filter(t => t.id !== tabId);
-      let boundary = without.findIndex(isSuspendedTerminal);
-      if (boundary === -1) boundary = without.length;
-      const reordered = [...without.slice(0, boundary), tab, ...without.slice(boundary)];
+      let insertAt = -1;
+      if (anchorTabId && anchorTabId !== tabId) {
+        const anchorIdx = without.findIndex(t => t.id === anchorTabId);
+        if (anchorIdx !== -1 && !isSuspendedTerminal(without[anchorIdx])) {
+          insertAt = anchorIdx + 1;
+        }
+      }
+      if (insertAt === -1) {
+        insertAt = without.findIndex(isSuspendedTerminal);
+        if (insertAt === -1) insertAt = without.length;
+      }
+      const reordered = [...without.slice(0, insertAt), tab, ...without.slice(insertAt)];
 
       const curIds = pane.tabs.map(t => t.id);
       const newIds = reordered.map(t => t.id);
-      if (newIds.every((id, i) => id === curIds[i])) return; // already at the boundary
+      if (newIds.every((id, i) => id === curIds[i])) return; // already in place
       this.reorderTabs(workspaceId, paneId, newIds);
     },
 

@@ -183,6 +183,10 @@
   // reordered), but a deliberate click IS a resume and must promote even the
   // first time — otherwise re-suspending it drops it back to its old slot.
   const userResumedIds = new Set<string>();
+  // For click-driven unsuspends, the tab the user was on at click time. The
+  // promotion below places the resumed tab right after this anchor (when the
+  // anchor is still in the active group) instead of at the end of the group.
+  const resumeAnchorIds = new Map<string, string>();
   $effect(() => {
     void terminalsStore.instanceVersion;
     const grouping = preferencesStore.groupActiveTabs;
@@ -193,7 +197,7 @@
           .filter(t => isTerminal(t) && (terminalsStore.get(t.id) || terminalsStore.isSpawning(t.id)))
           .map(t => t.id)
       );
-      const resumed: string[] = [];
+      const resumed: { id: string; anchor: string | null }[] = [];
       for (const t of pane.tabs) {
         // Only tabs that just went live this tick are candidates.
         if (!isTerminal(t) || !liveNow.has(t.id) || prevLive.has(t.id)) continue;
@@ -205,14 +209,16 @@
         // Promote on a real resume: either the tab was live before this session
         // (everLive), or the user just clicked it to unsuspend (userResumed).
         const userResumed = userResumedIds.delete(t.id);
+        const anchor = resumeAnchorIds.get(t.id) ?? null;
+        resumeAnchorIds.delete(t.id);
         if (liveSeeded && grouping && (everLive.has(t.id) || userResumed) && !justRestored) {
-          resumed.push(t.id);
+          resumed.push({ id: t.id, anchor });
         }
       }
       for (const id of liveNow) everLive.add(id);
       prevLive = liveNow;
       liveSeeded = true;
-      for (const id of resumed) workspacesStore.promoteResumedTab(workspaceId, pane.id, id);
+      for (const { id, anchor } of resumed) workspacesStore.promoteResumedTab(workspaceId, pane.id, id, anchor);
       // Once the just-activated tab is live (and any promotion reorder above has
       // landed), scroll it into view — handleTabClick deferred this scroll. Skip
       // if the user has since switched away (their new tab already scrolled).
@@ -460,6 +466,8 @@
   }
 
   async function handleTabClick(tabId: string) {
+    // The tab the user is leaving — anchor for placing a resumed suspended tab.
+    const prevActive = pane.active_tab_id;
     // Clicking a tab also focuses its pane, so pane-targeted actions (Cmd+T,
     // Cmd+D split, etc.) operate on the pane the user just interacted with.
     if (workspacesStore.activeWorkspace?.active_pane_id !== pane.id) {
@@ -475,6 +483,10 @@
     if (isTerm && !isLive && preferencesStore.groupActiveTabs) {
       pendingPromoteScrollId = tabId;
       userResumedIds.add(tabId); // a deliberate unsuspend must promote even on its first live
+      // Remember where the user came from so the resumed tab lands right next
+      // to it (promoteResumedTab validates the anchor is still active-group).
+      if (prevActive && prevActive !== tabId) resumeAnchorIds.set(tabId, prevActive);
+      else resumeAnchorIds.delete(tabId);
     } else {
       scrollTabIntoView(tabId);
     }
