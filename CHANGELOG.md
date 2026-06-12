@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.16.0
+
+- **Move tabs between panes without cloning.** Three new ways to rearrange your split layout — all move the existing tab (PTY intact, no respawn) instead of duplicating it. Drag a tab onto another pane's tab bar to drop it there; drag onto a pane's body to move into the center zone or create a new split on the edge you drop on (left, right, top, or bottom). For keyboard-first use, right-click any tab for "Move to New Split Right/Down" and per-pane move items — the first tab-level context menu in maiTerm.
+- **Image viewer background switcher.** Transparent PNGs were invisible under dark themes. The image viewer toolbar now has a toggle that cycles Dark → Light → Checkerboard, so you can inspect transparency regardless of your active theme. The choice persists across sessions.
+- **Resumed tab lands next to the tab you came from.** Unsuspending a tab from the tab strip or the hidden-tabs dropdown now places it right after the tab you were in, instead of at the end of the active group — so it's always one tab away when you switch back.
+- Agent Bridge picker defaults to connecting an existing tab instead of creating a new one — the more common case when linking two already-running agents.
+- Fix scrollback duplication where TUI apps (Claude Code, Ink-based CLIs) left permanent duplicate blocks in scrollback after a terminal resize. The PTY now coalesces rapid resize events and background tabs spawn at their saved size, so a width change never lands mid-stream.
+
 ## v1.15.0
 
 - **Composer dock — write prompts like a human.** A per-tab, autogrowing multi-line input docked below the terminal, built for composing long prompts for Claude Code (or any CLI) without fighting the shell's single-line editing. Enter inserts newlines, Cmd+Enter sends, and Esc returns focus to the terminal. When the foreground app has bracketed paste on (Claude Code, zsh, modern readline) the whole block is sent as one literal paste that submits once; otherwise lines are sent raw. Drafts persist per tab across switches and restarts, and Cmd+Shift+C toggles the dock. It's on by default (configurable under Tabs)
