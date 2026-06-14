@@ -7,6 +7,7 @@
   import { FitAddon } from '@xterm/addon-fit';
   import { WebLinksAddon } from '@xterm/addon-web-links';
   import { CanvasAddon } from '@xterm/addon-canvas';
+  import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
   import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
@@ -365,6 +366,14 @@
         leave: () => { hoveredLinkUri = null; },
       },
     });
+
+    // Match xterm's character-width table to alacritty_terminal's (Rust). The grid is
+    // laid out in Rust via the unicode-width crate, and render.rs emits a wide char once
+    // and skips its spacer cell, relying on xterm advancing the cursor by the SAME width.
+    // xterm's default Unicode 6 table counts many emoji as 1 cell where Rust counts 2, so
+    // the glyph gets clipped to half a cell. Unicode 11 widths align the two.
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = '11';
 
     fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
