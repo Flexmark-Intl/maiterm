@@ -932,8 +932,21 @@ function createWorkspacesStore() {
     async deleteTab(workspaceId: string, paneId: string, tabId: string) {
       // Tear down any agent bridge on this tab BEFORE it's removed from state, so the
       // surviving partner isn't left "bridged to a ghost" (a dangling bridge to a
-      // closed tab would hide the survivor from the Agent Bridge picker). Dynamic
-      // import avoids a static cycle (agentBridge imports this store).
+      // closed tab would hide the survivor from the Agent Bridge picker).
+      //
+      // PERMANENT-REMOVAL ONLY: deleteTab is the genuine-close path — Cmd+W, the ×
+      // button, or the shell itself exiting (pty-close → deleteTab). It is NOT reached
+      // when a tab merely goes inactive, so the bridge correctly survives all of:
+      //   • suspend        — suspendTab keeps the tab; pty-close is gated by isTabSuspending
+      //   • app quit       — pty-close returns early on terminalsStore.shuttingDown
+      //   • restart/resume — tabs reload from persisted state; rehydrate() rebuilds the
+      //                      bridge, and a dormant partner just queues until it resumes
+      //   • reload / move  — go through commands.deleteTab / atomic move, not this path
+      // A session ENDING (Claude exits to its shell) is not a tab delete either — that
+      // only suspends delivery; the bridge re-binds when the agent re-inits. We clear
+      // the durable pairing here precisely because the tab is gone for good.
+      //
+      // Dynamic import avoids a static cycle (agentBridge imports this store).
       import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.handleTabClosed(tabId)).catch(() => {});
 
       // If closing a diff tab with a pending Claude request, respond with rejection
@@ -1864,6 +1877,13 @@ function createWorkspacesStore() {
         const idx = workspaces.findIndex(w => w.id === workspaceId);
         if (idx >= 0) workspaces[idx] = updatedWs;
       }
+
+      // Reload mints a new tab id for the same resumed session — carry any agent bridge
+      // across so the partner isn't orphaned (pointing at the now-deleted old tab). Done
+      // after the state reload so the new tab resolves for persistence. NB: reload uses
+      // commands.deleteTab directly (above), bypassing the store deleteTab + its bridge
+      // teardown, so the transfer must be done explicitly here.
+      import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.remapTab(tabId, newTab.id)).catch(() => {});
     },
 
     async duplicateWindow() {

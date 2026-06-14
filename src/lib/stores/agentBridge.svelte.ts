@@ -405,6 +405,54 @@ function createAgentBridgeStore() {
       }
     },
 
+    /** A tab's id changed under us: reload (Cmd+Shift+R) mints a NEW id for the same
+     *  resumed session via duplicate-then-delete-original. Carry any bridge from the
+     *  old id to the new one and repoint the partner, so the pairing survives the
+     *  reload — otherwise the partner is orphaned (it keeps showing a ⇄ to a tab that
+     *  no longer exists, while the reloaded tab shows none: the asymmetric-icon bug).
+     *  No-op if the old tab wasn't bridged. Call once the new tab is in workspace state
+     *  (so the persist resolves it) and the old one has been deleted. */
+    remapTab(oldTabId: string, newTabId: string) {
+      if (oldTabId === newTabId) return;
+      const bridge = bridges.get(oldTabId);
+      if (!bridge) return;
+      const partnerId = bridge.partnerTabId;
+
+      // Move the entry to the new id and point the partner back at it.
+      bridges.delete(oldTabId);
+      bridges.set(newTabId, bridge);
+      const partner = bridges.get(partnerId);
+      if (partner) partner.partnerTabId = newTabId;
+
+      // Carry delivery state across, but the reloaded tab isn't live until its Claude
+      // re-inits — force not-ready so nothing injects into a booting shell; the
+      // claude-init-session handler flips it ready and flushes the queue.
+      const d = delivery.get(oldTabId) ?? { ready: false, busy: false, hasCompletedTurn: false, queue: [] };
+      delivery.delete(oldTabId);
+      if (d.busyTimer) { clearTimeout(d.busyTimer); d.busyTimer = undefined; }
+      d.ready = false;
+      d.busy = false;
+      delivery.set(newTabId, d);
+
+      // Re-key anything else keyed by the old id (pending opener, cwd hint), and any
+      // opener that referenced the old id as its caller.
+      const po = pendingOpeners.get(oldTabId);
+      if (po) { pendingOpeners.delete(oldTabId); pendingOpeners.set(newTabId, po); }
+      for (const [forkId, o] of pendingOpeners) {
+        if (o.callerTabId === oldTabId) pendingOpeners.set(forkId, { callerTabId: newTabId });
+      }
+      const ch = cwdHint.get(oldTabId);
+      if (ch !== undefined) { cwdHint.delete(oldTabId); cwdHint.set(newTabId, ch); }
+
+      bump();
+      // Persist the new reciprocal pairing. The old tab's record dies with the deleted
+      // tab; the partner's stale partnerSessionId self-heals when the reloaded agent
+      // re-inits (Case 2) or on the partner's next send.
+      void persistBridge(newTabId);
+      void persistBridge(partnerId);
+      logInfo(`agentBridge: remapped bridge ${oldTabId.slice(0, 8)} → ${newTabId.slice(0, 8)} (tab reloaded)`);
+    },
+
     getPartnerLabel(tabId: string): string | null {
       void version;
       return bridges.get(tabId)?.partnerLabel ?? null;
