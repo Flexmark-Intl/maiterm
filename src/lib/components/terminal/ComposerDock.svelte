@@ -291,6 +291,7 @@
     }
     sending = true;
     try {
+      const attachmentCount = attachments.length;
       const pathsPart = await resolveAttachmentPaths(instance.ptyId);
       if (pathsPart === null) return; // upload failed — nothing was sent
       // Attachment paths go on their own line for multi-line prompts, after a
@@ -302,10 +303,23 @@
       // would arrive as garbage input — send raw with CR line breaks instead,
       // which executes line-by-line, the natural semantics for such shells.
       const bracketed = await terminalBracketedPaste(instance.ptyId).catch(() => false);
-      const payload = bracketed
-        ? `\x1b[200~${full}\x1b[201~\r`
-        : `${full.replace(/\n/g, '\r')}\r`;
-      await writeTerminal(instance.ptyId, Array.from(new TextEncoder().encode(payload)));
+      const enc = (s: string) => Array.from(new TextEncoder().encode(s));
+      if (bracketed && attachmentCount > 0) {
+        // Claude Code reads image file paths out of a paste and loads them
+        // asynchronously to build [Image #N] attachments. A CR packed into the
+        // same write lands in the same PTY read — before that load settles — and
+        // gets swallowed, leaving the prompt populated but unsent. So close the
+        // paste, give it a beat to settle (longer when more files must be read),
+        // then send the submit CR as its own keystroke.
+        await writeTerminal(instance.ptyId, enc(`\x1b[200~${full}\x1b[201~`));
+        await new Promise((r) => setTimeout(r, Math.min(900, 200 + attachmentCount * 180)));
+        await writeTerminal(instance.ptyId, enc('\r'));
+      } else {
+        const payload = bracketed
+          ? `\x1b[200~${full}\x1b[201~\r`
+          : `${full.replace(/\n/g, '\r')}\r`;
+        await writeTerminal(instance.ptyId, enc(payload));
+      }
       value = '';
       setAttachments([]);
       draftDirty = true;
