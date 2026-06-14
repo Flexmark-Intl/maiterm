@@ -11,7 +11,6 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { claudeStateStore } from '$lib/stores/claudeState.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { writeTerminal, terminalBracketedPaste, readClipboardFilePaths, saveClipboardImage, getPtyInfo } from '$lib/tauri/commands';
   import { uploadWithProgress } from '$lib/utils/scpUpload';
@@ -69,11 +68,6 @@
 
   function basename(p: string): string {
     return p.split('/').pop() ?? p;
-  }
-
-  // Same escaping the terminal uses for dropped/pasted paths (TerminalPane).
-  function escapePathForTerminal(p: string): string {
-    return p.replace(/([^a-zA-Z0-9_\-.,/:@+])/g, '\\$1');
   }
 
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -259,7 +253,6 @@
       remote copies — same routing the terminal's drop handler uses. */
   async function resolveAttachmentPaths(ptyId: string): Promise<string | null> {
     if (attachments.length === 0) return '';
-    const isClaude = !!claudeStateStore.getState(tabId);
     const info = await getPtyInfo(ptyId).catch(() => null);
     const sshCommand = info?.foreground_command;
     if (sshCommand) {
@@ -273,9 +266,15 @@
       }
       return attachments.map(a => `/tmp/aiterm-uploads/${a.name}`).join(' ');
     }
-    return attachments
-      .map(a => (isClaude ? a.path : escapePathForTerminal(a.path)))
-      .join(' ');
+    // Send raw, unescaped paths. Composer attachments are file references for
+    // the foreground agent (Claude Code et al.), which wants the literal path —
+    // matching the terminal's own local-Claude drop convention. We deliberately
+    // don't shell-escape: escaping only ever helped a plain shell consume the
+    // path as a command argument, but it broke file detection in a Claude
+    // session maiTerm hadn't recognized as Claude (no hooks → backslashes Claude
+    // won't un-escape, so a path with spaces never resolves). Raw is correct for
+    // the agent case and a no-op for screenshot temp paths (no special chars).
+    return attachments.map(a => a.path).join(' ');
   }
 
   async function send() {
