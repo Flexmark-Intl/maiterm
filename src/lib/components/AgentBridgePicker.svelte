@@ -49,10 +49,14 @@
         for (const tab of pane.tabs) {
           if (tab.tab_type !== 'terminal') continue;
           if (tab.id === callerTabId) continue;
-          if (agentBridgeStore.isBridged(tab.id)) {
-            // Fork mode: never fork an already-bridged tab. Existing mode: allow
+          // Only a LIVE bridge (partner tab still open) constrains selection. A dead
+          // bridge — partner tab was closed — is effectively unbridged, so don't hide
+          // the survivor (this is what previously made a tab invisible to the picker
+          // after its old partner's tab was closed).
+          if (agentBridgeStore.isBridgedToLivePartner(tab.id)) {
+            // Fork mode: never fork a tab already in a live bridge. Existing mode: allow
             // re-selecting the caller's OWN partner (to repair a failed reconnect), but
-            // not a tab bridged to a third agent.
+            // not a tab live-bridged to a third agent.
             if (mode === 'fork') continue;
             if (agentBridgeStore.getPartnerTabId(tab.id) !== callerTabId) continue;
           }

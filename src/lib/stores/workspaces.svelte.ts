@@ -930,6 +930,12 @@ function createWorkspacesStore() {
     },
 
     async deleteTab(workspaceId: string, paneId: string, tabId: string) {
+      // Tear down any agent bridge on this tab BEFORE it's removed from state, so the
+      // surviving partner isn't left "bridged to a ghost" (a dangling bridge to a
+      // closed tab would hide the survivor from the Agent Bridge picker). Dynamic
+      // import avoids a static cycle (agentBridge imports this store).
+      import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.handleTabClosed(tabId)).catch(() => {});
+
       // If closing a diff tab with a pending Claude request, respond with rejection
       // so Claude Code doesn't hang waiting for accept/reject.
       const wsForDiff = workspaces.find(w => w.id === workspaceId);

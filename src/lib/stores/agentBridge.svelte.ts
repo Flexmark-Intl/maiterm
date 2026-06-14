@@ -383,6 +383,28 @@ function createAgentBridgeStore() {
       return bridges.get(tabId)?.partnerTabId ?? null;
     },
 
+    /** True only when this tab is bridged AND its partner tab still exists. A bridge
+     *  whose partner tab was closed is dead (unreachable), so gate "can this tab be
+     *  bridged?" on THIS rather than the raw isBridged() — otherwise a stale ghost
+     *  bridge to a closed tab would hide the survivor from the picker forever. */
+    isBridgedToLivePartner(tabId: string): boolean {
+      void version;
+      const partner = bridges.get(tabId)?.partnerTabId;
+      return !!partner && tabExists(partner);
+    },
+
+    /** A tab is being closed — tear down any bridge it was part of so the surviving
+     *  partner isn't left "bridged to a ghost". Symmetric in the normal case; the
+     *  fallback scan also clears a half-stale bridge where some OTHER tab still points
+     *  at the one being closed. Call this BEFORE the tab is removed from state so the
+     *  survivor can still be resolved (for the disconnect notice + persisted clear). */
+    handleTabClosed(tabId: string) {
+      if (bridges.has(tabId)) { this.disconnect(tabId); return; }
+      for (const [other, b] of bridges) {
+        if (b.partnerTabId === tabId) this.disconnect(other);
+      }
+    },
+
     getPartnerLabel(tabId: string): string | null {
       void version;
       return bridges.get(tabId)?.partnerLabel ?? null;
@@ -414,7 +436,12 @@ function createAgentBridgeStore() {
     ): Promise<{ ok: true; partnerTabId: string; partnerLabel: string } | { ok: false; error: string }> {
       const loc = resolveTab(callerTabId);
       if (!loc) return { ok: false, error: 'Caller tab not found.' };
-      if (bridges.has(callerTabId)) return { ok: false, error: 'This tab is already bridged. Disconnect it first.' };
+      // A LIVE bridge blocks; a dead one (partner tab closed) is silently cleared so
+      // the tab can be re-forked instead of being stuck behind a ghost.
+      if (bridges.has(callerTabId)) {
+        if (this.isBridgedToLivePartner(callerTabId)) return { ok: false, error: 'This tab is already bridged. Disconnect it first.' };
+        this.disconnect(callerTabId);
+      }
 
       const partnerLabel = `${target.tabName} · ${target.workspaceName}`;
       const res = await workspacesStore.forkSessionIntoSplit(
@@ -481,9 +508,10 @@ function createAgentBridgeStore() {
       const callerLabel = label(callerTabId);
       const targetLabel = `${targetLoc.tab.name} · ${targetLoc.ws.name}`;
 
-      // Don't hijack a bridge the target already has with a DIFFERENT agent.
+      // Don't hijack a bridge the target already has with a DIFFERENT, still-live agent.
+      // A bridge to a closed tab (ghost) doesn't count — it gets overwritten below.
       const targetPartner = bridges.get(targetTabId)?.partnerTabId;
-      if (targetPartner && targetPartner !== callerTabId) {
+      if (targetPartner && targetPartner !== callerTabId && tabExists(targetPartner)) {
         return { ok: false, error: `"${targetLabel}" is already bridged to another agent. Disconnect it there first.` };
       }
       // Abandon any stale bridge the caller has with a DIFFERENT agent (notify it).
