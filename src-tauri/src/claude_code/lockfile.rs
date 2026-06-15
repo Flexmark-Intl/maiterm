@@ -16,6 +16,13 @@ pub const STATUSLINE_PAYLOAD_SCRIPT: &str =
 pub const MAITERM_SKILL_MD: &str =
     include_str!("../../resources/maiterm-skill/SKILL.md");
 
+/// The Codex hook shim. Codex command-hooks run this script, which forwards the hook
+/// event (JSON on stdin) to the local MCP server's /hooks?runtime=codex endpoint.
+/// Bundled here and installed by CodexRegistrar; shipped to the remote install too.
+#[allow(dead_code)]
+pub const AGENT_HOOK_SHIM: &str =
+    include_str!("../../resources/maiterm-skill/bin/agent-hook.sh");
+
 fn mcp_server_key() -> &'static str {
     crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude)
 }
