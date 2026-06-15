@@ -207,7 +207,9 @@ pub fn spawn_pty(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "aiterm");
-    cmd.env_remove("CLAUDECODE");
+    for m in crate::state::agent_runtime::AGENT_ENV_MARKERS {
+        cmd.env_remove(m);
+    }
 
     // Set working directory — use provided cwd (from split) or fall back to home
     if let Some(ref dir) = cwd {

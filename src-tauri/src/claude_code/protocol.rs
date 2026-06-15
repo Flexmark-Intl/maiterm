@@ -522,7 +522,7 @@ pub fn initialize_response() -> Value {
              IMPORTANT: You MUST use tools from the '{}' MCP server ONLY. Do NOT use tools from any other maiterm MCP server. \
              IMPORTANT: Always call initSession when requested via /maiterm init, even if you believe it was already called. \
              Resume, fork, and compact events require re-initialization to pick up state changes.",
-            if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" }
+            crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude)
         )
     })
 }

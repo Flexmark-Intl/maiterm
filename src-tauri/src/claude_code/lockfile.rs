@@ -17,7 +17,7 @@ pub const MAITERM_SKILL_MD: &str =
     include_str!("../../resources/maiterm-skill/SKILL.md");
 
 fn mcp_server_key() -> &'static str {
-    if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" }
+    crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude)
 }
 
 /// The pre-rebrand server key for THIS build flavor. We strip it from

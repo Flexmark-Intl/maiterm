@@ -907,7 +907,7 @@ async fn process_message(
 
                     // Verify tab exists in this instance.
                     if find_window_for_tab(state, &tab_id).is_none() {
-                        let this_server = if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" };
+                        let this_server = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
                         let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
                         // A tabId unknown to this instance is usually a *stale*
                         // $AITERM_TAB_ID (the shell outlived the tab it was spawned
@@ -1119,7 +1119,7 @@ async fn process_message(
                 if let Some(tab_id) = arguments.get("tabId").and_then(|v| v.as_str()) {
                     if !tab_id.is_empty() && find_window_for_tab(state, tab_id).is_none() {
                         let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
-                        let this_server = if cfg!(debug_assertions) { "maiterm-dev" } else { "maiterm" };
+                        let this_server = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
                         let err_msg = format!(
                             "Tab '{}' does not exist in this maiTerm instance ({}). \
                              You may be calling the wrong MCP server. Use '{}' tools instead.",
