@@ -1223,11 +1223,56 @@ async fn process_message(
     }
 }
 
-// ─── Claude Code Hooks ──────────────────────────────────────────────────────
+// ─── Agent Hooks ────────────────────────────────────────────────────────────
 
-/// Handle POST /hooks — receives Claude Code hook events.
-/// SessionStart registers a session→tab mapping. Other events use
-/// that mapping to route Tauri events to the correct frontend tab.
+/// Canonical, runtime-neutral meaning of a raw hook event. Each runtime's wire
+/// event names normalize into one of these (see `normalize_hook_event`) so the
+/// handler logic is written once. Claude expresses "waiting for the human" as a
+/// `Notification` with a `notification_type` subfield; a non-Claude runtime that
+/// signals the same thing via a distinct top-level event (e.g. Codex's
+/// `PermissionRequest`) normalizes to the SAME `Notification` variant with the
+/// subtype synthesized, so it flows through the identical state/emit path.
+#[derive(Debug, PartialEq)]
+enum HookPhase {
+    SessionStart,
+    SessionEnd,
+    Stop,
+    Prompt,
+    ToolPre,
+    ToolPost,
+    Notification { notification_type: String },
+    Compact,
+    Other,
+}
+
+/// Map a raw hook event name (+ body, for the Notification subtype) to a canonical
+/// `HookPhase`. `runtime` is accepted for future runtimes whose names diverge; the
+/// names handled here are shared by Claude and Codex (Codex-only events like
+/// PermissionRequest/PostCompact are added in a later stage). Unrecognized names
+/// fall through to `Other` (logged, no state change) — matching the prior behavior.
+fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event: &Value) -> HookPhase {
+    match name {
+        "SessionStart" => HookPhase::SessionStart,
+        "SessionEnd" => HookPhase::SessionEnd,
+        "Stop" => HookPhase::Stop,
+        "UserPromptSubmit" => HookPhase::Prompt,
+        "PreToolUse" => HookPhase::ToolPre,
+        "PostToolUse" => HookPhase::ToolPost,
+        "PreCompact" => HookPhase::Compact,
+        "Notification" => HookPhase::Notification {
+            notification_type: event
+                .get("notification_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        _ => HookPhase::Other,
+    }
+}
+
+/// Handle POST /hooks — receives agent hook events (Claude today; other runtimes
+/// post here with a ?runtime= tag). SessionStart registers a session→tab mapping;
+/// other events use it to route Tauri events to the correct frontend tab.
 async fn hooks_handler(
     State(srv): State<ServerState>,
     headers: HeaderMap,
@@ -1295,8 +1340,8 @@ async fn hooks_handler(
         }
     });
 
-    match hook_event_name {
-        "SessionStart" => {
+    match normalize_hook_event(runtime, hook_event_name, &event) {
+        HookPhase::SessionStart => {
             let tab_id = tab_id_from_param.clone().unwrap_or_default();
             let cwd = event.get("cwd").and_then(|v| v.as_str()).map(String::from);
             let model = event.get("model").and_then(|v| v.as_str()).map(String::from);
@@ -1337,7 +1382,7 @@ async fn hooks_handler(
             }));
         }
 
-        "SessionEnd" => {
+        HookPhase::SessionEnd => {
             let tab_id = {
                 let mut sessions = srv.state.agent_sessions.write();
                 sessions.remove(&session_id).map(|s| s.tab_id)
@@ -1354,24 +1399,23 @@ async fn hooks_handler(
             }));
         }
 
-        "Notification" => {
+        HookPhase::Notification { notification_type } => {
             let tab_id = {
                 let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
 
-            let notification_type = event
-                .get("notification_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            // Update session state based on notification type
+            // notification_type comes from normalize_hook_event: the raw field for
+            // Claude, or a synthesized subtype for a runtime that signals the same
+            // human-waiting state via a distinct top-level event.
+            // Update session state based on notification type. The `_` arm PRESERVES
+            // the prior state for an unrecognized type (and the event still emits).
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    session.state = match notification_type {
+                    session.state = match notification_type.as_str() {
                         "idle_prompt" => AgentSessionState::WaitingInput,
                         "permission_prompt" => AgentSessionState::WaitingPermission,
                         _ => session.state,
@@ -1391,7 +1435,7 @@ async fn hooks_handler(
             }));
         }
 
-        "Stop" => {
+        HookPhase::Stop => {
             let tab_id = {
                 let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
@@ -1416,7 +1460,7 @@ async fn hooks_handler(
             }));
         }
 
-        "UserPromptSubmit" => {
+        HookPhase::Prompt => {
             let tab_id = {
                 let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
@@ -1440,7 +1484,7 @@ async fn hooks_handler(
             }));
         }
 
-        "PreToolUse" => {
+        HookPhase::ToolPre => {
             let tab_id = {
                 let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
@@ -1474,7 +1518,7 @@ async fn hooks_handler(
             }));
         }
 
-        "PostToolUse" => {
+        HookPhase::ToolPost => {
             let tab_id = {
                 let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
@@ -1506,7 +1550,7 @@ async fn hooks_handler(
             }));
         }
 
-        "PreCompact" => {
+        HookPhase::Compact => {
             let tab_id = {
                 let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
@@ -1529,8 +1573,8 @@ async fn hooks_handler(
             }));
         }
 
-        other => {
-            log::debug!("Claude hook: unhandled event type '{}'", other);
+        HookPhase::Other => {
+            log::debug!("Claude hook: unhandled event type '{}'", hook_event_name);
         }
     }
 
@@ -1555,6 +1599,45 @@ async fn handle_message(
 #[cfg(test)]
 mod tests {
     use super::derive_streamable_connection_id;
+    use super::{normalize_hook_event, HookPhase};
+    use crate::state::AgentRuntime;
+
+    fn norm(name: &str, ev: serde_json::Value) -> HookPhase {
+        normalize_hook_event(AgentRuntime::Claude, name, &ev)
+    }
+
+    #[test]
+    fn claude_event_names_map_to_canonical_phases() {
+        let nil = serde_json::json!({});
+        assert_eq!(norm("SessionStart", nil.clone()), HookPhase::SessionStart);
+        assert_eq!(norm("SessionEnd", nil.clone()), HookPhase::SessionEnd);
+        assert_eq!(norm("Stop", nil.clone()), HookPhase::Stop);
+        assert_eq!(norm("UserPromptSubmit", nil.clone()), HookPhase::Prompt);
+        assert_eq!(norm("PreToolUse", nil.clone()), HookPhase::ToolPre);
+        assert_eq!(norm("PostToolUse", nil.clone()), HookPhase::ToolPost);
+        assert_eq!(norm("PreCompact", nil.clone()), HookPhase::Compact);
+        // An unknown event falls through to Other (logged, no state change).
+        assert_eq!(norm("Frobnicate", nil), HookPhase::Other);
+    }
+
+    #[test]
+    fn notification_carries_its_subtype_for_the_permission_path() {
+        // permission_prompt / idle_prompt are what drive WaitingPermission/WaitingInput.
+        assert_eq!(
+            norm("Notification", serde_json::json!({ "notification_type": "permission_prompt" })),
+            HookPhase::Notification { notification_type: "permission_prompt".to_string() }
+        );
+        assert_eq!(
+            norm("Notification", serde_json::json!({ "notification_type": "idle_prompt" })),
+            HookPhase::Notification { notification_type: "idle_prompt".to_string() }
+        );
+        // A Notification with NO/unknown subtype still normalizes (the arm preserves
+        // state and still emits) — never silently dropped.
+        assert_eq!(
+            norm("Notification", serde_json::json!({})),
+            HookPhase::Notification { notification_type: String::new() }
+        );
+    }
 
     // Regression for the Agent Bridge "bridge dropped" bug: sessionless streamable-HTTP
     // requests used to collapse onto one shared "streamable-http" key, so two local
