@@ -1,3 +1,5 @@
+import type { AgentRuntime } from '$lib/agents/types';
+
 export type TabType = 'terminal' | 'editor' | 'diff';
 
 export interface EditorFileInfo {
@@ -59,6 +61,8 @@ export interface Tab {
   diff_context: DiffContext | null;
   import_highlight?: boolean;
   agent_bridge?: AgentBridge | null;
+  /** Which AI agent runtime this tab is running; detected at initSession. */
+  runtime?: AgentRuntime | null;
 }
 
 export interface Pane {
@@ -188,10 +192,10 @@ export interface Preferences {
   triggers: Trigger[];
   hidden_default_triggers: string[];
   claude_triggers_prompted: boolean;
-  claude_code_ide: boolean;
-  claude_code_ide_ssh: boolean;
-  claude_code_hooks: boolean;
-  claude_code_auto_resume: boolean;
+  claude_ide: boolean;
+  claude_ide_ssh: boolean;
+  claude_hooks: boolean;
+  claude_auto_resume: boolean;
   composer_default_open: boolean;
   windows_shell: string;
   file_link_action: string;

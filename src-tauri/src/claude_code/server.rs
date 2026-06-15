@@ -75,7 +75,7 @@ pub struct ServerSetup {
 pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     cleanup_stale_lockfiles();
 
-    if !state.app_data.read().preferences.claude_code_ide {
+    if !state.app_data.read().preferences.claude_ide {
         log::info!("Claude Code IDE integration disabled in preferences");
         return None;
     }
@@ -108,7 +108,7 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     *state.mcp_auth.write() = Some(auth.clone());
 
     let workspace_folders = collect_workspace_folders(state);
-    let hooks_enabled = state.app_data.read().preferences.claude_code_hooks;
+    let hooks_enabled = state.app_data.read().preferences.claude_hooks;
     if let Err(e) = write_lockfile(port, &auth, workspace_folders, hooks_enabled) {
         log::warn!("Failed to write Claude Code lock file: {}", e);
     }
@@ -289,10 +289,10 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
         ("show_recent_workspaces", PrefMeta { description: "Show recently used workspaces section in sidebar", ptype: "boolean", category: "Workspace", read_only: false }),
         ("workspace_sort_order", PrefMeta { description: "Workspace list sort order (default, alphabetical, recent)", ptype: "string", category: "Workspace", read_only: false }),
         ("show_workspace_tab_count", PrefMeta { description: "Show tab count badges on workspace items", ptype: "boolean", category: "Workspace", read_only: false }),
-        ("claude_code_ide", PrefMeta { description: "Enable Claude Code IDE integration (MCP server)", ptype: "boolean", category: "Integration", read_only: false }),
-        ("claude_code_ide_ssh", PrefMeta { description: "Enable MCP bridge over SSH (reverse tunnel for remote Claude Code)", ptype: "boolean", category: "Integration", read_only: false }),
-        ("claude_code_hooks", PrefMeta { description: "Enable hooks integration (session lifecycle events, tab indicators)", ptype: "boolean", category: "Integration", read_only: false }),
-        ("claude_code_auto_resume", PrefMeta { description: "Enable hooks-based auto-resume (programmatic session ID capture)", ptype: "boolean", category: "Integration", read_only: false }),
+        ("claude_ide", PrefMeta { description: "Enable Claude Code IDE integration (MCP server)", ptype: "boolean", category: "Integration", read_only: false }),
+        ("claude_ide_ssh", PrefMeta { description: "Enable MCP bridge over SSH (reverse tunnel for remote Claude Code)", ptype: "boolean", category: "Integration", read_only: false }),
+        ("claude_hooks", PrefMeta { description: "Enable hooks integration (session lifecycle events, tab indicators)", ptype: "boolean", category: "Integration", read_only: false }),
+        ("claude_auto_resume", PrefMeta { description: "Enable hooks-based auto-resume (programmatic session ID capture)", ptype: "boolean", category: "Integration", read_only: false }),
         ("backup_directory", PrefMeta { description: "Backup directory path (null = scheduled backups disabled)", ptype: "string", category: "Backup", read_only: false }),
         ("backup_interval", PrefMeta { description: "Scheduled backup interval (off, hourly, daily, weekly, monthly)", ptype: "string", category: "Backup", read_only: false }),
         ("backup_exclude_scrollback", PrefMeta { description: "Exclude terminal scrollback from backups", ptype: "boolean", category: "Backup", read_only: false }),

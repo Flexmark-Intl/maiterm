@@ -298,6 +298,11 @@ pub struct Tab {
     /// alias migrates state written before the link→bridge rename.
     #[serde(default, alias = "agent_link", skip_serializing_if = "Option::is_none")]
     pub agent_bridge: Option<AgentBridge>,
+    /// Which AI agent runtime this tab is running (Claude/Codex/…), detected at
+    /// initSession from the MCP client. `None` until detected; populated by a later
+    /// stage. Drives per-runtime resume command, fork capability, and bridge adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::state::AgentRuntime>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -782,18 +787,19 @@ pub struct Preferences {
     /// Whether the user has been prompted to enable Claude Code integrations.
     #[serde(default)]
     pub claude_triggers_prompted: bool,
-    /// Enable Claude Code IDE WebSocket integration server.
-    #[serde(default = "default_true")]
-    pub claude_code_ide: bool,
+    /// Enable the Claude Code IDE/MCP integration server.
+    /// `claude_code_ide` alias migrates state from before the per-runtime key rename.
+    #[serde(default = "default_true", alias = "claude_code_ide")]
+    pub claude_ide: bool,
     /// Enable MCP bridge over SSH (reverse tunnel to expose local MCP tools to remote Claude Code).
-    #[serde(default = "default_true")]
-    pub claude_code_ide_ssh: bool,
+    #[serde(default = "default_true", alias = "claude_code_ide_ssh")]
+    pub claude_ide_ssh: bool,
     /// Enable Claude Code hooks integration (registers lifecycle hooks in ~/.claude/settings.json).
-    #[serde(default = "default_true")]
-    pub claude_code_hooks: bool,
+    #[serde(default = "default_true", alias = "claude_code_hooks")]
+    pub claude_hooks: bool,
     /// Enable hooks-based auto-resume (initSession sets session ID, auto-configures resume).
-    #[serde(default = "default_true")]
-    pub claude_code_auto_resume: bool,
+    #[serde(default = "default_true", alias = "claude_code_auto_resume")]
+    pub claude_auto_resume: bool,
     /// Default open state for the composer dock on tabs that haven't been explicitly toggled.
     #[serde(default = "default_true")]
     pub composer_default_open: bool,
@@ -889,10 +895,10 @@ impl Default for Preferences {
             triggers: Vec::new(),
             hidden_default_triggers: Vec::new(),
             claude_triggers_prompted: false,
-            claude_code_ide: true,
-            claude_code_ide_ssh: true,
-            claude_code_hooks: true,
-            claude_code_auto_resume: true,
+            claude_ide: true,
+            claude_ide_ssh: true,
+            claude_hooks: true,
+            claude_auto_resume: true,
             composer_default_open: true,
             windows_shell: default_windows_shell(),
             file_link_action: default_file_link_action(),
@@ -944,6 +950,7 @@ impl Tab {
             diff_context: None,
             import_highlight: false,
             agent_bridge: None,
+            runtime: None,
         }
     }
 
@@ -979,6 +986,7 @@ impl Tab {
             diff_context: None,
             import_highlight: false,
             agent_bridge: None,
+            runtime: None,
         }
     }
 
@@ -1014,6 +1022,7 @@ impl Tab {
             diff_context: Some(diff_context),
             import_highlight: false,
             agent_bridge: None,
+            runtime: None,
         }
     }
 }
@@ -1047,5 +1056,41 @@ impl Workspace {
             suspended: false,
             pane_sizes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod pref_migration_tests {
+    use super::Preferences;
+
+    /// The per-runtime key rename (claude_code_ide -> claude_ide, etc.) must migrate
+    /// an existing state file via #[serde(alias)] WITHOUT resetting a user's explicit
+    /// choice to the default. This is the cross-language regression the rename guards.
+    #[test]
+    fn old_claude_code_keys_migrate_and_preserve_disabled() {
+        // A user who DISABLED the IDE + hooks under the old key names.
+        let old = serde_json::json!({ "claude_code_ide": false, "claude_code_hooks": false });
+        let prefs: Preferences = serde_json::from_value(old).unwrap();
+        assert!(!prefs.claude_ide, "claude_code_ide:false must map to claude_ide:false, not default-true");
+        assert!(!prefs.claude_hooks, "claude_code_hooks:false must map to claude_hooks:false");
+        // Keys absent from the old file still take their defaults.
+        assert!(prefs.claude_ide_ssh, "absent claude_ide_ssh defaults to true");
+
+        // Re-serialize: emits the NEW key, never the legacy one (alias is read-only).
+        let out = serde_json::to_value(&prefs).unwrap();
+        assert!(out.get("claude_ide").is_some(), "serializes under the new key");
+        assert!(out.get("claude_code_ide").is_none(), "does not emit the legacy key");
+    }
+
+    /// Mirrors the setPreference MCP path (to_value -> insert(meta_key) -> from_value):
+    /// because the meta key now matches the field's serialize name, the insert OVERWRITES
+    /// rather than adding a second aliased key, so from_value sees no duplicate field.
+    #[test]
+    fn set_preference_roundtrip_has_no_duplicate_field() {
+        let prefs = Preferences::default();
+        let mut json = serde_json::to_value(&prefs).unwrap();
+        json.as_object_mut().unwrap().insert("claude_ide".to_string(), serde_json::json!(false));
+        let updated: Preferences = serde_json::from_value(json).expect("no duplicate-field error");
+        assert!(!updated.claude_ide);
     }
 }

@@ -185,10 +185,10 @@ function createPreferencesStore() {
       triggers = prefs.triggers ?? [];
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
-      claudeCodeIde = prefs.claude_code_ide ?? false;
-      claudeCodeIdeSsh = prefs.claude_code_ide_ssh ?? true;
-      claudeCodeHooks = prefs.claude_code_hooks ?? true;
-      claudeCodeAutoResume = prefs.claude_code_auto_resume ?? true;
+      claudeCodeIde = prefs.claude_ide ?? false;
+      claudeCodeIdeSsh = prefs.claude_ide_ssh ?? true;
+      claudeCodeHooks = prefs.claude_hooks ?? true;
+      claudeCodeAutoResume = prefs.claude_auto_resume ?? true;
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -557,10 +557,10 @@ function createPreferencesStore() {
       triggers = prefs.triggers ?? [];
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
-      claudeCodeIde = prefs.claude_code_ide ?? false;
-      claudeCodeIdeSsh = prefs.claude_code_ide_ssh ?? true;
-      claudeCodeHooks = prefs.claude_code_hooks ?? true;
-      claudeCodeAutoResume = prefs.claude_code_auto_resume ?? true;
+      claudeCodeIde = prefs.claude_ide ?? false;
+      claudeCodeIdeSsh = prefs.claude_ide_ssh ?? true;
+      claudeCodeHooks = prefs.claude_hooks ?? true;
+      claudeCodeAutoResume = prefs.claude_auto_resume ?? true;
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -621,10 +621,10 @@ function createPreferencesStore() {
         triggers,
         hidden_default_triggers: hiddenDefaultTriggers,
         claude_triggers_prompted: claudeTriggersPrompted,
-        claude_code_ide: claudeCodeIde,
-        claude_code_ide_ssh: claudeCodeIdeSsh,
-        claude_code_hooks: claudeCodeHooks,
-        claude_code_auto_resume: claudeCodeAutoResume,
+        claude_ide: claudeCodeIde,
+        claude_ide_ssh: claudeCodeIdeSsh,
+        claude_hooks: claudeCodeHooks,
+        claude_auto_resume: claudeCodeAutoResume,
         composer_default_open: composerDefaultOpen,
         windows_shell: windowsShell,
         file_link_action: fileLinkAction,

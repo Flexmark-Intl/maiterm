@@ -472,6 +472,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 // Tab ids are remapped for the new window, so an Agent Bridge (which
                 // references the partner by tab id) can't carry over — drop it.
                 agent_bridge: None,
+                // Runtime is just a per-tab marker (no tab-id refs) — carry it over.
+                runtime: tab.runtime,
             }
         }).collect();
 
