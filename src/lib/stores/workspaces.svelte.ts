@@ -1844,19 +1844,16 @@ function createWorkspacesStore() {
       if (!newTab) return;
 
       // Mark split context so auto-resume command fires on mount (reload = full restore).
-      // Auto-resume settings are explicit user intent and win over the live-captured
-      // split context: if the user configured an SSH command / remote CWD, reload must
-      // honor it (e.g. they pointed auto-resume at a renamed remote folder). The live
-      // capture only fills gaps the user didn't pin. If auto-resume isn't configured,
-      // fall back to the live capture entirely.
+      // Reload destination follows the auto_resume_pinned lever:
+      //   - Pinned: the saved SSH command + remote CWD are explicit user intent and win
+      //     over the live-captured split context (e.g. they pointed auto-resume at a
+      //     renamed remote folder — editing the Remote CWD field auto-pins).
+      //   - Unpinned: track the live session (reconnect to wherever it currently is);
+      //     the saved SSH command is only a fallback when the live SSH has died.
       const splitCtx = terminalsStore.consumeSplitContext(newTab.id);
       if (splitCtx) {
         const ctx = { ...splitCtx, fireAutoResume: true };
-        const arEnabled = sourceTab.auto_resume_enabled ?? true;
-        // Use the persisted auto-resume SSH command + remote CWD when the user has it
-        // enabled (explicit intent — wins over the live capture), or when the live SSH
-        // has died and the persisted command is the only thing left to reconnect with.
-        if (sourceTab.auto_resume_ssh_command && (arEnabled || !ctx.sshCommand)) {
+        if (sourceTab.auto_resume_ssh_command && (sourceTab.auto_resume_pinned || !ctx.sshCommand)) {
           ctx.sshCommand = sourceTab.auto_resume_ssh_command;
           ctx.remoteCwd = sourceTab.auto_resume_remote_cwd ?? ctx.remoteCwd;
         }
