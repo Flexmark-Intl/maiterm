@@ -70,10 +70,13 @@ pub struct SshTunnel {
 }
 
 /// Tracked Claude Code session (registered via hooks).
-pub struct ClaudeSessionInfo {
+pub struct AgentSessionInfo {
+    /// Which agent runtime owns this session; detected at initSession (Stage 3 sets Claude everywhere as a placeholder).
+    #[allow(dead_code)]
+    pub runtime: crate::state::AgentRuntime,
     pub tab_id: String,
     pub cwd: Option<String>,
-    pub state: ClaudeSessionState,
+    pub state: AgentSessionState,
     /// Current tool being executed (set by PreToolUse, cleared by PostToolUse/Stop)
     pub tool_name: Option<String>,
     /// Model used in this session (set by SessionStart)
@@ -86,7 +89,7 @@ pub struct ClaudeSessionInfo {
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClaudeSessionState {
+pub enum AgentSessionState {
     Active,
     WaitingInput,
     WaitingPermission,
@@ -124,9 +127,9 @@ pub struct AppState {
     pub pty_stats: RwLock<HashMap<String, PtyStats>>,
     pub memory_samples: RwLock<Vec<MemorySample>>,
     // Claude Code hook sessions: session_id → session info
-    pub claude_sessions: RwLock<HashMap<String, ClaudeSessionInfo>>,
+    pub agent_sessions: RwLock<HashMap<String, AgentSessionInfo>>,
     // Pending session IDs from SessionStart HTTP hooks awaiting initSession to assign a tab
-    pub pending_hook_sessions: RwLock<Vec<(String, Option<String>, Instant)>>, // (session_id, cwd, timestamp)
+    pub pending_agent_sessions: RwLock<Vec<(String, Option<String>, Instant)>>, // (session_id, cwd, timestamp)
 }
 
 impl AppState {
@@ -158,8 +161,8 @@ impl AppState {
             pending_resizes: RwLock::new(HashMap::new()),
             pty_stats: RwLock::new(HashMap::new()),
             memory_samples: RwLock::new(Vec::new()),
-            claude_sessions: RwLock::new(HashMap::new()),
-            pending_hook_sessions: RwLock::new(Vec::new()),
+            agent_sessions: RwLock::new(HashMap::new()),
+            pending_agent_sessions: RwLock::new(Vec::new()),
         }
     }
 

@@ -476,7 +476,7 @@ fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>
             Some(serde_json::json!({ "success": true, "path": path_str, "excludedScrollback": exclude_scrollback }))
         }
         "getClaudeSessions" => {
-            let sessions = state.claude_sessions.read();
+            let sessions = state.agent_sessions.read();
             let app_data = state.app_data.read();
 
             // Build a map of tab_id → (tab_name, workspace_name) for enrichment
@@ -943,19 +943,20 @@ async fn process_message(
 
                     // Link claude session → tab mapping
                     {
-                        use crate::state::app_state::{ClaudeSessionInfo, ClaudeSessionState};
+                        use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
 
                         // If Claude passed sessionId explicitly, use that
                         if !session_id.is_empty() {
-                            let mut sessions = state.claude_sessions.write();
+                            let mut sessions = state.agent_sessions.write();
                             // Preserve existing fields (model, tool_name) if session already registered
                             let existing = sessions.remove(&session_id);
                             sessions.insert(
                                 session_id.clone(),
-                                ClaudeSessionInfo {
+                                AgentSessionInfo {
+                                    runtime: crate::state::AgentRuntime::Claude,
                                     tab_id: tab_id.clone(),
                                     cwd: existing.as_ref().and_then(|e| e.cwd.clone()),
-                                    state: ClaudeSessionState::Active,
+                                    state: AgentSessionState::Active,
                                     tool_name: existing.as_ref().and_then(|e| e.tool_name.clone()),
                                     model: existing.and_then(|e| e.model),
                                     connection_id: Some(connection_id.to_string()),
@@ -965,20 +966,21 @@ async fn process_message(
 
                         // Also pop the most recent pending SessionStart hook session and link it
                         let pending = {
-                            let mut pending = state.pending_hook_sessions.write();
+                            let mut pending = state.pending_agent_sessions.write();
                             let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
                             pending.retain(|(_, _, ts)| *ts > cutoff);
                             pending.pop()
                         };
                         if let Some((pending_sid, pending_cwd, _)) = pending {
                             if session_id.is_empty() || pending_sid != session_id {
-                                let mut sessions = state.claude_sessions.write();
+                                let mut sessions = state.agent_sessions.write();
                                 sessions.insert(
                                     pending_sid.clone(),
-                                    ClaudeSessionInfo {
+                                    AgentSessionInfo {
+                                        runtime: crate::state::AgentRuntime::Claude,
                                         tab_id: tab_id.clone(),
                                         cwd: pending_cwd,
-                                        state: ClaudeSessionState::Active,
+                                        state: AgentSessionState::Active,
                                         tool_name: None,
                                         model: None,
                                         connection_id: Some(connection_id.to_string()),
@@ -1018,7 +1020,7 @@ async fn process_message(
 
                 // ── Auto-inject tabId from connection affinity ──
                 // If the tool call doesn't include tabId but this connection has affinity, inject it.
-                // Falls back to claude_sessions when SSE reconnects cleared the connection affinity.
+                // Falls back to agent_sessions when SSE reconnects cleared the connection affinity.
                 // Snapshot the affinity tab once so the has-affinity check and the injection
                 // use the same value (no TOCTOU race with concurrent connection cleanup).
                 let mut affinity_tab: Option<String> = connection_tabs.read().get(connection_id).cloned();
@@ -1030,7 +1032,7 @@ async fn process_message(
                 // session exists, it's the one reconnecting. Falls back to the simpler
                 // "exactly 1 active session" heuristic if connection_ids aren't set.
                 if affinity_tab.is_none() {
-                    let sessions = state.claude_sessions.read();
+                    let sessions = state.agent_sessions.read();
                     let ct = connection_tabs.read();
 
                     // Unique tabs that currently have a live Claude session.
@@ -1067,7 +1069,7 @@ async fn process_message(
                     if let Some(tab_id) = recovered {
                         connection_tabs.write().insert(connection_id.to_string(), tab_id.clone());
                         // Update the session's connection_id to the new connection
-                        let mut sessions = state.claude_sessions.write();
+                        let mut sessions = state.agent_sessions.write();
                         for info in sessions.values_mut() {
                             if info.tab_id == tab_id {
                                 info.connection_id = Some(connection_id.to_string());
@@ -1292,14 +1294,15 @@ async fn hooks_handler(
             let model = event.get("model").and_then(|v| v.as_str()).map(String::from);
 
             if !session_id.is_empty() && !tab_id.is_empty() {
-                use crate::state::app_state::{ClaudeSessionInfo, ClaudeSessionState};
-                let mut sessions = srv.state.claude_sessions.write();
+                use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
+                let mut sessions = srv.state.agent_sessions.write();
                 sessions.insert(
                     session_id.clone(),
-                    ClaudeSessionInfo {
+                    AgentSessionInfo {
+                        runtime: crate::state::AgentRuntime::Claude,
                         tab_id: tab_id.clone(),
                         cwd: cwd.clone(),
-                        state: ClaudeSessionState::Active,
+                        state: AgentSessionState::Active,
                         tool_name: None,
                         model: model.clone(),
                         connection_id: None,
@@ -1308,7 +1311,7 @@ async fn hooks_handler(
                 log::info!("Claude hook: session {} started for tab {}", session_id, tab_id);
             } else if !session_id.is_empty() {
                 // No tab_id yet — buffer for initSession to pick up
-                let mut pending = srv.state.pending_hook_sessions.write();
+                let mut pending = srv.state.pending_agent_sessions.write();
                 // Clean entries older than 30s
                 let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
                 pending.retain(|(_, _, ts)| *ts > cutoff);
@@ -1327,7 +1330,7 @@ async fn hooks_handler(
 
         "SessionEnd" => {
             let tab_id = {
-                let mut sessions = srv.state.claude_sessions.write();
+                let mut sessions = srv.state.agent_sessions.write();
                 sessions.remove(&session_id).map(|s| s.tab_id)
             }
             .or(tab_id_from_param);
@@ -1343,7 +1346,7 @@ async fn hooks_handler(
 
         "Notification" => {
             let tab_id = {
-                let sessions = srv.state.claude_sessions.read();
+                let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
@@ -1355,12 +1358,12 @@ async fn hooks_handler(
 
             // Update session state based on notification type
             if !session_id.is_empty() {
-                use crate::state::app_state::ClaudeSessionState;
-                let mut sessions = srv.state.claude_sessions.write();
+                use crate::state::app_state::AgentSessionState;
+                let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.state = match notification_type {
-                        "idle_prompt" => ClaudeSessionState::WaitingInput,
-                        "permission_prompt" => ClaudeSessionState::WaitingPermission,
+                        "idle_prompt" => AgentSessionState::WaitingInput,
+                        "permission_prompt" => AgentSessionState::WaitingPermission,
                         _ => session.state,
                     };
                 }
@@ -1379,17 +1382,17 @@ async fn hooks_handler(
 
         "Stop" => {
             let tab_id = {
-                let sessions = srv.state.claude_sessions.read();
+                let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
 
             // Update session state to stopped + clear tool
             if !session_id.is_empty() {
-                use crate::state::app_state::ClaudeSessionState;
-                let mut sessions = srv.state.claude_sessions.write();
+                use crate::state::app_state::AgentSessionState;
+                let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    session.state = ClaudeSessionState::Stopped;
+                    session.state = AgentSessionState::Stopped;
                     session.tool_name = None;
                 }
             }
@@ -1403,17 +1406,17 @@ async fn hooks_handler(
 
         "UserPromptSubmit" => {
             let tab_id = {
-                let sessions = srv.state.claude_sessions.read();
+                let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
 
             // Update session state to processing
             if !session_id.is_empty() {
-                use crate::state::app_state::ClaudeSessionState;
-                let mut sessions = srv.state.claude_sessions.write();
+                use crate::state::app_state::AgentSessionState;
+                let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    session.state = ClaudeSessionState::Active;
+                    session.state = AgentSessionState::Active;
                 }
             }
 
@@ -1426,7 +1429,7 @@ async fn hooks_handler(
 
         "PreToolUse" => {
             let tab_id = {
-                let sessions = srv.state.claude_sessions.read();
+                let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
@@ -1439,10 +1442,10 @@ async fn hooks_handler(
 
             // Update session state back to active + track current tool
             if !session_id.is_empty() {
-                use crate::state::app_state::ClaudeSessionState;
-                let mut sessions = srv.state.claude_sessions.write();
+                use crate::state::app_state::AgentSessionState;
+                let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    session.state = ClaudeSessionState::Active;
+                    session.state = AgentSessionState::Active;
                     session.tool_name = if tool_name.is_empty() { None } else { Some(tool_name.clone()) };
                 }
             }
@@ -1459,7 +1462,7 @@ async fn hooks_handler(
 
         "PostToolUse" => {
             let tab_id = {
-                let sessions = srv.state.claude_sessions.read();
+                let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
@@ -1472,7 +1475,7 @@ async fn hooks_handler(
 
             // Clear current tool (back to thinking)
             if !session_id.is_empty() {
-                let mut sessions = srv.state.claude_sessions.write();
+                let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.tool_name = None;
                 }
@@ -1490,7 +1493,7 @@ async fn hooks_handler(
 
         "PreCompact" => {
             let tab_id = {
-                let sessions = srv.state.claude_sessions.read();
+                let sessions = srv.state.agent_sessions.read();
                 sessions.get(&session_id).map(|s| s.tab_id.clone())
             }
             .or(tab_id_from_param);
