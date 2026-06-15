@@ -5,7 +5,7 @@ import { terminalsStore } from './terminals.svelte';
 import { workspacesStore } from './workspaces.svelte';
 import { activityStore } from './activity.svelte';
 import { dispatch } from './notificationDispatch';
-import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
+import { getResumeCommand } from '$lib/agents/resume';
 import type { AgentRuntime, AgentState, WorkspaceAgentState } from '$lib/agents/types';
 
 /**
@@ -329,7 +329,7 @@ function createAgentStateStore() {
           }
         }
 
-        handleEnableAutoResume(tab_id, CLAUDE_RESUME_COMMAND);
+        handleEnableAutoResume(tab_id, getResumeCommand(workspacesStore.getTabRuntime(tab_id)));
         logInfo(`Claude init: set claudeSessionId for tab ${tab_id.slice(0, 8)} = ${session_id.slice(0, 8)}`);
       });
       unlisteners.push(u6);

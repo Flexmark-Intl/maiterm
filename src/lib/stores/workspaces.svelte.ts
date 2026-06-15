@@ -1,5 +1,6 @@
 import type { Terminal } from '@xterm/xterm';
 import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext } from '$lib/tauri/types';
+import type { AgentRuntime } from '$lib/agents/types';
 import * as commands from '$lib/tauri/commands';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -182,6 +183,15 @@ function createWorkspacesStore() {
     get sidebarCollapsed() { return sidebarCollapsed; },
     get recentWorkspaces() { return recentWorkspaces; },
     get lastSwitchedAt() { return lastSwitchedAt; },
+
+    /** Detected agent runtime for a tab, defaulting to 'claude' when none is set. */
+    getTabRuntime(tabId: string): AgentRuntime {
+      for (const ws of workspaces) for (const pane of ws.panes) {
+        const t = pane.tabs.find(x => x.id === tabId);
+        if (t) return t.runtime ?? 'claude';
+      }
+      return 'claude';
+    },
 
     /** True while a workspace is being suspended (PTYs being killed). */
     isWorkspaceSuspending(workspaceId: string) { return suspendingWorkspaceIds.has(workspaceId); },

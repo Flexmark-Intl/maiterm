@@ -8,6 +8,7 @@ import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } fr
 import { dispatch } from './notificationDispatch';
 import { error as logError } from '@tauri-apps/plugin-log';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
+import { isForkCommand } from '$lib/agents/resume';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
 
 const BUFFER_CAP = 4096;
@@ -374,7 +375,7 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
     // session id, resume must use the standard `claude --resume %claudeSessionId`
     // template (claudeState sets %claudeSessionId to the fork's id before calling
     // this). So never preserve a fork command — let the template take over.
-    const existing = existingRaw?.includes('--fork-session') ? null : existingRaw;
+    const existing = isForkCommand(workspacesStore.getTabRuntime(tabId), existingRaw) ? null : existingRaw;
     const cmd = existing || (commandTemplate || null);
 
     // Prevent SSH context downgrade: if the tab already has an SSH auto-resume

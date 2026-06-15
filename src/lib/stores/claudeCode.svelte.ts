@@ -4,7 +4,7 @@ import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { getEditorByFilePath, getEditorByTabId } from '$lib/stores/editorRegistry.svelte';
 import { interpolateVariables, getVariables, setVariable, handleEnableAutoResume, getTriggerStats } from '$lib/stores/triggers.svelte';
-import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
+import { getResumeCommand } from '$lib/agents/resume';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch as dispatchNotification } from '$lib/stores/notificationDispatch';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
@@ -1130,7 +1130,7 @@ function createClaudeCodeStore() {
 
     // If all context fields are provided, set directly
     if (args.cwd !== undefined || args.sshCommand !== undefined || args.remoteCwd !== undefined) {
-      const cmd = args.command ?? CLAUDE_RESUME_COMMAND;
+      const cmd = args.command ?? getResumeCommand(workspacesStore.getTabRuntime(tab.id));
       await workspacesStore.setTabAutoResumeContext(
         workspace.id, pane.id, tab.id,
         args.cwd ?? null, args.sshCommand ?? null, args.remoteCwd ?? null, cmd,
@@ -1139,7 +1139,7 @@ function createClaudeCodeStore() {
     }
 
     // Auto-detect PTY context (same as trigger-based enable)
-    const cmd = args.command ?? CLAUDE_RESUME_COMMAND;
+    const cmd = args.command ?? getResumeCommand(workspacesStore.getTabRuntime(tab.id));
     await handleEnableAutoResume(tab.id, cmd);
     return { success: true, tabId: tab.id, enabled: true, command: cmd };
   }

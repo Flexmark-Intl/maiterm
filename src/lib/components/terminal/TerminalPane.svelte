@@ -30,6 +30,7 @@
   import { dispatch } from '$lib/stores/notificationDispatch';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
+  import { getResumeCommand } from '$lib/agents/resume';
   import { createFilePathLinkProvider } from '$lib/utils/filePathDetector';
   import { openFileFromTerminal } from '$lib/utils/openFile';
   import { enableBridge, disableBridge, hasBridge, getBridgeInfo, buildUserSetupScript, isInteractiveSshSession } from '$lib/stores/sshMcpBridge.svelte';
@@ -1865,7 +1866,7 @@
             try {
               const ctx = await gatherAutoResumeContext();
               const sshCmd = ctx.sshCmd ? normalizeSshInput(ctx.sshCmd) : null;
-              await workspacesStore.setTabAutoResumeContext(workspaceId, paneId, tabId, ctx.cwd, sshCmd, ctx.remoteCwd, CLAUDE_RESUME_COMMAND);
+              await workspacesStore.setTabAutoResumeContext(workspaceId, paneId, tabId, ctx.cwd, sshCmd, ctx.remoteCwd, getResumeCommand(workspacesStore.getTabRuntime(tabId)));
               isAutoResume = true;
             } catch (e) {
               logError(`Auto-resume + Claude setup failed: ${e}`);
