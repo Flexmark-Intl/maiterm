@@ -1259,6 +1259,14 @@ async fn hooks_handler(
 
     log::debug!("Claude hook: received '{}' session={}", hook_event_name, &session_id[..session_id.len().min(8)]);
 
+    // Which agent runtime this hook came from: explicit ?runtime= (set by non-Claude
+    // shims), else the runtime already recorded for this session, else Claude.
+    let runtime = params.get("runtime")
+        .and_then(|s| crate::state::AgentRuntime::from_key(s))
+        .or_else(|| srv.state.agent_sessions.read().get(&session_id).map(|s| s.runtime))
+        .unwrap_or(crate::state::AgentRuntime::Claude);
+    let runtime_key = runtime.as_key();
+
     // tab_id comes from query param (set by the command hook script from $AITERM_TAB_ID)
     // Validate it actually exists — it may be stale after HMR reload or tab recreation.
     let tab_id_from_param = params.get("tab_id").and_then(|raw_id| {
@@ -1299,7 +1307,7 @@ async fn hooks_handler(
                 sessions.insert(
                     session_id.clone(),
                     AgentSessionInfo {
-                        runtime: crate::state::AgentRuntime::Claude,
+                        runtime,
                         tab_id: tab_id.clone(),
                         cwd: cwd.clone(),
                         state: AgentSessionState::Active,
@@ -1321,6 +1329,7 @@ async fn hooks_handler(
 
             let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
             let _ = srv.app_handle.emit("claude-hook-session-start", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": if tab_id.is_empty() { None } else { Some(&tab_id) },
                 "cwd": event.get("cwd"),
@@ -1338,6 +1347,7 @@ async fn hooks_handler(
             log::info!("Claude hook: session {} ended (tab {:?})", session_id, tab_id);
 
             let _ = srv.app_handle.emit("claude-hook-session-end", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "reason": event.get("reason"),
@@ -1372,6 +1382,7 @@ async fn hooks_handler(
             log::debug!("Claude hook: Notification type='{}' session={} (tab {:?})",
                 notification_type, &session_id[..session_id.len().min(8)], tab_id);
             let _ = srv.app_handle.emit("claude-hook-notification", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "notification_type": notification_type,
@@ -1399,6 +1410,7 @@ async fn hooks_handler(
 
             log::debug!("Claude hook: Stop for session {} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id);
             let _ = srv.app_handle.emit("claude-hook-stop", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
             }));
@@ -1422,6 +1434,7 @@ async fn hooks_handler(
 
             log::debug!("Claude hook: UserPromptSubmit session={} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id);
             let _ = srv.app_handle.emit("claude-hook-user-prompt", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
             }));
@@ -1453,6 +1466,7 @@ async fn hooks_handler(
             log::debug!("Claude hook: PreToolUse tool='{}' session={} (tab {:?})",
                 tool_name, &session_id[..session_id.len().min(8)], tab_id);
             let _ = srv.app_handle.emit("claude-hook-pre-tool-use", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "tool_name": tool_name,
@@ -1484,6 +1498,7 @@ async fn hooks_handler(
             log::debug!("Claude hook: PostToolUse tool='{}' session={} (tab {:?})",
                 tool_name, &session_id[..session_id.len().min(8)], tab_id);
             let _ = srv.app_handle.emit("claude-hook-post-tool-use", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "tool_name": tool_name,
@@ -1507,6 +1522,7 @@ async fn hooks_handler(
             log::debug!("Claude hook: PreCompact trigger='{}' session={} (tab {:?})",
                 trigger, &session_id[..session_id.len().min(8)], tab_id);
             let _ = srv.app_handle.emit("claude-hook-pre-compact", serde_json::json!({
+                "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "trigger": trigger,

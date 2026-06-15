@@ -32,6 +32,15 @@ impl AgentRuntime {
         }
     }
 
+    /// The stable serialized key for this runtime (inverse of `from_key`).
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+        }
+    }
+
     /// Per-connection detection from the MCP `initialize` `clientInfo.name`.
     /// Substring match on a lowercased name; default Claude (NEVER Codex).
     pub fn detect(client_info_name: Option<&str>) -> Self {
