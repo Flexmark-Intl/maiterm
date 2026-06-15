@@ -53,6 +53,11 @@ function createPreferencesStore() {
   let claudeCodeIdeSsh = $state(true);
   let claudeCodeHooks = $state(true);
   let claudeCodeAutoResume = $state(true);
+  let codexIde = $state(false);
+  let codexIdeSsh = $state(false);
+  let codexHooks = $state(false);
+  let codexAutoResume = $state(false);
+  let codexHooksBypassTrust = $state(false);
   let composerDefaultOpen = $state(true);
   let windowsShell = $state('powershell');
   let fileLinkAction = $state('modifier_click');
@@ -116,6 +121,11 @@ function createPreferencesStore() {
     get claudeCodeIdeSsh() { return claudeCodeIdeSsh; },
     get claudeCodeHooks() { return claudeCodeHooks; },
     get claudeCodeAutoResume() { return claudeCodeAutoResume; },
+    get codexIde() { return codexIde; },
+    get codexIdeSsh() { return codexIdeSsh; },
+    get codexHooks() { return codexHooks; },
+    get codexAutoResume() { return codexAutoResume; },
+    get codexHooksBypassTrust() { return codexHooksBypassTrust; },
     get composerDefaultOpen() { return composerDefaultOpen; },
     get windowsShell() { return windowsShell; },
     get fileLinkAction() { return fileLinkAction; },
@@ -189,6 +199,11 @@ function createPreferencesStore() {
       claudeCodeIdeSsh = prefs.claude_ide_ssh ?? true;
       claudeCodeHooks = prefs.claude_hooks ?? true;
       claudeCodeAutoResume = prefs.claude_auto_resume ?? true;
+      codexIde = prefs.codex_ide ?? false;
+      codexIdeSsh = prefs.codex_ide_ssh ?? false;
+      codexHooks = prefs.codex_hooks ?? false;
+      codexAutoResume = prefs.codex_auto_resume ?? false;
+      codexHooksBypassTrust = prefs.codex_hooks_bypass_trust ?? false;
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -418,6 +433,26 @@ function createPreferencesStore() {
       claudeCodeAutoResume = value;
       await this.save();
     },
+    async setCodexIde(value: boolean) {
+      codexIde = value;
+      await this.save();
+    },
+    async setCodexIdeSsh(value: boolean) {
+      codexIdeSsh = value;
+      await this.save();
+    },
+    async setCodexHooks(value: boolean) {
+      codexHooks = value;
+      await this.save();
+    },
+    async setCodexAutoResume(value: boolean) {
+      codexAutoResume = value;
+      await this.save();
+    },
+    async setCodexHooksBypassTrust(value: boolean) {
+      codexHooksBypassTrust = value;
+      await this.save();
+    },
     async setComposerDefaultOpen(value: boolean) {
       composerDefaultOpen = value;
       await this.save();
@@ -561,6 +596,11 @@ function createPreferencesStore() {
       claudeCodeIdeSsh = prefs.claude_ide_ssh ?? true;
       claudeCodeHooks = prefs.claude_hooks ?? true;
       claudeCodeAutoResume = prefs.claude_auto_resume ?? true;
+      codexIde = prefs.codex_ide ?? false;
+      codexIdeSsh = prefs.codex_ide_ssh ?? false;
+      codexHooks = prefs.codex_hooks ?? false;
+      codexAutoResume = prefs.codex_auto_resume ?? false;
+      codexHooksBypassTrust = prefs.codex_hooks_bypass_trust ?? false;
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -625,6 +665,11 @@ function createPreferencesStore() {
         claude_ide_ssh: claudeCodeIdeSsh,
         claude_hooks: claudeCodeHooks,
         claude_auto_resume: claudeCodeAutoResume,
+        codex_ide: codexIde,
+        codex_ide_ssh: codexIdeSsh,
+        codex_hooks: codexHooks,
+        codex_auto_resume: codexAutoResume,
+        codex_hooks_bypass_trust: codexHooksBypassTrust,
         composer_default_open: composerDefaultOpen,
         windows_shell: windowsShell,
         file_link_action: fileLinkAction,

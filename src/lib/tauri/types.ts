@@ -196,6 +196,11 @@ export interface Preferences {
   claude_ide_ssh: boolean;
   claude_hooks: boolean;
   claude_auto_resume: boolean;
+  codex_ide: boolean;
+  codex_ide_ssh: boolean;
+  codex_hooks: boolean;
+  codex_auto_resume: boolean;
+  codex_hooks_bypass_trust: boolean;
   composer_default_open: boolean;
   windows_shell: string;
   file_link_action: string;

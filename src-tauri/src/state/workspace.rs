@@ -800,6 +800,22 @@ pub struct Preferences {
     /// Enable hooks-based auto-resume (initSession sets session ID, auto-configures resume).
     #[serde(default = "default_true", alias = "claude_code_auto_resume")]
     pub claude_auto_resume: bool,
+    /// Enable the Codex IDE/MCP integration (opt-in; writes ~/.codex/config.toml).
+    #[serde(default)]
+    pub codex_ide: bool,
+    /// Enable the Codex MCP bridge over SSH.
+    #[serde(default)]
+    pub codex_ide_ssh: bool,
+    /// Enable Codex lifecycle hooks (command hooks in ~/.codex/hooks.json).
+    #[serde(default)]
+    pub codex_hooks: bool,
+    /// Enable Codex hooks-based auto-resume.
+    #[serde(default)]
+    pub codex_auto_resume: bool,
+    /// Pass --dangerously-bypass-hook-trust style handling / suppress the one-time
+    /// Codex hook-trust prompt friction (advanced; default off).
+    #[serde(default)]
+    pub codex_hooks_bypass_trust: bool,
     /// Default open state for the composer dock on tabs that haven't been explicitly toggled.
     #[serde(default = "default_true")]
     pub composer_default_open: bool,
@@ -899,6 +915,11 @@ impl Default for Preferences {
             claude_ide_ssh: true,
             claude_hooks: true,
             claude_auto_resume: true,
+            codex_ide: false,
+            codex_ide_ssh: false,
+            codex_hooks: false,
+            codex_auto_resume: false,
+            codex_hooks_bypass_trust: false,
             composer_default_open: true,
             windows_shell: default_windows_shell(),
             file_link_action: default_file_link_action(),
@@ -1092,5 +1113,18 @@ mod pref_migration_tests {
         json.as_object_mut().unwrap().insert("claude_ide".to_string(), serde_json::json!(false));
         let updated: Preferences = serde_json::from_value(json).expect("no duplicate-field error");
         assert!(!updated.claude_ide);
+    }
+
+    /// Codex integration is opt-in: every codex_* key must default OFF so upgrading
+    /// users never get a surprise ~/.codex write. Defaults and absent-key deserialize
+    /// (empty `{}`) must both yield all-false.
+    #[test]
+    fn codex_keys_default_off() {
+        let p = Preferences::default();
+        assert!(!p.codex_ide && !p.codex_hooks && !p.codex_ide_ssh && !p.codex_auto_resume && !p.codex_hooks_bypass_trust);
+
+        // Deserializing an empty object (no codex_* keys present) also yields all-false.
+        let empty: Preferences = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!empty.codex_ide && !empty.codex_hooks && !empty.codex_ide_ssh && !empty.codex_auto_resume && !empty.codex_hooks_bypass_trust);
     }
 }
