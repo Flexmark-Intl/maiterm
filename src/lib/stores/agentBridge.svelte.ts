@@ -3,7 +3,7 @@ import * as commands from '$lib/tauri/commands';
 import type { AgentBridge } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**

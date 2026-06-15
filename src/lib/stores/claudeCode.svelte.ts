@@ -7,7 +7,7 @@ import { interpolateVariables, getVariables, setVariable, handleEnableAutoResume
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch as dispatchNotification } from '$lib/stores/notificationDispatch';
-import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';

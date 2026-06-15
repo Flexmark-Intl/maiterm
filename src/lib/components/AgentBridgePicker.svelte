@@ -1,7 +1,7 @@
 <script lang="ts">
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
-  import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { getPtyInfo } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';

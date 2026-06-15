@@ -33,7 +33,7 @@
   import { createFilePathLinkProvider } from '$lib/utils/filePathDetector';
   import { openFileFromTerminal } from '$lib/utils/openFile';
   import { enableBridge, disableBridge, hasBridge, getBridgeInfo, buildUserSetupScript, isInteractiveSshSession } from '$lib/stores/sshMcpBridge.svelte';
-  import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import Button from '$lib/components/ui/Button.svelte';

@@ -18,7 +18,7 @@
   import type { ClaudeCodeToolRequest, Preferences, Tab } from '$lib/tauri/types';
   import type { ImportPreview } from '$lib/tauri/commands';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
-  import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';

@@ -6,6 +6,7 @@ import { workspacesStore } from './workspaces.svelte';
 import { activityStore } from './activity.svelte';
 import { dispatch } from './notificationDispatch';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
+import type { AgentRuntime, AgentState, WorkspaceAgentState } from '$lib/agents/types';
 
 /**
  * Claude Code session state per tab, driven by hook events.
@@ -21,11 +22,11 @@ import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
  *   SessionEnd → (removed)
  */
 
-export type ClaudeState = 'active' | 'idle' | 'permission';
-
-export interface ClaudeTabSession {
+export interface AgentTabSession {
+  /** Which agent runtime owns this session. */
+  runtime: AgentRuntime;
   sessionId: string;
-  state: ClaudeState;
+  state: AgentState;
   /** Current tool being executed (set by PreToolUse, cleared by PostToolUse/Stop) */
   toolName?: string;
   /** Human-readable summary of what the tool is doing */
@@ -37,10 +38,6 @@ export interface ClaudeTabSession {
    *  (e.g. the Agent Bridge picker lists most-recently-active agents first). */
   updatedAt: number;
 }
-
-/** Workspace-level rollup of Claude state across a set of tabs. `idle` is split
- *  into unread/read so the sidebar can show a filled vs hollow "done" dot. */
-export type WorkspaceClaudeState = 'permission' | 'active' | 'idle-unread' | 'idle-read';
 
 /** Build a human-readable action string from tool name + input. */
 function buildActionString(toolName: string, toolInput: Record<string, unknown> | null): string {
@@ -83,20 +80,22 @@ function summarizeToolDetail(toolName: string, toolInput: Record<string, unknown
  *  Claude was interrupted and clear the tool indicator. */
 const TOOL_STALE_TIMEOUT = 15_000;
 
-function createClaudeStateStore() {
+function createAgentStateStore() {
   // tabId → session info
-  let sessions = $state<Map<string, ClaudeTabSession>>(new Map());
+  let sessions = $state<Map<string, AgentTabSession>>(new Map());
   const unlisteners: (() => void)[] = [];
   // tabId → timeout handle for stale tool detection
   const staleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  function setState(tabId: string, sessionId: string, state: ClaudeState, toolName?: string, toolDetail?: string) {
+  function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string) {
     const current = sessions.get(tabId);
     if (current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
     // Entering idle fresh = unread; staying idle preserves whatever read flag we had.
     const read = state === 'idle' ? (current?.state === 'idle' ? current.read : false) : undefined;
     sessions = new Map(sessions);
-    sessions.set(tabId, { sessionId, state, toolName, toolDetail, read, updatedAt: Date.now() });
+    // runtime is hardcoded 'claude' for now — only Claude feeds this store today;
+    // a later stage threads the real runtime from hook payloads.
+    sessions.set(tabId, { runtime: 'claude', sessionId, state, toolName, toolDetail, read, updatedAt: Date.now() });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
     // Clear alert when leaving permission state (but only if we set it).
@@ -165,7 +164,7 @@ function createClaudeStateStore() {
     },
 
     /** Get Claude state for a tab, if a Claude session is active there. */
-    getState(tabId: string): ClaudeTabSession | undefined {
+    getState(tabId: string): AgentTabSession | undefined {
       return sessions.get(tabId);
     },
 
@@ -197,7 +196,7 @@ function createClaudeStateStore() {
      *  mirror the per-tab indicators (blue = working, green = done). Idle is
      *  split into unread/read: an unread "done" outranks a read one, so the
      *  workspace dot stays filled until every finished agent has been seen. */
-    getWorkspaceClaudeState(tabIds: string[]): WorkspaceClaudeState | null {
+    getWorkspaceClaudeState(tabIds: string[]): WorkspaceAgentState | null {
       let hasActiveTab = false;
       let hasIdleUnread = false;
       let hasIdleRead = false;
@@ -230,7 +229,7 @@ function createClaudeStateStore() {
      *  window's tab IDs — to keep the footer dot window-scoped and independent;
      *  without it the dot would count foreign-window agents and clicks couldn't
      *  navigate to them (`navigateToTab` only searches this window's workspaces). */
-    getGlobalClaudeState(scope?: ReadonlySet<string>): { state: WorkspaceClaudeState; tabId: string; tabIds: string[]; count: number } | null {
+    getGlobalClaudeState(scope?: ReadonlySet<string>): { state: WorkspaceAgentState; tabId: string; tabIds: string[]; count: number } | null {
       const { permission, active, idleUnread, idleRead } = computeBreakdown(scope);
       if (permission.length) return { state: 'permission', tabId: permission[0], tabIds: permission, count: permission.length };
       if (active.length) return { state: 'active', tabId: active[0], tabIds: active, count: active.length };
@@ -373,4 +372,11 @@ function createClaudeStateStore() {
   };
 }
 
-export const claudeStateStore = createClaudeStateStore();
+export const agentStateStore = createAgentStateStore();
+
+// Backward-compat aliases — existing consumers still import the old names; these
+// resolve to the renamed runtime-neutral store/types until they're migrated.
+export const claudeStateStore = agentStateStore;
+export type ClaudeState = AgentState;
+export type ClaudeTabSession = AgentTabSession;
+export type WorkspaceClaudeState = WorkspaceAgentState;

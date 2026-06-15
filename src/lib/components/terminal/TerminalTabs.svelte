@@ -11,7 +11,7 @@
   import { onVariablesChange, interpolateVariables } from '$lib/stores/triggers.svelte';
   import { isEditorDirty } from '$lib/stores/editorRegistry.svelte';
   import { getBridgeStatus } from '$lib/stores/sshMcpBridge.svelte';
-  import { claudeStateStore } from '$lib/stores/claudeState.svelte';
+  import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import { isImageFile, isPdfFile } from '$lib/utils/languageDetect';

@@ -4,7 +4,7 @@
   import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
-  import { claudeStateStore, type WorkspaceClaudeState } from '$lib/stores/claudeState.svelte';
+  import { claudeStateStore, type WorkspaceClaudeState } from '$lib/stores/agentState.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import * as commands from '$lib/tauri/commands';
   import { modSymbol } from '$lib/utils/platform';
