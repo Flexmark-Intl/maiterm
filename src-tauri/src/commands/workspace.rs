@@ -47,7 +47,9 @@ pub fn exit_app(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) {
     let port = *state.mcp_port.read();
     let auth = state.mcp_auth.read().clone().unwrap_or_default();
     if let Some(port) = port {
-        crate::claude_code::lockfile::delete_lockfile(port, &auth);
+        for r in crate::claude_code::registrar::all_registrars() {
+            r.unregister(port, &auth);
+        }
     }
 
     // Kill all SSH MCP tunnels

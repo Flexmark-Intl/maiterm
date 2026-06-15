@@ -20,8 +20,9 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 
-use super::lockfile::{cleanup_stale_lockfiles, ensure_mcp_settings, write_lockfile};
+use super::lockfile::cleanup_stale_lockfiles;
 use super::protocol::{initialize_response, tool_list_response, JsonRpcRequest, JsonRpcResponse};
+use super::registrar;
 use crate::state::AppState;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -75,8 +76,8 @@ pub struct ServerSetup {
 pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     cleanup_stale_lockfiles();
 
-    if !state.app_data.read().preferences.claude_ide {
-        log::info!("Claude Code IDE integration disabled in preferences");
+    if registrar::enabled_registrars(&state.app_data.read().preferences).is_empty() {
+        log::info!("No agent IDE integration enabled in preferences");
         return None;
     }
 
@@ -108,9 +109,11 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     *state.mcp_auth.write() = Some(auth.clone());
 
     let workspace_folders = collect_workspace_folders(state);
-    let hooks_enabled = state.app_data.read().preferences.claude_hooks;
-    if let Err(e) = write_lockfile(port, &auth, workspace_folders, hooks_enabled) {
-        log::warn!("Failed to write Claude Code lock file: {}", e);
+    // Snapshot prefs (clone) so no app_data lock is held during the registrars'
+    // filesystem I/O. workspace_folders is collected above to avoid a nested read.
+    let prefs = state.app_data.read().preferences.clone();
+    for r in registrar::enabled_registrars(&prefs) {
+        r.install(port, &auth, &workspace_folders, &prefs);
     }
 
     log::info!("Claude Code IDE server bound on http://127.0.0.1:{}", port);
@@ -144,14 +147,16 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
     // dead port until the next app restart. Runs until graceful shutdown.
     let reassert_port = setup.port;
     let reassert_auth = setup.auth.clone();
+    let reassert_state = state.clone();
     tauri::async_runtime::spawn(async move {
         let mut ticker = tokio::time::interval(MCP_REASSERT_INTERVAL);
         ticker.tick().await; // consume the immediate first tick
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    if let Err(e) = ensure_mcp_settings(reassert_port, &reassert_auth) {
-                        log::warn!("MCP settings re-assert failed: {}", e);
+                    let prefs = reassert_state.app_data.read().preferences.clone();
+                    for r in registrar::enabled_registrars(&prefs) {
+                        r.reassert_if_drifted(reassert_port, &reassert_auth);
                     }
                 }
                 res = reassert_shutdown.changed() => {
