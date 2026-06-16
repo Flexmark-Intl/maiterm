@@ -97,7 +97,9 @@ impl Registrar for CodexRegistrar {
         let shim_str = shim_path.to_string_lossy().to_string();
         match read_json(&hooks_path) {
             Ok(existing) => {
-                let merged = build_hooks_json(existing, &shim_str, auth);
+                // Local install: no baked port — the shim uses the per-process
+                // $AITERM_PORT (each tab spawned by the owning maiTerm instance).
+                let merged = build_hooks_json(existing, &shim_str, auth, None);
                 match serde_json::to_string_pretty(&merged) {
                     Ok(json) => {
                         if let Err(e) = atomic_write(&hooks_path, &json) {
@@ -274,10 +276,16 @@ fn maiterm_hook_entry(command: &str, matcher: Option<&str>) -> serde_json::Value
     group
 }
 
-/// The exact command maiTerm's hook runs: the absolute shim path + the auth token as $1.
+/// The exact command maiTerm's hook runs: the absolute shim path + the auth token as $1,
+/// and (for the SSH-remote install) the MCP port baked as $2 — the reverse-tunnel port
+/// is fixed for the bridge and authoritative even when the live shell lacks $AITERM_PORT.
+/// Local installs pass `None` so the shim uses the per-process env port (unchanged bytes).
 #[allow(dead_code)]
-fn hook_command(shim_path: &str, auth: &str) -> String {
-    format!("bash \"{}\" \"{}\"", shim_path, auth)
+fn hook_command(shim_path: &str, auth: &str, port: Option<u16>) -> String {
+    match port {
+        Some(p) => format!("bash \"{}\" \"{}\" \"{}\"", shim_path, auth, p),
+        None => format!("bash \"{}\" \"{}\"", shim_path, auth),
+    }
 }
 
 /// Merge maiTerm's command hooks into an existing (or absent) hooks.json value.
@@ -297,6 +305,7 @@ fn build_hooks_json(
     existing: Option<serde_json::Value>,
     shim_path: &str,
     auth: &str,
+    port: Option<u16>,
 ) -> serde_json::Value {
     // Start from the existing doc (preserve other top-level keys) or a fresh object.
     let mut root = match existing {
@@ -304,7 +313,7 @@ fn build_hooks_json(
         _ => serde_json::json!({}),
     };
 
-    let command = hook_command(shim_path, auth);
+    let command = hook_command(shim_path, auth, port);
 
     // Ensure root.hooks is an object.
     let root_obj = root.as_object_mut().expect("root is an object");
@@ -393,6 +402,37 @@ correct tab.\n",
     )
 }
 
+/// Placeholder the remote-Codex hooks.json carries for the shim path; the SSH setup
+/// script substitutes it with the remote's absolute `$HOME/.codex/hooks/agent-hook.sh`
+/// (resolved on the remote, so the literal path is robust regardless of how Codex
+/// invokes the hook command).
+pub const REMOTE_SHIM_PLACEHOLDER: &str = "__MAITERM_SHIM__";
+
+/// Render the remote-Codex artifacts as strings — NO filesystem writes. Reuses the
+/// SAME pure builders as the local `install()` so remote and local artifacts can't
+/// drift; only the port (the SSH reverse-tunnel port) and the shim path (a placeholder
+/// the remote setup script expands) differ. Returns
+/// `(config_toml_block, hooks_json_subtree, prompt_body)`:
+///   - `config_toml_block` is just our `[mcp_servers.<name>]` table (the remote setup
+///     script merges it into the host's existing `~/.codex/config.toml`);
+///   - `hooks_json_subtree` is our `{ "hooks": { … } }` (merged into `~/.codex/hooks.json`);
+///   - `prompt_body` is the `~/.codex/prompts/maiterm.md` reinforcement.
+pub fn render_codex_remote_artifacts(remote_port: u16, auth: &str) -> (String, String, String) {
+    let name = mcp_name();
+
+    let mut doc = DocumentMut::new();
+    put_codex_mcp_entry(&mut doc, name, remote_port, auth);
+    let config_block = doc.to_string();
+
+    // Bake the tunnel port as the shim's $2 so the remote hook routes correctly even
+    // when the live shell (tmux/sudo) lacks $AITERM_PORT.
+    let hooks = build_hooks_json(None, REMOTE_SHIM_PLACEHOLDER, auth, Some(remote_port));
+    let hooks_json = serde_json::to_string(&hooks).unwrap_or_else(|_| "{}".to_string());
+
+    let prompt = codex_prompt_body(name);
+    (config_block, hooks_json, prompt)
+}
+
 // ---------------------------------------------------------------------------
 // Small self-contained file helpers (home dir / atomic write / executable bit)
 // ---------------------------------------------------------------------------
@@ -458,7 +498,7 @@ mod tests {
     fn build_hooks_json_from_empty_produces_all_seven_events() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
         let auth = "TOKEN_ABC";
-        let v = build_hooks_json(None, shim, auth);
+        let v = build_hooks_json(None, shim, auth, None);
 
         let hooks = v.get("hooks").and_then(|h| h.as_object()).unwrap();
         assert_eq!(hooks.len(), CODEX_HOOK_EVENTS.len(), "all 7 events present");
@@ -485,10 +525,10 @@ mod tests {
     #[test]
     fn build_hooks_json_is_idempotent_and_updates_token() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
-        let first = build_hooks_json(None, shim, "OLD_TOKEN");
+        let first = build_hooks_json(None, shim, "OLD_TOKEN", None);
 
         // Re-run feeding its own output back in, with a NEW token.
-        let second = build_hooks_json(Some(first.clone()), shim, "NEW_TOKEN");
+        let second = build_hooks_json(Some(first.clone()), shim, "NEW_TOKEN", None);
 
         let hooks = second.get("hooks").and_then(|h| h.as_object()).unwrap();
         assert_eq!(hooks.len(), CODEX_HOOK_EVENTS.len());
@@ -515,7 +555,7 @@ mod tests {
             "someOtherTopLevel": { "keep": true }
         });
 
-        let v = build_hooks_json(Some(existing), shim, "TOK");
+        let v = build_hooks_json(Some(existing), shim, "TOK", None);
 
         // Top-level non-hooks key preserved.
         assert_eq!(v["someOtherTopLevel"]["keep"].as_bool(), Some(true));
@@ -536,7 +576,7 @@ mod tests {
     fn strip_maiterm_hooks_removes_only_ours_and_drops_empty_events() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
         // Build with ours, plus inject a user Stop hook.
-        let mut v = build_hooks_json(None, shim, "TOK");
+        let mut v = build_hooks_json(None, shim, "TOK", None);
         v["hooks"]["Stop"].as_array_mut().unwrap().push(serde_json::json!({
             "hooks": [{ "type": "command", "command": "echo user-stop", "timeout": 10 }]
         }));
@@ -550,6 +590,36 @@ mod tests {
         assert_eq!(stop.len(), 1);
         assert_eq!(count_maiterm_entries(&cleaned["hooks"]["Stop"]), 0, "no maiTerm entries left");
         assert_eq!(stop[0]["hooks"][0]["command"].as_str(), Some("echo user-stop"));
+    }
+
+    #[test]
+    fn hook_command_bakes_port_only_when_present() {
+        let shim = "/h/.codex/hooks/agent-hook.sh";
+        // Local form (no baked port) is byte-identical to the original 2-arg command.
+        assert_eq!(hook_command(shim, "TOK", None), format!("bash \"{}\" \"{}\"", shim, "TOK"));
+        // Remote form bakes the port as $2.
+        assert_eq!(
+            hook_command(shim, "TOK", Some(40123)),
+            format!("bash \"{}\" \"{}\" \"{}\"", shim, "TOK", 40123)
+        );
+    }
+
+    #[test]
+    fn render_codex_remote_artifacts_bakes_tunnel_port_and_placeholder() {
+        let (config_block, hooks_json, prompt) = render_codex_remote_artifacts(40123, "REMOTE_TOK");
+
+        // config.toml block: streamable-HTTP /mcp url + http_headers (NOT bearer_token).
+        assert!(config_block.contains("[mcp_servers."), "has table header:\n{}", config_block);
+        assert!(config_block.contains("http://127.0.0.1:40123/mcp"), "tunnel port in url");
+        assert!(config_block.contains("x-maiterm-authorization"), "auth via http_headers");
+        assert!(!config_block.contains("bearer_token"), "no bearer_token for streamable_http");
+
+        // hooks.json subtree: shim placeholder (expanded on the remote) + baked port $2.
+        assert!(hooks_json.contains(REMOTE_SHIM_PLACEHOLDER), "carries the shim placeholder");
+        assert!(hooks_json.contains("40123"), "bakes the tunnel port as the shim arg");
+        assert!(hooks_json.contains("REMOTE_TOK"), "carries the auth token");
+
+        assert!(prompt.contains("initSession"), "prompt reinforces initSession");
     }
 
     #[test]

@@ -280,7 +280,12 @@ function buildSetupScript(
  *   Leading space prevents the command from appearing in shell history.
  */
 export async function enableBridge(tabId: string, sshArgs: string, ptyId?: string): Promise<boolean> {
-  if (!preferencesStore.claudeCodeIde || !preferencesStore.claudeCodeIdeSsh) {
+  // Independent per-runtime gates: the tunnel + env injection are runtime-agnostic and
+  // run for either; the remote setup writes Claude artifacts only when claudeOn and
+  // Codex artifacts only when codexOn (so a Claude-only or Codex-only host both work).
+  const claudeOn = preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh;
+  const codexOn = preferencesStore.codexIde && preferencesStore.codexIdeSsh;
+  if (!claudeOn && !codexOn) {
     return false;
   }
 
@@ -308,13 +313,23 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
     const tunnelInfo = await commands.startSshTunnel(sshArgs, hostKey, tabId, localPort);
     logInfo(`SSH MCP bridge: tunnel to ${hostKey} on remote port ${tunnelInfo.remote_port}`);
 
-    // Kick off remote setup (lockfile + MCP entry + hooks + skill) in parallel
-    // with env-var injection below. The injection only needs remote_port, which
-    // we already have — awaiting setup first delays the export landing in the
-    // remote shell by ~0.5-2s, which collides with the user's first keystrokes.
-    const skillScripts = await commands.getMaitermSkillScripts();
-    const setupScript = buildSetupScript(tunnelInfo.remote_port, authToken, tabId, skillScripts);
-    const setupPromise = commands.sshRunSetup(sshArgs, setupScript);
+    // Kick off remote setup in parallel with env-var injection below. The injection
+    // only needs remote_port, which we already have — awaiting setup first delays the
+    // export landing in the remote shell by ~0.5-2s, which collides with the user's
+    // first keystrokes. Claude and Codex are SEPARATE background-SSH setups behind
+    // independent gates, so one failing can't break the other.
+    const setupPromises: Promise<void>[] = [];
+    if (claudeOn) {
+      const skillScripts = await commands.getMaitermSkillScripts();
+      const setupScript = buildSetupScript(tunnelInfo.remote_port, authToken, tabId, skillScripts);
+      setupPromises.push(commands.sshRunSetup(sshArgs, setupScript));
+    }
+    if (codexOn) {
+      // No-ops on a remote without the codex CLI. Reuses the local CodexRegistrar's
+      // renderers (config.toml + hooks.json + shim + prompt), pointed at the tunnel port.
+      const codexScript = await commands.buildCodexSetupScript(tunnelInfo.remote_port, authToken, tabId);
+      setupPromises.push(commands.sshRunSetup(sshArgs, codexScript));
+    }
 
     // Set trigger variables so auto-resume commands can interpolate them.
     // %aitermTabId, %aitermPort for individual values, %aitermExport for the full export command.
@@ -344,9 +359,9 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
       }
     }
 
-    // Wait for remote setup to finish before flipping to 'connected'.
-    // If setup failed, this throws and the outer catch marks the bridge as failed.
-    await setupPromise;
+    // Wait for remote setup(s) to finish before flipping to 'connected'.
+    // If any setup failed, this throws and the outer catch marks the bridge as failed.
+    await Promise.all(setupPromises);
 
     bridgeStates = new Map(bridgeStates.set(tabId, {
       hostKey,
@@ -427,6 +442,19 @@ export async function buildUserSetupScript(tabId: string): Promise<string | null
   const authToken = await commands.getMcpAuth();
   if (!authToken) return null;
 
-  const skillScripts = await commands.getMaitermSkillScripts();
-  return buildSetupScript(bridge.remotePort, authToken, tabId, skillScripts);
+  const claudeOn = preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh;
+  const codexOn = preferencesStore.codexIde && preferencesStore.codexIdeSsh;
+
+  // Concatenate the enabled runtimes' setup scripts (run in the user's shell after
+  // sudo/su). The Codex block is guarded by `if command -v codex` (not `exit`), so it
+  // is a safe no-op in the interactive shell when codex isn't installed for this user.
+  const parts: string[] = [];
+  if (claudeOn) {
+    const skillScripts = await commands.getMaitermSkillScripts();
+    parts.push(buildSetupScript(bridge.remotePort, authToken, tabId, skillScripts));
+  }
+  if (codexOn) {
+    parts.push(await commands.buildCodexSetupScript(bridge.remotePort, authToken, tabId));
+  }
+  return parts.length ? parts.join('\n') : null;
 }

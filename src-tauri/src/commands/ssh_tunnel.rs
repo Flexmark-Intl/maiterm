@@ -222,6 +222,111 @@ pub fn get_maiterm_skill_scripts() -> MaitermSkillScripts {
     }
 }
 
+/// python3 merge for `~/.codex/config.toml`: textual block-replace of our
+/// `[mcp_servers.<name>]` table (NO tomllib/tomli_w dependency — read-only/non-stdlib).
+/// Block on stdin, table name via `$__codex_name`. NO single quotes (shell wraps in `''`).
+const CODEX_TOML_MERGE_PY: &str = concat!(
+    "import os,sys,re\n",
+    "p=os.path.expanduser(\"~/.codex/config.toml\")\n",
+    "name=os.environ.get(\"__codex_name\",\"\")\n",
+    "block=sys.stdin.read()\n",
+    "try:\n src=open(p).read()\nexcept Exception:\n src=\"\"\n",
+    "lines=src.splitlines(True)\n",
+    "out=[]\ni=0\ntarget=\"[mcp_servers.\"+name+\"]\"\nhdr=re.compile(r\"^\\s*\\[\")\n",
+    "while i<len(lines):\n",
+    " if lines[i].strip()==target:\n",
+    "  i+=1\n",
+    "  while i<len(lines) and not hdr.match(lines[i]):\n   i+=1\n",
+    "  continue\n",
+    " out.append(lines[i])\n i+=1\n",
+    "base=\"\".join(out).rstrip()\n",
+    "res=(base+\"\\n\\n\"+block.strip()+\"\\n\") if base else (block.strip()+\"\\n\")\n",
+    "open(p,\"w\").write(res)\n",
+);
+
+/// python3 merge for `~/.codex/hooks.json`: replace the shim placeholder with the
+/// remote's absolute path, then replace-or-append OUR entries per event (matched by
+/// `agent-hook.sh`), preserving user hooks and other top-level keys. Ours on stdin,
+/// absolute shim path via `$MAITERM_SHIM`. NO single quotes.
+const CODEX_HOOKS_MERGE_PY: &str = concat!(
+    "import os,sys,json\n",
+    "p=os.path.expanduser(\"~/.codex/hooks.json\")\n",
+    "shim=os.environ.get(\"MAITERM_SHIM\",\"\")\n",
+    "ours=json.loads(sys.stdin.read().replace(\"__MAITERM_SHIM__\",shim))\n",
+    "try:\n cur=json.load(open(p))\nexcept Exception:\n cur={}\n",
+    "if not isinstance(cur,dict):\n cur={}\n",
+    "ch=cur.get(\"hooks\")\n",
+    "if not isinstance(ch,dict):\n ch={}\n cur[\"hooks\"]=ch\n",
+    "def isours(e):\n",
+    " for h in e.get(\"hooks\",[]):\n",
+    "  if \"agent-hook.sh\" in (h.get(\"command\") or \"\"):\n   return True\n",
+    " return False\n",
+    "for ev,entries in ours.get(\"hooks\",{}).items():\n",
+    " keep=[e for e in ch.get(ev,[]) if not isours(e)]\n",
+    " keep.extend(entries)\n",
+    " ch[ev]=keep\n",
+    "open(p,\"w\").write(json.dumps(cur,indent=2))\n",
+);
+
+/// Build the shell script that installs maiTerm's Codex integration on a REMOTE host
+/// over the SSH reverse tunnel, mirroring the local `CodexRegistrar` by reusing the SAME
+/// Rust renderers (`render_codex_remote_artifacts`) so remote and local artifacts can't
+/// drift. Writes `~/.codex/config.toml` (`[mcp_servers.<name>]` → the tunnel port via the
+/// streamable-HTTP `/mcp` endpoint + `http_headers` auth), the executable hook shim, a
+/// merged `~/.codex/hooks.json` (user hooks preserved), and the prompt. The whole body
+/// no-ops on hosts without the `codex` CLI. Run it via `ssh_run_setup` (background SSH,
+/// NOT the interactive PTY). `tab_id` reaches the shim through the env / `~/.aiterm` file
+/// the Claude setup block already writes — identical to how remote Claude resolves it.
+#[tauri::command]
+pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String) -> String {
+    let _ = tab_id; // resolved on the remote via env / ~/.aiterm, like Claude's hooks
+
+    let (config_block, hooks_json, prompt) =
+        crate::claude_code::codex::render_codex_remote_artifacts(remote_port, &auth);
+    let name = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Codex);
+    let shim = crate::claude_code::lockfile::AGENT_HOOK_SHIM;
+
+    // Single-quote shell-var payloads (escape embedded single quotes the POSIX way).
+    let q = |s: &str| s.replace('\'', "'\\''");
+
+    let toml_py = CODEX_TOML_MERGE_PY;
+    let hooks_py = CODEX_HOOKS_MERGE_PY;
+
+    let mut lines: Vec<String> = Vec::new();
+    // No-op cleanly on hosts without the Codex CLI. Use if/then/fi (NOT `|| exit`):
+    // this script is also written into the INTERACTIVE PTY by the "Install MCP for
+    // Current User" path, where `exit` would close the user's shell.
+    lines.push("if command -v codex >/dev/null 2>&1; then".to_string());
+    lines.push("mkdir -p ~/.codex/hooks ~/.codex/prompts".to_string());
+    lines.push("shim_abs=\"$HOME/.codex/hooks/agent-hook.sh\"".to_string());
+    // Hook shim — literal bytes via a quoted heredoc (no expansion of $1/$HOME/etc).
+    lines.push("cat > \"$shim_abs\" <<'MAITERM_CODEX_SHIM_EOF'".to_string());
+    lines.push(shim.trim_end().to_string());
+    lines.push("MAITERM_CODEX_SHIM_EOF".to_string());
+    lines.push("chmod 755 \"$shim_abs\"".to_string());
+    // Prompt.
+    lines.push("cat > ~/.codex/prompts/maiterm.md <<'MAITERM_CODEX_PROMPT_EOF'".to_string());
+    lines.push(prompt.trim_end().to_string());
+    lines.push("MAITERM_CODEX_PROMPT_EOF".to_string());
+    // config.toml merge (block on stdin, name via env).
+    lines.push(format!("__codex_toml='{}'", q(&config_block)));
+    lines.push(
+        format!("printf '%s' \"$__codex_toml\" | __codex_name='{}' python3 -c '", q(name))
+            + toml_py
+            + "'",
+    );
+    // hooks.json merge (ours on stdin, abs shim path via env).
+    lines.push(format!("__codex_hooks='{}'", q(&hooks_json)));
+    lines.push(
+        "printf '%s' \"$__codex_hooks\" | MAITERM_SHIM=\"$shim_abs\" python3 -c '".to_string()
+            + hooks_py
+            + "'",
+    );
+    lines.push("fi".to_string());
+
+    lines.join("\n")
+}
+
 /// Run setup commands on a remote host via a separate background SSH connection.
 /// This avoids injecting commands into the user's interactive PTY.
 /// Spawns `ssh {ssh_args} 'setup_script'` and waits for completion.
@@ -368,4 +473,56 @@ fn kill_process(pid: u32) {
     let _ = std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])
         .output();
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// Pipe `input` to `program -c <stdin-reader>` and return whether it exited 0.
+    fn pipe_ok(program: &str, args: &[&str], input: &str) -> (bool, String) {
+        let mut child = match Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            // If the validator binary isn't installed on this machine, don't fail CI.
+            Err(_) => return (true, format!("{} not available — skipped", program)),
+        };
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
+    #[test]
+    fn codex_setup_script_is_valid_bash() {
+        let script = build_codex_setup_script(40123, "TESTTOKEN123".to_string(), "tab-abc".to_string());
+        // bash -n parses (heredocs, pipes, if/fi, single-quoted python -c, multiline vars)
+        // without executing — catches the quoting/heredoc hazards before the live test.
+        let (ok, stderr) = pipe_ok("bash", &["-n"], &script);
+        assert!(ok, "bash -n rejected the generated script:\n{}\n--- stderr ---\n{}", script, stderr);
+
+        // Spot-check the load-bearing pieces are present and pointed at the tunnel port.
+        assert!(script.contains("if command -v codex >/dev/null 2>&1; then"));
+        assert!(script.contains("fi"));
+        assert!(script.contains("http://127.0.0.1:40123/mcp"), "config url uses tunnel port");
+        assert!(script.contains("agent-hook.sh"), "shim written");
+        assert!(script.contains("chmod 755"), "shim made executable");
+        assert!(script.contains("python3 -c '"), "merges via python3 -c");
+    }
+
+    #[test]
+    fn codex_merge_python_snippets_compile() {
+        // Compile-check (no execution / side effects) both embedded python merges.
+        let check = "import sys; compile(sys.stdin.read(), \"<embedded>\", \"exec\")";
+        let (ok1, e1) = pipe_ok("python3", &["-c", check], CODEX_TOML_MERGE_PY);
+        assert!(ok1, "config.toml merge python does not compile:\n{}", e1);
+        let (ok2, e2) = pipe_ok("python3", &["-c", check], CODEX_HOOKS_MERGE_PY);
+        assert!(ok2, "hooks.json merge python does not compile:\n{}", e2);
+    }
 }
