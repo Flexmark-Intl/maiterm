@@ -800,20 +800,20 @@ pub struct Preferences {
     /// Enable hooks-based auto-resume (initSession sets session ID, auto-configures resume).
     #[serde(default = "default_true", alias = "claude_code_auto_resume")]
     pub claude_auto_resume: bool,
-    /// Enable the Codex IDE/MCP integration (opt-in; writes ~/.codex/config.toml).
-    #[serde(default)]
+    /// Enable the Codex IDE/MCP integration (writes ~/.codex/config.toml). Default on.
+    #[serde(default = "default_true")]
     pub codex_ide: bool,
-    /// Enable the Codex MCP bridge over SSH.
-    #[serde(default)]
+    /// Enable the Codex MCP bridge over SSH. Default on (mirrors claude_ide_ssh).
+    #[serde(default = "default_true")]
     pub codex_ide_ssh: bool,
-    /// Enable Codex lifecycle hooks (command hooks in ~/.codex/hooks.json).
-    #[serde(default)]
+    /// Enable Codex lifecycle hooks (command hooks in ~/.codex/hooks.json). Default on.
+    #[serde(default = "default_true")]
     pub codex_hooks: bool,
-    /// Enable Codex hooks-based auto-resume.
-    #[serde(default)]
+    /// Enable Codex hooks-based auto-resume. Default on.
+    #[serde(default = "default_true")]
     pub codex_auto_resume: bool,
-    /// Pass --dangerously-bypass-hook-trust style handling / suppress the one-time
-    /// Codex hook-trust prompt friction (advanced; default off).
+    /// Suppress the one-time Codex hook-trust prompt friction (advanced; default OFF —
+    /// the trust prompt is a one-time interactive approval we deliberately keep).
     #[serde(default)]
     pub codex_hooks_bypass_trust: bool,
     /// Default open state for the composer dock on tabs that haven't been explicitly toggled.
@@ -915,10 +915,10 @@ impl Default for Preferences {
             claude_ide_ssh: true,
             claude_hooks: true,
             claude_auto_resume: true,
-            codex_ide: false,
-            codex_ide_ssh: false,
-            codex_hooks: false,
-            codex_auto_resume: false,
+            codex_ide: true,
+            codex_ide_ssh: true,
+            codex_hooks: true,
+            codex_auto_resume: true,
             codex_hooks_bypass_trust: false,
             composer_default_open: true,
             windows_shell: default_windows_shell(),
@@ -1115,16 +1115,19 @@ mod pref_migration_tests {
         assert!(!updated.claude_ide);
     }
 
-    /// Codex integration is opt-in: every codex_* key must default OFF so upgrading
-    /// users never get a surprise ~/.codex write. Defaults and absent-key deserialize
-    /// (empty `{}`) must both yield all-false.
+    /// Codex integration is on by default (parity with Claude) — EXCEPT the one-time
+    /// hook-trust bypass, which stays off so the trust prompt is preserved. Both the
+    /// Default impl and absent-key deserialize (empty `{}`, i.e. upgrading users) must
+    /// agree on this policy.
     #[test]
-    fn codex_keys_default_off() {
+    fn codex_keys_default_on_except_trust_bypass() {
         let p = Preferences::default();
-        assert!(!p.codex_ide && !p.codex_hooks && !p.codex_ide_ssh && !p.codex_auto_resume && !p.codex_hooks_bypass_trust);
+        assert!(p.codex_ide && p.codex_hooks && p.codex_ide_ssh && p.codex_auto_resume);
+        assert!(!p.codex_hooks_bypass_trust, "hook-trust bypass stays off");
 
-        // Deserializing an empty object (no codex_* keys present) also yields all-false.
+        // Deserializing an empty object (no codex_* keys present) yields the same policy.
         let empty: Preferences = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!empty.codex_ide && !empty.codex_hooks && !empty.codex_ide_ssh && !empty.codex_auto_resume && !empty.codex_hooks_bypass_trust);
+        assert!(empty.codex_ide && empty.codex_hooks && empty.codex_ide_ssh && empty.codex_auto_resume);
+        assert!(!empty.codex_hooks_bypass_trust);
     }
 }
