@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.17.1
+
+- Fix agent prompts not submitting on large or multi-line pastes, image sends, and long agent-to-agent bridge replies. Claude Code and Codex collapse a big paste into a `[Pasted text #N]` / `[Image #N]` chip via async processing, and a submit keystroke arriving before that settled was swallowed — the prompt would stage in the input but never send. The composer and the Agent Bridge now share one paste→settle→submit sequence with a payload-scaled delay, so short typed lines still send instantly while large payloads wait just long enough.
+- Add a search box to the archived-tabs dropdown, matching the hidden-tabs dropdown — an auto-focused field that filters archived tabs by name as you type.
+
 ## v1.17.0
 
 - **Codex support — run OpenAI's Codex CLI as a first-class agent.** maiTerm's deep agent integration is no longer Claude-only. Codex now gets the same treatment: live state in the sidebar and footer (working / waiting / finished), tab activity indicators, auto-resume after a crash or relaunch, Agent Bridge pairing, and notifications — all driven through the same hooks pipeline that powers Claude Code. On SSH hosts, maiTerm installs and configures remote Codex over the bridge just as it does for Claude, and it works without a manual `/maiterm init` because the runtime is detected from the hook path. Codex integration is on by default; it only takes effect once you actually run Codex.
