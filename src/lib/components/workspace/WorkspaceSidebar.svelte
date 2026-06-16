@@ -1023,21 +1023,24 @@
   }
 
   .footer-agent-slot {
-    width: 16px;
+    width: 24px;
     height: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
-  /* Each occupied slot is a bare dot with a comfortable click target. */
+  /* Each occupied slot is a bare dot whose click target fills the whole 24px
+     slot (matching the toolbar icon buttons). Fixed size, not 100% — the
+     Tooltip wrapper is inline-flex and would otherwise collapse the button to
+     the dot's 6px. The wrapper shrink-wraps the button, so it grows to 24px. */
   .footer-agent-dot {
     display: flex;
     align-items: center;
     justify-content: center;
     box-sizing: border-box;
-    width: 100%;
-    height: 100%;
+    width: 24px;
+    height: 24px;
     background: none;
     border: none;
     margin: 0;
