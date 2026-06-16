@@ -5,6 +5,7 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
+import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -45,7 +46,6 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
  * breaking, and a closed tab tears the bridge down cleanly.
  */
 
-const INJECT_GAP_MS = 120;           // gap between bracketed-paste and the submitting CR
 const INJECT_COOLDOWN_MS = 1000;     // post-injection cooldown: serialize injects + let the TUI register the input
 const DRAIN_TICK_MS = 1500;          // queue-drain backstop: re-attempt queued delivery while held
 const FORK_BOOT_POLL_MS = 500;       // poll interval while waiting for the fork's Claude to register
@@ -83,7 +83,6 @@ interface DeliveryState {
   busyTimer?: ReturnType<typeof setTimeout>;
 }
 
-const enc = (s: string) => Array.from(new TextEncoder().encode(s));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function createAgentBridgeStore() {
@@ -160,7 +159,10 @@ function createAgentBridgeStore() {
 
   /** Write a prompt into a tab's PTY as a bracketed paste, then submit with CR.
    *  Bracketed paste keeps multi-line content as one prompt (newlines don't submit
-   *  early); the deferred CR submits it. */
+   *  early); the deferred, settle-scaled CR submits it. Shares bracketedPasteSubmit
+   *  with the composer dock so the submit timing can't drift apart — a too-short gap
+   *  here was dropping the CR on long replies (a 20-line message stages as
+   *  `[Pasted text]` but never sends). */
   async function injectPrompt(tabId: string, text: string): Promise<boolean> {
     const inst = terminalsStore.get(tabId);
     if (!inst) {
@@ -168,9 +170,7 @@ function createAgentBridgeStore() {
       return false;
     }
     try {
-      await commands.writeTerminal(inst.ptyId, enc(`\x1b[200~${text}\x1b[201~`));
-      await sleep(INJECT_GAP_MS);
-      await commands.writeTerminal(inst.ptyId, enc('\r'));
+      await bracketedPasteSubmit(inst.ptyId, text);
       return true;
     } catch (e) {
       logError(`agentBridge: inject failed for tab ${tabId.slice(0, 8)}: ${e}`);

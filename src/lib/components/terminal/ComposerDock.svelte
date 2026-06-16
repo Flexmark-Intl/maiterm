@@ -14,6 +14,7 @@
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { writeTerminal, terminalBracketedPaste, readClipboardFilePaths, saveClipboardImage, getPtyInfo } from '$lib/tauri/commands';
   import { uploadWithProgress } from '$lib/utils/scpUpload';
+  import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
   import { isModKey, modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -279,7 +280,7 @@
 
   async function send() {
     if (sending) return;
-    const text = value.replace(/\n+$/, '');
+    const text = value.replace(/\s+$/, '');
     if (!text && attachments.length === 0) return;
     const instance = terminalsStore.get(tabId);
     if (!instance) {
@@ -302,22 +303,17 @@
       // would arrive as garbage input — send raw with CR line breaks instead,
       // which executes line-by-line, the natural semantics for such shells.
       const bracketed = await terminalBracketedPaste(instance.ptyId).catch(() => false);
-      const enc = (s: string) => Array.from(new TextEncoder().encode(s));
-      if (bracketed && attachmentCount > 0) {
-        // Claude Code reads image file paths out of a paste and loads them
-        // asynchronously to build [Image #N] attachments. A CR packed into the
-        // same write lands in the same PTY read — before that load settles — and
-        // gets swallowed, leaving the prompt populated but unsent. So close the
-        // paste, give it a beat to settle (longer when more files must be read),
-        // then send the submit CR as its own keystroke.
-        await writeTerminal(instance.ptyId, enc(`\x1b[200~${full}\x1b[201~`));
-        await new Promise((r) => setTimeout(r, Math.min(900, 200 + attachmentCount * 180)));
-        await writeTerminal(instance.ptyId, enc('\r'));
+      if (bracketed) {
+        // Submit via bracketed paste with a settle-delayed CR sent as its own
+        // keystroke — see bracketedPasteSubmit for why a CR packed into the same
+        // write gets swallowed when Claude collapses the paste into a chip.
+        await bracketedPasteSubmit(instance.ptyId, full, attachmentCount);
       } else {
-        const payload = bracketed
-          ? `\x1b[200~${full}\x1b[201~\r`
-          : `${full.replace(/\n/g, '\r')}\r`;
-        await writeTerminal(instance.ptyId, enc(payload));
+        // Old shells (macOS bash 3.2): the markers would arrive as garbage; send
+        // raw with CR line breaks, which executes line-by-line — the natural
+        // semantics there.
+        const enc = (s: string) => Array.from(new TextEncoder().encode(s));
+        await writeTerminal(instance.ptyId, enc(`${full.replace(/\n/g, '\r')}\r`));
       }
       value = '';
       setAttachments([]);
