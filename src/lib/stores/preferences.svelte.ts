@@ -436,22 +436,27 @@ function createPreferencesStore() {
     async setCodexIde(value: boolean) {
       codexIde = value;
       await this.save();
+      await commands.refreshAgentIntegrations();
     },
     async setCodexIdeSsh(value: boolean) {
       codexIdeSsh = value;
       await this.save();
+      await commands.refreshAgentIntegrations();
     },
     async setCodexHooks(value: boolean) {
       codexHooks = value;
       await this.save();
+      await commands.refreshAgentIntegrations();
     },
     async setCodexAutoResume(value: boolean) {
       codexAutoResume = value;
       await this.save();
+      await commands.refreshAgentIntegrations();
     },
     async setCodexHooksBypassTrust(value: boolean) {
       codexHooksBypassTrust = value;
       await this.save();
+      await commands.refreshAgentIntegrations();
     },
     async setComposerDefaultOpen(value: boolean) {
       composerDefaultOpen = value;

@@ -35,3 +35,31 @@ pub fn claude_code_notify_selection(
         Ok(())
     }
 }
+
+/// Re-apply on-disk integration for non-Claude runtimes after a preference toggle.
+/// Claude is managed at startup + by the re-assert timer, so it's skipped here. Each
+/// enabled runtime is (idempotently) installed and each disabled one unregistered, using
+/// the live MCP port/auth. No-op when the MCP server isn't up yet. Lets a user enable
+/// Codex from Preferences and have ~/.codex configured immediately, without a restart.
+#[tauri::command]
+pub fn refresh_agent_integrations(state: State<'_, Arc<AppState>>) {
+    let port = match *state.mcp_port.read() {
+        Some(p) => p,
+        None => return,
+    };
+    let auth = state.mcp_auth.read().clone().unwrap_or_default();
+    if auth.is_empty() {
+        return;
+    }
+    let prefs = state.app_data.read().preferences.clone();
+    for r in crate::claude_code::registrar::all_registrars() {
+        if r.runtime() == crate::state::AgentRuntime::Claude {
+            continue;
+        }
+        if r.enabled(&prefs) {
+            r.install(port, &auth, &[], &prefs);
+        } else {
+            r.unregister(port, &auth);
+        }
+    }
+}

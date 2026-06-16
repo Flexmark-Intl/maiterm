@@ -347,6 +347,13 @@ export async function setPreferences(preferences: Preferences): Promise<void> {
   return invoke('set_preferences', { preferences });
 }
 
+/** Re-apply on-disk integration for non-Claude runtimes (install/unregister) after a
+ *  preference toggle, using the live MCP port/auth — so enabling Codex configures
+ *  ~/.codex immediately without a restart. */
+export async function refreshAgentIntegrations(): Promise<void> {
+  return invoke('refresh_agent_integrations');
+}
+
 export async function copyTabHistory(sourceTabId: string, destTabId: string): Promise<void> {
   return invoke('copy_tab_history', { sourceTabId, destTabId });
 }

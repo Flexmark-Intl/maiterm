@@ -503,6 +503,7 @@ pub fn run() {
             commands::editor::ssh_list_files,
             commands::claude_code::claude_code_respond,
             commands::claude_code::claude_code_notify_selection,
+            commands::claude_code::refresh_agent_integrations,
             commands::ssh_tunnel::start_ssh_tunnel,
             commands::ssh_tunnel::detach_ssh_tunnel,
             commands::ssh_tunnel::get_ssh_tunnel,
