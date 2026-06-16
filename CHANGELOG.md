@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.17.0
+
+- **Codex support — run OpenAI's Codex CLI as a first-class agent.** maiTerm's deep agent integration is no longer Claude-only. Codex now gets the same treatment: live state in the sidebar and footer (working / waiting / finished), tab activity indicators, auto-resume after a crash or relaunch, Agent Bridge pairing, and notifications — all driven through the same hooks pipeline that powers Claude Code. On SSH hosts, maiTerm installs and configures remote Codex over the bridge just as it does for Claude, and it works without a manual `/maiterm init` because the runtime is detected from the hook path. Codex integration is on by default; it only takes effect once you actually run Codex.
+- **New "AI Agents" preferences section.** Agent settings are consolidated into one runtime-neutral section where you choose which agents — Claude Code, Codex — maiTerm integrates with locally and over SSH. Toggling an agent on or off installs or removes its integration immediately, no restart required. The Agent Bridge picker is now runtime-neutral, so you can pair any two supported agents.
+- **Auto-resume is now runtime-aware.** The auto-resume modal preselects the right resume command for whichever agent is running and hides itself when the tab has no agent. The standalone "Auto-resume + Claude" setup-guide modal has been removed in favor of this.
+- Fix wide emoji and CJK glyphs rendering as half-glyphs. The terminal now uses Unicode 11 character widths, so two-cell characters occupy the correct number of columns.
+- Always surface `.env` files in Quick Open, with a clearer show/hide toggle.
+- Context menus now clamp inside the window and scroll when taller than the available space, so items never spill off-screen.
+- Fix the footer agent dots' click target collapsing to the size of the dot — the full indicator is clickable again.
+
 ## v1.16.1
 
 - **Agent activity shows as three footer dots.** The sidebar's agent indicator was a single dot that only showed the highest-priority state, so a waiting agent could mask others that were still working or already finished. It's now up to three independent dots — working (blue), waiting (red), finished (green) — each clickable to cycle through every agent in that state. The sidebar is a touch wider (215px) to fit them while keeping workspace names readable; narrower saved widths snap up automatically.
