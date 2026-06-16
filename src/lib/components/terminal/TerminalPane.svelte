@@ -114,7 +114,6 @@
   // Inline prompt for auto-resume command
   let autoResumePrompt = $state<{ cwd: string | null; sshCmd: string | null; remoteCwd: string | null; pinned: boolean } | null>(null);
   let autoResumePromptValue = $state('');
-  let claudeSetupModal = $state(false);
   let autoResumeTextarea = $state<{ focus: () => void } | undefined>();
   let autoResumeHeightBeforeMouse = 0;
   let sessionIdCopied = $state(false);
@@ -1670,10 +1669,6 @@
             }
           },
         },
-        {
-          label: 'Auto-resume + Claude\u2026',
-          action: () => { claudeSetupModal = true; },
-        },
       ]),
       { label: '', separator: true, action: () => {} },
       ...(agentBridgeStore.isBridged(tabId) ? [
@@ -1867,45 +1862,6 @@
       </div>
     </div>
   </div>
-  {/if}
-  {#if claudeSetupModal}
-    <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -- backdrop dismiss on click; keyboard handled via Escape -->
-    <div class="claude-setup-backdrop" onclick={() => { claudeSetupModal = false; }} onkeydown={(e) => { if (e.key === 'Escape') claudeSetupModal = false; }}>
-      <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -- modal body stops click propagation to prevent backdrop dismiss; Escape key handled on backdrop -->
-      <div class="claude-setup-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-        <h3 class="claude-setup-title">Auto-resume + Claude</h3>
-        <div class="claude-setup-body">
-          <p>Automatically resume your Claude Code session when the terminal restarts.</p>
-          <h4>This will:</h4>
-          <ul>
-            <li>Enable the <strong>Claude Resume</strong> trigger &mdash; captures the <code>claude --resume</code> command when Claude exits</li>
-            <li>Enable the <strong>Claude Session ID</strong> trigger &mdash; captures the session UUID from <code>/status</code></li>
-            <li>Set an <strong>auto-resume command</strong> on this tab &mdash; resumes by session ID, falls back to the resume command, or starts <code>claude --continue</code></li>
-          </ul>
-          <h4>How it works:</h4>
-          <ol>
-            <li>Run Claude Code in this tab as usual</li>
-            <li>When Claude exits or you run <code>/status</code>, the triggers capture the session ID</li>
-            <li>If the terminal restarts (app relaunch, SSH reconnect), the auto-resume script uses the captured ID to reconnect to the same session</li>
-          </ol>
-          <p class="claude-setup-note">Triggers are global (configurable in Preferences &gt; Triggers) &mdash; they'll capture Claude session info in any tab. The auto-resume command is specific to this tab.</p>
-        </div>
-        <div class="claude-setup-actions">
-          <Button variant="secondary" onclick={() => { claudeSetupModal = false; }} style="padding:6px 18px;border-radius:4px;font-size: 1rem;font-weight:500">Cancel</Button>
-          <Button variant="primary" onclick={async () => {
-            try {
-              const ctx = await gatherAutoResumeContext();
-              const sshCmd = ctx.sshCmd ? normalizeSshInput(ctx.sshCmd) : null;
-              await workspacesStore.setTabAutoResumeContext(workspaceId, paneId, tabId, ctx.cwd, sshCmd, ctx.remoteCwd, getResumeCommand(workspacesStore.getTabRuntime(tabId)));
-              isAutoResume = true;
-            } catch (e) {
-              logError(`Auto-resume + Claude setup failed: ${e}`);
-            }
-            claudeSetupModal = false;
-          }} style="padding:6px 18px;border-radius:4px;font-size: 1rem;font-weight:500">Activate</Button>
-        </div>
-      </div>
-    </div>
   {/if}
   {#if claudeStateStore.getState(tabId)?.toolName}
     {@const cs = claudeStateStore.getState(tabId)!}
@@ -2251,84 +2207,6 @@
   .auto-resume-presets-label {
     font-size: 0.846rem;
     color: var(--fg-dim);
-  }
-
-  .claude-setup-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-  }
-
-  .claude-setup-modal {
-    background: var(--bg-medium);
-    border: 1px solid var(--bg-light);
-    border-radius: 8px;
-    padding: 20px 24px;
-    max-width: 480px;
-    width: 90%;
-    max-height: 80vh;
-    overflow-y: auto;
-  }
-
-  .claude-setup-title {
-    font-size: 1.154rem;
-    font-weight: 600;
-    color: var(--fg);
-    margin: 0 0 12px 0;
-  }
-
-  .claude-setup-body {
-    font-size: 1rem;
-    color: var(--fg);
-    line-height: 1.5;
-  }
-
-  .claude-setup-body p {
-    margin: 0 0 10px 0;
-  }
-
-  .claude-setup-body h4 {
-    font-size: 0.923rem;
-    font-weight: 600;
-    color: var(--fg-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin: 14px 0 6px 0;
-  }
-
-  .claude-setup-body ul,
-  .claude-setup-body ol {
-    margin: 0 0 10px 0;
-    padding-left: 20px;
-  }
-
-  .claude-setup-body li {
-    margin-bottom: 4px;
-  }
-
-  .claude-setup-body code {
-    background: var(--bg-dark);
-    padding: 1px 4px;
-    border-radius: 3px;
-    font-size: 0.923rem;
-    font-family: 'Menlo', Monaco, monospace;
-  }
-
-  .claude-setup-note {
-    font-size: 0.923rem;
-    color: var(--fg-dim);
-    font-style: italic;
-  }
-
-  .claude-setup-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 16px;
   }
 
 </style>
