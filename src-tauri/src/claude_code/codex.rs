@@ -230,7 +230,14 @@ fn put_codex_mcp_entry(doc: &mut DocumentMut, name: &str, port: u16, auth: &str)
         .as_table_mut()
         .expect("mcp_servers.<name> is a standard table");
     entry["url"] = toml_edit::value(format!("http://127.0.0.1:{}/mcp", port));
-    entry["bearer_token"] = toml_edit::value(auth);
+    // Codex rejects `bearer_token` for streamable_http servers ("bearer_token is not
+    // supported for streamable_http"), so pass the auth via http_headers instead — our
+    // server's extract_auth accepts the x-maiterm-authorization header (raw token).
+    let mut headers = toml_edit::InlineTable::new();
+    headers.insert("x-maiterm-authorization", toml_edit::Value::from(auth));
+    entry["http_headers"] = toml_edit::value(headers);
+    // Drop any stale bearer_token from a previous (rejected) format.
+    entry.remove("bearer_token");
 }
 
 /// Remove `[mcp_servers.<name>]` from the document. Returns true if anything changed.
@@ -557,7 +564,11 @@ mod tests {
             doc["mcp_servers"][name]["url"].as_str(),
             Some("http://127.0.0.1:51234/mcp")
         );
-        assert_eq!(doc["mcp_servers"][name]["bearer_token"].as_str(), Some("AUTHXYZ"));
+        // Auth goes via http_headers (Codex rejects bearer_token for streamable_http).
+        assert!(rendered.contains("http_headers"), "http_headers present:\n{}", rendered);
+        assert!(rendered.contains("x-maiterm-authorization"), "auth header present:\n{}", rendered);
+        assert!(rendered.contains("AUTHXYZ"), "token present:\n{}", rendered);
+        assert!(!rendered.contains("bearer_token"), "no bearer_token in our entry:\n{}", rendered);
     }
 
     #[test]
@@ -581,9 +592,10 @@ bearer_token = \"keepme\"
         // User's unrelated mcp server survives.
         assert_eq!(doc["mcp_servers"]["other"]["bearer_token"].as_str(), Some("keepme"));
         assert_eq!(doc["mcp_servers"]["other"]["url"].as_str(), Some("http://localhost:9999/mcp"));
-        // Ours added alongside it.
+        // Ours added alongside it, auth via http_headers (no bearer_token of our own).
         assert_eq!(doc["mcp_servers"][name]["url"].as_str(), Some("http://127.0.0.1:7000/mcp"));
-        assert_eq!(doc["mcp_servers"][name]["bearer_token"].as_str(), Some("NEWTOK"));
+        assert!(out.contains("x-maiterm-authorization"), "our auth header present:\n{}", out);
+        assert!(out.contains("NEWTOK"), "our token present:\n{}", out);
     }
 
     #[test]
@@ -596,7 +608,8 @@ bearer_token = \"keepme\"
         let changed = remove_codex_mcp_entry(&mut doc, name);
         assert!(changed);
         assert!(doc["mcp_servers"].get(name).is_none(), "our table removed");
-        assert_eq!(doc["mcp_servers"]["other"]["bearer_token"].as_str(), Some("OTHERTOK"), "other survives");
+        assert_eq!(doc["mcp_servers"]["other"]["url"].as_str(), Some("http://127.0.0.1:8000/mcp"), "other survives");
+        assert!(doc.to_string().contains("OTHERTOK"), "other's token survives");
 
         // Removing again is a no-op (returns false).
         assert!(!remove_codex_mcp_entry(&mut doc, name));
