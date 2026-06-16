@@ -562,7 +562,12 @@
               // (Confirming no foreground command also rules out a *remote*
               // shell's OSC 133 D;255 while ssh is still running.)
               const wasSsh = !!sshForeground;
-              if (claudeStateStore.getState(tabId)) {
+              // Only Claude clears its dot on shell-prompt return. Non-Claude
+              // runtimes (Codex/Gemini) emit their OWN OSC 133 from their TUI, so
+              // prompt-return is ambiguous and would clear a live agent mid-turn —
+              // their dormancy is handled deterministically by the backend reaper.
+              const agentSess = claudeStateStore.getState(tabId);
+              if (agentSess && agentSess.runtime === 'claude') {
                 claudeStateStore.clearSession(tabId);
               }
               if (hasBridge(tabId)) {

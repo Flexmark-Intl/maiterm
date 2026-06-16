@@ -812,6 +812,73 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
     }
 }
 
+/// Whether an agent CLI (one of `proc_names`, matched by argv0/comm basename) is
+/// alive anywhere in the descendant process tree rooted at `shell_pid`.
+///
+/// The dormancy reaper uses this to distinguish "the agent CLI is still running in
+/// this tab's shell" from "the agent exited and the dot should clear". Walking the
+/// whole descendant tree (not just the tty foreground leader) keeps a backgrounded
+/// (Ctrl-Z) or tool-spawning agent from being mistaken for gone. Cross-platform —
+/// reuses the same `sysinfo` parent→children idiom as `get_foreground_command`.
+pub fn agent_process_alive(shell_pid: u32, proc_names: &[&str]) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    if proc_names.is_empty() {
+        return false;
+    }
+
+    let mut sys = System::new();
+    let refresh = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+
+    let basename_lower = |s: &str| -> String {
+        std::path::Path::new(s)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(s)
+            .to_ascii_lowercase()
+    };
+
+    // Build parent → children adjacency and mark which pids are the agent binary
+    // (argv0 or comm basename matches). Same refresh/idiom as get_foreground_command.
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut is_agent: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
+    for (pid, process) in sys.processes() {
+        let pid = pid.as_u32();
+        if let Some(ppid) = process.parent() {
+            children.entry(ppid.as_u32()).or_default().push(pid);
+        }
+        let name = basename_lower(&process.name().to_string_lossy());
+        let argv0 = process
+            .cmd()
+            .first()
+            .map(|s| basename_lower(&s.to_string_lossy()))
+            .unwrap_or_default();
+        let matched = proc_names.iter().any(|c| {
+            let c = c.to_ascii_lowercase();
+            name == c || argv0 == c
+        });
+        is_agent.insert(pid, matched);
+    }
+
+    // BFS descendants of the shell (the shell row itself is not treated as a match).
+    let mut stack = vec![shell_pid];
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        if let Some(kids) = children.get(&pid) {
+            for &kid in kids {
+                if is_agent.get(&kid).copied().unwrap_or(false) {
+                    return true;
+                }
+                stack.push(kid);
+            }
+        }
+    }
+    false
+}
+
 #[cfg(windows)]
 fn is_ssh_command_win(cmd: &[std::ffi::OsString]) -> bool {
     let exe = cmd.first().map(|s| s.to_string_lossy()).unwrap_or_default();
@@ -1107,4 +1174,23 @@ fi
 "#;
     std::fs::write(&path, content).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_process_alive_empty_names_is_false() {
+        // No candidate names → nothing can match, even for a live pid.
+        assert!(!agent_process_alive(std::process::id(), &[]));
+    }
+
+    #[test]
+    fn agent_process_alive_dead_shell_is_false() {
+        // PID 1 (init/launchd) is not the parent of any `codex`/`claude`, and a
+        // wildly out-of-range pid has no descendants — both must read as gone.
+        assert!(!agent_process_alive(u32::MAX, &["codex"]));
+        assert!(!agent_process_alive(1, &["definitely-not-a-real-binary-xyz"]));
+    }
 }

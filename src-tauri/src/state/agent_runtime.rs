@@ -50,6 +50,19 @@ impl AgentRuntime {
             _ => Self::Claude,
         }
     }
+
+    /// Whether this runtime's dormancy is inferred from PTY/process lifecycle
+    /// (Codex/Gemini) rather than a `SessionEnd` hook (Claude). The dormancy
+    /// reaper only ever inspects runtimes for which this is true, so Claude is
+    /// never polled and stays byte-identical.
+    pub fn uses_pty_dormancy(self) -> bool {
+        matches!(descriptor(self).dormancy, DormancySource::PtyExitOrPrompt)
+    }
+
+    /// Process-name basenames the runtime's CLI appears as in `ps`, for the reaper.
+    pub fn agent_process_names(self) -> &'static [&'static str] {
+        descriptor(self).agent_process_names
+    }
 }
 
 /// How a runtime's hooks are installed on disk.
@@ -91,6 +104,10 @@ pub struct RuntimeDescriptor {
     pub needs_mcp_reassert: bool,
     pub hook_config: HookConfigKind,
     pub dormancy: DormancySource,
+    /// Process-name basenames the runtime's CLI appears as in `ps` (argv0 or comm).
+    /// Used by the dormancy reaper to tell "agent still running in the tab's PTY
+    /// tree" from "agent exited". Empty for runtimes whose dormancy is hook-driven.
+    pub agent_process_names: &'static [&'static str],
     /// How long a reported tool may stay "active" before being treated as stale.
     pub tool_stale_timeout_ms: u64,
 }
@@ -107,6 +124,8 @@ pub static CLAUDE_DESC: RuntimeDescriptor = RuntimeDescriptor {
     needs_mcp_reassert: true,
     hook_config: HookConfigKind::ClaudeSettingsJson,
     dormancy: DormancySource::SessionEndHook,
+    // Claude dormancy is hook-driven (SessionEnd), so the reaper never inspects it.
+    agent_process_names: &["claude"],
     tool_stale_timeout_ms: 15_000,
 };
 
@@ -123,6 +142,8 @@ pub static CODEX_DESC: RuntimeDescriptor = RuntimeDescriptor {
     needs_mcp_reassert: false,
     hook_config: HookConfigKind::CodexHooksJson,
     dormancy: DormancySource::PtyExitOrPrompt,
+    // The OpenAI Codex CLI (codex-rs) runs as a native `codex` binary.
+    agent_process_names: &["codex"],
     tool_stale_timeout_ms: 15_000,
 };
 
@@ -139,6 +160,7 @@ pub static GEMINI_DESC: RuntimeDescriptor = RuntimeDescriptor {
     needs_mcp_reassert: false,
     hook_config: HookConfigKind::CodexHooksJson,
     dormancy: DormancySource::PtyExitOrPrompt,
+    agent_process_names: &["gemini"],
     tool_stale_timeout_ms: 15_000,
 };
 

@@ -32,6 +32,12 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// The file is co-owned by the `claude` CLI, which can clobber our entry; this
 /// heals any drift within one tick. Idempotent — only writes when it differs.
 const MCP_REASSERT_INTERVAL: Duration = Duration::from_secs(30);
+/// Dormancy reaper cadence. Codex/Gemini have no SessionEnd hook, so we poll each
+/// non-Claude agent tab's PTY process tree this often and require this many
+/// consecutive "agent gone" observations before synthesizing a SessionEnd
+/// (debounces sysinfo refresh lag and the auto-resume exit→relaunch gap).
+const DORMANCY_POLL_INTERVAL: Duration = Duration::from_millis(1500);
+const DORMANCY_ABSENT_POLLS: u32 = 2;
 
 /// Per-SSE-session sender: receives raw JSON strings, which the SSE stream wraps as data events.
 type SseSessions = Arc<parking_lot::RwLock<HashMap<String, mpsc::UnboundedSender<String>>>>;
@@ -74,6 +80,87 @@ fn emit_dual(app: &AppHandle, agent_event: &str, legacy_event: &str, payload: Va
 fn emit_dual_to(app: &AppHandle, label: &str, agent_event: &str, legacy_event: &str, payload: Value) {
     let _ = app.emit_to(label, agent_event, payload.clone());
     let _ = app.emit_to(label, legacy_event, payload);
+}
+
+/// One dormancy-reaper poll. For every NON-Claude agent session, check whether the
+/// agent process is still alive in its tab's PTY descendant tree. After
+/// `DORMANCY_ABSENT_POLLS` consecutive "gone" observations, remove the session and
+/// emit the SAME `agent-hook-session-end` event Claude's SessionEnd hook emits, so
+/// the sidebar dot clears through the identical frontend teardown path.
+///
+/// Claude sessions are filtered out (`uses_pty_dormancy()` is false), so Claude is
+/// never polled and its lifecycle stays byte-identical. `absent` carries the
+/// per-session consecutive-gone counters across polls (owned by the reaper task).
+fn reap_dormant_sessions(app: &AppHandle, state: &Arc<AppState>, absent: &mut HashMap<String, u32>) {
+    use crate::state::AgentRuntime;
+
+    // Snapshot non-Claude candidates, then release the lock before the ps/sysinfo scan.
+    let candidates: Vec<(String, AgentRuntime, String)> = {
+        let sessions = state.agent_sessions.read();
+        sessions
+            .iter()
+            .filter(|(_, s)| s.runtime.uses_pty_dormancy())
+            .map(|(id, s)| (id.clone(), s.runtime, s.tab_id.clone()))
+            .collect()
+    };
+    if candidates.is_empty() {
+        absent.clear();
+        return;
+    }
+
+    let mut tracked: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (session_id, runtime, tab_id) in candidates {
+        tracked.insert(session_id.clone());
+
+        // Resolve the tab's shell PID: tab → pty_id → child_pid (no nested locks).
+        let pty_id: Option<String> = state.tab_pty_map.read().get(&tab_id).cloned();
+        let shell_pid: Option<u32> =
+            pty_id.and_then(|pid| state.pty_registry.read().get(&pid).and_then(|h| h.child_pid));
+
+        // Gone when the PTY is dead, or the agent binary is absent from its tree.
+        let gone = match shell_pid {
+            None => true,
+            Some(pid) => !crate::pty::manager::agent_process_alive(pid, runtime.agent_process_names()),
+        };
+
+        if !gone {
+            absent.remove(&session_id);
+            continue;
+        }
+
+        let count = absent.entry(session_id.clone()).or_insert(0);
+        *count += 1;
+        if *count < DORMANCY_ABSENT_POLLS {
+            continue;
+        }
+        absent.remove(&session_id);
+
+        // Confirmed dormant: remove the backend session and synthesize SessionEnd.
+        let removed = state.agent_sessions.write().remove(&session_id).is_some();
+        if removed {
+            log::info!(
+                "Dormancy: {} session {} gone (tab {}) → synthesizing session-end",
+                runtime.as_key(),
+                &session_id[..session_id.len().min(8)],
+                tab_id
+            );
+            emit_dual(
+                app,
+                "agent-hook-session-end",
+                "claude-hook-session-end",
+                serde_json::json!({
+                    "runtime": runtime.as_key(),
+                    "session_id": session_id,
+                    "tab_id": tab_id,
+                    "reason": "dormant",
+                }),
+            );
+        }
+    }
+
+    // Drop counters for sessions that vanished from the map (reaped or ended via a
+    // real hook) so the table can't grow unbounded.
+    absent.retain(|id, _| tracked.contains(id));
 }
 
 /// Extract the bearer/IDE auth token from a request, trying each accepted header
@@ -189,6 +276,7 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
     // Graceful shutdown signal — sender stored in AppState, triggered on app exit
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let mut reassert_shutdown = shutdown_tx.subscribe();
+    let mut reaper_shutdown = shutdown_tx.subscribe();
     *state.mcp_shutdown.lock() = Some(shutdown_tx);
 
     // Periodically re-assert our `~/.claude.json` entry so a clobber by the
@@ -216,6 +304,33 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
             }
         }
         log::debug!("MCP settings re-assert loop stopped");
+    });
+
+    // Dormancy reaper — Codex/Gemini have no SessionEnd hook, so a session going
+    // dormant is inferred from the agent process leaving the tab's PTY tree; we then
+    // synthesize the SAME SessionEnd teardown Claude gets from its hook. Claude
+    // sessions are never inspected (uses_pty_dormancy() == false), so this is a
+    // no-op for Claude and leaves its lifecycle byte-identical.
+    let reaper_state = state.clone();
+    let reaper_app = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ticker = tokio::time::interval(DORMANCY_POLL_INTERVAL);
+        ticker.tick().await; // consume the immediate first tick
+        // session_id → consecutive polls the agent was observed gone.
+        let mut absent: HashMap<String, u32> = HashMap::new();
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    reap_dormant_sessions(&reaper_app, &reaper_state, &mut absent);
+                }
+                res = reaper_shutdown.changed() => {
+                    if res.is_err() || *reaper_shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+        log::debug!("Dormancy reaper stopped");
     });
 
     let sse_sessions: SseSessions = Arc::new(parking_lot::RwLock::new(HashMap::new()));

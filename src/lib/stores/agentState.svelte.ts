@@ -98,14 +98,19 @@ function createAgentStateStore() {
     }
   }
 
-  function removeSession(tabId: string) {
-    if (!sessions.has(tabId)) return;
-    clearStaleTimer(tabId);
+  function removeSession(tabId: string, expectedSessionId?: string) {
     const was = sessions.get(tabId);
+    if (!was) return;
+    // A synthetic/stale SessionEnd may name a session already superseded in this
+    // tab (e.g. Codex exited and auto-resume started a NEW session before the
+    // dormancy reaper's end for the OLD one landed). Only clear when the end
+    // refers to the session we're currently showing.
+    if (expectedSessionId && was.sessionId !== expectedSessionId) return;
+    clearStaleTimer(tabId);
     sessions = new Map(sessions);
     sessions.delete(tabId);
     // Clean up tab state if session ended while in permission state
-    if (was?.state === 'permission') {
+    if (was.state === 'permission') {
       activityStore.clearTabState(tabId);
     }
   }
@@ -245,9 +250,9 @@ function createAgentStateStore() {
       unlisteners.push(u1);
 
       const u2 = await listen<{ session_id: string; tab_id: string | null }>('agent-hook-session-end', (e) => {
-        const { tab_id } = e.payload;
+        const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
-        removeSession(tab_id);
+        removeSession(tab_id, session_id);
         setVariable(tab_id, 'claudeAction', '');
         logInfo(`Claude state: session ended → tab ${tab_id.slice(0, 8)} removed`);
       });
