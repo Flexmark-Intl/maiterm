@@ -48,12 +48,12 @@ If you want to build maiTerm from source, you'll need:
 - **Cmd+,** — open preferences
 - **Cmd+/** — help and keyboard shortcuts
 
-## Setting Up Claude Code Integration
+## Setting Up Agent Integration
 
-Claude Code integration is enabled by default. When you run `claude` in a terminal tab, maiTerm automatically:
+maiTerm integrates with **Claude Code** and **OpenAI Codex**, both enabled by default. When you run `claude` or `codex` in a terminal tab, maiTerm automatically:
 
-1. Exposes MCP tools to Claude Code CLI
-2. Captures session IDs via built-in triggers
-3. Enables auto-resume for your sessions
+1. Exposes MCP/IDE tools to the agent
+2. Tracks live state through the agent's hooks
+3. Captures the session ID and enables auto-resume
 
-No configuration needed — it just works.
+No configuration needed — it just works, and maiTerm detects which agent connected on its own (no manual `/maiterm init`). To choose which agents maiTerm wires up — locally and over SSH — open **Preferences → AI Agents**. See [Agent Integration](/features/claude-code/) for the full picture.

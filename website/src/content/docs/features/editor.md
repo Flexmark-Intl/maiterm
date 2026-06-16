@@ -36,11 +36,11 @@ Picking a file opens it in an editor tab — local or remote via SCP.
 
 ## Diff Review
 
-Side-by-side diff tabs using CodeMirror's MergeView. Created by Claude Code's `openDiff` tool.
+Side-by-side diff tabs using CodeMirror's MergeView. Created by an agent's `openDiff` tool.
 
 - **Accept** — writes new content to the file (local or SCP)
-- **Reject** — responds to Claude with rejection, closes tab
-- **Blocking** — Claude Code waits for your accept/reject before continuing
+- **Reject** — responds to the agent with rejection, closes tab
+- **Blocking** — the agent waits for your accept/reject before continuing
 
 ## Image Preview
 

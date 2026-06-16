@@ -34,7 +34,7 @@ export default defineConfig({
             { label: 'Terminal', slug: 'features/terminal' },
             { label: 'Workspaces & Panes', slug: 'features/workspaces' },
             { label: 'Code Editor', slug: 'features/editor' },
-            { label: 'Claude Code Integration', slug: 'features/claude-code' },
+            { label: 'Agent Integration', slug: 'features/claude-code' },
             { label: 'Agent Bridge', slug: 'features/agent-bridge' },
             { label: 'Triggers & Automation', slug: 'features/triggers' },
             { label: 'Themes', slug: 'features/themes' },

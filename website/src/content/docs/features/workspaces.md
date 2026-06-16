@@ -38,10 +38,10 @@ Each tab has its own markdown notes panel. Track TODOs, paste connection strings
 
 ![Notes panel](/screenshots/notes-panel.png)
 
-Your Claude Code agent shares the same panel. Ask it to write down what it just did, keep a running TODO list, or summarize a debugging session, and it edits the notes directly through MCP tools — no copy-paste. It can read, write, update, organize, merge, and clean up both tab and workspace notes, so your notes stay current while you work.
+Your coding agent — Claude Code or Codex — shares the same panel. Ask it to write down what it just did, keep a running TODO list, or summarize a debugging session, and it edits the notes directly through MCP tools — no copy-paste. It can read, write, update, organize, merge, and clean up both tab and workspace notes, so your notes stay current while you work.
 
 - **Markdown or plain text** — your choice per tab
-- **Claude-maintained** — ask your agent to write, update, and tidy your notes via MCP tools
+- **Agent-maintained** — ask your agent to write, update, and tidy your notes via MCP tools
 - **Interactive checkboxes** — rendered in preview mode
 - **Editable tables** — click any table cell in preview mode to edit it in place; `Tab` moves between cells
 - **Edit and preview modes** — state persisted per tab

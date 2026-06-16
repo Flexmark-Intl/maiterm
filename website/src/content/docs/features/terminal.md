@@ -17,13 +17,13 @@ maiTerm's terminal does its heavy lifting in Rust: alacritty_terminal handles VT
 - **Multi-window** — open additional windows, duplicate windows with full tab context
 - **Per-tab command history** — each tab maintains its own shell history, cloned tabs inherit it
 - **File drop** — drag files onto a terminal to paste paths; over SSH, files are SCP'd to the remote CWD automatically, with live upload progress you can cancel
-- **Image paste** — paste clipboard images (Cmd+V) into Claude Code sessions as temp file paths
+- **Image paste** — paste clipboard images (Cmd+V) into agent sessions (Claude Code, Codex) as temp file paths
 
 ## Composer Dock
 
-A terminal gives you one line to type on — which is miserable for composing a long, careful prompt for Claude Code. The composer dock fixes that: a free-form, auto-growing text area docked below the terminal where Enter inserts newlines and `Cmd+Enter` sends. Press `Esc` to hop back to the terminal, `Cmd+Shift+C` to toggle the dock.
+A terminal gives you one line to type on — which is miserable for composing a long, careful prompt for a coding agent. The composer dock fixes that: a free-form, auto-growing text area docked below the terminal where Enter inserts newlines and `Cmd+Enter` sends. Press `Esc` to hop back to the terminal, `Cmd+Shift+C` to toggle the dock.
 
-Sending is smarter than a paste. The composer checks what the foreground app actually supports: when it speaks bracketed paste (Claude Code, zsh, modern readline), your multi-line text arrives as a single submission with the line breaks intact; for older shells it falls back to sending line by line. Either way, what you wrote is what gets run.
+Sending is smarter than a paste. The composer checks what the foreground app actually supports: when it speaks bracketed paste (Claude Code, Codex, zsh, modern readline), your multi-line text arrives as a single submission with the line breaks intact; for older shells it falls back to sending line by line. Either way, what you wrote is what gets run.
 
 It handles attachments too. Paste a screenshot or drop files onto the dock and they become **chips** above the input instead of raw paths cluttering your text. On send, the file paths are appended for you — and if the tab is an SSH session, the files are uploaded to the remote host first and referenced by their remote paths, same as dropping files on the terminal itself.
 
@@ -48,7 +48,7 @@ Tabs auto-update from terminal titles (OSC 0/2), but you can override with your 
 
 ## Deep Clone Everything
 
-Duplicate a tab and get *everything*: scrollback history, CWD, SSH session, Claude resume command, tab name, notes, trigger variables. Or shallow clone for just the name and CWD. New tabs automatically inherit the workspace's most common working directory.
+Duplicate a tab and get *everything*: scrollback history, CWD, SSH session, the agent's resume command, tab name, notes, trigger variables. Or shallow clone for just the name and CWD. New tabs automatically inherit the workspace's most common working directory.
 
 ## Archive and Restore
 

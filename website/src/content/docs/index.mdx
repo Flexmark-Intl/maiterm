@@ -36,7 +36,7 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 ## Why maiTerm?
 
-Other terminals give you tabs and splits. maiTerm gives you a system for managing the chaos of real AI-assisted development — where you're juggling multiple Claude sessions across projects, SSHing into servers, and trying to remember what you were doing three hours ago.
+Other terminals give you tabs and splits. maiTerm gives you a system for managing the chaos of real AI-assisted development — where you're juggling multiple agent sessions (Claude Code, Codex) across projects, SSHing into servers, and trying to remember what you were doing three hours ago.
 
 <CardGrid stagger>
   <Card title="Know what's in every tab" icon="open-book">
@@ -48,11 +48,11 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
   <Card title="Workspace Organization" icon="seti:folder">
     Group terminals by project. Each workspace has its own pane layout, tabs, and context. Suspend inactive workspaces to free resources — they resume instantly with full state when you need them.
   </Card>
-  <Card title="Claude Code Integration" icon="puzzle">
-    30+ MCP tools let Claude Code navigate your workspaces, manage notes, control preferences, review diffs, and discover what's running in your tabs. Real-time hooks track what Claude is doing — see the active tool, permission requests, and compaction state. Per-tab, per-workspace, and a global footer dot roll up every agent's state — working, waiting for permission, or done — so you can see at a glance which ones need you. Works over SSH too via reverse tunnel.
+  <Card title="AI Agent Integration" icon="puzzle">
+    Deep integration with Claude Code and OpenAI Codex through one runtime-neutral pipeline — pick which agents maiTerm wires up in Preferences. 40+ MCP tools let your agent navigate workspaces, manage notes, control preferences, review diffs, and discover what's running in your tabs. Real-time hooks track what each agent is doing — active tool, permission requests, compaction state. Per-tab, per-workspace, and a global footer dot roll up every agent's state — working, waiting for permission, or done — so you can see at a glance which ones need you. Works over SSH too via reverse tunnel.
   </Card>
   <Card title="Bridge two agents" icon="comment-alt">
-    Connect two running Claude Code sessions — one local, one over SSH, or two related projects — so they collaborate directly. One agent asks the other questions, requests research, or shares context, and replies come back as new turns. maiTerm spawns a split pane so you see both sides, stamps every message with the sender's real identity, and keeps the agents deferring to you for the decisions.
+    Connect two running agent sessions — one local, one over SSH, two related projects, even a Claude Code and a Codex — so they collaborate directly. One agent asks the other questions, requests research, or shares context, and replies come back as new turns. maiTerm spawns a split pane so you see both sides, stamps every message with the sender's real identity, and keeps the agents deferring to you for the decisions.
   </Card>
   <Card title="Compose prompts like a human" icon="pen">
     A multi-line composer dock under every terminal: Enter makes newlines, `Cmd+Enter` sends, and drafts survive tab switches and restarts. Paste screenshots or drop files and they become attachment chips — over SSH they're uploaded automatically. No more crafting a five-paragraph prompt on a single shell line.
@@ -70,7 +70,7 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     Set up auto-resume on a tab, then archive it. The tab disappears from your tab bar but preserves everything — scrollback, notes, triggers, resume command. When you need that task again, restore and pick up instantly. Pin auto-resume settings so they survive across restarts and replays.
   </Card>
   <Card title="Notes on everything" icon="pencil">
-    Every tab has its own markdown notes panel — track TODOs, paste connection strings, jot down what you're debugging. Workspace-level notes too. Claude Code can read, write, organize, merge, and clean up your notes via MCP tools — your AI agent shares the same scratchpad.
+    Every tab has its own markdown notes panel — track TODOs, paste connection strings, jot down what you're debugging. Workspace-level notes too. Your agent — Claude Code or Codex — can read, write, organize, merge, and clean up your notes via MCP tools, sharing the same scratchpad.
   </Card>
   <Card title="Rust-Powered Terminal" icon="laptop">
     alacritty_terminal does VTE parsing, buffering, and scrollback in the Rust backend, so the frontend only ever paints one screen — no GPU rendering needed. Scrollback is stored in SQLite for crash-safe persistence, and full terminal state survives restarts: tab layout, workspace state, and scrollback history all come back.
@@ -82,7 +82,7 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     Export your entire state — workspaces, tabs, scrollback, notes, triggers, preferences. Schedule automatic backups with gzip compression and auto-trim. Import on a new machine and preview what's inside — pick which workspaces to bring in, choose merge or overwrite, toggle preferences.
   </Card>
   <Card title="Split Pane Cloning" icon="random">
-    Duplicate a tab and get everything: scrollback, CWD, SSH session, Claude resume command, notes, trigger variables. SSH sessions clone to the same remote CWD.
+    Duplicate a tab and get everything: scrollback, CWD, SSH session, the agent's resume command, notes, trigger variables. SSH sessions clone to the same remote CWD.
   </Card>
 </CardGrid>
 
