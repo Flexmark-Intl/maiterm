@@ -11,7 +11,7 @@
   import '@xterm/xterm/css/xterm.css';
   import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
-  import { uploadWithProgress } from '$lib/utils/scpUpload';
+  import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { readText as clipboardReadText, writeText as clipboardWriteText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
@@ -300,10 +300,10 @@
           // Check if SSH session — need to SCP upload
           const info = await getPtyInfo(ptyId);
           if (info.foreground_command) {
-            const outcome = await uploadWithProgress(info.foreground_command, [localPath], '/tmp/aiterm-uploads', { titlePrefix: 'Screenshot' });
+            const outcome = await uploadWithProgress(info.foreground_command, [localPath], AGENT_UPLOAD_DIR, { titlePrefix: 'Screenshot' });
             if (outcome.status === 'done') {
               const basename = localPath.split('/').pop() ?? localPath;
-              const remotePath = `/tmp/aiterm-uploads/${basename}`;
+              const remotePath = `${AGENT_UPLOAD_DIR}/${basename}`;
               const bytes = Array.from(new TextEncoder().encode(remotePath));
               await writeTerminal(ptyId, bytes);
               toastStore.addToast('Screenshot', 'Screenshot uploaded', 'success');
@@ -1029,7 +1029,7 @@
               remoteCwd = (osc7Cwd ?? promptCwd ?? '~').trim();
               logInfo(`drag-drop: remoteCwd=${remoteCwd} (osc7=${osc7Cwd}, prompt=${promptCwd})`);
             }
-            const remoteDir = isClaudeSession ? '/tmp/aiterm-uploads' : remoteCwd;
+            const remoteDir = isClaudeSession ? AGENT_UPLOAD_DIR : remoteCwd;
             const count = paths.length;
             logInfo(`drag-drop SSH: uploading ${count} file(s) to ${remoteDir} via ${sshCommand} (claude=${isClaudeSession})`);
             logInfo(`drag-drop SSH: paths=${JSON.stringify(paths)}`);
@@ -1040,7 +1040,7 @@
                 if (isClaudeSession) {
                   // Write each path separately so Claude Code detects each as a file reference
                   for (let i = 0; i < basenames.length; i++) {
-                    const path = `/tmp/aiterm-uploads/${basenames[i]}`;
+                    const path = `${AGENT_UPLOAD_DIR}/${basenames[i]}`;
                     const bytes = Array.from(new TextEncoder().encode(path + ' '));
                     if (i > 0) await new Promise(r => setTimeout(r, 200));
                     await writeTerminal(ptyId, bytes);

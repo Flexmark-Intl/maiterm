@@ -10,6 +10,13 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/**
+ * Remote staging directory for files uploaded into an agent session (Claude
+ * Code et al.) over SSH. Single source of truth so the rebranded path can't
+ * drift across the call sites that reference it.
+ */
+export const AGENT_UPLOAD_DIR = '/tmp/maiterm-uploads';
+
 export type UploadOutcome = { status: 'done' | 'cancelled' | 'error'; error?: string };
 
 /**

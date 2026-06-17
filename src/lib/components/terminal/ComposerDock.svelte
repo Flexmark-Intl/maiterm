@@ -13,7 +13,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { writeTerminal, terminalBracketedPaste, readClipboardFilePaths, saveClipboardImage, getPtyInfo } from '$lib/tauri/commands';
-  import { uploadWithProgress } from '$lib/utils/scpUpload';
+  import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
   import { isModKey, modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -258,14 +258,14 @@
     const sshCommand = info?.foreground_command;
     if (sshCommand) {
       const localPaths = attachments.map(a => a.path);
-      const outcome = await uploadWithProgress(sshCommand, localPaths, '/tmp/aiterm-uploads', { titlePrefix: 'Attachment' });
+      const outcome = await uploadWithProgress(sshCommand, localPaths, AGENT_UPLOAD_DIR, { titlePrefix: 'Attachment' });
       if (outcome.status !== 'done') {
         if (outcome.status === 'error') {
           toastStore.addToast('Attachment Upload Failed', outcome.error ?? 'Upload failed', 'error');
         }
         return null; // abort send, keep draft + chips
       }
-      return attachments.map(a => `/tmp/aiterm-uploads/${a.name}`).join(' ');
+      return attachments.map(a => `${AGENT_UPLOAD_DIR}/${a.name}`).join(' ');
     }
     // Send raw, unescaped paths. Composer attachments are file references for
     // the foreground agent (Claude Code et al.), which wants the literal path —
