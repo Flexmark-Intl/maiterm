@@ -253,10 +253,21 @@ function createAgentBridgeStore() {
     finally { injecting.delete(tabId); }
   }
 
-  /** Deliver framed text to a tab, or queue it if the tab isn't deliverable. */
+  /** Deliver framed text to a tab, or queue it if the tab isn't deliverable.
+   *  Ordering rule: never jump the queue. If messages are already waiting (held
+   *  while the recipient was dormant or at a human prompt), this newer message goes
+   *  to the BACK and the in-order drain delivers it after them. Injecting directly
+   *  here would land a newer message AHEAD of older queued ones — the "newest-first"
+   *  reordering a recipient sees when a hold clears between the drain ticks. */
   async function deliver(tabId: string, text: string): Promise<'delivered' | 'queued' | 'failed'> {
     const d = delivery.get(tabId);
     if (!d) return 'failed';
+    if (d.queue.length > 0) {
+      d.queue.push(text);
+      ensureDrainPump();
+      void flush(tabId); // nudge the drain now (it always delivers the OLDEST first)
+      return 'queued';
+    }
     if (!deliverable(tabId)) {
       d.queue.push(text);
       ensureDrainPump();
