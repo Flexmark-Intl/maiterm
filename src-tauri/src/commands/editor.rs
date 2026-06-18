@@ -1121,7 +1121,14 @@ pub async fn ssh_list_files(
     // Always surface top-level .env* files regardless of the hidden/gitignore
     // filters — they're commonly edited and would otherwise be unreachable.
     // Duplicates (when the filters already include them) are removed below.
-    let env_lister = "ls -1p .env* 2>/dev/null | grep -v '/$'";
+    //
+    // The trailing `|| true` is load-bearing: this is the LAST command in the
+    // remote group, so its exit status becomes the whole command's status.
+    // `grep` exits 1 when there are no .env* files (the common case), which
+    // would otherwise make a perfectly good listing report "SSH list files
+    // failed". Force exit 0 here so an empty .env match is never fatal — real
+    // failures (bad host, missing dir) still surface via the `cd` short-circuit.
+    let env_lister = "ls -1p .env* 2>/dev/null | grep -v '/$' || true";
 
     // git ls-files --cached --others --exclude-standard lists tracked + untracked
     // files while respecting .gitignore. Plain `git ls-files` only shows tracked
