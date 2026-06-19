@@ -271,6 +271,10 @@ pub struct Tab {
     /// Persisted in-progress composer draft text for this tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composer_draft: Option<String>,
+    /// Mesh Workspace: one-line purpose for this agent (what it owns), fed into its priming.
+    /// Persisted so it survives restart (docs/mesh-workspace.md §11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_purpose: Option<String>,
     /// Trigger-extracted variables (persisted across restarts).
     #[serde(default)]
     pub trigger_variables: HashMap<String, String>,
@@ -1067,6 +1071,7 @@ impl Tab {
             notes_open: false,
             composer_open: None,
             composer_draft: None,
+            mesh_purpose: None,
             trigger_variables: HashMap::new(),
             archived_name: None,
             archived_at: None,
@@ -1103,6 +1108,7 @@ impl Tab {
             notes_open: false,
             composer_open: None,
             composer_draft: None,
+            mesh_purpose: None,
             trigger_variables: HashMap::new(),
             archived_name: None,
             archived_at: None,
@@ -1139,6 +1145,7 @@ impl Tab {
             notes_open: false,
             composer_open: None,
             composer_draft: None,
+            mesh_purpose: None,
             trigger_variables: HashMap::new(),
             archived_name: None,
             archived_at: None,

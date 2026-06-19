@@ -460,6 +460,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 notes_open: tab.notes_open,
                 composer_open: tab.composer_open,
                 composer_draft: tab.composer_draft.clone(),
+                mesh_purpose: tab.mesh_purpose.clone(),
                 trigger_variables: tab.trigger_variables.clone(),
                 archived_name: None,
                 archived_at: None,

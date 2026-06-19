@@ -50,6 +50,8 @@ export interface Tab {
   composer_open?: boolean | null;
   /** Persisted in-progress composer draft text. */
   composer_draft?: string | null;
+  /** Mesh Workspace one-line purpose for this agent (persisted across restarts). */
+  mesh_purpose?: string | null;
   trigger_variables: Record<string, string>;
   last_cwd: string | null;
   archived_name: string | null;

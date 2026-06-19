@@ -447,6 +447,7 @@ pub fn run() {
             commands::workspace::set_tab_notes_mode,
             commands::workspace::set_tab_composer_open,
             commands::workspace::set_tab_composer_draft,
+            commands::workspace::set_tab_mesh_purpose,
             commands::workspace::reorder_tabs,
             commands::workspace::reorder_workspaces,
             commands::workspace::duplicate_workspace,

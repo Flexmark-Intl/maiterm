@@ -323,6 +323,10 @@ export async function setTabComposerDraft(workspaceId: string, paneId: string, t
   return invoke('set_tab_composer_draft', { workspaceId, paneId, tabId, draft });
 }
 
+export async function setTabMeshPurpose(workspaceId: string, paneId: string, tabId: string, purpose: string | null): Promise<void> {
+  return invoke('set_tab_mesh_purpose', { workspaceId, paneId, tabId, purpose });
+}
+
 export async function reorderTabs(workspaceId: string, paneId: string, tabIds: string[]): Promise<void> {
   return invoke('reorder_tabs', { workspaceId, paneId, tabIds });
 }

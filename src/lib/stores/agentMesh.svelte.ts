@@ -40,8 +40,6 @@ const EDGE_RING_MAX = 300;
 function createAgentMeshStore() {
   // One router per mesh workspace (each scopes its roster + owns its topic registry).
   const routers = new Map<string, MeshRouter>();
-  // In-memory per-member purpose (priming context). Not persisted in v1 — like the 1:1 bridge.
-  const purposes = new Map<string, string>();
   // Members already primed this session (opener injected) — keyed by tabId, idempotent.
   const primed = new Set<string>();
   // Each member's status-note id (the one workspace note it maintains), keyed by tabId.
@@ -122,7 +120,7 @@ function createAgentMeshStore() {
           tabId: tab.id,
           role: roleName(tab.name),
           cwd: getCwd(tab.id),
-          purpose: purposes.get(tab.id) ?? null,
+          purpose: tab.mesh_purpose ?? null,
           live: !!claudeStateStore.getState(tab.id),
         });
       }
@@ -235,7 +233,6 @@ function createAgentMeshStore() {
 
   function removeMember(tabId: string) {
     deliveryCtl.remove(tabId);
-    purposes.delete(tabId);
   }
 
   /** Ensure this member has its one status note, reusing an existing one (by role marker)
@@ -321,7 +318,7 @@ function createAgentMeshStore() {
     get version() { return version; },
 
     getInternalSizes() {
-      return { routers: routers.size, delivery: deliveryCtl.size(), purposes: purposes.size, edges: edges.length };
+      return { routers: routers.size, delivery: deliveryCtl.size(), edges: edges.length };
     },
 
     /** Is this tab inside a mesh workspace? */
@@ -353,11 +350,23 @@ function createAgentMeshStore() {
       logInfo(`agentMesh: workspace ${wsId.slice(0, 8)} mesh ${enabled ? 'enabled' : 'disabled'}`);
     },
 
-    /** Set the one-line purpose used when priming a member (in-memory, v1). */
+    /** Set a member's one-line purpose (persisted on the tab so it survives restart). */
     setPurpose(tabId: string, purpose: string | null) {
-      if (purpose && purpose.trim()) purposes.set(tabId, purpose.trim());
-      else purposes.delete(tabId);
-      bump();
+      const clean = purpose && purpose.trim() ? purpose.trim() : null;
+      // Locate the tab and mutate it for immediate reactivity, then persist.
+      for (const ws of workspacesStore.workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find((t) => t.id === tabId);
+          if (tab) {
+            tab.mesh_purpose = clean;
+            commands.setTabMeshPurpose(ws.id, pane.id, tabId, clean).catch((e) =>
+              logError(`agentMesh: failed to persist purpose for tab ${tabId.slice(0, 8)}: ${e}`),
+            );
+            bump();
+            return;
+          }
+        }
+      }
     },
 
     /** Roster of the mesh workspace this tab belongs to (for the cockpit / listBridgedPeers). */
@@ -633,8 +642,6 @@ function createAgentMeshStore() {
     remapTab(oldTabId: string, newTabId: string) {
       if (oldTabId === newTabId || !deliveryCtl.has(oldTabId)) return;
       deliveryCtl.remap(oldTabId, newTabId);
-      const p = purposes.get(oldTabId);
-      if (p !== undefined) { purposes.delete(oldTabId); purposes.set(newTabId, p); }
       if (primed.has(oldTabId)) { primed.delete(oldTabId); primed.add(newTabId); }
       const nid = statusNoteIds.get(oldTabId);
       if (nid !== undefined) { statusNoteIds.delete(oldTabId); statusNoteIds.set(newTabId, nid); }
@@ -700,7 +707,6 @@ function createAgentMeshStore() {
       deliveryCtl.destroy();
       loopCtl.reset();
       routers.clear();
-      purposes.clear();
       primed.clear();
       statusNoteIds.clear();
       lastDecision.clear();
