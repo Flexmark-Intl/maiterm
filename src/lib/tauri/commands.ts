@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentBridge, AppData, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -437,6 +437,15 @@ export async function updateWorkspaceNote(workspaceId: string, noteId: string, c
 
 export async function deleteWorkspaceNote(workspaceId: string, noteId: string): Promise<void> {
   return invoke('delete_workspace_note', { workspaceId, noteId });
+}
+
+// Mesh workspace commands (docs/mesh-workspace.md)
+export async function setWorkspaceBridgeAll(workspaceId: string, enabled: boolean): Promise<void> {
+  return invoke('set_workspace_bridge_all', { workspaceId, enabled });
+}
+
+export async function setWorkspaceMeshTopics(workspaceId: string, topics: MeshTopic[]): Promise<void> {
+  return invoke('set_workspace_mesh_topics', { workspaceId, topics });
 }
 
 // Sound commands

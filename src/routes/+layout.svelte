@@ -20,6 +20,7 @@
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
+  import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
@@ -325,6 +326,8 @@
 
     // Agent Bridge (hook events → cross-agent message delivery)
     agentBridgeStore.init();
+    // Mesh Workspace (N:M agent bridging — docs/mesh-workspace.md)
+    agentMeshStore.init();
 
     // OS notification click → deep-link to workspace+tab.
     // NOTE: onAction only fires on mobile (iOS/Android). On desktop (macOS/Linux/Windows),
@@ -857,6 +860,7 @@
       unlistenClaudeConnection?.();
       claudeStateStore.destroy();
       agentBridgeStore.destroy();
+      agentMeshStore.destroy();
       unlistenNotificationAction?.unregister();
       unlistenFocus?.();
       unlistenResize?.();

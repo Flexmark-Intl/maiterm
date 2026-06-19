@@ -371,6 +371,10 @@ impl MeshTopic {
     }
 
     /// Create an Open topic owned by `owner_tab_id`, who is its first participant.
+    /// Test-only constructor: at runtime the frontend `agentMesh` store is authoritative
+    /// for topic creation (it mints ids + timestamps and persists the whole registry), so
+    /// this is exercised by the Rust unit tests rather than the command layer.
+    #[cfg(test)]
     pub fn new(id: String, label: String, owner_tab_id: String, now: String) -> Self {
         let normalized_label = Self::normalize_label(&label);
         let participants = vec![owner_tab_id.clone()];

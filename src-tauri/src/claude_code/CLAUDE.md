@@ -10,7 +10,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response()` (42 tools), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response()` (46 tools), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
@@ -64,8 +64,12 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getClaudeSessions | All active Claude sessions across tabs (state, tool, model, cwd) — multi-agent coordination |
 | listArchivedTabs | List archived (suspended) tabs with names, dates, restore context |
 | restoreArchivedTab | Restore an archived tab back into the active workspace |
-| sendToBridgedAgent | Send a message to the peer agent this tab is bridged with (Agent Bridge). Async — reply arrives as a new prompt turn |
-| getBridgedAgent | Report whether this tab is bridged and, if so, the partner's label/cwd |
+| sendToBridgedAgent | Send a message to a peer agent. 1:1 bridge: omit recipient/topic. Mesh Workspace: recipient (role/handle) + topic required. Async — reply arrives as a new prompt turn |
+| getBridgedAgent | Report whether this tab is bridged and, if so, the partner's label/cwd (in a mesh, returns the roster) |
+| listBridgedPeers | Mesh only: roster of reachable peers — handle (tabId), role, cwd, purpose, live |
+| listTopics | Mesh only: conversation topics — id, label, state, owner, participants, turn count |
+| startTopic | Mesh only: start/reuse a topic (caller becomes owner); returns the topic id |
+| completeTopic | Mesh only: owner marks a topic complete; signals participants, rejects further sends |
 
 ## Agent Bridge (agent-to-agent bridge)
 
@@ -135,6 +139,42 @@ drops the fork flag so it resumes its own conversation like any Claude tab.
 
 **Injection:** bracketed paste (`ESC[200~ … ESC[201~`) + a deferred `\r` so multi-line
 messages stay one prompt and submit cleanly into Claude's TUI.
+
+## Mesh Workspace (N:M agent bridging)
+
+A **Mesh Workspace** (`Workspace.bridge_all = true`) generalizes the 1:1 bridge: every agent
+tab in it is reachable by every other, over **topic-scoped** threads, with **no broadcast**
+(each message is crafted for one recipient). Full design: `docs/mesh-workspace.md`. Phase 1
+is headless (agents run in normal splits); the stage/filmstrip view is Phase 2.
+
+**Layered for testability** (each layer unit-tested, no Svelte/Tauri in the cores):
+- `src/lib/stores/agentDelivery.ts` — the recipient-keyed FIFO mailbox, **shared** with the
+  1:1 bridge (the mesh constructs its own controller instance).
+- `src/lib/stores/meshRouting.ts` — recipient resolution + the topic registry. Routing keys
+  off the **stable tabId handle**, never the editable role name (rename can't misroute);
+  ambiguous/unknown recipient → hard error with the roster (never a silent drop). Topics are
+  first-class, deduped by a **normalized label** (mirrors Rust `MeshTopic::normalize_label`);
+  create-on-first-send (sender owns), owner-or-human completes, completed topics **reject**
+  further sends at the tool boundary.
+- `src/lib/stores/meshSend.ts` — the send orchestration: build envelope with the next turn,
+  deliver, then commit topic state on success; emit a conversation edge **only on delivered**
+  (phantom-edge guard). `failed` commits nothing.
+- `src/lib/stores/agentMesh.svelte.ts` — the live store: derives the roster from workspace
+  membership (a **named** agent tab in a `bridge_all` workspace), wires the cores to live
+  state, persists the topic registry, and drives member readiness off the same hook events as
+  the 1:1 bridge (`agent-init-session`/`agent-hook-stop`/`agent-hook-session-end`).
+
+**Persistence:** `Workspace.bridge_all` + `Workspace.mesh_topics: Vec<MeshTopic>` (both
+`serde(default)`). Commands `set_workspace_bridge_all` and `set_workspace_mesh_topics`
+(coarse whole-registry replace — the frontend store is authoritative; the persist command
+re-canonicalizes each `normalized_label` server-side as an integrity guard). Roster is
+**derived, not persisted** (closing a tab removes it; renaming changes only the display
+label). Tests: `meshRouting.test.ts` (18), `meshSend.test.ts` (8), Rust `mesh_topic_tests` (4).
+
+**MCP tools:** `sendToBridgedAgent` gains optional `recipient` + `topic` (required-by-context
+at runtime in a mesh, untouched for 1:1 — Codex #1); `listBridgedPeers`, `listTopics`,
+`startTopic`, `completeTopic`. Dispatch in `claudeCode.svelte.ts` routes to `agentMeshStore`
+when the tab is in a mesh workspace, else the 1:1 `agentBridgeStore`.
 
 ## Claude Code Hooks Integration
 

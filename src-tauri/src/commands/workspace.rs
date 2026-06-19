@@ -1502,6 +1502,66 @@ pub fn delete_workspace_note(
     save_state(&data_clone)
 }
 
+/// Toggle a workspace into (or out of) Mesh mode. A mesh workspace bridges every agent
+/// tab in it N:M (see docs/mesh-workspace.md). Turning mesh OFF leaves any topic registry
+/// in place (harmless for a normal workspace; restored if mesh is re-enabled).
+#[tauri::command]
+pub fn set_workspace_bridge_all(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        workspace.bridge_all = enabled;
+        app_data.clone()
+    };
+    save_state(&data_clone)?;
+    Ok(())
+}
+
+/// Replace a mesh workspace's topic registry wholesale. The frontend `agentMesh` store is
+/// authoritative for topics (it mints ids + timestamps in JS and dedups by normalized
+/// label), so persistence is a coarse replace rather than granular CRUD — right-sized for
+/// the handful of topics a mesh carries, and it captures the current turn counters at flush
+/// time. Called on structural changes (create / complete / participant join).
+#[tauri::command]
+pub fn set_workspace_mesh_topics(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    mut topics: Vec<crate::state::MeshTopic>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    // Integrity guard: canonicalize the dedup key server-side so it can never drift from
+    // the label, regardless of what the caller sent (defense-in-depth — the TS and Rust
+    // normalizers must agree, and this makes Rust the source of truth on persist).
+    for t in topics.iter_mut() {
+        t.normalized_label = crate::state::MeshTopic::normalize_label(&t.label);
+    }
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        workspace.mesh_topics = topics;
+        app_data.clone()
+    };
+    save_state(&data_clone)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn create_diff_tab(
     window: tauri::Window,

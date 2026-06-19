@@ -469,6 +469,8 @@ pub fn run() {
             commands::workspace::add_workspace_note,
             commands::workspace::update_workspace_note,
             commands::workspace::delete_workspace_note,
+            commands::workspace::set_workspace_bridge_all,
+            commands::workspace::set_workspace_mesh_topics,
             commands::window::get_window_data,
             commands::window::create_window,
             commands::window::duplicate_window,

@@ -48,7 +48,7 @@ pub fn tool_list_response() -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
-    let mut tools: Vec<Value> = Vec::with_capacity(42);
+    let mut tools: Vec<Value> = Vec::with_capacity(46);
 
     // Batch 1: Session, info, notification, logs, document tools
     tools.extend(serde_json::json!([
@@ -491,19 +491,53 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "sendToBridgedAgent",
-            "description": "Send a message to the peer AI agent you are bridged with (running in another maiTerm pane, e.g. an expert on a related codebase). Use this to ask questions, request research, or share context. The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. maiTerm automatically stamps your identity (tab, workspace, cwd) on the message so the recipient knows it's from you, a peer agent, NOT from a human operator. Only works once a bridge has been established (the human connects two sessions via the Agent Bridge picker). If your conversation is complete, simply stop sending — do not reply just to acknowledge.",
+            "description": "Send a message to a peer AI agent in another maiTerm pane. Two contexts: (1) a 1:1 Agent Bridge — omit `recipient`/`topic`, the message goes to your single bridged partner; (2) a Mesh Workspace — every agent here is reachable, so `recipient` (a peer's role name or tabId handle from listBridgedPeers) and `topic` (an existing topic id from listTopics, or a short new label to start a thread) are REQUIRED, and each message must be crafted for that one recipient (no broadcast). The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. maiTerm stamps your identity (role, cwd) and the topic on the message so the recipient knows it's from you, a peer agent, NOT from a human. If your exchange is complete, just stop — do not reply only to acknowledge.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "message": { "type": "string", "description": "The message to send to the bridged agent. Be explicit: state who you are and why you're asking on first contact, then your question or information." }
+                    "message": { "type": "string", "description": "The message. Be explicit: state who you are and why you're asking on first contact, then your question or information." },
+                    "recipient": { "type": "string", "description": "Mesh only: the peer to send to — its role name (exact, case-insensitive) or its tabId handle from listBridgedPeers. Omit in a 1:1 bridge." },
+                    "topic": { "type": "string", "description": "Mesh only: the conversation thread — an existing topic id from listTopics, or a short new label (e.g. 'auth-refactor') to start one (you become its owner). Omit in a 1:1 bridge." }
                 },
                 "required": ["message"]
             }
         },
         {
             "name": "getBridgedAgent",
-            "description": "Check whether you are currently bridged to a peer AI agent and, if so, who. Returns the bridged agent's tab name, workspace, and working directory, or indicates that no bridge is active. Use this to discover the context of the agent you can reach via sendToBridgedAgent.",
+            "description": "Check whether you are currently bridged to a peer AI agent and, if so, who. Returns the bridged agent's tab name, workspace, and working directory, or indicates that no bridge is active. Use this to discover the context of the agent you can reach via sendToBridgedAgent. In a Mesh Workspace use listBridgedPeers instead (there are many peers).",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "listBridgedPeers",
+            "description": "Mesh Workspace only: list every other agent you can reach on the mesh. Returns each peer's `handle` (the stable tabId to address it by), `role` (its display name), working directory, one-line purpose, and whether it's currently live. Use this to discover who to talk to before calling sendToBridgedAgent. Routing keys off the handle, so a role rename never misroutes.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "listTopics",
+            "description": "Mesh Workspace only: list the conversation topics (threads) in this mesh — id, label, state (open/complete), owner, participants, and turn count. Reuse an existing OPEN topic's id when replying instead of coining a new label for the same thread. Each message you send must be tagged with exactly one topic.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "startTopic",
+            "description": "Mesh Workspace only: explicitly start (or reuse) a conversation topic and become its owner. Optional — sending with a new `topic` label also creates one. Returns the topic id to tag messages with. If an open topic with the same normalized label already exists, it is reused (no duplicate).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "A short human-readable thread label, e.g. 'auth-refactor' or 'deploy plan'." }
+                },
+                "required": ["label"]
+            }
+        },
+        {
+            "name": "completeTopic",
+            "description": "Mesh Workspace only: mark a topic complete. Only the topic's OWNER (the agent that started it) can complete it. maiTerm signals every participant that the thread is done; further sends on it are rejected. Call this when the thread's work is finished so peers stop replying.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "topicId": { "type": "string", "description": "The id of the topic to complete (from listTopics)." }
+                },
+                "required": ["topicId"]
+            }
         }
     ]).as_array().unwrap().clone());
 

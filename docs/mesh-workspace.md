@@ -445,20 +445,24 @@ overlay does not refit.
 
 Synthesized from findings. P1 blocks the phase; P2 same-phase; P3 follow-up.
 
-- [ ] **T1 (P1, human ~3d / CC ~1-2 sessions)** — delivery core — extract `delivery`/queue/
-  envelope/priming into a shared `agentDelivery` module; `agentBridge` consumes it.
-  - Surfaced by: D2. Files: `src/lib/stores/agentBridge.svelte.ts`, new `agentDelivery.ts`.
-  - Verify: **regression test** — 1:1 bridge delivers FIFO (e3d4eb8) unchanged.
-- [ ] **T2 (P1, human ~2-3d / CC ~1 session)** — topics — `MeshTopic` on `Workspace` (model
-  on `workspace_notes`); create-on-first-send + normalized-label dedup; complete (owner +
-  human); reject-on-completed.
-  - Surfaced by: D3, D8, Codex #7/#9. Files: `state/workspace.rs`, `commands/`, `tauri/types.ts`.
-  - Verify: Rust unit suite (16.6).
-- [ ] **T3 (P1, human ~2-3d / CC ~1 session)** — routing — `bridge_all` flag; derived roster;
-  stable handles; `sendToBridgedAgent` optional-args + runtime mesh validation;
-  `listBridgedPeers`/`listTopics`/`startTopic`/`completeTopic` tools.
-  - Surfaced by: D2, Codex #1/#2. Files: `protocol.rs`, `claudeCode.svelte.ts`, `agentBridge`/mesh store.
-  - Verify: TS routing tests; unknown-recipient → clear error.
+- [x] **T1 (P1) — DONE (`170229c`)** — delivery core — extracted `delivery`/queue/cooldown/
+  drain into a shared, dependency-injected `agentDelivery.ts`; `agentBridge` consumes it.
+  - Verify: **regression suite** `agentDelivery.test.ts` (6) — FIFO + e3d4eb8 no-queue-jump locked.
+- [x] **T2 (P1) — DONE (`0989436`)** — topics — `MeshTopic` + `MeshTopicState` on `Workspace`
+  (modeled on `workspace_notes`); `normalize_label` dedup key; `bridge_all` + `mesh_topics`
+  (both `serde(default)`); TS mirrors.
+  - Verify: Rust `mesh_topic_tests` (4) — dedup, owner round-trip, defaults, pre-mesh back-compat.
+- [x] **T3 (P1) — DONE** — routing — `set_workspace_bridge_all` + `set_workspace_mesh_topics`
+  commands (+ TS wrappers); pure `meshRouting.ts` (stable-handle resolution, topic registry,
+  create-on-first-send + dedup, owner/human complete, reject-on-completed) and pure
+  `meshSend.ts` (envelope → deliver → commit; edge-on-delivered-only); `agentMesh.svelte.ts`
+  live store (derived roster, member readiness, persistence, edge ring); `protocol.rs`
+  schemas (extended `sendToBridgedAgent` + `listBridgedPeers`/`listTopics`/`startTopic`/
+  `completeTopic`); `claudeCode.svelte.ts` mesh-vs-1:1 dispatch; lifecycle wired in
+  `+layout`/`+page`/`workspaces`.
+  - Verify: `meshRouting.test.ts` (18) + `meshSend.test.ts` (8) — unknown/ambiguous recipient →
+    error (no silent drop), self-send guard, dedup, reject-on-completed, edge-on-delivered-only,
+    routed-to-recipient-queue (real-controller FIFO integration).
 - [ ] **T4 (P1, human ~1d / CC ~minutes)** — loop control — soft per-topic cap (pause/resume) +
   hard TTL ceiling; prefs for `N`/`M`.
   - Surfaced by: D4, Codex #4. Files: `agentDelivery.ts`, prefs.

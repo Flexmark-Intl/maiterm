@@ -981,6 +981,7 @@ function createWorkspacesStore() {
       //
       // Dynamic import avoids a static cycle (agentBridge imports this store).
       import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.handleTabClosed(tabId)).catch(() => {});
+      import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.handleTabClosed(tabId)).catch(() => {});
 
       // If closing a diff tab with a pending Claude request, respond with rejection
       // so Claude Code doesn't hang waiting for accept/reject.
@@ -1914,6 +1915,7 @@ function createWorkspacesStore() {
       // commands.deleteTab directly (above), bypassing the store deleteTab + its bridge
       // teardown, so the transfer must be done explicitly here.
       import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.remapTab(tabId, newTab.id)).catch(() => {});
+      import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.remapTab(tabId, newTab.id)).catch(() => {});
     },
 
     async duplicateWindow() {

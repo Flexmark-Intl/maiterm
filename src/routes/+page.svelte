@@ -165,6 +165,8 @@
       }
       // Rebuild Agent Bridges from persisted state (after workspaces are loaded).
       agentBridgeStore.rehydrate();
+      // Rebuild Mesh routers + topic registries from persisted state.
+      import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.rehydrate()).catch(() => {});
     });
 
     // Listen for tab deactivation requests (e.g. "Suspend Other Tabs")

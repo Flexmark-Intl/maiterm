@@ -9,6 +9,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch as dispatchNotification } from '$lib/stores/notificationDispatch';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
+import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -177,10 +178,22 @@ function createClaudeCodeStore() {
           result = await handleRestoreArchivedTab(args as { workspaceId?: string; tabId: string });
           break;
         case 'sendToBridgedAgent':
-          result = await handleSendToBridgedAgent(args as { tabId?: string; message: string });
+          result = await handleSendToBridgedAgent(args as { tabId?: string; message: string; recipient?: string; topic?: string });
           break;
         case 'getBridgedAgent':
           result = handleGetBridgedAgent(args as { tabId?: string });
+          break;
+        case 'listBridgedPeers':
+          result = handleListBridgedPeers(args as { tabId?: string });
+          break;
+        case 'listTopics':
+          result = handleListTopics(args as { tabId?: string });
+          break;
+        case 'startTopic':
+          result = handleStartTopic(args as { tabId?: string; label: string });
+          break;
+        case 'completeTopic':
+          result = handleCompleteTopic(args as { tabId?: string; topicId: string });
           break;
         // getPreferences, setPreference, createBackup, listWindows handled directly on backend
         default:
@@ -1084,16 +1097,47 @@ function createClaudeCodeStore() {
 
   // --- Agent Bridge tools ---
 
-  async function handleSendToBridgedAgent(args: { tabId?: string; message: string }) {
+  async function handleSendToBridgedAgent(args: { tabId?: string; message: string; recipient?: string; topic?: string }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
+    // In a Mesh Workspace, route N:M (recipient + topic). Otherwise the 1:1 bridge.
+    if (agentMeshStore.isMeshTab(loc.tab.id)) {
+      return agentMeshStore.sendFromTab(loc.tab.id, { recipient: args.recipient, topic: args.topic, message: args.message });
+    }
     return agentBridgeStore.sendFromTab(loc.tab.id, args.message);
   }
 
   function handleGetBridgedAgent(args: { tabId?: string }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
+    if (agentMeshStore.isMeshTab(loc.tab.id)) return agentMeshStore.listPeers(loc.tab.id);
     return agentBridgeStore.getBridgeInfo(loc.tab.id);
+  }
+
+  function handleListBridgedPeers(args: { tabId?: string }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    return agentMeshStore.listPeers(loc.tab.id);
+  }
+
+  function handleListTopics(args: { tabId?: string }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    return agentMeshStore.listTopics(loc.tab.id);
+  }
+
+  function handleStartTopic(args: { tabId?: string; label: string }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    if (!args.label || !args.label.trim()) return { error: 'label is required to start a topic.' };
+    return agentMeshStore.startTopic(loc.tab.id, args.label);
+  }
+
+  function handleCompleteTopic(args: { tabId?: string; topicId: string }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    if (!args.topicId) return { error: 'topicId is required.' };
+    return agentMeshStore.completeTopic(loc.tab.id, args.topicId, false);
   }
 
   // --- Trigger variable tools ---
