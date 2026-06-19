@@ -255,6 +255,10 @@
   let isDragOver = $state(false);
   // Only cache the SSH command at drag-enter; CWD is resolved fresh at drop time
   let dragSshCommand: string | null = $state(null);
+  // The in-flight getPtyInfo() kicked off on drag-enter. The drop handler awaits
+  // it so a quick drop (or a slow remote host) can't read dragSshCommand before
+  // it resolves and misroute an SSH/agent drop into the local-paste branch.
+  let dragInfoPromise: Promise<void> | null = null;
 
   // Escape a file path for pasting into a terminal (backslash-escape shell metacharacters)
   function escapePathForTerminal(p: string): string {
@@ -986,41 +990,55 @@
           position.x >= rect.left && position.x <= rect.right &&
           position.y >= rect.top && position.y <= rect.bottom
         );
-        // On first enter, detect SSH session — cache only the SSH command
+        // On first enter, detect SSH session — cache only the SSH command. Keep
+        // the promise so a drop that races ahead of this resolving can await it.
         if (over && !isDragOver) {
-          getPtyInfo(ptyId).then(info => {
+          dragInfoPromise = getPtyInfo(ptyId).then(info => {
             logInfo(`drag-enter: foreground_command=${info.foreground_command}, cwd=${info.cwd}`);
             dragSshCommand = info.foreground_command ?? null;
           }).catch((e) => { logError(`drag-enter getPtyInfo failed: ${e}`); dragSshCommand = null; });
         }
         isDragOver = over;
       } else if (type === 'drop') {
-        const sshCommand = dragSshCommand;
+        const infoPromise = dragInfoPromise;
         isDragOver = false;
-        dragSshCommand = null;
-        if (!visible || !containerRef?.isConnected) return;
+        dragInfoPromise = null;
+        if (!visible || !containerRef?.isConnected) { dragSshCommand = null; return; }
         const { paths, position } = event.payload;
         const rect = containerRef.getBoundingClientRect();
         if (
           position.x >= rect.left && position.x <= rect.right &&
           position.y >= rect.top && position.y <= rect.bottom
         ) {
-          if (sshCommand) {
-            // SSH session — resolve remote CWD fresh at drop time
-            const isClaudeSession = !!claudeStateStore.getState(tabId);
-            let remoteCwd = '~';
-            if (!isClaudeSession) {
-              const oscState = terminalsStore.getOsc(tabId);
-              const osc7Cwd = oscState?.cwd ?? null;
-              const promptCwd = oscState?.promptCwd ?? null;
-              remoteCwd = (osc7Cwd ?? promptCwd ?? '~').trim();
-              logInfo(`drag-drop: remoteCwd=${remoteCwd} (osc7=${osc7Cwd}, prompt=${promptCwd})`);
-            }
-            const remoteDir = isClaudeSession ? AGENT_UPLOAD_DIR : remoteCwd;
-            const count = paths.length;
-            logInfo(`drag-drop SSH: uploading ${count} file(s) to ${remoteDir} via ${sshCommand} (claude=${isClaudeSession})`);
-            logInfo(`drag-drop SSH: paths=${JSON.stringify(paths)}`);
-            void (async () => {
+          terminal.focus();
+          void (async () => {
+            // Wait for the drag-enter SSH probe to resolve before routing. Without
+            // this, a quick drop (or a slow remote host like a laggy SSH session)
+            // reads dragSshCommand while it's still null and misroutes an SSH/agent
+            // drop into the local-paste branch — pasting a local path into a remote
+            // session instead of uploading. await the same in-flight getPtyInfo (no
+            // duplicate call); fall back to a fresh probe if drop arrived without an enter.
+            try {
+              if (infoPromise) await infoPromise;
+              else dragSshCommand = (await getPtyInfo(ptyId)).foreground_command ?? null;
+            } catch { /* getPtyInfo failure already logged; treat as local */ }
+            const sshCommand = dragSshCommand;
+            dragSshCommand = null;
+            if (sshCommand) {
+              // SSH session — resolve remote CWD fresh at drop time
+              const isClaudeSession = !!claudeStateStore.getState(tabId);
+              let remoteCwd = '~';
+              if (!isClaudeSession) {
+                const oscState = terminalsStore.getOsc(tabId);
+                const osc7Cwd = oscState?.cwd ?? null;
+                const promptCwd = oscState?.promptCwd ?? null;
+                remoteCwd = (osc7Cwd ?? promptCwd ?? '~').trim();
+                logInfo(`drag-drop: remoteCwd=${remoteCwd} (osc7=${osc7Cwd}, prompt=${promptCwd})`);
+              }
+              const remoteDir = isClaudeSession ? AGENT_UPLOAD_DIR : remoteCwd;
+              const count = paths.length;
+              logInfo(`drag-drop SSH: uploading ${count} file(s) to ${remoteDir} via ${sshCommand} (claude=${isClaudeSession})`);
+              logInfo(`drag-drop SSH: paths=${JSON.stringify(paths)}`);
               const outcome = await uploadWithProgress(sshCommand, paths, remoteDir);
               if (outcome.status === 'done') {
                 const basenames = paths.map(p => p.split('/').pop() ?? p);
@@ -1052,29 +1070,29 @@
                 logError(`drag-drop SCP upload failed: ${outcome.error}`);
                 toastStore.addToast('SCP Upload Failed', outcome.error ?? 'Upload failed', 'error');
               }
-            })();
-          } else if (claudeStateStore.getState(tabId)) {
-            // Local Claude session — write absolute paths so Claude can reference files
-            const count = paths.length;
-            logInfo(`drag-drop local Claude: sending ${count} file path(s)`);
-            (async () => {
+            } else if (claudeStateStore.getState(tabId)) {
+              // Local Claude session — write absolute paths so Claude can reference files
+              const count = paths.length;
+              logInfo(`drag-drop local Claude: sending ${count} file path(s)`);
               for (let i = 0; i < paths.length; i++) {
                 const bytes = Array.from(new TextEncoder().encode(paths[i] + ' '));
                 if (i > 0) await new Promise(r => setTimeout(r, 200));
                 await writeTerminal(ptyId, bytes);
               }
-            })().catch(e => logError(`drag-drop local Claude write failed: ${e}`));
-          } else {
-            // Local session — paste escaped file paths
-            const escaped = paths.map(escapePathForTerminal).join(' ');
-            const bytes = Array.from(new TextEncoder().encode(escaped));
-            writeTerminal(ptyId, bytes).catch(e => logError(String(e)));
-          }
-          terminal.focus();
+            } else {
+              // Local session — paste escaped file paths
+              const escaped = paths.map(escapePathForTerminal).join(' ');
+              const bytes = Array.from(new TextEncoder().encode(escaped));
+              await writeTerminal(ptyId, bytes);
+            }
+          })().catch(e => logError(`drag-drop failed: ${e}`));
+        } else {
+          dragSshCommand = null;
         }
       } else if (type === 'leave') {
         isDragOver = false;
         dragSshCommand = null;
+        dragInfoPromise = null;
       }
     });
 
