@@ -136,6 +136,13 @@
     });
   });
 
+  // When a mesh workspace becomes active (incl. on startup after an app restart), offer an
+  // auto re-check if any of its agents dropped — agentMesh waits out auto-resume first.
+  $effect(() => {
+    const id = workspacesStore.activeWorkspaceId;
+    if (id) agentMeshStore.maybeAutoRecheck(id);
+  });
+
   // Auto-suspend: periodically check for inactive workspaces
   $effect(() => {
     const minutes = preferencesStore.autoSuspendMinutes;

@@ -79,7 +79,7 @@
   </div>
 
   <div class="filmstrip">
-    <button class="exit-btn" onclick={exit} title="Switch back to the normal split/tab layout">⊟ Split view</button>
+    <button class="exit-btn" onclick={exit} title="Switch back to the normal tab/split layout">⊟ Tab view</button>
     {#if filmstrip.length === 0}
       <div class="strip-empty">{members.length === 0 ? 'No named agents in this mesh yet — name an agent tab to add it.' : 'All agents are on stage.'}</div>
     {/if}

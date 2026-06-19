@@ -50,6 +50,9 @@ function createAgentMeshStore() {
   // whether the stage/filmstrip layout is active (vs normal splits). In-memory UI state.
   interface StageState { active: boolean; left: string | null; right: string | null; }
   const stage = new Map<string, StageState>();
+  // Mesh workspaces we've already offered an auto re-check for this session (so switching
+  // between workspaces doesn't re-prompt). Cleared on destroy.
+  const autoRechecked = new Set<string>();
   // Recipient-keyed FIFO mailbox, shared core with the 1:1 bridge (separate instance).
   const deliveryCtl = createDeliveryController({
     inject: (tabId, text) => injectPrompt(tabId, text),
@@ -126,6 +129,20 @@ function createAgentMeshStore() {
       }
     }
     return out;
+  }
+
+  /** Does this mesh workspace have an agent that ISN'T running right now? A tab with a
+   *  persisted runtime (it WAS an agent) but no live agent-state has dropped — e.g. a
+   *  resume that hasn't landed (or failed) after an app restart. Drives the auto re-check. */
+  function hasUnreadyMembers(ws: Workspace): boolean {
+    for (const pane of ws.panes) {
+      for (const tab of pane.tabs) {
+        if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+        if (!tab.runtime) continue; // never an agent → not expected in the mesh
+        if (!claudeStateStore.getState(tab.id)) return true; // was an agent, not running now
+      }
+    }
+    return false;
   }
 
   function routerFor(wsId: string): MeshRouter | null {
@@ -330,6 +347,24 @@ function createAgentMeshStore() {
     isMeshWorkspace(wsId: string): boolean {
       void version;
       return !!getWorkspace(wsId)?.bridge_all;
+    },
+
+    /** On load / activation of a mesh workspace (e.g. after an app restart), give auto-resume
+     *  a few seconds to bring agents back, then — if any agent dropped — open the readiness
+     *  modal so the human can wake/re-init it. Guarded to fire at most once per workspace per
+     *  session, and only while that workspace is still the active one. */
+    maybeAutoRecheck(wsId: string) {
+      const ws = getWorkspace(wsId);
+      if (!ws?.bridge_all || autoRechecked.has(wsId)) return;
+      autoRechecked.add(wsId);
+      setTimeout(() => {
+        const w = getWorkspace(wsId);
+        if (!w?.bridge_all) return;
+        if (workspacesStore.activeWorkspaceId !== wsId) return; // user navigated away
+        if (hasUnreadyMembers(w)) {
+          window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: wsId }));
+        }
+      }, 5000);
     },
 
     /** Toggle a workspace into / out of mesh mode (persisted). */
@@ -711,6 +746,7 @@ function createAgentMeshStore() {
       statusNoteIds.clear();
       lastDecision.clear();
       stage.clear();
+      autoRechecked.clear();
       edges.length = 0;
     },
   };
