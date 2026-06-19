@@ -23,20 +23,38 @@ export function buildStatusNoteTemplate(role: string, purpose: string | null): s
 }
 
 /**
- * Extract the NEEDS DECISION block from a status note: everything from the heading line down
- * to the next bold heading (or end), with list markers/whitespace stripped and items joined
- * by "; ". Returns '' when there's no heading or only the empty placeholder — so a freshly
- * templated note (just `- `) raises nothing.
+ * Extract a section's list items from a status note: from the bold heading (e.g. `**Done:**`)
+ * down to the next bold heading (or end), with list markers/whitespace stripped and empty
+ * placeholder lines dropped. Anchored on the `**heading` so body text mentioning the word
+ * can't be mistaken for the section.
  */
-export function parseNeedsDecision(content: string): string {
-  const idx = content.search(/NEEDS DECISION/i);
-  if (idx === -1) return '';
+export function extractSection(content: string, heading: string): string[] {
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\*\\*\\s*${escaped}`, 'i');
+  const idx = content.search(re);
+  if (idx === -1) return [];
   let block = content.slice(idx).replace(/^[^\n]*\n?/, ''); // drop the heading line itself
   const end = block.search(/\n\s*\*\*/); // stop at the next bold heading
   if (end !== -1) block = block.slice(0, end);
-  const items = block
+  return block
     .split('\n')
     .map((l) => l.replace(/^[-*\s]+/, '').trim())
     .filter(Boolean);
-  return items.join('; ');
+}
+
+/**
+ * The NEEDS DECISION block joined by "; ". Returns '' when there's no heading or only the
+ * empty placeholder — so a freshly templated note (just `- `) raises nothing.
+ */
+export function parseNeedsDecision(content: string): string {
+  return extractSection(content, 'NEEDS DECISION').join('; ');
+}
+
+/** Structured view of a status note for the cockpit board (each section's items). */
+export function parseStatusNote(content: string): { done: string[]; needsDecision: string[]; blocked: string[] } {
+  return {
+    done: extractSection(content, 'Done'),
+    needsDecision: extractSection(content, 'NEEDS DECISION'),
+    blocked: extractSection(content, 'Blocked'),
+  };
 }

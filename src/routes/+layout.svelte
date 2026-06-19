@@ -30,6 +30,7 @@
   import { installGlobalSmartQuoteFix } from '$lib/utils/smartQuotes';
   import QuickOpen from '$lib/components/QuickOpen.svelte';
   import AgentBridgePicker from '$lib/components/AgentBridgePicker.svelte';
+  import MeshCockpit from '$lib/components/MeshCockpit.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
   import type { EditorFileInfo } from '$lib/tauri/types';
@@ -47,6 +48,7 @@
   let importFilePath = $state('');
   let showQuickOpen = $state(false);
   let showAgentBridgePicker = $state(false);
+  let showMeshCockpit = $state(false);
   let agentBridgeCallerTabId = $state<string | null>(null);
 
   // Cmd+W two-press confirmation: first press arms closeConfirmTabId for 2s,
@@ -449,7 +451,8 @@
             (e.key === ',') ||                                       // Cmd+, preferences
             (!e.shiftKey && key === 'o') ||                          // Cmd+O open file
             (!e.shiftKey && key === 'b') ||                          // Cmd+B toggle sidebar
-            (!e.shiftKey && key === 'e');                             // Cmd+E toggle notes
+            (!e.shiftKey && key === 'e') ||                          // Cmd+E toggle notes
+            (e.shiftKey && key === 'm');                             // Cmd+Shift+M mesh cockpit
           if (!isAppShortcut) return; // Let CodeMirror handle it
         } else if (e.altKey) {
           // Alt+Arrow keys etc — let editor handle
@@ -795,6 +798,14 @@
         return;
       }
 
+      // Cmd+Shift+M - Toggle the Mesh cockpit drawer
+      if (isMeta && e.shiftKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        e.stopPropagation();
+        showMeshCockpit = !showMeshCockpit;
+        return;
+      }
+
       // Cmd+, - Open preferences window
       if (isMeta && e.key === ',') {
         e.preventDefault();
@@ -839,12 +850,17 @@
     };
     window.addEventListener('open-agent-bridge-picker', onOpenAgentBridgePicker);
 
+    // Mesh cockpit opened from the workspace sidebar badge / titlebar button.
+    const onOpenMeshCockpit = () => { showMeshCockpit = true; };
+    window.addEventListener('open-mesh-cockpit', onOpenMeshCockpit);
+
     window.addEventListener('keydown', handleKeydown, true);
     window.addEventListener('keydown', handleKeydownAlt, true);
     window.addEventListener('keyup', handleKeyupAlt, true);
 
     return () => {
       window.removeEventListener('open-agent-bridge-picker', onOpenAgentBridgePicker);
+      window.removeEventListener('open-mesh-cockpit', onOpenMeshCockpit);
       window.removeEventListener('keydown', handleKeydown, true);
       window.removeEventListener('keydown', handleKeydownAlt, true);
       window.removeEventListener('keyup', handleKeyupAlt, true);
@@ -915,6 +931,14 @@
   callerTabId={agentBridgeCallerTabId}
   onclose={() => {
     showAgentBridgePicker = false;
+    const tab = workspacesStore.activeTab;
+    if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
+  }}
+/>
+<MeshCockpit
+  open={showMeshCockpit}
+  onclose={() => {
+    showMeshCockpit = false;
     const tab = workspacesStore.activeTab;
     if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
   }}

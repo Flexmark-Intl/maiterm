@@ -1846,6 +1846,62 @@
             </button>
           </div>
         {/if}
+
+        <h3 class="section-heading" style="margin-top: 20px;">Mesh Workspace</h3>
+        <p class="section-desc">
+          Loop control for Mesh Workspaces, where every agent talks to every other over
+          topic threads. A topic pauses at the soft cap (resume or complete it from the
+          cockpit, ⌘⇧M); the hard ceiling and time limit are backstops so an unwatched
+          ping-pong can't run unbounded.
+        </p>
+        <div class="setting">
+          <label for="mesh-soft-cap">Soft turn cap (per topic)</label>
+          <div class="number-input-wrapper">
+            <button class="number-btn" onclick={() => preferencesStore.setMeshSoftCap(preferencesStore.meshSoftCap - 1)}>−</button>
+            <input
+              type="number"
+              id="mesh-soft-cap"
+              class="number-input"
+              min="1"
+              max="1000"
+              value={preferencesStore.meshSoftCap}
+              onchange={(e) => preferencesStore.setMeshSoftCap(parseInt(e.currentTarget.value) || 12)}
+            />
+            <button class="number-btn" onclick={() => preferencesStore.setMeshSoftCap(preferencesStore.meshSoftCap + 1)}>+</button>
+          </div>
+        </div>
+        <div class="setting">
+          <label for="mesh-hard-cap">Hard turn ceiling (per topic)</label>
+          <div class="number-input-wrapper">
+            <button class="number-btn" onclick={() => preferencesStore.setMeshHardCap(preferencesStore.meshHardCap - 5)}>−</button>
+            <input
+              type="number"
+              id="mesh-hard-cap"
+              class="number-input"
+              min="1"
+              max="10000"
+              value={preferencesStore.meshHardCap}
+              onchange={(e) => preferencesStore.setMeshHardCap(parseInt(e.currentTarget.value) || 40)}
+            />
+            <button class="number-btn" onclick={() => preferencesStore.setMeshHardCap(preferencesStore.meshHardCap + 5)}>+</button>
+          </div>
+        </div>
+        <div class="setting">
+          <label for="mesh-ttl">Topic time limit (minutes, 0 = off)</label>
+          <div class="number-input-wrapper">
+            <button class="number-btn" onclick={() => preferencesStore.setMeshTopicTtlMinutes(preferencesStore.meshTopicTtlMinutes - 5)}>−</button>
+            <input
+              type="number"
+              id="mesh-ttl"
+              class="number-input"
+              min="0"
+              max="1440"
+              value={preferencesStore.meshTopicTtlMinutes}
+              onchange={(e) => preferencesStore.setMeshTopicTtlMinutes(parseInt(e.currentTarget.value) || 0)}
+            />
+            <button class="number-btn" onclick={() => preferencesStore.setMeshTopicTtlMinutes(preferencesStore.meshTopicTtlMinutes + 5)}>+</button>
+          </div>
+        </div>
       {:else if activeSection === 'backup'}
         <h3 class="section-heading">Backup Options</h3>
         <p class="section-desc">

@@ -574,6 +574,14 @@
             <button class="confirm-cancel" onclick={(e) => { e.stopPropagation(); confirmingDeleteId = null; }}>Cancel</button>
           {:else}
             <span class="workspace-name">{workspace.name}</span>
+            {#if workspace.bridge_all}
+              <button
+                class="mesh-badge"
+                title="Mesh Workspace — open cockpit (⌘⇧M)"
+                aria-label="Open mesh cockpit"
+                onclick={(e) => { e.stopPropagation(); if (workspace.id !== workspacesStore.activeWorkspaceId) handleItemClick(workspace.id); window.dispatchEvent(new CustomEvent('open-mesh-cockpit')); }}
+              >MESH</button>
+            {/if}
             {#if workspace.suspended}
               <IconButton
                 tooltip="Delete workspace"
@@ -842,6 +850,22 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+
+  .mesh-badge {
+    flex-shrink: 0;
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+    border: none;
+    cursor: pointer;
+    color: var(--bg-dark);
+    background: var(--accent);
+    opacity: 0.85;
+  }
+  .mesh-badge:hover { opacity: 1; }
 
   .tab-count-badge {
     flex-shrink: 0;

@@ -10,7 +10,7 @@ import { createDeliveryController } from '$lib/stores/agentDelivery';
 import { createMeshRouter, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
 import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores/meshSend';
 import { createLoopController, type LoopReason } from '$lib/stores/meshLoopControl';
-import { statusMarker, buildStatusNoteTemplate, parseNeedsDecision } from '$lib/stores/meshStatus';
+import { statusMarker, buildStatusNoteTemplate, parseNeedsDecision, parseStatusNote } from '$lib/stores/meshStatus';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch as dispatchNotification } from '$lib/stores/notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -379,6 +379,38 @@ function createAgentMeshStore() {
     getEdges(): MeshEdge[] {
       void version;
       return edges;
+    },
+
+    /** The status board for the cockpit: each member with its parsed status note + claude
+     *  state. Pairs the derived roster with each agent's one workspace note (§8). */
+    statusBoard(wsId: string) {
+      void version;
+      const ws = getWorkspace(wsId);
+      if (!ws || !ws.bridge_all) return [];
+      return membersOf(ws).map((m) => {
+        const noteId = statusNoteIds.get(m.tabId)
+          ?? ws.workspace_notes.find((n) => n.content.startsWith(statusMarker(m.role)))?.id
+          ?? null;
+        const note = noteId ? ws.workspace_notes.find((n) => n.id === noteId) : undefined;
+        const parsed = note ? parseStatusNote(note.content) : { done: [], needsDecision: [], blocked: [] };
+        const cs = claudeStateStore.getState(m.tabId);
+        return {
+          tabId: m.tabId,
+          role: m.role,
+          cwd: m.cwd,
+          purpose: m.purpose,
+          live: m.live,
+          claudeState: cs?.state ?? null,
+          noteId,
+          ...parsed,
+        };
+      });
+    },
+
+    /** Workspaces in this window that are meshes (for the cockpit's workspace resolution). */
+    meshWorkspaces(): { id: string; name: string }[] {
+      void version;
+      return workspacesStore.workspaces.filter((w) => w.bridge_all).map((w) => ({ id: w.id, name: w.name }));
     },
 
     // ─── MCP tool: listBridgedPeers ───────────────────────────────────────────

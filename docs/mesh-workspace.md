@@ -480,9 +480,19 @@ Synthesized from findings. P1 blocks the phase; P2 same-phase; P3 follow-up.
   `agent-init-session`, `agent-hook-stop` (catches a late-named agent), and mesh-enable.
   - Verify: `meshStatus.test.ts` (8) — marker/template, placeholder→empty, single/multi-item
     extraction, stop-at-next-heading, case-insensitive.
-- [ ] **T6 (P1, human ~1-2d / CC ~1 session)** — cockpit drawer — overlay drawer hosting the
-  status board + conversation-graph (edge events from `deliver()`) + human complete-topic.
-  - Surfaced by: §9, D8. Files: new drawer component, edge-event bus.
+- [x] **T6 (P1) — DONE** — cockpit drawer — `MeshCockpit.svelte`, a right-side overlay drawer
+  (⌘⇧M, or the sidebar MESH badge) over the active workspace: an enable-mesh CTA for a normal
+  workspace; for a mesh — a paused-topic banner (resume/complete), the conversation graph
+  (pure `meshGraph.ts` circular layout, owner→participant topic stars weighted by turns,
+  per-topic color, live pulse on recent deliveries, active-agent halo), the topics list
+  (turns + human Complete/Resume, D8), and the status board (per-agent parsed note with
+  NEEDS DECISION / Blocked / Done, editable purpose, deep-link to the tab). Prefs UI for
+  N/M/TTL added to the AI Agents settings section.
+  - Surfaced by: §9, D8. Files: `MeshCockpit.svelte`, `meshGraph.ts`, `+layout.svelte`
+    (shortcut + render + open-mesh-cockpit event), `WorkspaceSidebar.svelte` (badge),
+    `preferences/+page.svelte`.
+  - Verify: `meshGraph.test.ts` (7) — circle layout, active flag, owner-star edges wired to
+    node positions, completed/absent exclusion, recent-pulse window, paused flag.
 - [ ] **T7 (P2, spike first)** — mesh view — stage + filmstrip, CSS-scale swap, locked 50/50.
   - Surfaced by: §7, D7. **Gated on the §7.4 renderer/perf spike.**
 
