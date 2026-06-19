@@ -4,6 +4,7 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
+  import { replayAutoResume } from '$lib/stores/triggers.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
 
@@ -15,7 +16,7 @@
   }
   let { open, workspaceId, onclose, onEnabled }: Props = $props();
 
-  type Status = 'ready' | 'not-registered' | 'suspended' | 'unnamed';
+  type Status = 'ready' | 'not-registered' | 'dropped' | 'suspended' | 'unnamed';
   const WAIT_TIMEOUT_MS = 30_000;
 
   // Tabs that have a pending action (init sent / wake fired), → start time. A row clears when
@@ -55,14 +56,25 @@
       for (const tab of pane.tabs) {
         if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
         const inst = terminalsStore.get(tab.id);
-        const live = !!inst;
-        const registered = !!claudeStateStore.getState(tab.id) || !!tab.runtime;
-        const suspended = !!tab.pty_id && !live;
-        if (!live && !suspended) continue; // never started / empty tab — not an agent
+        const termLive = !!inst;                                // terminal/PTY attached
+        const agentLive = !!claudeStateStore.getState(tab.id);  // agent SESSION running + init'd
+        const wasAgent = !!tab.runtime;                         // persisted: this tab was an agent
+        const suspended = !!tab.pty_id && !termLive;
+        if (!termLive && !suspended) continue; // never started / empty tab — not an agent
         const named = tab.custom_name === true;
         const role = roleName(tab.name);
-        const status: Status = suspended ? 'suspended' : !named ? 'unnamed' : registered ? 'ready' : 'not-registered';
-        out.push({ tabId: tab.id, paneId: pane.id, name: tab.name, role, status, live, hasResume: !!tab.auto_resume_command, ptyId: inst?.ptyId ?? null, generic: named && isGeneric(role) });
+        // "Ready" REQUIRES a live agent session — the same signal that lights the tab's status
+        // dot (claudeState exists only between SessionStart and SessionEnd). `tab.runtime`
+        // persists across restarts, so it proves the tab WAS an agent, not that one is running
+        // now: a failed auto-resume leaves a live shell with runtime set but no session. That's
+        // 'dropped' (offer Resume), never 'ready'.
+        const status: Status =
+          suspended ? 'suspended'
+          : !named ? 'unnamed'
+          : agentLive ? 'ready'
+          : wasAgent ? 'dropped'
+          : 'not-registered';
+        out.push({ tabId: tab.id, paneId: pane.id, name: tab.name, role, status, live: termLive, hasResume: !!tab.auto_resume_command, ptyId: inst?.ptyId ?? null, generic: named && isGeneric(role) });
       }
     }
     return out;
@@ -70,6 +82,7 @@
 
   const readyCount = $derived(rows.filter((r) => r.status === 'ready').length);
   const suspendedRows = $derived(rows.filter((r) => r.status === 'suspended'));
+  const droppedRows = $derived(rows.filter((r) => r.status === 'dropped'));
   const notRegistered = $derived(rows.filter((r) => r.status === 'not-registered'));
   // Duplicate role names (case-insensitive) among named tabs — peers fall back to handle.
   const dupNames = $derived.by(() => {
@@ -103,11 +116,23 @@
     pending[r.tabId] = Date.now();
     window.dispatchEvent(new CustomEvent('mesh-activate-tab', { detail: r.tabId }));
   }
+  // Dropped = live shell, agent gone (auto-resume failed/ended). Re-run the tab's auto-resume
+  // in its live PTY (same path as the tab context-menu "replay auto-resume" — handles SSH, cwd,
+  // and %var interpolation). The agent re-registers + rejoins once its session comes back up.
+  async function resumeDropped(r: Row) {
+    if (!r.hasResume) return;
+    pending[r.tabId] = Date.now();
+    try { await replayAutoResume(r.tabId); }
+    catch (e) { logError(`mesh setup: resume failed for ${r.tabId.slice(0, 8)}: ${e}`); delete pending[r.tabId]; }
+  }
   function wakeAll() {
     for (const r of suspendedRows) wake(r);
   }
   function initAll() {
     for (const r of notRegistered) void sendInit(r);
+  }
+  function resumeAllDropped() {
+    for (const r of droppedRows) if (r.hasResume) void resumeDropped(r);
   }
   function startRename(r: Row) {
     renaming[r.tabId] = r.role === 'agent' ? '' : r.role;
@@ -129,10 +154,14 @@
   }
 
   function statusLabel(s: Status): string {
-    return s === 'ready' ? 'Ready' : s === 'not-registered' ? 'Not registered' : s === 'suspended' ? 'Suspended' : 'Needs a name';
+    return s === 'ready' ? 'Ready'
+      : s === 'not-registered' ? 'Not registered'
+      : s === 'dropped' ? 'Dropped'
+      : s === 'suspended' ? 'Suspended'
+      : 'Needs a name';
   }
-  function dotColor(s: Status): 'green' | 'yellow' | 'dim' {
-    return s === 'ready' ? 'green' : s === 'suspended' ? 'dim' : 'yellow';
+  function dotColor(s: Status): 'green' | 'yellow' | 'red' | 'dim' {
+    return s === 'ready' ? 'green' : s === 'dropped' ? 'red' : s === 'suspended' ? 'dim' : 'yellow';
   }
 
   function handleKeydown(e: KeyboardEvent) { if (e.key === 'Escape') { e.stopPropagation(); onclose(); } }
@@ -192,6 +221,12 @@
                 <span class="timeout" title="Didn't come online in 30s — check the tab">no response</span>
               {:else if r.status === 'not-registered'}
                 <button class="mini" onclick={() => sendInit(r)} disabled={!r.ptyId}>Send init</button>
+              {:else if r.status === 'dropped'}
+                {#if r.hasResume}
+                  <button class="mini" onclick={() => resumeDropped(r)} disabled={!r.ptyId}>Resume</button>
+                {:else}
+                  <span class="warn-inline" title="No auto-resume command — restart the agent in its tab">restart in tab</span>
+                {/if}
               {:else if r.status === 'suspended'}
                 <button class="mini" onclick={() => wake(r)}>Wake</button>
               {/if}
@@ -204,16 +239,18 @@
       </div>
 
       <!-- Batch actions -->
-      {#if suspendedRows.length > 1 || notRegistered.length > 1}
+      {#if suspendedRows.length > 1 || notRegistered.length > 1 || droppedRows.length > 1}
         <div class="batch">
           {#if suspendedRows.length > 1}<button class="mini ghost" onclick={wakeAll}>Wake all suspended ({suspendedRows.length})</button>{/if}
+          {#if droppedRows.length > 1}<button class="mini ghost" onclick={resumeAllDropped}>Resume all dropped ({droppedRows.length})</button>{/if}
           {#if notRegistered.length > 1}<button class="mini ghost" onclick={initAll}>Send init to all ({notRegistered.length})</button>{/if}
         </div>
       {/if}
 
       <!-- Warnings (non-blocking) -->
-      {#if readyCount < 2 || dupNames.length > 0}
+      {#if readyCount < 2 || dupNames.length > 0 || droppedRows.length > 0}
         <div class="warnings">
+          {#if droppedRows.length > 0}<div class="warn">⚠ {droppedRows.length} agent{droppedRows.length === 1 ? '' : 's'} dropped — auto-resume didn't bring {droppedRows.length === 1 ? 'it' : 'them'} back. Click Resume (or check the tab).</div>{/if}
           {#if readyCount < 2}<div class="warn">⚠ A mesh needs at least 2 ready agents (you have {readyCount}).</div>{/if}
           {#each dupNames as n}<div class="warn">⚠ Two agents named "{n}" — peers will address them by handle, not name.</div>{/each}
         </div>
@@ -254,6 +291,7 @@
   .status-tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
   .status-tag.ready { color: var(--green); }
   .status-tag.not-registered, .status-tag.unnamed { color: var(--yellow); }
+  .status-tag.dropped { color: var(--red); }
   .status-tag.suspended { color: var(--fg-dim); }
   .nudge, .warn-inline { font-size: 9px; color: var(--yellow); border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent); padding: 0 4px; border-radius: 3px; flex-shrink: 0; }
   .action { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
