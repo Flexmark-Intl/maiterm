@@ -155,11 +155,23 @@ suggests the most recent active topic as the likely default in tool descriptions
 
 - A tab joins the mesh only when it has an explicit descriptive name (`custom_name === true`
   on the tab, or a dedicated `mesh_role` field).
-- The human supplies a one-line **purpose** for the agent ("owns the REST API and DB
-  schema"), stored on the membership record.
+- **Purpose is OPTIONAL** (decision, post-Phase-1). A well-named tab already carries its
+  domain, and the agent *self-declares* its scope into its status note on join ("What I
+  own: …"), so a human-typed purpose is mostly redundant. It's kept as an optional **steer**
+  — to constrain/correct scope upfront (e.g. "auth flow only, not the whole API") — persisted
+  on `Tab.mesh_purpose`. The cockpit field is framed as optional, never shown as incomplete.
 - On join, maiTerm injects an opener directive (reusing `buildOpener`) containing: the
-  agent's role + purpose, the current roster, how topics work (set/propagate/complete, tag
-  every message), and the agent's own status-note id (see §8).
+  agent's role (+ purpose if set), the current roster, how topics work (set/propagate/complete,
+  tag every message), and the agent's own status-note id (see §8).
+- **Pre-flight setup modal (hardening).** Enabling mesh opens a readiness modal
+  (`MeshSetupModal.svelte`) that inventories every terminal tab into Ready / Not-registered /
+  Suspended / Unnamed and offers per-tab fixes: **Send `/maiterm init`** to a named-but-
+  unregistered tab (the agent-running-but-never-init'd case), **Wake** a suspended tab (+ "Wake
+  all", with a per-tab waiter that times out at 30s and reports no-shows), and **inline rename**
+  an unnamed agent (an unnamed tab can't be addressed, so it would silently not join).
+  Non-blocking warnings: fewer than 2 ready agents, duplicate role names (peers fall back to
+  the handle), a suspended tab with no auto-resume (wakes as a bare shell), and a generic-name
+  nudge. Enable commits only the ready set.
 
 ---
 

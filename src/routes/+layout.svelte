@@ -31,6 +31,7 @@
   import QuickOpen from '$lib/components/QuickOpen.svelte';
   import AgentBridgePicker from '$lib/components/AgentBridgePicker.svelte';
   import MeshCockpit from '$lib/components/MeshCockpit.svelte';
+  import MeshSetupModal from '$lib/components/MeshSetupModal.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
   import type { EditorFileInfo } from '$lib/tauri/types';
@@ -49,6 +50,7 @@
   let showQuickOpen = $state(false);
   let showAgentBridgePicker = $state(false);
   let showMeshCockpit = $state(false);
+  let meshSetupWorkspaceId = $state<string | null>(null);
   let agentBridgeCallerTabId = $state<string | null>(null);
 
   // Cmd+W two-press confirmation: first press arms closeConfirmTabId for 2s,
@@ -854,6 +856,10 @@
     const onOpenMeshCockpit = () => { showMeshCockpit = true; };
     window.addEventListener('open-mesh-cockpit', onOpenMeshCockpit);
 
+    // Mesh pre-flight setup modal, opened from the cockpit's Enable Mesh button.
+    const onOpenMeshSetup = (e: Event) => { meshSetupWorkspaceId = (e as CustomEvent<string>).detail ?? null; };
+    window.addEventListener('open-mesh-setup', onOpenMeshSetup);
+
     window.addEventListener('keydown', handleKeydown, true);
     window.addEventListener('keydown', handleKeydownAlt, true);
     window.addEventListener('keyup', handleKeyupAlt, true);
@@ -861,6 +867,7 @@
     return () => {
       window.removeEventListener('open-agent-bridge-picker', onOpenAgentBridgePicker);
       window.removeEventListener('open-mesh-cockpit', onOpenMeshCockpit);
+      window.removeEventListener('open-mesh-setup', onOpenMeshSetup);
       window.removeEventListener('keydown', handleKeydown, true);
       window.removeEventListener('keydown', handleKeydownAlt, true);
       window.removeEventListener('keyup', handleKeyupAlt, true);
@@ -942,6 +949,12 @@
     const tab = workspacesStore.activeTab;
     if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
   }}
+/>
+<MeshSetupModal
+  open={meshSetupWorkspaceId !== null}
+  workspaceId={meshSetupWorkspaceId}
+  onclose={() => { meshSetupWorkspaceId = null; }}
+  onEnabled={() => { showMeshCockpit = true; }}
 />
 <Toast />
 

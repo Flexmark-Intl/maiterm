@@ -56,10 +56,11 @@
     return r === 'soft' ? 'soft cap' : r === 'hard' ? 'hard ceiling' : 'time limit';
   }
 
-  async function enableMesh() {
+  function enableMesh() {
     if (!ws) return;
-    busy = true;
-    try { await agentMeshStore.setMeshEnabled(ws.id, true); } finally { busy = false; }
+    // Open the pre-flight setup modal (readiness check + fixes) instead of enabling blindly.
+    window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: ws.id }));
+    onclose();
   }
   async function disableMesh() {
     if (!ws) return;
@@ -203,7 +204,8 @@
               </div>
               <input
                 class="purpose-input"
-                placeholder="one-line purpose (what this agent owns)…"
+                placeholder="optional steer — a boundary or scope the name doesn't say…"
+                title="Optional. The agent declares its own scope on join; use this only to constrain or correct it (e.g. 'auth flow only, not the whole API')."
                 value={a.purpose ?? ''}
                 onchange={(e) => setPurpose(a.tabId, e)}
               />

@@ -177,7 +177,24 @@
       for (const id of tabIds) activatedTabIds.delete(id);
     }
     window.addEventListener('deactivate-tabs', handleDeactivateTabs);
-    return () => window.removeEventListener('deactivate-tabs', handleDeactivateTabs);
+
+    // Wake a suspended tab (mesh setup "Wake all"): activate it so its TerminalPane mounts and
+    // its auto-resume fires; clear any pending-resume gate on its pane so it doesn't sit waiting.
+    function handleActivateTab(e: Event) {
+      const tabId = (e as CustomEvent<string>).detail;
+      if (!tabId) return;
+      for (const ws of workspacesStore.workspaces) {
+        for (const pane of ws.panes) {
+          if (pane.tabs.some(t => t.id === tabId)) { pendingResumePanes.delete(pane.id); break; }
+        }
+      }
+      activatedTabIds.add(tabId);
+    }
+    window.addEventListener('mesh-activate-tab', handleActivateTab);
+    return () => {
+      window.removeEventListener('deactivate-tabs', handleDeactivateTabs);
+      window.removeEventListener('mesh-activate-tab', handleActivateTab);
+    };
   });
 
   function handleSidebarResize(delta: number) {
