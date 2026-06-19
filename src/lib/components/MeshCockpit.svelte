@@ -86,6 +86,13 @@
     agentMeshStore.toggleStageView(ws.id);
     onclose(); // get out of the way so the stage layout is visible
   }
+  function recheck() {
+    if (!ws) return;
+    // Re-open the readiness modal for this already-enabled mesh (wake/init agents that dropped,
+    // e.g. after an app restart). The modal detects bridge_all and runs in re-check mode.
+    window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: ws.id }));
+    onclose();
+  }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') { e.stopPropagation(); onclose(); }
@@ -227,6 +234,7 @@
 
         <footer class="cockpit-footer">
           <button class="mini" onclick={toggleStage}>{stageActive ? 'Exit stage view' : 'Stage view'}</button>
+          <button class="mini ghost" onclick={recheck}>Re-check</button>
           <button class="mini ghost danger" disabled={busy} onclick={disableMesh}>Disable Mesh</button>
         </footer>
       {/if}

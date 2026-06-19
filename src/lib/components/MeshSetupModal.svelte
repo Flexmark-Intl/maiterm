@@ -137,7 +137,12 @@
 
   function handleKeydown(e: KeyboardEvent) { if (e.key === 'Escape') { e.stopPropagation(); onclose(); } }
   function handleBackdrop(e: MouseEvent) { if (e.target === e.currentTarget) onclose(); }
-  const wsName = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId)?.name ?? 'this workspace');
+  const wsObj = $derived(workspacesStore.workspaces.find((w) => w.id === workspaceId));
+  const wsName = $derived(wsObj?.name ?? 'this workspace');
+  // Re-check mode: the workspace is ALREADY a mesh (e.g. reopened after restart). Then the
+  // primary action is just "Done" — woken/init'd agents auto-prime + join on their own, so
+  // there's nothing to "enable". Otherwise this is first-time setup.
+  const alreadyMesh = $derived(!!wsObj?.bridge_all);
 </script>
 
 {#if open && workspaceId}
@@ -146,10 +151,13 @@
     <div class="modal">
       <header>
         <span class="mesh-badge">MESH</span>
-        <h2>Set up mesh — {wsName}</h2>
+        <h2>{alreadyMesh ? 'Mesh readiness' : 'Set up mesh'} — {wsName}</h2>
         <button class="close-btn" onclick={onclose} aria-label="Close">×</button>
       </header>
-      <p class="sub">Each agent tab below joins the mesh once it's <strong>named</strong> and <strong>registered</strong> (has run <code>/maiterm init</code>). Fix any that aren't ready, then enable.</p>
+      <p class="sub">
+        Each agent tab joins once it's <strong>named</strong> and <strong>registered</strong> (has run <code>/maiterm init</code>).
+        {#if alreadyMesh}Wake or re-init any that dropped (e.g. after an app restart) — they rejoin and re-prime on their own.{:else}Fix any that aren't ready, then enable.{/if}
+      </p>
 
       {#if rows.length === 0}
         <div class="empty">No terminal tabs in this workspace yet. Open agent tabs first.</div>
@@ -212,10 +220,15 @@
       {/if}
 
       <footer>
-        <button class="mini ghost" onclick={onclose}>Cancel</button>
-        <button class="primary" disabled={busy || readyCount === 0} onclick={enableMesh}>
-          Enable Mesh{readyCount > 0 ? ` (${readyCount} ready)` : ''}
-        </button>
+        {#if alreadyMesh}
+          <span class="ready-count">{readyCount} agent{readyCount === 1 ? '' : 's'} ready</span>
+          <button class="primary" onclick={onclose}>Done</button>
+        {:else}
+          <button class="mini ghost" onclick={onclose}>Cancel</button>
+          <button class="primary" disabled={busy || readyCount === 0} onclick={enableMesh}>
+            Enable Mesh{readyCount > 0 ? ` (${readyCount} ready)` : ''}
+          </button>
+        {/if}
       </footer>
     </div>
   </div>
@@ -255,7 +268,8 @@
   .warnings { padding: 4px 16px; display: flex; flex-direction: column; gap: 4px; }
   .warn { font-size: 11px; color: var(--yellow); }
 
-  footer { display: flex; gap: 8px; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--bg-light); margin-top: 8px; }
+  footer { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 12px 16px; border-top: 1px solid var(--bg-light); margin-top: 8px; }
+  .ready-count { margin-right: auto; font-size: 11px; color: var(--fg-dim); }
   .primary { background: var(--accent); color: var(--bg-dark); border: none; border-radius: 5px; padding: 7px 16px; font-size: 12px; font-weight: 600; cursor: pointer; }
   .primary:hover { background: var(--accent-hover); }
   .primary:disabled { opacity: 0.5; cursor: default; }

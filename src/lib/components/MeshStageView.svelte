@@ -79,7 +79,7 @@
   </div>
 
   <div class="filmstrip">
-    <button class="exit-btn" onclick={exit} title="Exit stage view — back to normal splits">⤢ Exit</button>
+    <button class="exit-btn" onclick={exit} title="Switch back to the normal split/tab layout">⊟ Split view</button>
     {#if filmstrip.length === 0}
       <div class="strip-empty">{members.length === 0 ? 'No named agents in this mesh yet — name an agent tab to add it.' : 'All agents are on stage.'}</div>
     {/if}
@@ -129,11 +129,12 @@
     background: var(--bg-medium); border-top: 1px solid var(--bg-light);
   }
   .exit-btn {
-    flex-shrink: 0; align-self: flex-start;
-    background: none; border: 1px solid var(--bg-light); border-radius: 4px;
-    color: var(--fg-dim); font-size: 11px; padding: 4px 8px; cursor: pointer;
+    flex-shrink: 0; align-self: center;
+    background: var(--bg-dark); border: 1px solid var(--bg-light); border-radius: 4px;
+    color: var(--fg); font-size: 11px; font-weight: 500; padding: 6px 10px; cursor: pointer;
+    white-space: nowrap;
   }
-  .exit-btn:hover { color: var(--fg); border-color: var(--fg-dim); }
+  .exit-btn:hover { color: var(--accent); border-color: var(--accent); }
   .strip-empty { color: var(--fg-dim); font-size: 12px; padding-left: 8px; }
 
   .tile {

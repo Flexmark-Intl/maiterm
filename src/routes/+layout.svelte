@@ -956,6 +956,16 @@
   onclose={() => { meshSetupWorkspaceId = null; }}
   onEnabled={() => { showMeshCockpit = true; }}
 />
+<!-- Right-edge pull-tab: appears when the active workspace is a mesh and the cockpit is closed. -->
+{#if workspacesStore.activeWorkspace?.bridge_all && !showMeshCockpit && meshSetupWorkspaceId === null}
+  <button
+    class="mesh-lip"
+    onclick={() => { showMeshCockpit = true; }}
+    title="Open mesh cockpit (⌘⇧M)"
+    aria-label="Open mesh cockpit"
+  >MESH</button>
+{/if}
+
 <Toast />
 
 {#if closeConfirmTabId && closeConfirmTabId === workspacesStore.activeTab?.id}
@@ -967,6 +977,29 @@
 {/if}
 
 <style>
+  .mesh-lip {
+    position: fixed;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 900; /* below cockpit (1000) + modals, above content */
+    background: var(--accent);
+    color: var(--bg-dark);
+    border: none;
+    border-radius: 6px 0 0 6px;
+    padding: 14px 3px;
+    cursor: pointer;
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    opacity: 0.55;
+    box-shadow: -2px 0 8px rgba(0, 0, 0, 0.3);
+    transition: opacity 0.15s ease, padding-right 0.15s ease;
+  }
+  .mesh-lip:hover { opacity: 1; padding-right: 6px; }
+
   .close-confirm-backdrop {
     position: fixed;
     inset: 0;
