@@ -1,7 +1,7 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -12,6 +12,20 @@ use crate::terminal::event_proxy::AitermEventProxy;
 use crate::terminal::handle::create_terminal;
 use crate::terminal::osc::OscEvent;
 use crate::terminal::render;
+
+/// Frame interval for coalesced emission (~60fps). During a burst of PTY output
+/// the emitter thread renders at most one frame per interval; a trailing frame is
+/// always emitted within one interval of the last read once output settles.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Shared signal between a PTY's reader thread and its frame-emitter thread.
+/// The reader sets `dirty` after advancing the VTE parser; the emitter coalesces
+/// dirty notifications to one render per `FRAME_INTERVAL`. `closed` tells the
+/// emitter to exit once the reader has emitted the final settled frame.
+struct FrameSignal {
+    dirty: bool,
+    closed: bool,
+}
 
 pub fn spawn_pty(
     app_handle: &AppHandle,
@@ -345,12 +359,63 @@ pub fn spawn_pty(
         }
     });
 
+    // Coalesced frame emission. A busy TUI (Claude Code, vim, …) repaints its
+    // whole viewport on every PTY read; rendering + emitting each one inline
+    // saturated the renderer when several agents streamed at once (e.g. a split
+    // showing two live agents, plus hidden agent tabs that still consume frames).
+    // The reader now only flags the grid dirty; this dedicated emitter thread
+    // renders + emits at most once per FRAME_INTERVAL and always emits a trailing
+    // frame after the burst ends, then parks on the condvar with zero CPU.
+    let frame_signal = Arc::new((Mutex::new(FrameSignal { dirty: false, closed: false }), Condvar::new()));
+    {
+        let emitter_signal = Arc::clone(&frame_signal);
+        let emitter_state = Arc::clone(state);
+        let emitter_app = app_handle.clone();
+        let emitter_pty_id = pty_id.to_string();
+        thread::spawn(move || {
+            let (lock, cvar) = &*emitter_signal;
+            loop {
+                // Park until the grid changed (or the PTY closed) — no polling.
+                {
+                    let mut st = lock.lock().unwrap();
+                    while !st.dirty && !st.closed {
+                        st = cvar.wait(st).unwrap();
+                    }
+                    // The reader emits the final settled frame directly before it
+                    // sets `closed`, so on close we just exit without re-rendering
+                    // (the registry entry may already be gone anyway).
+                    if st.closed {
+                        break;
+                    }
+                    st.dirty = false;
+                }
+
+                {
+                    let registry = emitter_state.terminal_registry.read();
+                    if let Some(handle) = registry.get(&emitter_pty_id) {
+                        let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
+                        let _ = emitter_app.emit(
+                            &format!("term-frame-{}", emitter_pty_id),
+                            &frame,
+                        );
+                    }
+                }
+
+                // Rate-limit: reads during this window re-flag `dirty`, so the next
+                // iteration emits the coalesced result. The wake after the final
+                // read of a burst is the trailing frame.
+                thread::sleep(FRAME_INTERVAL);
+            }
+        });
+    }
+
     // Spawn reader thread — feeds PTY output through OSC interceptor + alacritty_terminal,
-    // then emits rendered frames to the frontend
+    // then flags the emitter thread to render a frame
     let pty_id_clone = pty_id.to_string();
     let tab_id_reader = tab_id.to_string();
     let app_handle_clone = app_handle.clone();
     let state_reader = Arc::clone(state);
+    let reader_signal = Arc::clone(&frame_signal);
 
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -423,19 +488,15 @@ pub fn spawn_pty(
                         }
                     }
 
-                    // Render viewport frame and emit to frontend after every read.
-                    // No throttling — render_viewport() is fast (grid iteration) and
-                    // the read() blocking naturally rate-limits during burst output.
-                    // Throttling caused missed final frames when no more data arrives.
+                    // Flag the grid dirty; the emitter thread coalesces to ~60fps
+                    // and guarantees a trailing frame once output settles. Rendering
+                    // inline on every read saturated the renderer under multi-agent
+                    // streaming (the sluggishness this replaces).
                     {
-                        let registry = state_reader.terminal_registry.read();
-                        if let Some(handle) = registry.get(&pty_id_clone) {
-                            let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
-                            let _ = app_handle_clone.emit(
-                                &format!("term-frame-{}", pty_id_clone),
-                                &frame,
-                            );
-                        }
+                        let (lock, cvar) = &*reader_signal;
+                        let mut st = lock.lock().unwrap();
+                        st.dirty = true;
+                        cvar.notify_one();
                     }
 
                     // Emit raw bytes for trigger engine (frontend, temporary bridge)
@@ -460,6 +521,15 @@ pub fn spawn_pty(
                     &frame,
                 );
             }
+        }
+
+        // Stop the emitter thread. The final frame above is emitted directly so it
+        // can't be lost to the coalescing window.
+        {
+            let (lock, cvar) = &*reader_signal;
+            let mut st = lock.lock().unwrap();
+            st.closed = true;
+            cvar.notify_one();
         }
 
         // Only emit close event if this PTY wasn't replaced by a new spawn for the same tab.
