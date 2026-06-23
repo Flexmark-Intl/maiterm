@@ -72,9 +72,9 @@ function createPreferencesStore() {
   let autoCheckUpdates = $state(true);
   let quickOpenShowHidden = $state(false);
   let quickOpenShowIgnored = $state(false);
-  let meshSoftCap = $state(12);
-  let meshHardCap = $state(40);
-  let meshTopicTtlMinutes = $state(30);
+  let meshSoftCap = $state(0);
+  let meshHardCap = $state(0);
+  let meshTopicTtlMinutes = $state(0);
 
   return {
     /** Resolves once the initial load() has completed. */
@@ -226,9 +226,9 @@ function createPreferencesStore() {
       autoCheckUpdates = prefs.auto_check_updates ?? true;
       quickOpenShowHidden = prefs.quick_open_show_hidden ?? false;
       quickOpenShowIgnored = prefs.quick_open_show_ignored ?? false;
-      meshSoftCap = prefs.mesh_soft_cap ?? 12;
-      meshHardCap = prefs.mesh_hard_cap ?? 40;
-      meshTopicTtlMinutes = prefs.mesh_topic_ttl_minutes ?? 30;
+      meshSoftCap = prefs.mesh_soft_cap ?? 0;
+      meshHardCap = prefs.mesh_hard_cap ?? 0;
+      meshTopicTtlMinutes = prefs.mesh_topic_ttl_minutes ?? 0;
       _resolveReady();
     },
 
@@ -549,13 +549,15 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    // All three mesh loop-control limits use 0 = OFF and are independent (no inter-field
+    // coupling): a user can disable any one without the others forcing it back on.
     async setMeshSoftCap(value: number) {
-      meshSoftCap = Math.max(1, Math.round(value));
+      meshSoftCap = Math.max(0, Math.round(value));
       await this.save();
     },
 
     async setMeshHardCap(value: number) {
-      meshHardCap = Math.max(meshSoftCap, Math.round(value));
+      meshHardCap = Math.max(0, Math.round(value));
       await this.save();
     },
 
@@ -652,9 +654,9 @@ function createPreferencesStore() {
       autoCheckUpdates = prefs.auto_check_updates ?? true;
       quickOpenShowHidden = prefs.quick_open_show_hidden ?? false;
       quickOpenShowIgnored = prefs.quick_open_show_ignored ?? false;
-      meshSoftCap = prefs.mesh_soft_cap ?? 12;
-      meshHardCap = prefs.mesh_hard_cap ?? 40;
-      meshTopicTtlMinutes = prefs.mesh_topic_ttl_minutes ?? 30;
+      meshSoftCap = prefs.mesh_soft_cap ?? 0;
+      meshHardCap = prefs.mesh_hard_cap ?? 0;
+      meshTopicTtlMinutes = prefs.mesh_topic_ttl_minutes ?? 0;
     },
 
     async save() {

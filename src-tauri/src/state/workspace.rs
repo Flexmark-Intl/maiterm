@@ -605,16 +605,18 @@ fn default_notify_min_duration() -> u32 {
     5
 }
 
+// Mesh loop-control limits default to 0 = OFF. By default a Mesh Workspace flows freely
+// (no pause/backstop); a user can opt into any of the three caps in Preferences → Mesh.
 fn default_mesh_soft_cap() -> u32 {
-    12
+    0
 }
 
 fn default_mesh_hard_cap() -> u32 {
-    40
+    0
 }
 
 fn default_mesh_topic_ttl_minutes() -> u32 {
-    30
+    0
 }
 
 fn default_notification_mode() -> String {

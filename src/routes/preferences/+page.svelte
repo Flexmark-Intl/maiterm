@@ -1869,44 +1869,54 @@
         <h3 class="section-heading" style="margin-top: 20px;">Mesh Workspace</h3>
         <p class="section-desc">
           Loop control for Mesh Workspaces, where every agent talks to every other over
-          topic threads. A topic pauses at the soft cap (resume or complete it from the
-          cockpit, ⌘⇧M); the hard ceiling and time limit are backstops so an unwatched
-          ping-pong can't run unbounded.
+          topic threads. All three limits default to <strong>0 = off</strong>, so a mesh
+          flows freely. Turn one on only if you want maiTerm to pause an unwatched
+          ping-pong: a topic pauses at the soft cap (resume or complete it from the cockpit,
+          ⌘⇧M), while the hard ceiling and time limit are absolute backstops.
         </p>
         <div class="setting">
-          <label for="mesh-soft-cap">Soft turn cap (per topic)</label>
+          <div>
+            <label for="mesh-soft-cap">Soft turn cap (per topic)</label>
+            <p class="setting-hint">{preferencesStore.meshSoftCap === 0 ? 'Off — topics never pause on turn count.' : `Pause a topic after ${preferencesStore.meshSoftCap} turns; resume adds another ${preferencesStore.meshSoftCap}.`}</p>
+          </div>
           <div class="number-input-wrapper">
             <button class="number-btn" onclick={() => preferencesStore.setMeshSoftCap(preferencesStore.meshSoftCap - 1)}>−</button>
             <input
               type="number"
               id="mesh-soft-cap"
               class="number-input"
-              min="1"
+              min="0"
               max="1000"
               value={preferencesStore.meshSoftCap}
-              onchange={(e) => preferencesStore.setMeshSoftCap(parseInt(e.currentTarget.value) || 12)}
+              onchange={(e) => preferencesStore.setMeshSoftCap(parseInt(e.currentTarget.value) || 0)}
             />
             <button class="number-btn" onclick={() => preferencesStore.setMeshSoftCap(preferencesStore.meshSoftCap + 1)}>+</button>
           </div>
         </div>
         <div class="setting">
-          <label for="mesh-hard-cap">Hard turn ceiling (per topic)</label>
+          <div>
+            <label for="mesh-hard-cap">Hard turn ceiling (per topic)</label>
+            <p class="setting-hint">{preferencesStore.meshHardCap === 0 ? 'Off — no absolute turn ceiling.' : `Hard stop at ${preferencesStore.meshHardCap} turns; a resume can't lift it (complete the topic).`}</p>
+          </div>
           <div class="number-input-wrapper">
             <button class="number-btn" onclick={() => preferencesStore.setMeshHardCap(preferencesStore.meshHardCap - 5)}>−</button>
             <input
               type="number"
               id="mesh-hard-cap"
               class="number-input"
-              min="1"
+              min="0"
               max="10000"
               value={preferencesStore.meshHardCap}
-              onchange={(e) => preferencesStore.setMeshHardCap(parseInt(e.currentTarget.value) || 40)}
+              onchange={(e) => preferencesStore.setMeshHardCap(parseInt(e.currentTarget.value) || 0)}
             />
             <button class="number-btn" onclick={() => preferencesStore.setMeshHardCap(preferencesStore.meshHardCap + 5)}>+</button>
           </div>
         </div>
         <div class="setting">
-          <label for="mesh-ttl">Topic time limit (minutes, 0 = off)</label>
+          <div>
+            <label for="mesh-ttl">Topic time limit (minutes)</label>
+            <p class="setting-hint">{preferencesStore.meshTopicTtlMinutes === 0 ? 'Off — topics never pause on age.' : `Pause a topic ${preferencesStore.meshTopicTtlMinutes} min after it starts (or its last resume).`}</p>
+          </div>
           <div class="number-input-wrapper">
             <button class="number-btn" onclick={() => preferencesStore.setMeshTopicTtlMinutes(preferencesStore.meshTopicTtlMinutes - 5)}>−</button>
             <input
