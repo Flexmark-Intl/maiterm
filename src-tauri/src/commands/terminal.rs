@@ -526,8 +526,18 @@ pub fn get_terminal_recent_text(
     pty_id: String,
     line_count: usize,
 ) -> Result<String, String> {
+    recent_text(&state, &pty_id, line_count)
+}
+
+/// Plain-API core for `get_terminal_recent_text` so backend-internal callers (e.g. the
+/// maiLink bridge) can read recent terminal text without a Tauri `State` handle.
+pub fn recent_text(
+    state: &AppState,
+    pty_id: &str,
+    line_count: usize,
+) -> Result<String, String> {
     let registry = state.terminal_registry.read();
-    let handle = registry.get(&pty_id).ok_or("Terminal not found")?;
+    let handle = registry.get(pty_id).ok_or("Terminal not found")?;
     let grid = handle.term.grid();
     let num_cols = handle.term.columns();
 
