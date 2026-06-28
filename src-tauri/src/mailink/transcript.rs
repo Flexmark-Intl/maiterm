@@ -1,0 +1,248 @@
+//! Per-turn source-markdown distillation for the maiLink chat surface (docs/mailink-protocol.md).
+//!
+//! The old transcript was `recent_text()` — a flattened scrape of the TUI frame (box-drawing,
+//! the `❯` prompt, footer; the agent's markdown already rendered-then-ANSI-stripped). That reads
+//! as terminal chrome in the phone's GFM renderer. Instead we read each turn's **source markdown**
+//! straight from Claude's session transcript JSONL (the agent's actual output, pre-TUI-render).
+//!
+//! Located by the unique session id (`~/.claude/projects/*/<session_id>.jsonl`) — no fragile
+//! cwd-munging, no hook changes. Each maiLink message is `{msg_id, role, text, ts}` where role is
+//! the frozen contract set `agent | user | system | tool`:
+//!   - assistant `text` blocks  → role "agent" (the markdown that lights up code fences/lists)
+//!   - assistant `tool_use`     → role "tool", a slim one-line marker (e.g. `Bash(rm …)`)
+//!   - user string content      → role "user" (the human's actual message)
+//! `thinking` blocks and `tool_result` payloads are skipped (private / noisy). Claude-only for now;
+//! callers fall back to `recent_text()` for other runtimes or when no transcript is found.
+
+use serde_json::{json, Value};
+use std::path::PathBuf;
+
+/// How tool calls render in the transcript. (b) is the default — assistant prose plus a slim
+/// one-line tool marker; raw tool_result dumps are always skipped.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ToolRender {
+    /// (a) assistant + user text only — no tool turns at all.
+    None,
+    /// (b) a compact one-line `role:"tool"` marker per tool call (default).
+    Marker,
+}
+
+/// Build the last `limit` maiLink messages for a Claude session, or `None` if its transcript
+/// can't be found/read (caller falls back to the terminal scrape).
+pub fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
+    let path = locate_jsonl(session_id)?;
+    let body = std::fs::read_to_string(&path).ok()?;
+    // Only the tail can hold the last `limit` turns; bound the work regardless of file size.
+    // A turn is a handful of lines, so ~12× headroom is plenty.
+    let lines: Vec<&str> = body.lines().collect();
+    let start = lines.len().saturating_sub(limit * 12 + 64);
+    let mut msgs: Vec<Value> = Vec::new();
+    for line in &lines[start..] {
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            push_line_messages(&v, tools, &mut msgs);
+        }
+    }
+    if msgs.len() > limit {
+        msgs = msgs.split_off(msgs.len() - limit);
+    }
+    Some(msgs)
+}
+
+/// Find `<session_id>.jsonl` under any `~/.claude/projects/*/` dir. The session id is globally
+/// unique, so a match is unambiguous.
+fn locate_jsonl(session_id: &str) -> Option<PathBuf> {
+    let root = dirs::home_dir()?.join(".claude").join("projects");
+    let file = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(&root).ok()? {
+        let dir = entry.ok()?.path();
+        if dir.is_dir() {
+            let candidate = dir.join(&file);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Turn one transcript line into zero or more maiLink messages, appended to `out`.
+fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
+    let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let uuid = v.get("uuid").and_then(|u| u.as_str()).unwrap_or("");
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .map(rfc3339_to_ms)
+        .unwrap_or(0);
+    let content = v.get("message").and_then(|m| m.get("content"));
+
+    match ty {
+        "assistant" => {
+            let Some(blocks) = content.and_then(|c| c.as_array()) else { return };
+            for (i, b) in blocks.iter().enumerate() {
+                match b.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        let text = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        if !text.trim().is_empty() {
+                            out.push(msg(format!("{uuid}:{i}"), "agent", text, ts));
+                        }
+                    }
+                    Some("tool_use") if tools == ToolRender::Marker => {
+                        out.push(msg(format!("{uuid}:{i}"), "tool", &tool_label(b), ts));
+                    }
+                    _ => {} // thinking, tool_use when None, etc.
+                }
+            }
+        }
+        "user" => {
+            // Only a plain string is real human input. List content is tool_result (skip) or the
+            // occasional injected "[Request interrupted…]" text (system noise, skip).
+            if let Some(text) = content.and_then(|c| c.as_str()) {
+                if !text.trim().is_empty() && !is_system_noise(text) {
+                    out.push(msg(uuid.to_string(), "user", text, ts));
+                }
+            }
+        }
+        _ => {} // system, attachment, mode, etc.
+    }
+}
+
+fn msg(msg_id: String, role: &str, text: &str, ts: i64) -> Value {
+    json!({ "msg_id": msg_id, "role": role, "text": text, "ts": ts })
+}
+
+/// A slim one-line label for a tool call, e.g. `Bash(rm -rf …)`, `Edit(src/lib.rs)`.
+fn tool_label(block: &Value) -> String {
+    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+    let input = block.get("input");
+    let arg = input.and_then(|inp| {
+        for key in ["command", "file_path", "path", "pattern", "query", "url"] {
+            if let Some(s) = inp.get(key).and_then(|v| v.as_str()) {
+                return Some(s.to_string());
+            }
+        }
+        None
+    });
+    match arg {
+        Some(a) => {
+            // Newlines collapsed so the chip stays one line. The UI truncates for display, so we
+            // only cap as payload hygiene (a heredoc command can be huge) — normal args pass whole.
+            let a = a.replace('\n', " ");
+            let a = if a.chars().count() > 160 {
+                format!("{} …", a.chars().take(160).collect::<String>())
+            } else {
+                a
+            };
+            format!("{name}({a})")
+        }
+        None => name.to_string(),
+    }
+}
+
+/// Drop user-string content that is injected system scaffolding, not a human message.
+fn is_system_noise(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with('<')                       // <local-command-…>, <command-name>, <system-reminder>
+        || t.starts_with("[Request interrupted")
+        || t.starts_with("Caveat:")
+}
+
+/// Parse an RFC3339 / ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.sssZ`) to unix ms. Returns 0
+/// on any parse miss (the maiLink list orders by array position, so `ts` is display-only). No
+/// chrono dependency — the format is fixed, so a tiny civil-days computation suffices.
+fn rfc3339_to_ms(s: &str) -> i64 {
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return 0;
+    }
+    let num = |a: usize, b: usize| -> i64 { s[a..b].parse::<i64>().unwrap_or(0) };
+    let (y, mo, d) = (num(0, 4), num(5, 7), num(8, 10));
+    let (h, mi, se) = (num(11, 13), num(14, 16), num(17, 19));
+    // Optional ".sss" fraction after the seconds.
+    let millis = if bytes.len() > 19 && bytes[19] == b'.' {
+        let frac: String = s[20..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let mut frac = frac;
+        frac.truncate(3);
+        while frac.len() < 3 {
+            frac.push('0');
+        }
+        frac.parse::<i64>().unwrap_or(0)
+    } else {
+        0
+    };
+    let days = days_from_civil(y, mo, d);
+    ((days * 24 + h) * 3600 + mi * 60 + se) * 1000 + millis
+}
+
+/// Days since 1970-01-01 for a civil (proleptic Gregorian) date — Howard Hinnant's algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + if m > 2 { -3 } else { 9 }) as i64;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfc3339_parses_to_known_epoch_ms() {
+        // 2026-06-27T21:25:57.904Z — verified against the unix epoch.
+        assert_eq!(rfc3339_to_ms("2026-06-27T21:25:57.904Z"), 1782595557904);
+        // Epoch itself.
+        assert_eq!(rfc3339_to_ms("1970-01-01T00:00:00.000Z"), 0);
+        // No fraction.
+        assert_eq!(rfc3339_to_ms("2000-01-01T00:00:00Z"), 946684800000);
+        // Garbage → 0, never panics.
+        assert_eq!(rfc3339_to_ms("not-a-date"), 0);
+    }
+
+    #[test]
+    fn parses_assistant_text_and_tool_marker_skips_thinking() {
+        let line = json!({
+            "type": "assistant",
+            "uuid": "u1",
+            "timestamp": "2026-06-27T21:25:57.904Z",
+            "message": { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "secret" },
+                { "type": "text", "text": "Here is **markdown**." },
+                { "type": "tool_use", "name": "Bash", "input": { "command": "rm -f /tmp/x" } }
+            ]}
+        });
+        let mut out = Vec::new();
+        push_line_messages(&line, ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 2); // thinking skipped
+        assert_eq!(out[0]["role"], "agent");
+        assert_eq!(out[0]["text"], "Here is **markdown**.");
+        assert_eq!(out[0]["ts"], 1782595557904i64);
+        assert_eq!(out[1]["role"], "tool");
+        assert_eq!(out[1]["text"], "Bash(rm -f /tmp/x)");
+
+        // ToolRender::None drops the tool marker entirely.
+        let mut out2 = Vec::new();
+        push_line_messages(&line, ToolRender::None, &mut out2);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0]["role"], "agent");
+    }
+
+    #[test]
+    fn user_string_kept_but_tool_result_and_noise_skipped() {
+        let real = json!({ "type": "user", "uuid": "u2", "timestamp": "2026-06-27T21:25:58Z",
+            "message": { "role": "user", "content": "Please fix the bug." } });
+        let toolres = json!({ "type": "user", "uuid": "u3", "timestamp": "2026-06-27T21:25:59Z",
+            "message": { "role": "user", "content": [ { "type": "tool_result", "content": "output" } ] } });
+        let noise = json!({ "type": "user", "uuid": "u4", "timestamp": "2026-06-27T21:26:00Z",
+            "message": { "role": "user", "content": "<system-reminder>hi</system-reminder>" } });
+        let mut out = Vec::new();
+        push_line_messages(&real, ToolRender::Marker, &mut out);
+        push_line_messages(&toolres, ToolRender::Marker, &mut out);
+        push_line_messages(&noise, ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "Please fix the bug.");
+    }
+}

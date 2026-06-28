@@ -32,6 +32,8 @@ use crate::state::app_state::AgentSessionState;
 use crate::state::workspace::TabType;
 use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
+mod transcript;
+
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
 /// sensible default until a `mailink_port` preference is wired (P2b).
 const DEFAULT_PORT: u16 = 8765;
@@ -781,6 +783,49 @@ fn pty_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
     app.tab_pty_map.read().get(tab_id).cloned()
 }
 
+/// The session id whose transcript we read for a tab. If a tab has more than one tracked session
+/// (e.g. after a resume minted a new id), prefer the most attention-worthy — consistent with how
+/// `session_states` picks the tab's displayed state.
+fn session_id_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
+    let sessions = app.agent_sessions.read();
+    sessions
+        .iter()
+        .filter(|(_, s)| s.tab_id == tab_id)
+        .max_by_key(|(_, s)| rank(s.state))
+        .map(|(id, _)| id.clone())
+}
+
+/// Build the chat transcript: per-turn source markdown from the Claude session JSONL when we can
+/// find it, otherwise the old single-system-turn terminal scrape (other runtimes / robustness).
+fn build_transcript(app: &AppState, tab_id: &str, runtime: &str, now: u64) -> Vec<Value> {
+    if runtime == "claude" {
+        if let Some(sid) = session_id_for_tab(app, tab_id) {
+            if let Some(turns) =
+                transcript::turns_for_session(&sid, 40, transcript::ToolRender::Marker)
+            {
+                if !turns.is_empty() {
+                    return turns;
+                }
+            }
+        }
+    }
+    // Fallback: distilled recent terminal text as a single system turn (the pre-distillation
+    // behavior). Uses the LIVE tab→pty map, not the persisted tab.pty_id which can be stale.
+    let recent = pty_for_tab(app, tab_id)
+        .and_then(|p| crate::commands::terminal::recent_text(app, &p, 40).ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    if !recent.trim().is_empty() {
+        out.push(json!({
+            "msg_id": format!("ctx_{tab_id}"),
+            "role": "system",
+            "text": recent,
+            "ts": now,
+        }));
+    }
+    out
+}
+
 /// Short, state-derived inbox preview. (Real distilled previews from terminal text are a
 /// later refinement — keeps the list path off the terminal lock.)
 fn preview_for(state: &str, tool: Option<&str>) -> String {
@@ -827,21 +872,10 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         None => ("dormant", runtime_key(meta.runtime), None),
     };
 
-    // v1 transcript: the distilled recent terminal text as a single system turn. Uses the
-    // LIVE tab→pty map (same as /context), not the persisted tab.pty_id which can be stale or
-    // unset. Real turn-by-turn distillation is a later refinement (P3).
-    let recent = pty_for_tab(app, tab_id)
-        .and_then(|p| crate::commands::terminal::recent_text(app, &p, 40).ok())
-        .unwrap_or_default();
-    let mut transcript = Vec::new();
-    if !recent.trim().is_empty() {
-        transcript.push(json!({
-            "msg_id": format!("ctx_{tab_id}"),
-            "role": "system",
-            "text": recent,
-            "ts": now,
-        }));
-    }
+    // Per-turn source markdown from the session transcript (Claude) so the phone's GFM renderer
+    // lights up; falls back to the distilled terminal scrape for other runtimes / when no
+    // transcript is found. See mailink/transcript.rs.
+    let transcript = build_transcript(app, tab_id, runtime, now);
 
     let mut detail = json!({
         "tabId": meta.tab_id,
