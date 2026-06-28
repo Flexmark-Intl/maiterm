@@ -575,11 +575,19 @@ so the contract is exercised, not just asserted.
   the relay's FCM `/push` leg is coded+deployed; needs Darryl to provision a Firebase project →
   `wrangler secret put FCM_SERVICE_ACCOUNT` → run the same finale with `platform:"fcm"`. A
   device-management surface (list/revoke paired devices) is a natural follow-up.
+- **Per-turn source-markdown distillation — DONE** (`6ce7232`): `ChatDetail.transcript` is now real
+  per-turn turns read from Claude's session JSONL (`~/.claude/projects/*/<session_id>.jsonl`, by the
+  unique session id — no hook change), not the `recent_text()` terminal scrape. assistant `text`→
+  `role:"agent"` (source markdown), `tool_use`→`role:"tool"` (compact `Name(arg)` chip), user string→
+  `role:"user"`; thinking/tool_result/system-scaffolding skipped. Claude-only; other runtimes keep
+  the scrape fallback (no regression). `mailink/transcript.rs`, unit-tested + validated on a real
+  942-turn transcript. (Live incremental `message`-over-WS push is still a refinement — the app
+  re-pulls `chat_detail` on the `chat_state` event today.)
 - **Two findings (notes, not blockers):** (1) `/message` bracketed-paste is correct for an
   agent TUI but leaks into a bare shell — fine for the intended use; (2) the *first*
   permission (for `initSession` itself) can't be tab-attributed since the session→tab mapping
   happens behind it (surfaces only in a dev/prod dual-instance setup).
 - **Known refinements (not blocking):** WS is a ~1.5s internal poller (push-from-hooks later);
   real prompt text/options + stable `prompt_id` need deeper hook capture (prompt lives in the
-  TUI, not `agent_sessions`); turn-by-turn transcript; real `lastActivityTs`/`unread`;
-  question-attention over WS; live `message` echoes.
+  TUI, not `agent_sessions`); real `lastActivityTs`/`unread`; question-attention over WS; live
+  `message`-over-WS echoes (transcript turns now distilled — see above).
