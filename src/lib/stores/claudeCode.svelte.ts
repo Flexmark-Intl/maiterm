@@ -832,17 +832,12 @@ function createClaudeCodeStore() {
     // Mesh: scan the written note for a NEEDS DECISION block → pull the human in (§8).
     agentMeshStore.onWorkspaceNoteWritten(ws.id, resultNoteId, args.content);
 
-    // Auto-open notes panel on workspace scope so the user sees the written note
-    if (preferencesStore.notesScope !== 'workspace') {
-      await preferencesStore.setNotesScope('workspace');
-    }
-    const activeTab = workspacesStore.activeWorkspace?.panes
-      .find(p => p.id === workspacesStore.activeWorkspace?.active_pane_id)
-      ?.tabs.find(t => t.id === workspacesStore.activeWorkspace?.panes
-        .find(p => p.id === workspacesStore.activeWorkspace?.active_pane_id)?.active_tab_id);
-    if (activeTab && !workspacesStore.isNotesVisible(activeTab.id)) {
-      workspacesStore.toggleNotes(activeTab.id);
-    }
+    // NOTE: do not auto-open the notes panel here. Workspace-note writes are
+    // frequent (mesh agents emit status notes continuously), and the old
+    // auto-open targeted the *active* workspace's tab rather than `ws`, so a
+    // note written in one workspace would pop the panel open in whatever
+    // workspace the user was currently looking at. Agents that genuinely want
+    // to surface a note should call the openNotesPanel tool explicitly.
 
     return { success: true, noteId: resultNoteId, action };
   }
