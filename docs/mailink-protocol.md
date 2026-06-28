@@ -386,12 +386,19 @@ payload either way; `cap` is the per-device capability (below).
 > Google delivering the push) needs the **public internet**; the **content path** (the WS pull
 > after the phone wakes) needs a route to the desktop (**LAN or WireGuard**). This is exactly
 > the normal WireGuard topology — phone on cellular/WiFi for internet **and** the WG tunnel for
-> the desktop — so it's not a constraint in practice. But a phone on a **LAN-only AP with no
-> internet uplink** is the degenerate case: it reaches the desktop fine, but APNs can never
-> issue a token (iOS `register()` fires neither `registration` nor `registrationError` — it
-> retries silently), so the whole chain stalls before any `/push-capability`/`/push-register`.
-> Symptom on the desktop: the paired device's `last_seen` never advances and `push_token`/
-> `push_cap` stay empty. Fix: give the phone a link with **both** internet and desktop reach.
+> the desktop — so it's not a constraint in practice. A phone on a **LAN-only AP with no
+> internet uplink** is one degenerate case: it reaches the desktop fine, but APNs can never
+> issue a token, so the chain stalls before any `/push-capability`/`/push-register`. Desktop
+> symptom: the paired device's `last_seen` never advances and `push_token`/`push_cap` stay empty.
+> Fix: give the phone a link with **both** internet and desktop reach.
+>
+> **Debugging note — that symptom is ambiguous.** "iOS `register()` called, but the plugin emits
+> neither `registration` nor `registrationError`" looks identical for (a) no internet / APNs
+> unreachable and (b) a **missing AppDelegate forwarding** of
+> `didRegisterForRemoteNotificationsWithDeviceToken` / `didFailToRegister…` into the push plugin
+> (the classic Capacitor gotcha — the stock template omits both methods). In the live bring-up it
+> was (b), not the network. **Check the app's APNs wiring first** (faster to rule out), then the
+> network path.
 
 ### 6.1 The relay is shared, multi-tenant infra — **the Flexmark-operated Cloudflare Worker**
 
@@ -552,14 +559,22 @@ so the contract is exercised, not just asserted.
   fake token with a valid cap → Apple `400 BadDeviceToken` (JWT + sandbox gateway + Workers→APNs
   **HTTP/2** all confirmed working); wrong cap → `403`; `/latest.json` → `200` (update service
   unaffected).
-- **REMAINING — (B) joint device test only:** the maiLink build is on the dPhone (push-entitled,
-  explicit App ID `dev.maiterm.mailink`, two-step + self-healing foreground re-mint). Choreography:
-  dPhone pairs with the **dev** maiTerm instance → foreground to mint the real `cap` + register
-  `{token,platform,env:"sandbox",cap}` → background/lock to drop the WS (the doorbell fires only
-  while uncovered) → fire a real permission on a maiLink-native tab → relay → APNs → lock-screen
-  alert → tap → deep-link `/chat/{tabId}` → WS → pull over LAN.
-- **Post-test:** fold the desktop capability changes into a normal maiTerm **release** so all users
-  get them (the dev instance has them; the shipped app does not). The relay deploy is independent.
+- **🏁 DOORBELL FINALE — PROVEN END-TO-END ON REAL HARDWARE** (2026-06-28, iPhone, locked): a real
+  Claude permission on a maiLink-native tab → the ~2s doorbell loop → relay `/push` (HMAC cap
+  verified) → APNs sandbox **`200 OK`** → dPhone **lock-screen alert** → tap → deep-link
+  `/chat/{tabId}` → WS reconnect over pinned LAN → live prompt rendered → **the human Approved from
+  the phone** → `/respond` injected the choice → the real Claude agent executed the command. The
+  whole reason-for-being works: agent needs you while you're away → your phone rings → you answer
+  from the lock screen → the agent moves. (Bug chain cleared en route: a missing iOS AppDelegate
+  APNs-forwarding method blocked token issuance — classic Capacitor gotcha, peer-side fix.)
+- **Post-proof, app-side polish (peer):** strip push-debug breadcrumbs; notifications pre-prompt;
+  gate initPush on transport-bootstrap (kill the mock-race); prod signing = flip
+  `aps-environment`/registerPush `env` to "production" (relay routes by `env`, **no relay change**).
+- **Post-proof, desktop/relay (mine):** fold the desktop capability code into a normal maiTerm
+  **release** (the dev instance has it; shipped app doesn't — relay deploy is independent). **Android:**
+  the relay's FCM `/push` leg is coded+deployed; needs Darryl to provision a Firebase project →
+  `wrangler secret put FCM_SERVICE_ACCOUNT` → run the same finale with `platform:"fcm"`. A
+  device-management surface (list/revoke paired devices) is a natural follow-up.
 - **Two findings (notes, not blockers):** (1) `/message` bracketed-paste is correct for an
   agent TUI but leaks into a bare shell — fine for the intended use; (2) the *first*
   permission (for `initSession` itself) can't be tab-attributed since the session→tab mapping
