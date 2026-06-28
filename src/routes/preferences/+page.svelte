@@ -1964,38 +1964,27 @@
         {#if preferencesStore.mailinkEnabled}
           <h3 class="section-heading" style="margin-top: 20px;">Doorbell (push wake)</h3>
           <p class="section-desc">
-            Optional. When a designated chat needs you and no phone is actively connected, maiTerm
-            sends a <em>content-free</em> wake to your phone through a push relay (the Cloudflare
-            <code>/push</code> route). Only the tab name and kind travel — never terminal content.
-            The phone wakes and pulls the real content over your LAN/WireGuard link. Leave the URL
-            empty to keep the doorbell off (you’ll still get notified while the app is connected).
+            When a designated chat needs you and no phone is actively connected, maiTerm sends a
+            <em>content-free</em> wake to your paired phones — only the tab name and kind travel,
+            never terminal content. The phone wakes and pulls the real content over your
+            LAN/WireGuard link. This works automatically once you pair a phone and allow its
+            notifications; there’s nothing to configure.
           </p>
 
           <div class="setting" style="flex-direction: column; align-items: stretch; gap: 6px;">
-            <label for="mailink-relay-url">Relay URL</label>
+            <label for="mailink-relay-url">Custom relay URL <span style="opacity:0.6;">(optional, advanced)</span></label>
             <input
               id="mailink-relay-url"
               type="text"
               class="pattern-input"
               value={preferencesStore.mailinkRelayUrl}
-              placeholder="https://updates.maiterm.dev/push"
+              placeholder="https://updates.maiterm.dev/push  (default)"
               onchange={(e) => preferencesStore.setMailinkRelayUrl(e.currentTarget.value)}
             />
-          </div>
-
-          <div class="setting" style="flex-direction: column; align-items: stretch; gap: 6px;">
-            <label for="mailink-relay-key">Relay key</label>
-            <input
-              id="mailink-relay-key"
-              type="password"
-              class="pattern-input"
-              value={preferencesStore.mailinkRelayKey}
-              placeholder="shared secret (x-mailink-relay-key)"
-              onchange={(e) => preferencesStore.setMailinkRelayKey(e.currentTarget.value)}
-            />
             <p class="setting-hint">
-              Must match the relay’s <code>MAILINK_RELAY_KEY</code> secret. The Apple <code>.p8</code>
-              and FCM keys live only on the relay, never on this device.
+              Leave empty to use the built-in shared relay. Only set this if you self-host your own
+              push relay. No secret is needed here — each phone mints its own device capability when
+              it pairs.
             </p>
           </div>
         {/if}

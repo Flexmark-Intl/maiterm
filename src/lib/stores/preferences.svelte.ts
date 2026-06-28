@@ -61,7 +61,6 @@ function createPreferencesStore() {
   let codexHooksBypassTrust = $state(false);
   let mailinkEnabled = $state(false);
   let mailinkRelayUrl = $state('');
-  let mailinkRelayKey = $state('');
   let composerDefaultOpen = $state(true);
   let windowsShell = $state('powershell');
   let fileLinkAction = $state('modifier_click');
@@ -136,7 +135,6 @@ function createPreferencesStore() {
     get codexHooksBypassTrust() { return codexHooksBypassTrust; },
     get mailinkEnabled() { return mailinkEnabled; },
     get mailinkRelayUrl() { return mailinkRelayUrl; },
-    get mailinkRelayKey() { return mailinkRelayKey; },
     get composerDefaultOpen() { return composerDefaultOpen; },
     get windowsShell() { return windowsShell; },
     get fileLinkAction() { return fileLinkAction; },
@@ -221,7 +219,6 @@ function createPreferencesStore() {
       codexHooksBypassTrust = prefs.codex_hooks_bypass_trust ?? false;
       mailinkEnabled = prefs.mailink_enabled ?? false;
       mailinkRelayUrl = prefs.mailink_relay_url ?? '';
-      mailinkRelayKey = prefs.mailink_relay_key ?? '';
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -508,11 +505,6 @@ function createPreferencesStore() {
       await this.save();
     },
 
-    async setMailinkRelayKey(value: string) {
-      mailinkRelayKey = value;
-      await this.save();
-    },
-
     async setWindowsShell(value: string) {
       windowsShell = value;
       await this.save();
@@ -667,7 +659,6 @@ function createPreferencesStore() {
       codexHooksBypassTrust = prefs.codex_hooks_bypass_trust ?? false;
       mailinkEnabled = prefs.mailink_enabled ?? false;
       mailinkRelayUrl = prefs.mailink_relay_url ?? '';
-      mailinkRelayKey = prefs.mailink_relay_key ?? '';
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -743,7 +734,6 @@ function createPreferencesStore() {
         codex_hooks_bypass_trust: codexHooksBypassTrust,
         mailink_enabled: mailinkEnabled,
         mailink_relay_url: mailinkRelayUrl.trim() || null,
-        mailink_relay_key: mailinkRelayKey.trim() || null,
         composer_default_open: composerDefaultOpen,
         windows_shell: windowsShell,
         file_link_action: fileLinkAction,

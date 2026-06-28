@@ -1008,14 +1008,11 @@ pub struct Preferences {
     /// docs/mailink-protocol.md §2.3/§3.
     #[serde(default)]
     pub mailink_devices: Vec<MailinkDevice>,
-    /// maiLink doorbell: push-relay endpoint (e.g. the Cloudflare worker `/push` route). Empty
-    /// ⇒ doorbell off (LAN-foreground notifications only). See docs/mailink-protocol.md §6.
+    /// maiLink doorbell: OPTIONAL override for the shared push relay (self-hosters only). Empty ⇒
+    /// use the built-in default (the Flexmark-operated worker). The doorbell is multi-tenant and
+    /// needs NO per-user secret — each phone mints its own capability. See docs/mailink-protocol.md §6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mailink_relay_url: Option<String>,
-    /// maiLink doorbell: shared secret sent as `x-mailink-relay-key` so only this desktop can
-    /// drive the relay. Pairs with the worker's secret.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mailink_relay_key: Option<String>,
 }
 
 /// A paired maiLink mobile device. The bearer token is stored hashed (never raw); deleting
@@ -1035,6 +1032,12 @@ pub struct MailinkDevice {
     /// APNs environment / FCM project hint ("sandbox" | "production").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_env: Option<String>,
+    /// Per-device doorbell capability the phone minted from the shared relay
+    /// (HMAC of the relay's CAP_SECRET over platform:push_token). The desktop presents this on
+    /// every /push so the multi-tenant relay accepts the wake without a per-user shared key.
+    /// See docs/mailink-protocol.md §6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_cap: Option<String>,
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: i64,
@@ -1118,7 +1121,6 @@ impl Default for Preferences {
             mailink_enabled: false,
             mailink_devices: Vec::new(),
             mailink_relay_url: None,
-            mailink_relay_key: None,
         }
     }
 }

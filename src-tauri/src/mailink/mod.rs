@@ -410,6 +410,7 @@ async fn post_pair(
         push_token: None,
         push_platform: None,
         push_env: None,
+        push_cap: None,
         created_at: now_ms() as i64,
         last_seen_at: now_ms() as i64,
     };
@@ -434,11 +435,15 @@ struct PushRegBody {
     platform: String,
     #[serde(default)]
     env: Option<String>,
+    /// The per-device capability the phone minted from the shared relay's /push-capability
+    /// (HMAC over platform:push_token). Required for the multi-tenant doorbell to ring it.
+    #[serde(default)]
+    cap: Option<String>,
 }
 
-/// POST /push-register — store the device's push token (APNs/FCM) so the doorbell relay can
-/// reach it. Must be called by a PAIRED device (not the dev token), since it attaches to a
-/// device record.
+/// POST /push-register — store the device's push token (APNs/FCM) + relay capability so the
+/// doorbell can reach it. Must be called by a PAIRED device (not the dev token), since it
+/// attaches to a device record.
 async fn post_push_register(
     State(s): State<ApiState>,
     headers: HeaderMap,
@@ -458,6 +463,7 @@ async fn post_push_register(
                 d.push_token = Some(body.token);
                 d.push_platform = Some(body.platform);
                 d.push_env = body.env;
+                d.push_cap = body.cap;
                 d.last_seen_at = now_ms() as i64;
             }
             // authed via the dev token (no device record) — push must target a paired device
@@ -920,11 +926,18 @@ fn local_ip() -> Option<String> {
     sock.local_addr().ok().map(|a| a.ip().to_string())
 }
 
+/// Default shared push relay (Flexmark-operated Cloudflare worker). maiLink is multi-tenant:
+/// every install points here by default so the doorbell works with zero config. A user can
+/// override it via Preferences.mailink_relay_url (e.g. to self-host). See docs/mailink-protocol.md
+/// §6.1.
+const DEFAULT_MAILINK_RELAY_URL: &str = "https://updates.maiterm.dev/push";
+
 /// Global doorbell trigger. Every ~2s: when a maiLink-native tab transitions INTO an
 /// attention state (permission / idle-done) AND no phone holds a live WS (uncovered), POST a
-/// content-free wake to the relay for each paired device's push token. No-op until a relay
-/// URL is configured. The relay (a Cloudflare worker) signs + forwards to APNs/FCM; the phone
-/// wakes and pulls the real content over LAN. See docs/mailink-protocol.md §6.
+/// content-free wake to the relay for each paired device that registered a push token + relay
+/// capability. The shared relay (Cloudflare worker) verifies the capability, signs, and forwards
+/// to APNs/FCM; the phone wakes and pulls the real content over LAN. See docs/mailink-protocol.md
+/// §6. No-op while no such device exists.
 async fn doorbell_loop(app: Arc<AppState>) {
     let client = reqwest::Client::new();
     let mut last: HashMap<String, String> = HashMap::new();
@@ -932,11 +945,16 @@ async fn doorbell_loop(app: Arc<AppState>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2000));
     loop {
         ticker.tick().await;
-        let (relay_url, relay_key) = {
+        // The relay URL is baked in (shared infra); an explicit pref overrides it for self-hosters.
+        let relay_url = {
             let p = &app.app_data.read().preferences;
-            (p.mailink_relay_url.clone(), p.mailink_relay_key.clone())
+            p.mailink_relay_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| DEFAULT_MAILINK_RELAY_URL.to_string())
         };
-        let relay_on = relay_url.as_deref().map(|u| !u.trim().is_empty()).unwrap_or(false);
         let covered = app
             .mailink_ws_count
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -953,23 +971,14 @@ async fn doorbell_loop(app: Arc<AppState>) {
             last.insert(tab.clone(), st.clone());
 
             // Fire only on a fresh transition into attention, after priming, while uncovered.
-            if !primed || !relay_on || covered {
+            if !primed || covered {
                 continue;
             }
             let is_attn = st == "permission" || st == "idle";
             let was_attn = matches!(prev.as_deref(), Some("permission") | Some("idle"));
             if is_attn && !was_attn {
                 let kind = if st == "permission" { "permission" } else { "idle_done" };
-                ring_devices(
-                    &client,
-                    &app,
-                    relay_url.as_deref().unwrap_or_default(),
-                    relay_key.as_deref(),
-                    &tab,
-                    &title,
-                    kind,
-                )
-                .await;
+                ring_devices(&client, &app, &relay_url, &tab, &title, kind).await;
             }
         }
         last.retain(|k, _| current.contains(k));
@@ -977,49 +986,46 @@ async fn doorbell_loop(app: Arc<AppState>) {
     }
 }
 
-/// POST the content-free wake to the relay, once per paired device that registered a push
-/// token. Payload carries ONLY {push_token, platform, env, tab_id, kind, title} — never
-/// terminal content (docs §6: content-light boundary; tab title + kind are allowed).
+/// POST the content-free wake to the shared relay, once per paired device that registered BOTH a
+/// push token and a relay capability (without the cap the multi-tenant relay rejects the wake).
+/// Payload carries ONLY {push_token, platform, env, cap, tab_id, kind, title} — never terminal
+/// content (docs §6: content-light boundary; tab title + kind are allowed).
 async fn ring_devices(
     client: &reqwest::Client,
     app: &Arc<AppState>,
     url: &str,
-    key: Option<&str>,
     tab_id: &str,
     title: &str,
     kind: &str,
 ) {
-    let targets: Vec<(String, String, Option<String>)> = app
+    let targets: Vec<(String, String, Option<String>, String)> = app
         .app_data
         .read()
         .preferences
         .mailink_devices
         .iter()
-        .filter_map(|d| {
-            d.push_token.as_ref().map(|t| {
-                (
-                    t.clone(),
-                    d.push_platform.clone().unwrap_or_else(|| "apns".to_string()),
-                    d.push_env.clone(),
-                )
-            })
+        .filter_map(|d| match (d.push_token.as_ref(), d.push_cap.as_ref()) {
+            (Some(t), Some(cap)) => Some((
+                t.clone(),
+                d.push_platform.clone().unwrap_or_else(|| "apns".to_string()),
+                d.push_env.clone(),
+                cap.clone(),
+            )),
+            _ => None,
         })
         .collect();
 
-    for (push_token, platform, env) in targets {
+    for (push_token, platform, env, cap) in targets {
         let body = json!({
             "push_token": push_token,
             "platform": platform,
             "env": env,
+            "cap": cap,
             "tab_id": tab_id,
             "kind": kind,
             "title": title,
         });
-        let mut req = client.post(url).json(&body);
-        if let Some(k) = key {
-            req = req.header("x-mailink-relay-key", k);
-        }
-        match req.send().await {
+        match client.post(url).json(&body).send().await {
             Ok(resp) => log::info!(
                 "[maiLink] doorbell → {platform} for tab {tab_id} ({kind}): {}",
                 resp.status()
