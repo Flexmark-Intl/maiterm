@@ -254,6 +254,10 @@ export interface Preferences {
   mesh_topic_ttl_minutes: number;
   /** maiLink: master switch for the mobile-companion LAN bridge (off by default). */
   mailink_enabled?: boolean;
+  /** maiLink doorbell: push-relay endpoint (e.g. the Cloudflare worker /push). Empty ⇒ off. */
+  mailink_relay_url?: string | null;
+  /** maiLink doorbell: shared secret sent as x-mailink-relay-key to the relay. */
+  mailink_relay_key?: string | null;
 }
 
 export interface WindowData {

@@ -989,6 +989,11 @@ pub fn set_preferences(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, m
             app_data.preferences.shell_integration_default_migrated;
         preferences.restore_session_default_migrated =
             app_data.preferences.restore_session_default_migrated;
+        // maiLink paired devices are backend-owned: the listener's /pair and
+        // /push-register handlers mutate them at runtime. The client payload omits the
+        // list, so a wholesale replace here would wipe every paired phone on any
+        // unrelated preference change. Preserve the stored value.
+        preferences.mailink_devices = app_data.preferences.mailink_devices.clone();
         app_data.preferences = preferences.clone();
         app_data.clone()
     };
