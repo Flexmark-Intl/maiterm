@@ -51,7 +51,7 @@ wrangler d1 execute aiterm_stats --remote \
   --command "SELECT day, COUNT(*) AS users FROM pings GROUP BY day ORDER BY day DESC LIMIT 14"
 ```
 
-## maiLink doorbell relay (`POST /push`)
+## maiLink doorbell relay (`POST /push`, `POST /push-capability`)
 
 The same Worker doubles as the maiLink content-free push relay
 (`docs/mailink-protocol.md` §6/§6.1). The maiTerm desktop POSTs a wake when a
@@ -62,13 +62,26 @@ reaches the relay** — only the tab title + a `kind` (`permission` / `idle_done
 ride along, which is all the alert shows. The phone wakes, opens its WS over
 LAN/WireGuard, and pulls the real content.
 
-Request (from the desktop, `application/json`, header `x-mailink-relay-key`):
+**Multi-tenant.** One relay serves every user of the single published maiLink app,
+so there is **no per-user shared secret** (it would have to ship in every install).
+Instead each phone mints a per-device **capability** once, at pairing:
+
+`POST /push-capability` — body `{push_token, platform}` → `{cap}`, where
+`cap = base64url(HMAC-SHA256(CAP_SECRET, "<platform>:<push_token>"))`. The phone
+hands `cap` to the desktops it pairs with (over the pinned-TLS LAN channel), and
+the desktop presents it on every `/push`. `CAP_SECRET` never leaves the relay; a
+desktop can't forge a cap for a token it never got from a real phone; rotating
+`CAP_SECRET` revokes every cap at once. Stateless — no DB.
+
+`POST /push` request (from the desktop, `application/json`):
 
 ```json
-{ "push_token": "...", "platform": "apns", "env": "sandbox",
+{ "push_token": "...", "platform": "apns", "env": "sandbox", "cap": "...",
   "tab_id": "...", "kind": "permission", "title": "tab name" }
 ```
 
+- `cap`: the phone-minted capability for this `(platform, push_token)`. Required;
+  `403 invalid capability` if missing or wrong.
 - `platform`: `apns` (default) or `fcm`.
 - `env`: only `"production"` routes to the APNs prod gateway
   (`api.push.apple.com`); anything else (incl. a dev build's `sandbox` token, or
@@ -78,19 +91,22 @@ Request (from the desktop, `application/json`, header `x-mailink-relay-key`):
 The response is JSON echoing the upstream verdict
 (`{platform, ok, status, detail}`) so the desktop log shows APNs/FCM's own status
 (e.g. `BadDeviceToken`) verbatim. `200` on success, `502` otherwise; `403` on a
-bad relay key, `503` if the relay isn't provisioned.
+bad capability, `503` if the relay isn't provisioned.
 
 Secrets (all via `wrangler secret put` — see `wrangler.toml` for the list):
-`MAILINK_RELAY_KEY`, `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC`,
-and (Android, optional) `FCM_SERVICE_ACCOUNT`.
+`CAP_SECRET`, `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC`, and
+(Android, optional) `FCM_SERVICE_ACCOUNT`.
 
-Smoke test once the secrets are set (uses a throwaway token — expect a
-`BadDeviceToken` from APNs, which proves auth/JWT/gateway all work):
+Smoke test once the secrets are set — mint a cap for a throwaway token, then ring
+it (expect `BadDeviceToken` from APNs, which proves cap+JWT+gateway all work):
 
 ```bash
+CAP=$(curl -sS -X POST https://updates.maiterm.dev/push-capability \
+  -H 'content-type: application/json' \
+  -d '{"push_token":"0000","platform":"apns"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["cap"])')
 curl -sS -X POST https://updates.maiterm.dev/push \
-  -H "x-mailink-relay-key: $RELAY_KEY" -H 'content-type: application/json' \
-  -d '{"push_token":"0000","platform":"apns","env":"sandbox","tab_id":"t1","kind":"permission","title":"smoke"}'
+  -H 'content-type: application/json' \
+  -d "{\"push_token\":\"0000\",\"platform\":\"apns\",\"env\":\"sandbox\",\"cap\":\"$CAP\",\"tab_id\":\"t1\",\"kind\":\"permission\",\"title\":\"smoke\"}"
 ```
 
 ## Deploy / update

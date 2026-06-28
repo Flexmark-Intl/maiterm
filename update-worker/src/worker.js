@@ -172,6 +172,36 @@ function pemToDer(pem) {
   return der;
 }
 
+// The doorbell is multi-tenant: ONE relay serves every maiTerm user of the one published
+// maiLink app, so it can't authenticate desktops with a single shared secret (that secret
+// would have to ship in every install). Instead each phone mints a per-device *capability*
+// once, at pairing, via POST /push-capability — cap = HMAC(CAP_SECRET, platform:push_token).
+// The phone hands the cap to the desktops it pairs with (over the pinned-TLS LAN channel);
+// the desktop presents it on every /push. CAP_SECRET never leaves the relay, and a desktop
+// can't forge a cap for a token it never received from a real phone. Stateless — no DB.
+async function hmacCap(secret, platform, pushToken) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`${platform}:${pushToken}`)
+  );
+  return b64urlFromBytes(new Uint8Array(mac));
+}
+
+function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 // APNs provider JWT (ES256). Apple wants this refreshed no more than once per ~20 min and
 // no less than once per hour, so cache it in the isolate global and reuse for 30 min.
 let _apnsJwtCache = { token: null, iat: 0, kid: null };
@@ -317,15 +347,34 @@ async function sendFcm(env, msg) {
   return { ok: resp.ok, status: resp.status, detail: detail || "" };
 }
 
-async function handlePush(request, env, ctx) {
-  // The relay key is mandatory: an unauthenticated push endpoint would be a spam vector.
-  // 503 (not 403) when unset so the desktop can tell "relay not provisioned yet" apart
-  // from "wrong key".
-  if (!env.MAILINK_RELAY_KEY) {
+// POST /push-capability — a phone mints its per-device capability here, once, at pairing.
+// Body {push_token, platform} → {cap}. Open by design (possessing the token is the gate;
+// tokens are app-private and only minted by APNs/FCM for the real phone), but the cap keeps
+// /push from being a blind open proxy and lets us revoke en masse by rotating CAP_SECRET.
+async function handlePushCapability(request, env) {
+  if (!env.CAP_SECRET) {
     return new Response("relay not configured\n", { status: 503 });
   }
-  if (request.headers.get("x-mailink-relay-key") !== env.MAILINK_RELAY_KEY) {
-    return new Response("forbidden\n", { status: 403 });
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("bad json\n", { status: 400 });
+  }
+  if (!body || !body.push_token) {
+    return new Response("missing push_token\n", { status: 400 });
+  }
+  const platform = body.platform === "fcm" ? "fcm" : "apns";
+  const cap = await hmacCap(env.CAP_SECRET, platform, body.push_token);
+  return Response.json({ cap });
+}
+
+async function handlePush(request, env, ctx) {
+  // No shared per-user secret (this relay is multi-tenant). The desktop authenticates each
+  // ring with the phone-minted capability instead. 503 (not 403) when CAP_SECRET is unset so
+  // the desktop can tell "relay not provisioned yet" apart from "bad capability".
+  if (!env.CAP_SECRET) {
+    return new Response("relay not configured\n", { status: 503 });
   }
   let msg;
   try {
@@ -337,6 +386,10 @@ async function handlePush(request, env, ctx) {
     return new Response("missing push_token or tab_id\n", { status: 400 });
   }
   const platform = msg.platform === "fcm" ? "fcm" : "apns";
+  const expectedCap = await hmacCap(env.CAP_SECRET, platform, msg.push_token);
+  if (!msg.cap || !timingSafeEqual(msg.cap, expectedCap)) {
+    return new Response("invalid capability\n", { status: 403 });
+  }
   try {
     const result = platform === "fcm" ? await sendFcm(env, msg) : await sendApns(env, msg);
     // 200 with the upstream status inside, so the desktop log shows APNs/FCM's own verdict
@@ -358,6 +411,12 @@ export default {
         return new Response("method not allowed\n", { status: 405 });
       }
       return handlePush(request, env, ctx);
+    }
+    if (url.pathname === "/push-capability") {
+      if (request.method !== "POST") {
+        return new Response("method not allowed\n", { status: 405 });
+      }
+      return handlePushCapability(request, env);
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed\n", { status: 405 });
