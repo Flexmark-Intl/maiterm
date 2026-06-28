@@ -19,6 +19,14 @@ UPSTREAM = "https://github.com/Flexmark-Intl/maiterm/releases/latest/download/la
 
 # STATS_KEY is a secret, not stored here. Set it with:
 #   wrangler secret put STATS_KEY
+#
+# maiLink doorbell relay (POST /push — docs/mailink-protocol.md §6.1). All secrets:
+#   wrangler secret put MAILINK_RELAY_KEY   # shared with maiTerm (x-mailink-relay-key header)
+#   wrangler secret put APNS_KEY_P8         # contents of the Apple .p8 (PEM, incl. BEGIN/END)
+#   wrangler secret put APNS_KEY_ID         # the .p8's Key ID (10 chars)
+#   wrangler secret put APNS_TEAM_ID        # Apple Team ID (e.g. 7HJJ4SQ4TC)
+#   wrangler secret put APNS_TOPIC          # iOS app bundle id (apns-topic)
+#   wrangler secret put FCM_SERVICE_ACCOUNT # (Android, optional) service-account JSON, one line
 
 [[d1_databases]]
 binding = "DB"

@@ -140,12 +140,228 @@ async function handleManifest(request, env, ctx, url) {
   });
 }
 
+// ───────────────────────────── maiLink doorbell relay ─────────────────────────────
+//
+// POST /push is the maiLink content-free wake relay (docs/mailink-protocol.md §6/§6.1).
+// The maiTerm desktop POSTs {push_token, platform, env, tab_id, kind, title} when a
+// maiLink-native tab needs a human AND no phone holds a live LAN WebSocket. We hold the
+// secrets that can't live safely on every desktop install (the APNs .p8 + the FCM
+// service-account key) and fan out to Apple / Google. We NEVER see terminal content —
+// only the tab title + kind ride along, which the contract permits in the alert.
+//
+// Stateless. The phone wakes, opens its WS over LAN/WireGuard, and pulls the real content.
+
+function b64urlFromBytes(bytes) {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function b64urlFromString(str) {
+  return b64urlFromBytes(new TextEncoder().encode(str));
+}
+
+function pemToDer(pem) {
+  const body = pem
+    .replace(/-----BEGIN [^-]+-----/, "")
+    .replace(/-----END [^-]+-----/, "")
+    .replace(/\s+/g, "");
+  const bin = atob(body);
+  const der = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) der[i] = bin.charCodeAt(i);
+  return der;
+}
+
+// APNs provider JWT (ES256). Apple wants this refreshed no more than once per ~20 min and
+// no less than once per hour, so cache it in the isolate global and reuse for 30 min.
+let _apnsJwtCache = { token: null, iat: 0, kid: null };
+
+async function apnsJwt(env) {
+  const kid = env.APNS_KEY_ID;
+  const iss = env.APNS_TEAM_ID;
+  const now = Math.floor(Date.now() / 1000);
+  if (_apnsJwtCache.token && _apnsJwtCache.kid === kid && now - _apnsJwtCache.iat < 1800) {
+    return _apnsJwtCache.token;
+  }
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToDer(env.APNS_KEY_P8),
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign"]
+  );
+  const header = b64urlFromString(JSON.stringify({ alg: "ES256", kid }));
+  const claims = b64urlFromString(JSON.stringify({ iss, iat: now }));
+  const signingInput = `${header}.${claims}`;
+  // WebCrypto ECDSA returns the raw r||s (IEEE P1363) signature JWS ES256 expects.
+  const sig = await crypto.subtle.sign(
+    { name: "ECDSA", hash: "SHA-256" },
+    key,
+    new TextEncoder().encode(signingInput)
+  );
+  const token = `${signingInput}.${b64urlFromBytes(new Uint8Array(sig))}`;
+  _apnsJwtCache = { token, iat: now, kid };
+  return token;
+}
+
+async function sendApns(env, msg) {
+  if (!env.APNS_KEY_P8 || !env.APNS_KEY_ID || !env.APNS_TEAM_ID || !env.APNS_TOPIC) {
+    return { ok: false, status: 503, detail: "apns not configured" };
+  }
+  // gateway-by-env: only "production" tokens go to the prod gateway; everything else
+  // (sandbox dev builds, or an unknown/missing env) uses the sandbox gateway.
+  const host =
+    msg.env === "production" ? "api.push.apple.com" : "api.sandbox.push.apple.com";
+  const jwt = await apnsJwt(env);
+  const body = JSON.stringify({
+    aps: {
+      alert: {
+        title: msg.title || "maiTerm",
+        body: msg.kind === "permission" ? "Needs your approval" : "Agent finished",
+      },
+      sound: "default",
+      "thread-id": msg.tab_id,
+      "interruption-level": msg.kind === "permission" ? "time-sensitive" : "active",
+    },
+    tabId: msg.tab_id,
+    kind: msg.kind,
+  });
+  const resp = await fetch(`https://${host}/3/device/${msg.push_token}`, {
+    method: "POST",
+    headers: {
+      authorization: `bearer ${jwt}`,
+      "apns-topic": env.APNS_TOPIC,
+      "apns-push-type": "alert",
+      "apns-priority": "10",
+      "apns-collapse-id": String(msg.tab_id).slice(0, 64),
+    },
+    body,
+  });
+  const detail = await resp.text();
+  return { ok: resp.ok, status: resp.status, detail: detail || "" };
+}
+
+// FCM HTTP v1 needs an OAuth2 access token minted from the service-account JWT (RS256).
+let _fcmTokenCache = { token: null, exp: 0 };
+
+async function fcmAccessToken(sa) {
+  const now = Math.floor(Date.now() / 1000);
+  if (_fcmTokenCache.token && now < _fcmTokenCache.exp - 60) return _fcmTokenCache.token;
+  const header = b64urlFromString(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = b64urlFromString(
+    JSON.stringify({
+      iss: sa.client_email,
+      scope: "https://www.googleapis.com/auth/firebase.messaging",
+      aud: sa.token_uri,
+      iat: now,
+      exp: now + 3600,
+    })
+  );
+  const signingInput = `${header}.${claims}`;
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToDer(sa.private_key),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(signingInput)
+  );
+  const assertion = `${signingInput}.${b64urlFromBytes(new Uint8Array(sig))}`;
+  const tokResp = await fetch(sa.token_uri, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+  const tok = await tokResp.json();
+  if (!tok.access_token) throw new Error(`fcm token mint failed: ${JSON.stringify(tok)}`);
+  _fcmTokenCache = { token: tok.access_token, exp: now + (tok.expires_in || 3600) };
+  return tok.access_token;
+}
+
+async function sendFcm(env, msg) {
+  if (!env.FCM_SERVICE_ACCOUNT) {
+    return { ok: false, status: 503, detail: "fcm not configured" };
+  }
+  const sa = JSON.parse(env.FCM_SERVICE_ACCOUNT);
+  const accessToken = await fcmAccessToken(sa);
+  const body = JSON.stringify({
+    message: {
+      token: msg.push_token,
+      notification: {
+        title: msg.title || "maiTerm",
+        body: msg.kind === "permission" ? "Needs your approval" : "Agent finished",
+      },
+      android: { collapse_key: String(msg.tab_id), priority: "high" },
+      data: { tabId: String(msg.tab_id), kind: String(msg.kind) },
+    },
+  });
+  const resp = await fetch(
+    `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body,
+    }
+  );
+  const detail = await resp.text();
+  return { ok: resp.ok, status: resp.status, detail: detail || "" };
+}
+
+async function handlePush(request, env, ctx) {
+  // The relay key is mandatory: an unauthenticated push endpoint would be a spam vector.
+  // 503 (not 403) when unset so the desktop can tell "relay not provisioned yet" apart
+  // from "wrong key".
+  if (!env.MAILINK_RELAY_KEY) {
+    return new Response("relay not configured\n", { status: 503 });
+  }
+  if (request.headers.get("x-mailink-relay-key") !== env.MAILINK_RELAY_KEY) {
+    return new Response("forbidden\n", { status: 403 });
+  }
+  let msg;
+  try {
+    msg = await request.json();
+  } catch {
+    return new Response("bad json\n", { status: 400 });
+  }
+  if (!msg || !msg.push_token || !msg.tab_id) {
+    return new Response("missing push_token or tab_id\n", { status: 400 });
+  }
+  const platform = msg.platform === "fcm" ? "fcm" : "apns";
+  try {
+    const result = platform === "fcm" ? await sendFcm(env, msg) : await sendApns(env, msg);
+    // 200 with the upstream status inside, so the desktop log shows APNs/FCM's own verdict
+    // (e.g. BadDeviceToken) without us guessing what's retryable.
+    return Response.json({ platform, ...result }, { status: result.ok ? 200 : 502 });
+  } catch (e) {
+    return Response.json(
+      { platform, ok: false, status: 500, detail: String(e && e.message ? e.message : e) },
+      { status: 502 }
+    );
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/push") {
+      if (request.method !== "POST") {
+        return new Response("method not allowed\n", { status: 405 });
+      }
+      return handlePush(request, env, ctx);
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed\n", { status: 405 });
     }
-    const url = new URL(request.url);
     if (url.pathname === "/stats") return handleStats(request, env);
     // Everything else serves the manifest (the updater hits /latest.json).
     return handleManifest(request, env, ctx, url);

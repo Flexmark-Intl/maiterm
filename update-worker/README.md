@@ -51,6 +51,48 @@ wrangler d1 execute aiterm_stats --remote \
   --command "SELECT day, COUNT(*) AS users FROM pings GROUP BY day ORDER BY day DESC LIMIT 14"
 ```
 
+## maiLink doorbell relay (`POST /push`)
+
+The same Worker doubles as the maiLink content-free push relay
+(`docs/mailink-protocol.md` §6/§6.1). The maiTerm desktop POSTs a wake when a
+maiLink-native tab needs a human **and** no phone holds a live LAN WebSocket; we
+hold the secrets that can't live safely on every install (the Apple `.p8` and the
+FCM service-account key) and fan out to APNs / FCM. **No terminal content ever
+reaches the relay** — only the tab title + a `kind` (`permission` / `idle_done`)
+ride along, which is all the alert shows. The phone wakes, opens its WS over
+LAN/WireGuard, and pulls the real content.
+
+Request (from the desktop, `application/json`, header `x-mailink-relay-key`):
+
+```json
+{ "push_token": "...", "platform": "apns", "env": "sandbox",
+  "tab_id": "...", "kind": "permission", "title": "tab name" }
+```
+
+- `platform`: `apns` (default) or `fcm`.
+- `env`: only `"production"` routes to the APNs prod gateway
+  (`api.push.apple.com`); anything else (incl. a dev build's `sandbox` token, or
+  an unknown value) uses `api.sandbox.push.apple.com`.
+- `collapse`/`thread` = `tab_id`, so repeat pings for one tab coalesce.
+
+The response is JSON echoing the upstream verdict
+(`{platform, ok, status, detail}`) so the desktop log shows APNs/FCM's own status
+(e.g. `BadDeviceToken`) verbatim. `200` on success, `502` otherwise; `403` on a
+bad relay key, `503` if the relay isn't provisioned.
+
+Secrets (all via `wrangler secret put` — see `wrangler.toml` for the list):
+`MAILINK_RELAY_KEY`, `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC`,
+and (Android, optional) `FCM_SERVICE_ACCOUNT`.
+
+Smoke test once the secrets are set (uses a throwaway token — expect a
+`BadDeviceToken` from APNs, which proves auth/JWT/gateway all work):
+
+```bash
+curl -sS -X POST https://updates.maiterm.dev/push \
+  -H "x-mailink-relay-key: $RELAY_KEY" -H 'content-type: application/json' \
+  -d '{"push_token":"0000","platform":"apns","env":"sandbox","tab_id":"t1","kind":"permission","title":"smoke"}'
+```
+
 ## Deploy / update
 
 ```bash
