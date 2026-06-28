@@ -287,7 +287,6 @@ struct TabMeta {
     tab_id: String,
     title: String,
     workspace: String,
-    pty_id: Option<String>,
     runtime: AgentRuntime,
 }
 
@@ -310,7 +309,6 @@ fn designated_tabs(app: &AppState) -> Vec<TabMeta> {
                         tab_id: tab.id.clone(),
                         title: tab.name.clone(),
                         workspace: ws.name.clone(),
-                        pty_id: tab.pty_id.clone(),
                         runtime: tab.runtime.unwrap_or_default(),
                     });
                 }
@@ -414,12 +412,11 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         None => ("dormant", runtime_key(meta.runtime), None),
     };
 
-    // v1 transcript: the distilled recent terminal text as a single system turn. Real
-    // turn-by-turn distillation is a later refinement (P3).
-    let recent = meta
-        .pty_id
-        .as_ref()
-        .and_then(|p| crate::commands::terminal::recent_text(app, p, 40).ok())
+    // v1 transcript: the distilled recent terminal text as a single system turn. Uses the
+    // LIVE tab→pty map (same as /context), not the persisted tab.pty_id which can be stale or
+    // unset. Real turn-by-turn distillation is a later refinement (P3).
+    let recent = pty_for_tab(app, tab_id)
+        .and_then(|p| crate::commands::terminal::recent_text(app, &p, 40).ok())
         .unwrap_or_default();
     let mut transcript = Vec::new();
     if !recent.trim().is_empty() {
