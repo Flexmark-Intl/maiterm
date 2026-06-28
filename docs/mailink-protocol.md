@@ -573,8 +573,14 @@ so the contract is exercised, not just asserted.
 - **Post-proof, desktop/relay (mine):** fold the desktop capability code into a normal maiTerm
   **release** (the dev instance has it; shipped app doesn't — relay deploy is independent). **Android:**
   the relay's FCM `/push` leg is coded+deployed; needs Darryl to provision a Firebase project →
-  `wrangler secret put FCM_SERVICE_ACCOUNT` → run the same finale with `platform:"fcm"`. A
-  device-management surface (list/revoke paired devices) is a natural follow-up.
+  `wrangler secret put FCM_SERVICE_ACCOUNT` → run the same finale with `platform:"fcm"`.
+- **Pairing & device-management UI — DONE**: Preferences ▸ AI Agents ▸ maiLink now has a real
+  **"Pair a phone"** button → a QR modal (renders the `mailink_create_pairing` payload via
+  `qrcode-generator`, shows the code + host:port + a 120s expiry countdown with regenerate), plus a
+  **Paired devices** list (name, platform/env, doorbell-ready badge, paired/last-seen) with inline
+  **Revoke**. New backend commands `mailink_list_devices` (sanitized — no token hash/cap) and
+  `mailink_remove_device` (idempotent; drops the record so the bearer stops working and the doorbell
+  stops ringing it). Closes the last P5 "Revocation UX" gap and replaces the deferred-UI stub.
 - **Per-turn source-markdown distillation — DONE** (`6ce7232`): `ChatDetail.transcript` is now real
   per-turn turns read from Claude's session JSONL (`~/.claude/projects/*/<session_id>.jsonl`, by the
   unique session id — no hook change), not the `recent_text()` terminal scrape. assistant `text`→

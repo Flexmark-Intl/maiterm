@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentBridge, AppData, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -467,9 +467,19 @@ export async function setWorkspaceMailinkNative(workspaceId: string, enabled: bo
   return invoke('set_workspace_mailink_native', { workspaceId, enabled });
 }
 
-/** Mint a one-time pairing code; returns the QR payload { v, host, port, fp, code, name }. */
-export async function mailinkCreatePairing(): Promise<Record<string, unknown>> {
+/** Mint a one-time pairing code; returns the QR payload the phone scans (120s TTL, single use). */
+export async function mailinkCreatePairing(): Promise<MailinkPairingPayload> {
   return invoke('mailink_create_pairing');
+}
+
+/** List paired maiLink devices (sanitized — no token hash / relay capability). */
+export async function mailinkListDevices(): Promise<MailinkDevice[]> {
+  return invoke('mailink_list_devices');
+}
+
+/** Unpair a device: its bearer token stops working and the doorbell stops ringing it. */
+export async function mailinkRemoveDevice(deviceId: string): Promise<void> {
+  return invoke('mailink_remove_device', { deviceId });
 }
 
 export async function setWorkspaceMeshTopics(workspaceId: string, topics: MeshTopic[]): Promise<void> {

@@ -258,6 +258,31 @@ export interface Preferences {
   mailink_relay_url?: string | null;
 }
 
+/** QR payload a phone scans to pair (docs/mailink-protocol.md §3.2). The phone dials
+ *  `https://host:port` pinning `fp`, then POSTs `code` to `/mailink/v1/pair`. */
+export interface MailinkPairingPayload {
+  v: number;
+  host: string;
+  port: number;
+  fp: string;
+  code: string;
+  name: string;
+}
+
+/** A paired maiLink device, sanitized for the Preferences list (no token hash / capability). */
+export interface MailinkDevice {
+  id: string;
+  name: string;
+  /** Push sender the relay uses: "apns" | "fcm" (absent until the phone registers for push). */
+  push_platform?: string | null;
+  /** APNs environment / FCM hint: "sandbox" | "production". */
+  push_env?: string | null;
+  /** True once the device registered both a push token and a relay capability (doorbell-ready). */
+  has_push: boolean;
+  created_at: number;
+  last_seen_at: number;
+}
+
 export interface WindowData {
   id: string;
   label: string;

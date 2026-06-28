@@ -490,6 +490,8 @@ pub fn run() {
             commands::workspace::set_tab_mailink_native,
             commands::workspace::set_workspace_mailink_native,
             commands::mailink::mailink_create_pairing,
+            commands::mailink::mailink_list_devices,
+            commands::mailink::mailink_remove_device,
             commands::window::get_window_data,
             commands::window::create_window,
             commands::window::duplicate_window,
