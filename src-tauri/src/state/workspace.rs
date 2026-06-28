@@ -1001,9 +1001,35 @@ pub struct Preferences {
     pub mesh_topic_ttl_minutes: u32,
     /// maiLink: master switch for the mobile-companion LAN bridge. When false (default),
     /// the maiLink listener is not started and no device can connect. See
-    /// docs/mailink-protocol.md. (Pairing, ports, and device tokens land in P2.)
+    /// docs/mailink-protocol.md.
     #[serde(default)]
     pub mailink_enabled: bool,
+    /// maiLink: paired mobile devices (each holds a revocable bearer token). See
+    /// docs/mailink-protocol.md §2.3/§3.
+    #[serde(default)]
+    pub mailink_devices: Vec<MailinkDevice>,
+}
+
+/// A paired maiLink mobile device. The bearer token is stored hashed (never raw); deleting
+/// the record instantly revokes the device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailinkDevice {
+    pub id: String,
+    pub name: String,
+    /// SHA-256 hex of the device's bearer token (never store the raw token).
+    pub token_hash: String,
+    /// Device's push token (APNs or FCM), set via /push-register after pairing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_token: Option<String>,
+    /// Which push sender the relay uses for this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_platform: Option<String>,
+    /// APNs environment / FCM project hint ("sandbox" | "production").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_env: Option<String>,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_seen_at: i64,
 }
 
 impl Default for Preferences {
@@ -1082,6 +1108,7 @@ impl Default for Preferences {
             mesh_hard_cap: default_mesh_hard_cap(),
             mesh_topic_ttl_minutes: default_mesh_topic_ttl_minutes(),
             mailink_enabled: false,
+            mailink_devices: Vec::new(),
         }
     }
 }

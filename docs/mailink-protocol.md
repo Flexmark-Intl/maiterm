@@ -487,10 +487,14 @@ so the contract is exercised, not just asserted.
   persisted, SAN-agnostic), `/heartbeat`, fingerprint pipeline (unit-tested vs `openssl`).
 - **P2b — DONE** (`96f49d9`): dev bearer token + `GET /chats`, `/chats/{tabId}`,
   `/chats/{tabId}/context` derived from live `agent_sessions` state. Compiles + unit tests pass.
-- **Next — live verification & hand-off:** run the app with `mailink_enabled`, curl the
-  endpoints over TLS, cross-check the `fp` vs openssl, and hand the maiLink agent
-  `{ host, port, fp, dev_token }` to swap its mock→live transport.
-- **P3 (known gaps):** real prompt text/options + a stable `prompt_id` (needs deeper hook
-  capture — the prompt lives in the TUI, not `agent_sessions`); turn-by-turn transcript;
-  real `lastActivityTs`/`unread`. Then P3 proper = WS live channel + `/message` + `/respond`;
-  P4 = APNs/FCM doorbell + QR `/pair` + device store.
+- **P3 — DONE** (`6da933a`): write path (`POST /message`, `/respond` with prompt_id
+  stale-guard, `/interrupt`) + live WS event stream (`GET /ws`). **Live-verified** on the dev
+  instance: fp == openssl, 401 auth on REST + WS, WS streams real `chat_state` frames, write
+  guards (409 dormant / `{ok:false,reason:"stale"}`). Endpoint handed to the maiLink agent
+  (`127.0.0.1:8765`, fp `sha256/Frtk3EEsAF…QTwu58=`, dev_token), all read+write+WS methods live.
+- **Next — P4:** QR `/pair` + per-device tokens + device store, `/push-register`, then the
+  APNs/FCM **doorbell send** (gated on the relay-hosting decision, §6.1/§10).
+- **Known refinements (not blocking):** WS is a ~1.5s internal poller (push-from-hooks later);
+  real prompt text/options + stable `prompt_id` need deeper hook capture (prompt lives in the
+  TUI, not `agent_sessions`); turn-by-turn transcript; real `lastActivityTs`/`unread`;
+  question-attention over WS; live `message` echoes.

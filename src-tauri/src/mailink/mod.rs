@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 
 use crate::state::app_state::AgentSessionState;
 use crate::state::workspace::TabType;
-use crate::state::{AgentRuntime, AppState};
+use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
 /// sensible default until a `mailink_port` preference is wired (P2b).
@@ -149,7 +149,7 @@ fn load_or_generate_dev_token() -> Result<String, String> {
 
 /// Synchronous setup during Tauri `setup()`: resolve the cert + fingerprint + dev token and
 /// log the pin. Returns `None` (with a logged reason) if init fails — the app still boots.
-pub fn prepare(_app_state: &Arc<AppState>) -> Option<MailinkConfig> {
+pub fn prepare(app_state: &Arc<AppState>) -> Option<MailinkConfig> {
     let (cert_pem, key_pem) = match load_or_generate_cert() {
         Ok(v) => v,
         Err(e) => {
@@ -166,6 +166,8 @@ pub fn prepare(_app_state: &Arc<AppState>) -> Option<MailinkConfig> {
         }
     };
     let port = DEFAULT_PORT;
+    // Publish (fp, port) so the pairing-code command can build the QR payload.
+    *app_state.mailink_info.write() = Some((fingerprint.clone(), port));
     log::info!("[maiLink] bridge enabled — listening on 0.0.0.0:{port} (TLS). Pin fp = {fingerprint}");
     log::info!("[maiLink] dev bearer token (Authorization: Bearer …): {dev_token}");
     Some(MailinkConfig {
@@ -198,6 +200,8 @@ pub async fn serve(app_state: Arc<AppState>, cfg: MailinkConfig) {
         .route("/mailink/v1/chats/{tab_id}/respond", post(post_respond))
         .route("/mailink/v1/chats/{tab_id}/interrupt", post(post_interrupt))
         .route("/mailink/v1/ws", get(ws_handler))
+        .route("/mailink/v1/pair", post(post_pair))
+        .route("/mailink/v1/push-register", post(post_push_register))
         .with_state(api);
 
     let tls = match RustlsConfig::from_pem(cfg.cert_pem.into_bytes(), cfg.key_pem.into_bytes()).await
@@ -237,7 +241,7 @@ async fn chats_list(
     State(s): State<ApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&headers, &s.dev_token)?;
+    authorize(&s, &headers)?;
     Ok(Json(json!(build_chats(&s.app))))
 }
 
@@ -248,7 +252,7 @@ async fn chat_detail(
     headers: HeaderMap,
     Path(tab_id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&headers, &s.dev_token)?;
+    authorize(&s, &headers)?;
     build_chat_detail(&s.app, &tab_id)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
@@ -266,7 +270,7 @@ async fn chat_context(
     Path(tab_id): Path<String>,
     Query(q): Query<ContextQuery>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&headers, &s.dev_token)?;
+    authorize(&s, &headers)?;
     let lines = q.lines.unwrap_or(40).min(500);
     let text = pty_for_tab(&s.app, &tab_id)
         .and_then(|pty| crate::commands::terminal::recent_text(&s.app, &pty, lines).ok())
@@ -290,7 +294,7 @@ async fn post_message(
     Path(tab_id): Path<String>,
     Json(body): Json<MessageBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&headers, &s.dev_token)?;
+    authorize(&s, &headers)?;
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
     inject_text(&s.app, &pty, &body.text, body.submit)
         .await
@@ -314,7 +318,7 @@ async fn post_respond(
     Path(tab_id): Path<String>,
     Json(body): Json<RespondBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&headers, &s.dev_token)?;
+    authorize(&s, &headers)?;
     let current = current_prompt(&s.app, &tab_id);
     let (kind, cur_id) = match current {
         Some(p) => p,
@@ -350,9 +354,104 @@ async fn post_interrupt(
     headers: HeaderMap,
     Path(tab_id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&headers, &s.dev_token)?;
+    authorize(&s, &headers)?;
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
     crate::pty::write_pty(&s.app, &pty, b"\x1b").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct PairBody {
+    code: String,
+    #[serde(default)]
+    device_name: Option<String>,
+}
+
+/// POST /pair — redeem a one-time pairing code (from the QR) → mint a per-device bearer
+/// token, persist the device (token stored hashed), return the raw token ONCE.
+async fn post_pair(
+    State(s): State<ApiState>,
+    Json(body): Json<PairBody>,
+) -> Result<Json<Value>, StatusCode> {
+    // validate + consume the code atomically
+    let valid = {
+        let mut codes = s.app.mailink_pairing_codes.write();
+        match codes.remove(&body.code) {
+            Some(expiry) => expiry > std::time::Instant::now(),
+            None => false,
+        }
+    };
+    if !valid {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    let token = gen_token(32);
+    let device = MailinkDevice {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: body
+            .device_name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "maiLink device".to_string()),
+        token_hash: sha256_hex(token.as_bytes()),
+        push_token: None,
+        push_platform: None,
+        push_env: None,
+        created_at: now_ms() as i64,
+        last_seen_at: now_ms() as i64,
+    };
+    let device_id = device.id.clone();
+    let data_clone = {
+        let mut data = s.app.app_data.write();
+        data.preferences.mailink_devices.push(device);
+        data.clone()
+    };
+    let _ = crate::state::save_state(&data_clone);
+    log::info!("[maiLink] paired new device {device_id}");
+    Ok(Json(json!({
+        "device_id": device_id,
+        "token": token,
+        "server_name": s.server_name,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct PushRegBody {
+    token: String,
+    platform: String,
+    #[serde(default)]
+    env: Option<String>,
+}
+
+/// POST /push-register — store the device's push token (APNs/FCM) so the doorbell relay can
+/// reach it. Must be called by a PAIRED device (not the dev token), since it attaches to a
+/// device record.
+async fn post_push_register(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<PushRegBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let hash = sha256_hex(bearer_token(&headers).as_bytes());
+    let data_clone = {
+        let mut data = s.app.app_data.write();
+        match data
+            .preferences
+            .mailink_devices
+            .iter_mut()
+            .find(|d| d.token_hash == hash)
+        {
+            Some(d) => {
+                d.push_token = Some(body.token);
+                d.push_platform = Some(body.platform);
+                d.push_env = body.env;
+                d.last_seen_at = now_ms() as i64;
+            }
+            // authed via the dev token (no device record) — push must target a paired device
+            None => return Err(StatusCode::CONFLICT),
+        }
+        data.clone()
+    };
+    let _ = crate::state::save_state(&data_clone);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -369,8 +468,8 @@ async fn ws_handler(
     Query(q): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let header_ok = authorize(&headers, &s.dev_token).is_ok();
-    let query_ok = q.token.as_deref() == Some(s.dev_token.as_str()) && !s.dev_token.is_empty();
+    let header_ok = token_valid(&s, bearer_token(&headers));
+    let query_ok = q.token.as_deref().map(|t| token_valid(&s, t)).unwrap_or(false);
     if !header_ok && !query_ok {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -530,14 +629,41 @@ fn permission_key(choice: &str) -> String {
     .to_string()
 }
 
-/// Bearer-token check. Returns 401 unless the `Authorization: Bearer <token>` matches.
-fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), StatusCode> {
-    let presented = headers
+/// Extract the `Authorization: Bearer <token>` value (empty string if absent).
+fn bearer_token(headers: &HeaderMap) -> &str {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if !expected.is_empty() && presented == expected {
+        .unwrap_or("")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// True if `token` is the dev token OR a paired device's token (compared by hash).
+fn token_valid(s: &ApiState, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    if token == s.dev_token && !s.dev_token.is_empty() {
+        return true;
+    }
+    let hash = sha256_hex(token.as_bytes());
+    s.app
+        .app_data
+        .read()
+        .preferences
+        .mailink_devices
+        .iter()
+        .any(|d| d.token_hash == hash)
+}
+
+/// Bearer-token gate for authed endpoints. 401 unless the token is the dev token or a paired
+/// device token.
+fn authorize(s: &ApiState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    if token_valid(s, bearer_token(headers)) {
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -731,6 +857,46 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Mint a one-time pairing code (120s TTL) and build the QR payload the desktop displays for
+/// scanning. Errors if the listener isn't running yet (no fp/port published).
+pub fn create_pairing(app: &Arc<AppState>) -> Result<Value, String> {
+    let (fp, port) = app
+        .mailink_info
+        .read()
+        .clone()
+        .ok_or("maiLink listener is not running")?;
+    let code = gen_token(8).to_uppercase();
+    app.mailink_pairing_codes.write().insert(
+        code.clone(),
+        std::time::Instant::now() + std::time::Duration::from_secs(120),
+    );
+    let host = local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+    Ok(json!({
+        "v": 1,
+        "host": host,
+        "port": port,
+        "fp": fp,
+        "code": code,
+        "name": "maiTerm",
+    }))
+}
+
+fn gen_token(n: usize) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..n)
+        .map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char)
+        .collect()
+}
+
+/// Best-effort primary LAN IPv4, resolved via the routing table (no packets sent).
+fn local_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
 }
 
 #[cfg(test)]

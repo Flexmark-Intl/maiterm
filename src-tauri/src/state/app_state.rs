@@ -130,6 +130,11 @@ pub struct AppState {
     pub agent_sessions: RwLock<HashMap<String, AgentSessionInfo>>,
     // Pending session IDs from SessionStart HTTP hooks awaiting initSession to assign a tab
     pub pending_agent_sessions: RwLock<Vec<(String, Option<String>, Instant)>>, // (session_id, cwd, timestamp)
+    // maiLink: outstanding one-time pairing codes → expiry instant (docs/mailink-protocol.md §3.2)
+    pub mailink_pairing_codes: RwLock<HashMap<String, Instant>>,
+    // maiLink: the live listener's (fingerprint, port), set at startup so the pairing-code
+    // command can build the QR payload without re-reading the cert.
+    pub mailink_info: RwLock<Option<(String, u16)>>,
 }
 
 impl AppState {
@@ -163,6 +168,8 @@ impl AppState {
             memory_samples: RwLock::new(Vec::new()),
             agent_sessions: RwLock::new(HashMap::new()),
             pending_agent_sessions: RwLock::new(Vec::new()),
+            mailink_pairing_codes: RwLock::new(HashMap::new()),
+            mailink_info: RwLock::new(None),
         }
     }
 

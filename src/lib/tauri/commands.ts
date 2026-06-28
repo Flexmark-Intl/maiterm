@@ -467,6 +467,11 @@ export async function setWorkspaceMailinkNative(workspaceId: string, enabled: bo
   return invoke('set_workspace_mailink_native', { workspaceId, enabled });
 }
 
+/** Mint a one-time pairing code; returns the QR payload { v, host, port, fp, code, name }. */
+export async function mailinkCreatePairing(): Promise<Record<string, unknown>> {
+  return invoke('mailink_create_pairing');
+}
+
 export async function setWorkspaceMeshTopics(workspaceId: string, topics: MeshTopic[]): Promise<void> {
   return invoke('set_workspace_mesh_topics', { workspaceId, topics });
 }

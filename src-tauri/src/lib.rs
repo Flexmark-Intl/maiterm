@@ -489,6 +489,7 @@ pub fn run() {
             commands::workspace::set_workspace_mesh_topics,
             commands::workspace::set_tab_mailink_native,
             commands::workspace::set_workspace_mailink_native,
+            commands::mailink::mailink_create_pairing,
             commands::window::get_window_data,
             commands::window::create_window,
             commands::window::duplicate_window,
