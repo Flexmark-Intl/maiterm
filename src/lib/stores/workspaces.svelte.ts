@@ -838,24 +838,26 @@ function createWorkspacesStore() {
         : workspaces.flatMap(w => w.panes).find(p => p.id === paneId)?.active_tab_id ?? undefined;
       const tab = await commands.createTab(workspaceId, paneId, name, afterTabId);
 
-      // Open new tab at the most common CWD (and SSH setup) among sibling
-      // LIVE terminal tabs. On ties, the active tab's setup wins. Suspended
-      // tabs are excluded — their persisted restore_* cwd is stale and, in a
-      // workspace that has accumulated many suspended tabs, would dominate the
-      // tally and pin every new tab to that majority directory regardless of
-      // which tab the user is actually on.
+      // Open the new tab at the host/cwd of the previous (active) tab — the
+      // tab the user was on when they opened the new one. We no longer survey
+      // the whole workspace for a "most common" setup; inheriting from the
+      // immediate sibling matches the user's mental model and avoids pinning
+      // every new tab to whichever directory happens to be the majority.
       const ws = workspaces.find(w => w.id === workspaceId);
       if (ws) {
         const activePane = ws.panes.find(p => p.id === paneId);
         const activeTabId = activePane?.active_tab_id;
+        const activeTab = activePane?.tabs.find(t => t.id === activeTabId);
 
-        // Query live PTY info for the active terminal — persisted fields
-        // (restore_ssh_command etc.) may not reflect the current state yet
-        // if auto-save hasn't fired.
-        let liveSsh: string | null = null;
-        let liveCwd: string | null = null;
-        if (activeTabId) {
-          const instance = terminalsStore.instances.get(activeTabId);
+        let best: { cwd: string | null; sshCommand: string | null; remoteCwd: string | null } | null = null;
+
+        if (activeTab?.tab_type === 'terminal') {
+          // Query live PTY info for the active terminal — persisted fields
+          // (restore_ssh_command etc.) may not reflect the current state yet
+          // if auto-save hasn't fired.
+          let liveSsh: string | null = null;
+          let liveCwd: string | null = null;
+          const instance = activeTabId ? terminalsStore.instances.get(activeTabId) : undefined;
           if (instance) {
             try {
               const info = await commands.getPtyInfo(instance.ptyId);
@@ -863,81 +865,73 @@ function createWorkspacesStore() {
               liveCwd = info.cwd;
             } catch { /* ignore */ }
           }
+
+          if (activeTab.auto_resume_enabled && activeTab.auto_resume_ssh_command) {
+            // Pinned auto-resume is the source of truth — live PTY state can
+            // be misleading (e.g. ssh → sudo -i changes foreground_command to
+            // something that won't reconnect correctly).
+            best = {
+              cwd: liveCwd ?? activeTab.last_cwd ?? null,
+              sshCommand: activeTab.auto_resume_ssh_command,
+              remoteCwd: activeTab.auto_resume_remote_cwd ?? null,
+            };
+          } else if (liveSsh) {
+            // Get remote cwd from OSC state (promptCwd) since live PTY only gives local cwd
+            const oscState = terminalsStore.getOsc(activeTab.id);
+            best = {
+              cwd: liveCwd,
+              sshCommand: liveSsh,
+              remoteCwd: oscState?.promptCwd ?? activeTab.auto_resume_remote_cwd ?? activeTab.restore_remote_cwd ?? null,
+            };
+          } else {
+            const ssh = activeTab.auto_resume_ssh_command || activeTab.restore_ssh_command || null;
+            // For live SSH tabs the real remote cwd lives in OSC promptCwd
+            // (the PTY only reports the local cwd); fall back to persisted.
+            const oscState = ssh ? terminalsStore.getOsc(activeTab.id) : null;
+            best = {
+              cwd: activeTab.last_cwd ?? liveCwd ?? null,
+              sshCommand: ssh,
+              remoteCwd: ssh
+                ? (oscState?.promptCwd ?? activeTab.auto_resume_remote_cwd ?? activeTab.restore_remote_cwd ?? null)
+                : null,
+            };
+          }
         }
 
-        // Build a composite key: "ssh\0command\0remoteCwd" for SSH tabs, or "local\0cwd" for local tabs
-        const setupCounts = new Map<string, { count: number; cwd: string | null; sshCommand: string | null; remoteCwd: string | null }>();
-        for (const p of ws.panes) {
-          for (const t of p.tabs) {
-            if (t.tab_type !== 'terminal') continue;
-            // Only count tabs with a live PTY. Suspended tabs are unregistered
-            // from the terminals store, so their (stale) restore_* cwd never
-            // skews the tally.
-            if (!terminalsStore.get(t.id)) continue;
-            // Use live PTY info for the active tab, persisted fields for others
-            let ssh: string | null;
-            let remoteCwd: string | null;
-            let localCwd: string | null;
-            if (t.id === activeTabId && t.auto_resume_enabled && t.auto_resume_ssh_command) {
-              // Pinned auto-resume is the source of truth — live PTY state can
-              // be misleading (e.g. ssh → sudo -i changes foreground_command to
-              // something that won't reconnect correctly).
-              ssh = t.auto_resume_ssh_command;
-              remoteCwd = t.auto_resume_remote_cwd ?? null;
-              localCwd = liveCwd ?? t.last_cwd;
-            } else if (t.id === activeTabId && liveSsh) {
-              ssh = liveSsh;
-              // Get remote cwd from OSC state (promptCwd) since live PTY only gives local cwd
-              const oscState = terminalsStore.getOsc(t.id);
-              remoteCwd = oscState?.promptCwd ?? t.auto_resume_remote_cwd ?? t.restore_remote_cwd ?? null;
-              localCwd = liveCwd;
-            } else {
-              ssh = t.auto_resume_ssh_command || t.restore_ssh_command || null;
-              // For live SSH tabs the real remote cwd lives in OSC promptCwd
-              // (the PTY only reports the local cwd); fall back to persisted.
-              const oscState = ssh ? terminalsStore.getOsc(t.id) : null;
-              remoteCwd = ssh
-                ? (oscState?.promptCwd ?? t.auto_resume_remote_cwd ?? t.restore_remote_cwd ?? null)
-                : null;
-              localCwd = t.last_cwd;
-            }
-            if (!ssh && !localCwd) continue;
-            const key = ssh ? `ssh\0${ssh}\0${remoteCwd ?? ''}` : `local\0${localCwd}`;
-            const existing = setupCounts.get(key);
-            if (existing) {
-              existing.count++;
-            } else {
-              setupCounts.set(key, { count: 1, cwd: localCwd, sshCommand: ssh, remoteCwd });
+        // Fallback: if there's no usable previous tab (the active tab is not a
+        // terminal, the pane is empty, or it's a fresh terminal that hasn't
+        // reported a cwd/host yet), inherit the most common host/cwd among the
+        // workspace's SUSPENDED terminal tabs, read from their persisted
+        // restore_*/auto_resume_* fields. Live siblings are intentionally not
+        // counted — among live tabs only the active one is considered.
+        if (!best || (!best.cwd && !best.sshCommand)) {
+          const setupCounts = new Map<string, { count: number; cwd: string | null; sshCommand: string | null; remoteCwd: string | null }>();
+          for (const p of ws.panes) {
+            for (const t of p.tabs) {
+              if (t.tab_type !== 'terminal') continue;
+              // Suspended = no live PTY registered in the terminals store.
+              if (terminalsStore.get(t.id)) continue;
+              const ssh = t.auto_resume_ssh_command || t.restore_ssh_command || null;
+              const remoteCwd = ssh ? (t.auto_resume_remote_cwd ?? t.restore_remote_cwd ?? null) : null;
+              const localCwd = t.auto_resume_cwd ?? t.restore_cwd ?? t.last_cwd ?? null;
+              if (!ssh && !localCwd) continue;
+              const key = ssh ? `ssh\0${ssh}\0${remoteCwd ?? ''}` : `local\0${localCwd}`;
+              const existing = setupCounts.get(key);
+              if (existing) {
+                existing.count++;
+              } else {
+                setupCounts.set(key, { count: 1, cwd: localCwd, sshCommand: ssh, remoteCwd });
+              }
             }
           }
-        }
-        // Find the active tab's setup key to use as tiebreaker
-        const activeTab = activePane?.tabs.find(t => t.id === activeTabId);
-        let activeKey: string | null = null;
-        if (activeTab?.tab_type === 'terminal') {
-          if (activeTab.auto_resume_enabled && activeTab.auto_resume_ssh_command) {
-            activeKey = `ssh\0${activeTab.auto_resume_ssh_command}\0${activeTab.auto_resume_remote_cwd ?? ''}`;
-          } else if (liveSsh) {
-            const oscState = terminalsStore.getOsc(activeTab.id);
-            const remoteCwd = oscState?.promptCwd ?? activeTab.auto_resume_remote_cwd ?? activeTab.restore_remote_cwd ?? null;
-            activeKey = `ssh\0${liveSsh}\0${remoteCwd ?? ''}`;
-          } else {
-            const localCwd = activeTab.last_cwd ?? liveCwd;
-            if (localCwd) activeKey = `local\0${localCwd}`;
+          // Most common wins; ties resolve to the first-seen (insertion order).
+          let bestCount = 0;
+          for (const entry of setupCounts.values()) {
+            if (entry.count > bestCount) { best = entry; bestCount = entry.count; }
           }
         }
-        let best: { cwd: string | null; sshCommand: string | null; remoteCwd: string | null } | null = null;
-        let bestCount = 0;
-        for (const [key, entry] of setupCounts) {
-          if (entry.count > bestCount || (entry.count === bestCount && key === activeKey)) {
-            best = entry; bestCount = entry.count;
-          }
-        }
-        // Fall back to live PTY info if no tab had any data
-        if (!best && (liveCwd || liveSsh)) {
-          best = { cwd: liveCwd, sshCommand: liveSsh, remoteCwd: null };
-        }
-        if (best) {
+
+        if (best && (best.cwd || best.sshCommand)) {
           terminalsStore.setSplitContext(tab.id, { cwd: best.cwd, sshCommand: best.sshCommand, remoteCwd: best.remoteCwd });
         }
       }
