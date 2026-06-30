@@ -208,11 +208,12 @@
             <div class="empty small">Agents post their status here as they work.</div>
           {/if}
           {#each board as a (a.tabId)}
-            <div class="agent-card" class:needs={a.needsDecision.length > 0}>
+            <div class="agent-card" class:needs={a.needsInput}>
               <div class="agent-head">
                 <StatusDot color={a.claudeState === 'active' ? 'accent' : a.live ? 'green' : 'dim'} pulse={a.claudeState === 'active'} />
                 <button class="role-link" onclick={() => openTab(a.tabId)} title="Open this agent's tab">{a.role}</button>
                 <span class="spacer"></span>
+                {#if a.needsInput}<button class="needs-you" onclick={() => openTab(a.tabId)} title="This agent is asking you — open its tab to answer">needs you</button>{/if}
                 {#if a.cwd}<span class="cwd" title={a.cwd}>{a.cwd.split('/').pop()}</span>{/if}
               </div>
               <input
@@ -222,18 +223,6 @@
                 value={a.purpose ?? ''}
                 onchange={(e) => setPurpose(a.tabId, e)}
               />
-              {#if a.needsDecision.length > 0}
-                <div class="card-row decision">
-                  <span class="tag">NEEDS DECISION</span>
-                  <ul>{#each a.needsDecision as d}<li>{d}</li>{/each}</ul>
-                </div>
-              {/if}
-              {#if a.blocked.length > 0}
-                <div class="card-row blocked"><span class="tag">Blocked</span> <ul>{#each a.blocked as b}<li>{b}</li>{/each}</ul></div>
-              {/if}
-              {#if a.done.length > 0}
-                <div class="card-row done"><span class="tag">Done</span> <ul>{#each a.done as d}<li>{d}</li>{/each}</ul></div>
-              {/if}
             </div>
           {/each}
         </section>
@@ -372,14 +361,13 @@
     color: var(--fg); font-size: 11px; padding: 4px 6px;
   }
   .purpose-input:focus { outline: none; border-color: var(--accent); }
-  .card-row { margin-top: 6px; font-size: 11px; }
-  .card-row ul { margin: 2px 0 0; padding-left: 16px; color: var(--fg); }
-  .card-row li { line-height: 1.4; }
-  .tag { font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--fg-dim); }
-  .card-row.decision .tag { color: var(--yellow); }
-  .card-row.decision ul { color: var(--fg); }
-  .card-row.blocked .tag { color: var(--red); }
-  .card-row.done .tag { color: var(--green); }
+  .needs-you {
+    background: color-mix(in srgb, var(--yellow) 18%, transparent);
+    border: 1px solid color-mix(in srgb, var(--yellow) 45%, transparent); border-radius: 3px;
+    color: var(--yellow); font-size: 9px; font-weight: 700; letter-spacing: 0.05em;
+    text-transform: uppercase; padding: 1px 5px; cursor: pointer;
+  }
+  .needs-you:hover { background: color-mix(in srgb, var(--yellow) 28%, transparent); }
 
   .cockpit-footer { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--bg-light); }
 

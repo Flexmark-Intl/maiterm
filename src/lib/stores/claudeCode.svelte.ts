@@ -843,9 +843,6 @@ function createClaudeCodeStore() {
       action = 'created';
     }
 
-    // Mesh: scan the written note for a NEEDS DECISION block → pull the human in (§8).
-    agentMeshStore.onWorkspaceNoteWritten(ws.id, resultNoteId, args.content);
-
     // NOTE: do not auto-open the notes panel here. Workspace-note writes are
     // frequent (mesh agents emit status notes continuously), and the old
     // auto-open targeted the *active* workspace's tab rather than `ws`, so a
