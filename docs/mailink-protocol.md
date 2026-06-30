@@ -1,16 +1,28 @@
 # maiLink — Mobile Companion Protocol & Architecture
 
-> Status: **design / contract draft v0.2**. This is the shared contract between the
+> Status: **design / contract draft v0.3**. This is the shared contract between the
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
-> built collaboratively with the maiLink agent). Date: 2026-06-27.
+> built collaboratively with the maiLink agent). Date: 2026-06-30.
+>
+> **v0.3 changelog** (agreed with the maiLink agent): the surface is now **topic-threaded**.
+> Per-tab `/chats` is superseded by **`/threads`** (a thread is `kind:"topic"` for a mesh
+> conversation or `kind:"solo"` for a lone agent tab); `thread_id` is the canonical key and
+> `tabId` becomes a participant identity. Transcript turns carry `author` + `thread_id`;
+> the WS `attention` event and doorbell context carry `thread_id` + `asked_by`. The pending
+> ask is the agent's **native** human prompt — `AskUserQuestion` (structured) or a permission
+> prompt — carried in `PendingPrompt` with a `respondable` flag (permission answers ship now;
+> `AskUserQuestion` ships read-only first, answer-from-phone as a fast-follow). This kills the
+> old agent-authored "status note / NEEDS DECISION" channel (desktop side, already removed):
+> one ask in, one card rendered, one `/respond` out. Full contract + TS types in **§12**;
+> it supersedes the chat-centric parts of §2.1, §4, §5, and §8. **Open product call (Darryl):**
+> iOS-first vs iOS+Android launch scope (unchanged from v0.2; protocol supports both).
 >
 > **v0.2 changelog** (agreed with the maiLink agent): app stack is **Capacitor +
 > SvelteKit + shadcn-svelte** (cross-platform, not native SwiftUI); `/push-register` is
 > **platform-tagged** (APNs+FCM); the WS `attention` event carries an optional inline
 > `prompt`; prompts have an opaque `prompt_id` carried through `/respond` (stale-guard);
 > `POST /message`'s `msg_id` is guaranteed identical to its later WS echo; a transcript
-> pagination param is reserved. **Open product call (Darryl):** iOS-first vs iOS+Android
-> at launch — the protocol supports both regardless; only the *launch scope* is undecided.
+> pagination param is reserved.
 
 ## 0. What maiLink is (and is not)
 
@@ -597,3 +609,145 @@ so the contract is exercised, not just asserted.
   real prompt text/options + stable `prompt_id` need deeper hook capture (prompt lives in the
   TUI, not `agent_sessions`); real `lastActivityTs`/`unread`; question-attention over WS; live
   `message`-over-WS echoes (transcript turns now distilled — see above).
+
+---
+
+## 12. v0.3 — Topic threads & the unified ask contract
+
+This section is the **canonical contract** for the topic-threaded surface. It supersedes the
+chat-centric shapes of §2.1 (designation), §4 (wire), §5 (respond), and §8 (discovery) where
+they conflict; the transport, TLS, pairing, and doorbell mechanics (§3, §6) are unchanged.
+
+**Why.** maiTerm's Mesh Workspace is **topic-native**: agents converse in topic-scoped threads
+(`MeshTopic` — owner, participants, turn count, open/complete, normalized-label dedup). Per-tab
+`/chats` leaked an implementation detail (one tab = one session) into the UI. A **thread = a
+conversation** is the right model for a chat app, so the app unifies on one `thread` concept and
+renders it once.
+
+**Single ask channel (no double-messaging).** The only "human needs to answer" signal is the
+agent's **native** prompt — Claude `AskUserQuestion` (structured multiple-choice elicitation) or a
+permission prompt — which maiTerm already tracks as `isAwaitingHumanInput`. The desktop side has
+**removed** the old agent-authored "status note / NEEDS DECISION" channel and instructs agents to
+ask via `AskUserQuestion` only (never print the question, never write a note). One ask in → one
+`PendingPrompt` → one card → one `/respond` out. On desktop the same signal raises a scoped
+toast + deep-link; on the phone it's the WS `attention` + doorbell.
+
+### 12.1 Canonical TS types (adopted from the maiLink app side)
+
+```ts
+export type Runtime = 'claude' | 'codex' | 'gemini';
+
+/** A participating agent in a thread. id is tabId-derived (stable across resume/fork) but is NOT the thread key. */
+export interface Participant { id: string; name: string; runtime: Runtime; }
+
+export type ThreadKind = 'topic' | 'solo';
+export type ThreadState = 'active' | 'idle' | 'permission' | 'dormant';
+
+/** Inbox row. GET /threads -> ThreadSummary[] */
+export interface ThreadSummary {
+  thread_id: string;            // canonical key everywhere (replaces tabId)
+  kind: ThreadKind;             // topic = N participants, solo = lone agent tab
+  label: string;                // topic label or solo tab title
+  owner: string;                // owner participant id
+  participants: Participant[];  // drives attribution chips (runtime glyph)
+  workspace: string;            // grouping
+  state: ThreadState;
+  unread: boolean;
+  lastActivityTs: number;
+  preview: string;
+}
+
+/** GET /threads/{thread_id} -> ThreadDetail */
+export interface ThreadDetail extends ThreadSummary {
+  transcript: Turn[];           // ONE ts-ordered authored list, all participants interleaved
+  pendingPrompt?: PendingPrompt;
+}
+
+export interface Turn {
+  msg_id: string;
+  thread_id: string;
+  author?: Participant;         // absent => the human/user
+  role: 'agent' | 'user' | 'tool' | 'system';
+  text: string;                 // source markdown
+  ts: number;
+}
+
+export interface AskOption { label: string; description?: string; }
+export interface AskQuestion {
+  header: string;               // short chip, e.g. "Auth method"
+  question: string;
+  multiSelect: boolean;
+  options: AskOption[];
+  allowOther: boolean;          // the "Other" free-text path
+}
+
+export interface PendingPrompt {
+  prompt_id: string;            // stale-guard on /respond
+  thread_id: string;
+  kind: 'permission' | 'question';
+  asked_by: Participant;        // card header + doorbell line
+  respondable: boolean;         // permission:true now, question:false until WRITE lands
+  // permission shape:
+  text?: string;
+  options?: string[];           // e.g. ["Yes","Yes, don't ask again","No"]
+  // AskUserQuestion shape:
+  questions?: AskQuestion[];
+}
+
+export interface RespondRequest {
+  prompt_id: string;
+  choice?: string;              // permission: chosen option label
+  answers?: Array<{             // AskUserQuestion: aligned to questions[]
+    selected: string[];         // multiSelect => >1
+    other?: string;             // when user chose "Other"
+  }>;
+}
+export interface RespondResponse { ok: boolean; reason?: string; } // "stale" | "not_respondable"
+
+// WS server->client
+export interface WsAttentionEvent {
+  type: 'attention';
+  thread_id: string;
+  kind: 'permission' | 'question' | 'idle_done';
+  asked_by: Participant;
+  summary: string;
+  prompt?: PendingPrompt;       // present for permission/question
+  ts: number;
+}
+// WsMessageEvent / WsChatStateEvent gain thread_id + author analogously; chats_changed -> threads_changed
+```
+
+### 12.2 REST/WS deltas
+
+- `GET /threads` → `ThreadSummary[]` (supersedes `/chats`). `GET /threads/{thread_id}` →
+  `ThreadDetail`. `/chats*` may remain a thin alias during migration; `thread_id` is canonical.
+- WS event `threads_changed` replaces `chats_changed`. `attention` and `message`/`chat_state`
+  events carry `thread_id` (+ `author` on message turns).
+- `POST /respond` takes `RespondRequest`; returns `RespondResponse` with `reason:"stale"`
+  (prompt_id no longer current) or `reason:"not_respondable"` (a race against a `respondable:false`
+  prompt — fails cleanly, no dead button).
+- **Doorbell** context (§6) gains `thread_id` + `asked_by` so the notification tap deep-links to the
+  thread (not a tabId).
+
+### 12.3 Desktop-side mapping & staging (maiTerm)
+
+- **threads** ← a `kind:"topic"` thread is one `MeshTopic` (id→`thread_id`, label, owner/participants
+  by tabId-derived `Participant`); a lone agent tab wraps as `kind:"solo"`. `tabId` is the
+  participant `id`, never the thread key.
+- **transcript** ← per-turn distillation already exists (`mailink/transcript.rs`, §11); add
+  `author` (the participant) + `thread_id` per turn and interleave participants by `ts` for a
+  topic thread. The app synthesizes the visual grouping; no server-side thread view.
+- **PendingPrompt** ← captured from the **PreToolUse hook**, which carries the full `tool_input`:
+  for `AskUserQuestion`, `tool_input.questions` populates `questions[]` (header/question/
+  multiSelect/options[{label,description}]/allowOther); a permission prompt populates `text` +
+  `options`. `asked_by` = the asking participant.
+- **respondable staging:**
+  - `permission` → `respondable:true` **now**. The permission `/respond`→TUI-inject path is already
+    proven end-to-end on hardware (§11 doorbell finale) — converging to threads must NOT regress it.
+  - `AskUserQuestion` → `respondable:false` first (app renders the structured ask read-only + an
+    "answer on desktop" affordance, still rings the doorbell). Flip to `true` as a **fast-follow**
+    once maiTerm can reliably inject the selection back into the TUI selector (arrow/enter
+    navigation — the genuinely hard part; bracketed-paste text won't drive it).
+- **answer field names:** `RespondRequest.answers[]` (`{selected[], other?}`) already mirrors
+  Claude's `AskUserQuestion` answer model; exact field names get pinned here when the capture path
+  is built (cosmetic rename for the app).
