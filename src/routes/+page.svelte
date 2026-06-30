@@ -50,6 +50,11 @@
   let restoreDone = $state(0);
   let restoreCurrentLabel = $state('');
   let restoreCancelling = $state(false);
+  // True from launch until session restore finishes (or there was nothing to
+  // restore). Defaults true so startup work that must see the *settled* tab set —
+  // e.g. the mesh auto-recheck — defers until respawns complete instead of firing
+  // mid-restore against half-spawned members. Cleared in runSessionRestore's finally.
+  let restoreInProgress = $state(true);
   // Non-reactive guard read inside the async loop (no need to trigger effects).
   let restoreCancelled = false;
   // Only surface the modal for a meaningful restore — a 1-2 tab restore happens
@@ -158,8 +163,14 @@
 
   // When a mesh workspace becomes active (incl. on startup after an app restart), offer an
   // auto re-check if any of its agents dropped — agentMesh waits out auto-resume first.
+  // Hold off while session restore is still respawning tabs: maybeAutoRecheck latches
+  // (runs once per workspace) and its readiness probe would see the not-yet-restored
+  // members as "dropped" and pop the mesh setup modal. Reading restoreInProgress here
+  // makes the effect re-run when restore completes, firing the recheck against the
+  // settled roster.
   $effect(() => {
     const id = workspacesStore.activeWorkspaceId;
+    if (restoreInProgress) return;
     if (id) agentMeshStore.maybeAutoRecheck(id);
   });
 
@@ -257,32 +268,38 @@
   // only waits for the PTY to come up), so agents relaunch in the background while
   // the next tab restores.
   async function runSessionRestore() {
-    const list = buildRestoreList();
-    if (list.length === 0) return;
+    try {
+      const list = buildRestoreList();
+      if (list.length === 0) return;
 
-    restoreCancelled = false;
-    restoreCancelling = false;
-    restoreDone = 0;
-    restoreTotal = list.length;
-    restoreCurrentLabel = list[0].label;
-    restoreActive = list.length >= RESTORE_MODAL_THRESHOLD;
+      restoreCancelled = false;
+      restoreCancelling = false;
+      restoreDone = 0;
+      restoreTotal = list.length;
+      restoreCurrentLabel = list[0].label;
+      restoreActive = list.length >= RESTORE_MODAL_THRESHOLD;
 
-    for (const item of list) {
-      if (restoreCancelled) break;
-      restoreCurrentLabel = item.label;
-      try {
-        activatedWorkspaceIds.add(item.workspaceId);
-        activatedTabIds.add(item.tabId);
-        await waitForTabSettled(item.tabId);
-      } catch {
-        // Never let one bad tab abort the whole restore.
+      for (const item of list) {
+        if (restoreCancelled) break;
+        restoreCurrentLabel = item.label;
+        try {
+          activatedWorkspaceIds.add(item.workspaceId);
+          activatedTabIds.add(item.tabId);
+          await waitForTabSettled(item.tabId);
+        } catch {
+          // Never let one bad tab abort the whole restore.
+        }
+        restoreDone += 1;
       }
-      restoreDone += 1;
+    } finally {
+      restoreActive = false;
+      restoreCancelling = false;
+      restoreCurrentLabel = '';
+      // Restore is done (or there was nothing to do, or it was cancelled mid-drain).
+      // Release the gate so deferred startup work — the mesh auto-recheck — runs now
+      // that the tab set has settled.
+      restoreInProgress = false;
     }
-
-    restoreActive = false;
-    restoreCancelling = false;
-    restoreCurrentLabel = '';
   }
 
   // Stop the restore. Dismiss the modal immediately for a snappy feel; the loop
