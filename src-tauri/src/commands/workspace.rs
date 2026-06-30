@@ -608,6 +608,17 @@ pub fn suspend_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>,
     let win = app_data.window_mut(&label).ok_or("Window not found")?;
     let ws = win.workspaces.iter_mut().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
     ws.suspended = true;
+    // Give the workspace's live terminal tabs their proper suspended status — the
+    // frontend already killed the PTYs, so leaving pty_id set would relapse the
+    // high-watermark and make these tabs read as "live" on the next restart.
+    for pane in ws.panes.iter_mut() {
+        for tab in pane.tabs.iter_mut() {
+            if matches!(tab.tab_type, TabType::Terminal) && tab.pty_id.is_some() {
+                tab.pty_id = None;
+                tab.suspended_at = Some(iso_now());
+            }
+        }
+    }
     save_state(&app_data)?;
     Ok(())
 }
@@ -719,6 +730,59 @@ pub fn suspend_tab(
     let data_clone = app_data.clone();
     drop(app_data);
     save_state(&data_clone)
+}
+
+/// One tab's new suspended state for `mark_tabs_suspended`.
+#[derive(serde::Deserialize)]
+pub struct TabSuspendMark {
+    pub tab_id: String,
+    /// Last-active time (ISO 8601) to record as the suspend age; None → now.
+    pub suspended_at: Option<String>,
+}
+
+/// Bulk-mark terminal tabs as properly suspended: clear the stale `pty_id` and
+/// stamp `suspended_at`. Session restore calls this for tabs that weren't
+/// genuinely live at the last shutdown, so the on-disk active-vs-suspended state
+/// stops lying (a tab keeps its `pty_id` forever unless explicitly suspended).
+/// Window-scoped and idempotent; only the listed terminal tabs are touched.
+#[tauri::command]
+pub fn mark_tabs_suspended(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    updates: Vec<TabSuspendMark>,
+) -> Result<(), String> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let marks: HashMap<String, Option<String>> =
+        updates.into_iter().map(|u| (u.tab_id, u.suspended_at)).collect();
+
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+
+    let mut changed = false;
+    for ws in win.workspaces.iter_mut() {
+        for pane in ws.panes.iter_mut() {
+            for tab in pane.tabs.iter_mut() {
+                if !matches!(tab.tab_type, TabType::Terminal) {
+                    continue;
+                }
+                if let Some(ts) = marks.get(&tab.id) {
+                    tab.pty_id = None;
+                    tab.suspended_at = Some(ts.clone().unwrap_or_else(iso_now));
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        let data_clone = app_data.clone();
+        drop(app_data);
+        save_state(&data_clone)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

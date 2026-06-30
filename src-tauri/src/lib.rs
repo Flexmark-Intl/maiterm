@@ -9,7 +9,7 @@ pub const APP_DISPLAY_NAME: &str = if cfg!(debug_assertions) { "maiTermDev" } el
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use state::{load_state, save_state, AppState, WindowData, Workspace};
-use state::persistence::{arm_running_marker, load_memory_trend, log_previous_run_status, migrate_app_data, migrate_scrollback_to_db};
+use state::persistence::{arm_running_marker, load_memory_trend, log_previous_run_status, migrate_app_data, migrate_scrollback_to_db, reconcile_tab_liveness};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tauri::menu::{AboutMetadata, MenuBuilder, MenuItem, SubmenuBuilder};
@@ -58,7 +58,10 @@ pub fn run() {
         *data = load_state();
         migrate_app_data(&mut data);
         migrate_scrollback_to_db(&mut data, &app_state.scrollback_db);
-        // Flush the cleaned JSON (scrollback stripped) to disk
+        // One-time: clear the stale pty_id high-watermark so restore can trust
+        // pty_id as "live at last shutdown" instead of inferring from timestamps.
+        reconcile_tab_liveness(&mut data, &app_state.scrollback_db);
+        // Flush the cleaned JSON (scrollback stripped + liveness reconciled) to disk
         let _ = save_state(&data);
 
         // Sweep scrollback DB for rows whose tab no longer exists in state —
@@ -428,7 +431,6 @@ pub fn run() {
             commands::terminal::has_saved_scrollback,
             commands::terminal::get_saved_scrollback_text,
             commands::terminal::get_saved_terminal_size,
-            commands::terminal::get_scrollback_tab_times,
             commands::workspace::get_app_data,
             commands::workspace::create_workspace,
             commands::workspace::delete_workspace,

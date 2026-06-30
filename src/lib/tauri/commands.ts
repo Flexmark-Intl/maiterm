@@ -208,6 +208,14 @@ export async function getSavedTerminalSize(tabId: string): Promise<[number, numb
   return invoke('get_saved_terminal_size', { tabId });
 }
 
+/** Bulk-mark terminal tabs as properly suspended (clears stale pty_id, stamps
+ *  suspended_at). `suspendedAt` is the last-active time for the idle age; pass
+ *  null to use now. Used by "suspend other tabs" so it can't leave a stale
+ *  pty_id (which would relapse the live-tab high-watermark). */
+export async function markTabsSuspended(updates: { tab_id: string; suspended_at: string | null }[]): Promise<void> {
+  return invoke('mark_tabs_suspended', { updates });
+}
+
 // Workspace commands
 export async function getAppData(): Promise<AppData> {
   return invoke('get_app_data');

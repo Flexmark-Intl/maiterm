@@ -538,6 +538,13 @@ function createWorkspacesStore() {
 
       suspendingWorkspaceIds.delete(ws.id);
       if (tornDown.length > 0) {
+        // Mark the torn-down tabs properly suspended — without this they keep a
+        // stale pty_id and would read as "live" on the next restart (the old
+        // high-watermark leak).
+        const now = new Date().toISOString();
+        const marks = tornDown.map(tabId => ({ tabId, suspendedAt: now }));
+        this.markTabsSuspendedLocal(marks);
+        commands.markTabsSuspended(marks.map(m => ({ tab_id: m.tabId, suspended_at: m.suspendedAt }))).catch(() => {});
         import('$lib/stores/navHistory.svelte').then(m => {
           for (const tabId of tornDown) {
             m.navHistoryStore.removeTab(tabId);
@@ -1129,6 +1136,28 @@ function createWorkspacesStore() {
       // so it re-mounts (and re-spawns the PTY) when the user clicks Resume.
       pendingResumePanes.add(paneId);
       window.dispatchEvent(new CustomEvent<string[]>('deactivate-tabs', { detail: [tabId] }));
+    },
+
+    /**
+     * Reflect a `mark_tabs_suspended` backend call in local state: clear the
+     * stale pty_id and stamp suspended_at so the tab bar shows these tabs dimmed
+     * with an idle age. Used by session restore to give tabs that weren't live
+     * at the last shutdown their proper suspended status. (Backend persists; this
+     * only updates the in-memory reactive copy.)
+     */
+    markTabsSuspendedLocal(marks: { tabId: string; suspendedAt: string }[]) {
+      const byId = new Map(marks.map(m => [m.tabId, m.suspendedAt]));
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          for (const tab of pane.tabs) {
+            const ts = byId.get(tab.id);
+            if (ts && (tab.tab_type === 'terminal' || !tab.tab_type)) {
+              tab.pty_id = null;
+              tab.suspended_at = ts;
+            }
+          }
+        }
+      }
     },
 
     async archiveTab(workspaceId: string, paneId: string, tabId: string, displayName: string) {

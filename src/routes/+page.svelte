@@ -13,6 +13,7 @@
   import EditorPane from '$lib/components/editor/EditorPane.svelte';
   import DiffPane from '$lib/components/editor/DiffPane.svelte';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
+  import SessionRestoreModal from '$lib/components/SessionRestoreModal.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { pendingResumePanes, resumePane } from '$lib/stores/resumeGate.svelte';
   import Resizer from '$lib/components/Resizer.svelte';
@@ -38,6 +39,22 @@
   let lastActiveWorkspaceId: string | null = null;
   // Skip resume gate on the very first workspace activation (app startup/restore).
   let initialActivationDone = false;
+
+  // Sequential session-restore progress (drives SessionRestoreModal). On launch we
+  // bring every tab that was live at last shutdown back one at a time — mounting
+  // them all in a single reaction pinwheels the main thread (each xterm mount is a
+  // layout + reflow). Restoring serially keeps the window responsive and lets the
+  // user cancel.
+  let restoreActive = $state(false);
+  let restoreTotal = $state(0);
+  let restoreDone = $state(0);
+  let restoreCurrentLabel = $state('');
+  let restoreCancelling = $state(false);
+  // Non-reactive guard read inside the async loop (no need to trigger effects).
+  let restoreCancelled = false;
+  // Only surface the modal for a meaningful restore — a 1-2 tab restore happens
+  // silently (still serial) so normal launches don't flash a dialog.
+  const RESTORE_MODAL_THRESHOLD = 3;
 
   $effect.pre(() => {
     const id = workspacesStore.activeWorkspaceId;
@@ -166,39 +183,130 @@
     return () => clearInterval(interval);
   });
 
+  interface RestoreItem {
+    workspaceId: string;
+    paneId: string;
+    tabId: string;
+    label: string;
+  }
+
+  // The ordered list of terminal tabs to bring back live. After the one-time boot
+  // reconcile (Rust `reconcile_tab_liveness`), `pty_id` is authoritative — set ⟺
+  // the tab had a live PTY at the last shutdown — and the suspend/close paths keep
+  // it that way, so restore just respawns the pty_id-set tabs. Also covers a
+  // still-running PTY on a window *reload* (reattach) and the visible workspace's
+  // active tab (the activation effect mounts it regardless). Active workspace
+  // first so the view the user is looking at comes back fastest; suspended
+  // workspaces stay dormant.
+  function buildRestoreList(): RestoreItem[] {
+    const respawnLive = preferencesStore.restoreSession;
+    const wss = workspacesStore.workspaces;
+    const activeWsId = workspacesStore.activeWorkspaceId;
+    const activeWs = wss.find(w => w.id === activeWsId);
+    const orderedWs = activeWs
+      ? [activeWs, ...wss.filter(w => w.id !== activeWsId)]
+      : [...wss];
+
+    const list: RestoreItem[] = [];
+    for (const ws of orderedWs) {
+      if (ws.suspended) continue;
+      for (const pane of ws.panes) {
+        const activeTab = pane.tabs.find(t => t.id === pane.active_tab_id);
+        const orderedTabs = activeTab
+          ? [activeTab, ...pane.tabs.filter(t => t.id !== pane.active_tab_id)]
+          : [...pane.tabs];
+        for (const tab of orderedTabs) {
+          const isTerminal = tab.tab_type === 'terminal' || !tab.tab_type;
+          if (!isTerminal) continue;
+          const needsReattach = terminalsStore.shouldReattach(tab.pty_id);
+          // pty_id set and not explicitly suspended ⟹ was live at last shutdown.
+          const wasLive = respawnLive && !!tab.pty_id && !tab.suspended_at;
+          const isActiveVisible = ws.id === activeWsId && tab.id === pane.active_tab_id;
+          if (!needsReattach && !wasLive && !isActiveVisible) continue;
+          list.push({
+            workspaceId: ws.id,
+            paneId: pane.id,
+            tabId: tab.id,
+            label: `${ws.name} › ${tab.name || 'Terminal'}`,
+          });
+        }
+      }
+    }
+    return list;
+  }
+
+  // Resolve once the tab's TerminalPane has registered (PTY spawned/reattached),
+  // or after a timeout so one wedged tab can't stall the queue. The trailing
+  // breather lets that mount's layout/reflow finish before the next one starts.
+  function waitForTabSettled(tabId: string, timeoutMs = 5000): Promise<void> {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        if (terminalsStore.get(tabId) || Date.now() - start > timeoutMs) {
+          setTimeout(resolve, 120);
+          return;
+        }
+        setTimeout(tick, 50);
+      };
+      tick();
+    });
+  }
+
+  // Drive the restore serially, updating the progress modal as it goes. Auto-resume
+  // commands fire inside each TerminalPane mount (we don't await them — the queue
+  // only waits for the PTY to come up), so agents relaunch in the background while
+  // the next tab restores.
+  async function runSessionRestore() {
+    const list = buildRestoreList();
+    if (list.length === 0) return;
+
+    restoreCancelled = false;
+    restoreCancelling = false;
+    restoreDone = 0;
+    restoreTotal = list.length;
+    restoreCurrentLabel = list[0].label;
+    restoreActive = list.length >= RESTORE_MODAL_THRESHOLD;
+
+    for (const item of list) {
+      if (restoreCancelled) break;
+      restoreCurrentLabel = item.label;
+      try {
+        activatedWorkspaceIds.add(item.workspaceId);
+        activatedTabIds.add(item.tabId);
+        await waitForTabSettled(item.tabId);
+      } catch {
+        // Never let one bad tab abort the whole restore.
+      }
+      restoreDone += 1;
+    }
+
+    restoreActive = false;
+    restoreCancelling = false;
+    restoreCurrentLabel = '';
+  }
+
+  // Stop the restore. Dismiss the modal immediately for a snappy feel; the loop
+  // drains its in-flight tab then breaks. Tabs already brought up stay live; the
+  // rest keep their pty_id and fall back to the normal resume-on-click gate.
+  function cancelSessionRestore() {
+    restoreCancelled = true;
+    restoreCancelling = true;
+    restoreActive = false;
+  }
+
   onMount(() => {
     workspacesStore.load().then(() => {
       loading = false;
 
-      // Session restore. Two independent reasons to bring a background tab live:
-      //  1. Reload reattach: its PTY is still alive in the backend (any mode).
-      //  2. Full-session restore ('all' mode): respawn + auto-resume every
-      //     non-suspended workspace's active tab so a crash / update / relaunch
-      //     comes back exactly as it was — not just the last-active workspace.
-      // The active workspace is already handled by the activation $effect above;
-      // this only adds the background workspaces. Mounting a TerminalPane for a
-      // workspace that isn't visible spawns its PTY detached (no slot) at its
-      // saved size and attaches later via 'terminal-slot-ready' when first shown.
-      const fullRestore = preferencesStore.restoreSession && preferencesStore.sessionRestoreMode === 'all';
-      for (const ws of workspacesStore.workspaces) {
-        let touched = false;
-        for (const pane of ws.panes) {
-          for (const tab of pane.tabs) {
-            const isTerminal = tab.tab_type === 'terminal' || !tab.tab_type;
-            // Reattach any tab whose backend PTY is still alive (window reload).
-            if (isTerminal && terminalsStore.shouldReattach(tab.pty_id)) {
-              activatedTabIds.add(tab.id);
-              touched = true;
-            }
-          }
-          // Full restore: spawn each non-suspended workspace's active tab.
-          if (fullRestore && !ws.suspended && pane.active_tab_id) {
-            activatedTabIds.add(pane.active_tab_id);
-            touched = true;
-          }
-        }
-        if (touched) activatedWorkspaceIds.add(ws.id);
-      }
+      // Session restore: respawn the tabs that were live at last shutdown — by
+      // then `pty_id` is the authoritative marker (the one-time boot reconcile
+      // cleared the old high-watermark) — one at a time, with a progress modal.
+      // The visible workspace's active tab is already activated by the $effect
+      // above; runSessionRestore covers the rest and serializes the mounts so the
+      // main thread stays responsive. The existingPtyId prop decides reattach
+      // (live PTY, reload) vs respawn (restart) per tab at render time.
+      // Fire-and-forget — nav history + bridge/mesh rehydrate below run now.
+      runSessionRestore();
 
       // Seed navigation history with the initial active tab
       const ws = workspacesStore.activeWorkspace;
@@ -392,6 +500,16 @@
 </div>
 
 <ChangelogModal open={showChangelog} onclose={() => showChangelog = false} version={appVersion} />
+
+{#if restoreActive}
+  <SessionRestoreModal
+    total={restoreTotal}
+    done={restoreDone}
+    currentLabel={restoreCurrentLabel}
+    cancelling={restoreCancelling}
+    oncancel={cancelSessionRestore}
+  />
+{/if}
 
 <style>
   .app {

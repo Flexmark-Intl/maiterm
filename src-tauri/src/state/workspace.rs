@@ -534,6 +534,12 @@ pub struct AppData {
     pub sidebar_collapsed: Option<bool>,
     #[serde(default)]
     pub preferences: Preferences,
+    /// One-time marker for the tab-liveness reconcile (clears the stale `pty_id`
+    /// high-watermark and stamps proper `suspended_at` on tabs that weren't
+    /// actually running). Once set, `pty_id` is authoritative and steady-state
+    /// restore never consults scrollback timestamps again.
+    #[serde(default)]
+    pub tab_liveness_reconciled: bool,
 }
 
 impl AppData {

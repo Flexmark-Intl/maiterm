@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::workspace::{AppData, Layout, SplitDirection, SplitNode, WindowData};
+use super::workspace::{AppData, Layout, SplitDirection, SplitNode, TabType, WindowData};
 
 /// Tracks whether the last load_state() successfully parsed a real state file.
 /// When false, save_state() will NOT overwrite the backup — preserving the last
@@ -528,4 +528,67 @@ pub fn migrate_scrollback_to_db(data: &mut AppData, db: &super::scrollback_db::S
     if migrated > 0 {
         log::info!("Migration: moved {} tab scrollbacks from JSON to SQLite", migrated);
     }
+}
+
+/// One-time reconcile of the `pty_id` high-watermark. `pty_id` is set on spawn and
+/// cleared only on explicit suspend, and several paths historically leaked it (a
+/// restart that didn't re-spawn a tab, "suspend other tabs", workspace suspend), so
+/// on an old state file nearly every tab looks live. This runs ONCE: a tab that
+/// looks live (pty_id set, no suspend marker) but wasn't genuinely running at the
+/// last shutdown — judged by scrollback recency, the only surviving record of the
+/// real live set — has its pty_id cleared and a proper `suspended_at` stamped (its
+/// last-active time). Afterward `pty_id` is authoritative and steady-state restore
+/// uses it directly; the leak paths are plugged so it stays that way.
+pub fn reconcile_tab_liveness(data: &mut AppData, db: &super::scrollback_db::ScrollbackDb) {
+    if data.tab_liveness_reconciled {
+        return;
+    }
+    // 24h relative to the newest save. The window is relative, so an app left off
+    // for weeks still resolves the last shutdown batch correctly.
+    const RECONCILE_WINDOW_MINUTES: i64 = 24 * 60;
+    // If the recency query fails, skip WITHOUT setting the flag so it retries next
+    // boot — better than a destructive clean-slate on a transient error.
+    let recent = match db.recent_tab_ids(RECONCILE_WINDOW_MINUTES) {
+        Ok(set) => set,
+        Err(e) => {
+            log::warn!("Tab-liveness reconcile skipped (scrollback query failed): {}", e);
+            return;
+        }
+    };
+    // tab_id -> last save time, to stamp a meaningful "idle" age.
+    let times: std::collections::HashMap<String, String> =
+        db.tab_times().unwrap_or_default().into_iter().collect();
+
+    let mut kept = 0usize;
+    let mut suspended = 0usize;
+    for win in &mut data.windows {
+        for ws in &mut win.workspaces {
+            for pane in &mut ws.panes {
+                for tab in &mut pane.tabs {
+                    if !matches!(tab.tab_type, TabType::Terminal) {
+                        continue;
+                    }
+                    // Only the high-watermark: looks live (pty_id set, no suspend
+                    // marker). Leave genuine suspended / never-spawned tabs alone.
+                    if tab.pty_id.is_none() || tab.suspended_at.is_some() {
+                        continue;
+                    }
+                    if recent.contains(&tab.id) {
+                        kept += 1; // genuinely live at last shutdown — keep pty_id
+                        continue;
+                    }
+                    tab.pty_id = None;
+                    tab.suspended_at = times
+                        .get(&tab.id)
+                        .map(|t| t.replacen(' ', "T", 1) + "Z"); // SQLite UTC -> RFC3339
+                    suspended += 1;
+                }
+            }
+        }
+    }
+    data.tab_liveness_reconciled = true;
+    log::info!(
+        "Tab-liveness reconcile: kept {} live, marked {} stale tabs suspended",
+        kept, suspended
+    );
 }

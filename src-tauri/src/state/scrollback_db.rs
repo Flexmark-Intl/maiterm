@@ -74,6 +74,50 @@ impl ScrollbackDb {
         Ok(result)
     }
 
+    /// `(tab_id, updated_at)` for every row, newest first. Session restore uses
+    /// this to tell genuinely-live tabs (scrollback flushed at the last shutdown,
+    /// so a recent `updated_at`) from the stale `pty_id` high-watermark — a tab
+    /// keeps its `pty_id` forever unless explicitly suspended, so `pty_id` alone
+    /// can't say what was actually running.
+    pub fn tab_times(&self) -> Result<Vec<(String, String)>, String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT tab_id, updated_at FROM scrollback ORDER BY updated_at DESC")
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("Failed to query scrollback times: {}", e))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("Failed to read scrollback row: {}", e))?);
+        }
+        Ok(out)
+    }
+
+    /// Tab IDs whose scrollback was saved within `within_minutes` of the NEWEST
+    /// save (relative, so a weeks-old shutdown still resolves). At a clean quit
+    /// `saveAllScrollback` flushes every live tab in one batch → this is the
+    /// genuine "live at last shutdown" set. Used ONLY by the one-time boot
+    /// reconcile, not by steady-state restore.
+    pub fn recent_tab_ids(&self, within_minutes: i64) -> Result<HashSet<String>, String> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT tab_id FROM scrollback
+                 WHERE updated_at >= datetime((SELECT MAX(updated_at) FROM scrollback), ?1)",
+            )
+            .map_err(|e| format!("Failed to prepare recency query: {}", e))?;
+        let modifier = format!("-{} minutes", within_minutes);
+        let rows = stmt
+            .query_map(rusqlite::params![modifier], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query recent tabs: {}", e))?;
+        let mut set = HashSet::new();
+        for r in rows {
+            set.insert(r.map_err(|e| format!("Failed to read recent row: {}", e))?);
+        }
+        Ok(set)
+    }
+
     pub fn load(&self, tab_id: &str) -> Result<Option<String>, String> {
         let conn = self.conn.lock();
         let mut stmt = conn
