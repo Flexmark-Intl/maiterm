@@ -52,6 +52,18 @@ pub async fn start_ssh_tunnel(
     cmd_args.push("-v".to_string());
     cmd_args.push("-o".to_string());
     cmd_args.push("ExitOnForwardFailure=yes".to_string());
+    // Fail fast + reap wedged tunnels. This tunnel is (typically) the ControlMaster
+    // for the host, so a hung remote otherwise lingers "alive" for the user's global
+    // ServerAliveInterval (often minutes) while every mux setup blocks. Bound the
+    // initial connect and detect a dead peer within ~30s, so the monitor task below
+    // removes the stale tunnel and the frontend can re-establish. Explicit -o wins
+    // over ~/.ssh/config, so slow user defaults don't override these.
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ConnectTimeout=15".to_string());
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ServerAliveInterval=10".to_string());
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ServerAliveCountMax=3".to_string());
     // No ControlMaster=no — let SSH multiplex over the user's existing control
     // socket if they have ControlMaster auto. This gives free auth for password/
     // passphrase users whose session is already authenticated.
@@ -341,6 +353,11 @@ pub async fn ssh_run_setup(
     // Batch mode — fail fast if no auth method works (no interactive prompt possible)
     cmd_args.push("-o".to_string());
     cmd_args.push("BatchMode=yes".to_string());
+    // Bound the connect so a dead/hung remote doesn't burn the full 30s timeout below.
+    // (When multiplexed over a live master this is a no-op; it matters for the direct
+    // connect + the case where the master itself is being torn down.)
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ConnectTimeout=15".to_string());
     // Don't allocate a PTY
     cmd_args.push("-T".to_string());
 
