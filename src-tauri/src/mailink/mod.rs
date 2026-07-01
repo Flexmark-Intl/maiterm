@@ -374,9 +374,26 @@ async fn post_message(
 
 #[derive(serde::Deserialize)]
 struct RespondBody {
-    choice: String,
+    /// Permission prompts only: the chosen menu label/number. Absent for question prompts.
+    #[serde(default)]
+    choice: Option<String>,
+    /// AskUserQuestion prompts: one entry per question (aligned by index to `questions[]`),
+    /// each carrying the chosen option LABELS. Absent for permission prompts. See docs §12.1.
+    #[serde(default)]
+    answers: Option<Vec<Answer>>,
     #[serde(default)]
     prompt_id: Option<String>,
+}
+
+/// One question's answer from the phone (docs §12.1). `selected` holds the chosen option labels
+/// verbatim from `questions[i].options[].label`; multiSelect ⇒ 0..n; a chosen "Other" ⇒ `other`
+/// is set (and for single-select, `selected` is empty when Other is used).
+#[derive(serde::Deserialize)]
+struct Answer {
+    #[serde(default)]
+    selected: Vec<String>,
+    #[serde(default)]
+    other: Option<String>,
 }
 
 /// POST /chats/{tabId}/respond — answer the tab's currently-open prompt. `prompt_id` is the
@@ -406,15 +423,32 @@ async fn post_respond(
     match kind {
         // permission menu: a single numeric keystroke selects the option (no bracketed paste)
         "permission" => {
-            let key = permission_key(&body.choice);
+            let key = permission_key(body.choice.as_deref().unwrap_or(""));
             crate::pty::write_pty(&s.app, &pty, key.as_bytes())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         }
-        // free-text question: the choice IS the answer text → paste + submit
+        // AskUserQuestion: replay the phone's per-question answers into the open selector.
+        "question" => {
+            let tool_input = match pending_question_for_tab(&s.app, &tab_id) {
+                Some(t) => t,
+                None => return Ok(Json(json!({ "ok": false, "reason": "stale" }))),
+            };
+            let answers = match body.answers.as_deref() {
+                Some(a) if !a.is_empty() => a,
+                _ => return Ok(Json(json!({ "ok": false, "reason": "bad_request" }))),
+            };
+            if let Err(e) = drive_question_answers(&s.app, &pty, &tool_input, answers).await {
+                log::warn!("[maiLink] AskUserQuestion answer injection failed: {e}");
+                return Ok(Json(json!({ "ok": false, "reason": "inject_failed", "detail": e })));
+            }
+        }
+        // free-text fallback: treat choice as a plain message → paste + submit
         _ => {
-            inject_text(&s.app, &pty, &body.choice, true)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if let Some(choice) = body.choice.as_deref() {
+                inject_text(&s.app, &pty, choice, true)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
         }
     }
     Ok(Json(json!({ "ok": true })))
@@ -775,6 +809,127 @@ async fn inject_text(
         let settle = 120 + (text.len() as u64 / 8).min(800);
         tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
         crate::pty::write_pty(app, pty_id, b"\r")?;
+    }
+    Ok(())
+}
+
+/// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).
+const NAV_SETTLE_MS: u64 = 90;
+const ADVANCE_SETTLE_MS: u64 = 220;
+
+/// Inject one keystroke, then wait `settle_ms` so the selector repaints before the next.
+async fn send_key(app: &Arc<AppState>, pty_id: &str, bytes: &[u8], settle_ms: u64) -> Result<(), String> {
+    crate::pty::write_pty(app, pty_id, bytes)?;
+    tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
+    Ok(())
+}
+
+/// Move the selector highlight from row `from` to row `to` with arrow keys. Returns `to`.
+async fn nav_to(app: &Arc<AppState>, pty_id: &str, from: usize, to: usize) -> Result<usize, String> {
+    if to > from {
+        for _ in 0..(to - from) {
+            send_key(app, pty_id, b"\x1b[B", NAV_SETTLE_MS).await?; // Down
+        }
+    } else {
+        for _ in 0..(from - to) {
+            send_key(app, pty_id, b"\x1b[A", NAV_SETTLE_MS).await?; // Up
+        }
+    }
+    Ok(to)
+}
+
+/// Replay the phone's per-question answers into Claude Code's open AskUserQuestion selector by
+/// injecting keystrokes, in question order.
+///
+/// RUNTIME-FRAGILE — the selector is a TUI, not a stable API. This encodes assumptions that MUST
+/// be confirmed live before `build_chat_detail` flips `respondable:true` (see docs §12.3):
+///   (a) each question's highlight starts at row 0;
+///   (b) Enter selects the highlighted option (single) / confirms toggles (multi) AND advances to
+///       the next question;
+///   (c) the free-text "Other" row sits directly after the last option;
+///   (d) multiSelect toggles with Space.
+/// If a future Claude Code build changes these, adjust here. All mapping is resolved BEFORE any
+/// keystroke is sent, so an unmappable answer rejects the whole batch rather than half-answering
+/// a live prompt.
+async fn drive_question_answers(
+    app: &Arc<AppState>,
+    pty_id: &str,
+    tool_input: &Value,
+    answers: &[Answer],
+) -> Result<(), String> {
+    let questions = tool_input
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .ok_or("pending ask has no questions[]")?;
+    if answers.len() != questions.len() {
+        return Err(format!(
+            "answer count {} != question count {}",
+            answers.len(),
+            questions.len()
+        ));
+    }
+
+    struct Plan {
+        multi: bool,
+        option_count: usize,
+        indices: Vec<usize>,   // option rows to select/toggle (empty ⇒ Other only)
+        other: Option<String>, // free-text for the "Other" row
+    }
+
+    // Resolve every answer to concrete selector actions up front (fail-closed on any bad map).
+    let mut plans: Vec<Plan> = Vec::with_capacity(questions.len());
+    for (qi, (q, ans)) in questions.iter().zip(answers).enumerate() {
+        let labels: Vec<&str> = q
+            .get("options")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| o.get("label").and_then(|v| v.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let multi = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let mut indices = Vec::new();
+        for sel in &ans.selected {
+            match labels.iter().position(|l| l == sel) {
+                Some(idx) => indices.push(idx),
+                None => return Err(format!("question {qi}: label {sel:?} not among options")),
+            }
+        }
+        let other = ans.other.clone().filter(|s| !s.trim().is_empty());
+        if indices.is_empty() && other.is_none() {
+            return Err(format!("question {qi}: no selection and no Other text"));
+        }
+        if !multi && (indices.len() > 1 || (indices.len() == 1 && other.is_some())) {
+            return Err(format!("question {qi}: single-select received multiple picks"));
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        plans.push(Plan { multi, option_count: labels.len(), indices, other });
+    }
+
+    // Inject, question by question.
+    for plan in &plans {
+        let mut cur = 0usize; // assumed highlight origin (a)
+        if plan.multi {
+            for &idx in &plan.indices {
+                cur = nav_to(app, pty_id, cur, idx).await?;
+                send_key(app, pty_id, b" ", NAV_SETTLE_MS).await?; // Space toggles (d)
+            }
+        } else if let Some(&idx) = plan.indices.first() {
+            cur = nav_to(app, pty_id, cur, idx).await?;
+        }
+
+        if let Some(text) = &plan.other {
+            // Other row follows the options (c); open it, then paste the free text.
+            cur = nav_to(app, pty_id, cur, plan.option_count).await?;
+            send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
+            inject_text(app, pty_id, text, true).await?;
+        } else {
+            send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // select/confirm + advance (b)
+        }
+        let _ = cur;
     }
     Ok(())
 }
@@ -1238,7 +1393,9 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // "approve AskUserQuestion?" card — exactly the bug where the phone showed something totally
     // different from the real question the desktop was showing. The open ask IS the structured
     // question; render THAT. It carries the REAL questions captured from the PreToolUse hook
-    // (tool_input.questions), respondable:false until TUI answer-injection lands.
+    // (tool_input.questions). The answer-injection path (`drive_question_answers` + the "question"
+    // arm of post_respond) is built but the selector keystroke mechanics are UNVERIFIED against a
+    // live TUI — keep respondable:false until that live check passes, then flip to true (docs §12.3).
     if tool.as_deref() == Some("AskUserQuestion") {
         let mut pp = json!({
             "prompt_id": format!("q_{tab_id}"),
