@@ -1854,12 +1854,23 @@ async fn hooks_handler(
 
             // Clear current tool (back to thinking)
             if !session_id.is_empty() {
+                use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.tool_name = None;
                     // AskUserQuestion completing means the human answered → no open question.
                     if tool_name == "AskUserQuestion" {
                         session.pending_question = None;
+                        // The WaitingPermission coinciding with an open ask (Claude fires a
+                        // permission_prompt Notification while AskUserQuestion waits) is spent
+                        // the moment the ask completes. Without this reset it lingers until the
+                        // NEXT hook event (seconds of post-answer thinking), and maiLink
+                        // synthesizes a ghost "permission" card from the stale state. Scoped to
+                        // AskUserQuestion so a real gate held for another (parallel) tool is
+                        // never masked.
+                        if matches!(session.state, AgentSessionState::WaitingPermission) {
+                            session.state = AgentSessionState::Active;
+                        }
                     }
                 }
             }
