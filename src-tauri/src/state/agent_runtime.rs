@@ -187,10 +187,21 @@ pub fn mcp_server_name(_rt: AgentRuntime) -> &'static str {
 }
 
 /// Env markers identifying an agent-spawned shell. Scrubbed from spawned PTYs so a
-/// nested terminal doesn't inherit an outer agent's environment. CLAUDECODE stays
-/// in the list, so Claude behavior is unchanged.
+/// nested terminal doesn't inherit an outer agent's environment. A freshly launched
+/// `claude` re-sets the ones it needs (CLAUDECODE, session id, entrypoint, …) for its
+/// own children, so scrubbing them here changes no Claude behavior.
+///
+/// CLAUDE_CODE_CHILD_SESSION is the critical one: if a resumed session inherits it,
+/// Claude comes up as a *child* session and silently stops writing its transcript to
+/// disk — the tab's chat history never persists. It leaks in when maiTerm is launched
+/// from inside a Claude session (e.g. the local deploy script's `open`), so it MUST be
+/// stripped before the auto-resumed `claude` sees it.
 pub const AGENT_ENV_MARKERS: &[&str] = &[
     "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
     "CODEX_SANDBOX",
     "CODEX_SANDBOX_NETWORK_DISABLED",
     "GEMINI_CLI",

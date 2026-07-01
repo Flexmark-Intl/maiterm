@@ -44,6 +44,13 @@ fi
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 log "=== maiTerm deploy: $SRC -> $DEST ==="
 
+# Don't leak THIS agent's Claude Code session identity into the relaunched app.
+# `open` hands our env to the new maiTerm, which would forward CLAUDE_CODE_CHILD_SESSION
+# into the auto-resumed claude → it comes up as a "child session" and silently stops
+# writing its transcript to disk (chat-history loss). maiTerm also scrubs these at PTY
+# spawn (AGENT_ENV_MARKERS) as the real fix; keep the app process itself clean too.
+unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDECODE
+
 # Give the caller's turn/tool-call time to return before we pull the rug.
 sleep 3
 
