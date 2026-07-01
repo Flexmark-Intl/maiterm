@@ -814,8 +814,8 @@ async fn inject_text(
 }
 
 /// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).
-const NAV_SETTLE_MS: u64 = 90;
-const ADVANCE_SETTLE_MS: u64 = 220;
+const NAV_SETTLE_MS: u64 = 130;
+const ADVANCE_SETTLE_MS: u64 = 280;
 
 /// Inject one keystroke, then wait `settle_ms` so the selector repaints before the next.
 async fn send_key(app: &Arc<AppState>, pty_id: &str, bytes: &[u8], settle_ms: u64) -> Result<(), String> {
@@ -841,16 +841,19 @@ async fn nav_to(app: &Arc<AppState>, pty_id: &str, from: usize, to: usize) -> Re
 /// Replay the phone's per-question answers into Claude Code's open AskUserQuestion selector by
 /// injecting keystrokes, in question order.
 ///
-/// RUNTIME-FRAGILE — the selector is a TUI, not a stable API. This encodes assumptions that MUST
-/// be confirmed live before `build_chat_detail` flips `respondable:true` (see docs §12.3):
-///   (a) each question's highlight starts at row 0;
-///   (b) Enter selects the highlighted option (single) / confirms toggles (multi) AND advances to
-///       the next question;
-///   (c) the free-text "Other" row sits directly after the last option;
-///   (d) multiSelect toggles with Space.
-/// If a future Claude Code build changes these, adjust here. All mapping is resolved BEFORE any
-/// keystroke is sent, so an unmappable answer rejects the whole batch rather than half-answering
-/// a live prompt.
+/// RUNTIME-FRAGILE — the selector is a TUI, not a stable API. Mechanics pinned live against
+/// Claude Code 2.1.x (docs §12.3):
+///   (a) each question's highlight starts at row 0;                          [VERIFIED]
+///   (b) single-select: arrow to the row, Enter selects AND advances;        [VERIFIED e2e]
+///   (c) after the LAST question, focus lands on a "Submit" tab — a single-question form submits
+///       on its own Enter, a multi-question form needs one more Enter (handled below); [VERIFIED]
+///   (d) the selector is arrow-only — the shown 1..n are labels, NOT digit-select keys; [VERIFIED]
+///   (e) multiSelect toggles with Space; the free-text "Other" row sits after the last option and
+///       opens an inline input.                                              [NOT yet reliable]
+/// NOTE: (e) is why `build_chat_detail` still keeps multiSelect/Other prompts non-respondable —
+/// live probes lost a multiSelect toggle and mis-fired the Other row. All mapping is resolved
+/// BEFORE any keystroke is sent, so an unmappable answer rejects the whole batch rather than
+/// half-answering a live prompt.
 async fn drive_question_answers(
     app: &Arc<AppState>,
     pty_id: &str,
@@ -930,6 +933,13 @@ async fn drive_question_answers(
             send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // select/confirm + advance (b)
         }
         let _ = cur;
+    }
+
+    // Multi-question forms do NOT auto-submit: answering the last question moves focus to the
+    // "Submit" tab in the header bar, which needs one final Enter. A single-question form submits
+    // on the question's own Enter. (Verified live — docs §12.3.)
+    if plans.len() > 1 {
+        send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
     }
     Ok(())
 }
