@@ -55,8 +55,8 @@ pub fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> O
 pub struct SessionMeta {
     /// Raw model id from the last assistant turn (e.g. "claude-opus-4-8"). Caller normalizes.
     /// NOTE: the transcript records only the BARE id — it never carries the 1M-context variant
-    /// marker (no "[1m]", no betas field), so the 1M window can't be detected from here. maiLink
-    /// infers it from observed context size instead (see build_meta in mod.rs).
+    /// marker (no "[1m]", no betas field), so the 1M window can't be detected from the id. maiLink
+    /// works around this by assuming 1M for Opus 4.8 (see context_limit_for in mod.rs).
     pub model_id: Option<String>,
     /// input + cache_read + cache_creation tokens — matches the maiTerm statusline's context count.
     pub context_tokens: u64,

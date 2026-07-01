@@ -993,10 +993,13 @@ fn preview_for(state: &str, tool: Option<&str>) -> String {
     }
 }
 
-/// The context window for a model id: the 1M-context variants (e.g. "…-4-8[1m]") vs the 200k
-/// default. Mirrors the maiTerm statusline's limit derivation.
+/// The context window for a model id: 1M-context variants vs the 200k default. The transcript/hook
+/// model id never carries the `[1m]` variant marker (Claude Code exposure gap — see
+/// SessionMeta::model_id), so we can't detect the 1M variant from the id alone. Opus 4.8 defaults to
+/// the 1M variant in this deployment, so assume 1M whenever Opus 4.8 is in use. Mirrors the maiTerm
+/// statusline's limit derivation.
 fn context_limit_for(model_id: &str) -> u64 {
-    if model_id.contains("[1m]") || model_id.contains("-1m") {
+    if model_id.contains("[1m]") || model_id.contains("-1m") || model_id.contains("opus-4-8") {
         1_000_000
     } else {
         200_000
@@ -1037,18 +1040,7 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     let sid = resolved_session_id_for_tab(app, tab_id)?;
     let meta = transcript::session_meta(&sid)?;
     let model_id = meta.model_id.as_deref().unwrap_or("");
-    let base_limit = context_limit_for(model_id);
-    // The transcript never carries the 1M-context variant marker (see SessionMeta::model_id in
-    // transcript.rs), so context_limit_for() returns the 200k base for a 1M Opus session. A prompt
-    // can't exceed its model's window, so observed usage above the base is only possible on a larger
-    // window → infer the 1M tier. Late-firing by nature: a fresh, low-usage 1M session still reads
-    // the base until it crosses it. No runtime source exposes the variant directly (Claude Code
-    // exposure gap), so this is the best signal maiTerm has.
-    let limit = if meta.context_tokens > base_limit {
-        1_000_000
-    } else {
-        base_limit
-    };
+    let limit = context_limit_for(model_id);
     let pct = ((meta.context_tokens as f64 / limit as f64) * 100.0)
         .round()
         .clamp(0.0, 100.0) as u64;
@@ -1417,10 +1409,11 @@ mod tests {
         assert_eq!(display_model("claude-sonnet-4-5"), "Sonnet 4.5");
         assert_eq!(display_model("claude-haiku-4-5-20251001"), "Haiku 4.5.20251001");
         assert_eq!(display_model("opus-4-8-1m"), "Opus 4.8");
-        // 1M-context variants vs the 200k default.
+        // 1M-context variants vs the 200k default. Opus 4.8 is assumed 1M even without a marker
+        // (the transcript id never carries one), so the bare id also resolves to 1M.
         assert_eq!(context_limit_for("claude-opus-4-8[1m]"), 1_000_000);
         assert_eq!(context_limit_for("claude-opus-4-8-1m"), 1_000_000);
-        assert_eq!(context_limit_for("claude-opus-4-8"), 200_000);
+        assert_eq!(context_limit_for("claude-opus-4-8"), 1_000_000);
         assert_eq!(context_limit_for("claude-sonnet-4-5"), 200_000);
     }
 
