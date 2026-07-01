@@ -36,10 +36,49 @@ fn migrate_imported_scrollback(data: &mut crate::state::AppData, db: &Scrollback
 #[tauri::command]
 pub fn exit_app(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) {
     log::info!("exit_app called — cleaning up and terminating process");
-    // Mark this run as having exited cleanly. If the process dies before
-    // reaching this line, the marker stays on disk and the next run flags
-    // previous_run_crashed=true in diagnostics.
+    run_shutdown_cleanup(&state);
+
+    // Spawn a watchdog: if the main exit doesn't complete within 2s
+    // (e.g. PTY threads stuck on Windows), force-terminate the process.
+    let app_clone = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        log::warn!("Force-exiting after 2s timeout");
+        app_clone.exit(0);
+    });
+
+    app.exit(0);
+}
+
+/// Shutdown cleanup shared by every exit path: the frontend-invoked `exit_app`
+/// (menu "Quit" → `quit-requested` → frontend save → this command) AND the
+/// native-quit `RunEvent::ExitRequested` handler in `lib.rs` (Dock → Quit,
+/// `osascript … to quit`, logout/restart — none of which reach `on_menu_event`).
+///
+/// Idempotent: a one-shot guard runs the body at most once, so the menu path
+/// (whose `app.exit` also produces a RunEvent) never double-cleans.
+///
+/// Clearing the running marker here is what stops a *clean* native quit from
+/// being reported as `previous_run.crashed` on the next launch — the previous
+/// code only cleared it from `exit_app`, which native quits bypass entirely.
+pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    // Clear the crash marker FIRST: even if a later step stalls, a graceful
+    // quit must never look like a crash.
     crate::state::persistence::clear_running_marker();
+
+    // Final state flush. Periodic autosave covers most of it, but a native
+    // quit skips the frontend's on-quit save, so persist current app_data now.
+    let data_clone = state.app_data.read().clone();
+    if let Err(e) = save_state(&data_clone) {
+        log::warn!("Final state save on shutdown failed: {}", e);
+    }
+
     // Shut down the Claude Code MCP server gracefully (releases the port)
     if let Some(tx) = state.mcp_shutdown.lock().take() {
         let _ = tx.send(true);
@@ -53,24 +92,13 @@ pub fn exit_app(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) {
     }
 
     // Kill all SSH MCP tunnels
-    crate::commands::ssh_tunnel::kill_all_tunnels(&state);
+    crate::commands::ssh_tunnel::kill_all_tunnels(state);
 
     // Kill all remaining PTYs so their threads can exit cleanly
     let pty_ids: Vec<String> = state.pty_registry.read().keys().cloned().collect();
     for id in &pty_ids {
-        let _ = crate::pty::kill_pty(&state, id);
+        let _ = crate::pty::kill_pty(state, id);
     }
-
-    // Spawn a watchdog: if the main exit doesn't complete within 2s
-    // (e.g. PTY threads stuck on Windows), force-terminate the process.
-    let app_clone = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        log::warn!("Force-exiting after 2s timeout");
-        app_clone.exit(0);
-    });
-
-    app.exit(0);
 }
 
 #[tauri::command]

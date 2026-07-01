@@ -555,6 +555,21 @@ pub fn run() {
             commands::system::check_full_disk_access,
             commands::system::open_full_disk_access_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Native quit paths — Dock → Quit, `osascript … to quit`, logout/
+            // restart — bypass the menu "Quit" → quit-requested → exit_app flow,
+            // so historically the running marker was never cleared (making every
+            // clean native quit look like a crash next launch) and MCP/PTY/tunnel
+            // cleanup never ran. Converge them on the shared shutdown path here.
+            // Idempotent with exit_app via the guard in run_shutdown_cleanup.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                    commands::workspace::run_shutdown_cleanup(&state);
+                } else {
+                    state::persistence::clear_running_marker();
+                }
+            }
+        });
 }
