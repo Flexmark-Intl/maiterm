@@ -35,6 +35,14 @@ pub struct TerminalHandle {
     /// User selection managed externally (not on term.selection which gets
     /// cleared by VTE processing). Stored here so it survives PTY output.
     pub selection: Option<Selection>,
+    /// One-shot latch: set once maiTerm has auto-answered Claude Code's blocking
+    /// "Resume from summary?" startup menu for this PTY so it never re-injects.
+    pub resume_menu_handled: bool,
+    /// Small rolling tail of recent output, kept only during session start (until
+    /// the menu is handled or the scan budget is spent) so the multi-line menu
+    /// signature is still matched when it straddles two PTY reads. See
+    /// `detect_resume_menu` in pty/manager.rs.
+    pub resume_scan_tail: Vec<u8>,
 }
 
 /// Create a new alacritty_terminal instance.
@@ -63,5 +71,7 @@ pub fn create_terminal(
         osc_interceptor,
         processor,
         selection: None,
+        resume_menu_handled: false,
+        resume_scan_tail: Vec::new(),
     }
 }
