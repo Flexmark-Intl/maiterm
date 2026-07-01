@@ -53,7 +53,10 @@ pub fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> O
 /// from the JSONL (not the SessionStart hook, whose `model` is often null) so it's always available
 /// for a Claude tab; naturally Claude-only since it reads `~/.claude` transcripts.
 pub struct SessionMeta {
-    /// Raw model id from the last assistant turn (e.g. "claude-opus-4-8[1m]"). Caller normalizes.
+    /// Raw model id from the last assistant turn (e.g. "claude-opus-4-8"). Caller normalizes.
+    /// NOTE: the transcript records only the BARE id — it never carries the 1M-context variant
+    /// marker (no "[1m]", no betas field), so the 1M window can't be detected from here. maiLink
+    /// infers it from observed context size instead (see build_meta in mod.rs).
     pub model_id: Option<String>,
     /// input + cache_read + cache_creation tokens — matches the maiTerm statusline's context count.
     pub context_tokens: u64,

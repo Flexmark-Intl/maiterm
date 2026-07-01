@@ -1037,7 +1037,18 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     let sid = resolved_session_id_for_tab(app, tab_id)?;
     let meta = transcript::session_meta(&sid)?;
     let model_id = meta.model_id.as_deref().unwrap_or("");
-    let limit = context_limit_for(model_id);
+    let base_limit = context_limit_for(model_id);
+    // The transcript never carries the 1M-context variant marker (see SessionMeta::model_id in
+    // transcript.rs), so context_limit_for() returns the 200k base for a 1M Opus session. A prompt
+    // can't exceed its model's window, so observed usage above the base is only possible on a larger
+    // window → infer the 1M tier. Late-firing by nature: a fresh, low-usage 1M session still reads
+    // the base until it crosses it. No runtime source exposes the variant directly (Claude Code
+    // exposure gap), so this is the best signal maiTerm has.
+    let limit = if meta.context_tokens > base_limit {
+        1_000_000
+    } else {
+        base_limit
+    };
     let pct = ((meta.context_tokens as f64 / limit as f64) * 100.0)
         .round()
         .clamp(0.0, 100.0) as u64;
