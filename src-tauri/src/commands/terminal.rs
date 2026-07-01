@@ -275,6 +275,22 @@ pub fn terminal_bracketed_paste(
         .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE))
 }
 
+/// Whether an agent CLI is still running in a tab (for the mesh readiness check).
+/// `agent_running` walks the PTY's local process tree for a claude/codex/gemini
+/// process — ground truth for LOCAL agents (no reliance on screen mode / hooks).
+/// It's always false for a REMOTE agent (its process lives past the ssh hop), so
+/// `ssh_foreground` reports whether the tty's foreground job is an ssh session — a
+/// live remote session where the agent is almost certainly still up. Either being
+/// true means the tab needs only re-registration (`/maiterm init`), NOT a full
+/// ssh+resume replay (which would inject junk into the running agent / nest ssh).
+#[tauri::command]
+pub fn get_agent_liveness(
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+) -> Result<pty::AgentLiveness, String> {
+    pty::get_agent_liveness(&*state, &pty_id)
+}
+
 /// Search the terminal buffer.
 #[tauri::command]
 pub fn search_terminal(

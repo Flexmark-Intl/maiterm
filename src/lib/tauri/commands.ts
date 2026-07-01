@@ -140,6 +140,19 @@ export async function terminalBracketedPaste(ptyId: string): Promise<boolean> {
   return invoke('terminal_bracketed_paste', { ptyId });
 }
 
+/** Liveness signals for the mesh readiness check. `agent_running` = a claude/codex/gemini
+ *  process is alive in the tab's LOCAL process tree (ground truth for local agents).
+ *  `ssh_foreground` = the tty's foreground job is an ssh session (a live remote session —
+ *  the remote agent lives past the hop, so this stands in for it). Either being true means
+ *  the tab needs only `/maiterm init`, not a full ssh+resume replay. */
+export interface AgentLiveness {
+  agent_running: boolean;
+  ssh_foreground: boolean;
+}
+export async function getAgentLiveness(ptyId: string): Promise<AgentLiveness> {
+  return invoke('get_agent_liveness', { ptyId });
+}
+
 export async function serializeTerminal(ptyId: string): Promise<number[]> {
   return invoke('serialize_terminal', { ptyId });
 }

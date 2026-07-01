@@ -865,6 +865,32 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
     Ok(PtyInfo { cwd, foreground_command })
 }
 
+/// Which agent CLIs to look for in a tab's process tree. Union of every runtime's
+/// `agent_process_names` (see `state/agent_runtime.rs`) — kept as a small literal so
+/// the readiness probe needn't know a tab's runtime up front.
+const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "gemini"];
+
+/// Liveness signals for the mesh readiness check — see the `get_agent_liveness` command.
+#[derive(serde::Serialize, Clone)]
+pub struct AgentLiveness {
+    pub agent_running: bool,
+    pub ssh_foreground: bool,
+}
+
+pub fn get_agent_liveness(state: &Arc<AppState>, pty_id: &str) -> Result<AgentLiveness, String> {
+    // Grab the child pid and drop the registry lock before the (heavier) process scan.
+    let pid = {
+        let registry = state.pty_registry.read();
+        let handle = registry.get(pty_id).ok_or("PTY not found")?;
+        handle.child_pid.ok_or("No child PID")?
+    };
+    // get_foreground_command only ever reports ssh/mosh/autossh, so Some(_) == a live
+    // remote session (the remote agent isn't in the local tree — this stands in for it).
+    let ssh_foreground = get_foreground_command(pid).is_some();
+    let agent_running = agent_process_alive(pid, AGENT_PROCESS_NAMES);
+    Ok(AgentLiveness { agent_running, ssh_foreground })
+}
+
 /// Get the current working directory of a process via /proc (Linux)
 #[cfg(target_os = "linux")]
 fn get_cwd_for_pid(pid: u32) -> Option<String> {

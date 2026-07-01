@@ -4,6 +4,7 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
+  import { getAgentLiveness } from '$lib/tauri/commands';
   import { replayAutoResume } from '$lib/stores/triggers.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -16,7 +17,7 @@
   }
   let { open, workspaceId, onclose, onEnabled }: Props = $props();
 
-  type Status = 'ready' | 'not-registered' | 'dropped' | 'suspended' | 'unnamed';
+  type Status = 'ready' | 'not-registered' | 'needs-init' | 'dropped' | 'suspended' | 'unnamed';
   const WAIT_TIMEOUT_MS = 30_000;
 
   // Tabs that have a pending action (init sent / wake fired), → start time. A row clears when
@@ -26,12 +27,42 @@
   let renaming = $state<Record<string, string>>({});
   let busy = $state(false);
 
+  // Process-based liveness probe per tab (async). A tab that WAS an agent but has no live
+  // session right now is ambiguous: either the agent is still running and just lost its maiTerm
+  // registration (e.g. its SessionStart hook raced the SSH bridge after an app restart) — needs
+  // only `/maiterm init` — or the agent truly exited and the shell is back at a prompt — needs a
+  // full auto-resume replay. `get_agent_liveness` answers this from ground truth: a claude/codex/
+  // gemini process alive in the local tree, or a live ssh foreground (remote agent lives past the
+  // hop). Either → running. Biasing toward init when in doubt is safe: worst case is a harmless
+  // `/maiterm init` typed at a shell, vs. injecting ssh+resume into a running agent.
+  let running = $state<Record<string, boolean>>({});
+
+  async function refreshLiveness() {
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+    if (!ws) return;
+    const seen = new Set<string>();
+    for (const pane of ws.panes) {
+      for (const tab of pane.tabs) {
+        if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+        const inst = terminalsStore.get(tab.id);
+        if (!inst || !tab.runtime || claudeStateStore.getState(tab.id)) continue; // only ambiguous tabs
+        seen.add(tab.id);
+        try { const l = await getAgentLiveness(inst.ptyId); running[tab.id] = l.agent_running || l.ssh_foreground; }
+        catch { /* PTY may have just closed — keep the prior reading */ }
+      }
+    }
+    // Drop tabs that are no longer ambiguous so a stale `true` can't linger as a false "running".
+    for (const id of Object.keys(running)) if (!seen.has(id)) delete running[id];
+  }
+
   // 1s tick (only while open) so the inventory re-reads live/registration state + the waiter
   // timeouts advance without depending on every upstream store being individually reactive.
+  // The same tick refreshes the liveness probe so running-but-unregistered agents are caught.
   let tick = $state(0);
   $effect(() => {
     if (!open) return;
-    const id = setInterval(() => { tick++; }, 1000);
+    void refreshLiveness();
+    const id = setInterval(() => { tick++; void refreshLiveness(); }, 1000);
     return () => clearInterval(id);
   });
 
@@ -66,13 +97,15 @@
         // "Ready" REQUIRES a live agent session — the same signal that lights the tab's status
         // dot (claudeState exists only between SessionStart and SessionEnd). `tab.runtime`
         // persists across restarts, so it proves the tab WAS an agent, not that one is running
-        // now: a failed auto-resume leaves a live shell with runtime set but no session. That's
-        // 'dropped' (offer Resume), never 'ready'.
+        // now. A tab with runtime but no live session splits two ways by the liveness probe:
+        //  • agent process still running (or a live remote ssh session) → it's just unregistered
+        //    (hook lost after restart) → 'needs-init' (offer `/maiterm init`, non-destructive);
+        //  • back at a shell prompt → the agent really exited → 'dropped' (offer full Resume).
         const status: Status =
           suspended ? 'suspended'
           : !named ? 'unnamed'
           : agentLive ? 'ready'
-          : wasAgent ? 'dropped'
+          : wasAgent ? (running[tab.id] ? 'needs-init' : 'dropped')
           : 'not-registered';
         out.push({ tabId: tab.id, paneId: pane.id, name: tab.name, role, status, live: termLive, hasResume: !!tab.auto_resume_command, ptyId: inst?.ptyId ?? null, generic: named && isGeneric(role) });
       }
@@ -83,7 +116,9 @@
   const readyCount = $derived(rows.filter((r) => r.status === 'ready').length);
   const suspendedRows = $derived(rows.filter((r) => r.status === 'suspended'));
   const droppedRows = $derived(rows.filter((r) => r.status === 'dropped'));
-  const notRegistered = $derived(rows.filter((r) => r.status === 'not-registered'));
+  // Tabs whose fix is `/maiterm init`: never-registered shells AND running-but-unregistered
+  // agents (a live agent that just needs to re-announce its tab — no resume replay).
+  const initableRows = $derived(rows.filter((r) => r.status === 'not-registered' || r.status === 'needs-init'));
   // Duplicate role names (case-insensitive) among named tabs — peers fall back to handle.
   const dupNames = $derived.by(() => {
     const counts: Record<string, number> = {};
@@ -129,7 +164,7 @@
     for (const r of suspendedRows) wake(r);
   }
   function initAll() {
-    for (const r of notRegistered) void sendInit(r);
+    for (const r of initableRows) void sendInit(r);
   }
   function resumeAllDropped() {
     for (const r of droppedRows) if (r.hasResume) void resumeDropped(r);
@@ -156,6 +191,7 @@
   function statusLabel(s: Status): string {
     return s === 'ready' ? 'Ready'
       : s === 'not-registered' ? 'Not registered'
+      : s === 'needs-init' ? 'Running · needs init'
       : s === 'dropped' ? 'Dropped'
       : s === 'suspended' ? 'Suspended'
       : 'Needs a name';
@@ -219,7 +255,7 @@
                 <span class="waiting">waiting…</span>
               {:else if w === 'timeout'}
                 <span class="timeout" title="Didn't come online in 30s — check the tab">no response</span>
-              {:else if r.status === 'not-registered'}
+              {:else if r.status === 'not-registered' || r.status === 'needs-init'}
                 <button class="mini" onclick={() => sendInit(r)} disabled={!r.ptyId}>Send init</button>
               {:else if r.status === 'dropped'}
                 {#if r.hasResume}
@@ -239,11 +275,11 @@
       </div>
 
       <!-- Batch actions -->
-      {#if suspendedRows.length > 1 || notRegistered.length > 1 || droppedRows.length > 1}
+      {#if suspendedRows.length > 1 || initableRows.length > 1 || droppedRows.length > 1}
         <div class="batch">
           {#if suspendedRows.length > 1}<button class="mini ghost" onclick={wakeAll}>Wake all suspended ({suspendedRows.length})</button>{/if}
           {#if droppedRows.length > 1}<button class="mini ghost" onclick={resumeAllDropped}>Resume all dropped ({droppedRows.length})</button>{/if}
-          {#if notRegistered.length > 1}<button class="mini ghost" onclick={initAll}>Send init to all ({notRegistered.length})</button>{/if}
+          {#if initableRows.length > 1}<button class="mini ghost" onclick={initAll}>Send init to all ({initableRows.length})</button>{/if}
         </div>
       {/if}
 
@@ -290,7 +326,7 @@
   .role { font-size: 13px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .status-tag { font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 5px; border-radius: 3px; flex-shrink: 0; }
   .status-tag.ready { color: var(--green); }
-  .status-tag.not-registered, .status-tag.unnamed { color: var(--yellow); }
+  .status-tag.not-registered, .status-tag.needs-init, .status-tag.unnamed { color: var(--yellow); }
   .status-tag.dropped { color: var(--red); }
   .status-tag.suspended { color: var(--fg-dim); }
   .nudge, .warn-inline { font-size: 9px; color: var(--yellow); border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent); padding: 0 4px; border-radius: 3px; flex-shrink: 0; }
