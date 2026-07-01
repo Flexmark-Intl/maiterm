@@ -599,8 +599,21 @@ so the contract is exercised, not just asserted.
   `role:"agent"` (source markdown), `tool_use`→`role:"tool"` (compact `Name(arg)` chip), user string→
   `role:"user"`; thinking/tool_result/system-scaffolding skipped. Claude-only; other runtimes keep
   the scrape fallback (no regression). `mailink/transcript.rs`, unit-tested + validated on a real
-  942-turn transcript. (Live incremental `message`-over-WS push is still a refinement — the app
-  re-pulls `chat_detail` on the `chat_state` event today.)
+  942-turn transcript.
+- **Live per-turn WS streaming — DONE** (`fa3b971`): supersedes the "still a refinement" note above.
+  `stream_new_messages` (`mailink/mod.rs`) runs a 400ms mtime-gated ticker that diffs each designated
+  tab's transcript and pushes one `{type:"message", role, text, msg_id, ts}` frame per newly-appended
+  turn. Streams `agent`/`tool`/`system`; **never** the phone's own `role:"user"` turns. Frame fields are
+  byte-identical to `GET`'s `turns_for_session(sid, 40, Marker)`, so the phone dedups the streamed frame
+  and any REST re-fetch to one entry. Latency win (≤400ms vs the old 1.5-2s re-pull), turn-granular by design.
+- **Context-compaction divider — DONE** (`3d96159`): a `compact_boundary` entry (`type:"system"`,
+  `subtype:"compact_boundary"`, fields TOP-LEVEL — no nested `message`) becomes one `role:"system"` turn
+  `Context compacted · <pre> → <post>` (prefix `Auto-compacted` when `compactMetadata.trigger=="auto"`;
+  bare label if metadata absent). `msg_id = entry.uuid` so stream + GET dedup; the streamer already passes
+  non-user roles, so it pushes live with no streamer change. The app renders `role:"system"` as a labeled
+  divider. Same commit drops the injected post-compaction summary (a `user` entry with
+  `isCompactSummary:true`, ~12k chars) that `is_system_noise` didn't catch and was leaking as a giant fake
+  user message. Adds `fmt_tokens_k` (776k / 1.2M rounding).
 - **Two findings (notes, not blockers):** (1) `/message` bracketed-paste is correct for an
   agent TUI but leaks into a bare shell — fine for the intended use; (2) the *first*
   permission (for `initSession` itself) can't be tab-attributed since the session→tab mapping
