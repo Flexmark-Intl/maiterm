@@ -158,6 +158,12 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
             }
         }
         "user" => {
+            // The post-compaction summary is injected as a `user` entry (isCompactSummary) but is
+            // huge internal scaffolding, not something the human typed. The compact_boundary arm
+            // below surfaces the event as a divider, so drop the summary blob itself.
+            if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
+                return;
+            }
             // Only a plain string is real human input. List content is tool_result (skip) or the
             // occasional injected "[Request interrupted…]" text (system noise, skip).
             if let Some(text) = content.and_then(|c| c.as_str()) {
@@ -166,12 +172,40 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
                 }
             }
         }
-        _ => {} // system, attachment, mode, etc.
+        // A compaction boundary → one `system` turn so maiLink can draw a divider showing how much
+        // context was summarized away (pre → post tokens). Its fields are top-level on the entry
+        // (no nested `message`); metadata may be absent on odd builds, so degrade gracefully.
+        "system" if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") => {
+            let cm = v.get("compactMetadata");
+            let auto = cm.and_then(|m| m.get("trigger")).and_then(|t| t.as_str()) == Some("auto");
+            let head = if auto { "Auto-compacted" } else { "Context compacted" };
+            let pre = cm.and_then(|m| m.get("preTokens")).and_then(|t| t.as_u64()).unwrap_or(0);
+            let post = cm.and_then(|m| m.get("postTokens")).and_then(|t| t.as_u64()).unwrap_or(0);
+            let text = if pre > 0 {
+                format!("{head} · {} → {}", fmt_tokens_k(pre), fmt_tokens_k(post))
+            } else {
+                head.to_string()
+            };
+            out.push(msg(uuid.to_string(), "system", &text, ts));
+        }
+        _ => {} // other system entries, attachment, mode, etc.
     }
 }
 
 fn msg(msg_id: String, role: &str, text: &str, ts: i64) -> Value {
     json!({ "msg_id": msg_id, "role": role, "text": text, "ts": ts })
+}
+
+/// Format a token count for the compaction divider: 775801 → "776k", 14384 → "14k", 1_250_000 →
+/// "1.2M". Mirrors the phone's context-gauge rounding so the numbers read consistently.
+fn fmt_tokens_k(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", ((n as f64) / 1000.0).round() as u64)
+    } else {
+        n.to_string()
+    }
 }
 
 /// A slim one-line label for a tool call, e.g. `Bash(rm -rf …)`, `Edit(src/lib.rs)`.
@@ -290,6 +324,50 @@ mod tests {
         push_line_messages(&line, ToolRender::None, &mut out2);
         assert_eq!(out2.len(), 1);
         assert_eq!(out2[0]["role"], "agent");
+    }
+
+    #[test]
+    fn compact_boundary_becomes_system_divider_and_summary_is_skipped() {
+        // The boundary entry → one `system` turn with a pre→post token delta (top-level fields).
+        let boundary = json!({
+            "type": "system", "subtype": "compact_boundary", "uuid": "cb1",
+            "timestamp": "2026-06-27T21:25:57.904Z", "content": "Conversation compacted",
+            "compactMetadata": { "trigger": "manual", "preTokens": 775801, "postTokens": 14384 }
+        });
+        let mut out = Vec::new();
+        push_line_messages(&boundary, ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[0]["msg_id"], "cb1");
+        assert_eq!(out[0]["text"], "Context compacted · 776k → 14k");
+        assert_eq!(out[0]["ts"], 1782595557904i64);
+
+        // trigger:"auto" swaps the label prefix and M-formats large counts.
+        let auto = json!({
+            "type": "system", "subtype": "compact_boundary", "uuid": "cb2",
+            "timestamp": "2026-06-27T21:25:57Z",
+            "compactMetadata": { "trigger": "auto", "preTokens": 1_250_000u64, "postTokens": 20000 }
+        });
+        let mut out2 = Vec::new();
+        push_line_messages(&auto, ToolRender::Marker, &mut out2);
+        assert_eq!(out2[0]["text"], "Auto-compacted · 1.2M → 20k");
+
+        // The injected compaction summary (isCompactSummary) is NOT surfaced as a user turn.
+        let summary = json!({
+            "type": "user", "uuid": "cs1", "timestamp": "2026-06-27T21:25:58Z",
+            "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
+            "message": { "role": "user", "content": "This session is being continued..." }
+        });
+        let mut out3 = Vec::new();
+        push_line_messages(&summary, ToolRender::Marker, &mut out3);
+        assert!(out3.is_empty());
+
+        // A non-compaction system entry is still ignored.
+        let other = json!({ "type": "system", "subtype": "other", "uuid": "s9",
+            "timestamp": "2026-06-27T21:25:58Z" });
+        let mut out4 = Vec::new();
+        push_line_messages(&other, ToolRender::Marker, &mut out4);
+        assert!(out4.is_empty());
     }
 
     #[test]
