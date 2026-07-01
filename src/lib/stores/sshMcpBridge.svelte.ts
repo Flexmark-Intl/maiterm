@@ -292,8 +292,12 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
   // Strip leading "ssh " prefix — callers may pass the full ps command or just the args
   sshArgs = sshArgs.replace(/^ssh\s+/, '');
 
-  // Already bridged or in progress?
-  if (bridgeStates.has(tabId)) return bridgeStates.get(tabId)!.status === 'connected';
+  // Already bridged or in progress? A prior 'failed' attempt is NOT a dead end —
+  // fall through and retry it (the remote may have been briefly down, e.g. a network
+  // blip during a reload). Only 'connected'/'pending' short-circuit.
+  const existing = bridgeStates.get(tabId);
+  const retryingFailed = existing?.status === 'failed';
+  if (existing && !retryingFailed) return existing.status === 'connected';
 
   // Mark as pending immediately to prevent concurrent calls from racing
   const hostKey = extractHostKey(sshArgs);
@@ -385,7 +389,11 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
       error: errMsg,
     }));
 
-    dispatch('MCP Bridge Failed', `Could not connect to ${hostKey}: ${errMsg}`, 'error', { tabId });
+    // Only surface the toast on the first failure of an episode. Retries (driven by
+    // term-title events once the host recovers) that fail again shouldn't re-nag.
+    if (!retryingFailed) {
+      dispatch('MCP Bridge Failed', `Could not connect to ${hostKey}: ${errMsg}`, 'error', { tabId });
+    }
     return false;
   }
 }
