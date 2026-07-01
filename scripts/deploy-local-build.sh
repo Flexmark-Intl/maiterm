@@ -51,8 +51,10 @@ log "=== maiTerm deploy: $SRC -> $DEST ==="
 # spawn (AGENT_ENV_MARKERS) as the real fix; keep the app process itself clean too.
 unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDECODE
 
-# Give the caller's turn/tool-call time to return before we pull the rug.
-sleep 3
+# Give the caller time to FINISH before we pull the rug: not just the tool-call
+# returning, but the agent's whole turn — final assistant message flushed to the
+# session .jsonl, Stop hooks run. 3s proved tight for a session mid-activity.
+sleep 15
 
 log "quitting $APP_NAME (graceful → state saves, auto-resume works)…"
 osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
