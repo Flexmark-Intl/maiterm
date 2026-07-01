@@ -633,10 +633,18 @@ fn chat_state_event(c: &Value) -> Value {
 /// Build an `attention` event for a tab, inlining the open prompt (delta 1) so the client can
 /// render decision buttons on the live path without a follow-up GET.
 fn attention_event(app: &AppState, tab_id: &str, state: &str, title: &str) -> Value {
-    let (kind, what) = match state {
-        "permission" => ("permission", "Needs your approval"),
-        "idle" => ("idle_done", "Finished"),
-        _ => ("question", "Has a question"),
+    let detail = build_chat_detail(app, tab_id);
+    let pp = detail.as_ref().and_then(|d| d.get("pendingPrompt"));
+    // Prefer the actual pending prompt's kind: an open AskUserQuestion yields kind:"question" even
+    // though its coincident state is "permission" (see build_chat_detail). Fall back to state.
+    let (kind, what) = match pp.and_then(|p| p.get("kind")).and_then(|k| k.as_str()) {
+        Some("question") => ("question", "Has a question"),
+        Some("permission") => ("permission", "Needs your approval"),
+        _ => match state {
+            "permission" => ("permission", "Needs your approval"),
+            "idle" => ("idle_done", "Finished"),
+            _ => ("question", "Has a question"),
+        },
     };
     let mut ev = json!({
         "type": "attention",
@@ -645,10 +653,8 @@ fn attention_event(app: &AppState, tab_id: &str, state: &str, title: &str) -> Va
         "summary": format!("{title}: {what}"),
         "ts": now_ms(),
     });
-    if let Some(detail) = build_chat_detail(app, tab_id) {
-        if let Some(pp) = detail.get("pendingPrompt") {
-            ev["prompt"] = pp.clone();
-        }
+    if let Some(p) = pp {
+        ev["prompt"] = p.clone();
     }
     ev
 }
@@ -680,10 +686,12 @@ async fn inject_text(
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String)> {
     let states = session_states(app);
     let (st, _rt, tool) = states.get(tab_id)?;
-    if map_state(*st) == "permission" {
-        Some(("permission", format!("p_{tab_id}")))
-    } else if tool.as_deref() == Some("AskUserQuestion") {
+    // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
+    // but the open ask is the structured question — the stale-guard must agree with what was shown.
+    if tool.as_deref() == Some("AskUserQuestion") {
         Some(("question", format!("q_{tab_id}")))
+    } else if map_state(*st) == "permission" {
+        Some(("permission", format!("p_{tab_id}")))
     } else {
         None
     }
@@ -964,6 +972,11 @@ fn build_transcript(app: &AppState, tab_id: &str, runtime: &str, now: u64) -> Ve
 /// Short, state-derived inbox preview. (Real distilled previews from terminal text are a
 /// later refinement — keeps the list path off the terminal lock.)
 fn preview_for(state: &str, tool: Option<&str>) -> String {
+    // An open AskUserQuestion is a human ask regardless of the coincident session state
+    // (permission_prompt Notification, or active if a build stops sending it) — label it as such.
+    if tool == Some("AskUserQuestion") {
+        return "Has a question".to_string();
+    }
     match state {
         "permission" => "Needs your approval".to_string(),
         "active" => tool
@@ -984,13 +997,16 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
                 None => ("dormant", runtime_key(t.runtime), None),
             };
+            let ask_open = tool.as_deref() == Some("AskUserQuestion");
             json!({
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspace": t.workspace,
                 "runtime": runtime,
                 "state": state,
-                "unread": state == "permission" || state == "idle",
+                // ask_open guards the case where a build leaves an open AskUserQuestion at
+                // state=="active" — it still needs to surface as unread in the inbox.
+                "unread": ask_open || state == "permission" || state == "idle",
                 "lastActivityTs": now,
                 "preview": preview_for(state, tool.as_deref()),
             })
@@ -1023,12 +1039,31 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "transcript": transcript,
     });
 
-    // pendingPrompt: the agent's native human ask (mailink-protocol §12). Permission stays
-    // synthesized (the hook carries no structured options; that respond path is proven) and is
-    // respondable now. AskUserQuestion carries the REAL structured questions captured from the
-    // PreToolUse hook (tool_input.questions) and is respondable:false until TUI answer-injection
-    // lands. thread_id == tab_id for a solo thread.
-    if state == "permission" {
+    // pendingPrompt: the agent's native human ask (mailink-protocol §12). thread_id == tab_id
+    // for a solo thread.
+    //
+    // AskUserQuestion is checked FIRST, keyed on tool_name (NOT state): while an AskUserQuestion
+    // waits, Claude fires a permission_prompt Notification that flips the session to
+    // WaitingPermission (state=="permission"). If we checked state first we'd synthesize a generic
+    // "approve AskUserQuestion?" card — exactly the bug where the phone showed something totally
+    // different from the real question the desktop was showing. The open ask IS the structured
+    // question; render THAT. It carries the REAL questions captured from the PreToolUse hook
+    // (tool_input.questions), respondable:false until TUI answer-injection lands.
+    if tool.as_deref() == Some("AskUserQuestion") {
+        let mut pp = json!({
+            "prompt_id": format!("q_{tab_id}"),
+            "thread_id": tab_id,
+            "kind": "question",
+            "respondable": false,
+        });
+        match pending_question_for_tab(app, tab_id).as_ref().and_then(map_ask_questions) {
+            Some(qs) => { pp["questions"] = qs; }
+            None => { pp["text"] = json!("The agent is asking a question — see the terminal for details."); }
+        }
+        detail["pendingPrompt"] = pp;
+    } else if state == "permission" {
+        // A real permission prompt (some other tool, e.g. Bash). Synthesized: the hook carries no
+        // structured options; that numeric-keystroke respond path is proven, so respondable now.
         let text = tool
             .as_deref()
             .map(|t| format!("{t} — approve?"))
@@ -1041,18 +1076,6 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             "text": text,
             "options": ["Yes", "Yes, don't ask again", "No"],
         });
-    } else if tool.as_deref() == Some("AskUserQuestion") {
-        let mut pp = json!({
-            "prompt_id": format!("q_{tab_id}"),
-            "thread_id": tab_id,
-            "kind": "question",
-            "respondable": false,
-        });
-        match pending_question_for_tab(app, tab_id).as_ref().and_then(map_ask_questions) {
-            Some(qs) => { pp["questions"] = qs; }
-            None => { pp["text"] = json!("The agent is asking a question — see the terminal for details."); }
-        }
-        detail["pendingPrompt"] = pp;
     }
 
     Some(detail)
@@ -1167,7 +1190,13 @@ async fn doorbell_loop(app: Arc<AppState>) {
             let is_attn = st == "permission" || st == "idle";
             let was_attn = matches!(prev.as_deref(), Some("permission") | Some("idle"));
             if is_attn && !was_attn {
-                let kind = if st == "permission" { "permission" } else { "idle_done" };
+                // Distinguish an open AskUserQuestion (state coincides with "permission") from a
+                // real approval prompt so the push line/route matches what the card will show.
+                let kind = match current_prompt(&app, &tab) {
+                    Some(("question", _)) => "question",
+                    Some(_) => "permission",
+                    None => "idle_done",
+                };
                 ring_devices(&client, &app, &relay_url, &tab, &title, kind).await;
             }
         }
