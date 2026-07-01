@@ -48,6 +48,55 @@ pub fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> O
     Some(msgs)
 }
 
+/// Live per-agent telemetry read from the tail of a Claude session's transcript JSONL: the model id
+/// and current context size (prompt tokens). Drives the maiLink per-agent `meta` strip. Sourced
+/// from the JSONL (not the SessionStart hook, whose `model` is often null) so it's always available
+/// for a Claude tab; naturally Claude-only since it reads `~/.claude` transcripts.
+pub struct SessionMeta {
+    /// Raw model id from the last assistant turn (e.g. "claude-opus-4-8[1m]"). Caller normalizes.
+    pub model_id: Option<String>,
+    /// input + cache_read + cache_creation tokens — matches the maiTerm statusline's context count.
+    pub context_tokens: u64,
+}
+
+/// Read the most recent `message.usage` line from a session's transcript and return its model id +
+/// summed context tokens. None if the transcript can't be found/read or has no usage yet.
+pub fn session_meta(session_id: &str) -> Option<SessionMeta> {
+    let path = locate_jsonl(session_id)?;
+    // The last usage block is near EOF (the latest assistant turn); scan a bounded tail so this
+    // stays cheap when polled per chat_state. A truncated first line just fails to parse → skipped.
+    let tail = read_tail(&path, 256 * 1024)?;
+    for line in tail.lines().rev() {
+        if !line.contains("\"usage\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(msg) = v.get("message") else { continue };
+        let Some(usage) = msg.get("usage") else { continue };
+        let tokens = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+            .iter()
+            .map(|k| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0))
+            .sum::<u64>();
+        if tokens == 0 {
+            continue;
+        }
+        let model_id = msg.get("model").and_then(|m| m.as_str()).map(String::from);
+        return Some(SessionMeta { model_id, context_tokens: tokens });
+    }
+    None
+}
+
+/// Read at most the last `max` bytes of a file as lossy UTF-8 (for tail scans).
+fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Find `<session_id>.jsonl` under any `~/.claude/projects/*/` dir. The session id is globally
 /// unique, so a match is unambiguous.
 fn locate_jsonl(session_id: &str) -> Option<PathBuf> {

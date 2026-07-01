@@ -638,7 +638,17 @@ toast + deep-link; on the phone it's the WS `attention` + doorbell.
 export type Runtime = 'claude' | 'codex' | 'gemini';
 
 /** A participating agent in a thread. id is tabId-derived (stable across resume/fork) but is NOT the thread key. */
-export interface Participant { id: string; name: string; runtime: Runtime; }
+export interface Participant { id: string; name: string; runtime: Runtime; meta?: AgentMeta; }
+
+/** Per-agent telemetry strip (thread header). All fields optional; the gauge is driven by contextPct. */
+export interface AgentMeta {
+  model?: string;         // normalized display name: "Opus 4.8", "GPT-5-codex", "Gemini 2.5 Pro"
+  effort?: string;        // runtime effort tier; OMITTED when the runtime has none, or not sourceable
+                          //   (Claude effort lives only in the statusLine payload maiTerm doesn't receive → omitted today)
+  contextPct?: number;    // 0–100, normalized — the always-present field
+  contextUsed?: number;   // token detail for the "142k / 1M" readout
+  contextLimit?: number;  // model-dependent (1,000,000 for [1m] variants, else 200,000)
+}
 
 export type ThreadKind = 'topic' | 'solo';
 export type ThreadState = 'active' | 'idle' | 'permission' | 'dormant';
@@ -758,3 +768,12 @@ export interface WsAttentionEvent {
   `RespondRequest.answers[]` aligned to `questions[]`, each `{selected: string[], other?: string}`.
   No rename needed app-side — §12.1 is canonical. (`/respond` write path for questions is the
   remaining desktop item: translate `answers[]` → the TUI selection, then flip `respondable:true`.)
+- **meta (per-agent telemetry) — IMPLEMENTED (Claude):** `model` + `contextPct`/`contextUsed`/
+  `contextLimit` are read from the Claude session transcript JSONL (`mailink/transcript.rs`
+  `session_meta`) — the last line carrying `message.usage`, summed
+  `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, over a model-dependent
+  limit (1,000,000 for `[1m]`/`-1m` model ids, else 200,000). `model` is normalized from the JSONL
+  `message.model` id (the SessionStart hook's model is usually null). Emitted on the `/chats`
+  object, in `chat_detail`, and on the WS `chat_state` event (so the gauge steps live per turn).
+  `effort` is omitted (only in Claude Code's statusLine payload, not received). Non-Claude tabs get
+  no `meta` (no Claude JSONL) — Codex/Gemini token sourcing is a later add.

@@ -621,13 +621,19 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
 }
 
 fn chat_state_event(c: &Value) -> Value {
-    json!({
+    let mut ev = json!({
         "type": "chat_state",
         "tabId": c["tabId"],
         "state": c["state"],
         "runtime": c["runtime"],
         "ts": now_ms(),
-    })
+    });
+    // Carry the per-agent meta so the phone's context gauge steps live per turn (peer merges it
+    // into the acting participant). Present only for Claude tabs with a resolvable transcript.
+    if let Some(meta) = c.get("meta") {
+        ev["meta"] = meta.clone();
+    }
+    ev
 }
 
 /// Build an `attention` event for a tab, inlining the open prompt (delta 1) so the client can
@@ -987,6 +993,65 @@ fn preview_for(state: &str, tool: Option<&str>) -> String {
     }
 }
 
+/// The context window for a model id: the 1M-context variants (e.g. "…-4-8[1m]") vs the 200k
+/// default. Mirrors the maiTerm statusline's limit derivation.
+fn context_limit_for(model_id: &str) -> u64 {
+    if model_id.contains("[1m]") || model_id.contains("-1m") {
+        1_000_000
+    } else {
+        200_000
+    }
+}
+
+/// Normalize a Claude model id to a friendly display string: "claude-opus-4-8[1m]" → "Opus 4.8".
+/// Strips the provider prefix and 1M marker, title-cases the family, and dot-joins the version.
+fn display_model(model_id: &str) -> String {
+    let s = model_id.trim();
+    let s = s.strip_prefix("claude-").unwrap_or(s);
+    let s = s.replace("[1m]", "");
+    let s = s.strip_suffix("-1m").unwrap_or(&s);
+    let parts: Vec<&str> = s.split('-').filter(|p| !p.is_empty()).collect();
+    let Some((family, version)) = parts.split_first() else {
+        return model_id.to_string();
+    };
+    let family_disp = {
+        let mut chars = family.chars();
+        match chars.next() {
+            Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+            None => family.to_string(),
+        }
+    };
+    if version.is_empty() {
+        family_disp
+    } else {
+        format!("{family_disp} {}", version.join("."))
+    }
+}
+
+/// Per-agent telemetry (mailink-protocol §12.1 `meta`): model display name + context gauge, read
+/// from the Claude transcript JSONL (the SessionStart hook's model is often null). Live/persisted
+/// session id so it also resolves during the resume-before-init window. `effort` is intentionally
+/// omitted — it's only in Claude Code's statusLine payload, which maiTerm doesn't receive. None for
+/// non-Claude tabs (no Claude JSONL) or before the first assistant turn.
+fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
+    let sid = resolved_session_id_for_tab(app, tab_id)?;
+    let meta = transcript::session_meta(&sid)?;
+    let model_id = meta.model_id.as_deref().unwrap_or("");
+    let limit = context_limit_for(model_id);
+    let pct = ((meta.context_tokens as f64 / limit as f64) * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u64;
+    let mut m = json!({
+        "contextUsed": meta.context_tokens,
+        "contextLimit": limit,
+        "contextPct": pct,
+    });
+    if !model_id.is_empty() {
+        m["model"] = json!(display_model(model_id));
+    }
+    Some(m)
+}
+
 fn build_chats(app: &AppState) -> Vec<Value> {
     let tabs = designated_tabs(app);
     let states = session_states(app);
@@ -998,7 +1063,7 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 None => ("dormant", runtime_key(t.runtime), None),
             };
             let ask_open = tool.as_deref() == Some("AskUserQuestion");
-            json!({
+            let mut chat = json!({
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspace": t.workspace,
@@ -1009,7 +1074,11 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "unread": ask_open || state == "permission" || state == "idle",
                 "lastActivityTs": now,
                 "preview": preview_for(state, tool.as_deref()),
-            })
+            });
+            if let Some(meta) = build_meta(app, &t.tab_id) {
+                chat["meta"] = meta;
+            }
+            chat
         })
         .collect()
 }
@@ -1038,6 +1107,11 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "lastActivityTs": now,
         "transcript": transcript,
     });
+
+    // Per-agent telemetry strip (model + context gauge). See build_meta.
+    if let Some(agent_meta) = build_meta(app, tab_id) {
+        detail["meta"] = agent_meta;
+    }
 
     // pendingPrompt: the agent's native human ask (mailink-protocol §12). thread_id == tab_id
     // for a solo thread.
@@ -1323,6 +1397,20 @@ mod tests {
         // No WS and the drop is older than the grace ⇒ uncovered again (phone really left).
         assert!(!ws_covered(false, now - WS_COVERAGE_GRACE_MS, now));
         assert!(!ws_covered(false, now - 60_000, now));
+    }
+
+    #[test]
+    fn model_display_and_context_limit() {
+        assert_eq!(display_model("claude-opus-4-8[1m]"), "Opus 4.8");
+        assert_eq!(display_model("claude-opus-4-8"), "Opus 4.8");
+        assert_eq!(display_model("claude-sonnet-4-5"), "Sonnet 4.5");
+        assert_eq!(display_model("claude-haiku-4-5-20251001"), "Haiku 4.5.20251001");
+        assert_eq!(display_model("opus-4-8-1m"), "Opus 4.8");
+        // 1M-context variants vs the 200k default.
+        assert_eq!(context_limit_for("claude-opus-4-8[1m]"), 1_000_000);
+        assert_eq!(context_limit_for("claude-opus-4-8-1m"), 1_000_000);
+        assert_eq!(context_limit_for("claude-opus-4-8"), 200_000);
+        assert_eq!(context_limit_for("claude-sonnet-4-5"), 200_000);
     }
 
     #[test]
