@@ -529,10 +529,15 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
                 return;
             }
             match content {
-                // A plain string is ordinary human input.
+                // A plain string is ordinary human input. Strip any leading injected image-path
+                // prefix first: when CC leaves a maiLink screenshot as a literal `<temp-path>
+                // <caption>` user turn (no native chip), the bare path must not survive into the
+                // persisted transcript or it renders as a duplicate raw-path bubble on re-open.
+                // A no-op for ordinary messages.
                 Some(Value::String(text)) => {
-                    if !text.trim().is_empty() && !is_system_noise(text) {
-                        out.push(msg(uuid.to_string(), "user", text, ts));
+                    let cleaned = strip_leading_image_refs(text);
+                    if !cleaned.trim().is_empty() && !is_system_noise(cleaned) {
+                        out.push(msg(uuid.to_string(), "user", cleaned, ts));
                     }
                 }
                 // List content is normally a tool_result (skip). The exception is a human message
@@ -582,9 +587,9 @@ fn msg(msg_id: String, role: &str, text: &str, ts: i64) -> Value {
 }
 
 /// Caption for a human image-attachment turn: its text blocks joined with spaces, any leading
-/// `[Image #N]` composer chips Claude Code may prepend stripped, trimmed. The result equals the
-/// caption the phone sent (empty when images were attached with no text), so maiLink's
-/// optimistic-bubble reconcile (role=="user" && text==caption) matches on this GET echo.
+/// image refs Claude Code may prepend stripped, trimmed. The result equals the caption the phone
+/// sent (empty when images were attached with no text), so maiLink's optimistic-bubble reconcile
+/// (role=="user" && text==caption) matches on this GET echo.
 fn image_message_caption(blocks: &[Value]) -> String {
     let joined = blocks
         .iter()
@@ -592,21 +597,35 @@ fn image_message_caption(blocks: &[Value]) -> String {
         .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
         .collect::<Vec<_>>()
         .join(" ");
-    strip_leading_image_chips(joined.trim()).trim().to_string()
+    strip_leading_image_refs(joined.trim()).trim().to_string()
 }
 
-/// Strip a leading run of `[Image #N]` chips (and surrounding whitespace) from `s`. Claude Code may
-/// prepend these to the submitted text when images are attached; removing them keeps the echoed
-/// caption byte-equal to what the phone sent. A no-op when no chip is present.
-fn strip_leading_image_chips(s: &str) -> &str {
+/// Strip a leading run of image references (and surrounding whitespace) from `s`, leaving the bare
+/// caption byte-equal to what the phone sent. Two forms are consumed, in any leading order:
+///   - `[Image #N]` chips — Claude Code's native composer markers when an image is attached.
+///   - `…/maiterm-mailink-<uuid>.<ext>` temp paths — what the maiLink image inject types into the
+///     PTY when CC does NOT convert the path to a chip. Left in, they survive as a literal
+///     `"<path> <caption>"` user turn → a duplicate raw-path bubble on the phone on thread re-open.
+/// A whitespace-delimited leading token is treated as one of ours only if it is an absolute path
+/// containing the `maiterm-mailink-` sidecar marker, so ordinary user text is never touched.
+/// A no-op when the text starts with neither form.
+fn strip_leading_image_refs(s: &str) -> &str {
     let mut s = s.trim_start();
-    while let Some(rest) = s.strip_prefix("[Image #") {
-        match rest.find(']') {
-            Some(end) if end > 0 && rest[..end].bytes().all(|b| b.is_ascii_digit()) => {
-                s = rest[end + 1..].trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("[Image #") {
+            if let Some(end) = rest.find(']') {
+                if end > 0 && rest[..end].bytes().all(|b| b.is_ascii_digit()) {
+                    s = rest[end + 1..].trim_start();
+                    continue;
+                }
             }
-            _ => break,
         }
+        let token = s.split_whitespace().next().unwrap_or("");
+        if !token.is_empty() && token.starts_with('/') && token.contains("maiterm-mailink-") {
+            s = s[token.len()..].trim_start();
+            continue;
+        }
+        break;
     }
     s
 }
@@ -906,6 +925,32 @@ mod tests {
         let mut out4 = Vec::new();
         push_line_messages(&tool_img, ToolRender::Marker, &mut out4);
         assert!(out4.is_empty());
+
+        // Literal-path inject: CC did NOT convert the maiLink screenshot to a native chip, so the
+        // turn is a plain string `<temp-path> <caption>`. The raw path must be stripped so the
+        // persisted echo == caption (else a duplicate raw-path bubble on thread re-open).
+        let literal = json!({ "type": "user", "uuid": "iu5", "timestamp": at,
+            "message": { "role": "user",
+                "content": "/var/folders/xy/T/maiterm-mailink-9f2c.png what is this error" } });
+        let mut out5 = Vec::new();
+        push_line_messages(&literal, ToolRender::Marker, &mut out5);
+        assert_eq!(out5.len(), 1);
+        assert_eq!(out5[0]["text"], "what is this error");
+
+        // Multiple images → multiple leading temp paths, all stripped down to the caption.
+        let multi = json!({ "type": "user", "uuid": "iu6", "timestamp": at,
+            "message": { "role": "user", "content":
+                "/tmp/maiterm-mailink-a.png /tmp/maiterm-mailink-b.jpg compare these" } });
+        let mut out6 = Vec::new();
+        push_line_messages(&multi, ToolRender::Marker, &mut out6);
+        assert_eq!(out6[0]["text"], "compare these");
+
+        // An ordinary message that merely mentions a path mid-sentence is untouched.
+        let ordinary = json!({ "type": "user", "uuid": "iu7", "timestamp": at,
+            "message": { "role": "user", "content": "check /var/log/app.png for the crash" } });
+        let mut out7 = Vec::new();
+        push_line_messages(&ordinary, ToolRender::Marker, &mut out7);
+        assert_eq!(out7[0]["text"], "check /var/log/app.png for the crash");
     }
 
     #[test]
