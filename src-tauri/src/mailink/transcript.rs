@@ -216,12 +216,33 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
             if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
                 return;
             }
-            // Only a plain string is real human input. List content is tool_result (skip) or the
-            // occasional injected "[Request interrupted…]" text (system noise, skip).
-            if let Some(text) = content.and_then(|c| c.as_str()) {
-                if !text.trim().is_empty() && !is_system_noise(text) {
-                    out.push(msg(uuid.to_string(), "user", text, ts));
+            match content {
+                // A plain string is ordinary human input.
+                Some(Value::String(text)) => {
+                    if !text.trim().is_empty() && !is_system_noise(text) {
+                        out.push(msg(uuid.to_string(), "user", text, ts));
+                    }
                 }
+                // List content is normally a tool_result (skip). The exception is a human message
+                // that ATTACHED an image (a maiLink screenshot send, or a desktop paste): its
+                // blocks are [text?, image, …]. Surface it — caption only (image bytes aren't
+                // re-sent; the phone keeps its own copy) — so the phone's optimistic image bubble
+                // reconciles against this GET echo. Non-image lists stay skipped as before.
+                Some(Value::Array(blocks)) => {
+                    let is_tool_result = blocks
+                        .iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"));
+                    let has_image = blocks
+                        .iter()
+                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("image"));
+                    if !is_tool_result && has_image {
+                        // Empty caption is legitimate (images with no text) — still emit so the
+                        // phone can reconcile by role + msg_id.
+                        let caption = image_message_caption(blocks);
+                        out.push(msg(uuid.to_string(), "user", &caption, ts));
+                    }
+                }
+                _ => {}
             }
         }
         // A compaction boundary → one `system` turn so maiLink can draw a divider showing how much
@@ -246,6 +267,36 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
 
 fn msg(msg_id: String, role: &str, text: &str, ts: i64) -> Value {
     json!({ "msg_id": msg_id, "role": role, "text": text, "ts": ts })
+}
+
+/// Caption for a human image-attachment turn: its text blocks joined with spaces, any leading
+/// `[Image #N]` composer chips Claude Code may prepend stripped, trimmed. The result equals the
+/// caption the phone sent (empty when images were attached with no text), so maiLink's
+/// optimistic-bubble reconcile (role=="user" && text==caption) matches on this GET echo.
+fn image_message_caption(blocks: &[Value]) -> String {
+    let joined = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    strip_leading_image_chips(joined.trim()).trim().to_string()
+}
+
+/// Strip a leading run of `[Image #N]` chips (and surrounding whitespace) from `s`. Claude Code may
+/// prepend these to the submitted text when images are attached; removing them keeps the echoed
+/// caption byte-equal to what the phone sent. A no-op when no chip is present.
+fn strip_leading_image_chips(s: &str) -> &str {
+    let mut s = s.trim_start();
+    while let Some(rest) = s.strip_prefix("[Image #") {
+        match rest.find(']') {
+            Some(end) if end > 0 && rest[..end].bytes().all(|b| b.is_ascii_digit()) => {
+                s = rest[end + 1..].trim_start();
+            }
+            _ => break,
+        }
+    }
+    s
 }
 
 /// Format a token count for the compaction divider: 775801 → "776k", 14384 → "14k", 1_250_000 →
@@ -461,6 +512,51 @@ mod tests {
         let no_ts = json!({ "type": "assistant",
             "message": { "role": "assistant", "content": [ { "type": "text", "text": "hi" } ] } });
         assert_eq!(real_turn_ts(&no_ts), None);
+    }
+
+    #[test]
+    fn image_attachment_user_turn_surfaced_with_caption_only() {
+        let ts = 1782595557904i64;
+        let at = "2026-06-27T21:25:57.904Z";
+
+        // Caption + one image block → one user turn carrying only the caption (no bytes echoed).
+        let with_caption = json!({ "type": "user", "uuid": "iu1", "timestamp": at,
+            "message": { "role": "user", "content": [
+                { "type": "text", "text": "look at this" },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAAA" } } ] } });
+        let mut out = Vec::new();
+        push_line_messages(&with_caption, ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "look at this");
+        assert_eq!(out[0]["msg_id"], "iu1");
+        assert_eq!(out[0]["ts"], ts);
+
+        // Images with NO caption → still surfaced with empty text so the phone can reconcile.
+        let no_caption = json!({ "type": "user", "uuid": "iu2", "timestamp": at,
+            "message": { "role": "user", "content": [
+                { "type": "image", "source": { "media_type": "image/jpeg" } } ] } });
+        let mut out2 = Vec::new();
+        push_line_messages(&no_caption, ToolRender::Marker, &mut out2);
+        assert_eq!(out2.len(), 1);
+        assert_eq!(out2[0]["text"], "");
+
+        // Leading [Image #N] chips Claude Code may inject are stripped → echo == caption.
+        let chipped = json!({ "type": "user", "uuid": "iu3", "timestamp": at,
+            "message": { "role": "user", "content": [
+                { "type": "text", "text": "[Image #1] [Image #2] my caption" },
+                { "type": "image", "source": {} } ] } });
+        let mut out3 = Vec::new();
+        push_line_messages(&chipped, ToolRender::Marker, &mut out3);
+        assert_eq!(out3[0]["text"], "my caption");
+
+        // A tool_result that CONTAINS an image is still skipped (not a human turn).
+        let tool_img = json!({ "type": "user", "uuid": "iu4", "timestamp": at,
+            "message": { "role": "user", "content": [
+                { "type": "tool_result", "content": [ { "type": "image", "source": {} } ] } ] } });
+        let mut out4 = Vec::new();
+        push_line_messages(&tool_img, ToolRender::Marker, &mut out4);
+        assert!(out4.is_empty());
     }
 
     #[test]

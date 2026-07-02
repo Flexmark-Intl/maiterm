@@ -347,9 +347,27 @@ async fn chat_context(
 
 #[derive(serde::Deserialize)]
 struct MessageBody {
+    /// Optional so the phone can send images with no caption (empty allowed once `images` is set).
+    #[serde(default)]
     text: String,
     #[serde(default)]
     submit: bool,
+    /// Inline images to attach to this message (mailink-protocol §12 image send). Absent/empty ⇒
+    /// today's plain-text message, unchanged for every runtime. See ImageInput.
+    #[serde(default)]
+    images: Vec<ImageInput>,
+}
+
+/// One inline image from the phone. `data` is base64 with NO `data:` prefix; `mime` carries the
+/// type separately ("image/png" | "image/jpeg" | "image/webp"); `name` is display/debug only. The
+/// phone pre-downscales each to <=1568px and caps 6/message, so payloads are ~<500KB each.
+#[derive(serde::Deserialize)]
+struct ImageInput {
+    data: String,
+    mime: String,
+    #[serde(default)]
+    #[allow(dead_code)] // display/debug only; the temp filename is uuid-based, not name-derived.
+    name: Option<String>,
 }
 
 /// POST /chats/{tabId}/message — inject a free-text message / proactive command into the
@@ -366,10 +384,48 @@ async fn post_message(
         return Err(StatusCode::NOT_FOUND);
     }
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
+
+    // Image attach: v1 supports LOCAL Claude Code only. Gate BEFORE touching the PTY and return a
+    // machine-readable `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app
+    // notice — never a "do it on the desktop" deferral. Text-only messages are unchanged for all
+    // runtimes.
+    if !body.images.is_empty() {
+        if runtime_for_tab(&s.app, &tab_id) != Some(AgentRuntime::Claude) {
+            return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_runtime",
+                "detail": "This agent can't accept images yet." })));
+        }
+        // foreground_command is Some only for a live ssh/mosh: the image temp files are LOCAL paths
+        // the remote claude can't see, so scope v1 to local sessions.
+        let is_ssh = crate::pty::get_pty_info(&s.app, &pty)
+            .map(|i| i.foreground_command.is_some())
+            .unwrap_or(false);
+        if is_ssh {
+            return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_ssh",
+                "detail": "Images aren't supported over SSH sessions yet." })));
+        }
+        inject_images_and_text(&s.app, &pty, &body)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()) })));
+    }
+
     inject_text(&s.app, &pty, &body.text, body.submit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()) })))
+}
+
+/// The persisted runtime for a tab (Claude/Codex/Gemini), or None if it isn't/was never an agent
+/// tab. Runtime persists after the agent process dies (see designated_tabs), so this is stable.
+fn runtime_for_tab(app: &AppState, tab_id: &str) -> Option<AgentRuntime> {
+    let data = app.app_data.read();
+    data.windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|t| t.id == tab_id)
+        .and_then(|t| t.runtime)
 }
 
 #[derive(serde::Deserialize)]
@@ -843,6 +899,60 @@ async fn inject_text(
         crate::pty::write_pty(app, pty_id, b"\r")?;
     }
     Ok(())
+}
+
+/// Pause between image-path writes (and before the caption/submit) so the Claude Code TUI converts
+/// each pasted path into an `[Image #N]` chip before the next path — or the CR — arrives. Mirrors
+/// the desktop drag-drop path's 200ms inter-path delay, with a little headroom.
+const IMAGE_SETTLE_MS: u64 = 220;
+
+/// Inject one or more images plus an optional caption into a LOCAL Claude Code TUI, then submit
+/// once for the whole batch. Mechanism (matches the desktop drag-drop/clipboard path and Claude
+/// Code's image-attach contract, confirmed against current CC behavior): write each image to a
+/// temp file with a recognized extension, then type its BARE ABSOLUTE PATH — raw, NOT wrapped in
+/// bracketed paste (wrapping defeats CC's path→image detection) — followed by a space, pausing
+/// between images so the TUI attaches each before the next arrives. Then paste the caption via the
+/// normal bracketed-paste path and submit with CR. CC reads the files at submit time; we leave the
+/// temp files for the OS to reap (small; deleting risks racing that read).
+async fn inject_images_and_text(
+    app: &Arc<AppState>,
+    pty_id: &str,
+    body: &MessageBody,
+) -> Result<(), String> {
+    for (i, img) in body.images.iter().enumerate() {
+        let path = save_image_temp(&img.data, &img.mime)?;
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(IMAGE_SETTLE_MS)).await;
+        }
+        let mut buf = path.into_bytes();
+        buf.push(b' '); // trailing space delimits the path from the next path / the caption
+        crate::pty::write_pty(app, pty_id, &buf)?;
+    }
+    // Let the TUI finish attaching the final image before the caption + CR land.
+    tokio::time::sleep(std::time::Duration::from_millis(IMAGE_SETTLE_MS)).await;
+    // Caption may be empty — an empty bracketed paste + CR just submits the images alone.
+    inject_text(app, pty_id, &body.text, body.submit).await
+}
+
+/// Decode a base64 image and write it to a temp file whose extension Claude Code recognizes as an
+/// image (it sniffs by extension). Returns the absolute path. Sibling of
+/// commands::editor::save_clipboard_image; kept local so the maiLink path has no UI-command dep.
+fn save_image_temp(data_base64: &str, mime: &str) -> Result<String, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("invalid image base64: {e}"))?;
+    let ext = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png", // unknown/absent mime: default to a recognized extension so CC still attaches.
+    };
+    let path =
+        std::env::temp_dir().join(format!("maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), ext));
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write temp image: {e}"))?;
+    log::info!("[maiLink] staged {} image bytes → {:?}", bytes.len(), path);
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).
