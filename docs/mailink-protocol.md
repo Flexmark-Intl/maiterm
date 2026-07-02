@@ -661,6 +661,16 @@ so the contract is exercised, not just asserted.
     injections are delivered as real user prompts and were rendering as giant fake "user"
     messages flooding every mesh participant's thread — now dropped by the transcript noise
     filter (and excluded from last-turn recency).
+  - **The 60s ask deadline (field bug, 2026-07-02).** Current Claude Code fires NO
+    notification hook for an AskUserQuestion (anthropics/claude-code#13830) — state stays
+    `active` — and AUTO-RESOLVES an unanswered ask after ~60s (undocumented,
+    non-configurable; #73394/#30740). Pre-deploy that made asks invisible on the phone until
+    expired. The prompt-kind transition above closes the signaling gap; additionally
+    `pendingPrompt` gains additive **`asked_at`** (unix ms, stamped at PreToolUse) so the app
+    can count down / expire the card, `questions[].options[]` pass through Claude's new
+    per-option `preview`, and the transcript chip reads `AskUserQuestion(<first question>)`
+    so an expired ask still shows what was asked. Late answers should fall back to a
+    free-text `/message`.
 - **Two findings (notes, not blockers):** (1) `/message` bracketed-paste is correct for an
   agent TUI but leaks into a bare shell — fine for the intended use; (2) the *first*
   permission (for `initSession` itself) can't be tab-attributed since the session→tab mapping
