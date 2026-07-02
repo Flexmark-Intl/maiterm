@@ -346,10 +346,14 @@ pub(crate) fn compact_tool_arg(input: &Value) -> Option<String> {
     (!a.trim().is_empty()).then_some(a)
 }
 
-/// Drop user-string content that is injected system scaffolding, not a human message.
+/// Drop user-string content that is injected scaffolding, not a human message.
 fn is_system_noise(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with('<')                       // <local-command-…>, <command-name>, <system-reminder>
+        // maiTerm's agent-to-agent injections: ⟦AGENT-BRIDGE⟧ / ⟦MESH⟧ / ⟦TOPIC COMPLETE⟧
+        // envelopes are delivered as real user prompts, so without this they render as giant
+        // fake "user" messages that flood every mesh participant's maiLink thread.
+        || t.starts_with('⟦')
         || t.starts_with("[Request interrupted")
         || t.starts_with("Caveat:")
 }
@@ -574,10 +578,19 @@ mod tests {
             "message": { "role": "user", "content": [ { "type": "tool_result", "content": "output" } ] } });
         let noise = json!({ "type": "user", "uuid": "u4", "timestamp": "2026-06-27T21:26:00Z",
             "message": { "role": "user", "content": "<system-reminder>hi</system-reminder>" } });
+        // Agent-to-agent injections (bridge/mesh envelopes) are not human messages.
+        let bridge = json!({ "type": "user", "uuid": "u5", "timestamp": "2026-06-27T21:26:01Z",
+            "message": { "role": "user",
+                "content": "⟦AGENT-BRIDGE⟧ Message from \"peer\" — a peer AI agent…" } });
+        let mesh = json!({ "type": "user", "uuid": "u6", "timestamp": "2026-06-27T21:26:02Z",
+            "message": { "role": "user",
+                "content": "⟦MESH⟧ Message from \"reviewer\" [topic: api] [turn 3]…" } });
         let mut out = Vec::new();
         push_line_messages(&real, ToolRender::Marker, &mut out);
         push_line_messages(&toolres, ToolRender::Marker, &mut out);
         push_line_messages(&noise, ToolRender::Marker, &mut out);
+        push_line_messages(&bridge, ToolRender::Marker, &mut out);
+        push_line_messages(&mesh, ToolRender::Marker, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "user");
         assert_eq!(out[0]["text"], "Please fix the bug.");
