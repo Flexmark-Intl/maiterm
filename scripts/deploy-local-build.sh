@@ -21,19 +21,33 @@ set -euo pipefail
 APP_NAME="maiTerm"
 PROC_NAME="aiterm"                     # Contents/MacOS binary name (for pgrep/killall)
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Re-exec sentinel — MUST be an argv flag, NOT an env var. `open` (below) hands our
+# environment to the relaunched maiTerm, which hands it to every PTY/shell it spawns.
+# An env-var sentinel therefore leaks into the NEXT agent's shell, so the next deploy
+# sees the flag already set, SKIPS self-detach, and runs the swap ATTACHED to the
+# agent's PTY — SIGKILLed mid-swap (exit 137) the instant maiTerm quits, leaving the
+# installed app un-swapped with no relaunch. argv does not leak through open→app→PTY.
+DETACH_FLAG="--detached-child"
+if [[ "${1:-}" == "$DETACH_FLAG" ]]; then
+  DETACHED=1; shift
+else
+  DETACHED=0
+fi
+
 SRC="${1:-$REPO/src-tauri/target/release/bundle/macos/$APP_NAME.app}"
 DEST="/Applications/$APP_NAME.app"
 LOG="$HOME/Library/Logs/com.aiterm.app/maiterm-deploy.log"
 mkdir -p "$(dirname "$LOG")"
 
 # ---- self-detach: the swap must outlive the maiTerm PTY that launched it ----
-if [[ "${MAITERM_DEPLOY_DETACHED:-}" != "1" ]]; then
+if [[ "$DETACHED" != "1" ]]; then
   # Validate synchronously so the caller sees a bad/missing build immediately.
   if [[ ! -x "$SRC/Contents/MacOS/$PROC_NAME" ]]; then
     echo "ERROR: no valid maiTerm build at: $SRC" >&2
     exit 1
   fi
-  MAITERM_DEPLOY_DETACHED=1 nohup "$0" "$SRC" >>"$LOG" 2>&1 </dev/null &
+  nohup "$0" "$DETACH_FLAG" "$SRC" >>"$LOG" 2>&1 </dev/null &
   disown || true
   echo "Detached deploy started (pid $!)."
   echo "Log: $LOG"
@@ -50,6 +64,9 @@ log "=== maiTerm deploy: $SRC -> $DEST ==="
 # writing its transcript to disk (chat-history loss). maiTerm also scrubs these at PTY
 # spawn (AGENT_ENV_MARKERS) as the real fix; keep the app process itself clean too.
 unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDECODE
+# Belt-and-suspenders: scrub the legacy env-var sentinel too, so a shell inside an app
+# launched by a PRE-argv build of this script stops propagating MAITERM_DEPLOY_DETACHED=1.
+unset MAITERM_DEPLOY_DETACHED
 
 # Give the caller time to FINISH before we pull the rug: not just the tool-call
 # returning, but the agent's whole turn — final assistant message flushed to the
