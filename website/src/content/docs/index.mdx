@@ -34,6 +34,58 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
   </div>
 </div>
 
+<section class="spotlight">
+
+<p class="spotlight-eyebrow">Spotlight — Mesh Workspace</p>
+
+## A team of specialist agents, not one giant context
+
+Flip a workspace into a **mesh** and every agent in it can message any other by role. Purpose-trained specialists — each expert in its own repository — ask each other precise questions and get answers back as real turns: the frontend agent asks the backend agent for an endpoint's exact shape, the backend loops in the infra agent, and nobody waits for you to play messenger. That's **cross-repository collaboration**, live, in panes you can watch.
+
+It's not just a coordination win — it's a token win. One monolithic agent has to drag every codebase into a single enormous context and re-read it turn after turn. A mesh keeps each agent's context small and sharply scoped, and agents trade short, addressed messages instead of duplicating each other's worlds — multi-repo work at a fraction of the token spend.
+
+<CardGrid>
+  <Card title="Addressed, never broadcast" icon="approve-check">
+    Every message routes to a specific role over a stable handle — a rename never misroutes, and an unknown recipient is a hard error, never a silent drop.
+  </Card>
+  <Card title="Topics keep threads honest" icon="list-format">
+    Conversation groups into owned, deduped topics — with opt-in loop caps (soft, hard, time-to-live) for when you want backstops on a runaway exchange.
+  </Card>
+  <Card title="You stay in the cockpit" icon="star">
+    `Cmd+Shift+M` opens a live conversation graph, a topic board with resume/complete controls, and a focused stage + filmstrip view of every agent.
+  </Card>
+</CardGrid>
+
+<p class="spotlight-cta"><a href="/features/mesh-workspace/">Explore Mesh Workspace →</a></p>
+
+</section>
+
+<section class="spotlight">
+
+<p class="spotlight-eyebrow">New — maiLink Companion</p>
+
+## Your agents, in your pocket. No cloud in the middle.
+
+**maiLink** is a phone companion that connects **directly to maiTerm running on your own computer**. Watch your agents work, answer their questions, approve permissions, and interrupt a runaway turn — from the couch, the garden, anywhere in the house.
+
+It travels over **your LAN only**, on an encrypted, authenticated channel — TLS with a pinned certificate and a per-device paired token. **No cloud service sits between your phone and your agents.** The single exception is a content-free push "doorbell" hosted on Cloudflare: when an agent needs you while the app is backgrounded, it wakes the app carrying only the tab name and event kind — never a transcript or message. Away from home? Set up a **WireGuard VPN** back to your LAN rather than exposing anything to the internet.
+
+<CardGrid>
+  <Card title="Live transcripts" icon="comment-alt">
+    Each agent streams per turn as a distilled chat — with its model, a live context-window gauge, and compaction shown as a divider in the thread.
+  </Card>
+  <Card title="Answer from anywhere" icon="approve-check-circle">
+    AskUserQuestion prompts arrive as interactive cards — single-select, multi-select, and "Other" free-text — plus reply to or interrupt a running agent, and send images to a local Claude Code session.
+  </Card>
+  <Card title="Pairing you control" icon="phone">
+    Pair by scanning a QR code; every phone gets its own revocable token — no shared secret anywhere. You choose which tabs and workspaces are reachable.
+  </Card>
+</CardGrid>
+
+<p class="spotlight-cta"><a href="/features/mailink/">Explore maiLink →</a></p>
+
+</section>
+
 ## Why maiTerm?
 
 Other terminals give you tabs and splits. maiTerm gives you a system for managing the chaos of real AI-assisted development — where you're juggling multiple agent sessions (Claude Code, Codex) across projects, SSHing into servers, and trying to remember what you were doing three hours ago.
@@ -55,7 +107,10 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     Connect two running agent sessions — one local, one over SSH, two related projects, even a Claude Code and a Codex — so they collaborate directly. One agent asks the other questions, requests research, or shares context, and replies come back as new turns. maiTerm spawns a split pane so you see both sides, stamps every message with the sender's real identity, and keeps the agents deferring to you for the decisions.
   </Card>
   <Card title="Mesh a whole workspace" icon="random">
-    Bridge connects two agents — a mesh connects them all. Flip a workspace into a mesh and every named agent can message any other by role, addressed and routed so a rename never misroutes. Conversation groups into topics with soft, hard, and time-to-live loop caps so agents can't thrash. Open the cockpit (`Cmd+Shift+M`) for a live conversation graph, a topic board, and a focused stage + filmstrip view of every agent.
+    Bridge connects two agents — a mesh connects them all. Flip a workspace into a mesh and every named agent can message any other by role, addressed and routed so a rename never misroutes. Conversation groups into topics, with opt-in soft, hard, and time-to-live loop caps when you want backstops. Open the cockpit (`Cmd+Shift+M`) for a live conversation graph, a topic board, and a focused stage + filmstrip view of every agent.
+  </Card>
+  <Card title="Reach agents from your phone" icon="phone">
+    maiLink, the companion app, connects directly to maiTerm over your LAN — encrypted, authenticated, no cloud in the data path. Watch live transcripts, answer agent questions, approve permissions, and interrupt runaway turns from anywhere in the house. QR pairing with revocable per-device tokens.
   </Card>
   <Card title="Compose prompts like a human" icon="pen">
     A multi-line composer dock under every terminal: Enter makes newlines, `Cmd+Enter` sends, and drafts survive tab switches and restarts. Paste screenshots or drop files and they become attachment chips — over SSH they're uploaded automatically. No more crafting a five-paragraph prompt on a single shell line.

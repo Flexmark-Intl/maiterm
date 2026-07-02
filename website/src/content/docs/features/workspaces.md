@@ -19,7 +19,7 @@ Group your terminals by project. Each workspace has its own pane layout, tabs, a
 - **Recent workspaces** — collapsible section, toggleable in preferences
 - **Workspace notes** — markdown notes scoped to the whole workspace
 - **Suspend & resume** — suspend inactive workspaces to free resources (PTYs are killed, memory released). Resume instantly with full state. Auto-suspend after configurable timeout (15/30/60 min)
-- **Full-session restore on relaunch** — on launch, maiTerm respawns and auto-resumes the active tab in *every* workspace, not just the last one you had open, so an agent in another workspace is already picking up where it left off when you switch to it. A window *reload* reattaches to terminals that are still running instead of respawning them
+- **Full-session restore on relaunch** — on launch, maiTerm respawns and auto-resumes every tab that was live at last shutdown, across *every* workspace — one at a time, with a cancellable progress modal — so an agent in another workspace is already picking up where it left off when you switch to it. A window *reload* reattaches to terminals that are still running instead of respawning them
 - **Multi-window** — open additional windows with independent workspace layouts; window positions remembered per monitor configuration
 
 ## Panes

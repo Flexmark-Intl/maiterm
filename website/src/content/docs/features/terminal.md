@@ -13,7 +13,7 @@ maiTerm's terminal does its heavy lifting in Rust: alacritty_terminal handles VT
 - **Pinned tabs** — pin the tabs you always want at hand; they cluster at the front of the tab strip and stay put, exempt from the active/suspended regrouping that reorders the rest
 - **Composer dock** — a multi-line input docked below the terminal for writing long prompts comfortably (`Cmd+Shift+C`) — see [Composer Dock](#composer-dock)
 - **Scrollback persistence** — saves and restores terminal state across restarts, on by default
-- **Full-session restore** — on launch, every workspace's active tab is respawned and auto-resumed (not just the last-active workspace's); a window reload reattaches to still-running terminals instead of respawning them
+- **Full-session restore** — on launch, every tab that was live at last shutdown is respawned and auto-resumed, across all workspaces. Tabs come back one at a time (with a progress modal you can cancel) so the app stays responsive; a window reload reattaches to still-running terminals instead of respawning them
 - **SSH session cloning** — split an SSH session to get a second shell at the same remote CWD
 - **SSH drop recovery** — when a connection drops unexpectedly, the tab keeps its title and offers a one-click reconnect
 - **Multi-window** — open additional windows, duplicate windows with full tab context
@@ -50,7 +50,7 @@ Tabs auto-update from terminal titles (OSC 0/2), but you can override with your 
 
 ## Deep Clone Everything
 
-Duplicate a tab and get *everything*: scrollback history, CWD, SSH session, the agent's resume command, tab name, notes, trigger variables. Or shallow clone for just the name and CWD. New tabs automatically inherit the workspace's most common working directory.
+Duplicate a tab and get *everything*: scrollback history, CWD, SSH session, the agent's resume command, tab name, notes, trigger variables. Or shallow clone for just the name and CWD. New tabs inherit the previous tab's host and working directory — open a tab from an SSH session and the new one lands on the same remote host, in the same directory.
 
 ## Archive and Restore
 

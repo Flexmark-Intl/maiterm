@@ -41,6 +41,7 @@ export default defineConfig({
             { label: 'Agent Integration', slug: 'features/agents' },
             { label: 'Agent Bridge', slug: 'features/agent-bridge' },
             { label: 'Mesh Workspace', slug: 'features/mesh-workspace' },
+            { label: 'maiLink Companion', slug: 'features/mailink' },
             { label: 'Triggers & Automation', slug: 'features/triggers' },
             { label: 'Themes', slug: 'features/themes' },
           ],

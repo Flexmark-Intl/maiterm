@@ -157,6 +157,10 @@ Bridge two running agent sessions so they can collaborate directly — one local
 
 See the dedicated [Agent Bridge](/features/agent-bridge/) page for the full walkthrough. To scale past a single pair to a whole roster of agents that can each address any other by role — with topics, loop control, and a cockpit — see [Mesh Workspace](/features/mesh-workspace/), the N:M generalization of a bridge.
 
+## maiLink — answer from your phone
+
+The same hooks that drive the state indicators can ring your phone. [maiLink](/features/mailink/) is a companion app that connects directly to maiTerm over your LAN — encrypted and authenticated, with no cloud in the data path — so you can watch live transcripts, answer `AskUserQuestion` prompts, approve permissions, and interrupt a running agent from anywhere in the house. See the dedicated [maiLink Companion](/features/mailink/) page.
+
 ## File Drop & Image Paste
 
 Drag files onto a terminal running an agent over SSH — maiTerm SCP uploads them to a temp directory on the remote and pastes the paths so the agent can read them as file references. On local terminals, file paths are pasted directly.

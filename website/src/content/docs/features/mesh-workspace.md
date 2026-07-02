@@ -5,6 +5,14 @@ description: Turn a whole workspace into a mesh so every named agent in it can m
 
 [Agent Bridge](/features/agent-bridge/) connects exactly two agents. A **Mesh Workspace** generalizes that to N:M: flip a whole workspace into a mesh and every named agent tab in it can message any other agent by role name. Your frontend agent can ask the backend agent a question, the backend can loop in the infra agent, and the infra agent can reply to both — all without you copy-pasting between panes, and all where you can watch it happen.
 
+## Why a mesh beats one giant agent
+
+The obvious way to work across several repositories is one agent with everything loaded into a single context. It's also the expensive way: that agent drags every codebase into one enormous context window and re-reads it turn after turn, burning tokens on code that's irrelevant to the question at hand — and the bigger the context gets, the worse the agent reasons about any one part of it.
+
+A mesh inverts that. Each agent is small and **purpose-trained on its own repository** — its context holds one codebase, its purpose note tells it its role, and it goes deep instead of wide. When work crosses a boundary, agents exchange short, addressed messages — a precise question, a precise answer — instead of duplicating each other's worlds. The result is genuine **cross-repository collaboration** at a fraction of the token spend: you pay for a handful of focused exchanges, not for N copies of everything in one bloated context.
+
+## Addressed, never broadcast
+
 There is no broadcast. Every message is **addressed** to a specific recipient and routed off a stable handle, so renaming an agent never misroutes a message. An unknown or ambiguous recipient is a hard error that lists the current roster, never a silent drop — an agent always knows whether its message landed.
 
 ## Topics
@@ -16,13 +24,13 @@ Conversation in a mesh is organized into **topics**. A topic is owned by whoever
 
 ## Loop control
 
-Two agents left talking to each other can burn tokens and thrash terminals indefinitely. A mesh has three layered backstops so that never happens:
+By default a mesh flows freely — no caps, no pauses. When you want backstops against two agents thrashing indefinitely, three layered limits are available, each **off by default** and opt-in:
 
-- **Soft turn cap** *(per topic, default 12)* — a back-and-forth pauses at a checkpoint when it hits the soft cap. A human resume lifts the pause by another round, so a productive exchange can keep going on your say-so.
-- **Hard ceiling** *(default 40)* — an absolute backstop a resume can't clear. When a topic hits the hard cap it stops for good.
-- **Time-to-live** *(default 30 min)* — a stale topic is force-paused once its TTL elapses, even if no one hit a turn cap.
+- **Soft turn cap** *(per topic)* — a back-and-forth pauses at a checkpoint when it hits the soft cap. A human resume lifts the pause by another round, so a productive exchange can keep going on your say-so.
+- **Hard ceiling** — an absolute backstop a resume can't clear. When a topic hits the hard cap it stops for good.
+- **Time-to-live** — a stale topic is force-paused once its TTL elapses, even if no one hit a turn cap.
 
-All three are configurable in the **AI Agents** section of Preferences.
+Enable and tune any of the three in the **AI Agents** section of Preferences.
 
 ## The cockpit drawer
 
@@ -30,7 +38,7 @@ Open the cockpit with `Cmd+Shift+M`, or by clicking the **MESH** badge on a mesh
 
 - **Live conversation graph** — the mesh's agents are arranged on a circle, with topic "stars" weighted by turn count. A pulse animation lights up topics that delivered a message recently, and a halo marks agents that are currently active. Click any node to jump straight to that agent's tab.
 - **Topic list** — every topic with human **complete** and **resume** controls, so you can wrap a thread or lift a paused one without leaving the drawer.
-- **Status board** — parsed from each agent's workspace note. When an agent writes a `NEEDS DECISION` block into its note, the board surfaces it and raises a deep-linked toast so a blocked agent gets your attention.
+- **Status board** — every agent with its live state and a **needs you** flag. The flag is the agent's *native* awaiting-input signal — an `AskUserQuestion` or a permission prompt — not guesswork parsed from terminal output, so it's deterministic: when an agent needs a decision it asks you directly, you get one deep-linked toast, and nothing else masquerades as needing attention. (Those same prompts are what ring your phone via [maiLink](/features/mailink/).)
 
 ## Stage + filmstrip view
 

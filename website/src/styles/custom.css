@@ -42,3 +42,40 @@
   border-radius: 0.4rem !important;
   overflow: hidden;
 }
+
+/* Landing-page release spotlights */
+.spotlight {
+  margin: 2.5rem 0;
+  padding: 1.75rem 1.75rem 1.5rem;
+  border: 1px solid color-mix(in srgb, var(--sl-color-accent) 40%, transparent);
+  border-radius: 0.6rem;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--sl-color-accent) 9%, var(--sl-color-bg)) 0%,
+    var(--sl-color-bg) 65%
+  );
+}
+
+.sl-markdown-content .spotlight h2 {
+  margin-top: 0.35rem;
+}
+
+.sl-markdown-content .spotlight .spotlight-eyebrow {
+  margin: 0;
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--sl-color-accent);
+}
+
+.sl-markdown-content .spotlight .spotlight-cta {
+  margin-top: 1.25rem;
+  font-weight: 600;
+}
+
+@media (max-width: 50rem) {
+  .spotlight {
+    padding: 1.25rem 1rem 1rem;
+  }
+}
