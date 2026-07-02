@@ -100,6 +100,58 @@ pub fn session_jsonl_mtime(session_id: &str) -> Option<u64> {
         .map(|d| d.as_millis() as u64)
 }
 
+/// Unix-ms timestamp of the last REAL turn in a Claude session transcript — the last assistant/tool
+/// turn or genuine human message — as distinct from the file mtime. A resume/replay appends only
+/// scaffolding (SessionStart hook context, `mode`/`last-prompt`/`permission-mode`/`attachment`
+/// metadata, `<system-reminder>` blocks, the post-compaction summary); that bumps the JSONL mtime
+/// for EVERY restored tab and would clump the whole inbox at "now" on a restart. Sourcing recency
+/// from the last real turn keeps a dormant thread at its true age across a restart. `None` if the
+/// transcript can't be found/read or no real turn falls within the scanned tail.
+pub fn session_last_turn_ts(session_id: &str) -> Option<u64> {
+    let path = locate_jsonl(session_id)?;
+    // The last real turn sits just before whatever small scaffolding a resume appends at EOF, so a
+    // 256KB tail clears the largest realistic resume dump (hook context + deferred-tool list) easily.
+    let tail = read_tail(&path, 256 * 1024)?;
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if let Some(ts) = real_turn_ts(&v) {
+            return Some(ts as u64); // scanning from EOF: the first real turn found IS the latest
+        }
+    }
+    None
+}
+
+/// The unix-ms timestamp of `v` iff it is a REAL turn (agent/tool output or a genuine human
+/// message), else `None`. Mirrors what `push_line_messages` surfaces so recency tracks exactly the
+/// content the phone renders — and, crucially, ignores every entry a resume appends. `ts <= 0`
+/// (missing/garbage timestamp) is treated as "no signal" → skip and keep scanning older turns.
+fn real_turn_ts(v: &Value) -> Option<i64> {
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .map(rfc3339_to_ms)
+        .filter(|&t| t > 0);
+    match v.get("type").and_then(|t| t.as_str()) {
+        // Any assistant turn (text, tool_use, even thinking-only) exists only from real work — a
+        // resume never runs the model, so it never appends one.
+        Some("assistant") => ts,
+        // A genuine human message is plain-string content that isn't the compaction summary, a
+        // tool_result (list content), or injected scaffolding (<system-reminder>, Caveat:, …).
+        Some("user") => {
+            if v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true) {
+                return None;
+            }
+            let text = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str())?;
+            if text.trim().is_empty() || is_system_noise(text) {
+                return None;
+            }
+            ts
+        }
+        // mode / last-prompt / permission-mode / attachment / compact_boundary / other system.
+        _ => None,
+    }
+}
+
 /// Read at most the last `max` bytes of a file as lossy UTF-8 (for tail scans).
 fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
@@ -368,6 +420,47 @@ mod tests {
         let mut out4 = Vec::new();
         push_line_messages(&other, ToolRender::Marker, &mut out4);
         assert!(out4.is_empty());
+    }
+
+    #[test]
+    fn real_turn_ts_counts_activity_but_ignores_resume_scaffolding() {
+        let ts = 1782595557904i64; // 2026-06-27T21:25:57.904Z
+        let at = "2026-06-27T21:25:57.904Z";
+
+        // Real activity → the entry's timestamp.
+        let asst = json!({ "type": "assistant", "timestamp": at,
+            "message": { "role": "assistant", "content": [ { "type": "text", "text": "hi" } ] } });
+        assert_eq!(real_turn_ts(&asst), Some(ts));
+        let tool = json!({ "type": "assistant", "timestamp": at,
+            "message": { "role": "assistant", "content": [ { "type": "tool_use", "name": "Bash" } ] } });
+        assert_eq!(real_turn_ts(&tool), Some(ts));
+        let human = json!({ "type": "user", "timestamp": at,
+            "message": { "role": "user", "content": "please fix it" } });
+        assert_eq!(real_turn_ts(&human), Some(ts));
+
+        // Resume/replay scaffolding and non-turns → None (must NOT advance recency on restart).
+        for scaffold in [
+            json!({ "type": "mode", "timestamp": at }),
+            json!({ "type": "last-prompt", "timestamp": at }),
+            json!({ "type": "permission-mode", "timestamp": at }),
+            json!({ "type": "attachment", "timestamp": at }),
+            json!({ "type": "system", "subtype": "compact_boundary", "timestamp": at }),
+            // tool_result (list content), injected reminder, and the compaction summary blob:
+            json!({ "type": "user", "timestamp": at,
+                "message": { "role": "user", "content": [ { "type": "tool_result", "content": "x" } ] } }),
+            json!({ "type": "user", "timestamp": at,
+                "message": { "role": "user", "content": "<system-reminder>init</system-reminder>" } }),
+            json!({ "type": "user", "timestamp": at, "isCompactSummary": true,
+                "message": { "role": "user", "content": "This session is being continued..." } }),
+        ] {
+            assert_eq!(real_turn_ts(&scaffold), None, "should ignore: {scaffold}");
+        }
+
+        // A real turn with a missing/garbage timestamp yields None so the scan falls back to an
+        // older turn (and ultimately scrollback) rather than emitting a 0 age.
+        let no_ts = json!({ "type": "assistant",
+            "message": { "role": "assistant", "content": [ { "type": "text", "text": "hi" } ] } });
+        assert_eq!(real_turn_ts(&no_ts), None);
     }
 
     #[test]

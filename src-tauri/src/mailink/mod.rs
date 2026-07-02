@@ -1410,14 +1410,18 @@ fn scrollback_times(app: &AppState) -> HashMap<String, u64> {
 }
 
 /// Per-tab last-activity timestamp (unix ms) that the phone's inbox sorts by. A REAL signal, not
-/// request time: the mtime of the tab's Claude transcript JSONL (bumped on every turn), else the
-/// persisted scrollback `updated_at` (any runtime), else `now` for a brand-new tab that has
-/// neither (legitimately "just now"). Previously every /chats row and the WS chat_state snapshot
-/// carried the same request `now`, so the inbox showed every chat at an identical age and they all
-/// flipped to "now" in lockstep — recency ordering was meaningless.
+/// request time and not file mtime: the timestamp of the tab's last actual turn (assistant/tool
+/// output or a genuine human message) from its Claude transcript, else the persisted scrollback
+/// `updated_at` (any runtime), else `now` for a brand-new tab that has neither (legitimately "just
+/// now"). We deliberately do NOT use the JSONL mtime here: a resume/replay rewrites the transcript
+/// (hook context, `mode`/`last-prompt` metadata, `<system-reminder>`s) WITHOUT adding a real turn,
+/// so mtime bumps for every restored tab on a restart and flattens the whole inbox to "now" —
+/// exactly the recency clump this signal exists to prevent. The last-real-turn ts does not advance
+/// on a pure resume. (mtime is still the right change-gate for WS streaming, where "anything
+/// appended → re-scan" is the intended semantics — see stream_new_messages.)
 fn last_activity_ts(app: &AppState, tab_id: &str, scrollback: &HashMap<String, u64>, now: u64) -> u64 {
     resolved_session_id_for_tab(app, tab_id)
-        .and_then(|sid| transcript::session_jsonl_mtime(&sid))
+        .and_then(|sid| transcript::session_last_turn_ts(&sid))
         .or_else(|| scrollback.get(tab_id).copied())
         .unwrap_or(now)
 }
