@@ -80,29 +80,68 @@
   }
 }
 
-/* maiLink phone product shots (gpt-image-2 renders, synthetic demo content) */
-.sl-markdown-content .phone-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1.25rem;
-  justify-content: center;
-  margin: 1.75rem 0;
+/* Product screenshots (synthetic gpt-image-2 renders, no real content) */
+
+/* Clear floated figures at each section boundary */
+.sl-markdown-content h2 { clear: both; }
+
+/* Phone shots placed beside the feature they illustrate */
+.sl-markdown-content .phone-figure {
+  max-width: 230px;
+  margin: 0.5rem auto 1.25rem;
+  text-align: center;
 }
-.sl-markdown-content .phone-row img {
-  width: 210px;
-  max-width: 46%;
+.sl-markdown-content .phone-figure img {
+  width: 100%;
   height: auto;
   border-radius: 1.1rem;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
 }
-.sl-markdown-content .spotlight-figure {
-  text-align: center;
+.sl-markdown-content .phone-figure figcaption {
+  margin-top: 0.55rem;
+  font-size: var(--sl-text-xs);
+  line-height: 1.45;
+  color: var(--sl-color-gray-3);
+}
+@media (min-width: 50rem) {
+  .sl-markdown-content .phone-figure.float-right { float: right; margin: 0.35rem 0 1rem 1.75rem; }
+  .sl-markdown-content .phone-figure.float-left { float: left; margin: 0.35rem 1.75rem 1rem 0; }
+}
+
+/* Two phones side by side (landing spotlight) */
+.sl-markdown-content .phone-pair {
+  display: flex;
+  gap: 1.25rem;
+  justify-content: center;
+  flex-wrap: wrap;
   margin: 1.5rem 0 0.25rem;
 }
-.sl-markdown-content .spotlight-figure img {
-  width: 240px;
-  max-width: 68%;
+.sl-markdown-content .phone-pair img {
+  width: 208px;
+  max-width: 44%;
   height: auto;
   border-radius: 1.1rem;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.16);
+}
+
+/* Mesh cockpit product shot */
+.sl-markdown-content .mesh-figure {
+  max-width: 380px;
+  margin: 1.5rem auto 0.5rem;
+  text-align: center;
+}
+@media (min-width: 50rem) {
+  .sl-markdown-content .mesh-figure.float-right { float: right; margin: 0.35rem 0 1rem 1.75rem; }
+  .sl-markdown-content .mesh-figure.float-left { float: left; margin: 0.35rem 1.75rem 1rem 0; }
+}
+.sl-markdown-content .mesh-figure img {
+  width: 100%;
+  height: auto;
+  border-radius: 0.7rem;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.22);
+}
+.sl-markdown-content .mesh-figure figcaption {
+  margin-top: 0.55rem;
+  font-size: var(--sl-text-xs);
+  color: var(--sl-color-gray-3);
 }

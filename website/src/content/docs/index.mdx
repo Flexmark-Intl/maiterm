@@ -44,6 +44,10 @@ Flip a workspace into a **mesh** and every agent in it can message any other by 
 
 It's not just a coordination win — it's a token win. One monolithic agent has to drag every codebase into a single enormous context and re-read it turn after turn. A mesh keeps each agent's context small and sharply scoped, and agents trade short, addressed messages instead of duplicating each other's worlds — multi-repo work at a fraction of the token spend.
 
+<figure class="mesh-figure">
+  <img src="/screenshots/mesh-cockpit.webp" alt="The maiTerm mesh cockpit — a node graph of six specialist agents, a list of topics they're collaborating on with turn counts, and a status board" />
+</figure>
+
 <CardGrid>
   <Card title="Addressed, never broadcast" icon="approve-check">
     Every message routes to a specific role over a stable handle — a rename never misroutes, and an unknown recipient is a hard error, never a silent drop.
@@ -70,9 +74,10 @@ It's not just a coordination win — it's a token win. One monolithic agent has 
 
 It travels over **your LAN only**, on an encrypted, authenticated channel — TLS with a pinned certificate and a per-device paired token. **No cloud service sits between your phone and your agents.** The single exception is a content-free push "doorbell" hosted on Cloudflare: when an agent needs you while the app is backgrounded, it wakes the app carrying only the tab name and event kind — never a transcript or message. Away from home? Set up a **WireGuard VPN** back to your LAN rather than exposing anything to the internet.
 
-<figure class="spotlight-figure">
-  <img src="/screenshots/mailink-inbox.webp" alt="maiLink on iPhone — an inbox of AI agents, with the ones that need your attention pinned to the top" width="240" />
-</figure>
+<div class="phone-pair">
+  <img src="/screenshots/mailink-inbox.webp" alt="maiLink on iPhone — an inbox of AI agents, with the ones needing attention pinned to the top" />
+  <img src="/screenshots/mailink-answer.webp" alt="Answering an agent's question from your phone — pick an option or type a free-text reply" />
+</div>
 
 <CardGrid>
   <Card title="Live transcripts" icon="comment-alt">

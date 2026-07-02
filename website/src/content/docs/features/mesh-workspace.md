@@ -7,6 +7,11 @@ description: Turn a whole workspace into a mesh so every named agent in it can m
 
 ## Why a mesh beats one giant agent
 
+<figure class="mesh-figure float-right">
+  <img src="/screenshots/mesh-cockpit.webp" alt="The maiTerm mesh cockpit — a node graph of six specialist agents, a topic list showing the conversations they're running with turn counts, and a status board" />
+  <figcaption>The mesh cockpit: agents on the graph, their topics and turn counts, and a status board.</figcaption>
+</figure>
+
 The obvious way to work across several repositories is one agent with everything loaded into a single context. It's also the expensive way: that agent drags every codebase into one enormous context window and re-reads it turn after turn, burning tokens on code that's irrelevant to the question at hand — and the bigger the context gets, the worse the agent reasons about any one part of it.
 
 A mesh inverts that. Each agent is small and **purpose-trained on its own repository** — its context holds one codebase, its purpose note tells it its role, and it goes deep instead of wide. When work crosses a boundary, agents exchange short, addressed messages — a precise question, a precise answer — instead of duplicating each other's worlds. The result is genuine **cross-repository collaboration** at a fraction of the token spend: you pay for a handful of focused exchanges, not for N copies of everything in one bloated context.

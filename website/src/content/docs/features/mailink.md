@@ -7,11 +7,10 @@ maiLink is a companion app for your phone that connects **directly to maiTerm ru
 
 maiLink is not a terminal. It renders a distilled chat transcript of an agent session and injects your replies back into it — the session itself never leaves your machine.
 
-<div class="phone-row">
-  <img src="/screenshots/mailink-inbox.webp" alt="maiLink inbox — agents grouped by whether they need your attention, each with a status and last message" />
-  <img src="/screenshots/mailink-answer.webp" alt="Answering an agent's multiple-choice question from the phone, with an option to type a free-text reply" />
-  <img src="/screenshots/mailink-transcript.webp" alt="A live agent transcript on the phone, with a bar to resume a dormant agent" />
-</div>
+<figure class="phone-figure float-right">
+  <img src="/screenshots/mailink-inbox.webp" alt="maiLink inbox on iPhone — agents grouped by whether they need your attention" />
+  <figcaption>The inbox — the agents that need you, first.</figcaption>
+</figure>
 
 ## No cloud in the data path
 
@@ -42,6 +41,11 @@ Every paired phone appears in the **Paired devices** list with its name and plat
 
 ## What you can do from the phone
 
+<figure class="phone-figure float-right">
+  <img src="/screenshots/mailink-answer.webp" alt="Answering an agent's AskUserQuestion from the phone — choose an option or type a free-text reply" />
+  <figcaption>Answer an agent's question — or interrupt it — without walking to your desk.</figcaption>
+</figure>
+
 - **Watch live transcripts.** Each agent's conversation streams to the phone per turn — a distilled chat view, not a terminal scrape. The thread shows the agent's model and a live context-window gauge, and a compaction shows up as a divider in the thread so you know when the agent's context was condensed.
 - **Answer questions.** When an agent asks a structured question (`AskUserQuestion`), it arrives as an interactive card — single-select, multi-select, and "Other" free-text answers all work from the phone.
 - **Approve permissions.** Permission prompts arrive the same way; approve or deny without walking to your desk.
@@ -50,6 +54,11 @@ Every paired phone appears in the **Paired devices** list with its name and plat
 - **Resume a stopped agent.** A tab whose agent has ended (network drop, quit) stays reachable, so you can auto-resume it from your phone.
 
 ## Choosing what's reachable
+
+<figure class="phone-figure float-left">
+  <img src="/screenshots/mailink-transcript.webp" alt="A live agent transcript on the phone, with a bar to resume a dormant agent" />
+  <figcaption>Every reachable agent — a live transcript you can pick up and resume.</figcaption>
+</figure>
 
 maiLink only ever surfaces **agent tabs** (Claude Code, Codex) — never plain shells. Which of those are reachable is up to you, under **Preferences → AI Agents → maiLink Mobile Companion**:
 
