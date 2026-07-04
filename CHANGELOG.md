@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.20.0
+
+- **Resuming a workspace brings back exactly the agents that were running.** Suspending a workspace now remembers which tabs had a live terminal; resuming it respawns and auto-resumes just those — so a 20-tab workspace that had 3 agents running comes back with those 3 live (with a progress modal for larger resumes), instead of waking tabs you never started or leaving live ones dead.
+- **maiLink — companion app refinements.**
+  - **Transcripts now show up for remote and Codex agents.** SSH-hosted Claude tabs — whose transcript lives on the remote host — and Codex tabs were rendering blank in the phone inbox; both now fall back to the live session so you see the conversation. Codex conversations distill per-turn from Codex's own session log, with the model name and a context-window gauge, matching how Claude tabs already worked.
+  - **Questions from your agents are answerable again, with the right timing.** An AskUserQuestion now reliably rings on the phone and shows what's being asked, and its countdown reflects whether your Claude Code build actually expires the question (newer builds leave it open by default) — so a live question no longer looks expired, and a late answer to a question that already closed can't accidentally land on the next one.
+  - **Permission cards show what you're approving.** A permission prompt now reads like `Bash(rm -rf ./dist) — approve?` instead of just the tool name, and approving a Codex prompt sends the keystroke that matches Codex's variable-length approval list, so your choice can't select the wrong option.
+  - Attention alerts (the doorbell) fire only on a real transition into "needs you," so merely opening the app or restoring a session no longer pushes a phantom "finished," while an AskUserQuestion that opens without a permission prompt still rings.
+  - Cleaner transcripts: agent-to-agent mesh and bridge messages are filtered out instead of flooding every participant's thread, a fan-out of subagents shows each one's task instead of a run of identical `Agent` chips, and an injected screenshot no longer leaves a duplicate raw-path bubble when you re-open the thread.
+
 ## v1.19.0
 
 - **maiLink — reach your agents from your phone.** A companion app that connects **directly to maiTerm running on your own computer** so you can watch and steer your agents from anywhere in the house. It talks to maiTerm over your **LAN only**, on an encrypted, authenticated channel (TLS with a per-device paired token) — **no cloud service sits in the middle**. The one small exception is a content-free push "doorbell": when an agent needs you while the app is backgrounded, a tiny relay hosted on Cloudflare wakes the app, carrying no transcript or message content. To reach your agents from outside your network, set up a WireGuard VPN back to your LAN rather than exposing anything to the internet.
