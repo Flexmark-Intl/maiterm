@@ -1408,8 +1408,8 @@ fn pending_question_for_tab(app: &AppState, tab_id: &str) -> Option<Value> {
         .and_then(|(_, s)| s.pending_question.clone())
 }
 
-/// Unix-ms when the tab's open AskUserQuestion was captured. Claude Code auto-resolves an
-/// unanswered ask after ~60s, so the phone uses this to show/expire its answer card.
+/// Unix-ms when the tab's open AskUserQuestion was captured. Display-only on the phone
+/// ("asked 2m ago"); expiry is derived from `question_expires_at`, never from this.
 fn pending_question_at_for_tab(app: &AppState, tab_id: &str) -> Option<i64> {
     let sessions = app.agent_sessions.read();
     sessions
@@ -1417,6 +1417,72 @@ fn pending_question_at_for_tab(app: &AppState, tab_id: &str) -> Option<i64> {
         .filter(|(_, s)| s.tab_id == tab_id)
         .max_by_key(|(_, s)| rank(s.state))
         .and_then(|(_, s)| s.pending_question_at)
+}
+
+/// Millis until an unanswered AskUserQuestion auto-resolves, given the session's Claude Code
+/// version and the user's `askUserQuestionTimeout` setting — `None` when the ask waits
+/// indefinitely. The timer's history (verified against the CC changelog AND a sweep of every
+/// local ask's resolution latency by version, 2026-07-03):
+///   - < 2.1.198: no timer ever (asks observed answered hours later).
+///   - 2.1.198–2.1.199: hard-coded 60s auto-resolve, non-configurable.
+///   - ≥ 2.1.200: opt-in via `askUserQuestionTimeout` in ~/.claude/settings.json (USER scope
+///     only): "never" (default) | "60s" | "5m" | "10m". Parsed generically (`<n>s`/`<n>m`) so a
+///     future value like "2m" still works.
+/// Unknown version ⇒ None: a missing countdown on an ask that does expire degrades safely
+/// (stale-guard + composer fallback), while a false countdown expires a live question — the
+/// strictly worse failure.
+pub(crate) fn ask_deadline_ms(version: Option<&str>, setting: Option<&str>) -> Option<i64> {
+    let v = parse_cc_version(version?)?;
+    if v < (2, 1, 198) {
+        return None;
+    }
+    if v < (2, 1, 200) {
+        return Some(60_000);
+    }
+    let s = setting?.trim().to_ascii_lowercase();
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: i64 = num.parse().ok().filter(|n| *n > 0)?;
+    match unit {
+        "s" => Some(n * 1_000),
+        "m" => Some(n * 60_000),
+        _ => None, // "never" and anything unrecognized
+    }
+}
+
+/// "2.1.200" → (2, 1, 200). Tolerates a suffix on the patch part ("2.2.0-beta1").
+fn parse_cc_version(s: &str) -> Option<(u64, u64, u64)> {
+    let mut it = s.split('.').map(|p| {
+        p.chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse::<u64>()
+            .ok()
+    });
+    Some((it.next()??, it.next()??, it.next()??))
+}
+
+/// The user's `askUserQuestionTimeout` from `~/.claude/settings.json` — the only scope Claude
+/// Code reads that key from (not project/local settings). `None` when unset or unreadable.
+fn ask_timeout_setting() -> Option<String> {
+    let path = dirs::home_dir()?.join(".claude").join("settings.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v.get("askUserQuestionTimeout")
+        .and_then(|s| s.as_str())
+        .map(String::from)
+}
+
+/// Absolute unix-ms deadline of the tab's open AskUserQuestion, when one applies to this
+/// session's CC build + settings. `None` ⇒ the ask waits indefinitely (the phone must show no
+/// countdown). Claude-only: codex/gemini have no AskUserQuestion.
+fn question_expires_at(app: &AppState, tab_id: &str) -> Option<i64> {
+    let at = pending_question_at_for_tab(app, tab_id)?;
+    let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
+    if !matches!(rt, AgentRuntime::Claude) {
+        return None;
+    }
+    let ver = transcript::claude_session_version(&sid);
+    let deadline = ask_deadline_ms(ver.as_deref(), ask_timeout_setting().as_deref())?;
+    Some(at + deadline)
 }
 
 /// The compact argument label of the tab's current tool (e.g. the Bash command awaiting
@@ -1751,11 +1817,16 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             Some(qs) => { pp["questions"] = qs; }
             None => { pp["text"] = json!("The agent is asking a question — see the terminal for details."); }
         }
-        // Claude Code auto-resolves an unanswered ask after ~60s (undocumented,
-        // non-configurable — anthropics/claude-code#73394). Additive: lets the app show a
-        // countdown / expire the card instead of offering a button that will land stale.
+        // asked_at is display-only on the phone ("asked 2m ago"). expires_at is AUTHORITATIVE
+        // for expiry: present only when this session's CC build + settings actually auto-resolve
+        // the ask (see ask_deadline_ms); absent ⇒ the app shows NO countdown and the question is
+        // answerable until the prompt clears. The real deadline is sent un-buffered — the app
+        // closes the tappable window at expires_at − 5s (keystroke-inject headroom) itself.
         if let Some(at) = pending_question_at_for_tab(app, tab_id) {
             pp["asked_at"] = json!(at);
+            if let Some(exp) = question_expires_at(app, tab_id) {
+                pp["expires_at"] = json!(exp);
+            }
         }
         detail["pendingPrompt"] = pp;
     } else if state == "permission" {
@@ -2084,6 +2155,25 @@ mod tests {
         assert_eq!(permission_key(Codex, "3"), "n");
         assert_eq!(permission_key(Codex, "5"), "n"); // unknown digit → safe decline
         assert_eq!(permission_key(Codex, "whatever"), "n");
+    }
+
+    #[test]
+    fn ask_deadline_is_version_and_setting_gated() {
+        // The 60s timer existed ONLY in CC 2.1.198–2.1.199.
+        assert_eq!(ask_deadline_ms(Some("2.1.197"), None), None);
+        assert_eq!(ask_deadline_ms(Some("2.1.198"), None), Some(60_000));
+        assert_eq!(ask_deadline_ms(Some("2.1.199"), Some("never")), Some(60_000)); // setting didn't exist yet
+        // ≥ 2.1.200: opt-in via askUserQuestionTimeout; default (unset/"never") = no deadline.
+        assert_eq!(ask_deadline_ms(Some("2.1.200"), None), None);
+        assert_eq!(ask_deadline_ms(Some("2.1.200"), Some("never")), None);
+        assert_eq!(ask_deadline_ms(Some("2.1.200"), Some("60s")), Some(60_000));
+        assert_eq!(ask_deadline_ms(Some("2.1.201"), Some("5m")), Some(300_000));
+        assert_eq!(ask_deadline_ms(Some("2.2.0"), Some("10m")), Some(600_000));
+        assert_eq!(ask_deadline_ms(Some("2.2.0-beta1"), Some("garbage")), None);
+        // Unknown version ⇒ no deadline (a false countdown expires a live question — worse
+        // than a missing one, which degrades to stale-guard + composer fallback).
+        assert_eq!(ask_deadline_ms(None, Some("60s")), None);
+        assert_eq!(ask_deadline_ms(Some("weird"), Some("60s")), None);
     }
 
     #[test]

@@ -152,6 +152,22 @@ fn session_meta(session_id: &str) -> Option<SessionMeta> {
     None
 }
 
+/// Claude Code version that wrote the most recent entries of a session's transcript (every JSONL
+/// entry carries a `"version"` field). Gates the AskUserQuestion expiry contract: the 60s
+/// auto-resolve existed only in specific CC versions (see `ask_deadline_ms` in mod.rs). Read from
+/// the newest entry so an in-place CC upgrade mid-session is picked up.
+pub fn claude_session_version(session_id: &str) -> Option<String> {
+    let path = locate_jsonl(session_id)?;
+    let tail = read_tail(&path, 64 * 1024)?;
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if let Some(ver) = v.get("version").and_then(|x| x.as_str()) {
+            return Some(ver.to_string());
+        }
+    }
+    None
+}
+
 /// Unix-ms timestamp of the last REAL turn in a Claude session transcript — the last assistant/tool
 /// turn or genuine human message — as distinct from the file mtime. A resume/replay appends only
 /// scaffolding (SessionStart hook context, `mode`/`last-prompt`/`permission-mode`/`attachment`
