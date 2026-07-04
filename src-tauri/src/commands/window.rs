@@ -466,6 +466,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 archived_name: None,
                 archived_at: None,
                 suspended_at: None,
+                wake_on_resume: false,
                 tab_type: tab.tab_type.clone(),
                 editor_file: tab.editor_file.clone(),
                 last_cwd: tab.last_cwd.clone(),

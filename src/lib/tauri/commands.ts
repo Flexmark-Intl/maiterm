@@ -294,7 +294,9 @@ export async function suspendWorkspace(workspaceId: string): Promise<void> {
   return invoke('suspend_workspace', { workspaceId });
 }
 
-export async function resumeWorkspace(workspaceId: string): Promise<void> {
+/** Clears the workspace's suspended flag; returns the ids of the tabs that were
+ *  live when it was suspended (their wake_on_resume flags are consumed). */
+export async function resumeWorkspace(workspaceId: string): Promise<string[]> {
   return invoke('resume_workspace', { workspaceId });
 }
 

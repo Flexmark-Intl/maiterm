@@ -298,6 +298,11 @@ pub struct Tab {
     /// "age" of a suspended tab in the hidden-tabs menu.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<String>,
+    /// True when this tab was live at the moment its workspace was suspended.
+    /// Resuming the workspace respawns exactly these tabs (mirrors app-restart
+    /// session restore); cleared on resume or when the tab goes live again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wake_on_resume: bool,
     #[serde(default)]
     pub tab_type: TabType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1173,6 +1178,7 @@ impl Tab {
             archived_name: None,
             archived_at: None,
             suspended_at: None,
+            wake_on_resume: false,
             tab_type: TabType::default(),
             editor_file: None,
             last_cwd: None,
@@ -1213,6 +1219,7 @@ impl Tab {
             archived_name: None,
             archived_at: None,
             suspended_at: None,
+            wake_on_resume: false,
             tab_type: TabType::Editor,
             editor_file: Some(file_info),
             last_cwd: None,
@@ -1253,6 +1260,7 @@ impl Tab {
             archived_name: None,
             archived_at: None,
             suspended_at: None,
+            wake_on_resume: false,
             tab_type: TabType::Diff,
             editor_file: None,
             last_cwd: None,

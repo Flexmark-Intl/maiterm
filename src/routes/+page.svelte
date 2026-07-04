@@ -50,11 +50,13 @@
   let restoreDone = $state(0);
   let restoreCurrentLabel = $state('');
   let restoreCancelling = $state(false);
-  // True from launch until session restore finishes (or there was nothing to
-  // restore). Defaults true so startup work that must see the *settled* tab set —
-  // e.g. the mesh auto-recheck — defers until respawns complete instead of firing
-  // mid-restore against half-spawned members. Cleared in runSessionRestore's finally.
-  let restoreInProgress = $state(true);
+  // >0 while a restore/wake drive is pending or running. Starts at 1 (held for
+  // the launch session restore) so startup work that must see the *settled* tab
+  // set — e.g. the mesh auto-recheck — defers until respawns complete instead of
+  // firing mid-restore against half-spawned members. A workspace resume raises
+  // the gate again while its previously-live tabs are respawning.
+  let restoreGate = $state(1);
+  const restoreInProgress = $derived(restoreGate > 0);
   // Non-reactive guard read inside the async loop (no need to trigger effects).
   let restoreCancelled = false;
   // Only surface the modal for a meaningful restore — a 1-2 tab restore happens
@@ -232,8 +234,12 @@
           const needsReattach = terminalsStore.shouldReattach(tab.pty_id);
           // pty_id set and not explicitly suspended ⟹ was live at last shutdown.
           const wasLive = respawnLive && !!tab.pty_id && !tab.suspended_at;
+          // Live-at-suspend tab of a workspace load() just un-suspended (full
+          // restore) — its pty_id was cleared at suspend, so the hint set is
+          // the only marker.
+          const pendingWake = workspacesStore.pendingWakeTabIds.has(tab.id);
           const isActiveVisible = ws.id === activeWsId && tab.id === pane.active_tab_id;
-          if (!needsReattach && !wasLive && !isActiveVisible) continue;
+          if (!needsReattach && !wasLive && !pendingWake && !isActiveVisible) continue;
           list.push({
             workspaceId: ws.id,
             paneId: pane.id,
@@ -263,26 +269,28 @@
     });
   }
 
-  // Drive the restore serially, updating the progress modal as it goes. Auto-resume
-  // commands fire inside each TerminalPane mount (we don't await them — the queue
-  // only waits for the PTY to come up), so agents relaunch in the background while
-  // the next tab restores.
-  async function runSessionRestore() {
+  // Drive a restore list serially, updating the progress modal as it goes.
+  // Auto-resume commands fire inside each TerminalPane mount (we don't await
+  // them — the queue only waits for the PTY to come up), so agents relaunch in
+  // the background while the next tab restores. Shared by the launch session
+  // restore and workspace resume (wake the tabs that were live at suspend).
+  async function driveRestore(list: RestoreItem[]) {
+    if (list.length === 0) return;
+
+    restoreCancelled = false;
+    restoreCancelling = false;
+    restoreDone = 0;
+    restoreTotal = list.length;
+    restoreCurrentLabel = list[0].label;
+    restoreActive = list.length >= RESTORE_MODAL_THRESHOLD;
+
     try {
-      const list = buildRestoreList();
-      if (list.length === 0) return;
-
-      restoreCancelled = false;
-      restoreCancelling = false;
-      restoreDone = 0;
-      restoreTotal = list.length;
-      restoreCurrentLabel = list[0].label;
-      restoreActive = list.length >= RESTORE_MODAL_THRESHOLD;
-
       for (const item of list) {
         if (restoreCancelled) break;
         restoreCurrentLabel = item.label;
         try {
+          // A woken tab shouldn't sit behind its pane's resume-on-click gate.
+          pendingResumePanes.delete(item.paneId);
           activatedWorkspaceIds.add(item.workspaceId);
           activatedTabIds.add(item.tabId);
           await waitForTabSettled(item.tabId);
@@ -295,10 +303,27 @@
       restoreActive = false;
       restoreCancelling = false;
       restoreCurrentLabel = '';
+    }
+  }
+
+  // Serialize drives — a workspace resume can land while the launch restore is
+  // still draining; chaining keeps the mounts one-at-a-time globally.
+  let restoreChain: Promise<void> = Promise.resolve();
+  function queueRestore(list: RestoreItem[]): Promise<void> {
+    restoreChain = restoreChain.then(() => driveRestore(list));
+    return restoreChain;
+  }
+
+  async function runSessionRestore() {
+    try {
+      const list = buildRestoreList();
+      workspacesStore.pendingWakeTabIds.clear();
+      await queueRestore(list);
+    } finally {
       // Restore is done (or there was nothing to do, or it was cancelled mid-drain).
       // Release the gate so deferred startup work — the mesh auto-recheck — runs now
       // that the tab set has settled.
-      restoreInProgress = false;
+      restoreGate -= 1;
     }
   }
 
@@ -357,9 +382,23 @@
       activatedTabIds.add(tabId);
     }
     window.addEventListener('mesh-activate-tab', handleActivateTab);
+
+    // Workspace resume: bring back the tabs that were live when it was suspended,
+    // serially like session restore. The gate is raised synchronously — the store
+    // dispatches this before setActiveWorkspace — so the mesh auto-recheck effect
+    // fired by the imminent workspace switch waits for the settled roster.
+    function handleWorkspaceResumeTabs(e: Event) {
+      const items = (e as CustomEvent<RestoreItem[]>).detail;
+      if (!items?.length) return;
+      restoreGate += 1;
+      queueRestore(items).finally(() => { restoreGate -= 1; });
+    }
+    window.addEventListener('workspace-resume-tabs', handleWorkspaceResumeTabs);
+
     return () => {
       window.removeEventListener('deactivate-tabs', handleDeactivateTabs);
       window.removeEventListener('mesh-activate-tab', handleActivateTab);
+      window.removeEventListener('workspace-resume-tabs', handleWorkspaceResumeTabs);
     };
   });
 

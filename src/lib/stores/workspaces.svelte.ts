@@ -134,6 +134,10 @@ function createWorkspacesStore() {
   const suspendingWorkspaceIds = new Set<string>();
   // Tab IDs currently being suspended — guards pty-close from deleting the tab
   const suspendingTabIds = new Set<string>();
+  // Tabs to respawn during launch session restore: previously-live tabs of
+  // workspaces un-suspended by load() (full-restore mode). Their pty_id was
+  // cleared at suspend time, so buildRestoreList in +page needs this hint.
+  const pendingWakeTabIds = new Set<string>();
   // Tick counter to force re-evaluation of recentWorkspaces when entries expire
   let _recentTick = $state(0);
   let _recentTimer: ReturnType<typeof setInterval> | null = null;
@@ -182,6 +186,7 @@ function createWorkspacesStore() {
     get sidebarWidth() { return sidebarWidth; },
     get sidebarCollapsed() { return sidebarCollapsed; },
     get recentWorkspaces() { return recentWorkspaces; },
+    get pendingWakeTabIds() { return pendingWakeTabIds; },
     get lastSwitchedAt() { return lastSwitchedAt; },
 
     /** Detected agent runtime for a tab, defaulting to 'claude' when none is set. */
@@ -314,7 +319,11 @@ function createWorkspacesStore() {
           // earlier versions persisted into state.
           if (ws.suspended) {
             ws.suspended = false;
-            commands.resumeWorkspace(ws.id).catch(() => {});
+            // Resume hands back the tabs that were live at suspend time; stash
+            // them so the launch session restore respawns them too (their
+            // pty_id was cleared at suspend, so the pty_id marker can't).
+            const wakeIds = await commands.resumeWorkspace(ws.id).catch(() => [] as string[]);
+            for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
           }
           continue;
         }
@@ -476,10 +485,35 @@ function createWorkspacesStore() {
       const ws = workspaces.find(w => w.id === workspaceId);
       if (!ws || !ws.suspended) return;
 
-      // Clear suspended flag
-      await commands.resumeWorkspace(workspaceId);
-      const wsToResume = workspaces.find(w => w.id === workspaceId);
-      if (wsToResume) wsToResume.suspended = false;
+      // Clear suspended flag; Rust hands back the tabs that were live when the
+      // workspace was suspended (consuming their wake_on_resume flags).
+      const wakeTabIds = await commands.resumeWorkspace(workspaceId).catch(() => [] as string[]);
+      ws.suspended = false;
+
+      // Build the wake list — the previously-live tabs, each pane's active tab
+      // first so the view the user lands on comes back fastest.
+      const wakeSet = new Set(wakeTabIds);
+      const items: { workspaceId: string; paneId: string; tabId: string; label: string }[] = [];
+      for (const pane of ws.panes) {
+        for (const tab of pane.tabs) {
+          tab.wake_on_resume = false; // keep local mirror in sync with backend
+          if (!wakeSet.has(tab.id)) continue;
+          const item = {
+            workspaceId: ws.id,
+            paneId: pane.id,
+            tabId: tab.id,
+            label: `${ws.name} › ${tab.name || 'Terminal'}`,
+          };
+          if (tab.id === pane.active_tab_id) items.unshift(item);
+          else items.push(item);
+        }
+      }
+
+      // Hand the wake list to the serial restore driver in +page *before* the
+      // switch so its restore gate raises ahead of the activation effects.
+      if (items.length > 0) {
+        window.dispatchEvent(new CustomEvent('workspace-resume-tabs', { detail: items }));
+      }
 
       // Switch to this workspace — lazy init handles PTY spawning
       await this.setActiveWorkspace(workspaceId);

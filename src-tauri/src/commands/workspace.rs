@@ -639,11 +639,14 @@ pub fn suspend_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>,
     // Give the workspace's live terminal tabs their proper suspended status — the
     // frontend already killed the PTYs, so leaving pty_id set would relapse the
     // high-watermark and make these tabs read as "live" on the next restart.
+    // Remember which tabs were live (wake_on_resume) so resuming the workspace
+    // brings back exactly that set, like app-restart session restore.
     for pane in ws.panes.iter_mut() {
         for tab in pane.tabs.iter_mut() {
             if matches!(tab.tab_type, TabType::Terminal) && tab.pty_id.is_some() {
                 tab.pty_id = None;
                 tab.suspended_at = Some(iso_now());
+                tab.wake_on_resume = true;
             }
         }
     }
@@ -652,14 +655,25 @@ pub fn suspend_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>,
 }
 
 #[tauri::command]
-pub fn resume_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>, workspace_id: String) -> Result<(), String> {
+pub fn resume_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>, workspace_id: String) -> Result<Vec<String>, String> {
     let label = window.label().to_string();
     let mut app_data = state.app_data.write();
     let win = app_data.window_mut(&label).ok_or("Window not found")?;
     let ws = win.workspaces.iter_mut().find(|w| w.id == workspace_id).ok_or("Workspace not found")?;
     ws.suspended = false;
+    // Hand back the tabs that were live when this workspace was suspended so the
+    // frontend can respawn them (consumed — the flags clear here).
+    let mut wake_tab_ids = Vec::new();
+    for pane in ws.panes.iter_mut() {
+        for tab in pane.tabs.iter_mut() {
+            if tab.wake_on_resume {
+                tab.wake_on_resume = false;
+                wake_tab_ids.push(tab.id.clone());
+            }
+        }
+    }
     save_state(&app_data)?;
-    Ok(())
+    Ok(wake_tab_ids)
 }
 
 #[tauri::command]
@@ -717,8 +731,10 @@ pub fn set_tab_pty_id(
         if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
             if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == tab_id) {
                 tab.pty_id = Some(pty_id);
-                // Tab is live again — drop its suspended-age timestamp.
+                // Tab is live again — drop its suspended-age timestamp and any
+                // pending wake-on-resume marker.
                 tab.suspended_at = None;
+                tab.wake_on_resume = false;
             }
         }
     }
@@ -754,6 +770,8 @@ pub fn suspend_tab(
     tab.restore_ssh_command = ssh_command;
     tab.restore_remote_cwd = remote_cwd;
     tab.suspended_at = Some(iso_now());
+    // Explicitly suspended — don't auto-wake it on workspace resume.
+    tab.wake_on_resume = false;
 
     let data_clone = app_data.clone();
     drop(app_data);
@@ -799,6 +817,7 @@ pub fn mark_tabs_suspended(
                 if let Some(ts) = marks.get(&tab.id) {
                     tab.pty_id = None;
                     tab.suspended_at = Some(ts.clone().unwrap_or_else(iso_now));
+                    tab.wake_on_resume = false;
                     changed = true;
                 }
             }
