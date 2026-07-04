@@ -41,6 +41,59 @@ fn build_log_plugin() -> tauri_plugin_log::Builder {
         .timezone_strategy(TimezoneStrategy::UseLocal)
 }
 
+/// Raise the file-descriptor soft limit toward the hard limit. macOS GUI apps
+/// start with a soft limit of 256; each open PTY costs 3 fds (master + cloned
+/// reader + writer), so ~70 terminal tabs exhausts it and every subsequent
+/// spawn fails with EMFILE ("Too many open files"). Returns (old, new) on a
+/// successful raise so the caller can log it once the logger is up.
+#[cfg(unix)]
+fn raise_fd_limit() -> Option<(u64, u64)> {
+    unsafe {
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return None;
+        }
+        let mut desired: libc::rlim_t = 65536;
+        #[cfg(target_os = "macos")]
+        {
+            // macOS rejects rlim_cur above kern.maxfilesperproc even when the
+            // hard limit reports RLIM_INFINITY.
+            let mut maxfiles: libc::c_int = 0;
+            let mut size = std::mem::size_of::<libc::c_int>();
+            let name = std::ffi::CString::new("kern.maxfilesperproc").unwrap();
+            if libc::sysctlbyname(
+                name.as_ptr(),
+                &mut maxfiles as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            ) == 0
+                && maxfiles > 0
+            {
+                desired = desired.min(maxfiles as libc::rlim_t);
+            }
+        }
+        if lim.rlim_max != libc::RLIM_INFINITY {
+            desired = desired.min(lim.rlim_max);
+        }
+        if desired <= lim.rlim_cur {
+            return None;
+        }
+        let old = lim.rlim_cur;
+        lim.rlim_cur = desired;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+            Some((old, desired))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() -> Option<(u64, u64)> {
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Arm crash marker BEFORE any other init. arm_running_marker() captures
@@ -49,6 +102,10 @@ pub fn run() {
     // is cached in the function's static so get_app_diagnostics can read it
     // back without us having to thread it through AppState.
     let _prev_run = arm_running_marker();
+
+    // Raise the fd soft limit before anything can spawn PTYs or sockets.
+    // Logged in setup() once the log plugin is active.
+    let fd_limit_raise = raise_fd_limit();
 
     let app_state = Arc::new(AppState::new());
 
@@ -128,6 +185,11 @@ pub fn run() {
             // tauri-plugin-log is active by now — surface the warning that
             // arm_running_marker() captured before the logger was ready.
             log_previous_run_status();
+
+            match fd_limit_raise {
+                Some((old, new)) => log::info!("Raised RLIMIT_NOFILE soft limit {} -> {}", old, new),
+                None => log::warn!("RLIMIT_NOFILE soft limit not raised (already at max or setrlimit failed)"),
+            }
 
             // Window title is set dynamically from the frontend (workspace name)
 
