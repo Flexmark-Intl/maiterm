@@ -1542,9 +1542,10 @@ fn map_ask_questions(tool_input: &Value) -> Option<Value> {
 }
 
 /// Build the chat transcript: per-turn source markdown from the session's transcript file
-/// (Claude JSONL / Codex rollout) when we can find it, otherwise the old single-system-turn
-/// terminal scrape (Gemini / robustness).
-fn build_transcript(app: &AppState, tab_id: &str, runtime: &str, now: u64) -> Vec<Value> {
+/// (Claude JSONL / Codex rollout) when we can find it, otherwise a single-system-turn scrape of
+/// the tab's own live terminal (SSH tabs — whose transcripts live on the remote host — pruned
+/// local sessions, Gemini, plain shells).
+fn build_transcript(app: &AppState, tab_id: &str, now: u64) -> Vec<Value> {
     // Resolve via the LIVE session, or (post-relaunch, pre-initSession) the persisted resume
     // id — so a dormant/resuming agent still shows its real distilled conversation, keyed to
     // THIS tab, instead of a raw terminal scrape or empty (which the app rendered as
@@ -1556,14 +1557,15 @@ fn build_transcript(app: &AppState, tab_id: &str, runtime: &str, now: u64) -> Ve
             }
         }
     }
-    if runtime == "claude" {
-        // No JSONL resolvable → empty, NOT the raw terminal scrape: the scrape is wide,
-        // unwrapped, and easily misread as another agent's content on a phone.
-        return Vec::new();
-    }
-    // Codex with no locatable rollout, Gemini (no transcript source yet), or a hand-designated
-    // plain shell: distilled recent terminal text as a single system turn. Uses the LIVE
-    // tab→pty map, not the persisted tab.pty_id which can be stale.
+    // No transcript file resolvable — Claude included. This is the NORMAL case for every SSH
+    // tab (the session runs on the remote host, so its JSONL lives in the REMOTE
+    // ~/.claude/projects — most of Darryl's fleet) and for old local sessions Claude Code has
+    // pruned (cleanupPeriodDays). Field bug 2026-07-03: Claude used to return empty here "to
+    // avoid a scrape being misread", which blanked MOST of the inbox; the scrape is this tab's
+    // own live PTY content (keyed via the LIVE tab→pty map, not the stale persisted tab.pty_id),
+    // so showing it as a single system turn is strictly better than nothing. Dormant tabs have
+    // no live PTY and still come back empty — the app renders its "no messages captured yet"
+    // empty-state for those.
     let recent = pty_for_tab(app, tab_id)
         .and_then(|p| crate::commands::terminal::recent_text(app, &p, 40).ok())
         .unwrap_or_default();
@@ -1769,7 +1771,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // Per-turn source markdown from the session transcript (Claude) so the phone's GFM renderer
     // lights up; falls back to the distilled terminal scrape for other runtimes / when no
     // transcript is found. See mailink/transcript.rs.
-    let transcript = build_transcript(app, tab_id, runtime, now);
+    let transcript = build_transcript(app, tab_id, now);
 
     let mut detail = json!({
         "tabId": meta.tab_id,
