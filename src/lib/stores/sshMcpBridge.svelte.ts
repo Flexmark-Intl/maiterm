@@ -116,6 +116,22 @@ export function isInteractiveSshSession(cmd: string): boolean {
 }
 
 /**
+ * True when the tab's PTY currently has an interactive ssh session in the
+ * foreground — the precondition for writing bridge setup / env-var commands
+ * to the PTY. Writing when ssh has exited dumps the script into the LOCAL
+ * shell, which clobbers local ~/.claude.json / ~/.claude/settings.json /
+ * ~/.aiterm with remote-tunnel ports that are dead on this machine.
+ */
+export async function isRemoteShellForeground(ptyId: string): Promise<boolean> {
+  try {
+    const info = await commands.getPtyInfo(ptyId);
+    return !!info.foreground_command && isInteractiveSshSession(info.foreground_command);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Build a shell script for background SSH execution.
  * This runs as a non-interactive command, not through the user's PTY.
  * Sets up: lockfile, MCP entry in ~/.claude.json, hooks in ~/.claude/settings.json.
@@ -349,8 +365,7 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
     // PTY whose foreground is no longer ssh dumps the export into the local shell.
     if (ptyId) {
       try {
-        const info = await commands.getPtyInfo(ptyId);
-        if (!info.foreground_command || !isInteractiveSshSession(info.foreground_command)) {
+        if (!(await isRemoteShellForeground(ptyId))) {
           logInfo("SSH MCP bridge: skipping env-var injection — ssh no longer foreground for tab " + tabId);
         } else {
           const envCmd = " export AITERM_TAB_ID=" + tabId + " AITERM_PORT=" + tunnelInfo.remote_port + "\n";

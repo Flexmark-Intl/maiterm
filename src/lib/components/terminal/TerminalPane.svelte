@@ -34,7 +34,7 @@
   import type { AgentRuntime } from '$lib/agents/types';
   import { createFilePathLinkProvider } from '$lib/utils/filePathDetector';
   import { openFileFromTerminal } from '$lib/utils/openFile';
-  import { enableBridge, disableBridge, hasBridge, getBridgeInfo, getBridgeStatus, buildUserSetupScript, isInteractiveSshSession } from '$lib/stores/sshMcpBridge.svelte';
+  import { enableBridge, disableBridge, hasBridge, getBridgeInfo, getBridgeStatus, buildUserSetupScript, isInteractiveSshSession, isRemoteShellForeground } from '$lib/stores/sshMcpBridge.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import Icon from '$lib/components/Icon.svelte';
@@ -1735,6 +1735,12 @@
           {
             label: 'Inject maiTerm Env Vars',
             action: async () => {
+              // Guard: if ssh is no longer foreground, this export would land in
+              // the LOCAL shell and poison its AITERM_* env with remote-tunnel values.
+              if (!(await isRemoteShellForeground(ptyId))) {
+                dispatch('MCP Bridge', 'No SSH session in the foreground — not injecting env vars into the local shell', 'error', { tabId });
+                return;
+              }
               const bridge = getBridgeInfo(tabId);
               if (bridge?.remotePort) {
                 const envCmd = " export AITERM_TAB_ID=" + tabId + " AITERM_PORT=" + bridge.remotePort + "\n";
@@ -1746,6 +1752,15 @@
           {
             label: 'Install MCP for Current User',
             action: async () => {
+              // Guard: this script is built for the REMOTE end of the tunnel. If ssh
+              // has exited, it would execute in the local shell and clobber the local
+              // ~/.claude.json / ~/.claude/settings.json / ~/.aiterm with a
+              // remote-tunnel port that is dead on this machine (hooks then fail
+              // with ECONNREFUSED in every tab).
+              if (!(await isRemoteShellForeground(ptyId))) {
+                dispatch('MCP Bridge', 'No SSH session in the foreground — refusing to run the remote MCP setup in the local shell', 'error', { tabId });
+                return;
+              }
               const script = await buildUserSetupScript(tabId);
               if (script) {
                 const cmd = ' ' + script + '\n';
