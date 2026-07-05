@@ -229,6 +229,8 @@ key; mint a per-request id instead so distinct agents can't merge.
 
 **Stale hook cleanup:** On startup, `write_hook_settings()` sweeps hooks whose port has no live lockfile. `cleanup_stale_lockfiles()` also removes hooks for dead servers by auth token. Port extraction handles both URL format (`127.0.0.1:NNNNN`) and legacy env var format (`AITERM_PORT = "NNNNN"`).
 
+**Hook self-heal:** the 30s reassert loop (`reassert_if_drifted`) covers BOTH `~/.claude.json` (`ensure_mcp_settings`) and the hooks in `~/.claude/settings.json` (`ensure_hook_settings`, gated on `claude_hooks` pref). Both files are co-owned: the `claude` CLI rewrites them, and an SSH-bridge setup script that lands in a local shell clobbers them with remote-tunnel ports (dead locally → ECONNREFUSED on every hook). `build_our_hooks()` is the single definition shared by install and drift check.
+
 **Auto-open notes panel:** `claudeCode.svelte.ts` auto-opens notes panel when MCP tools write tab notes or workspace notes, switching scope as appropriate.
 
 ## SSH MCP Bridge (Remote IDE Tools)
