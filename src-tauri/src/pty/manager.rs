@@ -947,14 +947,38 @@ fn is_ssh_command(cmd: &str) -> bool {
     matches!(basename, "ssh" | "mosh" | "autossh")
 }
 
-/// Get the foreground process command via ps (Unix)
-///
-/// We rely on the tty's foreground process group (tpgid) instead of "any ssh
-/// descendant of the shell": a subprocess that the foreground app happens to
-/// spawn (e.g. Claude running ssh as a worker for one of its Bash tool calls)
-/// must NOT make the shell look remote. Only the actual foreground job counts.
+/// TTL for the shared process-snapshot caches below. The mesh readiness modal polls
+/// `get_agent_liveness` for EVERY ambiguous tab once per second; without a cache each
+/// call runs its own full `ps -x` / sysinfo sweep, and with dozens of tabs that's
+/// dozens of full process enumerations per second (~1.5 cores burned even off the
+/// main thread). One sweep per TTL answers the whole tick; staleness under a second
+/// is invisible to a 1s poll UI.
+const PROC_SNAPSHOT_TTL: Duration = Duration::from_millis(800);
+
+/// One process row from a single `ps` sweep (unix foreground-job probe).
 #[cfg(unix)]
-fn get_foreground_command(shell_pid: u32) -> Option<String> {
+struct PsRow {
+    pid: u32,
+    pgid: u32,
+    tpgid: i32,
+    cmd: String,
+}
+
+#[cfg(unix)]
+static PS_SNAPSHOT: Mutex<Option<(std::time::Instant, Arc<Vec<PsRow>>)>> = Mutex::new(None);
+
+/// Full `ps` sweep, cached for PROC_SNAPSHOT_TTL. Holding the lock across the spawn
+/// intentionally serializes concurrent refreshers — the second caller blocks briefly
+/// and then reads the fresh snapshot instead of spawning its own `ps`.
+#[cfg(unix)]
+fn ps_rows_snapshot() -> Option<Arc<Vec<PsRow>>> {
+    let mut guard = PS_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((taken, rows)) = guard.as_ref() {
+        if taken.elapsed() < PROC_SNAPSHOT_TTL {
+            return Some(rows.clone());
+        }
+    }
+
     // macOS BSD ps uses -x (show processes without controlling terminal)
     // Linux procps uses -e (select all processes) for equivalent behavior
     #[cfg(target_os = "macos")]
@@ -969,14 +993,7 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    struct Row {
-        pid: u32,
-        pgid: u32,
-        tpgid: i32,
-        cmd: String,
-    }
-
-    let mut rows: Vec<Row> = Vec::new();
+    let mut rows: Vec<PsRow> = Vec::new();
     for line in stdout.lines() {
         let trimmed = line.trim();
         // split_whitespace collapses multiple spaces — critical because ps
@@ -998,8 +1015,23 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
         if cmd.is_empty() {
             continue;
         }
-        rows.push(Row { pid, pgid, tpgid, cmd });
+        rows.push(PsRow { pid, pgid, tpgid, cmd });
     }
+
+    let rows = Arc::new(rows);
+    *guard = Some((std::time::Instant::now(), rows.clone()));
+    Some(rows)
+}
+
+/// Get the foreground process command via ps (Unix)
+///
+/// We rely on the tty's foreground process group (tpgid) instead of "any ssh
+/// descendant of the shell": a subprocess that the foreground app happens to
+/// spawn (e.g. Claude running ssh as a worker for one of its Bash tool calls)
+/// must NOT make the shell look remote. Only the actual foreground job counts.
+#[cfg(unix)]
+fn get_foreground_command(shell_pid: u32) -> Option<String> {
+    let rows = ps_rows_snapshot()?;
 
     let shell_row = rows.iter().find(|r| r.pid == shell_pid)?;
 
@@ -1033,43 +1065,26 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
 /// (Ctrl-Z) or tool-spawning agent from being mistaken for gone. Cross-platform —
 /// reuses the same `sysinfo` parent→children idiom as `get_foreground_command`.
 pub fn agent_process_alive(shell_pid: u32, proc_names: &[&str]) -> bool {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     if proc_names.is_empty() {
         return false;
     }
 
-    let mut sys = System::new();
-    let refresh = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
-    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+    let rows = proc_tree_snapshot();
 
-    let basename_lower = |s: &str| -> String {
-        std::path::Path::new(s)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(s)
-            .to_ascii_lowercase()
-    };
-
-    // Build parent → children adjacency and mark which pids are the agent binary
-    // (argv0 or comm basename matches). Same refresh/idiom as get_foreground_command.
+    // Build parent → children adjacency from the (cached) snapshot; matching against
+    // proc_names is cheap and done per call so different callers (mesh readiness vs.
+    // the dormancy reaper's runtime-specific names) can share the same snapshot.
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     let mut is_agent: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
-    for (pid, process) in sys.processes() {
-        let pid = pid.as_u32();
-        if let Some(ppid) = process.parent() {
-            children.entry(ppid.as_u32()).or_default().push(pid);
+    for row in rows.iter() {
+        if let Some(ppid) = row.ppid {
+            children.entry(ppid).or_default().push(row.pid);
         }
-        let name = basename_lower(&process.name().to_string_lossy());
-        let argv0 = process
-            .cmd()
-            .first()
-            .map(|s| basename_lower(&s.to_string_lossy()))
-            .unwrap_or_default();
         let matched = proc_names.iter().any(|c| {
             let c = c.to_ascii_lowercase();
-            name == c || argv0 == c
+            row.name == c || row.argv0 == c
         });
-        is_agent.insert(pid, matched);
+        is_agent.insert(row.pid, matched);
     }
 
     // BFS descendants of the shell (the shell row itself is not treated as a match).
@@ -1089,6 +1104,61 @@ pub fn agent_process_alive(shell_pid: u32, proc_names: &[&str]) -> bool {
         }
     }
     false
+}
+
+/// One process row from a single sysinfo sweep: pid, parent, and the pre-lowercased
+/// comm/argv0 basenames `agent_process_alive` matches against.
+struct ProcTreeRow {
+    pid: u32,
+    ppid: Option<u32>,
+    name: String,
+    argv0: String,
+}
+
+static PROC_TREE_SNAPSHOT: Mutex<Option<(std::time::Instant, Arc<Vec<ProcTreeRow>>)>> =
+    Mutex::new(None);
+
+/// Full sysinfo process sweep, cached for PROC_SNAPSHOT_TTL (same rationale and
+/// lock-across-refresh idiom as `ps_rows_snapshot`).
+fn proc_tree_snapshot() -> Arc<Vec<ProcTreeRow>> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let mut guard = PROC_TREE_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((taken, rows)) = guard.as_ref() {
+        if taken.elapsed() < PROC_SNAPSHOT_TTL {
+            return rows.clone();
+        }
+    }
+
+    let mut sys = System::new();
+    let refresh = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always);
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
+
+    let basename_lower = |s: &str| -> String {
+        std::path::Path::new(s)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(s)
+            .to_ascii_lowercase()
+    };
+
+    let mut rows: Vec<ProcTreeRow> = Vec::with_capacity(sys.processes().len());
+    for (pid, process) in sys.processes() {
+        rows.push(ProcTreeRow {
+            pid: pid.as_u32(),
+            ppid: process.parent().map(|p| p.as_u32()),
+            name: basename_lower(&process.name().to_string_lossy()),
+            argv0: process
+                .cmd()
+                .first()
+                .map(|s| basename_lower(&s.to_string_lossy()))
+                .unwrap_or_default(),
+        });
+    }
+
+    let rows = Arc::new(rows);
+    *guard = Some((std::time::Instant::now(), rows.clone()));
+    rows
 }
 
 #[cfg(windows)]
