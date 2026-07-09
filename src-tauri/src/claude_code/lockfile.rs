@@ -55,6 +55,30 @@ fn is_process_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// A lockfile is live when its owning process is running — or, for tunnel
+/// lockfiles written into ~/.claude/ide by a *peer* maiTerm's SSH-bridge
+/// remote setup (this machine was the ssh target; the lockfile has `pid: 0`
+/// because the listener is sshd's reverse-tunnel port, not a local process),
+/// when the port still accepts connections. pid 0 must never take the pid
+/// path: kill(0, 0) signals our own process group and always succeeds, which
+/// made tunnel lockfiles — and their hook entries — immortal after the
+/// tunnel died (the 61720 ECONNREFUSED incident).
+fn lockfile_is_live(pid: u64, port: u16) -> bool {
+    if pid > 0 {
+        return is_process_alive(pid as u32);
+    }
+    port_is_listening(port)
+}
+
+fn port_is_listening(port: u16) -> bool {
+    use std::net::{SocketAddr, TcpStream};
+    if port == 0 {
+        return false;
+    }
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).is_ok()
+}
+
 fn ide_lock_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("ide"))
 }
@@ -534,14 +558,9 @@ fn collect_live_lockfile_ports() -> Vec<u16> {
         let Ok(contents) = fs::read_to_string(&path) else { continue };
         let Ok(data) = serde_json::from_str::<serde_json::Value>(&contents) else { continue };
 
-        let alive = data
-            .get("pid")
-            .and_then(|v| v.as_u64())
-            .map(|pid| is_process_alive(pid as u32))
-            .unwrap_or(false);
-
-        if alive {
-            if let Some(port) = data.get("serverPort").and_then(|v| v.as_u64()) {
+        let pid = data.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+        if let Some(port) = data.get("serverPort").and_then(|v| v.as_u64()) {
+            if lockfile_is_live(pid, port as u16) {
                 ports.push(port as u16);
             }
         }
@@ -805,18 +824,20 @@ pub fn cleanup_stale_lockfiles() {
             continue;
         };
 
-        if let Some(pid) = data.get("pid").and_then(|v| v.as_u64()) {
-            let alive = is_process_alive(pid as u32);
-            if !alive {
-                // Collect port/auth before deleting so we can clean their hooks
-                let port = data.get("serverPort").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-                let auth = data.get("authToken").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if port > 0 && !auth.is_empty() {
-                    stale_ports.push((port, auth));
-                }
-                log::info!("Removing stale lock file {:?} (pid {} dead)", path, pid);
-                let _ = fs::remove_file(&path);
+        let pid = data.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let port = data.get("serverPort").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        if !lockfile_is_live(pid, port) {
+            // Collect port/auth before deleting so we can clean their hooks
+            let auth = data.get("authToken").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if port > 0 && !auth.is_empty() {
+                stale_ports.push((port, auth));
             }
+            log::info!(
+                "Removing stale lock file {:?} ({})",
+                path,
+                if pid > 0 { format!("pid {} dead", pid) } else { format!("tunnel port {} not listening", port) }
+            );
+            let _ = fs::remove_file(&path);
         }
     }
 
