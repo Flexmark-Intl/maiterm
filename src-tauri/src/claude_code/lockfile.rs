@@ -450,11 +450,50 @@ fn hooks_are_current(path: &std::path::Path, port: u16, auth: &str) -> bool {
     // Claude refuses HTTP hooks whose URL isn't allowlisted, so a missing
     // pattern is drift even when the hook entries themselves survived.
     let pattern = format!("http://127.0.0.1:{}/*", port);
-    settings
+    let allowed = settings
         .get("allowedHttpHookUrls")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().any(|v| v.as_str() == Some(&pattern)))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !allowed {
+        return false;
+    }
+
+    // Stale foreign maiTerm entries are drift too. A deploy overlap leaves the
+    // old instance's hooks behind (its lockfile was still live when we swept at
+    // startup, then it died without clean exit) — every hook then also dials
+    // the dead port, and every session shows ECONNREFUSED noise. The sweep that
+    // removes them lives in write_hook_settings, which only runs on drift, so
+    // stale ports must *count* as drift.
+    let mut foreign_ports: Vec<u16> = Vec::new();
+    for entries in hooks.values() {
+        if let Some(arr) = entries.as_array() {
+            for entry in arr {
+                if let Some(p) = extract_hook_port(entry) {
+                    if p != port && !foreign_ports.contains(&p) {
+                        foreign_ports.push(p);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(arr) = settings.get("allowedHttpHookUrls").and_then(|v| v.as_array()) {
+        for v in arr {
+            if let Some(p) = v.as_str().and_then(extract_port_from_url) {
+                if p != port && !foreign_ports.contains(&p) {
+                    foreign_ports.push(p);
+                }
+            }
+        }
+    }
+    if !foreign_ports.is_empty() {
+        let live = collect_live_lockfile_ports();
+        if foreign_ports.iter().any(|p| !live.contains(p)) {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Re-assert our hooks in ~/.claude/settings.json *only if they have drifted*.
