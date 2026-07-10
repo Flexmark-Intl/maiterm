@@ -1,5 +1,9 @@
 # Terminal Components
 
+> **Split-pane performance**: why split panes degrade rendering while separate
+> windows don't (one JS main thread per webview vs. one process per window), and the
+> options to fix it — see [`docs/split-pane-performance.md`](../../../../docs/split-pane-performance.md).
+
 ## Architecture: alacritty_terminal + xterm.js
 
 Terminal parsing and buffer management runs in Rust via `alacritty_terminal`. xterm.js serves only as a thin renderer (scrollback=0, ~2KB per terminal).
