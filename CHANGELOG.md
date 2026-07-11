@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.20.2
+
+- **Fix mesh messages showing the wrong sender.** In a mesh workspace, every `⟦MESH⟧ "Message from …"` line was labeled with the *recipient's* own role name instead of the sender's — so a message from one agent arrived looking like it came from you. The envelope now derives the sender's identity from the sending tab, making a mislabel structurally impossible.
+
 ## v1.20.1
 
 - **Fix the UI freezing after opening a mesh workspace.** The readiness modal polls every ambiguous tab once a second to see whether its agent is still alive, and each poll ran a full process scan on the main thread — with dozens of tabs the app beach-balled, and restarting re-triggered it. The probe now runs off the main thread and one process sweep answers the whole poll tick instead of one per tab.
