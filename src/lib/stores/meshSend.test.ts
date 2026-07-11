@@ -19,7 +19,9 @@ function harness(roster: MeshMember[], deliverImpl: (tabId: string, text: string
   const deps: MeshSendDeps = {
     router,
     deliver: async (tabId, text) => { delivered.push({ tabId, text }); return deliverImpl(tabId, text); },
-    buildEnvelope: (_s, role, topic, turn, msg) => `[${role}|${topic.label}|${turn}] ${msg}`,
+    // Mirror the real builder: stamp the SENDER's role (resolved from senderTabId), never the recipient's.
+    buildEnvelope: (senderTabId, topic, turn, msg) =>
+      `[${roster.find((m) => m.tabId === senderTabId)?.role ?? senderTabId}|${topic.label}|${turn}] ${msg}`,
     emitEdge: (e) => edges.push(e),
     persistTopics: () => { persists++; },
     isLive: (tabId) => roster.find((m) => m.tabId === tabId)?.live ?? false,
@@ -36,8 +38,9 @@ describe('performMeshSend', () => {
     const r = await performMeshSend(h.deps, { senderTabId: 't-api', recipient: 'Mobile App', topic: 'Auth', message: 'hello' });
     expect(r.ok).toBe(true);
     if (r.ok) { expect(r.delivered).toBe(true); expect(r.recipient).toBe('Mobile App'); }
-    // routed to the recipient handle, not the sender or the role string
-    expect(h.delivered).toEqual([{ tabId: 't-mob', text: '[Mobile App|Auth|1] hello' }]);
+    // routed to the recipient handle (t-mob), but the envelope's "from" is the SENDER's role
+    // (Backend API) — NOT the recipient's (Mobile App). This is the misroute-label regression guard.
+    expect(h.delivered).toEqual([{ tabId: 't-mob', text: '[Backend API|Auth|1] hello' }]);
     // exactly one confirmed edge, sender→recipient
     expect(h.edges).toHaveLength(1);
     expect(h.edges[0]).toMatchObject({ sender: 't-api', recipient: 't-mob', turn: 1, ts: 1234 });
@@ -145,7 +148,7 @@ describe('performMeshSend × real delivery controller (routed to recipient queue
     deps = {
       router,
       deliver: (tabId, text) => ctl.deliver(tabId, text),
-      buildEnvelope: (_s, _role, topic, turn, msg) => `[${turn}] ${msg}`,
+      buildEnvelope: (_s, topic, turn, msg) => `[${turn}] ${msg}`,
       emitEdge: (e) => edges.push(e),
       persistTopics: () => {},
       isLive: (tabId) => live.has(tabId),

@@ -103,6 +103,19 @@ function createAgentMeshStore() {
     return osc?.cwd ?? osc?.promptCwd ?? null;
   }
 
+  /** The sender's addressable role, resolved from its tab. Identity is maiTerm-stamped from
+   *  the tab itself (never a value the caller threads through) so the envelope's "from" can
+   *  never be someone else's name. Falls back to a short handle if the tab has vanished. */
+  function roleForTab(tabId: string): string {
+    for (const ws of workspacesStore.workspaces) {
+      for (const pane of ws.panes) {
+        const tab = pane.tabs.find((t) => t.id === tabId);
+        if (tab) return roleName(tab.name);
+      }
+    }
+    return tabId.slice(0, 8);
+  }
+
   /** Is this tab an agent participant in the mesh? A named terminal tab that has run (or is
    *  running) an agent. The name requirement is the join gate (§6 — a tab needs an explicit
    *  descriptive name to be addressable). */
@@ -190,9 +203,10 @@ function createAgentMeshStore() {
 
   // ─── Envelope (identity + topic stamped by maiTerm) ─────────────────────────
 
-  function buildEnvelope(senderTabId: string, senderRole: string, topic: MeshTopic, turn: number, message: string): string {
+  function buildEnvelope(senderTabId: string, topic: MeshTopic, turn: number, message: string): string {
     const cwd = getCwd(senderTabId);
     const where = cwd ? `, working in ${cwd}` : '';
+    const senderRole = roleForTab(senderTabId);
     return (
       `⟦MESH⟧ Message from "${senderRole}"${where} — a peer AI agent, NOT your human operator. [topic: ${topic.label}] [turn ${turn}]\n` +
       `Reply with the sendToBridgedAgent tool, tagging topic "${topic.id}". If this fully answers it, just stop — don't reply only to acknowledge.\n\n` +
