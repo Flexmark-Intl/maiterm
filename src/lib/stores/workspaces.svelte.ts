@@ -334,6 +334,20 @@ function createWorkspacesStore() {
         }
       }
 
+      // The active workspace is skipped by the loop above (it's never dimmed —
+      // you're looking at it). But if it was persisted suspended — e.g. a single-
+      // workspace window whose only workspace was suspended (which nulls the active
+      // id path), or a stale suspension — nothing would un-suspend it, and
+      // buildRestoreList skips suspended workspaces wholesale, so that window comes
+      // back empty. Un-suspend it here (regardless of mode) and fold its live-at-
+      // suspend tabs into the wake set so restore respawns them.
+      const activeWs = workspaces.find(w => w.id === activeWorkspaceId);
+      if (activeWs?.suspended) {
+        activeWs.suspended = false;
+        const wakeIds = await commands.resumeWorkspace(activeWs.id).catch(() => [] as string[]);
+        for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
+      }
+
       // Create default workspace if none exist
       if (workspaces.length === 0) {
         await this.createWorkspace('Default');
