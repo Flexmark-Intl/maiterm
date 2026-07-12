@@ -540,27 +540,70 @@ pub fn migrate_scrollback_to_db(data: &mut AppData, db: &super::scrollback_db::S
 /// last-active time). Afterward `pty_id` is authoritative and steady-state restore
 /// uses it directly; the leak paths are plugged so it stays that way.
 pub fn reconcile_tab_liveness(data: &mut AppData, db: &super::scrollback_db::ScrollbackDb) {
-    if data.tab_liveness_reconciled {
-        return;
-    }
-    // 24h relative to the newest save. The window is relative, so an app left off
-    // for weeks still resolves the last shutdown batch correctly.
-    const RECONCILE_WINDOW_MINUTES: i64 = 24 * 60;
-    // If the recency query fails, skip WITHOUT setting the flag so it retries next
-    // boot — better than a destructive clean-slate on a transient error.
-    let recent = match db.recent_tab_ids(RECONCILE_WINDOW_MINUTES) {
-        Ok(set) => set,
-        Err(e) => {
-            log::warn!("Tab-liveness reconcile skipped (scrollback query failed): {}", e);
-            return;
-        }
-    };
-    // tab_id -> last save time, to stamp a meaningful "idle" age.
+    // tab_id -> last scrollback save time, to stamp a meaningful "idle" age.
     let times: std::collections::HashMap<String, String> =
         db.tab_times().unwrap_or_default().into_iter().collect();
 
-    let mut kept = 0usize;
-    let mut suspended = 0usize;
+    // Part 1 — ONE-TIME high-watermark clear. On an old state file nearly every
+    // tab looks live (pty_id was write-once). Clear pty_id on tabs that look live
+    // but weren't running at last shutdown (judged by scrollback recency).
+    if !data.tab_liveness_reconciled {
+        // 24h relative to the newest save. The window is relative, so an app left
+        // off for weeks still resolves the last shutdown batch correctly.
+        const RECONCILE_WINDOW_MINUTES: i64 = 24 * 60;
+        // If the recency query fails, skip WITHOUT setting the flag so it retries
+        // next boot — better than a destructive clean-slate on a transient error.
+        match db.recent_tab_ids(RECONCILE_WINDOW_MINUTES) {
+            Ok(recent) => {
+                let mut kept = 0usize;
+                let mut suspended = 0usize;
+                for win in &mut data.windows {
+                    for ws in &mut win.workspaces {
+                        for pane in &mut ws.panes {
+                            for tab in &mut pane.tabs {
+                                if !matches!(tab.tab_type, TabType::Terminal) {
+                                    continue;
+                                }
+                                // Only the high-watermark: looks live (pty_id set,
+                                // no suspend marker). Leave genuine suspended /
+                                // never-spawned tabs alone.
+                                if tab.pty_id.is_none() || tab.suspended_at.is_some() {
+                                    continue;
+                                }
+                                if recent.contains(&tab.id) {
+                                    kept += 1; // genuinely live at last shutdown
+                                    continue;
+                                }
+                                tab.pty_id = None;
+                                tab.suspended_at = times
+                                    .get(&tab.id)
+                                    .map(|t| t.replacen(' ', "T", 1) + "Z"); // SQLite UTC -> RFC3339
+                                suspended += 1;
+                            }
+                        }
+                    }
+                }
+                data.tab_liveness_reconciled = true;
+                log::info!(
+                    "Tab-liveness reconcile: kept {} live, marked {} stale tabs suspended",
+                    kept, suspended
+                );
+            }
+            Err(e) => {
+                log::warn!("Tab-liveness reconcile skipped (scrollback query failed): {}", e);
+            }
+        }
+    }
+
+    // Part 2 — EVERY boot: normalize "limbo" terminal tabs (pty_id=None AND
+    // suspended_at=None) to properly-suspended. These already render and resume
+    // like suspended tabs, but a missing suspended_at means no "suspended Xd ago"
+    // age and they get miscounted as "uninitialized" in diagnostics. They come
+    // from PTYs that ended without going through a suspend path (legacy state,
+    // pre-discipline versions). Stamp the scrollback save time (real idle age)
+    // where we have it, else now. Idempotent once stamped; restore is unaffected
+    // (pty_id is still None, so the tab was never restore-eligible).
+    let mut normalized = 0usize;
     for win in &mut data.windows {
         for ws in &mut win.workspaces {
             for pane in &mut ws.panes {
@@ -568,27 +611,21 @@ pub fn reconcile_tab_liveness(data: &mut AppData, db: &super::scrollback_db::Scr
                     if !matches!(tab.tab_type, TabType::Terminal) {
                         continue;
                     }
-                    // Only the high-watermark: looks live (pty_id set, no suspend
-                    // marker). Leave genuine suspended / never-spawned tabs alone.
-                    if tab.pty_id.is_none() || tab.suspended_at.is_some() {
+                    if tab.pty_id.is_some() || tab.suspended_at.is_some() {
                         continue;
                     }
-                    if recent.contains(&tab.id) {
-                        kept += 1; // genuinely live at last shutdown — keep pty_id
-                        continue;
-                    }
-                    tab.pty_id = None;
-                    tab.suspended_at = times
-                        .get(&tab.id)
-                        .map(|t| t.replacen(' ', "T", 1) + "Z"); // SQLite UTC -> RFC3339
-                    suspended += 1;
+                    tab.suspended_at = Some(
+                        times
+                            .get(&tab.id)
+                            .map(|t| t.replacen(' ', "T", 1) + "Z")
+                            .unwrap_or_else(crate::commands::workspace::iso_now),
+                    );
+                    normalized += 1;
                 }
             }
         }
     }
-    data.tab_liveness_reconciled = true;
-    log::info!(
-        "Tab-liveness reconcile: kept {} live, marked {} stale tabs suspended",
-        kept, suspended
-    );
+    if normalized > 0 {
+        log::info!("Tab-liveness: normalized {} limbo tab(s) to suspended", normalized);
+    }
 }

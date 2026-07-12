@@ -1571,7 +1571,7 @@ fn now_utc_parts() -> (i64, u32, u32, u64, u64, u64) {
     (y, mo, da, h, m, s)
 }
 
-fn iso_now() -> String {
+pub fn iso_now() -> String {
     let (y, mo, da, h, m, s) = now_utc_parts();
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, da, h, m, s)
 }
