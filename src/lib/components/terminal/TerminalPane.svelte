@@ -695,7 +695,7 @@
 
     // If the source pane was running SSH (or last session had SSH), replay the command.
     // SSH command sent immediately; auto-resume deferred until after bridge setup so
-    // AITERM_TAB_ID env var is available in the remote shell when Claude starts.
+    // MAITERM_TAB_ID env var is available in the remote shell when Claude starts.
     // Skip all of this when reattaching to an existing PTY (e.g. tab moved between workspaces).
     if (!reattaching) {
       if (ctx?.sshCommand) {
@@ -1122,7 +1122,7 @@
     // is being preserved. The bridge is keyed by tabId (unchanged across a move),
     // so the reattaching pane keeps using it. Tearing it down here would drop the
     // bridge state, and the new pane's title handler would then re-enable it,
-    // re-injecting `export AITERM_TAB_ID=…` into the live session.
+    // re-injecting `export MAITERM_TAB_ID=…` into the live session.
     if (!ptyPreserved) {
       disableBridge(tabId).catch(() => {});
     }
@@ -1736,14 +1736,14 @@
             label: 'Inject maiTerm Env Vars',
             action: async () => {
               // Guard: if ssh is no longer foreground, this export would land in
-              // the LOCAL shell and poison its AITERM_* env with remote-tunnel values.
+              // the LOCAL shell and poison its MAITERM_* env with remote-tunnel values.
               if (!(await isRemoteShellForeground(ptyId))) {
                 dispatch('MCP Bridge', 'No SSH session in the foreground — not injecting env vars into the local shell', 'error', { tabId });
                 return;
               }
               const bridge = getBridgeInfo(tabId);
               if (bridge?.remotePort) {
-                const envCmd = " export AITERM_TAB_ID=" + tabId + " AITERM_PORT=" + bridge.remotePort + "\n";
+                const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort + "\n";
                 const bytes = Array.from(new TextEncoder().encode(envCmd));
                 await writeTerminal(ptyId, bytes);
               }

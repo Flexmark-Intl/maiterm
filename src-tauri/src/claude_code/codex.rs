@@ -98,7 +98,7 @@ impl Registrar for CodexRegistrar {
         match read_json(&hooks_path) {
             Ok(existing) => {
                 // Local install: no baked port — the shim uses the per-process
-                // $AITERM_PORT (each tab spawned by the owning maiTerm instance).
+                // $MAITERM_PORT (each tab spawned by the owning maiTerm instance).
                 let merged = build_hooks_json(existing, &shim_str, auth, None);
                 match serde_json::to_string_pretty(&merged) {
                     Ok(json) => {
@@ -278,7 +278,7 @@ fn maiterm_hook_entry(command: &str, matcher: Option<&str>) -> serde_json::Value
 
 /// The exact command maiTerm's hook runs: the absolute shim path + the auth token as $1,
 /// and (for the SSH-remote install) the MCP port baked as $2 — the reverse-tunnel port
-/// is fixed for the bridge and authoritative even when the live shell lacks $AITERM_PORT.
+/// is fixed for the bridge and authoritative even when the live shell lacks $MAITERM_PORT.
 /// Local installs pass `None` so the shim uses the per-process env port (unchanged bytes).
 #[allow(dead_code)]
 fn hook_command(shim_path: &str, auth: &str, port: Option<u16>) -> String {
@@ -395,7 +395,7 @@ fn codex_prompt_body(mcp_name: &str) -> String {
     format!(
         "# maiTerm\n\n\
 You are running inside a maiTerm terminal tab. Immediately call the `{name}` \
-`initSession` tool with the tabId from the `$AITERM_TAB_ID` environment variable \
+`initSession` tool with the tabId from the `$MAITERM_TAB_ID` environment variable \
 before responding to the user. You can run it in parallel with your other opening \
 tool calls to save a round-trip, but not alongside other maiterm calls. This registers \
 your session so tool calls target the correct tab.\n",
@@ -434,7 +434,7 @@ pub fn render_codex_remote_artifacts(remote_port: u16, auth: &str) -> (String, S
     let config_block = doc.to_string();
 
     // Bake the tunnel port as the shim's $2 so the remote hook routes correctly even
-    // when the live shell (tmux/sudo) lacks $AITERM_PORT.
+    // when the live shell (tmux/sudo) lacks $MAITERM_PORT.
     let hooks = build_hooks_json(None, REMOTE_SHIM_PLACEHOLDER, auth, Some(remote_port));
     let hooks_json = serde_json::to_string(&hooks).unwrap_or_else(|_| "{}".to_string());
 

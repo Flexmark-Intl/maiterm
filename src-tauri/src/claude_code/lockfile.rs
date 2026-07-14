@@ -286,13 +286,13 @@ fn build_our_hooks(port: u16, auth: &str) -> serde_json::Value {
 
     // SessionStart command hook: reads session_id from stdin JSON, echoes tab ID + session ID
     // into Claude's context so Claude passes both to initSession.
-    // Gate on $AITERM_PORT matching our port to prevent dev/prod cross-talk.
+    // Gate on $MAITERM_PORT matching our port to prevent dev/prod cross-talk.
     let mcp_key = mcp_server_key();
     let session_start_cmd = format!(
-        "{{ [ \"$AITERM_PORT\" = \"{port}\" ] || [ -z \"$AITERM_PORT\" ]; }} && \
-         [ -n \"$AITERM_TAB_ID\" ] && \
-         AITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && \
-         echo 'Your maiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. \
+        "{{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
+         [ -n \"$MAITERM_TAB_ID\" ] && \
+         MAITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && \
+         echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. \
 You MUST immediately call the {mcp_key} initSession tool with this tabId and sessionId before responding to the user. You can run it in parallel with your other opening tool calls to save a round-trip, but not alongside other maiterm calls. This is required for correct tab targeting.' || true",
         port = port,
         mcp_key = mcp_key,
@@ -347,7 +347,7 @@ You MUST immediately call the {mcp_key} initSession tool with this tabId and ses
 /// Write Claude Code hooks into ~/.claude/settings.json.
 ///
 /// Registers:
-/// - SessionStart (command) — reads $AITERM_TAB_ID, POSTs to our server, injects tab ID context
+/// - SessionStart (command) — reads $MAITERM_TAB_ID, POSTs to our server, injects tab ID context
 /// - SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact (http)
 ///
 /// We identify our entries by matching the hook URL, so we don't clobber user hooks.
@@ -578,12 +578,13 @@ fn extract_hook_port(entry: &serde_json::Value) -> Option<u16> {
                     return Some(port);
                 }
             }
-            // Command hooks — look for our URL or AITERM_PORT pattern
+            // Command hooks — look for our URL or the MAITERM_PORT/legacy AITERM_PORT pattern
             if let Some(cmd) = hook.get("command").and_then(|v| v.as_str()) {
                 if let Some(port) = extract_port_from_url(cmd) {
                     return Some(port);
                 }
-                // Also match AITERM_PORT = "NNNNN" pattern (old hook format)
+                // Also match the MAITERM_PORT = "NNNNN" pattern in command hooks
+                // (and legacy AITERM_PORT — see extract_port_from_aiterm_var).
                 if let Some(port) = extract_port_from_aiterm_var(cmd) {
                     return Some(port);
                 }
@@ -593,9 +594,12 @@ fn extract_hook_port(entry: &serde_json::Value) -> Option<u16> {
     None
 }
 
-/// Extract port from AITERM_PORT = "12345" or AITERM_PORT\" = \"12345\" patterns in command strings.
+/// Extract port from a `MAITERM_PORT = "12345"` (or `MAITERM_PORT" = "12345"`) pattern in a
+/// command hook. The marker is the legacy `"AITERM_PORT"` substring, which also appears inside
+/// `"MAITERM_PORT"` — so a single match recognizes BOTH our current hooks and any old ones left
+/// on already-provisioned remotes, which is what lets hook re-install replace them.
 fn extract_port_from_aiterm_var(s: &str) -> Option<u16> {
-    // Match both: AITERM_PORT" = "12345" and AITERM_PORT = "12345"
+    // "AITERM_PORT" is a substring of "MAITERM_PORT", so this matches new and legacy alike.
     let marker = "AITERM_PORT";
     let idx = s.find(marker)? + marker.len();
     let rest = &s[idx..];

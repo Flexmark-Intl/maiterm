@@ -7,7 +7,7 @@ description: Quick maiTerm terminal operations — /maiterm notes, /maiterm diag
 
 If the argument is `init`, do ONLY this and stop — do NOT read the command table below and do NOT keyword-search across MCP servers:
 1. Load the tool with one targeted lookup: ToolSearch `select:mcp__maiterm__initSession,mcp__maiterm-dev__initSession,mcp__aiterm__initSession,mcp__aiterm-dev__initSession`
-2. Call the one named in your SessionStart hook context (this build registers exactly one of maiterm/maiterm-dev; the aiterm/aiterm-dev names are legacy fallbacks) with `{ "tabId": "<value of $AITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.
+2. Call the one named in your SessionStart hook context (this build registers exactly one of maiterm/maiterm-dev; the aiterm/aiterm-dev names are legacy fallbacks) with `{ "tabId": "<value of $MAITERM_TAB_ID>", "sessionId": "<from your SessionStart hook context>" }`.
 
 Always re-run this when asked, even if you think you already initialized — resume/fork/compact require re-init.
 
@@ -42,10 +42,10 @@ Execute the maiTerm MCP tool for the requested operation. Use whichever maiterm 
 | `logs` | readLogs | `{}` |
 | `logs <search>` | readLogs | `{ "search": "<search>" }` |
 | `sessions` | getClaudeSessions | `{}` |
-| `init` | initSession | `{ "tabId": "$AITERM_TAB_ID", "sessionId": "<from SessionStart hook>" }` |
+| `init` | initSession | `{ "tabId": "$MAITERM_TAB_ID", "sessionId": "<from SessionStart hook>" }` |
 
 Call the exact MCP tool listed above with the specified parameters. Do not ask for clarification — just execute.
-For `init`: read tabId from $AITERM_TAB_ID env var and sessionId from your SessionStart hook context. IMPORTANT: Always call initSession when requested, even if you believe it was already called earlier in the session. Session resume, fork, and compact events require re-initialization to pick up state changes.
+For `init`: read tabId from $MAITERM_TAB_ID env var and sessionId from your SessionStart hook context. IMPORTANT: Always call initSession when requested, even if you believe it was already called earlier in the session. Session resume, fork, and compact events require re-initialization to pick up state changes.
 
 ## statusline — install the maiTerm status line
 

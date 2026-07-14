@@ -10,10 +10,10 @@
 #   $1            the MCP auth token (embedded in ~/.codex/hooks.json by CodexRegistrar)
 #   $2            (optional) the MCP server port baked at install time. Used for the
 #                 SSH-remote install, where the reverse-tunnel port is fixed for the
-#                 bridge and the live shell may lack $AITERM_PORT (tmux/sudo/su). Local
-#                 installs omit it and rely on the per-process $AITERM_PORT env var.
-#   $AITERM_PORT  the maiTerm MCP server port (live, per-process)
-#   $AITERM_TAB_ID  the maiTerm tab this Codex session runs in
+#                 bridge and the live shell may lack $MAITERM_PORT (tmux/sudo/su). Local
+#                 installs omit it and rely on the per-process $MAITERM_PORT env var.
+#   $MAITERM_PORT  the maiTerm MCP server port (live, per-process)
+#   $MAITERM_TAB_ID  the maiTerm tab this Codex session runs in
 #
 # The ?runtime=codex tag tells maiTerm's /hooks handler to normalize Codex's event
 # names/payload; ?tab_id routes the event to the right frontend tab. Output is a bare
@@ -24,15 +24,15 @@ token="$1"
 baked_port="${2:-}"
 
 # tmux / sudo / su don't inherit the maiTerm env vars. Fall back to the ~/.aiterm file
-# the bridge wrote (export AITERM_TAB_ID / AITERM_PORT) so hooks still route correctly.
-if [ -z "${AITERM_TAB_ID:-}" ] || [ -z "${AITERM_PORT:-}" ]; then
+# the bridge wrote (export MAITERM_TAB_ID / MAITERM_PORT) so hooks still route correctly.
+if [ -z "${MAITERM_TAB_ID:-}" ] || [ -z "${MAITERM_PORT:-}" ]; then
   [ -f "$HOME/.aiterm" ] && . "$HOME/.aiterm" 2>/dev/null || true
 fi
 
 # Prefer the install-baked port when present (SSH-remote: the tunnel port is fixed and
 # authoritative regardless of the live shell's env); otherwise use the live env port.
-port="${baked_port:-${AITERM_PORT:-}}"
-tab="${AITERM_TAB_ID:-}"
+port="${baked_port:-${MAITERM_PORT:-}}"
+tab="${MAITERM_TAB_ID:-}"
 
 # Read the event payload from stdin regardless, so the pipe never blocks Codex.
 payload="$(cat)"

@@ -33,7 +33,7 @@ let bridgeStates = $state<Map<string, BridgeState>>(new Map());
 const tunnelListeners = new Map<string, UnlistenFn>();
 
 /**
- * Remote ports for which we've already injected `export AITERM_TAB_ID/PORT` into
+ * Remote ports for which we've already injected `export MAITERM_TAB_ID/PORT` into
  * the live shell, keyed by tabId. The env vars persist for the whole ssh session,
  * so injecting once is enough. Without this, a bridge whose remote setup keeps
  * timing out stays in 'failed' state and the term-title retry loop re-injects the
@@ -182,17 +182,17 @@ function buildSetupScript(
   // HTTP hooks tunnel back through the reverse SSH tunnel to our local MCP server.
   const hooksUrl = "http://127.0.0.1:" + remotePort + "/hooks";
 
-  // SessionStart command hook: reads $AITERM_TAB_ID (injected into PTY after bridge setup),
+  // SessionStart command hook: reads $MAITERM_TAB_ID (injected into PTY after bridge setup),
   // extracts session_id from hook stdin, echoes both into Claude's context.
   // Uses double-quoted JS string to avoid template literal ${} interpolation of bash vars.
-  // SessionStart hook: reads $AITERM_TAB_ID from env, falls back to ~/.aiterm file
+  // SessionStart hook: reads $MAITERM_TAB_ID from env, falls back to ~/.aiterm file
   // (needed when Claude runs inside tmux where env vars weren't inherited).
   const sessionStartCmd =
-    "{ [ -z \"$AITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
-    "{ [ \"$AITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$AITERM_PORT\" ]; } && " +
-    "[ -n \"$AITERM_TAB_ID\" ] && " +
-    "AITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && " +
-    "echo 'Your maiTerm tab ID is '$AITERM_TAB_ID'. Your session ID is '$AITERM_SID'. " +
+    "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
+    "{ [ \"$MAITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$MAITERM_PORT\" ]; } && " +
+    "[ -n \"$MAITERM_TAB_ID\" ] && " +
+    "MAITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && " +
+    "echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. " +
     "You MUST immediately call the maiterm initSession tool with this tabId and sessionId before responding to the user. You can run it in parallel with your other opening tool calls to save a round-trip, but not alongside other maiterm calls. This is required for correct tab targeting.' || true";
 
   const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
@@ -281,7 +281,7 @@ function buildSetupScript(
     '[ -f ~/.claude.json ] || echo \'{}\' > ~/.claude.json',
     'fi',
     // Write tab ID + port to ~/.aiterm so tmux/new shells can source it
-    `printf 'export AITERM_TAB_ID=${tabId}\\nexport AITERM_PORT=${remotePort}\\n' > ~/.aiterm`,
+    `printf 'export MAITERM_TAB_ID=${tabId}\\nexport MAITERM_PORT=${remotePort}\\n' > ~/.aiterm`,
     // Install /maiterm skill on the remote (drop any legacy /aiterm one)
     'rm -rf ~/.claude/skills/aiterm',
     'mkdir -p ~/.claude/skills/maiterm',
@@ -308,7 +308,7 @@ function buildSetupScript(
 /**
  * Enable the MCP bridge for an SSH tab.
  * Spawns (or reuses) a reverse tunnel, writes lockfile + hooks via background SSH,
- * and injects AITERM_TAB_ID / AITERM_PORT env vars into the remote shell.
+ * and injects MAITERM_TAB_ID / MAITERM_PORT env vars into the remote shell.
  *
  * @param ptyId — if provided, injects env vars into the remote shell via PTY write.
  *   Leading space prevents the command from appearing in shell history.
@@ -352,12 +352,12 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
     logInfo(`SSH MCP bridge: tunnel to ${hostKey} on remote port ${tunnelInfo.remote_port}`);
 
     // Set trigger variables so auto-resume commands can interpolate them.
-    // %aitermTabId, %aitermPort for individual values, %aitermExport for the full export command.
-    setVariable(tabId, 'aitermTabId', tabId);
-    setVariable(tabId, 'aitermPort', String(tunnelInfo.remote_port));
-    setVariable(tabId, 'aitermExport', `export AITERM_TAB_ID=${tabId} AITERM_PORT=${tunnelInfo.remote_port}`);
+    // %maitermTabId, %maitermPort for individual values, %maitermExport for the full export command.
+    setVariable(tabId, 'maitermTabId', tabId);
+    setVariable(tabId, 'maitermPort', String(tunnelInfo.remote_port));
+    setVariable(tabId, 'maitermExport', `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port}`);
 
-    // Inject AITERM_TAB_ID and AITERM_PORT into the remote shell FIRST — before
+    // Inject MAITERM_TAB_ID and MAITERM_PORT into the remote shell FIRST — before
     // building or kicking off the remote setup below. The injection only needs
     // remote_port (already known), so NOTHING else should sit between tunnel-up
     // and the PTY write: every await in between (getMaitermSkillScripts,
@@ -374,14 +374,14 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
     if (ptyId && injectedEnvPort.get(tabId) === tunnelInfo.remote_port) {
       // Already injected for this port — a prior attempt's export is still live in
       // the shell. Re-injecting on every failed-setup retry would spam the user's
-      // interactive session with `export AITERM_TAB_ID=…` lines, once per prompt.
+      // interactive session with `export MAITERM_TAB_ID=…` lines, once per prompt.
       logInfo("SSH MCP bridge: env vars already injected for tab " + tabId + " — skipping re-injection");
     } else if (ptyId) {
       try {
         if (!(await isRemoteShellForeground(ptyId))) {
           logInfo("SSH MCP bridge: skipping env-var injection — ssh no longer foreground for tab " + tabId);
         } else {
-          const envCmd = " export AITERM_TAB_ID=" + tabId + " AITERM_PORT=" + tunnelInfo.remote_port + "\n";
+          const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port + "\n";
           const bytes = Array.from(new TextEncoder().encode(envCmd));
           await commands.writeTerminal(ptyId, bytes);
           injectedEnvPort.set(tabId, tunnelInfo.remote_port);

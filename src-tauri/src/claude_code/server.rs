@@ -1098,7 +1098,7 @@ async fn process_message(
                         let resp = JsonRpcResponse::success(
                             id,
                             serde_json::json!({
-                                "content": [{ "type": "text", "text": "Error: tabId is required. Read your tab ID from the SessionStart hook context or $AITERM_TAB_ID environment variable." }],
+                                "content": [{ "type": "text", "text": "Error: tabId is required. Read your tab ID from the SessionStart hook context or $MAITERM_TAB_ID environment variable." }],
                                 "isError": true
                             }),
                         );
@@ -1110,14 +1110,14 @@ async fn process_message(
                         let this_server = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
                         let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
                         // A tabId unknown to this instance is usually a *stale*
-                        // $AITERM_TAB_ID (the shell outlived the tab it was spawned
+                        // $MAITERM_TAB_ID (the shell outlived the tab it was spawned
                         // under), not a wrong-instance call. The old "use the other
                         // server" message caused a circular bounce when the id was
                         // stale in BOTH instances (each blamed the other). Give a
                         // deterministic recovery path instead: getActiveTab → retry.
                         let msg = format!(
                             "Tab '{}' was not found in this maiTerm instance ({}). This almost always means your \
-                             $AITERM_TAB_ID is stale (the shell outlived the tab it was created under, or was \
+                             $MAITERM_TAB_ID is stale (the shell outlived the tab it was created under, or was \
                              started under a different tab). To recover: call getActiveTab to get your real tab \
                              ID, then call initSession again with that tabId. \
                              Only if getActiveTab also fails should you assume you belong to the other instance \
@@ -1371,7 +1371,7 @@ async fn process_message(
                             serde_json::json!({
                                 "content": [{ "type": "text", "text":
                                     "Session not initialized. You must call initSession with your tabId first. \
-                                     Read your tab ID from $AITERM_TAB_ID environment variable."
+                                     Read your tab ID from $MAITERM_TAB_ID environment variable."
                                 }],
                                 "isError": true
                             }),
@@ -1583,7 +1583,7 @@ async fn hooks_handler(
         .unwrap_or(crate::state::AgentRuntime::Claude);
     let runtime_key = runtime.as_key();
 
-    // tab_id comes from query param (set by the command hook script from $AITERM_TAB_ID)
+    // tab_id comes from query param (set by the command hook script from $MAITERM_TAB_ID)
     // Validate it actually exists — it may be stale after HMR reload or tab recreation.
     let tab_id_from_param = params.get("tab_id").and_then(|raw_id| {
         if raw_id.is_empty() {

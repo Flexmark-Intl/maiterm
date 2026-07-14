@@ -168,12 +168,12 @@ pub fn spawn_pty(
         let mut cmd = CommandBuilder::new(&shell);
 
         // Expose tab ID so processes (e.g. Claude Code) can identify their terminal
-        cmd.env("AITERM_TAB_ID", tab_id);
+        cmd.env("MAITERM_TAB_ID", tab_id);
 
         // Expose MCP server port so hooks can scope to this maiTerm instance
         // (prevents dev/prod cross-talk when both are running)
         if let Some(port) = state.mcp_port.read().as_ref() {
-            cmd.env("AITERM_PORT", port.to_string());
+            cmd.env("MAITERM_PORT", port.to_string());
         }
 
         // Most shells use -l for login, fish uses --login
@@ -271,7 +271,7 @@ pub fn spawn_pty(
                                     .map(|h| h.to_string_lossy().to_string())
                                     .unwrap_or_default()
                             });
-                        cmd.env("AITERM_REAL_ZDOTDIR", &real_zdotdir);
+                        cmd.env("MAITERM_REAL_ZDOTDIR", &real_zdotdir);
                         cmd.env("ZDOTDIR", integration_dir.to_string_lossy().to_string());
                     }
                 }
@@ -1315,8 +1315,8 @@ fn setup_zsh_integration(title: bool, shell_integration: bool) -> Result<std::pa
     std::fs::create_dir_all(&zsh_dir).map_err(|e| e.to_string())?;
 
     let zshenv_content = r#"# maiTerm shell integration - do not edit
-if [[ -n "$AITERM_REAL_ZDOTDIR" ]]; then
-  [[ -f "$AITERM_REAL_ZDOTDIR/.zshenv" ]] && source "$AITERM_REAL_ZDOTDIR/.zshenv"
+if [[ -n "$MAITERM_REAL_ZDOTDIR" ]]; then
+  [[ -f "$MAITERM_REAL_ZDOTDIR/.zshenv" ]] && source "$MAITERM_REAL_ZDOTDIR/.zshenv"
 else
   [[ -f "$HOME/.zshenv" ]] && source "$HOME/.zshenv"
 fi
@@ -1324,8 +1324,8 @@ fi
 
     let mut hooks = String::new();
     hooks.push_str("# maiTerm shell integration - do not edit\n");
-    hooks.push_str("if [[ -n \"$AITERM_REAL_ZDOTDIR\" ]]; then\n");
-    hooks.push_str("  ZDOTDIR=\"$AITERM_REAL_ZDOTDIR\"\n");
+    hooks.push_str("if [[ -n \"$MAITERM_REAL_ZDOTDIR\" ]]; then\n");
+    hooks.push_str("  ZDOTDIR=\"$MAITERM_REAL_ZDOTDIR\"\n");
     hooks.push_str("  [[ -f \"$ZDOTDIR/.zshrc\" ]] && source \"$ZDOTDIR/.zshrc\"\n");
     hooks.push_str("else\n");
     hooks.push_str("  ZDOTDIR=\"$HOME\"\n");

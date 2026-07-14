@@ -54,11 +54,11 @@ pub fn tool_list_response() -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "initSession",
-            "description": "Call this tool once at the start of every session (new, resume, fork, compact). Registers your terminal tab ID and session ID so all subsequent tool calls automatically target your tab. Read your tab ID from the SessionStart hook context ('Your maiTerm tab ID is ...') or from the $AITERM_TAB_ID environment variable.",
+            "description": "Call this tool once at the start of every session (new, resume, fork, compact). Registers your terminal tab ID and session ID so all subsequent tool calls automatically target your tab. Read your tab ID from the SessionStart hook context ('Your maiTerm tab ID is ...') or from the $MAITERM_TAB_ID environment variable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tabId": { "type": "string", "description": "Your maiTerm tab ID (from SessionStart hook context or $AITERM_TAB_ID env var)" },
+                    "tabId": { "type": "string", "description": "Your maiTerm tab ID (from SessionStart hook context or $MAITERM_TAB_ID env var)" },
                     "sessionId": { "type": "string", "description": "Your Claude session ID (optional, for session tracking)" }
                 },
                 "required": ["tabId"]
@@ -364,7 +364,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "getActiveTab",
-            "description": "Get the currently active workspace, pane, and tab in the current window. Returns windowLabel, IDs, names, tab type, display name, and notes status. Use this as a lightweight alternative to listWorkspaces when you just need to know the current context. Prefer reading $AITERM_TAB_ID for your own tab ID instead of calling this.",
+            "description": "Get the currently active workspace, pane, and tab in the current window. Returns windowLabel, IDs, names, tab type, display name, and notes status. Use this as a lightweight alternative to listWorkspaces when you just need to know the current context. Prefer reading $MAITERM_TAB_ID for your own tab ID instead of calling this.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ]).as_array().unwrap().clone());
@@ -551,7 +551,7 @@ pub fn initialize_response(client_protocol_version: Option<&str>) -> Value {
         "serverInfo": { "name": crate::APP_DISPLAY_NAME, "version": crate::APP_VERSION },
         "instructions": format!(
             "You are running inside a maiTerm terminal tab. At the start of every session (new, resume, compact, clear), \
-             you MUST call initSession with your tab ID (from $AITERM_TAB_ID or SessionStart hook context) before responding to the user. \
+             you MUST call initSession with your tab ID (from $MAITERM_TAB_ID or SessionStart hook context) before responding to the user. \
              You may run this call in parallel with your other opening tool calls (e.g. reading files) to save a round-trip — \
              but do NOT batch it with other maiterm tool calls, which would race the registration and can target the wrong tab. \
              This registers your session so all tool calls automatically target the correct tab. \
