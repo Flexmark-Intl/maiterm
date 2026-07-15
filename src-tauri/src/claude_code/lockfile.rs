@@ -355,8 +355,9 @@ You MUST immediately call the {mcp_key} initSession tool with this tabId and ses
 /// SessionStart context — a failed initSession followed by a recovery dance.
 const MAITERM_CMD_HOOK_MARKER: &str = "initSession tool with this tabId";
 
-/// True when `entry` is one of maiTerm's SessionStart command hooks (any version).
-fn is_our_command_hook(entry: &serde_json::Value) -> bool {
+/// True when `entry` is a maiTerm SessionStart command hook — from ANY instance
+/// or vintage (ours, a dev/prod sibling's, a peer tunnel's, pre-rename AITERM_).
+fn is_maiterm_command_hook(entry: &serde_json::Value) -> bool {
     if let Some(hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
         for hook in hooks {
             if let Some(cmd) = hook.get("command").and_then(|v| v.as_str()) {
@@ -367,6 +368,32 @@ fn is_our_command_hook(entry: &serde_json::Value) -> bool {
         }
     }
     false
+}
+
+/// True when a SessionStart command hook is OURS to manage — swept before
+/// re-adding our single copy on install, and counted by the drift check.
+/// Every marker-matching hook qualifies EXCEPT a sibling local instance's:
+/// one whose gate port is owned by a live pid > 0 lockfile (dev and prod run
+/// simultaneously and share ~/.claude/settings.json — if each swept the
+/// other's hook, their 30s self-heals would fight forever, and the loser's
+/// sessions would boot with no tab id). Port-scoping alone can't replace this
+/// check: a tunnel-gated hook (pid-0 lockfile, or no lockfile) must always be
+/// ours to sweep, because a TCP probe can't tell an active peer tunnel from a
+/// zombie listener whose tunnel died — exactly how the stale pre-rename hook
+/// survived every liveness sweep. A swept ACTIVE peer hook is the accepted
+/// trade-off; the peer rewrites it on its next bridge connect.
+fn command_hook_is_ours_to_sweep(
+    entry: &serde_json::Value,
+    our_port: u16,
+    local_instance_ports: &[u16],
+) -> bool {
+    if !is_maiterm_command_hook(entry) {
+        return false;
+    }
+    match extract_hook_port(entry) {
+        Some(p) => p == our_port || !local_instance_ports.contains(&p),
+        None => true,
+    }
 }
 
 /// Write Claude Code hooks into ~/.claude/settings.json.
@@ -426,6 +453,7 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
     }
 
     // Merge our hooks with existing user hooks (don't clobber)
+    let local_instance_ports = collect_local_instance_ports();
     let hooks_obj = settings
         .as_object_mut()
         .ok_or("settings.json is not an object")?
@@ -441,14 +469,17 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
 
                 if let Some(arr) = event_array.as_array_mut() {
                     // Remove existing maiTerm hook entries before re-adding ours: HTTP
-                    // hooks matching our URL, PLUS any maiTerm SessionStart *command*
-                    // hook. The command hook carries no URL, so URL-matching alone let a
-                    // fresh copy pile up on every re-assert; matching it by signature
-                    // also sweeps stale pre-rename AITERM_ command hooks that gate on a
-                    // dead tunnel port the liveness sweep can't catch (and that source
-                    // ~/.aiterm to emit a phantom tab id into the agent's context).
+                    // hooks matching our URL, PLUS every maiTerm SessionStart *command*
+                    // hook that is ours to manage (see command_hook_is_ours_to_sweep —
+                    // a live dev/prod sibling's hook is left alone). The command hook
+                    // carries no URL, so URL-matching alone let a fresh copy pile up on
+                    // every re-assert; matching it by signature also sweeps stale
+                    // pre-rename AITERM_ command hooks that gate on a zombie tunnel
+                    // port the liveness sweep can't catch (and that source ~/.aiterm to
+                    // emit a phantom tab id into the agent's context).
                     arr.retain(|entry| {
-                        !entry_matches_url(entry, &hooks_url) && !is_our_command_hook(entry)
+                        !entry_matches_url(entry, &hooks_url)
+                            && !command_hook_is_ours_to_sweep(entry, port, &local_instance_ports)
                     });
                     // Add our entries
                     if let Some(our_arr) = our_entries.as_array() {
@@ -502,17 +533,33 @@ fn hooks_are_current(path: &std::path::Path, port: u16, auth: &str) -> bool {
         return false;
     }
 
-    // Exactly one of our SessionStart command hooks may exist. Two or more means
-    // duplicates piled up (the merge historically deduped only URL-bearing HTTP hooks,
-    // never the command hook) or a stale pre-rename AITERM_ command hook still lingers.
-    // Both are drift the write path must sweep — left in place, the stale hook sources
-    // ~/.aiterm and feeds a phantom tab id into the agent's SessionStart context.
-    let cmd_hook_count = settings
-        .get("hooks")
-        .and_then(|h| h.get("SessionStart"))
+    // Exactly one SessionStart command hook that we manage may exist. Two or more
+    // means duplicates piled up (the merge historically deduped only URL-bearing HTTP
+    // hooks, never the command hook) or a stale pre-rename AITERM_ command hook still
+    // lingers. Both are drift the write path must sweep — left in place, the stale hook
+    // sources ~/.aiterm and feeds a phantom tab id into the agent's SessionStart
+    // context. A live dev/prod sibling's hook is neither counted nor swept — see
+    // command_hook_is_ours_to_sweep. Mirror the write path's rule exactly, or the
+    // self-heal loops forever on a state the write can't change.
+    let session_start_cmd_hooks: Vec<&serde_json::Value> = hooks
+        .get("SessionStart")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter(|e| is_our_command_hook(e)).count())
-        .unwrap_or(0);
+        .map(|arr| arr.iter().filter(|e| is_maiterm_command_hook(e)).collect())
+        .unwrap_or_default();
+    // Reading the lockfile dir every 30s is avoidable in the common steady state:
+    // only foreign-gated command hooks need the sibling-instance lookup.
+    let local_instance_ports = if session_start_cmd_hooks
+        .iter()
+        .any(|e| extract_hook_port(e) != Some(port))
+    {
+        collect_local_instance_ports()
+    } else {
+        Vec::new()
+    };
+    let cmd_hook_count = session_start_cmd_hooks
+        .iter()
+        .filter(|e| command_hook_is_ours_to_sweep(e, port, &local_instance_ports))
+        .count();
     if cmd_hook_count != 1 {
         return false;
     }
@@ -607,6 +654,39 @@ fn collect_live_lockfile_ports() -> Vec<u16> {
         let pid = data.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
         if let Some(port) = data.get("serverPort").and_then(|v| v.as_u64()) {
             if lockfile_is_live(pid, port as u16) {
+                ports.push(port as u16);
+            }
+        }
+    }
+    ports
+}
+
+/// Collect ports of live *local maiTerm instances*: lockfiles with pid > 0 whose
+/// process is running. Unlike `collect_live_lockfile_ports`, this deliberately
+/// excludes pid-0 tunnel lockfiles — their port-probe liveness can't tell an
+/// active peer tunnel from a zombie listener, which is exactly how a stale
+/// tunnel-gated command hook once survived every sweep. Used only to recognize
+/// a concurrently-running dev/prod sibling's SessionStart command hook, where
+/// the process check is reliable.
+fn collect_local_instance_ports() -> Vec<u16> {
+    let Some(dir) = ide_lock_dir() else { return vec![] };
+    let Ok(entries) = fs::read_dir(&dir) else { return vec![] };
+    let mut ports = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lock") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else { continue };
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&contents) else { continue };
+
+        let pid = data.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+        if pid == 0 {
+            continue;
+        }
+        if let Some(port) = data.get("serverPort").and_then(|v| v.as_u64()) {
+            if is_process_alive(pid as u32) {
                 ports.push(port as u16);
             }
         }
@@ -963,4 +1043,84 @@ fn cleanup_stale_hooks(stale_ports: &[(u16, String)]) -> Result<(), String> {
 
     log::info!("Cleaned {} stale hook entries from ~/.claude/settings.json", removed_count);
     Ok(())
+}
+
+#[cfg(test)]
+mod command_hook_sweep_tests {
+    use super::*;
+
+    fn cmd_hook(gate: &str) -> serde_json::Value {
+        serde_json::json!({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": format!(
+                    "{{ [ \"$MAITERM_PORT\" = \"{gate}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
+                     echo 'call the maiterm initSession tool with this tabId and sessionId'"
+                ),
+                "timeout": 5
+            }]
+        })
+    }
+
+    fn http_hook(port: u16) -> serde_json::Value {
+        serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "http", "url": format!("http://127.0.0.1:{port}/hooks") }]
+        })
+    }
+
+    #[test]
+    fn our_own_hook_is_swept_even_when_our_lockfile_is_live() {
+        // Dedup depends on this: our port may be in local_instance_ports.
+        assert!(command_hook_is_ours_to_sweep(&cmd_hook("56819"), 56819, &[56819]));
+    }
+
+    #[test]
+    fn live_sibling_instance_hook_is_kept() {
+        // Dev + prod share ~/.claude/settings.json — never sweep the other's hook.
+        assert!(!command_hook_is_ours_to_sweep(&cmd_hook("40001"), 56819, &[40001]));
+    }
+
+    #[test]
+    fn tunnel_or_dead_gated_hook_is_swept() {
+        // Foreign port with no pid>0 lockfile: zombie tunnel or dead instance.
+        assert!(command_hook_is_ours_to_sweep(&cmd_hook("59184"), 56819, &[]));
+        assert!(command_hook_is_ours_to_sweep(&cmd_hook("59184"), 56819, &[40001]));
+    }
+
+    #[test]
+    fn legacy_aiterm_hook_is_swept() {
+        // Pre-rename hooks gate on AITERM_PORT; extract_hook_port still finds it.
+        let legacy = serde_json::json!({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": "{ [ -z \"$AITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; \
+                            { [ \"$AITERM_PORT\" = \"59184\" ] || [ -z \"$AITERM_PORT\" ]; } && \
+                            echo 'call the aiterm initSession tool with this tabId and sessionId'"
+            }]
+        });
+        assert!(command_hook_is_ours_to_sweep(&legacy, 56819, &[]));
+    }
+
+    #[test]
+    fn marker_hook_without_extractable_port_is_swept() {
+        let portless = serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": "echo 'initSession tool with this tabId'" }]
+        });
+        assert!(command_hook_is_ours_to_sweep(&portless, 56819, &[40001]));
+    }
+
+    #[test]
+    fn non_maiterm_entries_are_never_swept() {
+        // User command hooks and our own HTTP hooks don't match the signature.
+        let user_hook = serde_json::json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": "echo hello" }]
+        });
+        assert!(!command_hook_is_ours_to_sweep(&user_hook, 56819, &[]));
+        assert!(!command_hook_is_ours_to_sweep(&http_hook(56819), 56819, &[]));
+    }
 }
