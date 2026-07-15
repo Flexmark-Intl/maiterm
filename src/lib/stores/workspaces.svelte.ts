@@ -311,12 +311,9 @@ function createWorkspacesStore() {
         // reattach. Never leave a workspace that's actually running dimmed.
         const hasLivePty = ws.panes.some(p => p.tabs.some(t =>
           (t.tab_type === 'terminal' || !t.tab_type) && t.pty_id && livePtySet.has(t.pty_id)));
-        if (restoreMode === 'all' || hasLivePty) {
-          // Full restore (or a still-running reload): clear any persisted
-          // suspension so it's not dimmed — its active tab is respawned (or
-          // reattached) by the activation pass in +page. This also un-does the
-          // old "suspend every non-active workspace on load" behavior that
-          // earlier versions persisted into state.
+        if (hasLivePty) {
+          // Still-running reload: never leave a workspace that's actually
+          // running dimmed — its tabs reattach via the activation pass in +page.
           if (ws.suspended) {
             ws.suspended = false;
             // Resume hands back the tabs that were live at suspend time; stash
@@ -325,6 +322,13 @@ function createWorkspacesStore() {
             const wakeIds = await commands.resumeWorkspace(ws.id).catch(() => [] as string[]);
             for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
           }
+          continue;
+        }
+        if (restoreMode === 'all') {
+          // Full restore respawns the pty_id-set tabs of non-suspended
+          // workspaces (buildRestoreList), but a persisted suspension is user
+          // intent — a workspace suspended before quit/update stays suspended
+          // across the restart (resume-on-click brings it back).
           continue;
         }
         // last_active mode, app restart, no live PTY → suspend (dimmed, resume on click).
