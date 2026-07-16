@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.20.6
+
+- **Fix agents resuming with a phantom tab ID.** A resumed agent could come up greeted with a maiTerm tab ID that no longer exists — failing its session registration and falling into a recovery dance. Two long-standing gaps in how maiTerm manages its `SessionStart` hook in `~/.claude/settings.json` were to blame: re-installs appended identical duplicate hooks unbounded, and stale pre-rename hooks were never swept — so an old hook could echo a dead tab ID from a stale fallback file. maiTerm now keeps exactly one current copy of its hook, and the 30-second self-heal removes duplicates and outdated variants — while leaving a live dev/prod sibling instance's hook alone (both share the same settings file and would otherwise sweep each other forever).
+- **Workspaces you suspend stay suspended across a restart.** With session restore set to "all", a workspace you explicitly suspended right before quitting (or installing an update) came back live on relaunch. An explicit suspension now survives a full restore; the only automatic wake left is a workspace whose terminals are genuinely still running after a reload.
+
 ## v1.20.5
 
 - **The agent environment variables are now named `MAITERM_*` instead of `AITERM_*`.** The tab-ID and port variables injected into your shells — including the `export MAITERM_TAB_ID=…` line you see when connecting to an SSH host — carried the old `aiterm` name. They're renamed everywhere (local and remote shells, hooks, and the Codex shim) to match the maiTerm branding.

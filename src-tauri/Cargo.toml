@@ -1,6 +1,6 @@
 [package]
 name = "aiterm"
-version = "1.20.5"
+version = "1.20.6"
 description = "A Tauri-based terminal organizer"
 authors = ["you"]
 license = "LicenseRef-Proprietary"
