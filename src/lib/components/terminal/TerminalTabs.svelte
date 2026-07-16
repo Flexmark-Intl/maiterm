@@ -1118,12 +1118,13 @@
           />
         </div>
       {:else}
+        <!-- Pin renders alongside the type/status indicator — pinned-ness must stay
+             visible instead of competing with a transient state for the slot. -->
+        {#if tab.pinned}{@render pinGlyph(tab)}{/if}
         {#if isDiff}
-          {#if tab.pinned}{@render pinGlyph(tab)}{:else}<Tooltip text="Diff"><span class="editor-icon"><Icon name="diff" size={12} /></span></Tooltip>{/if}
+          <Tooltip text="Diff"><span class="editor-icon"><Icon name="diff" size={12} /></span></Tooltip>
         {:else if isEditor}
-          {#if tab.pinned}
-            {@render pinGlyph(tab)}
-          {:else if tab.editor_file && isPdfFile(tab.editor_file.file_path)}
+          {#if tab.editor_file && isPdfFile(tab.editor_file.file_path)}
             <Tooltip text="PDF"><span class="editor-icon"><Icon name="pdf" size={12} /></span></Tooltip>
           {:else if tab.editor_file && isImageFile(tab.editor_file.file_path)}
             <Tooltip text="Image"><span class="editor-icon"><Icon name="image" size={12} /></span></Tooltip>
@@ -1146,8 +1147,6 @@
           <span class="indicator" class:completed-indicator={shellState.exitCode === 0} class:failed-indicator={shellState.exitCode !== 0}>{#if shellState.exitCode === 0}<Icon name="check" size={11} />{:else}<Icon name="cross" size={11} />{/if}</span>
         {:else if hasActivity}
           <span class="indicator"><StatusDot color="accent" /></span>
-        {:else if tab.pinned}
-          {@render pinGlyph(tab)}
         {/if}
         {#if !isEditor && preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh}
           {@const bridgeStatus = getBridgeStatus(tab.id)}
