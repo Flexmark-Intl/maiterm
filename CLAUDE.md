@@ -46,6 +46,7 @@ src-tauri/src/                # Backend (Rust)
 ├── lib.rs                    # Tauri app setup, command registration
 ├── commands/                 # Tauri command handlers
 ├── claude_code/              # Claude Code IDE integration (MCP server)
+├── comms/                    # Comms integration (/maiterm resolve): Mattermost client + thread-reply watcher
 ├── terminal/                 # Terminal backend (alacritty_terminal)
 │   ├── handle.rs             # TerminalHandle, TermDimensions, create_terminal()
 │   ├── event_proxy.rs        # AitermEventProxy (EventListener → Tauri events)
@@ -168,6 +169,7 @@ Preferences
 ├── clone_cwd, clone_scrollback, clone_ssh, clone_history, clone_notes
 ├── claude_code_ide, claude_code_ide_ssh
 ├── triggers, hidden_default_triggers
+├── comms_provider, comms_server_url, comms_bot_token (Mattermost bot; token never in preference_meta)
 └── (see state/workspace.rs for full list)
 ```
 

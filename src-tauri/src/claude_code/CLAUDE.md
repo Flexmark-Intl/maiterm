@@ -10,7 +10,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response()` (46 tools), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response()` (49 tools), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
@@ -70,6 +70,36 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | listTopics | Mesh only: conversation topics — id, label, state, owner, participants, turn count |
 | startTopic | Mesh only: start/reuse a topic (caller becomes owner); returns the topic id |
 | completeTopic | Mesh only: owner marks a topic complete; signals participants, rejects further sends |
+| bindCommsThread | Comms (/maiterm resolve): bind this tab to a Mattermost thread by permalink; returns the thread as a [REPORT]-tagged transcript and records `Tab.comms_binding`. Backend-only |
+| postCommsReply | Comms: post Mattermost markdown to the bound thread; `resolve: true` clears the binding after posting. Backend-only |
+| unbindCommsThread | Comms: clear the tab's thread binding without posting (idempotent). Backend-only |
+
+## Comms Integration (/maiterm resolve)
+
+Binds a tab to an external chat thread (Mattermost; `provider` field is the Slack seam) so an
+agent can pull a bug-report thread as a work item and post a resolution back. Module:
+`src-tauri/src/comms/` (thin bot-token REST client + permalink parsing + the reply watcher).
+
+- **Config**: `Preferences.comms_provider` / `comms_server_url` / `comms_bot_token` (single
+  account per install; set in Preferences → Integrations, test via the `comms_test_connection`
+  command). **Invariant: `comms_bot_token` must never be added to `preference_meta()`** — that
+  omission is what keeps the token unreadable via getPreferences/setPreference.
+- **Binding**: `Tab.comms_binding` (`CommsBinding`: provider, server_url snapshot, channel_id,
+  root_id, permalink, last_seen_create_at cursor, bound_at). Persisted — survives restart, dies
+  with the tab; never cloned by tab/workspace duplication (one thread = one tab, or the watcher
+  would double-inject).
+- **Watcher** (`comms::watcher_loop`, spawned unconditionally in `lib.rs` setup): every 5s scans
+  tabs for bindings, fetches each bound thread, and injects new human posts (cursor-newer,
+  not-the-bot, non-empty) into the tab's PTY via `mailink::inject_text` as one
+  `[Mattermost thread update …]` bracketed paste per tick. Holds (cursor unadvanced) while the
+  tab has no live agent session or PTY; exponential per-binding backoff on errors; auth failures
+  logged once per config fingerprint.
+- **Async dispatch**: the comms tools made `handle_backend_tool` async (awaited at its single
+  call site in `process_message`). New arms must never hold a lock guard across an await.
+- **Skill**: the `resolve` section of `resources/maiterm-skill/SKILL.md` is the agent-facing
+  orchestration (silent-while-working, one `**@Support:**`/`**@Dev:**`-addressed question when
+  blocked, two-part resolution post: plain-language for support staff, `---`, technical bullets
+  for devs).
 
 ## Agent Bridge (agent-to-agent bridge)
 
