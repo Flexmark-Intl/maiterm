@@ -529,6 +529,14 @@ export async function mailinkRemoveDevice(deviceId: string): Promise<void> {
   return invoke('mailink_remove_device', { deviceId });
 }
 
+/** Test a comms (Mattermost) server URL + bot token before saving them. */
+export async function commsTestConnection(
+  serverUrl: string,
+  botToken: string
+): Promise<{ ok: boolean; bot_username: string }> {
+  return invoke('comms_test_connection', { serverUrl, botToken });
+}
+
 export async function setWorkspaceMeshTopics(workspaceId: string, topics: MeshTopic[]): Promise<void> {
   return invoke('set_workspace_mesh_topics', { workspaceId, topics });
 }

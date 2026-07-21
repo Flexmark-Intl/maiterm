@@ -75,6 +75,20 @@ export interface Tab {
   /** maiLink exception: when true, hold this tab back from maiLink even while the
    *  "make all tabs available" preference is on (ignored in designate-only mode). */
   mailink_excluded?: boolean;
+  /** Comms thread binding (/maiterm resolve): while set, the comms watcher forwards
+   *  new human replies in the bound chat thread into this tab's agent session. */
+  comms_binding?: CommsBinding | null;
+}
+
+/** A tab's binding to an external chat thread (Mattermost) — see /maiterm resolve. */
+export interface CommsBinding {
+  provider: string;
+  server_url: string;
+  channel_id: string;
+  root_id: string;
+  permalink: string;
+  last_seen_create_at: number;
+  bound_at: number;
 }
 
 export interface Pane {
@@ -265,6 +279,12 @@ export interface Preferences {
   mailink_expose_all?: boolean;
   /** maiLink doorbell: OPTIONAL override for the shared push relay (self-hosters). Empty ⇒ built-in default. */
   mailink_relay_url?: string | null;
+  /** Comms integration provider ("mattermost"; Slack may follow). */
+  comms_provider?: string;
+  /** Comms server base URL (e.g. https://chat.example.com). Empty/null = not configured. */
+  comms_server_url?: string | null;
+  /** Comms bot bearer token. Stored raw in state (no keychain layer); never exposed to MCP tools. */
+  comms_bot_token?: string | null;
 }
 
 /** QR payload a phone scans to pair (docs/mailink-protocol.md §3.2). The phone dials

@@ -566,6 +566,7 @@ pub fn run() {
             commands::mailink::mailink_set_enabled,
             commands::mailink::mailink_list_devices,
             commands::mailink::mailink_remove_device,
+            commands::comms::comms_test_connection,
             commands::window::get_window_data,
             commands::window::create_window,
             commands::window::duplicate_window,

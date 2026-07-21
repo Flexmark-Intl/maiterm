@@ -8,7 +8,7 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { modLabel, altLabel, isModKey, isMac } from '$lib/utils/platform';
-  import { getAllWorkspaces, getAllTabs, listSystemSounds, playSystemSound, detectWindowsShells, exportState, importState, pickBackupDirectory, backupFilename, previewImport, checkFullDiskAccess, openFullDiskAccessSettings, mailinkCreatePairing, mailinkListDevices, mailinkRemoveDevice } from '$lib/tauri/commands';
+  import { getAllWorkspaces, getAllTabs, listSystemSounds, playSystemSound, detectWindowsShells, exportState, importState, pickBackupDirectory, backupFilename, previewImport, checkFullDiskAccess, openFullDiskAccessSettings, mailinkCreatePairing, mailinkListDevices, mailinkRemoveDevice, commsTestConnection } from '$lib/tauri/commands';
   import type { ImportPreview } from '$lib/tauri/commands';
   import qrcode from 'qrcode-generator';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
@@ -80,13 +80,37 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'claude_code', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'claude_code', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
     saved && sectionIds.includes(saved as SectionId) ? saved as SectionId : 'appearance'
   );
   $effect(() => { localStorage.setItem('prefs-section', activeSection); });
+
+  // ─── Comms integration (Mattermost) test-connection state ──────────────────
+  let commsTestStatus = $state('');
+  let commsTestOk = $state<boolean | null>(null);
+  let commsTesting = $state(false);
+
+  async function handleCommsTest() {
+    commsTesting = true;
+    commsTestStatus = '';
+    commsTestOk = null;
+    try {
+      const result = await commsTestConnection(
+        preferencesStore.commsServerUrl,
+        preferencesStore.commsBotToken
+      );
+      commsTestOk = true;
+      commsTestStatus = `Connected — bot account @${result.bot_username}`;
+    } catch (e) {
+      commsTestOk = false;
+      commsTestStatus = String(e);
+    } finally {
+      commsTesting = false;
+    }
+  }
 
   // ─── maiLink pairing & paired devices ──────────────────────────────────────
   let mailinkDevices = $state<MailinkDevice[]>([]);
@@ -190,6 +214,7 @@
     { id: 'notifications' as const, label: 'Notifications' },
     { id: 'triggers' as const, label: 'Triggers' },
     { id: 'claude_code' as const, label: 'AI Agents' },
+    { id: 'integrations' as const, label: 'Integrations' },
     { id: 'backup' as const, label: 'Backup' },
     { id: 'updates' as const, label: 'Updates' },
     ...isMac() ? [{ id: 'permissions' as const, label: 'Permissions' }] : [],
@@ -2153,6 +2178,79 @@
             <p class="setting-hint" style="color: var(--red, #f7768e);">{pairingError}</p>
           {/if}
         {/if}
+      {:else if activeSection === 'integrations'}
+        <h3 class="section-heading">Chat Integration</h3>
+        <p class="section-desc">
+          Connect maiTerm to your team's chat server so agents can work threads with
+          <code>/maiterm resolve &lt;permalink&gt;</code>: the thread is pulled in as a work item,
+          replies are forwarded to the agent while it works, and the resolution is posted back.
+          The bot account must be a member of any channel it should read or post in.
+        </p>
+
+        <div class="setting">
+          <div>
+            <label for="comms-provider">Provider</label>
+            <p class="setting-hint">Chat platform to integrate with</p>
+          </div>
+          <select
+            id="comms-provider"
+            value={preferencesStore.commsProvider}
+            onchange={(e) => preferencesStore.setCommsProvider(e.currentTarget.value)}
+          >
+            <option value="mattermost">Mattermost</option>
+          </select>
+        </div>
+
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="comms-server-url">Server URL</label>
+            <p class="setting-hint">Base URL of your Mattermost server</p>
+          </div>
+          <input
+            id="comms-server-url"
+            type="text"
+            class="pattern-input"
+            style="max-width: 280px;"
+            value={preferencesStore.commsServerUrl}
+            placeholder="https://chat.example.com"
+            onchange={(e) => preferencesStore.setCommsServerUrl(e.currentTarget.value)}
+          />
+        </div>
+
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="comms-bot-token">Bot Token</label>
+            <p class="setting-hint">
+              Token of a Mattermost bot account (System Console → Integrations → Bot Accounts).
+              Stored locally; never exposed to agents.
+            </p>
+          </div>
+          <input
+            id="comms-bot-token"
+            type="password"
+            class="pattern-input"
+            style="max-width: 280px;"
+            value={preferencesStore.commsBotToken}
+            placeholder="bot access token"
+            autocomplete="off"
+            onchange={(e) => preferencesStore.setCommsBotToken(e.currentTarget.value)}
+          />
+        </div>
+
+        <div class="setting" style="flex-direction: column; align-items: flex-start; gap: 10px;">
+          <button
+            class="backup-btn"
+            onclick={handleCommsTest}
+            disabled={commsTesting || !preferencesStore.commsServerUrl.trim() || !preferencesStore.commsBotToken.trim()}
+          >
+            {commsTesting ? 'Testing…' : 'Test Connection'}
+          </button>
+          {#if commsTestStatus}
+            <p class="backup-status" style={commsTestOk === false ? 'color: var(--error, #f7768e);' : ''}>
+              {commsTestStatus}
+            </p>
+          {/if}
+        </div>
       {:else if activeSection === 'backup'}
         <h3 class="section-heading">Backup Options</h3>
         <p class="section-desc">

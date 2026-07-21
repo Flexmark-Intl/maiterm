@@ -62,6 +62,9 @@ function createPreferencesStore() {
   let mailinkEnabled = $state(false);
   let mailinkExposeAll = $state(true);
   let mailinkRelayUrl = $state('');
+  let commsProvider = $state('mattermost');
+  let commsServerUrl = $state('');
+  let commsBotToken = $state('');
   let composerDefaultOpen = $state(true);
   let windowsShell = $state('powershell');
   let fileLinkAction = $state('modifier_click');
@@ -137,6 +140,9 @@ function createPreferencesStore() {
     get mailinkEnabled() { return mailinkEnabled; },
     get mailinkExposeAll() { return mailinkExposeAll; },
     get mailinkRelayUrl() { return mailinkRelayUrl; },
+    get commsProvider() { return commsProvider; },
+    get commsServerUrl() { return commsServerUrl; },
+    get commsBotToken() { return commsBotToken; },
     get composerDefaultOpen() { return composerDefaultOpen; },
     get windowsShell() { return windowsShell; },
     get fileLinkAction() { return fileLinkAction; },
@@ -222,6 +228,9 @@ function createPreferencesStore() {
       mailinkEnabled = prefs.mailink_enabled ?? false;
       mailinkExposeAll = prefs.mailink_expose_all ?? true;
       mailinkRelayUrl = prefs.mailink_relay_url ?? '';
+      commsProvider = prefs.comms_provider || 'mattermost';
+      commsServerUrl = prefs.comms_server_url ?? '';
+      commsBotToken = prefs.comms_bot_token ?? '';
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -520,6 +529,21 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setCommsProvider(value: string) {
+      commsProvider = value;
+      await this.save();
+    },
+
+    async setCommsServerUrl(value: string) {
+      commsServerUrl = value;
+      await this.save();
+    },
+
+    async setCommsBotToken(value: string) {
+      commsBotToken = value;
+      await this.save();
+    },
+
     async setWindowsShell(value: string) {
       windowsShell = value;
       await this.save();
@@ -675,6 +699,9 @@ function createPreferencesStore() {
       mailinkEnabled = prefs.mailink_enabled ?? false;
       mailinkExposeAll = prefs.mailink_expose_all ?? true;
       mailinkRelayUrl = prefs.mailink_relay_url ?? '';
+      commsProvider = prefs.comms_provider || 'mattermost';
+      commsServerUrl = prefs.comms_server_url ?? '';
+      commsBotToken = prefs.comms_bot_token ?? '';
       composerDefaultOpen = prefs.composer_default_open ?? true;
       windowsShell = prefs.windows_shell ?? 'powershell';
       fileLinkAction = prefs.file_link_action ?? 'modifier_click';
@@ -751,6 +778,9 @@ function createPreferencesStore() {
         mailink_enabled: mailinkEnabled,
         mailink_expose_all: mailinkExposeAll,
         mailink_relay_url: mailinkRelayUrl.trim() || null,
+        comms_provider: commsProvider,
+        comms_server_url: commsServerUrl.trim() || null,
+        comms_bot_token: commsBotToken.trim() || null,
         composer_default_open: composerDefaultOpen,
         windows_shell: windowsShell,
         file_link_action: fileLinkAction,

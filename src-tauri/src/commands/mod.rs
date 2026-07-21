@@ -1,4 +1,5 @@
 pub mod claude_code;
+pub mod comms;
 pub mod editor;
 pub mod mailink;
 pub mod scheduler;
