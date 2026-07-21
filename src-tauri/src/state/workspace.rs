@@ -284,6 +284,10 @@ pub struct Tab {
     /// Trigger-extracted variables (persisted across restarts).
     #[serde(default)]
     pub trigger_variables: HashMap<String, String>,
+    /// Comms thread binding (/maiterm resolve). While set, the comms watcher forwards
+    /// new human replies in the bound chat thread into this tab's agent session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comms_binding: Option<CommsBinding>,
     /// Last known working directory (absolute path, updated live from OSC 7 / prompt patterns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cwd: Option<String>,
@@ -1036,6 +1040,39 @@ pub struct Preferences {
     /// needs NO per-user secret — each phone mints its own capability. See docs/mailink-protocol.md §6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mailink_relay_url: Option<String>,
+    /// Comms integration provider ("mattermost"; Slack may follow).
+    #[serde(default = "default_comms_provider")]
+    pub comms_provider: String,
+    /// Comms server base URL, e.g. "https://chat.example.com". None/empty = not configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comms_server_url: Option<String>,
+    /// Comms bot bearer token. NEVER list in preference_meta() — it must not be readable
+    /// via the getPreferences/setPreference MCP tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comms_bot_token: Option<String>,
+}
+
+fn default_comms_provider() -> String {
+    "mattermost".to_string()
+}
+
+/// A tab's binding to an external chat thread (/maiterm resolve). The comms watcher
+/// polls the thread and injects new human replies into the tab's agent session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommsBinding {
+    /// Provider this binding belongs to ("mattermost").
+    pub provider: String,
+    /// Server base URL snapshot at bind time.
+    pub server_url: String,
+    pub channel_id: String,
+    /// Thread root post id — replies are posted with this as root.
+    pub root_id: String,
+    /// Original permalink, for display.
+    pub permalink: String,
+    /// Newest provider create_at (ms) already delivered to the session; the watcher
+    /// only forwards posts newer than this.
+    pub last_seen_create_at: i64,
+    pub bound_at: i64,
 }
 
 /// A paired maiLink mobile device. The bearer token is stored hashed (never raw); deleting
@@ -1145,6 +1182,9 @@ impl Default for Preferences {
             mailink_expose_all: true,
             mailink_devices: Vec::new(),
             mailink_relay_url: None,
+            comms_provider: default_comms_provider(),
+            comms_server_url: None,
+            comms_bot_token: None,
         }
     }
 }
@@ -1188,6 +1228,7 @@ impl Tab {
             runtime: None,
             mailink_native: false,
             mailink_excluded: false,
+            comms_binding: None,
         }
     }
 
@@ -1229,6 +1270,7 @@ impl Tab {
             runtime: None,
             mailink_native: false,
             mailink_excluded: false,
+            comms_binding: None,
         }
     }
 
@@ -1270,6 +1312,7 @@ impl Tab {
             runtime: None,
             mailink_native: false,
             mailink_excluded: false,
+            comms_binding: None,
         }
     }
 }

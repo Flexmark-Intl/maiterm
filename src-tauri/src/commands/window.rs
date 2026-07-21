@@ -480,6 +480,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 // maiLink designation is a per-tab marker (no tab-id refs) — carry it over.
                 mailink_native: tab.mailink_native,
                 mailink_excluded: tab.mailink_excluded,
+                // A comms thread binding must stay unique to one tab — cloning it would
+                // make the watcher double-inject thread replies. Never carry it over.
+                comms_binding: None,
             }
         }).collect();
 
