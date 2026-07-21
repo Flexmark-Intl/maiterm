@@ -143,23 +143,9 @@ async fn fetch_once(host_key: &str, ssh_args: &str, session_id: &str, transcript
     let quoted = format!("'{}'", transcript_path.replace('\'', "'\\''"));
     let script = format!("wc -c < {quoted}\ntail -c +{} {quoted}", offset + 1);
 
-    let mut cmd_args: Vec<String> = Vec::new();
-    #[cfg(unix)]
-    if let Some(sock) = crate::commands::ssh_tunnel::cm_socket_path(host_key) {
-        // Mux over the bridge tunnel's master — never become one (a dead socket falls
-        // through to a plain BatchMode connection, which key-auth hosts still satisfy).
-        cmd_args.push("-o".into());
-        cmd_args.push("ControlMaster=no".into());
-        cmd_args.push("-o".into());
-        cmd_args.push(format!("ControlPath={}", sock.display()));
-    }
-    #[cfg(not(unix))]
-    let _ = host_key;
-    cmd_args.push("-o".into());
-    cmd_args.push("BatchMode=yes".into());
-    cmd_args.push("-o".into());
-    cmd_args.push("ConnectTimeout=5".into());
-    cmd_args.push("-T".into());
+    // Mux over the bridge tunnel's master — never become one (a dead socket falls
+    // through to a plain BatchMode connection, which key-auth hosts still satisfy).
+    let mut cmd_args = crate::commands::ssh_tunnel::mux_client_args(host_key);
     for arg in ssh_args.split_whitespace() {
         cmd_args.push(arg.to_string());
     }

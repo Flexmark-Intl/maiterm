@@ -39,6 +39,30 @@ fn prepare_cm_socket(host_key: &str) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// Arg prefix for short-lived maiTerm ssh commands aimed at a bridge host: mux over the
+/// tunnel's ControlMaster socket when it's alive (re-auth-free, ~tens of ms), fall back to
+/// an independent BatchMode connection when it isn't. Used by the transcript mirror's
+/// fetches and remote image staging. Callers append the tunnel's recorded `ssh_args` and
+/// the remote command.
+pub fn mux_client_args(host_key: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    #[cfg(unix)]
+    if let Some(sock) = cm_socket_path(host_key) {
+        args.push("-o".into());
+        args.push("ControlMaster=no".into());
+        args.push("-o".into());
+        args.push(format!("ControlPath={}", sock.display()));
+    }
+    #[cfg(not(unix))]
+    let _ = host_key;
+    args.push("-o".into());
+    args.push("BatchMode=yes".into());
+    args.push("-o".into());
+    args.push("ConnectTimeout=5".into());
+    args.push("-T".into());
+    args
+}
+
 /// Remove the CM socket for a host. ssh usually unlinks it when the master exits; this is
 /// belt-and-braces for kills/crashes so the next tunnel start finds a clean path.
 fn cleanup_cm_socket(host_key: &str) {

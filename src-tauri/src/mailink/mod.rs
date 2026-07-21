@@ -423,25 +423,52 @@ async fn post_message(
     }
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
 
-    // Image attach: v1 supports LOCAL Claude Code only. Gate BEFORE touching the PTY and return a
-    // machine-readable `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app
-    // notice — never a "do it on the desktop" deferral. Text-only messages are unchanged for all
-    // runtimes.
+    // Image attach: Claude only. Gate BEFORE touching the PTY and return a machine-readable
+    // `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app notice — never a
+    // "do it on the desktop" deferral. Text-only messages are unchanged for all runtimes.
     if !body.images.is_empty() {
         if runtime_for_tab(&s.app, &tab_id) != Some(AgentRuntime::Claude) {
             return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_runtime",
                 "detail": "This agent can't accept images yet." })));
         }
-        // foreground_command is Some only for a live ssh/mosh: the image temp files are LOCAL paths
-        // the remote claude can't see, so scope v1 to local sessions.
+        // foreground_command is Some only for a live ssh/mosh: the temp files are LOCAL paths the
+        // remote claude can't see. With a live bridge tunnel we stage the bytes on the remote host
+        // over its mux socket and type THOSE paths; no tunnel (mosh, bridge down/disabled) or a
+        // failed transfer degrades to the same `unsupported_ssh` the app already renders.
         let is_ssh = crate::pty::get_pty_info(&s.app, &pty)
             .map(|i| i.foreground_command.is_some())
             .unwrap_or(false);
-        if is_ssh {
-            return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_ssh",
-                "detail": "Images aren't supported over SSH sessions yet." })));
-        }
-        inject_images_and_text(&s.app, &pty, &body)
+        let paths = if is_ssh {
+            let tunnel = {
+                let tunnels = s.app.ssh_tunnels.read();
+                tunnels
+                    .values()
+                    .find(|t| t.tab_ids.contains(&tab_id))
+                    .map(|t| (t.host_key.clone(), t.ssh_args.clone()))
+            };
+            let Some((host_key, ssh_args)) = tunnel else {
+                return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_ssh",
+                    "detail": "Images need the maiTerm SSH bridge, which isn't connected for this tab." })));
+            };
+            match stage_images_remote(&host_key, &ssh_args, &body.images).await {
+                Ok(paths) => paths,
+                Err(e) => {
+                    log::warn!("[maiLink] remote image staging failed for tab {tab_id}: {e}");
+                    return Ok(Json(json!({ "status": "unsupported", "reason": "unsupported_ssh",
+                        "detail": "Couldn't stage the images on the remote host." })));
+                }
+            }
+        } else {
+            let mut paths = Vec::with_capacity(body.images.len());
+            for img in &body.images {
+                paths.push(save_image_temp(&img.data, &img.mime).map_err(|e| {
+                    log::warn!("[maiLink] local image staging failed for tab {tab_id}: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?);
+            }
+            paths
+        };
+        inject_image_paths_and_text(&s.app, &pty, &paths, &body)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         return Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()) })));
@@ -959,25 +986,26 @@ async fn inject_text(
 /// the desktop drag-drop path's 200ms inter-path delay, with a little headroom.
 const IMAGE_SETTLE_MS: u64 = 220;
 
-/// Inject one or more images plus an optional caption into a LOCAL Claude Code TUI, then submit
-/// once for the whole batch. Mechanism (matches the desktop drag-drop/clipboard path and Claude
-/// Code's image-attach contract, confirmed against current CC behavior): write each image to a
-/// temp file with a recognized extension, then type its BARE ABSOLUTE PATH — raw, NOT wrapped in
+/// Type pre-staged image paths plus an optional caption into a Claude Code TUI, then submit once
+/// for the whole batch. The paths must already exist on the host where claude RUNS (local temp
+/// files, or remote-staged for SSH tabs — staging happens before any typing so a failed transfer
+/// never leaves half a batch in the prompt). Mechanism (matches the desktop drag-drop/clipboard
+/// path and CC's image-attach contract): type each BARE ABSOLUTE PATH — raw, NOT wrapped in
 /// bracketed paste (wrapping defeats CC's path→image detection) — followed by a space, pausing
 /// between images so the TUI attaches each before the next arrives. Then paste the caption via the
 /// normal bracketed-paste path and submit with CR. CC reads the files at submit time; we leave the
-/// temp files for the OS to reap (small; deleting risks racing that read).
-async fn inject_images_and_text(
+/// temp files for the OS tmp reaper (small; deleting risks racing that read).
+async fn inject_image_paths_and_text(
     app: &Arc<AppState>,
     pty_id: &str,
+    paths: &[String],
     body: &MessageBody,
 ) -> Result<(), String> {
-    for (i, img) in body.images.iter().enumerate() {
-        let path = save_image_temp(&img.data, &img.mime)?;
+    for (i, path) in paths.iter().enumerate() {
         if i > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(IMAGE_SETTLE_MS)).await;
         }
-        let mut buf = path.into_bytes();
+        let mut buf = path.clone().into_bytes();
         buf.push(b' '); // trailing space delimits the path from the next path / the caption
         crate::pty::write_pty(app, pty_id, &buf)?;
     }
@@ -987,25 +1015,112 @@ async fn inject_images_and_text(
     inject_text(app, pty_id, &body.text, body.submit).await
 }
 
-/// Decode a base64 image and write it to a temp file whose extension Claude Code recognizes as an
-/// image (it sniffs by extension). Returns the absolute path. Sibling of
-/// commands::editor::save_clipboard_image; kept local so the maiLink path has no UI-command dep.
-fn save_image_temp(data_base64: &str, mime: &str) -> Result<String, String> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_base64.as_bytes())
-        .map_err(|e| format!("invalid image base64: {e}"))?;
-    let ext = match mime {
+/// The temp-file extension for an image mime. Claude Code sniffs images BY EXTENSION, so unknown
+/// mimes default to a recognized one rather than failing the attach.
+fn image_ext(mime: &str) -> &'static str {
+    match mime {
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
         "image/gif" => "gif",
-        _ => "png", // unknown/absent mime: default to a recognized extension so CC still attaches.
-    };
-    let path =
-        std::env::temp_dir().join(format!("maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), ext));
+        _ => "png",
+    }
+}
+
+fn decode_image(data_base64: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("invalid image base64: {e}"))
+}
+
+/// Decode a base64 image and write it to a temp file whose extension Claude Code recognizes as an
+/// image. Returns the absolute path. Sibling of commands::editor::save_clipboard_image; kept local
+/// so the maiLink path has no UI-command dep.
+fn save_image_temp(data_base64: &str, mime: &str) -> Result<String, String> {
+    let bytes = decode_image(data_base64)?;
+    let path = std::env::temp_dir()
+        .join(format!("maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), image_ext(mime)));
     std::fs::write(&path, &bytes).map_err(|e| format!("cannot write temp image: {e}"))?;
     log::info!("[maiLink] staged {} image bytes → {:?}", bytes.len(), path);
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Stage a message's images in the SSH tab's REMOTE /tmp, returning the remote paths to type.
+/// Bytes stream over `ssh … 'cat > path'` mux'd through the bridge tunnel's ControlMaster
+/// socket — ssh (not scp) so the tunnel's recorded ssh_args apply verbatim (scp's -P port flag
+/// diverges from ssh's -p). All-or-nothing: any failed transfer fails the batch before a single
+/// path is typed. Fixed /tmp (not $TMPDIR) so the typed path is knowable without a round trip;
+/// like local temps, the files are left to the remote's tmp reaper. Caveat: staging lands on the
+/// tunnel host — if the user ssh'd onward to a third host, claude there can't see the files and
+/// renders dead path chips (recoverable; same class of mismatch as the transcript mirror, which
+/// simply finds no file).
+async fn stage_images_remote(
+    host_key: &str,
+    ssh_args: &str,
+    images: &[ImageInput],
+) -> Result<Vec<String>, String> {
+    let mut paths = Vec::with_capacity(images.len());
+    for img in images {
+        let bytes = decode_image(&img.data)?;
+        let remote_path =
+            format!("/tmp/maiterm-mailink-{}.{}", uuid::Uuid::new_v4(), image_ext(&img.mime));
+        push_bytes_remote(host_key, ssh_args, &bytes, &remote_path).await?;
+        log::info!(
+            "[maiLink] staged {} image bytes → {}:{}",
+            bytes.len(), host_key, remote_path
+        );
+        paths.push(remote_path);
+    }
+    Ok(paths)
+}
+
+/// Write `bytes` to `remote_path` on an SSH bridge host via `cat > path` with the bytes on
+/// stdin. ~tens of ms over the mux socket; BatchMode direct fallback when the socket is dead.
+async fn push_bytes_remote(
+    host_key: &str,
+    ssh_args: &str,
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), String> {
+    let quoted = format!("'{}'", remote_path.replace('\'', "'\\''"));
+    let mut cmd_args = crate::commands::ssh_tunnel::mux_client_args(host_key);
+    for arg in ssh_args.split_whitespace() {
+        cmd_args.push(arg.to_string());
+    }
+    cmd_args.push(format!("cat > {quoted}"));
+
+    let mut child = tokio::process::Command::new("ssh")
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ssh spawn failed: {e}"))?;
+
+    let mut stdin = child.stdin.take().ok_or("no ssh stdin")?;
+    use tokio::io::AsyncWriteExt;
+    stdin
+        .write_all(bytes)
+        .await
+        .map_err(|e| format!("streaming image bytes failed: {e}"))?;
+    drop(stdin); // EOF ends the remote `cat`
+
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "image transfer timed out (30s)".to_string())?
+    .map_err(|e| format!("ssh wait failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "remote write failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).

@@ -393,6 +393,13 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   base64 inflates ~1.37× on top), so a 6-image batch runs ~3–6 MB and two heavy screenshots alone
   used to exceed the old limit. A 413 on this route means "images too large", not a transient error
   — don't retry it verbatim.
+  **SSH tabs**: with a live bridge tunnel, the desktop stages the decoded bytes in the REMOTE
+  host's `/tmp` (same `maiterm-mailink-<uuid>.<ext>` stem — the marker contract above holds
+  unchanged for echo-stripping) by streaming them over the tunnel's mux socket, then types the
+  remote paths; the send returns `delivered` exactly like a local tab, all-or-nothing (a failed
+  transfer never types half a batch). `{status:"unsupported", reason:"unsupported_ssh"}` now means
+  only "no usable bridge" (tunnel down/disabled, mosh) or "staging failed" — render it as the same
+  in-app notice as before; a retry after the bridge reconnects can succeed.
 - **Answer a permission/question** (`POST .../respond {choice, prompt_id}`): Claude's TUI
   answers permission with a numeric/selection keystroke (e.g. `1`=yes, `2`=yes+don't-ask,
   `3`/Esc=no). The desktop maps `choice` → the correct keystroke for that runtime and injects
