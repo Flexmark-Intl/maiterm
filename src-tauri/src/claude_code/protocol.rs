@@ -48,7 +48,7 @@ pub fn tool_list_response() -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
-    let mut tools: Vec<Value> = Vec::with_capacity(46);
+    let mut tools: Vec<Value> = Vec::with_capacity(49);
 
     // Batch 1: Session, info, notification, logs, document tools
     tools.extend(serde_json::json!([
@@ -537,6 +537,46 @@ pub fn tool_list_response() -> Value {
                     "topicId": { "type": "string", "description": "The id of the topic to complete (from listTopics)." }
                 },
                 "required": ["topicId"]
+            }
+        }
+    ]).as_array().unwrap().clone());
+
+    // Batch: comms integration (/maiterm resolve — Mattermost thread binding)
+    tools.extend(serde_json::json!([
+        {
+            "name": "bindCommsThread",
+            "description": "Bind this tab to a Mattermost thread (/maiterm resolve). Fetches the whole thread via the configured bot account and returns it as a transcript ([REPORT] marks the root post — the work item). While bound, new human replies in the thread are automatically injected into this session as steering input. Rebinding replaces any prior binding on this tab.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "url": { "type": "string", "description": "Mattermost permalink: https://<server>/<team>/pl/<post-id>" }
+                },
+                "required": ["url"]
+            }
+        },
+        {
+            "name": "postCommsReply",
+            "description": "Post a reply (Mattermost markdown) to the thread this tab is bound to via bindCommsThread. Pass resolve: true with the final resolution post to also close the binding (stops reply forwarding). The bot must be a member of the channel.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "message": { "type": "string", "description": "The message to post (Mattermost markdown)" },
+                    "resolve": { "type": "boolean", "description": "true = this is the final resolution post; clears the thread binding after posting" }
+                },
+                "required": ["message"]
+            }
+        },
+        {
+            "name": "unbindCommsThread",
+            "description": "Clear this tab's Mattermost thread binding without posting (e.g. when abandoning the issue). Post a brief note via postCommsReply first so the thread isn't left hanging. Idempotent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }
+                },
+                "required": []
             }
         }
     ]).as_array().unwrap().clone());

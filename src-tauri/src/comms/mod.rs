@@ -113,6 +113,27 @@ pub fn display_name(user: &User) -> String {
     user.username.clone()
 }
 
+/// Epoch milliseconds → "YYYY-MM-DD HH:MM UTC" (civil-from-days, no chrono dep).
+pub fn format_ts_ms(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86400);
+    let tod = secs.rem_euclid(86400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        tod / 3600,
+        (tod % 3600) / 60
+    )
+}
+
 /// Posts newer than the binding's cursor, excluding the bot's own posts and
 /// empty/system messages. Pure so the filtering is unit-testable.
 fn new_human_posts<'a>(
@@ -351,6 +372,13 @@ mod tests {
         assert!(parse_permalink("not a url").is_err());
         assert!(parse_permalink("https://chat.example.com/team/channels/town-square").is_err());
         assert!(parse_permalink("https://chat.example.com/team/pl/").is_err());
+    }
+
+    #[test]
+    fn format_ts_civil_math() {
+        assert_eq!(format_ts_ms(0), "1970-01-01 00:00 UTC");
+        // 2024-02-29 12:30 UTC (leap day) = 1709209800000 ms
+        assert_eq!(format_ts_ms(1_709_209_800_000), "2024-02-29 12:30 UTC");
     }
 
     #[test]

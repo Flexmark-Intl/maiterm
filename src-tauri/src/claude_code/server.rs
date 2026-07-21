@@ -469,6 +469,10 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
         ("codex_hooks", PrefMeta { description: "Enable Codex lifecycle hooks", ptype: "boolean", category: "Integration", read_only: false }),
         ("codex_auto_resume", PrefMeta { description: "Enable Codex hooks-based auto-resume", ptype: "boolean", category: "Integration", read_only: false }),
         ("codex_hooks_bypass_trust", PrefMeta { description: "Skip the one-time Codex hook-trust prompt (advanced)", ptype: "boolean", category: "Integration", read_only: false }),
+        // comms_bot_token is deliberately ABSENT: preference_meta() is the getPreferences/
+        // setPreference surface, and the bot token must never be readable by agents.
+        ("comms_provider", PrefMeta { description: "Comms integration provider (mattermost)", ptype: "string", category: "Integration", read_only: false }),
+        ("comms_server_url", PrefMeta { description: "Comms server base URL for /maiterm resolve (e.g. https://chat.example.com)", ptype: "string", category: "Integration", read_only: false }),
         ("backup_directory", PrefMeta { description: "Backup directory path (null = scheduled backups disabled)", ptype: "string", category: "Backup", read_only: false }),
         ("backup_interval", PrefMeta { description: "Scheduled backup interval (off, hourly, daily, weekly, monthly)", ptype: "string", category: "Backup", read_only: false }),
         ("backup_exclude_scrollback", PrefMeta { description: "Exclude terminal scrollback from backups", ptype: "boolean", category: "Backup", read_only: false }),
@@ -483,8 +487,23 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
 
 /// Handle tools that can be resolved entirely on the backend without frontend involvement.
 /// Returns Some(result) if handled, None if the tool should be forwarded to the frontend.
-fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
+/// Async for the comms tools (outbound HTTP); lock guards must never be held across an await.
+async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
     match tool_name {
+        "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state).await),
+        "postCommsReply" => Some(handle_post_comms_reply(arguments, state).await),
+        "unbindCommsThread" => {
+            let tab_id = match required_tab_id(arguments) {
+                Ok(t) => t,
+                Err(e) => return Some(e),
+            };
+            let had_binding = set_comms_binding(state, &tab_id, None);
+            Some(match had_binding {
+                Some(true) => serde_json::json!({ "unbound": true }),
+                Some(false) => serde_json::json!({ "unbound": false, "note": "tab was not bound to a comms thread" }),
+                None => serde_json::json!({ "error": format!("Tab '{tab_id}' not found") }),
+            })
+        }
         "listWindows" => {
             let app_data = state.app_data.read();
             let windows: Vec<Value> = app_data.windows.iter()
@@ -688,6 +707,203 @@ fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>
         }
         _ => None,
     }
+}
+
+/// The tabId argument (auto-injected by connection affinity after initSession).
+fn required_tab_id(arguments: &Value) -> Result<String, Value> {
+    match arguments.get("tabId").and_then(|v| v.as_str()) {
+        Some(t) if !t.is_empty() => Ok(t.to_string()),
+        _ => Err(serde_json::json!({ "error": "Missing tabId — call initSession first" })),
+    }
+}
+
+/// Set or clear a tab's comms binding and persist. Returns None if the tab doesn't
+/// exist, otherwise Some(previous binding presence).
+fn set_comms_binding(
+    state: &Arc<AppState>,
+    tab_id: &str,
+    binding: Option<crate::state::CommsBinding>,
+) -> Option<bool> {
+    let (data_clone, had) = {
+        let mut app_data = state.app_data.write();
+        let tab = app_data
+            .windows
+            .iter_mut()
+            .flat_map(|w| &mut w.workspaces)
+            .flat_map(|ws| &mut ws.panes)
+            .flat_map(|p| &mut p.tabs)
+            .find(|t| t.id == tab_id)?;
+        let had = tab.comms_binding.is_some();
+        tab.comms_binding = binding;
+        (app_data.clone(), had)
+    };
+    if let Err(e) = crate::state::save_state(&data_clone) {
+        log::warn!("[comms] failed to persist binding change: {e}");
+    }
+    Some(had)
+}
+
+/// The tab's current comms binding, if any.
+fn get_comms_binding(state: &Arc<AppState>, tab_id: &str) -> Option<crate::state::CommsBinding> {
+    let app_data = state.app_data.read();
+    app_data
+        .windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|t| t.id == tab_id)
+        .and_then(|t| t.comms_binding.clone())
+}
+
+async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> Value {
+    use crate::comms;
+
+    let tab_id = match required_tab_id(arguments) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let url = match arguments.get("url").and_then(|v| v.as_str()) {
+        Some(u) if !u.trim().is_empty() => u.trim().to_string(),
+        _ => return serde_json::json!({ "error": "Missing required parameter: url (a Mattermost permalink)" }),
+    };
+
+    let parsed = match comms::parse_permalink(&url) {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    let client = match comms::client_from_prefs(state, reqwest::Client::new()) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    // The permalink must belong to the configured server — API calls always use the
+    // configured base URL, so a foreign permalink would silently 404 otherwise.
+    let cfg_host = client
+        .base_url()
+        .split("://")
+        .nth(1)
+        .unwrap_or_default()
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if !cfg_host.is_empty() && !parsed.host.eq_ignore_ascii_case(&cfg_host) {
+        return serde_json::json!({ "error": format!(
+            "permalink host '{}' does not match the configured comms server '{}' — check Preferences → Integrations",
+            parsed.host, cfg_host
+        ) });
+    }
+
+    let post = match client.get_post(&parsed.post_id).await {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    let root_id = if post.root_id.is_empty() { post.id.clone() } else { post.root_id.clone() };
+    let thread = match client.get_thread(&root_id).await {
+        Ok(t) => t,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+
+    // Author display names (best-effort — fall back to the raw user id).
+    let author_ids: Vec<String> = thread
+        .iter()
+        .map(|p| p.user_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let names: std::collections::HashMap<String, String> = client
+        .users_by_ids(&author_ids)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|u| (u.id.clone(), comms::display_name(u)))
+        .collect();
+
+    let mut transcript = String::new();
+    for p in &thread {
+        let who = names.get(&p.user_id).cloned().unwrap_or_else(|| p.user_id.clone());
+        let tag = if p.id == root_id { "[REPORT] " } else { "" };
+        transcript.push_str(&format!(
+            "{tag}— {who} ({}):\n{}\n\n",
+            comms::format_ts_ms(p.create_at),
+            p.message.trim()
+        ));
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let last_seen = thread.iter().map(|p| p.create_at).max().unwrap_or(now_ms);
+    let binding = crate::state::CommsBinding {
+        provider: "mattermost".to_string(),
+        server_url: client.base_url().to_string(),
+        channel_id: post.channel_id.clone(),
+        root_id: root_id.clone(),
+        permalink: url.clone(),
+        last_seen_create_at: last_seen,
+        bound_at: now_ms,
+    };
+    let replaced = match set_comms_binding(state, &tab_id, Some(binding)) {
+        Some(had) => had,
+        None => return serde_json::json!({ "error": format!("Tab '{tab_id}' not found") }),
+    };
+
+    let mut result = serde_json::json!({
+        "bound": true,
+        "provider": "mattermost",
+        "permalink": url,
+        "channel_id": post.channel_id,
+        "root_id": root_id,
+        "message_count": thread.len(),
+        "thread": transcript.trim_end(),
+    });
+    if replaced {
+        result["note"] = Value::String("this tab was already bound to a thread — the previous binding was replaced".to_string());
+    }
+    result
+}
+
+async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Value {
+    use crate::comms;
+
+    let tab_id = match required_tab_id(arguments) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let message = match arguments.get("message").and_then(|v| v.as_str()) {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        _ => return serde_json::json!({ "error": "Missing required parameter: message" }),
+    };
+    let resolve = arguments.get("resolve").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let Some(binding) = get_comms_binding(state, &tab_id) else {
+        return serde_json::json!({ "error": "tab is not bound to a comms thread — run /maiterm resolve <url> first" });
+    };
+    let client = match comms::client_from_prefs(state, reqwest::Client::new()) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+
+    let posted = match client
+        .create_post(&binding.channel_id, &binding.root_id, &message)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+
+    if resolve {
+        set_comms_binding(state, &tab_id, None);
+    } else {
+        // Belt-and-braces cursor advance — the watcher also filters the bot's own
+        // posts by user id, but not re-delivering our own reply is cheap certainty.
+        let mut updated = binding;
+        updated.last_seen_create_at = updated.last_seen_create_at.max(posted.create_at);
+        set_comms_binding(state, &tab_id, Some(updated));
+    }
+
+    serde_json::json!({ "posted": true, "post_id": posted.id, "resolved": resolve })
 }
 
 fn collect_workspace_folders(_state: &Arc<AppState>) -> Vec<String> {
@@ -1406,7 +1622,7 @@ async fn process_message(
                 }
 
                 // Backend-only tools: handle directly without emitting to frontend
-                if let Some(result) = handle_backend_tool(&tool_name, &arguments, state, app_handle) {
+                if let Some(result) = handle_backend_tool(&tool_name, &arguments, state, app_handle).await {
                     let content_text = serde_json::to_string(&result).unwrap_or_default();
                     let resp = JsonRpcResponse::success(
                         id,
