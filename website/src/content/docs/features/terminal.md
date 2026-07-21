@@ -10,7 +10,7 @@ maiTerm's terminal does its heavy lifting in Rust: alacritty_terminal handles VT
 - **alacritty_terminal + xterm.js** — Rust-native VTE parsing, buffering, and scrollback in the backend; xterm.js renders just the visible viewport
 - **Split panes** — horizontal and vertical splits, drag to resize, fully recursive binary tree layout
 - **Multiple tabs** — per-pane tabs with activity indicators and completion detection; tabs scrolled out of view collapse into a searchable overflow menu that also shows how long each suspended tab has been parked
-- **Pinned tabs** — pin the tabs you always want at hand; they cluster at the front of the tab strip and stay put, exempt from the active/suspended regrouping that reorders the rest
+- **Pinned tabs** — pin the tabs you always want at hand; they cluster at the front of the tab strip and stay put, exempt from the active/suspended regrouping that reorders the rest. A pinned tab always shows its pin alongside whatever activity or file-type indicator it's displaying, and reloading one (`Cmd+Shift+R`) keeps it pinned and in its place
 - **Composer dock** — a multi-line input docked below the terminal for writing long prompts comfortably (`Cmd+Shift+C`) — see [Composer Dock](#composer-dock)
 - **Scrollback persistence** — saves and restores terminal state across restarts, on by default
 - **Full-session restore** — on launch, every tab that was live at last shutdown is respawned and auto-resumed, across all workspaces. Tabs come back one at a time (with a progress modal you can cancel) so the app stays responsive; a window reload reattaches to still-running terminals instead of respawning them
