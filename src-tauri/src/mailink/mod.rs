@@ -964,7 +964,7 @@ fn attention_event(app: &AppState, tab_id: &str, state: &str, title: &str) -> Va
 /// Inject text into a PTY: bracketed paste, then (if submit) a deferred CR — the same
 /// convention as `agentPrompt.ts::bracketedPasteSubmit`, so a multi-line message stays one
 /// prompt and submits cleanly into the agent's TUI.
-async fn inject_text(
+pub(crate) async fn inject_text(
     app: &Arc<AppState>,
     pty_id: &str,
     text: &str,
@@ -1490,7 +1490,7 @@ fn runtime_key(r: AgentRuntime) -> &'static str {
     }
 }
 
-fn pty_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
+pub(crate) fn pty_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
     app.tab_pty_map.read().get(tab_id).cloned()
 }
 

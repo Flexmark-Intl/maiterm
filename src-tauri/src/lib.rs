@@ -1,5 +1,6 @@
 mod claude_code;
 mod commands;
+mod comms;
 mod mailink;
 mod pty;
 mod state;
@@ -370,6 +371,11 @@ pub fn run() {
                     log::error!("[maiLink] {e}");
                 }
             }
+
+            // Comms integration (/maiterm resolve): global thread-reply watcher.
+            // Always spawned — it idles cheaply when no tab is bound, and bound
+            // tabs persist on disk so this doubles as restart rehydration.
+            tauri::async_runtime::spawn(comms::watcher_loop(app_state.clone()));
 
             // Background tasks owned by Rust (independent of any webview's
             // event loop). See commands/scheduler.rs for the rationale.
