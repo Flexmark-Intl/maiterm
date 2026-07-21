@@ -32,6 +32,7 @@ use crate::state::app_state::AgentSessionState;
 use crate::state::workspace::TabType;
 use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
+pub(crate) mod mirror;
 pub(crate) mod transcript;
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
@@ -199,6 +200,7 @@ pub fn start(app_state: &Arc<AppState>) -> Result<(), String> {
         return Ok(()); // already running
     }
     let cfg = prepare(app_state).ok_or("maiLink bridge failed to initialize (see logs)")?;
+    mirror::prune_stale_shadows();
     let st = Arc::clone(app_state);
     tauri::async_runtime::spawn(async move {
         serve(st, cfg).await;
@@ -736,12 +738,21 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // A faster, mtime-gated ticker for per-turn message streaming: near-instant delivery without
     // paying the full chat rebuild (build_chats) at this cadence.
     let mut msg_ticker = tokio::time::interval(std::time::Duration::from_millis(400));
+    // SSH transcript mirror keep-fresh: hook events drive most fetches, but a long assistant
+    // turn appends JSONL with no hook until Stop — while a phone is actually watching, pull
+    // the delta on a slow tick too. schedule_fetch coalesces, so ticks over an idle session
+    // cost one no-op ssh mux command; non-SSH tabs are filtered out inside.
+    let mut mirror_ticker = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         tokio::select! {
             _ = msg_ticker.tick() => {
                 if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes).await.is_err() {
                     return;
                 }
+            }
+            _ = mirror_ticker.tick() => {
+                let tabs: Vec<String> = designated_tabs(&s.app).into_iter().map(|t| t.tab_id).collect();
+                mirror::refresh_tabs(&s.app, &tabs);
             }
             _ = ticker.tick() => {
                 let chats = build_chats(&s.app);

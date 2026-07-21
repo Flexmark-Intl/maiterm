@@ -787,15 +787,23 @@ export interface Turn {
   ts: number;
 }
 
-// kind:"terminal_snapshot" — emitted for Claude/SSH tabs with no locatable LOCAL JSONL (the session
-// runs on a remote host, or the local session was pruned). It is a single system turn holding a raw
-// scrape of the tab's live terminal grid (last ~40 rows, newline-delimited, may contain TUI chrome),
-// with a STABLE msg_id (`ctx_<tabId>`) that is re-scraped on every GET. Render it preformatted
-// (white-space: pre-wrap; overflow-wrap: break-word), badged as a live terminal snapshot, and treat
-// it as ONE replaceable block — not appended history. Older clients can sniff the `ctx_` msg_id
-// prefix for the same signal. Dormant tabs (no live PTY) omit it entirely → empty transcript →
-// "no messages captured yet". True per-turn history for SSH tabs is a future item (fetch remote JSONL
-// over the SSH bridge).
+// kind:"terminal_snapshot" — emitted for tabs with no locatable JSONL (a pruned local session,
+// Gemini, a plain shell, or an SSH tab whose transcript mirror is unavailable — see below). It is a
+// single system turn holding a raw scrape of the tab's live terminal grid (last ~40 rows,
+// newline-delimited, may contain TUI chrome), with a STABLE msg_id (`ctx_<tabId>`) that is
+// re-scraped on every GET. Render it preformatted (white-space: pre-wrap; overflow-wrap:
+// break-word), badged as a live terminal snapshot, and treat it as ONE replaceable block — not
+// appended history. Older clients can sniff the `ctx_` msg_id prefix for the same signal. Dormant
+// tabs (no live PTY) omit it entirely → empty transcript → "no messages captured yet".
+//
+// SSH Claude tabs (v2 transcript mirror): the desktop mirrors the session's REMOTE JSONL into a
+// local shadow file (offset-tracked `tail` fetches mux'd over the SSH bridge tunnel's maiTerm-owned
+// ControlMaster socket; hook events are the fetch trigger, plus a slow keep-fresh tick while a WS
+// client is connected). With a healthy mirror an SSH Claude tab serves REAL distilled turns —
+// indistinguishable on the wire from a local tab (same GET shape, same `message` WS streaming, same
+// per-agent meta) — and the snapshot turn does not appear. If the mirror can't fetch (tunnel down,
+// bridge disabled), the tab degrades to exactly the snapshot fallback above. No client-side changes
+// are required either way. Codex/Gemini SSH tabs always use the snapshot path.
 
 export interface AskOption { label: string; description?: string; }
 export interface AskQuestion {

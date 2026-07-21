@@ -1177,6 +1177,7 @@ async fn process_message(
                                     tool_detail: existing.as_ref().and_then(|e| e.tool_detail.clone()),
                                     pending_question: existing.as_ref().and_then(|e| e.pending_question.clone()),
                                     pending_question_at: existing.as_ref().and_then(|e| e.pending_question_at),
+                                    transcript_path: existing.as_ref().and_then(|e| e.transcript_path.clone()),
                                     model: existing.and_then(|e| e.model),
                                     connection_id: Some(connection_id.to_string()),
                                 },
@@ -1209,6 +1210,7 @@ async fn process_message(
                                         tool_detail: None,
                                         pending_question: None,
                                         pending_question_at: None,
+                                        transcript_path: None,
                                         model: None,
                                         connection_id: Some(connection_id.to_string()),
                                     },
@@ -1572,6 +1574,12 @@ async fn hooks_handler(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Present on every Claude hook payload; for SSH tabs it's the REMOTE JSONL path. Captured
+    // below (post-match) onto the session and fed to the SSH transcript mirror.
+    let transcript_path = event
+        .get("transcript_path")
+        .and_then(|v| v.as_str())
+        .map(String::from);
 
     log::debug!("Claude hook: received '{}' session={}", hook_event_name, &session_id[..session_id.len().min(8)]);
 
@@ -1631,6 +1639,7 @@ async fn hooks_handler(
                         tool_detail: None,
                         pending_question: None,
                         pending_question_at: None,
+                        transcript_path: transcript_path.clone(),
                         model: model.clone(),
                         connection_id: None,
                     },
@@ -1950,6 +1959,24 @@ async fn hooks_handler(
 
         HookPhase::Other => {
             log::debug!("Claude hook: unhandled event type '{}'", hook_event_name);
+        }
+    }
+
+    // SSH transcript mirror: refresh the session's transcript_path (SessionStart above inserts
+    // it; every later hook re-carries it, covering resume-minted paths) and treat this hook as
+    // the "something appended" signal. schedule_fetch() no-ops for non-SSH tabs.
+    if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
+        if let Some(tp) = &transcript_path {
+            let tab_id = {
+                let mut sessions = srv.state.agent_sessions.write();
+                sessions.get_mut(&session_id).map(|s| {
+                    s.transcript_path = Some(tp.clone());
+                    s.tab_id.clone()
+                })
+            };
+            if let Some(tab_id) = tab_id.filter(|t| !t.is_empty()) {
+                crate::mailink::mirror::schedule_fetch(&srv.state, &tab_id, &session_id, tp);
+            }
         }
     }
 

@@ -73,6 +73,17 @@ pub struct SshTunnel {
     pub ssh_args: String,
 }
 
+/// Per-session coalescing state for the SSH transcript mirror (mailink/mirror.rs).
+/// One fetch in flight per session; events landing mid-fetch set `dirty` so the worker
+/// loops once more instead of overlapping ssh processes.
+#[derive(Default)]
+pub struct RemoteMirrorEntry {
+    pub in_flight: bool,
+    pub dirty: bool,
+    /// Unix-ms until which new fetches are skipped after a failure (backoff).
+    pub backoff_until_ms: u64,
+}
+
 /// Tracked Claude Code session (registered via hooks).
 pub struct AgentSessionInfo {
     /// Which agent runtime owns this session; detected at initSession (Stage 3 sets Claude everywhere as a placeholder).
@@ -98,6 +109,11 @@ pub struct AgentSessionInfo {
     pub pending_question_at: Option<i64>,
     /// Model used in this session (set by SessionStart)
     pub model: Option<String>,
+    /// Absolute path of the session's transcript JSONL *on the host where the agent runs* — a
+    /// REMOTE path for SSH tabs. Every Claude hook payload carries it verbatim (even through the
+    /// SSH reverse tunnel); captured/refreshed by hooks_handler so the SSH transcript mirror
+    /// (mailink/mirror.rs) knows exactly what file to fetch. Claude-only today.
+    pub transcript_path: Option<String>,
     /// MCP connection ID that called initSession for this session.
     /// Used to recover affinity after SSE reconnects: if a session's
     /// connection_id is no longer in connection_tabs, it's orphaned.
@@ -137,6 +153,8 @@ pub struct AppState {
     pub ssh_tunnels: RwLock<HashMap<String, SshTunnel>>,
     // Remote file watchers (SSH stat polling): keyed by tab_id
     pub remote_file_watchers: RwLock<HashMap<String, RemoteFileWatch>>,
+    // SSH transcript mirror fetch coalescing: keyed by session_id
+    pub remote_mirrors: RwLock<HashMap<String, RemoteMirrorEntry>>,
     pub remote_watcher_running: std::sync::atomic::AtomicBool,
     // Resizes deferred while the PTY is actively streaming (keyed by pty_id)
     pub pending_resizes: RwLock<HashMap<String, PendingResize>>,
@@ -191,6 +209,7 @@ impl AppState {
             mcp_shutdown: parking_lot::Mutex::new(None),
             ssh_tunnels: RwLock::new(HashMap::new()),
             remote_file_watchers: RwLock::new(HashMap::new()),
+            remote_mirrors: RwLock::new(HashMap::new()),
             remote_watcher_running: std::sync::atomic::AtomicBool::new(false),
             pending_resizes: RwLock::new(HashMap::new()),
             pty_stats: RwLock::new(HashMap::new()),

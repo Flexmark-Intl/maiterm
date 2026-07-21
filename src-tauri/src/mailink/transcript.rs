@@ -231,21 +231,28 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// Find `<session_id>.jsonl` under any `~/.claude/projects/*/` dir. The session id is globally
-/// unique, so a match is unambiguous.
+/// Find `<session_id>.jsonl` under any `~/.claude/projects/*/` dir, or — for SSH tabs whose
+/// session runs on a remote host — its locally shadow-mirrored copy (mirror.rs). The session
+/// id is globally unique, so a match is unambiguous and the two roots can't collide. This
+/// single lookup is what makes mirrored SSH tabs indistinguishable from local ones: every
+/// transcript consumer (distiller, mtime gate, meta, recency) resolves through here.
 fn locate_jsonl(session_id: &str) -> Option<PathBuf> {
-    let root = dirs::home_dir()?.join(".claude").join("projects");
     let file = format!("{session_id}.jsonl");
-    for entry in std::fs::read_dir(&root).ok()? {
-        let dir = entry.ok()?.path();
-        if dir.is_dir() {
-            let candidate = dir.join(&file);
-            if candidate.is_file() {
-                return Some(candidate);
+    if let Some(root) = dirs::home_dir().map(|h| h.join(".claude").join("projects")) {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if dir.is_dir() {
+                    let candidate = dir.join(&file);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
             }
         }
     }
-    None
+    let shadow = super::mirror::shadow_dir()?.join(&file);
+    shadow.is_file().then_some(shadow)
 }
 
 // ─── Codex (rollout JSONL) ──────────────────────────────────────────────────────────────
@@ -772,6 +779,22 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locate_jsonl_falls_back_to_the_shadow_mirror_dir() {
+        // A remote (SSH) session has no ~/.claude/projects file locally; the mirror writes
+        // <shadow_dir>/<sid>.jsonl and locate_jsonl must resolve it — that fallback is the
+        // entire downstream integration of the mirror.
+        let sid = "shadow-test-0000-4000-8000-aiterm-mirror";
+        let dir = super::super::mirror::shadow_dir().expect("data dir resolvable");
+        std::fs::create_dir_all(&dir).expect("create shadow dir");
+        let path = dir.join(format!("{sid}.jsonl"));
+        std::fs::write(&path, "{}\n").expect("write shadow file");
+        let found = locate_jsonl(sid);
+        let _ = std::fs::remove_file(&path); // clean up before asserting
+        assert_eq!(found, Some(path));
+        assert!(locate_jsonl(sid).is_none(), "gone once the shadow file is removed");
+    }
 
     #[test]
     fn rfc3339_parses_to_known_epoch_ms() {
