@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.22.0
+
+- **Work a Mattermost support thread to resolution from a maiTerm tab — the new `/maiterm resolve` integration.** Point an agent at a Mattermost thread (paste the message permalink) and it binds that tab to the thread: it reads the whole conversation as a bug report, investigates and fixes the issue in the tab's repository, and posts the resolution back to the thread — without you leaving maiTerm. Configure the bot once in **Preferences → Integrations** (Mattermost server URL + bot token); a bound tab shows a green `@` indicator you can right-click to manage.
+  - **You stay in control of what the agent can act on.** Only messages that `@mention` the bot are delivered into the session, and each one is tagged by the sender's authority: an authorized operator's message carries full authority, while support staff and other channel members are treated as information and requests only — the agent won't take destructive or scope-expanding actions on their say-so, it relays those to you instead. Authorized usernames are managed in Preferences → Integrations.
+  - **Operator kill switch.** End a thread binding yourself at any time from the tab's right-click menu — severing it never depends on the agent cooperating, and it posts nothing to the thread.
+  - **Configurable response style.** A free-text "Response Instructions" field lets you set how the agent communicates on threads (tone, formatting, what to include) without touching its safety and authority rules.
+  - **A fix stays open until a human confirms it.** Posting a resolution no longer auto-closes the thread — the agent asks support to test and confirm, keeps working if it's still broken, and only closes out on a human's confirmation.
+  - **You're told when a reply can't be delivered.** If someone replies to a bound thread while its agent session isn't running, maiTerm raises a notification (deep-linking to the tab) instead of silently holding the message; the backlog is delivered when you resume the session.
+
 ## v1.21.0
 
 - **maiLink — SSH-hosted Claude agents are now first-class in the phone app.**
