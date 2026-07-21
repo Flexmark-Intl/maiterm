@@ -491,6 +491,7 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
 async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
     match tool_name {
         "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state).await),
+        "readCommsThread" => Some(handle_read_comms_thread(arguments, state).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state).await),
         "unbindCommsThread" => {
             let tab_id = match required_tab_id(arguments) {
@@ -803,32 +804,11 @@ async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
         Ok(t) => t,
         Err(e) => return serde_json::json!({ "error": e.to_string() }),
     };
+    // The bot's own @username — so the agent can tell support how to reach it (only
+    // messages that @mention the bot are forwarded into this session).
+    let bot_username = client.me().await.map(|u| u.username).unwrap_or_default();
 
-    // Author display names (best-effort — fall back to the raw user id).
-    let author_ids: Vec<String> = thread
-        .iter()
-        .map(|p| p.user_id.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    let names: std::collections::HashMap<String, String> = client
-        .users_by_ids(&author_ids)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .map(|u| (u.id.clone(), comms::display_name(u)))
-        .collect();
-
-    let mut transcript = String::new();
-    for p in &thread {
-        let who = names.get(&p.user_id).cloned().unwrap_or_else(|| p.user_id.clone());
-        let tag = if p.id == root_id { "[REPORT] " } else { "" };
-        transcript.push_str(&format!(
-            "{tag}— {who} ({}):\n{}\n\n",
-            comms::format_ts_ms(p.create_at),
-            p.message.trim()
-        ));
-    }
+    let transcript = comms::build_transcript(&client, &thread, &root_id).await;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -855,13 +835,41 @@ async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
         "permalink": url,
         "channel_id": post.channel_id,
         "root_id": root_id,
+        "bot_username": bot_username,
         "message_count": thread.len(),
-        "thread": transcript.trim_end(),
+        "thread": transcript,
     });
     if replaced {
         result["note"] = Value::String("this tab was already bound to a thread — the previous binding was replaced".to_string());
     }
     result
+}
+
+async fn handle_read_comms_thread(arguments: &Value, state: &Arc<AppState>) -> Value {
+    use crate::comms;
+
+    let tab_id = match required_tab_id(arguments) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let Some(binding) = get_comms_binding(state, &tab_id) else {
+        return serde_json::json!({ "error": "tab is not bound to a comms thread — run /maiterm resolve <url> first" });
+    };
+    let client = match comms::client_from_prefs(state, reqwest::Client::new()) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    let thread = match client.get_thread(&binding.root_id).await {
+        Ok(t) => t,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    let transcript = comms::build_transcript(&client, &thread, &binding.root_id).await;
+    serde_json::json!({
+        "provider": binding.provider,
+        "permalink": binding.permalink,
+        "message_count": thread.len(),
+        "thread": transcript,
+    })
 }
 
 async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Value {

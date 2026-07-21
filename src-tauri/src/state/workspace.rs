@@ -1050,6 +1050,12 @@ pub struct Preferences {
     /// via the getPreferences/setPreference MCP tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comms_bot_token: Option<String>,
+    /// Comms usernames whose thread @mentions carry FULL operator authority (everyone else
+    /// is scoped: investigate + reply only, destructive actions need operator confirmation).
+    /// Matched case-insensitively against the post author's username. Deliberately NOT in
+    /// preference_meta() — no chat message may edit who is trusted, only the human via the UI.
+    #[serde(default)]
+    pub comms_authorized_users: Vec<String>,
 }
 
 fn default_comms_provider() -> String {
@@ -1185,6 +1191,7 @@ impl Default for Preferences {
             comms_provider: default_comms_provider(),
             comms_server_url: None,
             comms_bot_token: None,
+            comms_authorized_users: Vec::new(),
         }
     }
 }

@@ -48,7 +48,7 @@ pub fn tool_list_response() -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
-    let mut tools: Vec<Value> = Vec::with_capacity(49);
+    let mut tools: Vec<Value> = Vec::with_capacity(50);
 
     // Batch 1: Session, info, notification, logs, document tools
     tools.extend(serde_json::json!([
@@ -553,6 +553,17 @@ pub fn tool_list_response() -> Value {
                     "url": { "type": "string", "description": "Mattermost permalink: https://<server>/<team>/pl/<post-id>" }
                 },
                 "required": ["url"]
+            }
+        },
+        {
+            "name": "readCommsThread",
+            "description": "Re-fetch the full current Mattermost thread this tab is bound to, as a transcript. Use this to catch up on ambient discussion — only messages that @mention the bot are auto-injected into your session, so the rest of the thread is read-on-demand.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }
+                },
+                "required": []
             }
         },
         {
