@@ -67,6 +67,10 @@ pub struct SshTunnel {
     pub remote_port: u16,
     pub host_key: String,
     pub tab_ids: std::collections::HashSet<String>,
+    /// The ssh destination args the tunnel was started with (e.g. "-p 2222 user@host").
+    /// Reused verbatim by the SSH transcript mirror so its fetch commands hit the same
+    /// destination (and can mux over the tunnel's ControlMaster socket).
+    pub ssh_args: String,
 }
 
 /// Tracked Claude Code session (registered via hooks).

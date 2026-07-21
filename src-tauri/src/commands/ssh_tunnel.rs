@@ -4,6 +4,52 @@ use tauri::Emitter;
 
 use crate::state::AppState;
 
+/// The maiTerm-owned ControlMaster socket for a bridge host. The tunnel becomes the master;
+/// short-lived clients (transcript-mirror fetches, scp) mux over it with `ControlMaster=no`
+/// — no re-auth, tens of ms per command. Deliberately NOT the user's `~/.ssh/master-*`
+/// namespace: a maiTerm connection owning the user's socket once broke their own
+/// `ssh <host>` when it died ("mux_client_request_session: Session open refused by peer").
+/// Lives under `~/.maiterm` (dev/prod-suffixed) because macOS caps unix-socket paths at
+/// 104 bytes — the app data dir doesn't reliably fit.
+#[cfg(unix)]
+pub fn cm_socket_path(host_key: &str) -> Option<std::path::PathBuf> {
+    let dir = dirs::home_dir()?
+        .join(".maiterm")
+        .join(if cfg!(debug_assertions) { "cm-dev" } else { "cm" });
+    let safe: String = host_key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@') { c } else { '_' })
+        .collect();
+    Some(dir.join(format!("{safe}.sock")))
+}
+
+/// Create the socket dir (0700) and clear any stale socket file so `ControlMaster=yes`
+/// actually becomes the master (with a leftover file ssh prints "ControlSocket already
+/// exists, disabling multiplexing" and silently degrades). Only called when no live tunnel
+/// is tracked for the host, so the file can't belong to a working master.
+#[cfg(unix)]
+fn prepare_cm_socket(host_key: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let path = cm_socket_path(host_key)?;
+    let dir = path.parent()?;
+    if !dir.is_dir() {
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).ok()?;
+    }
+    let _ = std::fs::remove_file(&path);
+    Some(path)
+}
+
+/// Remove the CM socket for a host. ssh usually unlinks it when the master exits; this is
+/// belt-and-braces for kills/crashes so the next tunnel start finds a clean path.
+fn cleanup_cm_socket(host_key: &str) {
+    #[cfg(unix)]
+    if let Some(path) = cm_socket_path(host_key) {
+        let _ = std::fs::remove_file(path);
+    }
+    #[cfg(not(unix))]
+    let _ = host_key;
+}
+
 #[derive(serde::Serialize)]
 pub struct SshTunnelInfo {
     pub tunnel_id: String,
@@ -67,12 +113,32 @@ pub async fn start_ssh_tunnel(
     // and own `~/.ssh/master-<user>@<host>.socket`, forcing the user's own plain
     // `ssh <host>` to multiplex over OUR tunnel. When our connection then saturates or
     // degrades, their manual ssh breaks with "mux_client_request_session: Session open
-    // refused by peer". ControlPath=none makes the bridge a fully independent
-    // connection (matches the `-o ControlMaster=no` the interactive sessions inject).
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ControlMaster=no".to_string());
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ControlPath=none".to_string());
+    // refused by peer". Instead the tunnel is master of a socket in OUR OWN namespace
+    // (~/.maiterm/cm*, see cm_socket_path): the user's ssh never resolves that path, so
+    // the poisoning failure mode is impossible, while short-lived maiTerm clients
+    // (transcript-mirror fetches, scp) get free mux'd commands over the already-
+    // authenticated tunnel. The socket lives and dies with the tunnel process — no
+    // ControlPersist, so no daemonized master escapes our pid tracking.
+    #[cfg(unix)]
+    if let Some(sock) = prepare_cm_socket(&host_key) {
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlMaster=yes".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push(format!("ControlPath={}", sock.display()));
+    } else {
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlMaster=no".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlPath=none".to_string());
+    }
+    // Windows OpenSSH has no ControlMaster support — plain independent connection.
+    #[cfg(not(unix))]
+    {
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlMaster=no".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlPath=none".to_string());
+    }
     cmd_args.push("-R".to_string());
     cmd_args.push(format!("0:127.0.0.1:{}", local_port));
 
@@ -112,6 +178,7 @@ pub async fn start_ssh_tunnel(
             remote_port,
             host_key: host_key.clone(),
             tab_ids,
+            ssh_args: ssh_args.clone(),
         });
     }
 
@@ -129,6 +196,7 @@ pub async fn start_ssh_tunnel(
             log::info!("SSH tunnel process exited cleanly for {} (likely ControlMaster mux)", hk);
         } else {
             log::info!("SSH tunnel process exited with error for {}", hk);
+            cleanup_cm_socket(&hk);
             let tab_ids: Vec<String> = {
                 let mut tunnels = state_clone.ssh_tunnels.write();
                 if let Some(tunnel) = tunnels.remove(&hk) {
@@ -176,6 +244,7 @@ pub async fn detach_ssh_tunnel(
 
     if let Some(pid) = should_kill {
         kill_process(pid);
+        cleanup_cm_socket(&host_key);
         log::info!("Killed SSH tunnel for {} (pid {})", host_key, pid);
     }
 
@@ -205,6 +274,7 @@ pub fn kill_all_tunnels(state: &Arc<AppState>) {
     };
     for (host_key, pid) in tunnels {
         kill_process(pid);
+        cleanup_cm_socket(&host_key);
         log::info!("Killed SSH tunnel for {} on shutdown", host_key);
     }
 }
@@ -539,6 +609,20 @@ mod tests {
         assert!(script.contains("agent-hook.sh"), "shim written");
         assert!(script.contains("chmod 755"), "shim made executable");
         assert!(script.contains("python3 -c '"), "merges via python3 -c");
+    }
+
+    #[test]
+    fn cm_socket_path_is_sanitized_and_short() {
+        let p = cm_socket_path("ews@nova").expect("home dir");
+        let s = p.to_string_lossy();
+        assert!(s.ends_with("ews@nova.sock"));
+        assert!(s.contains("/.maiterm/cm"), "lives in the maiTerm-owned namespace: {s}");
+        // Hostile chars can't traverse or break the ssh option value.
+        let odd = cm_socket_path("user@host with/slash:port").unwrap();
+        let name = odd.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, "user@host_with_slash_port.sock");
+        // macOS caps sun_path at 104 bytes — a realistic host key must fit.
+        assert!(s.len() < 104, "socket path too long for macOS: {} bytes", s.len());
     }
 
     #[test]
