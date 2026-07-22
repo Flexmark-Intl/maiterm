@@ -19,10 +19,18 @@
 
   type Status = 'ready' | 'not-registered' | 'needs-init' | 'dropped' | 'suspended' | 'unnamed';
   const WAIT_TIMEOUT_MS = 30_000;
+  // Retry cadence for pending inits on 'needs-init' rows. The first paste can be swallowed
+  // whole by a startup dialog — e.g. Claude Code's "restore as is / compact first" resume
+  // prompt, where the submit CR answers the DIALOG (starting a long compaction) and the init
+  // text is lost. Re-sending until the tab registers delivers the init after the dialog
+  // resolves; extra sends into a busy TUI are harmless (queued or dropped, and idempotent).
+  const INIT_RETRY_MS = 20_000;
+  const MAX_INIT_SENDS = 6; // initial send + 5 retries (~2 min — covers a long compaction)
 
-  // Tabs that have a pending action (init sent / wake fired), → start time. A row clears when
-  // it reaches 'ready'; it flips to a timeout warning if it never comes online.
-  let pending = $state<Record<string, number>>({});
+  // Tabs that have a pending action (init sent / wake fired) → last-send time + send count.
+  // A row clears when it reaches 'ready'; it flips to a timeout warning once retries are
+  // exhausted (init) or the single attempt goes unanswered (wake/resume).
+  let pending = $state<Record<string, { started: number; sends: number }>>({});
   // Inline-rename buffer for unnamed tabs.
   let renaming = $state<Record<string, string>>({});
   let busy = $state(false);
@@ -62,9 +70,24 @@
   $effect(() => {
     if (!open) return;
     void refreshLiveness();
-    const id = setInterval(() => { tick++; void refreshLiveness(); }, 1000);
+    const id = setInterval(() => { tick++; void refreshLiveness(); retryPendingInits(); }, 1000);
     return () => clearInterval(id);
   });
+
+  // Re-send `/maiterm init` to rows that are still running-but-unregistered after a send —
+  // see INIT_RETRY_MS for why the first paste can vanish (startup dialogs eat it). Runs from
+  // the interval (not an effect) so the pending-map writes can't re-trigger reactivity.
+  function retryPendingInits() {
+    for (const r of rows) {
+      const p = pending[r.tabId];
+      if (!p || r.status !== 'needs-init' || !r.ptyId) continue;
+      if (p.sends >= MAX_INIT_SENDS || Date.now() - p.started < INIT_RETRY_MS) continue;
+      p.started = Date.now();
+      p.sends += 1;
+      void bracketedPasteSubmit(r.ptyId, '/maiterm init')
+        .catch((e) => logError(`mesh setup: init retry failed for ${r.tabId.slice(0, 8)}: ${e}`));
+    }
+  }
 
   function roleName(name: string): string {
     return name.replace(/^[⇄↔→⌗]\s*/u, '').trim() || 'agent';
@@ -129,10 +152,12 @@
   // Per-row waiter state derived from `pending` + the tick. (Resolved entries are pruned in an
   // effect, not here — mutating state during render would loop.)
   function waitState(r: Row): 'waiting' | 'timeout' | null {
-    const started = pending[r.tabId];
-    if (started === undefined || r.status === 'ready') return null;
+    const p = pending[r.tabId];
+    if (p === undefined || r.status === 'ready') return null;
     void tick;
-    return Date.now() - started > WAIT_TIMEOUT_MS ? 'timeout' : 'waiting';
+    // needs-init rows keep waiting while retries remain (see retryPendingInits).
+    const canRetry = r.status === 'needs-init' && p.sends < MAX_INIT_SENDS;
+    return !canRetry && Date.now() - p.started > WAIT_TIMEOUT_MS ? 'timeout' : 'waiting';
   }
 
   // Prune pending entries once their tab reaches 'ready' (keeps the map from lingering).
@@ -143,12 +168,12 @@
 
   async function sendInit(r: Row) {
     if (!r.ptyId) return;
-    pending[r.tabId] = Date.now();
+    pending[r.tabId] = { started: Date.now(), sends: 1 };
     try { await bracketedPasteSubmit(r.ptyId, '/maiterm init'); }
     catch (e) { logError(`mesh setup: send init failed for ${r.tabId.slice(0, 8)}: ${e}`); delete pending[r.tabId]; }
   }
   function wake(r: Row) {
-    pending[r.tabId] = Date.now();
+    pending[r.tabId] = { started: Date.now(), sends: 1 };
     window.dispatchEvent(new CustomEvent('mesh-activate-tab', { detail: r.tabId }));
   }
   // Dropped = live shell, agent gone (auto-resume failed/ended). Re-run the tab's auto-resume
@@ -156,7 +181,7 @@
   // and %var interpolation). The agent re-registers + rejoins once its session comes back up.
   async function resumeDropped(r: Row) {
     if (!r.hasResume) return;
-    pending[r.tabId] = Date.now();
+    pending[r.tabId] = { started: Date.now(), sends: 1 };
     try { await replayAutoResume(r.tabId); }
     catch (e) { logError(`mesh setup: resume failed for ${r.tabId.slice(0, 8)}: ${e}`); delete pending[r.tabId]; }
   }
@@ -254,7 +279,10 @@
               {#if w === 'waiting'}
                 <span class="waiting">waiting…</span>
               {:else if w === 'timeout'}
-                <span class="timeout" title="Didn't come online in 30s — check the tab">no response</span>
+                <span class="timeout" title="Didn't come online — check the tab">no response</span>
+                {#if r.status === 'not-registered' || r.status === 'needs-init'}
+                  <button class="mini" onclick={() => sendInit(r)} disabled={!r.ptyId}>Retry</button>
+                {/if}
               {:else if r.status === 'not-registered' || r.status === 'needs-init'}
                 <button class="mini" onclick={() => sendInit(r)} disabled={!r.ptyId}>Send init</button>
               {:else if r.status === 'dropped'}
