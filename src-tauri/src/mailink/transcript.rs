@@ -81,12 +81,23 @@ pub enum ToolRender {
     Marker,
 }
 
+/// Byte cap for a transcript tail read. The distiller keeps only the last ~40 turns, so it never
+/// needs the whole file — real sessions here reach 155 MB, and reading + line-splitting that on
+/// every `GET /chats/{tab}` (re-polled every 2 s while a thread is open) was a 10–25 s open. 8 MiB
+/// comfortably holds ≥40 distilled turns even for heavy sessions while capping the read regardless
+/// of file size. A pathological session whose last 40 turns exceed 8 MiB renders slightly fewer
+/// turns — acceptable versus a 25 s open, and tunable here.
+const TRANSCRIPT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Build the last `limit` maiLink messages for a Claude session, or `None` if its transcript
 /// can't be found/read (caller falls back to the terminal scrape).
 fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
     let path = locate_jsonl(session_id)?;
-    let body = std::fs::read_to_string(&path).ok()?;
-    // Only the tail can hold the last `limit` turns; bound the work regardless of file size.
+    // Only the tail can hold the last `limit` turns; bound the read regardless of file size (a 155 MB
+    // session would otherwise be read + UTF-8-validated + line-split in full). A truncated first line
+    // just fails to parse and is skipped, same as every other tail scan here. Claude msg_ids are the
+    // per-turn uuids from the JSON, so a tail window (vs the whole file) can't shift them.
+    let body = read_tail(&path, TRANSCRIPT_TAIL_BYTES)?;
     // A turn is a handful of lines, so ~12× headroom is plenty.
     let lines: Vec<&str> = body.lines().collect();
     let start = lines.len().saturating_sub(limit * 12 + 64);
@@ -231,6 +242,21 @@ fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Read at most the last `max` bytes of a file as raw bytes, returning `(bytes, base)` where `base`
+/// is the byte offset in the FILE where the returned buffer starts. The Codex reader needs exact
+/// file byte offsets (its msg_ids key on them), so it works on raw bytes rather than the lossy
+/// String from `read_tail` — a U+FFFD replacement would inflate lengths and drift the offsets.
+fn read_tail_bytes(path: &std::path::Path, max: u64) -> Option<(Vec<u8>, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let base = len.saturating_sub(max);
+    f.seek(SeekFrom::Start(base)).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some((buf, base))
+}
+
 /// Find `<session_id>.jsonl` under any `~/.claude/projects/*/` dir, or — for SSH tabs whose
 /// session runs on a remote host — its locally shadow-mirrored copy (mirror.rs). The session
 /// id is globally unique, so a match is unambiguous and the two roots can't collide. This
@@ -324,20 +350,30 @@ fn subdirs_desc(path: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// Build the last `limit` maiLink messages for a Codex session, or `None` if its rollout can't
-/// be found/read (caller falls back to the terminal scrape). msg_ids are `cx<line>[:<block>]`
-/// keyed on the GLOBAL line number — stable across reads because the rollout is append-only, so
-/// the streamed frame and any REST re-fetch dedup to one entry (same guarantee as Claude's
-/// uuid-based ids).
+/// be found/read (caller falls back to the terminal scrape). msg_ids are `cx<byte_offset>[:<block>]`
+/// keyed on the line's GLOBAL byte offset in the rollout — stable across reads because the rollout
+/// is append-only (a line's start byte never moves), so the streamed frame and any REST re-fetch
+/// dedup to one entry (same guarantee as Claude's uuid-based ids). Byte offset — not line number —
+/// so it survives the bounded tail read below: it's recoverable from a mid-file slice, whereas a
+/// line index would shift as the file grows.
 fn codex_turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
     let path = locate_codex_jsonl(session_id)?;
-    let body = std::fs::read_to_string(&path).ok()?;
-    let lines: Vec<&str> = body.lines().collect();
-    // Only the tail can hold the last `limit` turns; bound the parse like the Claude path.
-    let start = lines.len().saturating_sub(limit * 12 + 64);
+    // Bound the read like the Claude path — rollouts grow large too, and chat_detail re-reads on
+    // every poll. Work on raw bytes so line offsets are exact file offsets (see read_tail_bytes).
+    let (buf, base) = read_tail_bytes(&path, TRANSCRIPT_TAIL_BYTES)?;
+    let mut off = base;
     let mut msgs: Vec<Value> = Vec::new();
-    for (i, line) in lines[start..].iter().enumerate() {
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            push_codex_line_messages(start + i, &v, tools, &mut msgs);
+    for (idx, line) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
+        let line_start = off;
+        off += line.len() as u64;
+        // If the tail began mid-file it starts mid-line; that leading fragment isn't a real line
+        // and its byte offset would be wrong — skip it (matches the partial-line skip elsewhere).
+        if idx == 0 && base > 0 {
+            continue;
+        }
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
+        if let Ok(v) = serde_json::from_slice::<Value>(trimmed) {
+            push_codex_line_messages(line_start, &v, tools, &mut msgs);
         }
     }
     if msgs.len() > limit {
@@ -346,8 +382,9 @@ fn codex_turns_for_session(session_id: &str, limit: usize, tools: ToolRender) ->
     Some(msgs)
 }
 
-/// Turn one rollout line into zero or more maiLink messages, appended to `out`.
-fn push_codex_line_messages(line_no: usize, v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
+/// Turn one rollout line into zero or more maiLink messages, appended to `out`. `line_no` is the
+/// line's global byte offset in the rollout — the stable per-line key baked into its msg_id.
+fn push_codex_line_messages(line_no: u64, v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
     if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
         return; // event_msg mirrors response_item content; session_meta/turn_context are meta
     }
@@ -1056,7 +1093,7 @@ mod tests {
 
         let mut out = Vec::new();
         for (i, line) in [agent, user, scaffold, reasoning, event_dup].iter().enumerate() {
-            push_codex_line_messages(i, line, ToolRender::Marker, &mut out);
+            push_codex_line_messages(i as u64, line, ToolRender::Marker, &mut out);
         }
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "agent");
@@ -1066,6 +1103,54 @@ mod tests {
         assert_eq!(out[1]["role"], "user");
         assert_eq!(out[1]["text"], "hi");
         assert_eq!(out[1]["msg_id"], "cx1:0");
+    }
+
+    /// The Codex tail read keys msg_ids on each line's GLOBAL byte offset. The property that makes
+    /// that safe: a given line's offset is identical no matter how far back the tail window starts,
+    /// AND a window that begins mid-line drops that partial fragment. Without both, a growing
+    /// rollout would re-id the same turn between reads → duplicate streamed frames.
+    #[test]
+    fn read_tail_bytes_yields_stable_global_offsets_and_skips_partial_line() {
+        use std::io::Write;
+        // Three newline-terminated "lines" of known lengths.
+        let l0 = b"line-zero\n"; // 10 bytes, offset 0
+        let l1 = b"line-one!!\n"; // 11 bytes, offset 10
+        let l2 = b"line-two-xy\n"; // 12 bytes, offset 21
+        let mut file = std::env::temp_dir();
+        file.push(format!("maiterm-codex-offset-{}.jsonl", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&file).unwrap();
+            f.write_all(l0).unwrap();
+            f.write_all(l1).unwrap();
+            f.write_all(l2).unwrap();
+        }
+        let total = (l0.len() + l1.len() + l2.len()) as u64;
+
+        // Compute the global offset of every COMPLETE line in a tail window of `max` bytes.
+        let offsets = |max: u64| -> Vec<u64> {
+            let (buf, base) = read_tail_bytes(&file, max).unwrap();
+            let mut off = base;
+            let mut out = Vec::new();
+            for (idx, line) in buf.split_inclusive(|&b| b == b'\n').enumerate() {
+                let start = off;
+                off += line.len() as u64;
+                if idx == 0 && base > 0 {
+                    continue; // partial leading fragment — dropped
+                }
+                out.push(start);
+            }
+            out
+        };
+
+        // Whole file: all three lines at their true offsets.
+        assert_eq!(offsets(total), vec![0, 10, 21]);
+        // Tail that starts INSIDE line 1 (base = total-20 = 13): the l1 fragment is dropped, and l2
+        // still reports its true global offset 21 — byte-identical to the whole-file read.
+        assert_eq!(offsets(20), vec![21]);
+        // A wider tail that starts inside line 0 keeps l1 and l2 at their real offsets.
+        assert_eq!(offsets(total - 5), vec![10, 21]);
+
+        std::fs::remove_file(&file).ok();
     }
 
     #[test]
@@ -1089,7 +1174,7 @@ mod tests {
 
         let mut out = Vec::new();
         for (i, line) in [exec, argv, patch, output].iter().enumerate() {
-            push_codex_line_messages(i, line, ToolRender::Marker, &mut out);
+            push_codex_line_messages(i as u64, line, ToolRender::Marker, &mut out);
         }
         assert_eq!(out.len(), 3);
         assert_eq!(out[0]["role"], "tool");
