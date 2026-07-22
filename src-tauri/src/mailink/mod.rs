@@ -27,6 +27,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tauri::Emitter;
 
 use crate::state::app_state::AgentSessionState;
 use crate::state::workspace::TabType;
@@ -57,6 +58,10 @@ pub struct MailinkConfig {
 #[derive(Clone)]
 struct ApiState {
     app: Arc<AppState>,
+    /// Emit target for desktop-side reflection of backend-initiated mutations (e.g. a phone
+    /// rename must update the live tab title in every open window, not just on next reload).
+    /// `None` only in router unit tests, which construct `ApiState` directly and never emit.
+    app_handle: Option<tauri::AppHandle>,
     server_name: String,
     fingerprint: String,
     dev_token: String,
@@ -195,7 +200,7 @@ fn load_or_generate_dev_token() -> Result<String, String> {
 /// Start the bridge if it isn't already running. Idempotent (a no-op if `mailink_info` is
 /// already published). Called at boot when the pref is on, and on a runtime enable toggle.
 /// Returns `Err` (already logged) if cert/token/TLS init fails.
-pub fn start(app_state: &Arc<AppState>) -> Result<(), String> {
+pub fn start(app_state: &Arc<AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
     if app_state.mailink_info.read().is_some() {
         return Ok(()); // already running
     }
@@ -203,7 +208,7 @@ pub fn start(app_state: &Arc<AppState>) -> Result<(), String> {
     mirror::prune_stale_shadows();
     let st = Arc::clone(app_state);
     tauri::async_runtime::spawn(async move {
-        serve(st, cfg).await;
+        serve(st, cfg, app_handle).await;
     });
     Ok(())
 }
@@ -273,6 +278,7 @@ fn build_router(api: ApiState) -> Router {
         )
         .route("/mailink/v1/chats/{tab_id}/respond", post(post_respond))
         .route("/mailink/v1/chats/{tab_id}/interrupt", post(post_interrupt))
+        .route("/mailink/v1/chats/{tab_id}/rename", post(post_rename))
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
@@ -280,7 +286,7 @@ fn build_router(api: ApiState) -> Router {
 }
 
 /// Background task: install the rustls crypto provider, build the router, and serve over TLS.
-pub async fn serve(app_state: Arc<AppState>, cfg: MailinkConfig) {
+pub async fn serve(app_state: Arc<AppState>, cfg: MailinkConfig, app_handle: tauri::AppHandle) {
     // rustls 0.23 needs a process-default crypto provider before any TLS config is built.
     // Pin ring explicitly (idempotent; ignore the Err if another component already set one).
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -296,6 +302,7 @@ pub async fn serve(app_state: Arc<AppState>, cfg: MailinkConfig) {
 
     let api = ApiState {
         app: app_state,
+        app_handle: Some(app_handle),
         server_name: "maiTerm".to_string(),
         fingerprint: cfg.fingerprint.clone(),
         dev_token: cfg.dev_token.clone(),
@@ -611,6 +618,82 @@ async fn post_interrupt(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Max tab title accepted from the phone. Titles are one-line chat labels; a runaway string would
+/// wreck the desktop tab strip. We normalize rather than reject on length: trim, then cap by CHAR
+/// count (not bytes — never split a multibyte grapheme's code point).
+const MAX_TAB_TITLE_CHARS: usize = 120;
+
+/// Normalize a phone-supplied tab title: trim surrounding whitespace, then cap by CHAR count so a
+/// runaway string can't wreck the desktop tab strip. Returns `None` for empty/whitespace-only
+/// input (the caller rejects with 400 — an empty title is a client bug, not a way to clear it).
+fn normalize_tab_title(raw: &str) -> Option<String> {
+    let t: String = raw.trim().chars().take(MAX_TAB_TITLE_CHARS).collect();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RenameBody {
+    title: String,
+}
+
+/// POST /chats/{tabId}/rename — set the tab's title from the phone. Sets `custom_name` so the
+/// chosen title pins against later OSC/agent title overrides (same semantics as a desktop rename),
+/// persists it (survives resume/restart), and emits `mailink-tab-renamed` so every open desktop
+/// window updates the live tab strip. The WS poller carries the new label to the phone as
+/// `chats_changed` within one tick. Returns the normalized title actually stored.
+async fn post_rename(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let title = normalize_tab_title(&body.title).ok_or(StatusCode::BAD_REQUEST)?;
+    if !set_tab_name(&s.app, &tab_id, &title) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Reflect on every open desktop window's tab strip immediately (the frontend store owns its
+    // own copy of tab.name and has no other signal that the backend changed it).
+    if let Some(h) = &s.app_handle {
+        let _ = h.emit("mailink-tab-renamed", json!({ "tabId": tab_id, "name": title }));
+    }
+    Ok(Json(json!({ "ok": true, "title": title })))
+}
+
+/// Find the terminal tab `tab_id` across all windows and set its name + `custom_name`, persisting
+/// eagerly (like the frontend `rename_tab` command). Returns false if the tab id isn't found.
+fn set_tab_name(app: &AppState, tab_id: &str, name: &str) -> bool {
+    let data_clone = {
+        let mut data = app.app_data.write();
+        let mut found = false;
+        'outer: for win in &mut data.windows {
+            for ws in &mut win.workspaces {
+                for pane in &mut ws.panes {
+                    if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.name = name.to_string();
+                        tab.custom_name = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        if !found {
+            return false;
+        }
+        data.clone()
+    };
+    let _ = crate::state::save_state(&data_clone);
+    true
+}
+
 #[derive(serde::Deserialize)]
 struct PairBody {
     code: String,
@@ -746,6 +829,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     let _coverage = WsCoverageGuard(s.app.clone());
 
     let mut last: HashMap<String, String> = HashMap::new();
+    // Per-tab last-seen title. A rename doesn't move `state`/`prompt` (the attn_key), so it needs
+    // its own diff to trigger a `chats_changed` and re-fetch the label on the phone.
+    let mut titles: HashMap<String, String> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -758,6 +844,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
         if socket.send(Message::Text(chat_state_event(&c).to_string().into())).await.is_err() {
             return;
         }
+        titles.insert(tab.clone(), c["title"].as_str().unwrap_or_default().to_string());
         last.insert(tab, key);
     }
 
@@ -794,6 +881,13 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     if prev.is_none() {
                         roster_changed = true;
                     }
+                    // A rename of an already-known tab changes the label but not state/prompt —
+                    // fire `chats_changed` so the inbox + open thread re-fetch the new title.
+                    let title = c["title"].as_str().unwrap_or_default().to_string();
+                    if prev.is_some() && titles.get(&tab).map(String::as_str) != Some(title.as_str()) {
+                        roster_changed = true;
+                    }
+                    titles.insert(tab.clone(), title);
                     if prev.as_deref() != Some(key.as_str()) {
                         if socket.send(Message::Text(chat_state_event(c).to_string().into())).await.is_err() {
                             return;
@@ -815,7 +909,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -2195,6 +2289,7 @@ mod tests {
 
         let api = ApiState {
             app: Arc::new(AppState::new()),
+            app_handle: None,
             server_name: "maiTerm".to_string(),
             fingerprint: "sha256/test".to_string(),
             dev_token: "correct-token".to_string(),
@@ -2252,6 +2347,7 @@ mod tests {
 
         let api = ApiState {
             app: Arc::new(AppState::new()),
+            app_handle: None,
             server_name: "maiTerm".to_string(),
             fingerprint: "sha256/test".to_string(),
             dev_token: "correct-token".to_string(),
@@ -2265,6 +2361,20 @@ mod tests {
             .unwrap();
         let status = build_router(api).oneshot(req).await.unwrap().status();
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn normalize_tab_title_trims_rejects_empty_and_caps_length() {
+        // trims surrounding whitespace
+        assert_eq!(normalize_tab_title("  deploy box  ").as_deref(), Some("deploy box"));
+        // empty / whitespace-only → None (handler turns this into 400)
+        assert_eq!(normalize_tab_title(""), None);
+        assert_eq!(normalize_tab_title("   \t\n "), None);
+        // capped by CHAR count, and the cap never splits a multibyte code point
+        let long = "é".repeat(MAX_TAB_TITLE_CHARS + 40);
+        let out = normalize_tab_title(&long).unwrap();
+        assert_eq!(out.chars().count(), MAX_TAB_TITLE_CHARS);
+        assert!(out.chars().all(|c| c == 'é'), "must not split a multibyte grapheme");
     }
 
     /// The one subtle, breakage-prone property: our PEM→DER extraction (which feeds the

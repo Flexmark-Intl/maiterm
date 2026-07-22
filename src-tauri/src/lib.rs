@@ -367,7 +367,7 @@ pub fn run() {
             // opt-in TLS listener — only started when the user has enabled it. Kept distinct
             // from the localhost-only Claude-Code server above.
             if app_state.app_data.read().preferences.mailink_enabled {
-                if let Err(e) = mailink::start(&app_state) {
+                if let Err(e) = mailink::start(&app_state, app.handle().clone()) {
                     log::error!("[maiLink] {e}");
                 }
             }

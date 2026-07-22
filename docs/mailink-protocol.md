@@ -299,6 +299,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent) | `{}` → `{ok}` |
+| `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `GET  /heartbeat` | Liveness + server clock | → `{ok, now, server_name}` |
 
 ### 4.2 WebSocket (live chat channel) — `GET /mailink/v1/ws` (upgrade)
@@ -318,7 +319,7 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // `prompt` mirrors pendingPrompt; present for permission/question,
                                                      // omitted for idle_done. Lets the app render decision buttons on the
                                                      // live path with no follow-up GET. GET /chats/{tabId} stays source of truth.
-{ "type": "chats_changed" }                           // roster/designation changed; re-GET /chats
+{ "type": "chats_changed" }                           // roster/designation OR a tab title changed; re-GET /chats
 ```
 
 Client→server frames are optional conveniences mirroring the REST actions (`message`,
@@ -415,7 +416,17 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
 - **Activate** (`POST .../activate`): for a dormant maiLink-native tab, run the existing
   auto-resume/spawn path (the same machinery clone/bridge use) and `switchTab` to focus it;
   return the resulting state. For a live tab it's a focus + presence no-op.
-- **Interrupt**: inject `\x1b` (Esc) — the documented "human interrupts the agent" gesture.
+- **Interrupt**: inject `\x1b` (Esc) — the documented "human interrupts the agent" gesture. A
+  single Esc byte, nothing else — it interrupts a running turn, clears a half-typed line, and
+  backs out of a TUI menu (including the resume startup menu), so the button is a safe always-on
+  escape hatch regardless of the tab's believed state. `404` if the tab isn't maiLink-available;
+  `409` if it has no live PTY (nothing to interrupt — resume it first).
+- **Rename** (`POST .../rename`): set the tab title. The title is trimmed and capped at 120
+  chars; empty/whitespace-only is `400` (not a way to clear the name). Sets `custom_name` so the
+  chosen title pins against later OSC/agent title overrides (same as a desktop rename), persists
+  it (survives resume/restart), and updates the live desktop tab strip in every open window.
+  Returns the normalized `title` actually stored. The label reaches other phones as a
+  `chats_changed` on the next WS tick (≤1.5 s) — re-GET `/chats`.
 
 ---
 

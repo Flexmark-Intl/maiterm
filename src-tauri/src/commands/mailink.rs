@@ -21,6 +21,7 @@ pub fn mailink_create_pairing(
 /// its (fingerprint, port) so pairing works right away; on disable, it is graceful-shutdown.
 #[tauri::command]
 pub fn mailink_set_enabled(
+    app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     enabled: bool,
 ) -> Result<(), String> {
@@ -31,7 +32,7 @@ pub fn mailink_set_enabled(
     };
     save_state(&data_clone)?;
     if enabled {
-        crate::mailink::start(&state)?;
+        crate::mailink::start(&state, app)?;
     } else {
         crate::mailink::shutdown(&state);
     }

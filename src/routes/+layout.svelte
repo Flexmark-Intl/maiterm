@@ -252,6 +252,13 @@
       }
     }).then(unlisten => { unlistenReloadTab = unlisten; });
 
+    // A maiLink phone renamed a tab — the backend already persisted it; sync the store so the
+    // live tab strip reflects the new title without a reload.
+    let unlistenTabRenamed: (() => void) | undefined;
+    listen<{ tabId: string; name: string }>('mailink-tab-renamed', (event) => {
+      workspacesStore.applyExternalRename(event.payload.tabId, event.payload.name);
+    }).then(unlisten => { unlistenTabRenamed = unlisten; });
+
     // Check for updates menu event
     let unlistenCheckUpdates: (() => void) | undefined;
     listen('check-for-updates', () => {
@@ -912,6 +919,7 @@
       unlistenClose?.();
       unlistenQuit?.();
       unlistenReloadTab?.();
+      unlistenTabRenamed?.();
       unlistenExportState?.();
       unlistenImportState?.();
       unlistenStateImported?.();

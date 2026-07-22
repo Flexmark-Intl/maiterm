@@ -1481,6 +1481,24 @@ function createWorkspacesStore() {
       }
     },
 
+    /**
+     * Apply a rename that originated in the backend (e.g. a maiLink phone rename). The backend
+     * already mutated app_data and persisted, so this only syncs the in-memory store so the live
+     * tab strip reflects the new title without a reload. No command call — that would double-write.
+     */
+    applyExternalRename(tabId: string, name: string) {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) {
+            tab.name = name;
+            tab.custom_name = true;
+            return;
+          }
+        }
+      }
+    },
+
     async updateEditorTabFile(tabId: string, name: string, fileInfo: EditorFileInfo) {
       await commands.updateEditorTabFile(tabId, name, fileInfo);
       for (const ws of workspaces) {
