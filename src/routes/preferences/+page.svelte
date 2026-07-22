@@ -2253,21 +2253,23 @@
         </div>
 
         <h3 class="section-heading">Message Authority</h3>
-        <p class="section-desc">
-          When an agent is working a thread, it only acts on messages that <strong>@mention the bot</strong>.
-          Those messages are scoped by default — the agent may investigate and reply, but won't take
-          destructive or scope-expanding actions on a support request without confirming with you first.
-          Usernames listed below are trusted: their @mentions carry your full authority.
-          Matching is by Mattermost username, so this is only as trustworthy as your server's identities.
-        </p>
 
-        <div class="setting" style="flex-direction: column; align-items: flex-start; gap: 8px;">
-          <label for="comms-authorized">Authorized usernames</label>
-          <p class="setting-hint">One username per line (with or without a leading <code>@</code>).</p>
+        <div class="setting comms-field">
+          <div class="comms-field-desc">
+            <label for="comms-authorized">Authorized usernames</label>
+            <p class="setting-hint">
+              When an agent is working a thread, it only acts on messages that
+              <strong>@mention the bot</strong>. Those messages are scoped by default — the agent
+              may investigate and reply, but won't take destructive or scope-expanding actions on a
+              support request without confirming with you first. Usernames listed here are trusted:
+              their @mentions carry your full authority. Matching is by Mattermost username, so this
+              is only as trustworthy as your server's identities. One per line (with or without a
+              leading <code>@</code>).
+            </p>
+          </div>
           <textarea
             id="comms-authorized"
-            class="pattern-input"
-            style="width: 100%; max-width: 380px; min-height: 90px; font-family: var(--font-mono, monospace);"
+            class="pattern-input comms-field-input"
             placeholder={'darryl\nlead-dev'}
             value={preferencesStore.commsAuthorizedUsers.join('\n')}
             onchange={(e) => preferencesStore.setCommsAuthorizedUsers(
@@ -2279,17 +2281,19 @@
           ></textarea>
         </div>
 
-        <div class="setting" style="flex-direction: column; align-items: flex-start; gap: 8px;">
-          <label for="comms-pickup">Pickup users</label>
-          <p class="setting-hint">
-            Usernames who can <strong>summon</strong> the bot — @mentioning it in a chat-monitored
-            channel assigns that thread to the monitoring tab. Their messages still carry
-            support-tier authority while the work runs. Authorized users can always summon.
-          </p>
+        <div class="setting comms-field">
+          <div class="comms-field-desc">
+            <label for="comms-pickup">Pickup users</label>
+            <p class="setting-hint">
+              Usernames who can <strong>summon</strong> the bot — @mentioning it in a chat-monitored
+              channel assigns that thread to the monitoring tab. Their messages still carry
+              support-tier authority while the work runs. Authorized users can always summon.
+              One per line (with or without a leading <code>@</code>).
+            </p>
+          </div>
           <textarea
             id="comms-pickup"
-            class="pattern-input"
-            style="width: 100%; max-width: 380px; min-height: 70px; font-family: var(--font-mono, monospace);"
+            class="pattern-input comms-field-input"
             placeholder={'support-jane\nsupport-bob'}
             value={preferencesStore.commsPickupUsers.join('\n')}
             onchange={(e) => preferencesStore.setCommsPickupUsers(
@@ -2659,6 +2663,33 @@
   .setting > .label-text {
     font-size: 1rem;
     color: var(--fg);
+  }
+
+  /* Two-column comms field: description on the left, textarea on the right. */
+  .comms-field {
+    align-items: flex-start;
+    gap: 20px;
+  }
+
+  .comms-field-desc {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .comms-field-desc > label {
+    font-size: 1rem;
+    color: var(--fg);
+  }
+
+  .comms-field-desc .setting-hint {
+    max-width: none;
+  }
+
+  .comms-field-input {
+    flex: 0 0 220px;
+    align-self: stretch;
+    min-height: 90px;
+    font-family: var(--font-mono, monospace);
   }
 
   .number-input-wrapper {
