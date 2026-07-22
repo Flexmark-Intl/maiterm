@@ -275,6 +275,24 @@
       agentMeshStore.initializeMesh(event.payload.workspaceId);
     }).then(unlisten => { unlistenMeshInit = unlisten; });
 
+    // maiLink tab-lifecycle actions. Each is tab-scoped and globally emitted; the store methods
+    // no-op in windows that don't own the tab (archive/close resolve the live tab by id; restore
+    // targets the archived tab's workspace). Same owning-window contract as resume/mesh-init.
+    let unlistenArchiveTab: (() => void) | undefined;
+    listen<{ tabId: string }>('mailink-archive-tab', (event) => {
+      workspacesStore.archiveTabById(event.payload.tabId);
+    }).then(unlisten => { unlistenArchiveTab = unlisten; });
+
+    let unlistenCloseTab: (() => void) | undefined;
+    listen<{ tabId: string }>('mailink-close-tab', (event) => {
+      workspacesStore.closeTabById(event.payload.tabId);
+    }).then(unlisten => { unlistenCloseTab = unlisten; });
+
+    let unlistenRestoreTab: (() => void) | undefined;
+    listen<{ workspaceId: string; tabId: string }>('mailink-restore-tab', (event) => {
+      workspacesStore.restoreArchivedTab(event.payload.workspaceId, event.payload.tabId);
+    }).then(unlisten => { unlistenRestoreTab = unlisten; });
+
     // Check for updates menu event
     let unlistenCheckUpdates: (() => void) | undefined;
     listen('check-for-updates', () => {
@@ -938,6 +956,9 @@
       unlistenTabRenamed?.();
       unlistenResumeWorkspace?.();
       unlistenMeshInit?.();
+      unlistenArchiveTab?.();
+      unlistenCloseTab?.();
+      unlistenRestoreTab?.();
       unlistenExportState?.();
       unlistenImportState?.();
       unlistenStateImported?.();

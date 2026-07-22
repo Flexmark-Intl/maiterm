@@ -267,6 +267,8 @@ fn build_router(api: ApiState) -> Router {
     Router::new()
         .route("/mailink/v1/heartbeat", get(heartbeat))
         .route("/mailink/v1/chats", get(chats_list))
+        // Static segment — must be registered before `/chats/{tab_id}` so it isn't shadowed.
+        .route("/mailink/v1/chats/archived", get(chats_archived))
         .route("/mailink/v1/chats/{tab_id}", get(chat_detail))
         .route("/mailink/v1/chats/{tab_id}/context", get(chat_context))
         // Image sends carry base64 inline (mailink-protocol §12), so this is the one route that
@@ -287,6 +289,9 @@ fn build_router(api: ApiState) -> Router {
             "/mailink/v1/chats/{tab_id}/mesh-init",
             post(post_mesh_init),
         )
+        .route("/mailink/v1/chats/{tab_id}/archive", post(post_archive))
+        .route("/mailink/v1/chats/{tab_id}/close", post(post_close))
+        .route("/mailink/v1/chats/{tab_id}/restore", post(post_restore))
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
@@ -817,6 +822,79 @@ async fn post_mesh_init(
         "initiated": true,
         "workspaceId": meta.workspace_id,
     })))
+}
+
+/// POST /chats/{tabId}/archive — archive a live tab (RECOVERABLE). The tab leaves the workspace's
+/// live tabs into its `archived_tabs`; scrollback + restore context (cwd, ssh) are preserved and
+/// it can be restored later. Archiving needs the frontend (serialize the live xterm buffer, kill
+/// the PTY, reselect the active tab), so — like resume-workspace — this emits and the owning
+/// window's `workspacesStore.archiveTab(...)` does the work. It drops from GET /chats and a
+/// `chats_changed` follows on the next WS tick (≤1.5 s).
+async fn post_archive(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    // Must be a currently-live maiLink tab (archive/close operate on GET /chats entries).
+    if !designated_tabs(&s.app).iter().any(|t| t.tab_id == tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let h = s.app_handle.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    // tab ids are app-unique — the owning window resolves ws+pane and acts; others no-op.
+    let _ = h.emit("mailink-archive-tab", json!({ "tabId": tab_id }));
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// POST /chats/{tabId}/close — end a tab permanently (DESTRUCTIVE, NOT recoverable). This is the
+/// genuine-close path (desktop Cmd+W / × button): the PTY is killed, the tab is removed from
+/// state, its scrollback is deleted, and any agent bridge on it is torn down — there is no
+/// archive entry afterward. Frontend-driven for the same reasons as archive; emits
+/// `mailink-close-tab`. The phone should confirm before calling this.
+async fn post_close(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !designated_tabs(&s.app).iter().any(|t| t.tab_id == tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let h = s.app_handle.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = h.emit("mailink-close-tab", json!({ "tabId": tab_id }));
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// POST /chats/{tabId}/restore — un-archive a tab back into its workspace (reverses archive). The
+/// tab id here is an ARCHIVED tab (from GET /chats/archived), not a live one, so it's resolved
+/// against `archived_tabs` rather than `designated_tabs`. Restoring respawns the PTY + replays
+/// auto-resume (frontend), so this emits `mailink-restore-tab` with the resolved workspace id and
+/// the owning window runs `workspacesStore.restoreArchivedTab(...)`. It reappears in GET /chats on
+/// the next `chats_changed`.
+async fn post_restore(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let workspace_id = archived_workspace_of(&s.app, &tab_id).ok_or(StatusCode::NOT_FOUND)?;
+    let h = s.app_handle.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = h.emit(
+        "mailink-restore-tab",
+        json!({ "workspaceId": workspace_id, "tabId": tab_id }),
+    );
+    Ok(Json(json!({ "ok": true, "workspaceId": workspace_id })))
+}
+
+/// GET /chats/archived — the flat list of archived tabs across every window/workspace (they're
+/// NOT in GET /chats, which only lists live/designated tabs). `workspaceId` on each entry lets the
+/// phone group by workspace client-side; the id is what POST /chats/{tabId}/restore takes.
+async fn chats_archived(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(json!(archived_chats(&s.app))))
 }
 
 #[derive(serde::Deserialize)]
@@ -1727,6 +1805,51 @@ fn designated_tabs(app: &AppState) -> Vec<TabMeta> {
             }
         }
     }
+    out
+}
+
+/// Resolve an ARCHIVED tab id → its owning workspace id (searching every window/workspace's
+/// `archived_tabs`). `None` if no archived tab has that id. Used by POST /chats/{tabId}/restore.
+fn archived_workspace_of(app: &AppState, tab_id: &str) -> Option<String> {
+    let data = app.app_data.read();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            if ws.archived_tabs.iter().any(|t| t.id == tab_id) {
+                return Some(ws.id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// The flat archived-tab list for GET /chats/archived — every workspace's `archived_tabs` across
+/// all windows, newest-archived first. Only terminal tabs are exposed (editor/diff archives aren't
+/// maiLink chats). `runtime` is best-effort (persisted from when it was live); `cwd` is the
+/// restore cwd captured at archive time.
+fn archived_chats(app: &AppState) -> Vec<Value> {
+    let data = app.app_data.read();
+    let mut out = Vec::new();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            for tab in &ws.archived_tabs {
+                if !matches!(tab.tab_type, TabType::Terminal) {
+                    continue;
+                }
+                out.push(json!({
+                    "tabId": tab.id,
+                    // The resolved name shown in the archive list (falls back to the raw tab name).
+                    "name": tab.archived_name.clone().unwrap_or_else(|| tab.name.clone()),
+                    "workspace": ws.name,
+                    "workspaceId": ws.id,
+                    "runtime": tab.runtime.map(runtime_key),
+                    "archivedAt": tab.archived_at,
+                    "cwd": tab.restore_cwd,
+                }));
+            }
+        }
+    }
+    // Newest archived first; entries without a timestamp sort last.
+    out.sort_by(|a, b| b["archivedAt"].as_str().cmp(&a["archivedAt"].as_str()));
     out
 }
 
@@ -2872,6 +2995,45 @@ mod tests {
         assert!(m.workspace_suspended);
         assert_eq!(m.workspace_id, ws_id);
         assert!(m.mesh, "bridge_all surfaces as the mesh flag");
+    }
+
+    #[test]
+    fn archived_chats_lists_and_resolves_by_tab_id() {
+        use crate::state::workspace::{Tab, WindowData, Workspace};
+        let app = AppState::new();
+        let (ws_id, older_id, newer_id) = {
+            let mut data = app.app_data.write();
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("ENAGIC".into());
+            let mut older = Tab::new("agent-old".into());
+            older.runtime = Some(AgentRuntime::Claude);
+            older.archived_name = Some("Old Agent".into());
+            older.archived_at = Some("2026-07-20T10:00:00Z".into());
+            older.restore_cwd = Some("/tmp/old".into());
+            let mut newer = Tab::new("agent-new".into());
+            newer.archived_at = Some("2026-07-22T10:00:00Z".into());
+            let ids = (ws.id.clone(), older.id.clone(), newer.id.clone());
+            ws.archived_tabs.push(older);
+            ws.archived_tabs.push(newer);
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            ids
+        };
+
+        let list = archived_chats(&app);
+        assert_eq!(list.len(), 2);
+        // Newest-archived first.
+        assert_eq!(list[0]["tabId"].as_str(), Some(newer_id.as_str()));
+        assert_eq!(list[1]["tabId"].as_str(), Some(older_id.as_str()));
+        // Resolved name + workspace + captured cwd surface on the older entry.
+        assert_eq!(list[1]["name"].as_str(), Some("Old Agent"));
+        assert_eq!(list[1]["workspaceId"].as_str(), Some(ws_id.as_str()));
+        assert_eq!(list[1]["runtime"].as_str(), Some("claude"));
+        assert_eq!(list[1]["cwd"].as_str(), Some("/tmp/old"));
+
+        // restore resolves an archived tab id → its owning workspace; unknown ids → None.
+        assert_eq!(archived_workspace_of(&app, &older_id).as_deref(), Some(ws_id.as_str()));
+        assert_eq!(archived_workspace_of(&app, "nope"), None);
     }
 
     #[test]

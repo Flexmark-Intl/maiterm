@@ -302,6 +302,10 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
+| `GET  /chats/archived` | Archived (recoverable) tabs across all workspaces | → `ArchivedChat[]` |
+| `POST /chats/{tabId}/archive` | Archive a live tab (RECOVERABLE) | `{}` → `{ok}` |
+| `POST /chats/{tabId}/close` | End a live tab PERMANENTLY (destructive) | `{}` → `{ok}` |
+| `POST /chats/{tabId}/restore` | Un-archive a tab back into its workspace | `{}` → `{ok, workspaceId?}` |
 | `GET  /heartbeat` | Liveness + server clock | → `{ok, now, server_name}` |
 
 ### 4.2 WebSocket (live chat channel) — `GET /mailink/v1/ws` (upgrade)
@@ -365,6 +369,18 @@ interface ChatDetail extends Chat {
 // `message{role:'user'}` WS echo for that turn (mints at accept-time, reused for both) —
 // lets the app reconcile an optimistic local bubble against the echo.
 interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string; ts: number; }
+
+// GET /chats/archived — recoverable tabs (NOT in GET /chats). Flat across workspaces; group by
+// workspaceId client-side. tabId is what POST /chats/{tabId}/restore takes.
+interface ArchivedChat {
+  tabId: string;
+  name: string;             // resolved display label captured at archive time
+  workspace: string;        // workspace name
+  workspaceId: string;      // owning workspace id
+  runtime?: 'claude' | 'codex' | 'gemini';  // persisted from when it was live
+  archivedAt?: string;      // ISO-8601; list is sorted newest-first
+  cwd?: string;             // restore cwd captured at archive time
+}
 ```
 
 ---
@@ -472,6 +488,22 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   `initiated:true` with `workspaceId` when the pass was kicked off. Per-member Initialize from
   the thread view stays what it is today — `/message` with `/maiterm init` — which is exactly
   what the group action types for running members.
+- **Archive / Close / Restore** (tab lifecycle): two DISTINCT real operations, both reversible-ness
+  labelled honestly:
+  - **Archive** (`POST .../archive`) — RECOVERABLE. The tab leaves the workspace's live tabs into
+    its archive; scrollback + restore context (cwd, ssh, auto-resume) are preserved. It drops from
+    GET /chats and a `chats_changed` follows (≤1.5 s). Later restorable.
+  - **Close** (`POST .../close`) — DESTRUCTIVE, NOT recoverable. The genuine end-conversation path
+    (desktop Cmd+W): PTY killed, tab removed, scrollback deleted, any agent bridge torn down — no
+    archive entry afterward. The phone MUST confirm before calling this.
+  - **Restore** (`POST .../restore`) — reverses Archive. The `tabId` is an ARCHIVED tab (from GET
+    /chats/archived), not a live one. Respawns the PTY + replays auto-resume; reappears in GET
+    /chats on the next `chats_changed`. Returns the resolved `workspaceId`.
+  All three are frontend-driven (serialize/kill/respawn PTYs), so — like resume-workspace — the
+  backend emits to the owning window and returns `{ok}` immediately; the observable result arrives
+  as the follow-up `chats_changed`. `404` if the tab id isn't a live maiLink tab (archive/close) or
+  isn't an archived tab (restore). Archived tabs live outside GET /chats: enumerate them with **GET
+  /chats/archived** (flat `ArchivedChat[]`, newest-first; group by `workspaceId` on the phone).
 
 ---
 

@@ -1335,6 +1335,37 @@ function createWorkspacesStore() {
       });
     },
 
+    // Locate a live tab's (workspace, pane) by id alone — for maiLink phone actions that address a
+    // tab without knowing its container. Returns null if it isn't a live tab in this window.
+    _locateTab(tabId: string): { workspaceId: string; paneId: string; tab: Tab } | null {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) return { workspaceId: ws.id, paneId: pane.id, tab };
+        }
+      }
+      return null;
+    },
+
+    // maiLink "Archive" — archive a live tab by id (recoverable). Resolves the container and the
+    // display label (approximating the tab strip's displayName: an OSC title stands in for a
+    // non-custom name), then delegates to the full archiveTab path.
+    async archiveTabById(tabId: string) {
+      const loc = this._locateTab(tabId);
+      if (!loc) return;
+      const osc = terminalsStore.getOsc(tabId);
+      const name = loc.tab.custom_name ? loc.tab.name : (osc?.title || loc.tab.name);
+      await this.archiveTab(loc.workspaceId, loc.paneId, tabId, name);
+    },
+
+    // maiLink "Close" — permanently end a live tab by id (destructive; deleteTab kills the PTY,
+    // tears down bridges, and removes it with no archive entry).
+    async closeTabById(tabId: string) {
+      const loc = this._locateTab(tabId);
+      if (!loc) return;
+      await this.deleteTab(loc.workspaceId, loc.paneId, tabId);
+    },
+
     async deleteArchivedTab(workspaceId: string, tabId: string) {
       await commands.deleteArchivedTab(workspaceId, tabId);
       const ws = workspaces.find(w => w.id === workspaceId);
