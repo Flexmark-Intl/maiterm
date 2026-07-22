@@ -348,6 +348,10 @@ interface Chat {
   mesh: boolean;            // owning workspace is a Mesh Workspace → badge the group, offer Initialize-all
   runtime: 'claude' | 'codex' | 'gemini';
   state: 'active' | 'idle' | 'permission' | 'dormant';
+                            // dormant = no live agent. A tab with a live PTY that is still producing
+                            // turns but whose session registration was lost (e.g. a mesh/SSH resume
+                            // where the hook/init handshake missed) reports 'active' via a
+                            // self-correcting liveness fallback — never a stuck 'dormant' over live output.
   unread: boolean;          // idle/attention not yet seen on a device
   lastActivityTs: number;
   preview: string;          // last line(s) of distilled context

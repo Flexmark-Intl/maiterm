@@ -1880,6 +1880,36 @@ fn session_states(app: &AppState) -> HashMap<String, (AgentSessionState, AgentRu
     map
 }
 
+/// How recently a tab's transcript must have produced a REAL turn for the live-agent fallback to
+/// override "dormant". Long enough to bridge a slow tool call / thinking gap, short enough that a
+/// genuinely finished-and-quiet agent reverts to dormant so the operator sees the real state.
+const LIVE_STATE_FALLBACK_MS: u64 = 10 * 60 * 1000;
+
+/// Pure decision for the dormant→live fallback (unit-tested; the impl below wires the real reads).
+fn live_fallback_decision(has_live_pty: bool, last_turn_ts: Option<u64>, now: u64) -> bool {
+    has_live_pty && last_turn_ts.is_some_and(|ts| now.saturating_sub(ts) <= LIVE_STATE_FALLBACK_MS)
+}
+
+/// Self-correcting liveness fallback for a designated tab that has NO tracked `agent_sessions`
+/// entry (would report "dormant"). Such a tab can still be a fully-live, producing agent whose
+/// session entry was simply never created: on a mesh/SSH resume, SessionStart buffers to `pending`
+/// (Claude http hooks carry no tab_id to insert directly) and initSession may catch neither a
+/// sessionId nor a still-unclaimed pending entry (the pending pool is shared across all tabs, so a
+/// sibling's init can consume it) — and once no entry exists, the running agent's per-turn hooks
+/// only MUTATE an existing entry, so they can never heal it. When such a tab has a LIVE PTY and its
+/// transcript produced a real turn within LIVE_STATE_FALLBACK_MS, report "active" (NOT "idle":
+/// active is not an attention state, so this drops the phone's dormant/Initialize banner without
+/// firing a phantom "done" doorbell). Self-correcting: PTY death or a transcript that stops
+/// advancing reverts to "dormant". Cheap: an in-memory PTY-map lookup + a bounded transcript tail
+/// read (the same read `last_activity_ts` already does per tab) — no process scan.
+fn tab_looks_live_despite_no_session(app: &AppState, tab_id: &str, now: u64) -> bool {
+    live_fallback_decision(
+        pty_for_tab(app, tab_id).is_some(),
+        resolved_session_for_tab(app, tab_id).and_then(|(rt, sid)| transcript::last_turn_ts_for(rt, &sid)),
+        now,
+    )
+}
+
 fn rank(s: AgentSessionState) -> u8 {
     match s {
         AgentSessionState::WaitingPermission => 3,
@@ -2307,7 +2337,14 @@ fn build_chats(app: &AppState) -> Vec<Value> {
         .map(|t| {
             let (state, runtime, tool) = match states.get(&t.tab_id) {
                 Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
-                None => ("dormant", runtime_key(t.runtime), None),
+                None => {
+                    let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
+                        "active"
+                    } else {
+                        "dormant"
+                    };
+                    (st, runtime_key(t.runtime), None)
+                }
             };
             let ask_open = tool.as_deref() == Some("AskUserQuestion");
             // The kind of prompt currently open, if any. An open AskUserQuestion outranks the
@@ -2384,7 +2421,14 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let ms_activity = ph.elapsed().as_millis(); // locate_jsonl + last-turn tail read
     let (state, runtime, tool) = match states.get(tab_id) {
         Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
-        None => ("dormant", runtime_key(meta.runtime), None),
+        None => {
+            let st = if tab_looks_live_despite_no_session(app, tab_id, now) {
+                "active"
+            } else {
+                "dormant"
+            };
+            (st, runtime_key(meta.runtime), None)
+        }
     };
 
     // Per-turn source markdown from the session transcript (Claude) so the phone's GFM renderer
@@ -3034,6 +3078,23 @@ mod tests {
         // restore resolves an archived tab id → its owning workspace; unknown ids → None.
         assert_eq!(archived_workspace_of(&app, &older_id).as_deref(), Some(ws_id.as_str()));
         assert_eq!(archived_workspace_of(&app, "nope"), None);
+    }
+
+    #[test]
+    fn live_fallback_flips_dormant_only_for_a_live_pty_with_a_recent_turn() {
+        let now = 10_000_000u64;
+        let recent = now - 1000; // 1s ago
+        let stale = now - (LIVE_STATE_FALLBACK_MS + 1); // just past the window
+        // Live PTY + a recent real turn → treat as active (drops the dormant banner).
+        assert!(live_fallback_decision(true, Some(recent), now));
+        // No live PTY → genuinely dormant regardless of transcript recency (e.g. suspended).
+        assert!(!live_fallback_decision(false, Some(recent), now));
+        // Live PTY but the last real turn aged out → revert to dormant (self-correcting).
+        assert!(!live_fallback_decision(true, Some(stale), now));
+        // Live PTY but no resolvable transcript turn at all → dormant.
+        assert!(!live_fallback_decision(true, None, now));
+        // A turn timestamp slightly in the future (clock skew) is still "recent", not underflow.
+        assert!(live_fallback_decision(true, Some(now + 5000), now));
     }
 
     #[test]
