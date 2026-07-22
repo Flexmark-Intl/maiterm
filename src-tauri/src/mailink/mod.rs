@@ -2035,11 +2035,21 @@ fn last_activity_ts(app: &AppState, tab_id: &str, scrollback: &HashMap<String, u
 }
 
 fn build_chats(app: &AppState) -> Vec<Value> {
+    let t_total = std::time::Instant::now();
+    let ph = std::time::Instant::now();
     let tabs = designated_tabs(app);
+    let ms_tabs = ph.elapsed().as_millis(); // app_data read lock + workspace scan
+    let ph = std::time::Instant::now();
     let states = session_states(app);
+    let ms_states = ph.elapsed().as_millis();
     let now = now_ms();
+    let ph = std::time::Instant::now();
     let scrollback = scrollback_times(app);
-    tabs.into_iter()
+    let ms_scrollback = ph.elapsed().as_millis(); // scrollback_db mutex + one SQLite query
+    let tab_count = tabs.len();
+    let ph = std::time::Instant::now();
+    let chats: Vec<Value> = tabs
+        .into_iter()
         .map(|t| {
             let (state, runtime, tool) = match states.get(&t.tab_id) {
                 Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
@@ -2075,14 +2085,44 @@ fn build_chats(app: &AppState) -> Vec<Value> {
             }
             chat
         })
-        .collect()
+        .collect();
+    let ms_loop = ph.elapsed().as_millis(); // per-tab: locate_jsonl + last-turn + meta tail reads
+    let ms_total = t_total.elapsed().as_millis();
+    if ms_total > SLOW_BUILD_LOG_MS {
+        log::warn!(
+            "mailink slow chat-list tabs={} total={}ms [tabs(app_data)={} states(sessions)={} scrollback(db)={} per_tab_loop={}]",
+            tab_count, ms_total, ms_tabs, ms_states, ms_scrollback, ms_loop,
+        );
+    }
+    chats
 }
 
+/// A chat_detail / chat-list build slower than this logs a per-phase WARN breakdown. Opening a
+/// thread is a handful of ms of CPU (transcript tail read + parse), so anything past this is
+/// almost always LOCK-WAIT — an `app_data.read()` queued behind a `save_state` writer, or the
+/// `scrollback_db` mutex behind a scrollback `save()`. The per-phase timings localize which lock.
+const SLOW_BUILD_LOG_MS: u128 = 500;
+
 fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
+    let t_total = std::time::Instant::now();
+
+    let ph = std::time::Instant::now();
     let meta = designated_tabs(app).into_iter().find(|t| t.tab_id == tab_id)?;
+    let ms_tabs = ph.elapsed().as_millis(); // app_data read lock + workspace scan
+
+    let ph = std::time::Instant::now();
     let states = session_states(app);
+    let ms_states = ph.elapsed().as_millis(); // agent_sessions read lock
+
     let now = now_ms();
-    let last_activity = last_activity_ts(app, tab_id, &scrollback_times(app), now);
+
+    let ph = std::time::Instant::now();
+    let scrollback = scrollback_times(app);
+    let ms_scrollback = ph.elapsed().as_millis(); // scrollback_db mutex + one SQLite query
+
+    let ph = std::time::Instant::now();
+    let last_activity = last_activity_ts(app, tab_id, &scrollback, now);
+    let ms_activity = ph.elapsed().as_millis(); // locate_jsonl + last-turn tail read
     let (state, runtime, tool) = match states.get(tab_id) {
         Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
         None => ("dormant", runtime_key(meta.runtime), None),
@@ -2091,7 +2131,9 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // Per-turn source markdown from the session transcript (Claude) so the phone's GFM renderer
     // lights up; falls back to the distilled terminal scrape for other runtimes / when no
     // transcript is found. See mailink/transcript.rs.
+    let ph = std::time::Instant::now();
     let transcript = build_transcript(app, tab_id, now);
+    let ms_transcript = ph.elapsed().as_millis(); // 8 MiB tail read + distill
 
     let mut detail = json!({
         "tabId": meta.tab_id,
@@ -2109,9 +2151,11 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     });
 
     // Per-agent telemetry strip (model + context gauge). See build_meta.
+    let ph = std::time::Instant::now();
     if let Some(agent_meta) = build_meta(app, tab_id) {
         detail["meta"] = agent_meta;
     }
+    let ms_meta = ph.elapsed().as_millis(); // locate_jsonl + meta tail read
 
     // pendingPrompt: the agent's native human ask (mailink-protocol §12). thread_id == tab_id
     // for a solo thread.
@@ -2169,6 +2213,23 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             "text": text,
             "options": ["Yes", "Yes, don't ask again", "No"],
         });
+    }
+
+    let ms_total = t_total.elapsed().as_millis();
+    if ms_total > SLOW_BUILD_LOG_MS {
+        // A slow open is near-always lock-wait, not CPU: whichever phase dominates names the
+        // contended lock (tabs=app_data, scrollback=scrollback_db) vs real work (transcript/meta).
+        log::warn!(
+            "mailink slow chat_detail tab={} total={}ms [tabs(app_data)={} states(sessions)={} scrollback(db)={} activity={} transcript={} meta={}]",
+            &tab_id[..tab_id.len().min(8)],
+            ms_total,
+            ms_tabs,
+            ms_states,
+            ms_scrollback,
+            ms_activity,
+            ms_transcript,
+            ms_meta,
+        );
     }
 
     Some(detail)
