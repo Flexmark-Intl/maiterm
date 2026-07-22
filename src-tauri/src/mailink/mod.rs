@@ -283,6 +283,10 @@ fn build_router(api: ApiState) -> Router {
             "/mailink/v1/chats/{tab_id}/resume-workspace",
             post(post_resume_workspace),
         )
+        .route(
+            "/mailink/v1/chats/{tab_id}/mesh-init",
+            post(post_mesh_init),
+        )
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
@@ -770,6 +774,51 @@ async fn post_resume_workspace(
     })))
 }
 
+/// POST /chats/{tabId}/mesh-init — bring the MESH workspace that owns this tab back to ready
+/// (the phone's one-tap "Initialize all", typically after a maiTerm restart). Tab-scoped like
+/// resume-workspace: the phone addresses by tabId, the server resolves tab → workspace.
+///
+/// The triage is frontend-owned — per member: a running agent that lost its registration gets
+/// `/maiterm init` typed into its PTY (dialog-safe delivery), an exited agent gets its
+/// auto-resume replayed, live members are untouched — so this emits `mailink-mesh-init` and the
+/// owning window's `agentMeshStore.initializeMesh()` does the work headlessly. Progress is
+/// observable on the phone as members re-register: chat_state flips dormant → active/idle.
+///
+/// Returns `{ ok, initiated }`: `initiated=false` (200, with `reason`) when the workspace isn't
+/// a mesh (`"not-mesh"`) or is suspended (`"workspace-suspended"` — resume it first; mesh-init
+/// needs live PTYs). `404` if the tab isn't maiLink-available.
+async fn post_mesh_init(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let meta = designated_tabs(&s.app)
+        .into_iter()
+        .find(|t| t.tab_id == tab_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !meta.mesh {
+        return Ok(Json(json!({ "ok": true, "initiated": false, "reason": "not-mesh" })));
+    }
+    if meta.workspace_suspended {
+        return Ok(Json(
+            json!({ "ok": true, "initiated": false, "reason": "workspace-suspended" }),
+        ));
+    }
+    // Workspace ids are app-unique, so a global emit reaches exactly one owning window; the
+    // store's `initializeMesh` guards `!ws?.bridge_all` → every other window no-ops.
+    let h = s.app_handle.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = h.emit(
+        "mailink-mesh-init",
+        json!({ "workspaceId": meta.workspace_id }),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "initiated": true,
+        "workspaceId": meta.workspace_id,
+    })))
+}
+
 #[derive(serde::Deserialize)]
 struct PairBody {
     code: String,
@@ -912,6 +961,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // tab's state either (its sessions were already dormant), so it too needs its own diff to fire
     // `chats_changed` → the phone re-GETs /chats and swaps Initialize ⇄ Resume-workspace.
     let mut suspended: HashMap<String, bool> = HashMap::new();
+    // Per-tab last-seen mesh flag — enabling/disabling a Mesh Workspace from the desktop must
+    // re-badge the phone's inbox group the same way (state/prompt don't move).
+    let mut mesh: HashMap<String, bool> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -926,6 +978,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
         }
         titles.insert(tab.clone(), c["title"].as_str().unwrap_or_default().to_string());
         suspended.insert(tab.clone(), c["workspaceSuspended"].as_bool().unwrap_or(false));
+        mesh.insert(tab.clone(), c["mesh"].as_bool().unwrap_or(false));
         last.insert(tab, key);
     }
 
@@ -976,6 +1029,12 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         roster_changed = true;
                     }
                     suspended.insert(tab.clone(), ws_susp);
+                    // Same for the mesh flag (toggled from the desktop's mesh setup modal).
+                    let ws_mesh = c["mesh"].as_bool().unwrap_or(false);
+                    if prev.is_some() && mesh.get(&tab) != Some(&ws_mesh) {
+                        roster_changed = true;
+                    }
+                    mesh.insert(tab.clone(), ws_mesh);
                     if prev.as_deref() != Some(key.as_str()) {
                         if socket.send(Message::Text(chat_state_event(c).to_string().into())).await.is_err() {
                             return;
@@ -997,7 +1056,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -1622,6 +1681,9 @@ struct TabMeta {
     /// suspended workspace can't be Initialized per-tab — the workspace must be resumed first — so
     /// the phone shows a "Resume workspace" affordance instead of a dead-end Initialize button.
     workspace_suspended: bool,
+    /// Whether the owning workspace is a Mesh Workspace (`Workspace.bridge_all`). The phone
+    /// badges the workspace group and offers the mesh Initialize-all action on it.
+    mesh: bool,
     runtime: AgentRuntime,
 }
 
@@ -1658,6 +1720,7 @@ fn designated_tabs(app: &AppState) -> Vec<TabMeta> {
                         workspace: ws.name.clone(),
                         workspace_id: ws.id.clone(),
                         workspace_suspended: ws.suspended,
+                        mesh: ws.bridge_all,
                         runtime: tab.runtime.unwrap_or_default(),
                     });
                 }
@@ -2135,6 +2198,8 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "workspaceId": t.workspace_id,
                 // Surfaced so the phone shows "Resume workspace" instead of a dead-end Initialize.
                 "workspaceSuspended": t.workspace_suspended,
+                // Mesh Workspace flag — the phone badges the group and offers Initialize-all.
+                "mesh": t.mesh,
                 "runtime": runtime,
                 "state": state,
                 // Additive field: lets clients (and our own tickers) see prompt-kind changes
@@ -2207,6 +2272,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "workspace": meta.workspace,
         "workspaceId": meta.workspace_id,
         "workspaceSuspended": meta.workspace_suspended,
+        "mesh": meta.mesh,
         "runtime": runtime,
         "state": state,
         // Same rule as build_chats: an open AskUserQuestion is unread even if a build leaves
@@ -2785,6 +2851,7 @@ mod tests {
             let mut win = WindowData::new("main".into());
             let mut ws = Workspace::new("ENAGIC".into());
             ws.suspended = true;
+            ws.bridge_all = true;
             // The auto-created Terminal tab needs a detected runtime to be exposed in expose-all.
             ws.panes[0].tabs[0].runtime = Some(AgentRuntime::Claude);
             let ids = (ws.id.clone(), ws.panes[0].tabs[0].id.clone());
@@ -2799,6 +2866,7 @@ mod tests {
             .expect("suspended-workspace tab is still exposed to maiLink");
         assert!(m.workspace_suspended);
         assert_eq!(m.workspace_id, ws_id);
+        assert!(m.mesh, "bridge_all surfaces as the mesh flag");
     }
 
     #[test]

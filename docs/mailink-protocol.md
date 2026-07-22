@@ -301,6 +301,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
+| `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
 | `GET  /heartbeat` | Liveness + server clock | → `{ok, now, server_name}` |
 
 ### 4.2 WebSocket (live chat channel) — `GET /mailink/v1/ws` (upgrade)
@@ -320,7 +321,7 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // `prompt` mirrors pendingPrompt; present for permission/question,
                                                      // omitted for idle_done. Lets the app render decision buttons on the
                                                      // live path with no follow-up GET. GET /chats/{tabId} stays source of truth.
-{ "type": "chats_changed" }                           // roster/designation, a tab title, OR a workspace's suspended flag changed; re-GET /chats
+{ "type": "chats_changed" }                           // roster/designation, a tab title, a workspace's suspended flag, OR its mesh flag changed; re-GET /chats
 ```
 
 Client→server frames are optional conveniences mirroring the REST actions (`message`,
@@ -340,6 +341,7 @@ interface Chat {
   workspace: string;        // workspace name (grouping)
   workspaceId: string;      // owning workspace id (stable; resume flow resolves tab→workspace)
   workspaceSuspended: boolean; // owning workspace is suspended → show "Resume workspace", not Initialize
+  mesh: boolean;            // owning workspace is a Mesh Workspace → badge the group, offer Initialize-all
   runtime: 'claude' | 'codex' | 'gemini';
   state: 'active' | 'idle' | 'permission' | 'dormant';
   unread: boolean;          // idle/attention not yet seen on a device
@@ -454,6 +456,22 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   resume the tab is live on its own — no separate per-tab Initialize needed. The suspended→awake
   transition reaches every phone as a `chats_changed` (≤1.5 s) — re-GET `/chats` and the tabs now
   report their live state.
+- **Mesh Initialize-all** (`POST .../mesh-init`): bring the *Mesh Workspace* that owns this tab
+  back to ready, typically after a maiTerm restart. Tab-scoped like resume-workspace (server
+  resolves tab→workspace; the `mesh` field on `Chat` says when to offer it). Post-restart, mesh
+  members usually show `state:"dormant"` even though their agent processes were auto-resumed —
+  what they lost is their maiTerm *registration* (hook liveness + the MCP connection→tab binding
+  that routes their outbound mesh sends), restored by `/maiterm init`. The desktop triages each
+  member by a process probe: agent still running → types `/maiterm init` into its PTY
+  (dialog-safe); agent exited → replays the tab's auto-resume; already-live members untouched.
+  The phone does NOT need to distinguish these cases — one tap covers all members, and progress
+  arrives as normal `chat_state` events (`dormant` → `active`/`idle`) as each agent re-registers
+  (allow ~5–30 s per member; resume replays can take longer). Returns `{ ok, initiated }`:
+  `initiated:false` with `reason:"not-mesh"` (workspace isn't a mesh) or
+  `reason:"workspace-suspended"` (resume the workspace first — mesh-init needs live PTYs);
+  `initiated:true` with `workspaceId` when the pass was kicked off. Per-member Initialize from
+  the thread view stays what it is today — `/message` with `/maiterm init` — which is exactly
+  what the group action types for running members.
 
 ---
 

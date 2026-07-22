@@ -10,7 +10,7 @@ import { createDeliveryController } from '$lib/stores/agentDelivery';
 import { createMeshRouter, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
 import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores/meshSend';
 import { createLoopController, type LoopReason } from '$lib/stores/meshLoopControl';
-import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
+import { getVariables, setVariable, replayAutoResume } from '$lib/stores/triggers.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
@@ -155,6 +155,26 @@ function createAgentMeshStore() {
       }
     }
     return false;
+  }
+
+  // Dialog-safe `/maiterm init` delivery for the headless initializeMesh pass (sibling of
+  // MeshSetupModal's sendInit, minus its pending-UI supersede bookkeeping): a resumed agent may
+  // be sitting at a startup dialog (e.g. "restore as is / compact first") that would swallow a
+  // straight paste — so send a bare CR to answer it, wait for the PTY to go output-quiet
+  // (compaction/thinking spinners repaint continuously), then deliver the init exactly once.
+  const INIT_QUIET_MS = 1500;
+  const INIT_QUIET_POLL_MS = 300;
+  const INIT_QUIET_CAP_MS = 120_000;
+  async function settleAndSendInit(tabId: string, ptyId: string) {
+    await commands.writeTerminal(ptyId, [0x0d]);
+    const t0 = Date.now();
+    while (Date.now() - t0 < INIT_QUIET_CAP_MS) {
+      const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
+      if (Date.now() - lastOut >= INIT_QUIET_MS) break;
+      await new Promise((res) => setTimeout(res, INIT_QUIET_POLL_MS));
+    }
+    if (claudeStateStore.getState(tabId)) return; // re-registered on its own while settling
+    await bracketedPasteSubmit(ptyId, '/maiterm init');
   }
 
   function routerFor(wsId: string): MeshRouter | null {
@@ -342,6 +362,45 @@ function createAgentMeshStore() {
           window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: wsId }));
         }
       }, 5000);
+    },
+
+    /** Headless mesh readiness pass — maiLink's one-tap "Initialize all" (`mailink-mesh-init`
+     *  event → here), the phone-driven equivalent of MeshSetupModal's triage with no UI. For
+     *  every member that WAS an agent (persisted runtime) but has no live session, the process
+     *  probe decides the remedy — still running (or a live ssh hop) → type `/maiterm init` into
+     *  its PTY; process gone → replay the tab's auto-resume. Live members are untouched; tabs
+     *  without a live PTY are skipped (a suspended workspace must be resumed first — the
+     *  endpoint guards that). Members run concurrently so one slow tab doesn't serialize the
+     *  rest; progress reaches the phone as each agent re-registers (dormant → active/idle). */
+    initializeMesh(wsId: string) {
+      const ws = getWorkspace(wsId);
+      if (!ws?.bridge_all || ws.suspended) return;
+      for (const pane of ws.panes) {
+        for (const tab of pane.tabs) {
+          if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+          if (!tab.runtime) continue; // never an agent — nothing to initialize
+          if (claudeStateStore.getState(tab.id)) continue; // already live
+          const inst = terminalsStore.get(tab.id);
+          if (!inst) continue; // no live PTY — can't reach it headlessly
+          const tabId = tab.id;
+          const ptyId = inst.ptyId;
+          const hasResume = !!tab.auto_resume_command;
+          void (async () => {
+            try {
+              const l = await commands.getAgentLiveness(ptyId);
+              if (l.agent_running || l.ssh_foreground) {
+                await settleAndSendInit(tabId, ptyId);
+              } else if (hasResume) {
+                await replayAutoResume(tabId);
+              } else {
+                logInfo(`mesh init (maiLink): ${tabId.slice(0, 8)} dropped with no auto-resume — skipped`);
+              }
+            } catch (e) {
+              logError(`mesh init (maiLink) failed for ${tabId.slice(0, 8)}: ${e}`);
+            }
+          })();
+        }
+      }
     },
 
     /** Toggle a workspace into / out of mesh mode (persisted). */

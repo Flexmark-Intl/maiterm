@@ -268,6 +268,13 @@
       workspacesStore.resumeWorkspace(event.payload.workspaceId);
     }).then(unlisten => { unlistenResumeWorkspace = unlisten; });
 
+    // A maiLink phone tapped "Initialize all" on a mesh workspace. Same global-emit contract:
+    // initializeMesh() no-ops unless this window owns a live (non-suspended) mesh with that id.
+    let unlistenMeshInit: (() => void) | undefined;
+    listen<{ workspaceId: string }>('mailink-mesh-init', (event) => {
+      agentMeshStore.initializeMesh(event.payload.workspaceId);
+    }).then(unlisten => { unlistenMeshInit = unlisten; });
+
     // Check for updates menu event
     let unlistenCheckUpdates: (() => void) | undefined;
     listen('check-for-updates', () => {
@@ -930,6 +937,7 @@
       unlistenReloadTab?.();
       unlistenTabRenamed?.();
       unlistenResumeWorkspace?.();
+      unlistenMeshInit?.();
       unlistenExportState?.();
       unlistenImportState?.();
       unlistenStateImported?.();
