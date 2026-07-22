@@ -279,6 +279,10 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/chats/{tab_id}/respond", post(post_respond))
         .route("/mailink/v1/chats/{tab_id}/interrupt", post(post_interrupt))
         .route("/mailink/v1/chats/{tab_id}/rename", post(post_rename))
+        .route(
+            "/mailink/v1/chats/{tab_id}/resume-workspace",
+            post(post_resume_workspace),
+        )
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
@@ -728,6 +732,44 @@ fn set_tab_name(app: &AppState, tab_id: &str, name: &str) -> bool {
     true
 }
 
+/// POST /chats/{tabId}/resume-workspace — wake the SUSPENDED workspace that owns this tab so its
+/// tabs come back live. Tab-scoped (not workspace-scoped) so the phone keeps addressing everything
+/// by tabId; the server resolves tab → workspace. Suspension is a frontend-driven operation (the
+/// PTY respawn + agent auto-resume lives in the Svelte store, which the backend can't do), so this
+/// emits `mailink-resume-workspace` and the owning window's frontend runs `resumeWorkspace()` —
+/// which respawns exactly the tabs that were live at suspend and re-inits their agents. After that
+/// the tab is live on its own; the phone does NOT need a separate per-tab Initialize.
+///
+/// Returns `{ ok, resumed }`: `resumed=false` (200) when the workspace was already awake (nothing
+/// to do — the phone can Initialize per-tab as usual); `resumed=true` when a resume was kicked off.
+/// `404` if the tab isn't maiLink-available.
+async fn post_resume_workspace(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let meta = designated_tabs(&s.app)
+        .into_iter()
+        .find(|t| t.tab_id == tab_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if !meta.workspace_suspended {
+        return Ok(Json(json!({ "ok": true, "resumed": false })));
+    }
+    // Workspace ids are app-unique (uuid), so a global emit reaches exactly one owning window; the
+    // store's `resumeWorkspace` guards `!ws || !ws.suspended` → every other window no-ops.
+    let h = s.app_handle.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = h.emit(
+        "mailink-resume-workspace",
+        json!({ "workspaceId": meta.workspace_id }),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "resumed": true,
+        "workspaceId": meta.workspace_id,
+    })))
+}
+
 #[derive(serde::Deserialize)]
 struct PairBody {
     code: String,
@@ -866,6 +908,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // Per-tab last-seen title. A rename doesn't move `state`/`prompt` (the attn_key), so it needs
     // its own diff to trigger a `chats_changed` and re-fetch the label on the phone.
     let mut titles: HashMap<String, String> = HashMap::new();
+    // Per-tab last-seen workspace-suspended flag. Suspending/resuming a workspace doesn't move any
+    // tab's state either (its sessions were already dormant), so it too needs its own diff to fire
+    // `chats_changed` → the phone re-GETs /chats and swaps Initialize ⇄ Resume-workspace.
+    let mut suspended: HashMap<String, bool> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -879,6 +925,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
             return;
         }
         titles.insert(tab.clone(), c["title"].as_str().unwrap_or_default().to_string());
+        suspended.insert(tab.clone(), c["workspaceSuspended"].as_bool().unwrap_or(false));
         last.insert(tab, key);
     }
 
@@ -922,6 +969,13 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         roster_changed = true;
                     }
                     titles.insert(tab.clone(), title);
+                    // Workspace suspend/resume flips this without touching state/prompt — diff it
+                    // so the phone re-fetches and swaps the Initialize ⇄ Resume-workspace control.
+                    let ws_susp = c["workspaceSuspended"].as_bool().unwrap_or(false);
+                    if prev.is_some() && suspended.get(&tab) != Some(&ws_susp) {
+                        roster_changed = true;
+                    }
+                    suspended.insert(tab.clone(), ws_susp);
                     if prev.as_deref() != Some(key.as_str()) {
                         if socket.send(Message::Text(chat_state_event(c).to_string().into())).await.is_err() {
                             return;
@@ -943,7 +997,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -1561,6 +1615,13 @@ struct TabMeta {
     tab_id: String,
     title: String,
     workspace: String,
+    /// Owning workspace id — lets the phone resolve tab → workspace for the resume flow without
+    /// having to model workspace ids itself (it resumes by tabId; the server does the lookup).
+    workspace_id: String,
+    /// Whether the owning workspace is suspended (PTYs killed, tabs restore-on-demand). A tab in a
+    /// suspended workspace can't be Initialized per-tab — the workspace must be resumed first — so
+    /// the phone shows a "Resume workspace" affordance instead of a dead-end Initialize button.
+    workspace_suspended: bool,
     runtime: AgentRuntime,
 }
 
@@ -1595,6 +1656,8 @@ fn designated_tabs(app: &AppState) -> Vec<TabMeta> {
                         tab_id: tab.id.clone(),
                         title: tab.name.clone(),
                         workspace: ws.name.clone(),
+                        workspace_id: ws.id.clone(),
+                        workspace_suspended: ws.suspended,
                         runtime: tab.runtime.unwrap_or_default(),
                     });
                 }
@@ -2069,6 +2132,9 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspace": t.workspace,
+                "workspaceId": t.workspace_id,
+                // Surfaced so the phone shows "Resume workspace" instead of a dead-end Initialize.
+                "workspaceSuspended": t.workspace_suspended,
                 "runtime": runtime,
                 "state": state,
                 // Additive field: lets clients (and our own tickers) see prompt-kind changes
@@ -2139,6 +2205,8 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "tabId": meta.tab_id,
         "title": meta.title,
         "workspace": meta.workspace,
+        "workspaceId": meta.workspace_id,
+        "workspaceSuspended": meta.workspace_suspended,
         "runtime": runtime,
         "state": state,
         // Same rule as build_chats: an open AskUserQuestion is unread even if a build leaves
@@ -2705,6 +2773,32 @@ mod tests {
             app.agent_sessions.read()["d"].state,
             AgentSessionState::Stopped
         ));
+    }
+
+    #[test]
+    fn designated_tabs_surface_workspace_id_and_suspension() {
+        use crate::state::workspace::{WindowData, Workspace};
+        let app = AppState::new();
+        let (ws_id, tab_id) = {
+            let mut data = app.app_data.write();
+            data.preferences.mailink_expose_all = true;
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("ENAGIC".into());
+            ws.suspended = true;
+            // The auto-created Terminal tab needs a detected runtime to be exposed in expose-all.
+            ws.panes[0].tabs[0].runtime = Some(AgentRuntime::Claude);
+            let ids = (ws.id.clone(), ws.panes[0].tabs[0].id.clone());
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            ids
+        };
+        let metas = designated_tabs(&app);
+        let m = metas
+            .iter()
+            .find(|m| m.tab_id == tab_id)
+            .expect("suspended-workspace tab is still exposed to maiLink");
+        assert!(m.workspace_suspended);
+        assert_eq!(m.workspace_id, ws_id);
     }
 
     #[test]

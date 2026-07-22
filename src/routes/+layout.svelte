@@ -259,6 +259,15 @@
       workspacesStore.applyExternalRename(event.payload.tabId, event.payload.name);
     }).then(unlisten => { unlistenTabRenamed = unlisten; });
 
+    // A maiLink phone tapped "Resume workspace" on a suspended workspace. Only the window that
+    // owns the workspace acts — resumeWorkspace() no-ops when the id isn't a suspended workspace
+    // here — so a global emit reaching every window is safe. This respawns the tabs that were live
+    // at suspend (agents auto-resume + re-init), the same path as the desktop resume affordance.
+    let unlistenResumeWorkspace: (() => void) | undefined;
+    listen<{ workspaceId: string }>('mailink-resume-workspace', (event) => {
+      workspacesStore.resumeWorkspace(event.payload.workspaceId);
+    }).then(unlisten => { unlistenResumeWorkspace = unlisten; });
+
     // Check for updates menu event
     let unlistenCheckUpdates: (() => void) | undefined;
     listen('check-for-updates', () => {
@@ -920,6 +929,7 @@
       unlistenQuit?.();
       unlistenReloadTab?.();
       unlistenTabRenamed?.();
+      unlistenResumeWorkspace?.();
       unlistenExportState?.();
       unlistenImportState?.();
       unlistenStateImported?.();

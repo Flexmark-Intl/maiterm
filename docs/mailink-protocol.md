@@ -300,6 +300,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
+| `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `GET  /heartbeat` | Liveness + server clock | → `{ok, now, server_name}` |
 
 ### 4.2 WebSocket (live chat channel) — `GET /mailink/v1/ws` (upgrade)
@@ -319,7 +320,7 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // `prompt` mirrors pendingPrompt; present for permission/question,
                                                      // omitted for idle_done. Lets the app render decision buttons on the
                                                      // live path with no follow-up GET. GET /chats/{tabId} stays source of truth.
-{ "type": "chats_changed" }                           // roster/designation OR a tab title changed; re-GET /chats
+{ "type": "chats_changed" }                           // roster/designation, a tab title, OR a workspace's suspended flag changed; re-GET /chats
 ```
 
 Client→server frames are optional conveniences mirroring the REST actions (`message`,
@@ -337,6 +338,8 @@ interface Chat {
   tabId: string;
   title: string;            // tab name
   workspace: string;        // workspace name (grouping)
+  workspaceId: string;      // owning workspace id (stable; resume flow resolves tab→workspace)
+  workspaceSuspended: boolean; // owning workspace is suspended → show "Resume workspace", not Initialize
   runtime: 'claude' | 'codex' | 'gemini';
   state: 'active' | 'idle' | 'permission' | 'dormant';
   unread: boolean;          // idle/attention not yet seen on a device
@@ -437,6 +440,20 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   it (survives resume/restart), and updates the live desktop tab strip in every open window.
   Returns the normalized `title` actually stored. The label reaches other phones as a
   `chats_changed` on the next WS tick (≤1.5 s) — re-GET `/chats`.
+- **Resume workspace** (`POST .../resume-workspace`): wake the *suspended* workspace that owns
+  this tab. Tab-scoped so the phone never has to model workspace ids — the server resolves
+  tab→workspace. A **suspended** workspace has its PTYs killed and tabs restore-on-demand, so a
+  per-tab Initialize (`/message` with `/maiterm init`) can't work — it returns `409` (no live PTY,
+  same 409 a plain-dormant tab returns; the two are told apart by the `workspaceSuspended` field,
+  not the error). The UI should therefore key off `workspaceSuspended`: when `true`, show
+  **Resume workspace** instead of Initialize. This endpoint returns `{ ok, resumed }` —
+  `resumed:false` (200) if the workspace was already awake (proceed to normal per-tab Initialize),
+  `resumed:true` if a resume was kicked off. Suspend/resume is a frontend operation (PTY respawn +
+  agent auto-resume live in the desktop app), so the backend signals the owning window to run it;
+  it **respawns exactly the tabs that were live at suspend and re-inits their agents**, so after
+  resume the tab is live on its own — no separate per-tab Initialize needed. The suspended→awake
+  transition reaches every phone as a `chats_changed` (≤1.5 s) — re-GET `/chats` and the tabs now
+  report their live state.
 
 ---
 
