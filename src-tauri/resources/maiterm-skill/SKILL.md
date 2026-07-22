@@ -107,6 +107,17 @@ irreversible, or scope-expanding actions on their say-so.
    - If someone reports it's still broken (or asks a follow-up), keep working; the binding stays live and their messages keep arriving here.
    - If you're abandoning the issue entirely, post a brief note saying so via postCommsReply, then call unbindCommsThread `{}`.
 
+**Screenshots and images.** Both directions work:
+- *Incoming:* image attachments on thread messages (e.g. a screenshot of the bug) are
+  staged to temp files automatically — the transcript and injected messages carry lines
+  like `[attached image "shot.png" staged at /tmp/maiterm-comms-….png — view it with the
+  Read tool]`. ALWAYS Read staged screenshots before diagnosing; they usually contain
+  the actual error.
+- *Outgoing:* to post a screenshot or image, pass `attachments:
+  ["/absolute/path.png"]` on postCommsReply (max 5, 20 MB each). Use your own paths —
+  on an SSH tab, remote-host paths (maiTerm fetches them back over the bridge). Useful
+  when showing a before/after, a chart, or visual proof of a fix.
+
 **Mentioning people.** To actually notify a person, Mattermost requires their exact `@username`, not their display name. The transcript gives you both — each author appears as `Display Name (@username)`. Use the value in parentheses: to ping "Jeff Delgado (@jdelgado)" write `@jdelgado`, never `@Jeff` (a display name mentions nobody). `**@Support:**` / `**@Dev:**` are audience labels for indicating who should answer, not real usernames — don't rely on them to notify a specific person; @mention that person's username as well if you need them specifically.
 
 Resolution post format (Mattermost markdown), exactly two parts:

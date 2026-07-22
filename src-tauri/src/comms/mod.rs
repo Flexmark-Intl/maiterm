@@ -134,14 +134,175 @@ pub fn format_ts_ms(ms: i64) -> String {
     )
 }
 
+/// Where staged attachment files must land so a tab's agent can Read them.
+pub enum StagingTarget {
+    /// Local PTY — files go to the local temp dir.
+    Local,
+    /// SSH tab with a live bridge tunnel — bytes stream to the remote /tmp over
+    /// the tunnel's maiTerm-owned CM socket (mailink::push_bytes_remote).
+    Remote { host_key: String, ssh_args: String },
+    /// SSH tab without a usable tunnel — staging impossible; attachments are noted only.
+    Unavailable,
+}
+
+/// Resolve where attachment files for `tab_id` must be staged. Mirrors maiLink's
+/// image-send logic: foreground ssh/mosh means local temp paths are invisible to the
+/// remote agent, so a live bridge tunnel is required to stage on the remote host.
+pub fn staging_target_for_tab(app: &Arc<AppState>, tab_id: &str) -> StagingTarget {
+    let Some(pty) = crate::mailink::pty_for_tab(app, tab_id) else {
+        return StagingTarget::Local; // no PTY: bind-time staging still works locally
+    };
+    let is_ssh = crate::pty::get_pty_info(app, &pty)
+        .map(|i| i.foreground_command.is_some())
+        .unwrap_or(false);
+    if !is_ssh {
+        return StagingTarget::Local;
+    }
+    let tunnels = app.ssh_tunnels.read();
+    match tunnels
+        .values()
+        .find(|t| t.tab_ids.contains(&tab_id.to_string()))
+    {
+        Some(t) => StagingTarget::Remote {
+            host_key: t.host_key.clone(),
+            ssh_args: t.ssh_args.clone(),
+        },
+        None => StagingTarget::Unavailable,
+    }
+}
+
+/// Attachment staging caps: per-file byte ceiling and per-call file count. Screenshots
+/// are ~1–3 MB; anything past these is noted in the transcript instead of fetched.
+const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_STAGED_FILES: usize = 8;
+
+/// File extension Claude Code's Read tool renders as an image, or None for
+/// non-image/unsupported types (noted by name, never fetched).
+fn image_ext(mime: &str, name: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => match name.rsplit('.').next().map(|e| e.to_ascii_lowercase()) {
+            Some(e) if e == "png" => Some("png"),
+            Some(e) if e == "jpg" || e == "jpeg" => Some("jpg"),
+            Some(e) if e == "gif" => Some("gif"),
+            Some(e) if e == "webp" => Some("webp"),
+            _ => None,
+        },
+    }
+}
+
+/// Download a set of posts' image attachments and stage them where the tab's agent can
+/// Read them. Returns post_id → transcript-ready note lines (staged path, or why not).
+/// Best-effort: a failed download/stage becomes a note, never an error.
+pub async fn stage_attachments(
+    client: &MattermostClient,
+    target: &StagingTarget,
+    posts: &[&mattermost::Post],
+) -> HashMap<String, Vec<String>> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut staged_count = 0usize;
+
+    for p in posts {
+        if p.file_ids.is_empty() && p.metadata.files.is_empty() {
+            continue;
+        }
+        // Prefer metadata (rides along free); fall back to per-id info fetches.
+        let mut files = p.metadata.files.clone();
+        if files.is_empty() {
+            for id in &p.file_ids {
+                match client.file_info(id).await {
+                    Ok(f) => files.push(f),
+                    Err(e) => out.entry(p.id.clone()).or_default().push(format!(
+                        "[attachment {id} — info lookup failed: {e}]"
+                    )),
+                }
+            }
+        }
+
+        for f in &files {
+            let label = if f.name.is_empty() { f.id.clone() } else { f.name.clone() };
+            let note = match image_ext(&f.mime_type, &f.name) {
+                None => format!(
+                    "[attachment \"{label}\" ({}) — not a viewable image; ask a human to describe it or handle it out of band]",
+                    if f.mime_type.is_empty() { "unknown type" } else { &f.mime_type }
+                ),
+                Some(_) if matches!(target, StagingTarget::Unavailable) => format!(
+                    "[attached image \"{label}\" — cannot be staged for this SSH tab (no live maiTerm bridge tunnel); ask a human to describe it]"
+                ),
+                Some(_) if staged_count >= MAX_STAGED_FILES => format!(
+                    "[attached image \"{label}\" — not staged (attachment limit reached)]"
+                ),
+                Some(_) if f.size > MAX_ATTACHMENT_BYTES as i64 => format!(
+                    "[attached image \"{label}\" — skipped ({} MB exceeds the 10 MB staging cap)]",
+                    f.size / (1024 * 1024)
+                ),
+                Some(ext) => match stage_one(client, target, &f.id, ext).await {
+                    Ok(path) => {
+                        staged_count += 1;
+                        format!(
+                            "[attached image \"{label}\" staged at {path} — view it with the Read tool]"
+                        )
+                    }
+                    Err(e) => {
+                        log::warn!("[comms] attachment staging failed ({label}): {e}");
+                        format!("[attached image \"{label}\" — staging failed: {e}]")
+                    }
+                },
+            };
+            out.entry(p.id.clone()).or_default().push(note);
+        }
+    }
+    out
+}
+
+/// Download one file and write it local-temp or remote-/tmp per the target.
+async fn stage_one(
+    client: &MattermostClient,
+    target: &StagingTarget,
+    file_id: &str,
+    ext: &str,
+) -> Result<String, String> {
+    let bytes = client.get_file(file_id).await.map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "file is {} MB (cap 10 MB)",
+            bytes.len() / (1024 * 1024)
+        ));
+    }
+    match target {
+        StagingTarget::Remote { host_key, ssh_args } => {
+            let remote_path = format!("/tmp/maiterm-comms-{}.{ext}", uuid::Uuid::new_v4());
+            crate::mailink::push_bytes_remote(host_key, ssh_args, &bytes, &remote_path).await?;
+            log::info!(
+                "[comms] staged {} attachment bytes → {host_key}:{remote_path}",
+                bytes.len()
+            );
+            Ok(remote_path)
+        }
+        _ => {
+            let path = std::env::temp_dir()
+                .join(format!("maiterm-comms-{}.{ext}", uuid::Uuid::new_v4()));
+            std::fs::write(&path, &bytes).map_err(|e| format!("cannot write temp file: {e}"))?;
+            log::info!("[comms] staged {} attachment bytes → {path:?}", bytes.len());
+            Ok(path.to_string_lossy().to_string())
+        }
+    }
+}
+
 /// Render a fetched thread as a chronological transcript. Each author is shown as
 /// `Display Name (@username)` so the agent has the exact handle needed to @mention them
 /// in Mattermost (display names don't notify). The root post is labeled `[REPORT]`.
 /// Resolves authors best-effort (falls back to the raw user id if lookup fails).
+/// `attachments` (from stage_attachments) supplies per-post note lines — staged image
+/// paths the agent can Read — rendered under the message body.
 pub async fn build_transcript(
     client: &MattermostClient,
     thread: &[mattermost::Post],
     root_id: &str,
+    attachments: &HashMap<String, Vec<String>>,
 ) -> String {
     let author_ids: Vec<String> = thread
         .iter()
@@ -165,7 +326,14 @@ pub async fn build_transcript(
             None => format!("{} ({ts})", p.user_id),
         };
         let tag = if p.id == root_id { "[REPORT] " } else { "" };
-        transcript.push_str(&format!("{tag}— {who}:\n{}\n\n", p.message.trim()));
+        transcript.push_str(&format!("{tag}— {who}:\n{}\n", p.message.trim()));
+        if let Some(notes) = attachments.get(&p.id) {
+            for n in notes {
+                transcript.push_str(n);
+                transcript.push('\n');
+            }
+        }
+        transcript.push('\n');
     }
     transcript.trim_end().to_string()
 }
@@ -394,6 +562,11 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
 
             resolve_authors(&client, &addressed, &mut authors).await;
 
+            // Stage any image attachments on the addressed posts so the agent can Read
+            // them (screenshots in bug reports). Failed stagings degrade to notes.
+            let staging = staging_target_for_tab(&app, &tab_id);
+            let attachment_notes = stage_attachments(&client, &staging, &addressed).await;
+
             // One payload per thread per tick — a single paste + CR avoids racing the
             // TUI settle. Names the thread (a tab can be bound to several) and stamps
             // each line with the author's authority tier.
@@ -418,6 +591,11 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                     "support"
                 };
                 payload.push_str(&format!("\n— {who} (@{uname}) [{tag}]: {}", p.message.trim()));
+                if let Some(notes) = attachment_notes.get(&p.id) {
+                    for n in notes {
+                        payload.push_str(&format!("\n  {n}"));
+                    }
+                }
             }
 
             match crate::mailink::inject_text(&app, &pty_id, &payload, true).await {
@@ -550,6 +728,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                                         &ch.id,
                                         &root,
                                         "I'm at capacity on other issues right now — I'll pick this up as soon as one closes out.",
+                                        &[],
                                     )
                                     .await;
                             }
@@ -678,7 +857,10 @@ async fn summon_pickup(
         .get_thread(root_id)
         .await
         .map_err(|e| e.to_string())?;
-    let transcript = build_transcript(client, &thread, root_id).await;
+    let staging = staging_target_for_tab(app, tab_id);
+    let thread_refs: Vec<&mattermost::Post> = thread.iter().collect();
+    let attachment_notes = stage_attachments(client, &staging, &thread_refs).await;
+    let transcript = build_transcript(client, &thread, root_id, &attachment_notes).await;
     let last_seen = thread
         .iter()
         .map(|p| p.create_at)
@@ -825,7 +1007,21 @@ mod tests {
             user_id: user.into(),
             message: msg.into(),
             create_at: at,
+            file_ids: Vec::new(),
+            metadata: Default::default(),
         }
+    }
+
+    #[test]
+    fn image_ext_maps_mime_then_name() {
+        assert_eq!(image_ext("image/png", "x"), Some("png"));
+        assert_eq!(image_ext("image/jpeg", "x"), Some("jpg"));
+        // mime absent/odd → filename extension decides, case-insensitive
+        assert_eq!(image_ext("", "Screen Shot.PNG"), Some("png"));
+        assert_eq!(image_ext("application/octet-stream", "photo.jpeg"), Some("jpg"));
+        // non-images stay None (noted, never fetched)
+        assert_eq!(image_ext("application/zip", "logs.zip"), None);
+        assert_eq!(image_ext("", "notes.txt"), None);
     }
 
     #[test]

@@ -912,7 +912,12 @@ async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
     // messages that @mention the bot are forwarded into this session).
     let bot_username = client.me().await.map(|u| u.username).unwrap_or_default();
 
-    let transcript = comms::build_transcript(&client, &thread, &root_id).await;
+    // Stage image attachments (screenshots in the bug report) where this tab's agent
+    // can Read them; the transcript carries the staged paths.
+    let staging = comms::staging_target_for_tab(state, &tab_id);
+    let thread_refs: Vec<_> = thread.iter().collect();
+    let attachment_notes = comms::stage_attachments(&client, &staging, &thread_refs).await;
+    let transcript = comms::build_transcript(&client, &thread, &root_id, &attachment_notes).await;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -984,7 +989,10 @@ async fn handle_read_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
         Ok(t) => t,
         Err(e) => return serde_json::json!({ "error": e.to_string() }),
     };
-    let transcript = comms::build_transcript(&client, &thread, &binding.root_id).await;
+    let staging = comms::staging_target_for_tab(state, &tab_id);
+    let thread_refs: Vec<_> = thread.iter().collect();
+    let attachment_notes = comms::stage_attachments(&client, &staging, &thread_refs).await;
+    let transcript = comms::build_transcript(&client, &thread, &binding.root_id, &attachment_notes).await;
     let mut result = serde_json::json!({
         "provider": binding.provider,
         "permalink": binding.permalink,
@@ -1010,6 +1018,20 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
         _ => return serde_json::json!({ "error": "Missing required parameter: message" }),
     };
     let resolve = arguments.get("resolve").and_then(|v| v.as_bool()).unwrap_or(false);
+    let attachments: Vec<String> = arguments
+        .get("attachments")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if attachments.len() > 5 {
+        return serde_json::json!({ "error": "at most 5 attachments per post" });
+    }
 
     let binding = match resolve_comms_binding(state, &tab_id, arguments) {
         Ok(b) => b,
@@ -1020,8 +1042,56 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
         Err(e) => return serde_json::json!({ "error": e.to_string() }),
     };
 
+    // Upload attachments first (the post references their file ids). Paths are the
+    // AGENT's paths: local files for a local tab, remote-host files for an SSH tab
+    // (fetched back over the bridge tunnel before upload). All-or-nothing.
+    let mut file_ids: Vec<String> = Vec::new();
+    if !attachments.is_empty() {
+        let staging = comms::staging_target_for_tab(state, &tab_id);
+        for path in &attachments {
+            let bytes = match &staging {
+                comms::StagingTarget::Remote { host_key, ssh_args } => {
+                    match crate::mailink::fetch_bytes_remote(host_key, ssh_args, path).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            return serde_json::json!({ "error": format!(
+                                "could not fetch '{path}' from the remote host: {e}"
+                            ) })
+                        }
+                    }
+                }
+                comms::StagingTarget::Unavailable => {
+                    return serde_json::json!({ "error": format!(
+                        "cannot fetch '{path}': this SSH tab has no live maiTerm bridge tunnel"
+                    ) })
+                }
+                comms::StagingTarget::Local => match std::fs::read(path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return serde_json::json!({ "error": format!("could not read '{path}': {e}") })
+                    }
+                },
+            };
+            if bytes.len() > 20 * 1024 * 1024 {
+                return serde_json::json!({ "error": format!(
+                    "'{path}' is {} MB — attachments are capped at 20 MB", bytes.len() / (1024 * 1024)
+                ) });
+            }
+            let filename = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "attachment".to_string());
+            match client.upload_file(&binding.channel_id, &filename, bytes).await {
+                Ok(id) => file_ids.push(id),
+                Err(e) => {
+                    return serde_json::json!({ "error": format!("upload of '{path}' failed: {e}") })
+                }
+            }
+        }
+    }
+
     let posted = match client
-        .create_post(&binding.channel_id, &binding.root_id, &message)
+        .create_post(&binding.channel_id, &binding.root_id, &message, &file_ids)
         .await
     {
         Ok(p) => p,
@@ -1038,7 +1108,13 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
         upsert_comms_binding(state, &tab_id, updated);
     }
 
-    serde_json::json!({ "posted": true, "post_id": posted.id, "root_id": binding.root_id, "resolved": resolve })
+    serde_json::json!({
+        "posted": true,
+        "post_id": posted.id,
+        "root_id": binding.root_id,
+        "resolved": resolve,
+        "attached_files": file_ids.len(),
+    })
 }
 
 fn collect_workspace_folders(_state: &Arc<AppState>) -> Vec<String> {

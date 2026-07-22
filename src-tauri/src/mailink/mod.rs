@@ -1170,7 +1170,8 @@ async fn stage_images_remote(
 
 /// Write `bytes` to `remote_path` on an SSH bridge host via `cat > path` with the bytes on
 /// stdin. ~tens of ms over the mux socket; BatchMode direct fallback when the socket is dead.
-async fn push_bytes_remote(
+/// pub(crate): the comms attachment staging (screenshots → SSH tabs) reuses it.
+pub(crate) async fn push_bytes_remote(
     host_key: &str,
     ssh_args: &str,
     bytes: &[u8],
@@ -1215,6 +1216,44 @@ async fn push_bytes_remote(
         ));
     }
     Ok(())
+}
+
+/// Read `remote_path`'s bytes from an SSH bridge host via `cat < path` — the pull mirror
+/// of push_bytes_remote, muxing over the same tunnel-owned CM socket. Used by the comms
+/// integration to fetch an SSH-tab agent's screenshot before uploading it to the chat.
+pub(crate) async fn fetch_bytes_remote(
+    host_key: &str,
+    ssh_args: &str,
+    remote_path: &str,
+) -> Result<Vec<u8>, String> {
+    let quoted = format!("'{}'", remote_path.replace('\'', "'\\''"));
+    let mut cmd_args = crate::commands::ssh_tunnel::mux_client_args(host_key);
+    for arg in ssh_args.split_whitespace() {
+        cmd_args.push(arg.to_string());
+    }
+    cmd_args.push(format!("cat < {quoted}"));
+
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        tokio::process::Command::new("ssh")
+            .args(&cmd_args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| "remote read timed out (30s)".to_string())?
+    .map_err(|e| format!("ssh spawn failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "remote read failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
 }
 
 /// Settle delays so the TUI redraws between keystrokes (mirrors inject_text's paste settle).

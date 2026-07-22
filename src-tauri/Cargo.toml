@@ -45,7 +45,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = "0.13"
 sha2 = "0.10"
 # maiLink doorbell: POST the content-free wake to the push relay (Cloudflare worker).
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "multipart"] }
 rand = "0.8"
 libc = "0.2"
 # macOS backend MUST be FSEvents, not kqueue. We watch a file's PARENT directory

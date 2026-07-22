@@ -109,6 +109,19 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   the summon (one-time in-thread "at capacity" reply + operator `comms-summon` notification) and
   retries when the tab frees; unauthorized mentions notify the operator only, nothing in-thread.
   Pickup users are summon-only — their messages stay [support]-tier during the work.
+  Summon candidates require `create_at` past the cursor: Mattermost's `?since=` is
+  **update_at-based**, so an EDIT of an old post is re-served — without the guard, editing the
+  root of a just-resolved (unbound) thread re-picked the whole thread up as fresh work.
+- **Image attachments (both directions)**: incoming — `Post.file_ids`/`metadata.files` are
+  deserialized; `comms::stage_attachments` downloads image files (png/jpg/gif/webp, ≤10 MB,
+  ≤8/call) and stages them where the tab's agent can Read them (`staging_target_for_tab`:
+  local temp dir, or remote /tmp over the bridge tunnel via `mailink::push_bytes_remote` for
+  SSH tabs; SSH-without-tunnel degrades to a "cannot be staged" note). Staged paths appear as
+  `[attached image … staged at <path> — view it with the Read tool]` lines in bind/read
+  transcripts, watcher injections, and summon pickups. Outgoing — `postCommsReply` takes
+  `attachments: [paths]` (max 5, ≤20 MB): local tabs read the files directly; SSH tabs fetch
+  the agent's remote paths back over the tunnel (`mailink::fetch_bytes_remote`), then
+  `upload_file` (multipart POST /api/v4/files) → `create_post` with `file_ids`.
 - **Watcher** (`comms::watcher_loop`, spawned unconditionally in `lib.rs` setup): every 5s scans
   tabs for bindings, fetches each bound thread, and injects **only posts that @mention the bot's
   own username** (`mentions_username`, cursor-newer, not-the-bot, non-empty) into the tab's PTY
