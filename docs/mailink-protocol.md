@@ -298,7 +298,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/message` | Send a message / proactive command | `{text, submit?:true}` → `{status:"queued"\|"delivered", msg_id}` |
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
-| `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent) | `{}` → `{ok}` |
+| `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `GET  /heartbeat` | Liveness + server clock | → `{ok, now, server_name}` |
 
@@ -420,7 +420,17 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   single Esc byte, nothing else — it interrupts a running turn, clears a half-typed line, and
   backs out of a TUI menu (including the resume startup menu), so the button is a safe always-on
   escape hatch regardless of the tab's believed state. `404` if the tab isn't maiLink-available;
-  `409` if it has no live PTY (nothing to interrupt — resume it first).
+  `409` if it has no live PTY (nothing to interrupt — resume it first). Returns
+  `{ ok: true, settled: bool }`: **Claude Code does not fire its `Stop` hook on a user
+  interrupt** (only on a normal turn completion), so the hook-driven chat state would otherwise
+  latch at `active` ("Working") forever after an Esc. Because the interrupt is server-originated,
+  the endpoint authoritatively settles the tab's running sessions to idle in the same in-memory
+  state every reader consumes (WS + REST both converge on `idle` within a tick — no transient
+  event to be clobbered by the poll floor). `settled` is `true` when a running turn was actually
+  stopped, `false` when nothing was running. If the Esc didn't land and the agent keeps working,
+  the next real tool-use hook flips the state back to `active`, so a spurious idle self-heals.
+  (This settles maiLink's own view; a *desktop keyboard* Esc bypasses this endpoint and would
+  need PTY observation to detect — out of scope here.)
 - **Rename** (`POST .../rename`): set the tab title. The title is trimmed and capped at 120
   chars; empty/whitespace-only is `400` (not a way to clear the name). Sets `custom_name` so the
   chosen title pins against later OSC/agent title overrides (same as a desktop rename), persists

@@ -615,7 +615,41 @@ async fn post_interrupt(
     }
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
     crate::pty::write_pty(&s.app, &pty, b"\x1b").map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "ok": true })))
+    // Claude Code does NOT fire its Stop hook on a user interrupt (ESC) — only on a normal turn
+    // completion. Our whole chat-state machine is hook-driven, so after an interrupt the session
+    // stays `Active` forever and the tab latches "Working" on the phone. We caused the interrupt,
+    // so we authoritatively settle the tab's running sessions to `Stopped` (mirroring the Stop
+    // hook): the next WS tick / REST poll then reports `idle`. Fixing the SOURCE — not emitting a
+    // transient event — is what survives the phone's 2s REST-poll floor; an event would be
+    // overwritten within a tick. If the ESC didn't actually land (agent keeps working), the next
+    // real PreToolUse hook flips it back to `Active`, so a spurious idle self-heals.
+    let settled = settle_tab_interrupt(&s.app, &tab_id);
+    Ok(Json(json!({ "ok": true, "settled": settled })))
+}
+
+/// Settle a tab's mid-turn agent sessions to `Stopped` after an interrupt, mirroring the Stop
+/// hook's reset (state + tool + pending-question cleared). Only touches sessions that are actually
+/// running (`Active` / `WaitingPermission`) so an already-idle tab is left alone. Returns true if
+/// any session was transitioned — i.e. the interrupt settled a running turn.
+fn settle_tab_interrupt(app: &AppState, tab_id: &str) -> bool {
+    let mut sessions = app.agent_sessions.write();
+    let mut changed = false;
+    for sess in sessions.values_mut() {
+        if sess.tab_id == tab_id
+            && matches!(
+                sess.state,
+                AgentSessionState::Active | AgentSessionState::WaitingPermission
+            )
+        {
+            sess.state = AgentSessionState::Stopped;
+            sess.tool_name = None;
+            sess.tool_detail = None;
+            sess.pending_question = None;
+            sess.pending_question_at = None;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Max tab title accepted from the phone. Titles are one-line chat labels; a runaway string would
@@ -2559,6 +2593,57 @@ mod tests {
         // than a missing one, which degrades to stale-guard + composer fallback).
         assert_eq!(ask_deadline_ms(None, Some("60s")), None);
         assert_eq!(ask_deadline_ms(Some("weird"), Some("60s")), None);
+    }
+
+    #[test]
+    fn interrupt_settles_only_the_targeted_tabs_running_sessions() {
+        use crate::state::app_state::AgentSessionInfo;
+        let app = AppState::new();
+        let mk = |tab: &str, state: AgentSessionState| AgentSessionInfo {
+            runtime: AgentRuntime::Claude,
+            tab_id: tab.to_string(),
+            cwd: None,
+            state,
+            tool_name: Some("Bash".into()),
+            tool_detail: Some("ls".into()),
+            pending_question: Some(json!({ "q": 1 })),
+            pending_question_at: Some(123),
+            model: None,
+            transcript_path: None,
+            connection_id: None,
+        };
+        {
+            let mut s = app.agent_sessions.write();
+            s.insert("a".into(), mk("tab-1", AgentSessionState::Active));
+            s.insert("b".into(), mk("tab-1", AgentSessionState::WaitingInput)); // already idle
+            s.insert("c".into(), mk("tab-2", AgentSessionState::Active)); // other tab
+        }
+
+        // Interrupting tab-1 settles its running session and clears its tool/question, but leaves
+        // the already-idle session and the other tab untouched.
+        assert!(settle_tab_interrupt(&app, "tab-1"));
+        {
+            let s = app.agent_sessions.read();
+            assert!(matches!(s["a"].state, AgentSessionState::Stopped));
+            assert!(s["a"].tool_name.is_none() && s["a"].tool_detail.is_none());
+            assert!(s["a"].pending_question.is_none() && s["a"].pending_question_at.is_none());
+            assert!(matches!(s["b"].state, AgentSessionState::WaitingInput));
+            assert!(s["b"].tool_name.is_some()); // untouched — we only reset running sessions
+            assert!(matches!(s["c"].state, AgentSessionState::Active));
+        }
+
+        // Nothing left running on tab-1 → no-op, reported as false (nothing was interrupted).
+        assert!(!settle_tab_interrupt(&app, "tab-1"));
+
+        // An open permission gate counts as running and settles too (ESC dismisses it).
+        app.agent_sessions
+            .write()
+            .insert("d".into(), mk("tab-3", AgentSessionState::WaitingPermission));
+        assert!(settle_tab_interrupt(&app, "tab-3"));
+        assert!(matches!(
+            app.agent_sessions.read()["d"].state,
+            AgentSessionState::Stopped
+        ));
     }
 
     #[test]
