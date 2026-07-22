@@ -2103,9 +2103,9 @@ fn display_model(model_id: &str) -> String {
 /// from the session's transcript file — Claude JSONL `message.usage` (the SessionStart hook's
 /// model is often null), or a Codex rollout's `token_count`/`turn_context` (which state the
 /// window and model directly). Live/persisted session id so it also resolves during the
-/// resume-before-init window. `effort` is intentionally omitted — it's only in Claude Code's
-/// statusLine payload, which maiTerm doesn't receive. None for Gemini tabs (no transcript
-/// source) or before the first assistant turn.
+/// resume-before-init window. `effort` (Claude-only reasoning level) rides the same assistant
+/// JSONL line as the usage block. None for Gemini tabs (no transcript source) or before the
+/// first assistant turn.
 fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let meta = transcript::meta_for(rt, &sid)?;
@@ -2122,6 +2122,11 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     });
     if !model_id.is_empty() {
         m["model"] = json!(display_model_for(rt, model_id));
+    }
+    // Reasoning-effort level (Claude-only; low/medium/high/xhigh/max) read from the transcript's
+    // top-level `effort` field. Optional — omitted for effort-less models and non-Claude runtimes.
+    if let Some(effort) = meta.effort {
+        m["effort"] = json!(effort);
     }
     Some(m)
 }

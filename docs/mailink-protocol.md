@@ -810,8 +810,9 @@ export interface Participant { id: string; name: string; runtime: Runtime; meta?
 /** Per-agent telemetry strip (thread header). All fields optional; the gauge is driven by contextPct. */
 export interface AgentMeta {
   model?: string;         // normalized display name: "Opus 4.8", "GPT-5-codex", "Gemini 2.5 Pro"
-  effort?: string;        // runtime effort tier; OMITTED when the runtime has none, or not sourceable
-                          //   (Claude effort lives only in the statusLine payload maiTerm doesn't receive → omitted today)
+  effort?: string;        // Claude reasoning tier: low | medium | high | xhigh | max. Read from the
+                          //   transcript's top-level `effort` field (same assistant line as usage).
+                          //   OMITTED for effort-less models, non-Claude runtimes, or before the first turn.
   contextPct?: number;    // 0–100, normalized — the always-present field
   contextUsed?: number;   // token detail for the "142k / 1M" readout
   contextLimit?: number;  // model-dependent (1,000,000 for [1m] variants, else 200,000)

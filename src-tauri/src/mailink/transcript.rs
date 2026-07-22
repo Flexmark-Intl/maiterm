@@ -134,6 +134,10 @@ pub struct SessionMeta {
     /// The model's context window when the transcript states it directly (Codex rollouts carry
     /// `model_context_window`). `None` for Claude — the caller derives it from the model id.
     pub context_window: Option<u64>,
+    /// Reasoning-effort level from the last assistant turn (Claude: low/medium/high/xhigh/max —
+    /// a top-level `effort` field on each JSONL entry). `None` for a model with no effort param,
+    /// an older transcript that predates the field, or a non-Claude runtime.
+    pub effort: Option<String>,
 }
 
 /// Read the most recent `message.usage` line from a Claude session's transcript and return its
@@ -143,6 +147,13 @@ fn session_meta(session_id: &str) -> Option<SessionMeta> {
     // The last usage block is near EOF (the latest assistant turn); scan a bounded tail so this
     // stays cheap when polled per chat_state. A truncated first line just fails to parse → skipped.
     let tail = read_tail(&path, 256 * 1024)?;
+    claude_meta_from_tail(&tail)
+}
+
+/// Parse a Claude JSONL tail (newest lines last) into model id + context tokens + effort, scanning
+/// upward for the latest assistant turn that carries a usable `message.usage`. Split out so it can
+/// be unit-tested without a real `~/.claude` transcript (mirrors `codex_meta_from_tail`).
+fn claude_meta_from_tail(tail: &str) -> Option<SessionMeta> {
     for line in tail.lines().rev() {
         if !line.contains("\"usage\"") {
             continue;
@@ -158,7 +169,10 @@ fn session_meta(session_id: &str) -> Option<SessionMeta> {
             continue;
         }
         let model_id = msg.get("model").and_then(|m| m.as_str()).map(String::from);
-        return Some(SessionMeta { model_id, context_tokens: tokens, context_window: None });
+        // `effort` is a top-level field on the SAME assistant line (sibling of `message`), so it
+        // costs no extra read. Absent on older transcripts / effort-less models → None.
+        let effort = v.get("effort").and_then(|e| e.as_str()).map(String::from);
+        return Some(SessionMeta { model_id, context_tokens: tokens, context_window: None, effort });
     }
     None
 }
@@ -499,7 +513,8 @@ fn codex_meta_from_tail(tail: &str) -> Option<SessionMeta> {
         }
     }
     let (context_tokens, context_window) = tokens?;
-    Some(SessionMeta { model_id, context_tokens, context_window })
+    // Codex rollouts don't carry a Claude-style effort level; effort stays Claude-only.
+    Some(SessionMeta { model_id, context_tokens, context_window, effort: None })
 }
 
 /// Unix-ms timestamp of the last REAL turn in a codex rollout — mirrors
@@ -1224,6 +1239,34 @@ mod tests {
 
         // No usable token_count at all → None (no gauge is better than a wrong gauge).
         assert!(codex_meta_from_tail(r#"{"type":"turn_context","payload":{"model":"gpt-5.5"}}"#).is_none());
+    }
+
+    #[test]
+    fn claude_meta_reads_effort_and_model_from_last_assistant_turn() {
+        // Shapes trimmed from a real ~/.claude transcript: `effort` is top-level, sibling of
+        // `message`; the usage block is inside `message`.
+        let with_effort = concat!(
+            r#"{"type":"user","message":{"role":"user","content":"hi"}}"#, "\n",
+            r#"{"type":"assistant","effort":"xhigh","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":1000,"cache_read_input_tokens":200,"cache_creation_input_tokens":50}}}"#, "\n",
+        );
+        let meta = claude_meta_from_tail(with_effort).expect("parses");
+        assert_eq!(meta.model_id.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(meta.context_tokens, 1250);
+        assert_eq!(meta.effort.as_deref(), Some("xhigh"));
+        assert_eq!(meta.context_window, None); // Claude derives the window from the model id
+
+        // Older transcript / effort-less model: the field is simply absent → None (not an error).
+        let no_effort = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":500}}}"#;
+        let meta2 = claude_meta_from_tail(no_effort).expect("parses");
+        assert_eq!(meta2.effort, None);
+        assert_eq!(meta2.context_tokens, 500);
+
+        // Newest assistant turn wins: a later high overrides an earlier medium.
+        let two_turns = concat!(
+            r#"{"type":"assistant","effort":"medium","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":100}}}"#, "\n",
+            r#"{"type":"assistant","effort":"high","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":900}}}"#, "\n",
+        );
+        assert_eq!(claude_meta_from_tail(two_turns).unwrap().effort.as_deref(), Some("high"));
     }
 
     #[test]
