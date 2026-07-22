@@ -688,6 +688,26 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         continue;
                     }
 
+                    // A mention the bot has ALREADY replied to is not a fresh summon.
+                    // This is the tail of a just-closed binding: "@bot confirmed, all
+                    // good" is delivered by the binding watcher, the agent acks with
+                    // resolve (unbind) — and THEN this scan reaches the same mention
+                    // with the root now unbound, which would re-bind the whole thread
+                    // as new work (zombie binding + spurious busy replies). The busy
+                    // notice itself doesn't count as an answer, or queued summons
+                    // would never be picked up.
+                    let thread = match client.get_thread(&root).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            log::warn!("[comms] summon thread fetch failed ({}): {e}", ch.name);
+                            break; // hold cursor; retried next tick
+                        }
+                    };
+                    if summon_already_answered(&thread, &bot_id, post.create_at) {
+                        new_cursor = post.create_at;
+                        continue;
+                    }
+
                     resolve_authors(&client, &[post], &mut authors).await;
                     let (uname, who) = authors
                         .get(&post.user_id)
@@ -724,12 +744,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         if busy_replied.insert(root.clone()) {
                             if session_live && bound_count >= MAX_TAB_BINDINGS {
                                 let _ = client
-                                    .create_post(
-                                        &ch.id,
-                                        &root,
-                                        "I'm at capacity on other issues right now — I'll pick this up as soon as one closes out.",
-                                        &[],
-                                    )
+                                    .create_post(&ch.id, &root, BUSY_REPLY_MSG, &[])
                                     .await;
                             }
                             let preview: String = post.message.trim().chars().take(120).collect();
@@ -749,7 +764,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
 
                     // ── Pickup: bind + inject ──
                     match summon_pickup(
-                        &app, &client, &tab_id, &pty, ch, &root, post, &who, &uname,
+                        &app, &client, &tab_id, &pty, ch, &root, &thread, post, &who, &uname,
                         authorized.contains(&uname.to_ascii_lowercase()),
                         &bot_username,
                     )
@@ -784,6 +799,27 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
 /// Max simultaneous thread bindings a monitor tab will accept from summons; further
 /// summons queue in-channel (cursor hold) until one closes.
 const MAX_TAB_BINDINGS: usize = 3;
+
+/// In-thread notice posted once when a summon must queue. Excluded from the
+/// "bot already answered" check (summon_already_answered) — a queued summon is
+/// still waiting for pickup, so the notice must not mark it handled.
+const BUSY_REPLY_MSG: &str =
+    "I'm at capacity on other issues right now — I'll pick this up as soon as one closes out.";
+
+/// True if the bot replied in `thread` after `mention_create_at` with anything other
+/// than the busy-queue notice — i.e. the mention was already handled by a since-closed
+/// binding (e.g. a confirmed-close ack), not a fresh summon. Pure for unit testing.
+fn summon_already_answered(
+    thread: &[mattermost::Post],
+    bot_user_id: &str,
+    mention_create_at: i64,
+) -> bool {
+    thread.iter().any(|p| {
+        p.user_id == bot_user_id
+            && p.create_at > mention_create_at
+            && p.message.trim() != BUSY_REPLY_MSG
+    })
+}
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -847,20 +883,17 @@ async fn summon_pickup(
     pty_id: &str,
     ch: &crate::state::CommsMonitorChannel,
     root_id: &str,
+    thread: &[mattermost::Post],
     summon_post: &mattermost::Post,
     who: &str,
     uname: &str,
     is_authorized: bool,
     bot_username: &str,
 ) -> Result<(), String> {
-    let thread = client
-        .get_thread(root_id)
-        .await
-        .map_err(|e| e.to_string())?;
     let staging = staging_target_for_tab(app, tab_id);
     let thread_refs: Vec<&mattermost::Post> = thread.iter().collect();
     let attachment_notes = stage_attachments(client, &staging, &thread_refs).await;
-    let transcript = build_transcript(client, &thread, root_id, &attachment_notes).await;
+    let transcript = build_transcript(client, thread, root_id, &attachment_notes).await;
     let last_seen = thread
         .iter()
         .map(|p| p.create_at)
@@ -1063,6 +1096,31 @@ mod tests {
         // no mention at all
         assert!(!mentions_username("just chatting about the bug", "maibot"));
         assert!(!mentions_username("email me@maibot.com", "maibot")); // no leading @
+    }
+
+    #[test]
+    fn summon_answered_detection() {
+        // Bot acked after the mention → handled, not a fresh summon.
+        let t = vec![
+            post("1", "alice", "@maibot confirmed, all good", 100),
+            post("2", "bot", "Thanks — closing this out.", 200),
+        ];
+        assert!(summon_already_answered(&t, "bot", 100));
+        // Busy-queue notice after the mention does NOT count — still waiting.
+        let t = vec![
+            post("1", "alice", "@maibot take a look", 100),
+            post("2", "bot", BUSY_REPLY_MSG, 200),
+        ];
+        assert!(!summon_already_answered(&t, "bot", 100));
+        // Bot replies BEFORE the mention → "@maibot it broke again" is a fresh summon.
+        let t = vec![
+            post("1", "bot", "resolution posted", 100),
+            post("2", "alice", "@maibot it broke again", 200),
+        ];
+        assert!(!summon_already_answered(&t, "bot", 200));
+        // No bot posts at all → fresh summon.
+        let t = vec![post("1", "alice", "@maibot help", 100)];
+        assert!(!summon_already_answered(&t, "bot", 100));
     }
 
     #[test]
