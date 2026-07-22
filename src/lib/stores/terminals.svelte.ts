@@ -61,6 +61,11 @@ function createTerminalsStore() {
   // Prevents pointless serialization of idle terminals, which creates large
   // temporary strings that pressure the GC (81 terminals × ~300KB = 24MB/cycle).
   const dirtyTabs = new Set<string>();
+  // Last raw PTY output per tab (ms epoch), stamped on every chunk — including TUI
+  // spinner/redraw frames that activityStore deliberately filters out. Non-reactive:
+  // consumers poll it (e.g. mesh setup waits for output quiescence before injecting
+  // a command, so a paste can't land mid-compaction or mid-dialog-transition).
+  const lastOutputAt = new Map<string, number>();
   // Tabs whose PTY is being spawned — treated as "active" by the tab grouping
   // logic so they don't flash into the suspended group before registration.
   let spawningTabs = $state(new Set<string>());
@@ -80,7 +85,9 @@ function createTerminalsStore() {
     get shuttingDown() { return _shuttingDown; },
     get searchVisibleFor() { return searchVisibleFor; },
     isCanvasRenderer(tabId: string) { return canvasTabs.has(tabId); },
-    markDirty(tabId: string) { dirtyTabs.add(tabId); },
+    markDirty(tabId: string) { dirtyTabs.add(tabId); lastOutputAt.set(tabId, Date.now()); },
+    /** ms epoch of the tab's last raw PTY output, or undefined if none seen. */
+    getLastOutputAt(tabId: string): number | undefined { return lastOutputAt.get(tabId); },
     isDirty(tabId: string) { return dirtyTabs.has(tabId); },
     clearDirty(tabId: string) { dirtyTabs.delete(tabId); },
     markSpawning(tabId: string) { spawningTabs = new Set(spawningTabs).add(tabId); },
@@ -150,6 +157,7 @@ function createTerminalsStore() {
     unregister(tabId: string) {
       instances = new Map(instances);
       instances.delete(tabId);
+      lastOutputAt.delete(tabId);
       instanceVersion++;
     },
 
