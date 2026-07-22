@@ -486,6 +486,15 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 // handle yet (busy/at-cap/no session) so it is retried naturally.
                 let mut new_cursor = since;
                 for post in &posts {
+                    // `since` is UPDATE_AT-based on the server: an edit of an old post
+                    // (typo fix, headline trim) re-serves it here with its original
+                    // create_at. Only genuinely NEW posts are summon candidates —
+                    // otherwise editing a resolved thread's root re-picks the whole
+                    // thread up as fresh work. Skipping without touching new_cursor is
+                    // safe: create_at ordering keeps the cursor monotonic.
+                    if post.create_at <= since {
+                        continue;
+                    }
                     let is_summon_mention = post.user_id != bot_id
                         && !post.message.trim().is_empty()
                         && mentions_username(&post.message, &bot_username);
