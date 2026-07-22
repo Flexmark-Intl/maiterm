@@ -700,7 +700,9 @@ async fn summon_pickup(
         "[Mattermost pickup — {who} (@{uname}) [{tag}] summoned you (@{bot_username}) in channel \"{}\". \
          This tab is now bound to that thread (root_id {root_id}, {permalink}). Work it per the \
          /maiterm resolve workflow from the maiterm skill. If you are already working another \
-         thread, delegate this one to a subagent (Task tool) so both proceed independently — and \
+         thread, delegate this one to a subagent (Task tool) — or, if this tab is in a Mesh \
+         Workspace and a peer's purpose matches the issue (listBridgedPeers), to that peer — so \
+         both proceed independently. You stay the dispatcher either way — and \
          ALWAYS pass root_id \"{root_id}\" on postCommsReply/readCommsThread calls for this \
          thread.{instructions}\nSummon message and thread so far:\n{transcript}]",
         ch.name
