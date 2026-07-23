@@ -1081,7 +1081,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 mirror::refresh_tabs(&s.app, &tabs);
             }
             _ = ticker.tick() => {
-                let chats = build_chats(&s.app);
+                // Summaries, not full chats: this fires forever at 1.5s, and the full build's
+                // scrollback + per-tab transcript reads were constant background lock pressure.
+                // The rare transitioning tab is enriched below.
+                let chats = build_chat_summaries(&s.app);
                 let mut current_ids = std::collections::HashSet::new();
                 let mut roster_changed = false;
                 for c in &chats {
@@ -1114,7 +1117,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     }
                     mesh.insert(tab.clone(), ws_mesh);
                     if prev.as_deref() != Some(key.as_str()) {
-                        if socket.send(Message::Text(chat_state_event(c).to_string().into())).await.is_err() {
+                        if socket.send(Message::Text(enriched_chat_state_event(&s.app, c).to_string().into())).await.is_err() {
                             return;
                         }
                         // Attention only on an OBSERVED transition into an attention state. A tab
@@ -1150,6 +1153,24 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
             }
         }
     }
+}
+
+/// `chat_state_event` for a ticker SUMMARY row (build_chat_summaries): fills in the two fields
+/// the summary deliberately omits — lastActivityTs and meta — for just this one transitioning
+/// tab, so the per-tick cost of the heavy sources is paid only on actual state changes.
+fn enriched_chat_state_event(app: &AppState, c: &Value) -> Value {
+    let tab_id = c["tabId"].as_str().unwrap_or_default();
+    let mut c = c.clone();
+    c["lastActivityTs"] = json!(last_activity_ts(
+        app,
+        tab_id,
+        scrollback_time_for(app, tab_id),
+        now_ms(),
+    ));
+    if let Some(meta) = build_meta(app, tab_id) {
+        c["meta"] = meta;
+    }
+    chat_state_event(&c)
 }
 
 fn chat_state_event(c: &Value) -> Value {
@@ -2331,6 +2352,53 @@ fn last_activity_ts(app: &AppState, tab_id: &str, scrollback_ts: Option<u64>, no
         .unwrap_or(now)
 }
 
+/// The in-memory-only slice of `build_chats` that the periodic tickers (WS diff loop, doorbell)
+/// actually consume: identity + the diffed flags + state/prompt. Deliberately NO lastActivityTs,
+/// meta, or preview — those need the scrollback DB and transcript tails, and rebuilding them for
+/// every tab every ~2s was the permanent background load that kept the scrollback mutex ~40%
+/// held and made human-initiated fetches queue for seconds (the "chat-list storm" was maiTerm's
+/// own tickers, not the phone). The one per-tab I/O left is the dormant fallback's stat-gated
+/// tail read, and only for tabs with no session entry. Tabs that actually transition get
+/// enriched on demand (enriched_chat_state_event); full builds remain for REST + the
+/// once-per-connection WS snapshot.
+fn build_chat_summaries(app: &AppState) -> Vec<Value> {
+    let states = session_states(app);
+    let now = now_ms();
+    designated_tabs(app)
+        .into_iter()
+        .map(|t| {
+            let (state, runtime, tool) = match states.get(&t.tab_id) {
+                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
+                None => {
+                    let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
+                        "active"
+                    } else {
+                        "dormant"
+                    };
+                    (st, runtime_key(t.runtime), None)
+                }
+            };
+            // Same prompt-kind rule as build_chats: an open AskUserQuestion outranks permission.
+            let prompt_kind = if tool.as_deref() == Some("AskUserQuestion") {
+                Some("question")
+            } else if state == "permission" {
+                Some("permission")
+            } else {
+                None
+            };
+            json!({
+                "tabId": t.tab_id,
+                "title": t.title,
+                "workspaceSuspended": t.workspace_suspended,
+                "mesh": t.mesh,
+                "runtime": runtime,
+                "state": state,
+                "prompt": prompt_kind,
+            })
+        })
+        .collect()
+}
+
 fn build_chats(app: &AppState) -> Vec<Value> {
     let t_total = std::time::Instant::now();
     let ph = std::time::Instant::now();
@@ -2649,7 +2717,12 @@ async fn doorbell_loop(app: Arc<AppState>) {
             now_ms(),
         );
 
-        let chats = build_chats(&app);
+        // Summaries only — the doorbell consumes tabId/title/state/prompt and nothing else, and
+        // this loop runs forever at 2s whether or not a phone exists (being UNcovered is exactly
+        // when it must ring). The full build_chats here was the fixed-interval "chat-list storm":
+        // scrollback + per-tab transcript reads for 100 tabs, every 2s, holding the scrollback
+        // mutex ~40% of wall-clock so every human-initiated fetch queued behind it.
+        let chats = build_chat_summaries(&app);
         let mut current = std::collections::HashSet::new();
         for c in &chats {
             let tab = c["tabId"].as_str().unwrap_or_default().to_string();
@@ -3053,6 +3126,42 @@ mod tests {
         assert!(m.workspace_suspended);
         assert_eq!(m.workspace_id, ws_id);
         assert!(m.mesh, "bridge_all surfaces as the mesh flag");
+    }
+
+    #[test]
+    fn chat_summaries_carry_every_field_the_tickers_diff() {
+        // The WS ticker diffs title/workspaceSuspended/mesh and keys on attn_key(state, prompt);
+        // the doorbell needs tabId/title/state/prompt; chat_state events need runtime. If a field
+        // the tickers consume ever drops out of the summary shape, the diff silently degrades
+        // (e.g. every tick looks like a rename) — pin the shape here.
+        use crate::state::workspace::{WindowData, Workspace};
+        let app = AppState::new();
+        let tab_id = {
+            let mut data = app.app_data.write();
+            data.preferences.mailink_expose_all = true;
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("ENAGIC".into());
+            ws.suspended = true;
+            ws.bridge_all = true;
+            ws.panes[0].tabs[0].runtime = Some(AgentRuntime::Claude);
+            let id = ws.panes[0].tabs[0].id.clone();
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            id
+        };
+        let summaries = build_chat_summaries(&app);
+        let s = summaries
+            .iter()
+            .find(|c| c["tabId"] == json!(tab_id))
+            .expect("designated tab summarized");
+        assert!(s["title"].is_string());
+        assert_eq!(s["workspaceSuspended"], json!(true));
+        assert_eq!(s["mesh"], json!(true));
+        assert_eq!(s["runtime"], json!("claude"));
+        assert_eq!(s["state"], json!("dormant"), "no session entry, no live PTY");
+        assert!(s["prompt"].is_null());
+        // And the heavy fields must NOT be here — their absence is the whole point.
+        assert!(s.get("lastActivityTs").is_none() && s.get("meta").is_none());
     }
 
     #[test]
