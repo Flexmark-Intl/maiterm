@@ -89,6 +89,57 @@ pub enum ToolRender {
 /// turns — acceptable versus a 25 s open, and tunable here.
 const TRANSCRIPT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
+// ─── tail-facts cache ───────────────────────────────────────────────────────────────────
+//
+// The two per-tab list facts — last REAL turn ts and session meta (model/context/effort) — both
+// come from the same bounded tail of the same file, and chat-list recomputes them for EVERY
+// designated tab on every call while the file is unchanged for almost all of them. Gate on
+// (mtime, len) and cache the parsed pair per path: steady-state cost per tab drops from two
+// 256 KB read+parses to one stat. Transcripts are append-only, so (mtime, len) is a sound
+// change key; a miss re-reads and replaces the entry.
+
+/// Bytes scanned for the last-turn / meta facts. The newest usage line and the last real turn
+/// both sit near EOF (a resume appends only small scaffolding past them).
+const FACTS_TAIL_BYTES: u64 = 256 * 1024;
+
+#[derive(Clone, Default)]
+struct TailFacts {
+    last_turn_ts: Option<u64>,
+    meta: Option<SessionMeta>,
+}
+
+static TAIL_FACTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, TailFacts)>>> =
+    std::sync::OnceLock::new();
+
+/// The cached (or freshly parsed) facts for `path`, where `parse` distills a raw tail into the
+/// pair. `parse` is keyed per runtime by the caller; a given path always belongs to one runtime,
+/// so entries never mix parsers.
+fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
+    let Ok(md) = std::fs::metadata(path) else { return TailFacts::default() };
+    let mtime_ms = md
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let len = md.len();
+    let cache = TAIL_FACTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some((m, l, facts)) = c.get(path) {
+            if *m == mtime_ms && *l == len {
+                return facts.clone();
+            }
+        }
+    }
+    let facts = read_tail(path, FACTS_TAIL_BYTES)
+        .map(|tail| parse(&tail))
+        .unwrap_or_default();
+    if let Ok(mut c) = cache.lock() {
+        c.insert(path.clone(), (mtime_ms, len, facts.clone()));
+    }
+    facts
+}
+
 /// Build the last `limit` maiLink messages for a Claude session, or `None` if its transcript
 /// can't be found/read (caller falls back to the terminal scrape).
 fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
@@ -117,6 +168,7 @@ fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Optio
 /// and current context size (prompt tokens). Drives the maiLink per-agent `meta` strip. Sourced
 /// from the JSONL (not the SessionStart hook, whose `model` is often null) so it's always available
 /// for a Claude tab; naturally Claude-only since it reads `~/.claude` transcripts.
+#[derive(Clone)]
 pub struct SessionMeta {
     /// Raw model id from the last assistant turn (e.g. "claude-opus-4-8", "gpt-5.5"). Caller
     /// normalizes for display.
@@ -142,12 +194,18 @@ pub struct SessionMeta {
 
 /// Read the most recent `message.usage` line from a Claude session's transcript and return its
 /// model id + summed context tokens. None if the transcript can't be found/read or has no usage.
+/// Served from the (mtime, len)-gated tail-facts cache.
 fn session_meta(session_id: &str) -> Option<SessionMeta> {
     let path = locate_jsonl(session_id)?;
-    // The last usage block is near EOF (the latest assistant turn); scan a bounded tail so this
-    // stays cheap when polled per chat_state. A truncated first line just fails to parse → skipped.
-    let tail = read_tail(&path, 256 * 1024)?;
-    claude_meta_from_tail(&tail)
+    tail_facts(&path, claude_tail_facts).meta
+}
+
+/// Parse both cached facts (last real turn ts + meta) from one Claude JSONL tail.
+fn claude_tail_facts(tail: &str) -> TailFacts {
+    TailFacts {
+        last_turn_ts: claude_last_turn_from_tail(tail),
+        meta: claude_meta_from_tail(tail),
+    }
 }
 
 /// Parse a Claude JSONL tail (newest lines last) into model id + context tokens + effort, scanning
@@ -202,9 +260,13 @@ pub fn claude_session_version(session_id: &str) -> Option<String> {
 /// transcript can't be found/read or no real turn falls within the scanned tail.
 fn session_last_turn_ts(session_id: &str) -> Option<u64> {
     let path = locate_jsonl(session_id)?;
-    // The last real turn sits just before whatever small scaffolding a resume appends at EOF, so a
-    // 256KB tail clears the largest realistic resume dump (hook context + deferred-tool list) easily.
-    let tail = read_tail(&path, 256 * 1024)?;
+    // The last real turn sits just before whatever small scaffolding a resume appends at EOF, so
+    // FACTS_TAIL_BYTES clears the largest realistic resume dump (hook context + deferred-tool
+    // list) easily. Served from the (mtime, len)-gated tail-facts cache.
+    tail_facts(&path, claude_tail_facts).last_turn_ts
+}
+
+fn claude_last_turn_from_tail(tail: &str) -> Option<u64> {
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if let Some(ts) = real_turn_ts(&v) {
@@ -276,7 +338,28 @@ fn read_tail_bytes(path: &std::path::Path, max: u64) -> Option<(Vec<u8>, u64)> {
 /// id is globally unique, so a match is unambiguous and the two roots can't collide. This
 /// single lookup is what makes mirrored SSH tabs indistinguishable from local ones: every
 /// transcript consumer (distiller, mtime gate, meta, recency) resolves through here.
+/// session_id → located transcript path. Uncached, every lookup was a `read_dir` over EVERY
+/// `~/.claude/projects/*` dir plus one stat each — and chat-list does 2-3 lookups per tab per
+/// call. Sessions append in place and never move, so cache hits just re-validate with
+/// `is_file()` (same contract as CODEX_PATHS below).
+static CLAUDE_PATHS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PathBuf>>> =
+    std::sync::OnceLock::new();
+
 fn locate_jsonl(session_id: &str) -> Option<PathBuf> {
+    let cache = CLAUDE_PATHS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Some(p) = cache.lock().ok()?.get(session_id) {
+        if p.is_file() {
+            return Some(p.clone());
+        }
+    }
+    let found = locate_jsonl_uncached(session_id)?;
+    if let Ok(mut c) = cache.lock() {
+        c.insert(session_id.to_string(), found.clone());
+    }
+    Some(found)
+}
+
+fn locate_jsonl_uncached(session_id: &str) -> Option<PathBuf> {
     let file = format!("{session_id}.jsonl");
     if let Some(root) = dirs::home_dir().map(|h| h.join(".claude").join("projects")) {
         if let Ok(entries) = std::fs::read_dir(&root) {
@@ -465,8 +548,15 @@ fn push_codex_line_messages(line_no: u64, v: &Value, tools: ToolRender, out: &mu
 /// the window, both stated in the file) + last `turn_context` (model id).
 fn codex_session_meta(session_id: &str) -> Option<SessionMeta> {
     let path = locate_codex_jsonl(session_id)?;
-    let tail = read_tail(&path, 256 * 1024)?;
-    codex_meta_from_tail(&tail)
+    tail_facts(&path, codex_tail_facts).meta
+}
+
+/// Parse both cached facts (last real turn ts + meta) from one codex rollout tail.
+fn codex_tail_facts(tail: &str) -> TailFacts {
+    TailFacts {
+        last_turn_ts: codex_last_turn_from_tail(tail),
+        meta: codex_meta_from_tail(tail),
+    }
 }
 
 fn codex_meta_from_tail(tail: &str) -> Option<SessionMeta> {
@@ -521,7 +611,10 @@ fn codex_meta_from_tail(tail: &str) -> Option<SessionMeta> {
 /// `session_last_turn_ts`'s rationale (recency from content, not file churn).
 fn codex_session_last_turn_ts(session_id: &str) -> Option<u64> {
     let path = locate_codex_jsonl(session_id)?;
-    let tail = read_tail(&path, 256 * 1024)?;
+    tail_facts(&path, codex_tail_facts).last_turn_ts
+}
+
+fn codex_last_turn_from_tail(tail: &str) -> Option<u64> {
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if let Some(ts) = codex_real_turn_ts(&v) {
@@ -846,6 +939,53 @@ mod tests {
         let _ = std::fs::remove_file(&path); // clean up before asserting
         assert_eq!(found, Some(path));
         assert!(locate_jsonl(sid).is_none(), "gone once the shadow file is removed");
+    }
+
+    #[test]
+    fn tail_facts_cache_serves_hits_and_refreshes_on_append() {
+        // The cache key is (mtime, len): an unchanged file must serve the cached parse, an
+        // append (len changes even within mtime granularity) must re-parse. Uses the real
+        // claude parser so the test also pins the facts themselves.
+        let dir = std::env::temp_dir().join("aiterm-tail-facts-test");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("facts-test-session.jsonl");
+        let turn = |ts: &str| {
+            format!(
+                "{}\n",
+                json!({
+                    "type": "assistant",
+                    "timestamp": ts,
+                    "effort": "high",
+                    "message": {
+                        "model": "claude-opus-4-8",
+                        "content": [{ "type": "text", "text": "hi" }],
+                        "usage": { "input_tokens": 10, "cache_read_input_tokens": 5 }
+                    }
+                })
+            )
+        };
+        std::fs::write(&path, turn("2026-06-27T21:25:57.904Z")).expect("write");
+
+        let first = tail_facts(&path, claude_tail_facts);
+        assert_eq!(first.last_turn_ts, Some(1782595557904));
+        let meta = first.meta.as_ref().expect("meta parsed");
+        assert_eq!(meta.model_id.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(meta.context_tokens, 15);
+        assert_eq!(meta.effort.as_deref(), Some("high"));
+
+        // Unchanged file → same facts (cache hit or not, the answer must be identical).
+        assert_eq!(tail_facts(&path, claude_tail_facts).last_turn_ts, Some(1782595557904));
+
+        // Append a newer turn → facts must advance (len changed, so the gate re-reads).
+        let mut body = std::fs::read_to_string(&path).unwrap();
+        body.push_str(&turn("2026-06-27T21:30:00.000Z"));
+        std::fs::write(&path, body).expect("append");
+        assert_eq!(tail_facts(&path, claude_tail_facts).last_turn_ts, Some(1782595800000));
+
+        // A vanished file yields empty facts, not stale ones.
+        std::fs::remove_file(&path).unwrap();
+        let gone = tail_facts(&path, claude_tail_facts);
+        assert!(gone.last_turn_ts.is_none() && gone.meta.is_none());
     }
 
     #[test]
