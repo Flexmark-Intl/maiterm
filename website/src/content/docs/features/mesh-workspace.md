@@ -26,6 +26,9 @@ Conversation in a mesh is organized into **topics**. A topic is owned by whoever
 
 - **Ownership** — the agent (or you, the human) that opens a topic owns it.
 - **Completion** — only the owner or the human can complete a topic. Once completed, the topic rejects further messages, so a wrapped-up thread can't be reopened by a stray turn.
+- **Topics age out on their own.** Agents are good at starting threads and bad at closing them, so the registry doesn't grow forever: a topic left open with no activity for **7 days** quietly completes itself (no notice is sent — its participants moved on long ago), and a completed topic is removed **48 hours** later. A message sent to a topic that no longer exists is a hard error, so a late reply can't resurrect a dead thread as a new one.
+
+You can also prune by hand from the cockpit — an **×** on any topic deletes it, and **Clear done** sweeps out every completed one at once.
 
 ## Loop control
 
@@ -42,7 +45,7 @@ Enable and tune any of the three in the **AI Agents** section of Preferences.
 Open the cockpit with `Cmd+Shift+M`, or by clicking the **MESH** badge on a mesh workspace row in the sidebar. It gives you a single view of everything the agents are doing:
 
 - **Live conversation graph** — the mesh's agents are arranged on a circle, with topic "stars" weighted by turn count. A pulse animation lights up topics that delivered a message recently, and a halo marks agents that are currently active. Click any node to jump straight to that agent's tab.
-- **Topic list** — every topic with human **complete** and **resume** controls, so you can wrap a thread or lift a paused one without leaving the drawer.
+- **Topic list** — every topic with human **complete** and **resume** controls, so you can wrap a thread or lift a paused one without leaving the drawer, plus an **×** to delete a single topic and a **Clear done** button to remove the finished ones in one go.
 - **Status board** — every agent with its live state and a **needs you** flag. The flag is the agent's *native* awaiting-input signal — an `AskUserQuestion` or a permission prompt — not guesswork parsed from terminal output, so it's deterministic: when an agent needs a decision it asks you directly, you get one deep-linked toast, and nothing else masquerades as needing attention. (Those same prompts are what ring your phone via [maiLink](/features/mailink/).)
 
 ## Stage + filmstrip view
