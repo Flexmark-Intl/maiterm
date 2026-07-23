@@ -372,6 +372,57 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Stage a remote file to a stable local temp path and return that path.
+///
+/// Backs the "Copy Local Copy Path" tab action: opening an SSH file reads its
+/// bytes into the editor and deletes the transfer temp immediately (see
+/// `scp_read_file`), so there is no lingering local file to point at. This
+/// re-materializes the current remote-saved file on demand under
+/// `<temp>/maiterm-ssh/<host+path hash>/<basename>` — a subdir keyed by
+/// (host, path) so same-named files don't collide and repeat clicks return the
+/// same path.
+#[command]
+pub async fn stage_remote_file_temp(
+    ssh_command: String,
+    remote_path: String,
+) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+
+    let user_host = extract_user_host(&ssh_command)?;
+    let remote_path = expand_remote_tilde(&user_host, &remote_path);
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    user_host.hash(&mut hasher);
+    remote_path.hash(&mut hasher);
+    let key = format!("{:016x}", hasher.finish());
+
+    let dir = std::env::temp_dir().join("maiterm-ssh").join(&key);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Cannot create temp directory: {}", e))?;
+
+    let basename = Path::new(&remote_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "file".to_string());
+    let dest = dir.join(&basename);
+
+    let output = std::process::Command::new("scp")
+        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("ConnectTimeout=10")
+        .arg(format!("{}:{}", user_host, remote_path))
+        .arg(dest.to_str().ok_or("Invalid destination path")?)
+        .output()
+        .map_err(|e| format!("Failed to run scp: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Staging failed: {}", stderr.trim()));
+    }
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
 /// Download a remote file over SCP into the local Downloads directory.
 /// Returns the absolute local path of the saved copy.
 #[command]

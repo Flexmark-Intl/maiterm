@@ -21,6 +21,10 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TabListMenu from './TabListMenu.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
+  import { toastStore } from '$lib/stores/toasts.svelte';
+  import { stageRemoteFileTemp } from '$lib/tauri/commands';
+  import { error as logError } from '@tauri-apps/plugin-log';
 
   interface Props {
     workspaceId: string;
@@ -946,6 +950,31 @@
     }
   }
 
+  async function copyTextToClipboard(text: string, successTitle: string) {
+    try {
+      await clipboardWriteText(text);
+      toastStore.addToast(successTitle, text, 'success');
+    } catch (e) {
+      logError(`[TerminalTabs] copy path failed: ${e}`);
+      toastStore.addToast('Copy failed', String(e), 'error');
+    }
+  }
+
+  // SSH files are read into the editor and their transfer temp is deleted at
+  // once, so there is no local file to point at. Re-stage the current remote
+  // file on demand and copy that local path.
+  async function copyLocalTempPath(sshCommand: string, remotePath: string) {
+    try {
+      toastStore.addToast('Staging…', remotePath, 'info');
+      const local = await stageRemoteFileTemp(sshCommand, remotePath);
+      await clipboardWriteText(local);
+      toastStore.addToast('Local copy path copied', local, 'success');
+    } catch (e) {
+      logError(`[TerminalTabs] stage local copy failed: ${e}`);
+      toastStore.addToast('Copy failed', String(e), 'error');
+    }
+  }
+
   function tabMenuItems(tabId: string) {
     const onlyTab = pane.tabs.length === 1;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
@@ -993,7 +1022,30 @@
           })),
         }
       : null;
+    // Copy-path items for editor tabs. For SSH files "Copy Full Path" gives the
+    // remote real path; "Copy Local Copy Path" stages a local copy on demand.
+    const editorFile = tabObj?.tab_type === 'editor' ? tabObj.editor_file : null;
+    const editorPathItems: MenuItem[] = [];
+    if (editorFile) {
+      const fullPath = editorFile.is_remote
+        ? (editorFile.remote_path ?? editorFile.file_path)
+        : editorFile.file_path;
+      editorPathItems.push({
+        label: 'Copy Full Path',
+        action: () => copyTextToClipboard(fullPath, 'Path copied'),
+      });
+      if (editorFile.is_remote && editorFile.remote_ssh_command && editorFile.remote_path) {
+        const ssh = editorFile.remote_ssh_command;
+        const remote = editorFile.remote_path;
+        editorPathItems.push({
+          label: 'Copy Local Copy Path',
+          action: () => copyLocalTempPath(ssh, remote),
+        });
+      }
+    }
     const items: Array<MenuItem> = [
+      ...editorPathItems,
+      ...(editorPathItems.length > 0 ? [{ label: '', separator: true, action: () => {} }] : []),
       {
         label: isPinned ? 'Unpin tab' : 'Pin tab',
         action: () => workspacesStore.setTabPinned(workspaceId, pane.id, tabId, !isPinned),

@@ -591,6 +591,7 @@ pub fn run() {
             commands::editor::save_clipboard_image,
             commands::editor::reveal_in_file_manager,
             commands::editor::download_remote_file,
+            commands::editor::stage_remote_file_temp,
             commands::editor::scp_upload_files,
             commands::editor::cancel_scp_upload,
             commands::editor::create_editor_tab,

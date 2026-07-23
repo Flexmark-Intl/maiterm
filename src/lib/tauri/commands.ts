@@ -687,6 +687,11 @@ export async function downloadRemoteFile(sshCommand: string, remotePath: string)
   return invoke('download_remote_file', { sshCommand, remotePath });
 }
 
+/** SCP a remote file to a stable local temp path (on demand); returns that path. */
+export async function stageRemoteFileTemp(sshCommand: string, remotePath: string): Promise<string> {
+  return invoke('stage_remote_file_temp', { sshCommand, remotePath });
+}
+
 export async function scpUploadFiles(sshCommand: string, localPaths: string[], remoteDir: string, uploadId: string): Promise<void> {
   return invoke('scp_upload_files', { sshCommand, localPaths, remoteDir, uploadId });
 }
