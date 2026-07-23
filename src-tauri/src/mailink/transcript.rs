@@ -238,20 +238,48 @@ fn claude_meta_from_tail(tail: &str) -> Option<SessionMeta> {
 /// The maiTerm tab id that most recently HOSTED a Claude session, read from the transcript
 /// itself: the SessionStart command hook echoes `Your maiTerm tab ID is $MAITERM_TAB_ID` into
 /// the session (lockfile.rs `build_our_hooks`) on every start/resume/compact, so the LAST
-/// occurrence names the tab the session last actually ran in. Used by the boot-time session-id
-/// dedupe (persistence.rs) to decide which of several claiming tabs keeps a duplicated
-/// `claudeSessionId`. `None` if the transcript can't be located or no marker falls within the
-/// scanned tail (a session that's run a long stretch since its last start/resume).
+/// occurrence names the tab the session last actually ran in. Used to resolve a CONTESTED
+/// session id (tab duplication copies the var on purpose — reload/fork workflows) to its one
+/// rightful renderer: ownership follows actual usage, and flips to the duplicate the moment it
+/// actually resumes the session there. `None` if the transcript can't be located or no marker
+/// falls within the scanned tail (a session that's run a long stretch since its last
+/// start/resume). (mtime, len)-cached — resolution paths hit this per ticker pass.
 pub(crate) fn claude_session_host_tab(session_id: &str) -> Option<String> {
+    static HOST_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, (u64, u64, Option<String>)>>,
+    > = std::sync::OnceLock::new();
+
     let path = locate_jsonl(session_id)?;
-    let tail = read_tail(&path, 4 * 1024 * 1024)?;
-    const MARKER: &str = "maiTerm tab ID is ";
-    let idx = tail.rfind(MARKER)?;
-    let id: String = tail[idx + MARKER.len()..]
-        .chars()
-        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
-        .collect();
-    (id.len() >= 8).then_some(id)
+    let md = std::fs::metadata(&path).ok()?;
+    let mtime_ms = md
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let len = md.len();
+    let cache = HOST_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some((m, l, host)) = c.get(&path) {
+            if *m == mtime_ms && *l == len {
+                return host.clone();
+            }
+        }
+    }
+    let host = (|| {
+        let tail = read_tail(&path, 4 * 1024 * 1024)?;
+        const MARKER: &str = "maiTerm tab ID is ";
+        let idx = tail.rfind(MARKER)?;
+        let id: String = tail[idx + MARKER.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+            .collect();
+        (id.len() >= 8).then_some(id)
+    })();
+    if let Ok(mut c) = cache.lock() {
+        c.insert(path, (mtime_ms, len, host.clone()));
+    }
+    host
 }
 
 /// Claude Code version that wrote the most recent entries of a session's transcript (every JSONL

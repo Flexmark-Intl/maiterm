@@ -2,14 +2,15 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
-import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, shellEscapePath } from '$lib/tauri/commands';
+import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, shellEscapePath, countSessionIdClaimants } from '$lib/tauri/commands';
 import { stripAnsi } from '$lib/utils/ansi';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
-import { error as logError } from '@tauri-apps/plugin-log';
+import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
-import { isForkCommand } from '$lib/agents/resume';
+import { isForkCommand, sessionIdVar, forkFlag } from '$lib/agents/resume';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
+import type { AgentRuntime } from '$lib/agents/types';
 
 const BUFFER_CAP = 4096;
 
@@ -401,6 +402,31 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
   }
 }
 
+/** If `cmd` would resume a session id that ANOTHER existing tab still claims, append the
+ *  runtime's fork flag so it resumes the same history into a FRESH session id. Duplicating a
+ *  tab copies the session-id var on purpose (reload = duplicate + close original; fork =
+ *  duplicate + branch) — but two tabs actually RUNNING one session is never intended: both
+ *  agents would interleave into one transcript. Forking preserves the full conversation in
+ *  both tabs and diverges them automatically; once the other claimant is closed (the reload
+ *  flow), the sid is uncontested and plain resume is untouched. No-op when the runtime can't
+ *  fork (codex/gemini), the command doesn't reference the session var, or it already forks. */
+async function forkResumeIfContested(tabId: string, runtime: AgentRuntime, cmd: string): Promise<string> {
+  const varName = sessionIdVar(runtime);
+  const flag = forkFlag(runtime);
+  if (!flag || !cmd.includes('%' + varName) || cmd.includes(flag)) return cmd;
+  const sid = variableMap.get(tabId)?.get(varName);
+  if (!sid) return cmd;
+  try {
+    if ((await countSessionIdClaimants(sid)) > 1) {
+      logInfo(`auto-resume: session ${sid.slice(0, 8)} contested by another tab — forking instead of resuming`);
+      return `${cmd} ${flag}`;
+    }
+  } catch {
+    // Probe failure → plain resume (pre-existing behavior beats blocking the replay).
+  }
+  return cmd;
+}
+
 /** Replay the stored auto-resume command into the current PTY. */
 export async function replayAutoResume(tabId: string) {
   const instance = terminalsStore.get(tabId);
@@ -413,7 +439,8 @@ export async function replayAutoResume(tabId: string) {
   const sshCmd = tab.auto_resume_ssh_command ?? null;
   const remoteCwd = tab.auto_resume_remote_cwd ?? null;
   const localCwd = tab.auto_resume_cwd ?? null;
-  const cmd = tab.auto_resume_command ?? null;
+  let cmd = tab.auto_resume_command ?? null;
+  if (cmd) cmd = await forkResumeIfContested(tabId, tab.runtime ?? 'claude', cmd);
 
   try {
     if (sshCmd) {

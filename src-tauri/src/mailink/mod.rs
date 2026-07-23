@@ -2003,33 +2003,22 @@ fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRunti
         }
     }
     let (rt, sid) = found?;
-    // Collision guard: a session id names ONE session, so if any OTHER tab also claims this id
-    // (via its own runtime's session-id var), neither claim is trustworthy — tab duplication
-    // used to clone the var, and trusting it rendered one conversation on two tabs. Returning
-    // None drops this tab to the snapshot fallback instead of showing someone else's transcript;
-    // a LIVE registration (live_session_for_tab, tried before this fn) is unaffected.
-    let claimants = data
-        .windows
-        .iter()
-        .flat_map(|w| &w.workspaces)
-        .flat_map(|ws| &ws.panes)
-        .flat_map(|p| &p.tabs)
-        .filter(|t| {
-            let var = crate::state::agent_runtime::descriptor(t.runtime.unwrap_or_default())
-                .session_id_var;
-            t.trigger_variables.get(var).map(String::as_str) == Some(sid.as_str())
-        })
-        .count();
-    if claimants > 1 {
-        // debug, not warn: this runs on every ticker pass for every unresolved tab, and an
-        // existing collision would flood the log — the boot-time migration warns once instead.
-        log::debug!(
-            "mailink: session id {} claimed by {} tabs — refusing the persisted resolution for tab {}",
-            &sid[..sid.len().min(8)],
-            claimants,
-            &tab_id[..tab_id.len().min(8)],
-        );
-        return None;
+    // Contested-sid resolution: tab duplication copies the session-id var ON PURPOSE (reload =
+    // duplicate + close original; fork = duplicate + branch), so two tabs claiming one sid is a
+    // legitimate transient state — but only ONE of them may render the conversation, or both
+    // tabs show the same (possibly someone else's) transcript. The transcript itself names its
+    // rightful renderer: the SessionStart hook echoes the hosting tab id into the JSONL on
+    // every start/resume/compact, so the last marker follows actual usage — the original keeps
+    // rendering until the duplicate actually resumes the session, then it flips. Unknown host
+    // (unlocatable transcript, marker out of tail range, non-Claude runtime) → None for every
+    // claimant: the snapshot fallback beats rendering someone else's conversation. A LIVE
+    // registration (live_session_for_tab, tried before this fn) is unaffected.
+    if data.session_id_claimants(&sid) > 1 {
+        let owns = rt == AgentRuntime::Claude
+            && transcript::claude_session_host_tab(&sid).as_deref() == Some(tab_id);
+        if !owns {
+            return None;
+        }
     }
     Some((rt, sid))
 }
@@ -3159,12 +3148,15 @@ mod tests {
     }
 
     #[test]
-    fn persisted_session_resolution_refuses_a_contested_session_id() {
-        // Two tabs claiming one claudeSessionId (the duplicated-tab bug) must BOTH resolve to
-        // None — rendering nothing beats rendering someone else's conversation. A tab with a
-        // unique sid still resolves.
+    fn contested_session_id_resolves_only_to_the_transcript_named_host() {
+        // Tab duplication copies the session-id var on purpose (reload / fork workflows), so
+        // two claimants is a legitimate transient state — but only the transcript-named host
+        // may render the conversation. Unknown host (no locatable transcript) → None for BOTH:
+        // rendering nothing beats rendering someone else's conversation. Unique sids resolve
+        // as before.
         use crate::state::workspace::{WindowData, Workspace};
         let app = AppState::new();
+        let sid = "contested-0000-4000-8000-aiterm-test000";
         let (dup_a, dup_b, solo) = {
             let mut data = app.app_data.write();
             let mut win = WindowData::new("main".into());
@@ -3176,8 +3168,8 @@ mod tests {
             for tab in &mut ws.panes[0].tabs {
                 tab.runtime = Some(AgentRuntime::Claude);
             }
-            ws.panes[0].tabs[0].trigger_variables.insert("claudeSessionId".into(), "sid-shared".into());
-            ws.panes[0].tabs[1].trigger_variables.insert("claudeSessionId".into(), "sid-shared".into());
+            ws.panes[0].tabs[0].trigger_variables.insert("claudeSessionId".into(), sid.into());
+            ws.panes[0].tabs[1].trigger_variables.insert("claudeSessionId".into(), sid.into());
             ws.panes[0].tabs[2].trigger_variables.insert("claudeSessionId".into(), "sid-solo".into());
             let ids = (
                 ws.panes[0].tabs[0].id.clone(),
@@ -3188,11 +3180,36 @@ mod tests {
             data.windows.push(win);
             ids
         };
+
+        // Phase 1 — no transcript anywhere: unknown host, both claimants refuse.
         assert_eq!(persisted_session_for_tab(&app, &dup_a), None);
         assert_eq!(persisted_session_for_tab(&app, &dup_b), None);
         assert_eq!(
             persisted_session_for_tab(&app, &solo),
             Some((AgentRuntime::Claude, "sid-solo".to_string()))
+        );
+
+        // Phase 2 — a transcript whose SessionStart hook line names dup_b as the most recent
+        // host: dup_b resolves, dup_a still refuses. (Shadow-mirror dir, same resolution path
+        // as the locate_jsonl test.)
+        let dir = super::mirror::shadow_dir().expect("data dir resolvable");
+        std::fs::create_dir_all(&dir).expect("create shadow dir");
+        let path = dir.join(format!("{sid}.jsonl"));
+        let line = json!({
+            "type": "user",
+            "message": { "content": format!(
+                "SessionStart hook success: Your maiTerm tab ID is {dup_b}. Your session ID is {sid}."
+            )}
+        });
+        std::fs::write(&path, format!("{line}\n")).expect("write shadow transcript");
+        let resolved_a = persisted_session_for_tab(&app, &dup_a);
+        let resolved_b = persisted_session_for_tab(&app, &dup_b);
+        let _ = std::fs::remove_file(&path); // clean up before asserting
+        assert_eq!(resolved_a, None, "non-host claimant refuses");
+        assert_eq!(
+            resolved_b,
+            Some((AgentRuntime::Claude, sid.to_string())),
+            "transcript-named host renders"
         );
     }
 

@@ -115,6 +115,15 @@ pub fn get_app_data(state: State<'_, Arc<AppState>>) -> crate::state::AppData {
     state.app_data.read().clone()
 }
 
+/// How many live tabs (any window) claim `session_id` via their runtime's session-id trigger
+/// var. The frontend's contested-resume probe: auto-resume replays fork (`--fork-session`)
+/// instead of plain-resuming a sid another tab still claims — two tabs running one session is
+/// never intended, even though duplication copying the sid is (reload / fork workflows).
+#[tauri::command]
+pub fn count_session_id_claimants(state: State<'_, Arc<AppState>>, session_id: String) -> usize {
+    state.app_data.read().session_id_claimants(&session_id)
+}
+
 #[tauri::command]
 pub fn create_workspace(window: tauri::Window, state: State<'_, Arc<AppState>>, name: String) -> Result<Workspace, String> {
     let label = window.label().to_string();

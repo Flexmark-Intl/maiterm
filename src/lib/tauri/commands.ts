@@ -249,6 +249,13 @@ export async function getAppData(): Promise<AppData> {
   return invoke('get_app_data');
 }
 
+/** How many live tabs (any window) claim this session id via their runtime's session-id
+ *  trigger var. >1 ⇒ contested (a duplicated tab still holds a copy) — auto-resume forks
+ *  instead of plain-resuming. */
+export async function countSessionIdClaimants(sessionId: string): Promise<number> {
+  return invoke('count_session_id_claimants', { sessionId });
+}
+
 export async function createWorkspace(name: string): Promise<Workspace> {
   return invoke('create_workspace', { name });
 }
