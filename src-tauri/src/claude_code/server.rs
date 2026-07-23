@@ -1649,6 +1649,19 @@ async fn process_message(
                             let mut sessions = state.agent_sessions.write();
                             // Preserve existing fields (model, tool_name) if session already registered
                             let existing = sessions.remove(&session_id);
+                            // A session re-binding to a DIFFERENT tab is legitimate for tab
+                            // duplication (reload = dup+close, fork = dup+/branch), but is also
+                            // the fingerprint of SSH shared-host identity pollution (an env-less
+                            // agent announcing a sibling tab's id via ~/.aiterm). Log it so the
+                            // rebind is visible without changing behavior.
+                            if let Some(prev_tab) = existing.as_ref().map(|e| &e.tab_id) {
+                                if *prev_tab != tab_id {
+                                    log::warn!(
+                                        "initSession: session {} rebinding tab {} → {}",
+                                        session_id, prev_tab, tab_id
+                                    );
+                                }
+                            }
                             sessions.insert(
                                 session_id.clone(),
                                 AgentSessionInfo {
