@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.24.1
+
+- **Mesh topics no longer pile up forever.** The topic registry only ever grew — a busy mesh had accumulated 75 topics, most of them long-finished or abandoned. Topics now age out on their own: one left open with no activity for 7 days quietly completes, and a completed topic is removed 48 hours later. The Topics panel in the cockpit also gains manual control — an **×** to delete a single topic and a **Clear done** button to sweep out the finished ones.
+- **Fix SSH features silently going dead when several tabs share one host.** With more than one tab bridged to the same server — the normal state right after a restart — maiTerm kept only the last tab's registration, so everything keyed to that connection (Mattermost attachment staging, sending images to a remote agent from your phone) quietly behaved as though there were no bridge at all for every other tab. Registrations for a host are now merged rather than overwritten, and a staging attempt that finds no bridge warns instead of failing silently.
+- **Fix a restart opening a redundant tunnel for every tab on the same host.** Re-bridging dozens of tabs at once had each of them racing to create its own tunnel to the same server. Connections to a given host now establish once and are reused by the rest — and reuse is confirmed by asking the connection itself whether it's alive, rather than assuming it's dead because a helper process has exited.
+- **Fix a remote agent announcing itself as the wrong tab.** On a host where several maiTerm tabs connect to the *same* remote account, an agent started in a shell without maiTerm's environment (inside `tmux`, or after `su`) could pick up whichever tab connected most recently and register as that one — quietly rotating a live session onto an unrelated tab. Because all tabs on a host share a single connection, such an agent genuinely can't be told apart, so maiTerm now fails closed: the shared fallback file is written only when one tab is bridged to that host, and otherwise the agent shows a visible "needs init" rather than binding to the wrong tab.
+- **Mattermost resolutions put the ask where you'll see it.** Agents were posting the summary, then the technical details, and only then "please verify" — leaving the actual request buried under a wall of developer detail. The call to action now sits at the end of the summary, and technical details always come last.
+
 ## v1.24.0
 
 - **maiLink — manage your tabs and workspaces from the phone, not just chat with them.** The phone app gains the tab-lifecycle actions you'd otherwise have to walk back to your desk for:
