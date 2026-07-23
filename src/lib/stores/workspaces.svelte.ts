@@ -1,7 +1,6 @@
 import type { Terminal } from '@xterm/xterm';
 import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
-import { SESSION_ID_VARS } from '$lib/agents/descriptor';
 import * as commands from '$lib/tauri/commands';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -2010,18 +2009,10 @@ function createWorkspacesStore() {
         const srcVars = getVariables(tabId);
         if (srcVars && srcVars.size > 0) {
           const plain: Record<string, string> = {};
-          // NEVER copy the runtime session-id vars (claudeSessionId & co): a session id names ONE
-          // resumable session, and a duplicate inheriting it shows the source's conversation in
-          // maiLink and auto-resumes into the SAME transcript. The duplicate registers its own id
-          // the moment its agent starts.
-          for (const [k, v] of srcVars) {
-            if (!SESSION_ID_VARS.has(k)) plain[k] = v;
-          }
-          if (Object.keys(plain).length > 0) {
-            await commands.setTabTriggerVariables(workspaceId, paneId, newTab.id, plain).catch(e =>
-              logError(`Failed to copy trigger variables: ${e}`)
-            );
-          }
+          for (const [k, v] of srcVars) plain[k] = v;
+          await commands.setTabTriggerVariables(workspaceId, paneId, newTab.id, plain).catch(e =>
+            logError(`Failed to copy trigger variables: ${e}`)
+          );
         }
       }
 
