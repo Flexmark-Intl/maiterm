@@ -229,9 +229,14 @@ pub async fn stage_attachments(
                     "[attachment \"{label}\" ({}) — not a viewable image; ask a human to describe it or handle it out of band]",
                     if f.mime_type.is_empty() { "unknown type" } else { &f.mime_type }
                 ),
-                Some(_) if matches!(target, StagingTarget::Unavailable) => format!(
-                    "[attached image \"{label}\" — cannot be staged for this SSH tab (no live maiTerm bridge tunnel); ask a human to describe it]"
-                ),
+                Some(_) if matches!(target, StagingTarget::Unavailable) => {
+                    log::warn!(
+                        "[comms] attachment \"{label}\" not staged: ssh foreground but no bridge tunnel registered for this tab"
+                    );
+                    format!(
+                        "[attached image \"{label}\" — cannot be staged for this SSH tab (no live maiTerm bridge tunnel); ask a human to describe it]"
+                    )
+                }
                 Some(_) if staged_count >= MAX_STAGED_FILES => format!(
                     "[attached image \"{label}\" — not staged (attachment limit reached)]"
                 ),

@@ -95,7 +95,7 @@ pub async fn start_ssh_tunnel(
     local_port: u16,
 ) -> Result<SshTunnelInfo, String> {
     // Check if tunnel already exists for this host
-    {
+    let inherited_tab_ids: std::collections::HashSet<String> = {
         let mut tunnels = state.ssh_tunnels.write();
         if let Some(tunnel) = tunnels.get_mut(&host_key) {
             // Verify the process is still alive
@@ -107,10 +107,19 @@ pub async fn start_ssh_tunnel(
                     host_key,
                 });
             }
-            // Process died — remove stale entry and create new tunnel
-            tunnels.remove(&host_key);
+            // Stored pid is gone — either the tunnel died, or it was a CM mux client
+            // that exited cleanly while the master still holds the forwardings. Replace
+            // the entry, but carry its tab_ids over: dropping them silently strips those
+            // tabs of every tunnel-keyed feature (comms attachment staging, maiLink
+            // image sends) even though their forwardings still work.
+            tunnels
+                .remove(&host_key)
+                .map(|t| t.tab_ids)
+                .unwrap_or_default()
+        } else {
+            Default::default()
         }
-    }
+    };
 
     // Build SSH command args
     // ssh_args is already cleaned (e.g. "user@host" or "-p 2222 user@host")
@@ -192,18 +201,25 @@ pub async fn start_ssh_tunnel(
 
     log::info!("SSH tunnel established: {} → remote port {}", host_key, remote_port);
 
-    // Store the tunnel (don't store the Child — we track by PID)
+    // Store the tunnel (don't store the Child — we track by PID).
+    // Merge, never blind-insert: N tabs bridging the same host at once (typical right
+    // after an app restart) all pass the exists-check above before any has stored, and
+    // a plain insert() would leave only the last writer's tab_id in the entry.
     {
         let mut tunnels = state.ssh_tunnels.write();
-        let mut tab_ids = std::collections::HashSet::new();
-        tab_ids.insert(tab_id);
-        tunnels.insert(host_key.clone(), crate::state::app_state::SshTunnel {
-            pid,
-            remote_port,
-            host_key: host_key.clone(),
-            tab_ids,
-            ssh_args: ssh_args.clone(),
-        });
+        let entry = tunnels
+            .entry(host_key.clone())
+            .or_insert_with(|| crate::state::app_state::SshTunnel {
+                pid,
+                remote_port,
+                host_key: host_key.clone(),
+                tab_ids: Default::default(),
+                ssh_args: ssh_args.clone(),
+            });
+        entry.pid = pid;
+        entry.remote_port = remote_port;
+        entry.tab_ids.extend(inherited_tab_ids);
+        entry.tab_ids.insert(tab_id);
     }
 
     // Spawn background task to monitor the process and clean up on exit.
