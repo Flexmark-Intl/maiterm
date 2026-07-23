@@ -55,6 +55,14 @@ Get the permalink from Mattermost's **⋯ → Copy Link** on the message. From t
 
 Ambient discussion in the thread isn't pushed at the agent, but it can re-read the whole thread on demand at any point to catch up on messages that weren't addressed to it.
 
+## Screenshots, both directions
+
+Bug reports come with pictures. Images attached to a thread message are **staged where the agent can actually open them**: maiTerm downloads the attachment and hands the agent a real file path, so a screenshot of the broken screen becomes something it can look at rather than something it's told about. This works for an agent running on a remote host over SSH too — the image is pushed to the remote machine over the same bridge tunnel the rest of the integration uses.
+
+The agent can attach images to its own replies as well — a before/after, an annotated screenshot, visual proof that a fix landed — and they're uploaded to Mattermost and posted with the reply like any other attachment. Remote agents can send images back the same way; maiTerm fetches the file from the remote host before uploading it.
+
+Both directions cover the usual formats (PNG, JPEG, GIF, WebP), with sensible per-message size and count limits so a thread can't be used to shovel arbitrary files around.
+
 ## Watching channels and getting summoned
 
 Copying a permalink for every report gets old. A **monitoring tab** removes that step: it watches the channels you pick and picks up threads on demand, so a bug report becomes a bound work item the moment someone asks for the bot.
@@ -65,6 +73,7 @@ From then on, the tab is a **dispatcher**. Whenever someone `@mentions` the bot 
 
 - **One tab, several threads.** A monitoring tab works **up to three threads at once**. Each binding is independent — the agent keeps their investigations separate — and the tab's `@` indicator shows a live count of how many are bound. The indicator is **dim while the tab is monitoring but idle**, and turns **green with a count** once threads are bound.
 - **Overflow queues.** A summon that arrives while the tab is already at its three-thread capacity, busy, or offline doesn't get dropped — it waits. When the tab is at capacity, the bot posts a **one-time reply** to the waiting thread ("I'm at capacity on other issues right now — I'll pick this up as soon as one closes out") so the humans aren't left wondering, and you get a notification. As soon as a thread closes out or the session comes back, the queued summon is picked up automatically.
+- **Only a genuinely new ask summons.** Editing an old message never counts as one — fixing a typo in the root report of a thread you just closed out won't drag the whole thread back in as fresh work. Neither does a mention the bot has already replied to: confirming a fix can't re-open the thread it just closed. A real new `@mention` — "@bot it's broken again" — still summons as normal.
 
 Only people you've authorized can summon the bot — see [Who can summon the bot](#who-can-summon-the-bot) below. An `@mention` from anyone else is never picked up; it just notifies you.
 

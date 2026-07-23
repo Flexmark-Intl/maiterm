@@ -72,6 +72,8 @@ It's not just a coordination win — it's a token win. One monolithic agent has 
 
 **maiLink** is a phone companion that connects **directly to maiTerm running on your own computer**. Watch your agents work, answer their questions, approve permissions, and interrupt a runaway turn — from the couch, the garden, anywhere in the house.
 
+Now it manages your desk, too. **Rename** a tab, **archive** one for later (and restore it from the archived list — it respawns and resumes its agent), or **close** one for good. Tap **Resume workspace** to wake a suspended workspace back to life, bringing back exactly the tabs that were running. Mesh workspaces are badged in the inbox with a one-tap **Initialize all** that readies every agent in them.
+
 It travels over **your LAN only**, on an encrypted, authenticated channel — TLS with a pinned certificate and a per-device paired token. **No cloud service sits between your phone and your agents.** The single exception is a content-free push "doorbell" hosted on Cloudflare: when an agent needs you while the app is backgrounded, it wakes the app carrying only the tab name and event kind — never a transcript or message. Away from home? Set up a **WireGuard VPN** back to your LAN rather than exposing anything to the internet.
 
 <div class="phone-pair">
@@ -81,13 +83,13 @@ It travels over **your LAN only**, on an encrypted, authenticated channel — TL
 
 <CardGrid>
   <Card title="Live transcripts" icon="comment-alt">
-    Each agent streams per turn as a distilled chat — with its model, a live context-window gauge, and compaction shown as a divider in the thread.
+    Each agent streams per turn as a distilled chat — with its model, reasoning effort, a live context-window gauge, and compaction shown as a divider in the thread. Fast even on hundred-tab windows and sessions hundreds of megabytes long.
   </Card>
   <Card title="Answer from anywhere" icon="approve-check-circle">
-    AskUserQuestion prompts arrive as interactive cards — single-select, multi-select, and "Other" free-text — plus reply to or interrupt a running agent, and send images to a local Claude Code session.
+    AskUserQuestion prompts arrive as interactive cards — single-select, multi-select, and "Other" free-text — plus reply to or interrupt a running agent, and send images to a Claude Code session, local or over SSH.
   </Card>
-  <Card title="Pairing you control" icon="phone">
-    Pair by scanning a QR code; every phone gets its own revocable token — no shared secret anywhere. You choose which tabs and workspaces are reachable.
+  <Card title="Run the desk from the couch" icon="phone">
+    Rename, archive, restore, or close a tab; wake a suspended workspace; ready a whole mesh in one tap. Pair by scanning a QR code — every phone gets its own revocable token, and you choose which tabs are reachable.
   </Card>
 </CardGrid>
 
@@ -104,6 +106,8 @@ It travels over **your LAN only**, on an encrypted, authenticated channel — TL
 A bug report lands in a **Mattermost** thread. Now maiTerm can be watching for it: right-click a tab → **Enable chat monitoring…**, pick the channels your bot belongs to, and that tab becomes a dispatcher. Whenever someone **`@mentions` the bot** in a thread, maiTerm binds the thread to the tab and hands the agent the whole conversation — it reproduces and **fixes the issue in that tab's repository**, then posts the resolution back, a plain-language summary for support and technical detail for the devs, without you ever leaving maiTerm. Still prefer to hand-pick? Paste a permalink with `/maiterm resolve` — both paths land in the same flow. Configure the bot once in **Preferences → Integrations**.
 
 You stay in control of what it can act on. Only people you list can summon it, only messages that **`@mention` the bot** reach the agent, and each is scoped by its sender: an authorized operator carries your full authority, a **pickup user** can summon but their work is investigate-and-report, and everyone else can neither summon nor direct destructive work. A monitoring tab works **up to three threads at once** — its `@` indicator is dim while idle, green with a count once threads are bound — and a fix stays open until a **human confirms** it works.
+
+**Screenshots work both ways.** An image attached to a report is staged where the agent can actually open it — including for agents running on a remote host over SSH — and the agent can attach images to its own replies, so a before/after or visual proof of a fix goes back to the thread.
 
 <CardGrid>
   <Card title="Summoned, not pasted" icon="approve-check">
@@ -148,7 +152,7 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     Watch your Mattermost channels and the bot picks up threads on demand: `@mention` it and maiTerm binds the thread to a dispatcher tab, which works the bug to resolution — reading the whole thread, fixing it in that tab's repo, and posting back a support summary plus technical detail. One tab handles up to three threads at once; you can still hand-pick a thread with `/maiterm resolve <permalink>`. Authorized operators carry your authority, pickup users can summon but stay investigate-only, and a fix stays open until a human confirms. Configure the bot once in Preferences → Integrations.
   </Card>
   <Card title="Reach agents from your phone" icon="phone">
-    maiLink, the companion app, connects directly to maiTerm over your LAN — encrypted, authenticated, no cloud in the data path. Watch live transcripts, answer agent questions, approve permissions, and interrupt runaway turns from anywhere in the house. QR pairing with revocable per-device tokens.
+    maiLink, the companion app, connects directly to maiTerm over your LAN — encrypted, authenticated, no cloud in the data path. Watch live transcripts, answer agent questions, approve permissions, and interrupt runaway turns from anywhere in the house. Manage the tabs themselves too — rename, archive, restore, close, wake a suspended workspace, or ready a whole mesh in one tap. QR pairing with revocable per-device tokens.
   </Card>
   <Card title="Compose prompts like a human" icon="pen">
     A multi-line composer dock under every terminal: Enter makes newlines, `Cmd+Enter` sends, and drafts survive tab switches and restarts. Paste screenshots or drop files and they become attachment chips — over SSH they're uploaded automatically. No more crafting a five-paragraph prompt on a single shell line.

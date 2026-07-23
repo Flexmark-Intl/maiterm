@@ -56,6 +56,8 @@ Duplicate a tab and get *everything*: scrollback history, CWD, SSH session, the 
 
 Done with a session but not ready to lose it? Archive the tab. It disappears from your tab bar but preserves everything — scrollback, notes, trigger state. Restore it later and resume right where you left off.
 
+Agent tabs can be archived, restored, renamed, or closed from your phone too — see [maiLink](/features/mailink/#managing-tabs-and-workspaces-from-the-phone).
+
 ## Suspend a Tab
 
 Park a single session without closing it. Suspending a tab kills its PTY to free memory and CPU, but keeps the tab — and its scrollback — visible in the tab bar. A suspended tab still shows its last session's output behind a frosted-glass resume overlay, so you can see exactly what it was doing before you wake it. Click to resume and the shell spins back up. Handy for an idle SSH session or a finished build you want to keep around without it holding resources.
