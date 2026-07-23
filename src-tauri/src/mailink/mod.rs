@@ -2292,13 +2292,26 @@ fn scrollback_times(app: &AppState) -> HashMap<String, u64> {
     let mut out = HashMap::new();
     if let Ok(rows) = app.scrollback_db.tab_times() {
         for (tab, updated) in rows {
-            let ms = transcript::rfc3339_to_ms(&format!("{}Z", updated.replace(' ', "T")));
+            let ms = scrollback_ts_to_ms(&updated);
             if ms > 0 {
                 out.insert(tab, ms as u64);
             }
         }
     }
     out
+}
+
+/// SQLite `datetime('now')` (`YYYY-MM-DD HH:MM:SS` UTC) → unix ms via the shared RFC3339 parser.
+fn scrollback_ts_to_ms(updated: &str) -> i64 {
+    transcript::rfc3339_to_ms(&format!("{}Z", updated.replace(' ', "T")))
+}
+
+/// Single-tab scrollback `updated_at` in unix ms — chat_detail's counterpart to
+/// `scrollback_times`, so a one-tab build doesn't scan the whole roster.
+fn scrollback_time_for(app: &AppState, tab_id: &str) -> Option<u64> {
+    let updated = app.scrollback_db.tab_time(tab_id).ok().flatten()?;
+    let ms = scrollback_ts_to_ms(&updated);
+    (ms > 0).then_some(ms as u64)
 }
 
 /// Per-tab last-activity timestamp (unix ms) that the phone's inbox sorts by. A REAL signal, not
@@ -2311,10 +2324,10 @@ fn scrollback_times(app: &AppState) -> HashMap<String, u64> {
 /// exactly the recency clump this signal exists to prevent. The last-real-turn ts does not advance
 /// on a pure resume. (mtime is still the right change-gate for WS streaming, where "anything
 /// appended → re-scan" is the intended semantics — see stream_new_messages.)
-fn last_activity_ts(app: &AppState, tab_id: &str, scrollback: &HashMap<String, u64>, now: u64) -> u64 {
+fn last_activity_ts(app: &AppState, tab_id: &str, scrollback_ts: Option<u64>, now: u64) -> u64 {
     resolved_session_for_tab(app, tab_id)
         .and_then(|(rt, sid)| transcript::last_turn_ts_for(rt, &sid))
-        .or_else(|| scrollback.get(tab_id).copied())
+        .or(scrollback_ts)
         .unwrap_or(now)
 }
 
@@ -2373,7 +2386,7 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
                 "unread": ask_open || state == "permission" || state == "idle",
-                "lastActivityTs": last_activity_ts(app, &t.tab_id, &scrollback, now),
+                "lastActivityTs": last_activity_ts(app, &t.tab_id, scrollback.get(&t.tab_id).copied(), now),
                 "preview": preview_for(state, tool.as_deref()),
             });
             if let Some(meta) = build_meta(app, &t.tab_id) {
@@ -2413,11 +2426,12 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let now = now_ms();
 
     let ph = std::time::Instant::now();
-    let scrollback = scrollback_times(app);
-    let ms_scrollback = ph.elapsed().as_millis(); // scrollback_db mutex + one SQLite query
+    // Single-row lookup — a one-tab build has no business scanning the whole roster's times.
+    let scrollback_ts = scrollback_time_for(app, tab_id);
+    let ms_scrollback = ph.elapsed().as_millis(); // scrollback_db read conn + one indexed row
 
     let ph = std::time::Instant::now();
-    let last_activity = last_activity_ts(app, tab_id, &scrollback, now);
+    let last_activity = last_activity_ts(app, tab_id, scrollback_ts, now);
     let ms_activity = ph.elapsed().as_millis(); // locate_jsonl + last-turn tail read
     let (state, runtime, tool) = match states.get(tab_id) {
         Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
