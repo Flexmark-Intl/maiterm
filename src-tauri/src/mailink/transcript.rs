@@ -235,6 +235,25 @@ fn claude_meta_from_tail(tail: &str) -> Option<SessionMeta> {
     None
 }
 
+/// The maiTerm tab id that most recently HOSTED a Claude session, read from the transcript
+/// itself: the SessionStart command hook echoes `Your maiTerm tab ID is $MAITERM_TAB_ID` into
+/// the session (lockfile.rs `build_our_hooks`) on every start/resume/compact, so the LAST
+/// occurrence names the tab the session last actually ran in. Used by the boot-time session-id
+/// dedupe (persistence.rs) to decide which of several claiming tabs keeps a duplicated
+/// `claudeSessionId`. `None` if the transcript can't be located or no marker falls within the
+/// scanned tail (a session that's run a long stretch since its last start/resume).
+pub(crate) fn claude_session_host_tab(session_id: &str) -> Option<String> {
+    let path = locate_jsonl(session_id)?;
+    let tail = read_tail(&path, 4 * 1024 * 1024)?;
+    const MARKER: &str = "maiTerm tab ID is ";
+    let idx = tail.rfind(MARKER)?;
+    let id: String = tail[idx + MARKER.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+        .collect();
+    (id.len() >= 8).then_some(id)
+}
+
 /// Claude Code version that wrote the most recent entries of a session's transcript (every JSONL
 /// entry carries a `"version"` field). Gates the AskUserQuestion expiry contract: the 60s
 /// auto-resolve existed only in specific CC versions (see `ask_deadline_ms` in mod.rs). Read from

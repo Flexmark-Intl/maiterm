@@ -645,3 +645,171 @@ pub fn reconcile_tab_liveness(data: &mut AppData, db: &super::scrollback_db::Scr
         log::info!("Tab-liveness: normalized {} limbo tab(s) to suspended", normalized);
     }
 }
+
+/// Every boot: drop duplicated session-id trigger vars. Tab duplication used to clone the whole
+/// variable map — including `claudeSessionId`/`codexSessionId`/`geminiSessionId` — so a pair of
+/// tabs could claim ONE session: both rendered the same conversation in maiLink, and with
+/// clone_auto_resume both replayed `--resume <same sid>` into the same transcript. The clone path
+/// is fixed (duplicateTab filters SESSION_ID_VARS), but existing state keeps the collisions until
+/// they're cleared here.
+///
+/// For each id claimed by >1 tab: keep the var only on the tab the transcript itself names as its
+/// most recent host (`claude_session_host_tab` — the SessionStart hook line appended on every
+/// start/resume/compact). If the transcript can't be located or names none of the claimants,
+/// clear ALL of them: a fresh session on next start beats resuming someone else's. Runs every
+/// boot (one in-memory pass; transcript reads only for actual collisions) so a collision from any
+/// other source self-heals too.
+pub fn dedupe_session_id_vars(data: &mut AppData) {
+    use crate::state::agent_runtime::descriptor;
+
+    // (session_id_var, sid) → claiming tab ids, each tab judged by its OWN runtime's var —
+    // matching exactly how persisted_session_for_tab would resolve it.
+    let mut claims: std::collections::HashMap<(&'static str, String), Vec<String>> =
+        std::collections::HashMap::new();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            for pane in &ws.panes {
+                for tab in &pane.tabs {
+                    let var = descriptor(tab.runtime.unwrap_or_default()).session_id_var;
+                    if let Some(sid) = tab.trigger_variables.get(var).filter(|s| !s.is_empty()) {
+                        claims
+                            .entry((var, sid.clone()))
+                            .or_default()
+                            .push(tab.id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Plan removals: (tab_id, var) pairs to clear.
+    let mut removals: Vec<(String, &'static str)> = Vec::new();
+    for ((var, sid), tabs) in claims {
+        if tabs.len() < 2 {
+            continue;
+        }
+        let owner = if var == "claudeSessionId" {
+            crate::mailink::transcript::claude_session_host_tab(&sid)
+                .filter(|host| tabs.contains(host))
+        } else {
+            None // no in-transcript host marker for other runtimes → clear all claimants
+        };
+        log::warn!(
+            "Session-id dedupe: {} {}… claimed by {} tabs — keeping {}",
+            var,
+            &sid[..sid.len().min(8)],
+            tabs.len(),
+            owner
+                .as_deref()
+                .map(|o| format!("{}…", &o[..o.len().min(8)]))
+                .unwrap_or_else(|| "none (no transcript host)".into()),
+        );
+        for tab_id in tabs {
+            if owner.as_deref() != Some(tab_id.as_str()) {
+                removals.push((tab_id, var));
+            }
+        }
+    }
+    if removals.is_empty() {
+        return;
+    }
+
+    let mut cleared = 0usize;
+    for win in &mut data.windows {
+        for ws in &mut win.workspaces {
+            for pane in &mut ws.panes {
+                for tab in &mut pane.tabs {
+                    for (tab_id, var) in &removals {
+                        if tab.id == *tab_id && tab.trigger_variables.remove(*var).is_some() {
+                            cleared += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    log::warn!("Session-id dedupe: cleared {} duplicated session-id var(s)", cleared);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::workspace::{WindowData, Workspace};
+
+    /// AppData with one window/workspace and `n` Claude terminal tabs; returns tab ids.
+    fn data_with_tabs(n: usize) -> (AppData, Vec<String>) {
+        let mut data = AppData::default();
+        let mut win = WindowData::new("main".into());
+        let mut ws = Workspace::new("WS".into());
+        while ws.panes[0].tabs.len() < n {
+            let name = format!("t{}", ws.panes[0].tabs.len());
+            ws.panes[0].tabs.push(crate::state::workspace::Tab::new(name));
+        }
+        for tab in &mut ws.panes[0].tabs {
+            tab.runtime = Some(crate::state::AgentRuntime::Claude);
+        }
+        let ids = ws.panes[0].tabs.iter().map(|t| t.id.clone()).collect();
+        win.workspaces.push(ws);
+        data.windows.push(win);
+        (data, ids)
+    }
+
+    fn set_sid(data: &mut AppData, tab_id: &str, sid: &str) {
+        let tab = data.windows[0].workspaces[0].panes[0]
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == tab_id)
+            .unwrap();
+        tab.trigger_variables
+            .insert("claudeSessionId".into(), sid.into());
+    }
+
+    fn sid_of(data: &AppData, tab_id: &str) -> Option<String> {
+        data.windows[0].workspaces[0].panes[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| t.trigger_variables.get("claudeSessionId").cloned())
+    }
+
+    #[test]
+    fn dedupe_clears_all_claimants_when_no_transcript_names_a_host() {
+        // Two tabs claim one sid with no locatable transcript → neither may keep it (resuming
+        // someone else's session is worse than starting fresh). A third tab's unique sid is
+        // untouched.
+        let (mut data, ids) = data_with_tabs(3);
+        set_sid(&mut data, &ids[0], "dedupe-test-no-transcript-sid");
+        set_sid(&mut data, &ids[1], "dedupe-test-no-transcript-sid");
+        set_sid(&mut data, &ids[2], "dedupe-test-unique-sid");
+        dedupe_session_id_vars(&mut data);
+        assert_eq!(sid_of(&data, &ids[0]), None);
+        assert_eq!(sid_of(&data, &ids[1]), None);
+        assert_eq!(sid_of(&data, &ids[2]), Some("dedupe-test-unique-sid".into()));
+    }
+
+    #[test]
+    fn dedupe_keeps_the_transcript_named_host_and_clears_the_duplicate() {
+        // The transcript's SessionStart hook line names its most recent host tab — that claimant
+        // keeps the sid, the duplicate loses it. Uses a shadow-mirror transcript like the
+        // locate_jsonl test (same resolution path).
+        let (mut data, ids) = data_with_tabs(2);
+        let sid = "dedupe-host-0000-4000-8000-aiterm-test00";
+        set_sid(&mut data, &ids[0], sid);
+        set_sid(&mut data, &ids[1], sid);
+        let dir = crate::mailink::mirror::shadow_dir().expect("data dir resolvable");
+        std::fs::create_dir_all(&dir).expect("create shadow dir");
+        let path = dir.join(format!("{sid}.jsonl"));
+        let line = serde_json::json!({
+            "type": "user",
+            "message": { "content": format!(
+                "SessionStart hook success: Your maiTerm tab ID is {}. Your session ID is {sid}.",
+                ids[1]
+            )}
+        });
+        std::fs::write(&path, format!("{line}\n")).expect("write shadow transcript");
+        dedupe_session_id_vars(&mut data);
+        let _ = std::fs::remove_file(&path); // clean up before asserting
+        assert_eq!(sid_of(&data, &ids[0]), None, "duplicate cleared");
+        assert_eq!(sid_of(&data, &ids[1]), Some(sid.into()), "transcript-named host keeps it");
+    }
+}

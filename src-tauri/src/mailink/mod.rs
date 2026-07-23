@@ -1981,6 +1981,7 @@ fn live_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntime, S
 /// the app shows stale/duplicated detail.
 fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntime, String)> {
     let data = app.app_data.read();
+    let mut found: Option<(AgentRuntime, String)> = None;
     for win in &data.windows {
         for ws in &win.workspaces {
             for pane in &ws.panes {
@@ -1990,7 +1991,7 @@ fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRunti
                         // app versions predating Tab.runtime can still carry claudeSessionId.
                         let rt = tab.runtime.unwrap_or_default();
                         let var = crate::state::agent_runtime::descriptor(rt).session_id_var;
-                        return tab
+                        found = tab
                             .trigger_variables
                             .get(var)
                             .cloned()
@@ -2001,7 +2002,36 @@ fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRunti
             }
         }
     }
-    None
+    let (rt, sid) = found?;
+    // Collision guard: a session id names ONE session, so if any OTHER tab also claims this id
+    // (via its own runtime's session-id var), neither claim is trustworthy — tab duplication
+    // used to clone the var, and trusting it rendered one conversation on two tabs. Returning
+    // None drops this tab to the snapshot fallback instead of showing someone else's transcript;
+    // a LIVE registration (live_session_for_tab, tried before this fn) is unaffected.
+    let claimants = data
+        .windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .filter(|t| {
+            let var = crate::state::agent_runtime::descriptor(t.runtime.unwrap_or_default())
+                .session_id_var;
+            t.trigger_variables.get(var).map(String::as_str) == Some(sid.as_str())
+        })
+        .count();
+    if claimants > 1 {
+        // debug, not warn: this runs on every ticker pass for every unresolved tab, and an
+        // existing collision would flood the log — the boot-time migration warns once instead.
+        log::debug!(
+            "mailink: session id {} claimed by {} tabs — refusing the persisted resolution for tab {}",
+            &sid[..sid.len().min(8)],
+            claimants,
+            &tab_id[..tab_id.len().min(8)],
+        );
+        return None;
+    }
+    Some((rt, sid))
 }
 
 /// (runtime, session id) for reading a tab's transcript: the LIVE session if one is registered,
@@ -3126,6 +3156,44 @@ mod tests {
         assert!(m.workspace_suspended);
         assert_eq!(m.workspace_id, ws_id);
         assert!(m.mesh, "bridge_all surfaces as the mesh flag");
+    }
+
+    #[test]
+    fn persisted_session_resolution_refuses_a_contested_session_id() {
+        // Two tabs claiming one claudeSessionId (the duplicated-tab bug) must BOTH resolve to
+        // None — rendering nothing beats rendering someone else's conversation. A tab with a
+        // unique sid still resolves.
+        use crate::state::workspace::{WindowData, Workspace};
+        let app = AppState::new();
+        let (dup_a, dup_b, solo) = {
+            let mut data = app.app_data.write();
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("ENAGIC".into());
+            while ws.panes[0].tabs.len() < 3 {
+                let n = ws.panes[0].tabs.len();
+                ws.panes[0].tabs.push(crate::state::workspace::Tab::new(format!("t{n}")));
+            }
+            for tab in &mut ws.panes[0].tabs {
+                tab.runtime = Some(AgentRuntime::Claude);
+            }
+            ws.panes[0].tabs[0].trigger_variables.insert("claudeSessionId".into(), "sid-shared".into());
+            ws.panes[0].tabs[1].trigger_variables.insert("claudeSessionId".into(), "sid-shared".into());
+            ws.panes[0].tabs[2].trigger_variables.insert("claudeSessionId".into(), "sid-solo".into());
+            let ids = (
+                ws.panes[0].tabs[0].id.clone(),
+                ws.panes[0].tabs[1].id.clone(),
+                ws.panes[0].tabs[2].id.clone(),
+            );
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            ids
+        };
+        assert_eq!(persisted_session_for_tab(&app, &dup_a), None);
+        assert_eq!(persisted_session_for_tab(&app, &dup_b), None);
+        assert_eq!(
+            persisted_session_for_tab(&app, &solo),
+            Some((AgentRuntime::Claude, "sid-solo".to_string()))
+        );
     }
 
     #[test]

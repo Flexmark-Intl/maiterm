@@ -10,7 +10,7 @@ pub const APP_DISPLAY_NAME: &str = if cfg!(debug_assertions) { "maiTermDev" } el
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use state::{load_state, save_state, AppState, WindowData, Workspace};
-use state::persistence::{arm_running_marker, load_memory_trend, log_previous_run_status, migrate_app_data, migrate_scrollback_to_db, reconcile_tab_liveness};
+use state::persistence::{arm_running_marker, dedupe_session_id_vars, load_memory_trend, log_previous_run_status, migrate_app_data, migrate_scrollback_to_db, reconcile_tab_liveness};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 use tauri::menu::{AboutMetadata, MenuBuilder, MenuItem, SubmenuBuilder};
@@ -119,6 +119,10 @@ pub fn run() {
         // One-time: clear the stale pty_id high-watermark so restore can trust
         // pty_id as "live at last shutdown" instead of inferring from timestamps.
         reconcile_tab_liveness(&mut data, &app_state.scrollback_db);
+        // Duplicated-tab session-id collisions: one sid claimed by two tabs makes both render
+        // one conversation (and both auto-resume it). Keep the transcript-named host, clear the
+        // rest.
+        dedupe_session_id_vars(&mut data);
         // Flush the cleaned JSON (scrollback stripped + liveness reconciled) to disk
         let _ = save_state(&data);
 
