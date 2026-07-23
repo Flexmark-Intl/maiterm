@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.24.2
+
+- **Copy an editor tab's file path from its right-click menu.** Right-clicking an editor tab now offers **Copy Full Path** — the real remote path for a file opened over SSH, the local path otherwise. SSH files also get **Copy Local Copy Path**: because opening a remote file reads its bytes straight into the editor and cleans up the transfer temp, there was previously no local file to point tooling at. maiTerm now re-materializes the current remote-saved file on demand at a stable per-file location and copies that path — so repeat clicks reuse the same file and same-named files from different hosts don't collide.
+
 ## v1.24.1
 
 - **Mesh topics no longer pile up forever.** The topic registry only ever grew — a busy mesh had accumulated 75 topics, most of them long-finished or abandoned. Topics now age out on their own: one left open with no activity for 7 days quietly completes, and a completed topic is removed 48 hours later. The Topics panel in the cockpit also gains manual control — an **×** to delete a single topic and a **Clear done** button to sweep out the finished ones.
