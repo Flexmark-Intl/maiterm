@@ -115,6 +115,13 @@ your topics" burden from model memory to a queryable source of truth.
 3. **Complete** — the owner calls `completeTopic(id)`. maiTerm injects a
    `⟦TOPIC COMPLETE⟧` notice into every participant, who updates its status note and stops
    replying on that topic.
+4. **Expire** — agents rarely complete their threads, so a lifecycle sweep (on app start +
+   hourly) keeps the registry from growing forever: an open topic idle > 7 days is
+   auto-completed **silently** (no notice — its participants moved on long ago), and a
+   completed topic is hard-deleted after 48 h. The human can also delete any topic (✕) or
+   clear all completed ones from the cockpit. Deletion is silent by design: a late reply
+   tagged with a dead id fails at the send boundary (a UUID-shaped `topic` arg that matches
+   nothing is an error, never a new topic), so no junk threads are minted.
 
 ### 4.4 Enforcement
 

@@ -158,6 +158,13 @@ describe('topic registry', () => {
     expect(snap[0].turn).toBe(2);
   });
 
+  it('rejects a UUID-shaped topic arg that matches no topic (no junk-labeled thread)', () => {
+    const r = router.resolveTopicForSend('t-api', '7a289d83-3036-4845-a7f2-429219d64d5b');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('not found');
+    expect(router.all()).toHaveLength(0);
+  });
+
   it('round-trips through load() (persisted seed)', () => {
     const a = router.startTopic('t-api', 'Persisted');
     if (!a.ok) throw new Error('setup');
@@ -169,5 +176,84 @@ describe('topic registry', () => {
     const b = r2.resolveTopicForSend('t-mob', 'persisted');
     expect(b.ok).toBe(true);
     if (b.ok) { expect(b.created).toBe(false); expect(b.topic.id).toBe(a.topic.id); }
+  });
+});
+
+describe('topic lifecycle (sweep / delete / clear)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const OPTS = { staleOpenMs: 7 * DAY, completedRetentionMs: 2 * DAY };
+  // Harness clock is fixed at 2026-01-01; sweep "now" is passed explicitly.
+  const T0 = Date.parse('2026-01-01T00:00:00.000Z');
+  let router: MeshRouter;
+  beforeEach(() => {
+    ({ router } = makeHarness([member('t-api', 'Backend API'), member('t-mob', 'Mobile App')]));
+  });
+
+  it('sweep auto-completes open topics idle past the threshold', () => {
+    const stale = router.startTopic('t-api', 'Stale');
+    const other = router.startTopic('t-api', 'Also Stale');
+    if (!stale.ok || !other.ok) throw new Error('setup');
+    const { autoCompleted, expired } = router.sweep(T0 + 8 * DAY, OPTS);
+    expect(autoCompleted.map((t) => t.label).sort()).toEqual(['Also Stale', 'Stale']);
+    expect(expired).toEqual([]);
+    // Auto-completed topics stay listed (dimmed) — updated_at was re-based to the fixed clock.
+    expect(router.all()).toHaveLength(2);
+    expect(router.open()).toHaveLength(0);
+  });
+
+  it('sweep keeps an open topic under the idle threshold open', () => {
+    const a = router.startTopic('t-api', 'Active');
+    if (!a.ok) throw new Error('setup');
+    const { autoCompleted, expired } = router.sweep(T0 + 3 * DAY, OPTS);
+    expect(autoCompleted).toEqual([]);
+    expect(expired).toEqual([]);
+    expect(router.open()).toHaveLength(1);
+  });
+
+  it('sweep expires completed topics past retention, keeps recent closures', () => {
+    const old = router.startTopic('t-api', 'Old Done');
+    if (!old.ok) throw new Error('setup');
+    router.completeTopic('t-api', old.topic.id, false); // updated_at = T0 (fixed clock)
+    const { autoCompleted, expired } = router.sweep(T0 + 3 * DAY, OPTS);
+    expect(autoCompleted).toEqual([]);
+    expect(expired).toEqual([old.topic.id]);
+    expect(router.all()).toHaveLength(0);
+    // A closure inside the retention window survives.
+    const recent = router.startTopic('t-api', 'Recent Done');
+    if (!recent.ok) throw new Error('setup');
+    router.completeTopic('t-api', recent.topic.id, false);
+    expect(router.sweep(T0 + 1 * DAY, OPTS).expired).toEqual([]);
+    expect(router.all()).toHaveLength(1);
+  });
+
+  it('never auto-completes and expires a topic in the same pass', () => {
+    const a = router.startTopic('t-api', 'Abandoned');
+    if (!a.ok) throw new Error('setup');
+    // Idle far past BOTH thresholds: it auto-completes but must survive this sweep.
+    const { autoCompleted, expired } = router.sweep(T0 + 30 * DAY, OPTS);
+    expect(autoCompleted).toHaveLength(1);
+    expect(expired).toEqual([]);
+    expect(router.all()).toHaveLength(1);
+  });
+
+  it('remove() deletes by id; unknown id returns null', () => {
+    const a = router.startTopic('t-api', 'Doomed');
+    if (!a.ok) throw new Error('setup');
+    expect(router.remove(a.topic.id)?.label).toBe('Doomed');
+    expect(router.all()).toHaveLength(0);
+    expect(router.remove('nope')).toBeNull();
+  });
+
+  it('clearCompleted() removes all completed topics and returns their ids', () => {
+    const open = router.startTopic('t-api', 'Still Going');
+    const done1 = router.startTopic('t-api', 'Done A');
+    const done2 = router.startTopic('t-mob', 'Done B');
+    if (!open.ok || !done1.ok || !done2.ok) throw new Error('setup');
+    router.completeTopic('t-api', done1.topic.id, false);
+    router.completeTopic(null, done2.topic.id, true);
+    const removed = router.clearCompleted();
+    expect(removed.sort()).toEqual([done1.topic.id, done2.topic.id].sort());
+    expect(router.all().map((t) => t.label)).toEqual(['Still Going']);
+    expect(router.clearCompleted()).toEqual([]); // idempotent on an already-clean registry
   });
 });

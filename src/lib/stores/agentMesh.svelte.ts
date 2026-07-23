@@ -35,6 +35,14 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
  */
 
 const EDGE_RING_MAX = 300;
+// Topic lifecycle hygiene: agents rarely call completeTopic, so without a sweep the cockpit
+// list only ever grows. An open topic idle this long is auto-completed (silently — no
+// ⟦TOPIC COMPLETE⟧ notice; its participants moved on long ago), and a completed topic is
+// hard-deleted after a short retention (long enough to see the closure dimmed in the panel).
+// Swept on rehydrate (app start) and hourly for long-running sessions.
+const TOPIC_STALE_OPEN_MS = 7 * 24 * 60 * 60 * 1000;
+const TOPIC_COMPLETED_RETENTION_MS = 48 * 60 * 60 * 1000;
+const TOPIC_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 // Persisted (per-tab trigger variable) marker that an agent has been introduced to the mesh,
 // so a resumed agent — whose transcript already holds the opener — isn't re-onboarded on every
 // app restart. Survives restart without a new Tab field.
@@ -202,6 +210,24 @@ function createAgentMeshStore() {
     commands.setWorkspaceMeshTopics(wsId, router.snapshot()).catch((e) =>
       logError(`agentMesh: failed to persist topics for ws ${wsId.slice(0, 8)}: ${e}`),
     );
+  }
+
+  /** Run the lifecycle sweep on one workspace's registry (see the TOPIC_* constants).
+   *  NOT safe inside a $derived read (it bumps version) — call from rehydrate / the
+   *  hourly interval, never from routerFor. */
+  function sweepTopics(wsId: string) {
+    const router = routers.get(wsId);
+    if (!router) return;
+    const { autoCompleted, expired } = router.sweep(Date.now(), {
+      staleOpenMs: TOPIC_STALE_OPEN_MS,
+      completedRetentionMs: TOPIC_COMPLETED_RETENTION_MS,
+    });
+    if (!autoCompleted.length && !expired.length) return;
+    for (const t of autoCompleted) loopCtl.clear(t.id);
+    for (const id of expired) loopCtl.clear(id);
+    persistTopics(wsId);
+    bump();
+    logInfo(`agentMesh: topic sweep for ws ${wsId.slice(0, 8)} — auto-completed ${autoCompleted.length} stale open, expired ${expired.length} completed`);
   }
 
   // ─── Injection (shared shape with the 1:1 bridge) ───────────────────────────
@@ -636,6 +662,35 @@ function createAgentMeshStore() {
       return { success: true, topic: { id: r.topic.id, label: r.topic.label, state: r.topic.state } };
     },
 
+    // ─── Cockpit: human topic deletion (✕ / "Clear done") ──────────────────────
+
+    /** Human hard-deletes a topic outright. Silent — no agent notice; a late reply tagged
+     *  with the dead id errors at the send boundary instead of minting a junk topic. */
+    deleteTopic(topicId: string): { success: true } | { error: string } {
+      const ctx = findTopicById(topicId);
+      if (!ctx) return { error: `Topic not found: ${topicId}` };
+      routerFor(ctx.ws.id)?.remove(topicId);
+      loopCtl.clear(topicId);
+      persistTopics(ctx.ws.id);
+      bump();
+      logInfo(`agentMesh: topic ${topicId.slice(0, 8)} "${ctx.topic.label}" deleted by human`);
+      return { success: true };
+    },
+
+    /** Human clears every completed topic of a workspace in one click. */
+    clearCompletedTopics(wsId: string): number {
+      const router = routerFor(wsId);
+      if (!router) return 0;
+      const removed = router.clearCompleted();
+      if (removed.length) {
+        for (const id of removed) loopCtl.clear(id);
+        persistTopics(wsId);
+        bump();
+        logInfo(`agentMesh: cleared ${removed.length} completed topic(s) for ws ${wsId.slice(0, 8)}`);
+      }
+      return removed.length;
+    },
+
     // ─── Cockpit: loop-control resume + pause inspection (human-driven) ────────
 
     /** Human lifts a paused topic's soft cap (and re-bases its TTL) so it flows again. */
@@ -744,6 +799,12 @@ function createAgentMeshStore() {
         bump();
       });
       unlisteners.push(u3);
+
+      // Hourly topic-lifecycle sweep for long-running sessions (rehydrate covers app start).
+      const sweepInterval = setInterval(() => {
+        for (const wsId of routers.keys()) sweepTopics(wsId);
+      }, TOPIC_SWEEP_INTERVAL_MS);
+      unlisteners.push(() => clearInterval(sweepInterval));
     },
 
     /** Rebuild routers (and their topic registries) from persisted state after load. */
@@ -754,6 +815,7 @@ function createAgentMeshStore() {
         const router = routerFor(ws.id);
         if (!router) continue;
         for (const m of membersOf(ws)) ensureMember(m.tabId);
+        sweepTopics(ws.id);
         count++;
       }
       if (count) { bump(); logInfo(`agentMesh: rehydrated ${count} mesh workspace(s)`); }

@@ -60,6 +60,9 @@ export type CompleteResolution =
  * whitespace / `_` / `-`, drop empties, rejoin with `-`. MUST stay in lockstep with the
  * Rust impl so a topic created in one layer dedups against the other.
  */
+/** UUID shape — how topic ids are minted in production (crypto.randomUUID). */
+const LOOKS_LIKE_TOPIC_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function normalizeLabel(label: string): string {
   return label
     .trim()
@@ -146,6 +149,11 @@ export function createMeshRouter(deps: MeshRouterDeps) {
       }
       return { ok: true, topic: byId, created: false };
     }
+    // A UUID-shaped arg is a dangling topic id (completed-and-expired, or human-deleted),
+    // not a label — creating a topic literally labeled with the UUID accretes junk threads.
+    if (LOOKS_LIKE_TOPIC_ID.test(arg)) {
+      return { ok: false, error: `Topic id ${arg} not found — it may have been completed and cleared. Reply on an open topic from listTopics, or start a new one with a short descriptive label.` };
+    }
     const norm = normalizeLabel(arg);
     if (!norm) return { ok: false, error: 'topic label is empty after normalization.' };
     const existing = topics.find((t) => t.state === 'open' && t.normalized_label === norm);
@@ -202,6 +210,32 @@ export function createMeshRouter(deps: MeshRouterDeps) {
     return topic.turn;
   }
 
+  /** Lifecycle sweep: auto-complete open topics idle past `staleOpenMs` (agents rarely call
+   *  completeTopic, so abandoned threads otherwise stay open forever), and hard-delete
+   *  completed topics idle past `completedRetentionMs` (long enough for the human to see the
+   *  closure dimmed in the cockpit). An auto-completed topic gets a fresh `updated_at`, so it
+   *  rides out the retention window before expiring — never both transitions in one pass. */
+  function sweep(nowMs: number, opts: { staleOpenMs: number; completedRetentionMs: number }): { autoCompleted: MeshTopic[]; expired: string[] } {
+    const autoCompleted: MeshTopic[] = [];
+    const expired: string[] = [];
+    const keep: MeshTopic[] = [];
+    for (const t of topics) {
+      const idleMs = nowMs - (Date.parse(t.updated_at) || nowMs);
+      if (t.state === 'open' && idleMs > opts.staleOpenMs) {
+        t.state = 'complete';
+        t.updated_at = deps.now();
+        autoCompleted.push(t);
+        keep.push(t);
+      } else if (t.state === 'complete' && idleMs > opts.completedRetentionMs) {
+        expired.push(t.id);
+      } else {
+        keep.push(t);
+      }
+    }
+    topics = keep;
+    return { autoCompleted, expired };
+  }
+
   return {
     /** Seed the registry from persisted workspace state. */
     load(persisted: MeshTopic[]) {
@@ -226,6 +260,18 @@ export function createMeshRouter(deps: MeshRouterDeps) {
     completeTopic,
     recordParticipant,
     bumpTurn,
+    sweep,
+    /** Hard-delete a topic (human ✕ in the cockpit). Returns the removed topic, or null. */
+    remove(topicId: string): MeshTopic | null {
+      const i = topics.findIndex((t) => t.id === topicId);
+      return i === -1 ? null : topics.splice(i, 1)[0];
+    },
+    /** Hard-delete every completed topic (human "Clear done"). Returns the removed ids. */
+    clearCompleted(): string[] {
+      const removed = topics.filter((t) => t.state === 'complete').map((t) => t.id);
+      if (removed.length) topics = topics.filter((t) => t.state !== 'complete');
+      return removed;
+    },
     /** Drop topics owned by / participated in by tabs that no longer exist, keeping the
      *  registry from accreting dead threads. `liveTabIds` is the current member set. */
     pruneFor(liveTabIds: Set<string>) {

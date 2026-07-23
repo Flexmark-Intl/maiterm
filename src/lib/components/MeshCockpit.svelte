@@ -79,6 +79,13 @@
   function resumeTopic(id: string) {
     agentMeshStore.resumeTopic(id);
   }
+  function deleteTopic(id: string) {
+    agentMeshStore.deleteTopic(id);
+  }
+  function clearCompleted() {
+    if (ws) agentMeshStore.clearCompletedTopics(ws.id);
+  }
+  const completedCount = $derived(topics.filter((t) => t.state === 'complete').length);
   async function openTab(tabId: string) {
     await navigateToTab(tabId);
     onclose();
@@ -183,7 +190,12 @@
         <!-- Topics -->
         {#if topics.length > 0}
           <section class="panel">
-            <h3>Topics</h3>
+            <div class="panel-head">
+              <h3>Topics</h3>
+              {#if completedCount > 0}
+                <button class="mini ghost" onclick={clearCompleted} title="Remove all completed topics from the list">Clear done ({completedCount})</button>
+              {/if}
+            </div>
             {#each topics as t (t.id)}
               {@const isPaused = pausedIds.has(t.id)}
               <div class="topic" class:complete={t.state === 'complete'} class:paused={isPaused}>
@@ -196,6 +208,7 @@
                   {#if isPaused}<button class="mini" onclick={() => resumeTopic(t.id)}>Resume</button>{/if}
                   <button class="mini ghost" onclick={() => completeTopic(t.id)}>Complete</button>
                 {/if}
+                <button class="t-del" onclick={() => deleteTopic(t.id)} title="Delete this topic" aria-label="Delete topic {t.label}">×</button>
               </div>
             {/each}
           </section>
@@ -339,8 +352,12 @@
 
   .panel { padding: 10px 12px; border-top: 1px solid var(--bg-light); }
   .panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-dim); margin: 0 0 8px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .panel-head h3 { margin: 0; }
 
   .topic { display: flex; align-items: center; gap: 7px; padding: 4px 0; font-size: 12px; }
+  .t-del { background: none; border: none; color: var(--fg-dim); font-size: 14px; line-height: 1; cursor: pointer; padding: 0 2px; flex-shrink: 0; }
+  .t-del:hover { color: var(--red); }
   .topic.complete { opacity: 0.5; }
   .topic.paused .t-label { color: var(--yellow); }
   .swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
