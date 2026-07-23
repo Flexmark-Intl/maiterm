@@ -98,6 +98,16 @@ const gemini: RuntimeDescriptorTs = {
   configHint: '~/.gemini/settings.json',
 };
 
+/**
+ * Every runtime's session-id trigger variable. These identify ONE live/resumable session, so
+ * they must never be copied to another tab — a duplicate that inherits its source's session id
+ * renders the source's conversation in maiLink and auto-resumes `--resume <same sid>` into the
+ * same transcript (two agents appending to one session).
+ */
+export const SESSION_ID_VARS: ReadonlySet<string> = new Set(
+  [claude, codex, gemini].map((d) => d.sessionIdVar),
+);
+
 /** Resolve the frontend descriptor for a runtime (defaults to Claude). */
 export function getDescriptor(runtime: AgentRuntime): RuntimeDescriptorTs {
   switch (runtime) {
