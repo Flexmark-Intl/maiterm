@@ -151,6 +151,11 @@ pub struct AppState {
     pub mcp_shutdown: parking_lot::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     // SSH MCP tunnels: keyed by host_key (user@host)
     pub ssh_tunnels: RwLock<HashMap<String, SshTunnel>>,
+    // Per-host single-flight locks for tunnel establishment: an app restart re-bridges
+    // many tabs at once, often to the same server — serialize same-host starts so the
+    // first caller spawns the tunnel and the rest reuse it. Keyed by host_key.
+    pub ssh_tunnel_start_locks:
+        parking_lot::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     // Remote file watchers (SSH stat polling): keyed by tab_id
     pub remote_file_watchers: RwLock<HashMap<String, RemoteFileWatch>>,
     // SSH transcript mirror fetch coalescing: keyed by session_id
@@ -208,6 +213,7 @@ impl AppState {
             ide_notify_tx: parking_lot::Mutex::new(None),
             mcp_shutdown: parking_lot::Mutex::new(None),
             ssh_tunnels: RwLock::new(HashMap::new()),
+            ssh_tunnel_start_locks: parking_lot::Mutex::new(HashMap::new()),
             remote_file_watchers: RwLock::new(HashMap::new()),
             remote_mirrors: RwLock::new(HashMap::new()),
             remote_watcher_running: std::sync::atomic::AtomicBool::new(false),
