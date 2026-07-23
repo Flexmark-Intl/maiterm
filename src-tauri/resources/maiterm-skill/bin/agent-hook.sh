@@ -25,6 +25,8 @@ baked_port="${2:-}"
 
 # tmux / sudo / su don't inherit the maiTerm env vars. Fall back to the ~/.aiterm file
 # the bridge wrote (export MAITERM_TAB_ID / MAITERM_PORT) so hooks still route correctly.
+# The file only exists when the account has a single bridged tab: on shared hosts every
+# tab shares one tunnel/port, so the fallback would misroute — those hooks fail closed.
 if [ -z "${MAITERM_TAB_ID:-}" ] || [ -z "${MAITERM_PORT:-}" ]; then
   [ -f "$HOME/.aiterm" ] && . "$HOME/.aiterm" 2>/dev/null || true
 fi
