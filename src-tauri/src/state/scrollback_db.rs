@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 pub struct ScrollbackDb {
     conn: Mutex<Connection>,
+    /// Dedicated read connection (`PRAGMA query_only=ON`). WAL lets readers run concurrently
+    /// with the writer, but a single shared `Mutex<Connection>` re-serialized everything anyway —
+    /// maiLink's chat-list/chat_detail metadata reads were queueing seconds behind full-buffer
+    /// scrollback `save()`s. Metadata reads (`tab_times`/`tab_time`/`saved_size`/`has`/
+    /// `recent_tab_ids`) go through here; `load()` stays on the write conn (its big-blob reads
+    /// would otherwise stall these cheap ones the same way saves did).
+    read_conn: Mutex<Connection>,
 }
 
 impl ScrollbackDb {
@@ -18,6 +25,7 @@ impl ScrollbackDb {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
              CREATE TABLE IF NOT EXISTS scrollback (
                  tab_id TEXT PRIMARY KEY,
                  data TEXT NOT NULL,
@@ -30,8 +38,28 @@ impl ScrollbackDb {
         let _ = conn.execute("ALTER TABLE scrollback ADD COLUMN cols INTEGER", []);
         let _ = conn.execute("ALTER TABLE scrollback ADD COLUMN rows INTEGER", []);
 
+        // Covering index for the timestamp queries. `updated_at` is stored AFTER the `data` blob
+        // in each row, so without this, `tab_times()` had to walk every tab's ENTIRE scrollback
+        // (overflow-page chains included) just to reach the timestamp — a full-DB read per call,
+        // ~0.5-1s uncontended at 100 tabs. All of `tab_times` / `tab_time` / `recent_tab_ids`
+        // answer from the index alone (tab_id first so single-tab seeks work too; the 100-row
+        // ORDER BY in tab_times is free). One-time build cost on first launch after upgrade,
+        // then maintained incrementally.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scrollback_tab_updated ON scrollback(tab_id, updated_at)",
+            [],
+        );
+
+        // Opened read-write (a read-only open of a WAL db has -shm edge cases) but locked to
+        // reads via query_only — this connection must never take the write lock.
+        let read_conn = Connection::open(&path).map_err(|e| format!("Failed to open scrollback read conn: {}", e))?;
+        read_conn
+            .execute_batch("PRAGMA busy_timeout=5000; PRAGMA query_only=ON;")
+            .map_err(|e| format!("Failed to configure scrollback read conn: {}", e))?;
+
         Ok(Self {
             conn: Mutex::new(conn),
+            read_conn: Mutex::new(read_conn),
         })
     }
 
@@ -59,7 +87,7 @@ impl ScrollbackDb {
 
     /// Terminal size (cols, rows) recorded with the last scrollback save.
     pub fn saved_size(&self, tab_id: &str) -> Result<Option<(u16, u16)>, String> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn.lock();
         let mut stmt = conn
             .prepare("SELECT cols, rows FROM scrollback WHERE tab_id = ?1")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
@@ -80,7 +108,7 @@ impl ScrollbackDb {
     /// keeps its `pty_id` forever unless explicitly suspended, so `pty_id` alone
     /// can't say what was actually running.
     pub fn tab_times(&self) -> Result<Vec<(String, String)>, String> {
-        let conn = self.conn.lock();
+        let conn = self.read_conn.lock();
         let mut stmt = conn
             .prepare("SELECT tab_id, updated_at FROM scrollback ORDER BY updated_at DESC")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
@@ -92,6 +120,19 @@ impl ScrollbackDb {
             out.push(r.map_err(|e| format!("Failed to read scrollback row: {}", e))?);
         }
         Ok(out)
+    }
+
+    /// `updated_at` for a single tab — for callers (chat_detail) that need one tab's
+    /// timestamp and shouldn't pay for the full roster scan.
+    pub fn tab_time(&self, tab_id: &str) -> Result<Option<String>, String> {
+        let conn = self.read_conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT updated_at FROM scrollback WHERE tab_id = ?1")
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+        let result = stmt
+            .query_row(rusqlite::params![tab_id], |row| row.get::<_, String>(0))
+            .ok();
+        Ok(result)
     }
 
     /// Tab IDs whose scrollback was saved within `within_minutes` of the NEWEST
