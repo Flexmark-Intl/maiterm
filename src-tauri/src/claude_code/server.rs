@@ -387,6 +387,62 @@ fn find_window_for_tab(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     None
 }
 
+/// The tab's persisted resume session id — the `<runtime>SessionId` trigger variable that
+/// auto-resume interpolates into `claude --resume …` / `codex resume …`. Since a resume keeps
+/// the session id, this is what lets `initSession` match a resumed agent's buffered
+/// SessionStart back to ITS tab even when the pending pool holds many tabs' entries.
+fn persisted_resume_session_id(
+    state: &Arc<AppState>,
+    tab_id: &str,
+    runtime: crate::state::AgentRuntime,
+) -> Option<String> {
+    let var = crate::state::agent_runtime::descriptor(runtime).session_id_var;
+    let data = state.app_data.read();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            for pane in &ws.panes {
+                for tab in &pane.tabs {
+                    if tab.id == tab_id {
+                        return tab
+                            .trigger_variables
+                            .get(var)
+                            .cloned()
+                            .filter(|s| !s.is_empty());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Pure selection rule for the empty-sessionId path of `initSession` (unit-tested): which
+/// pending SessionStart entry, if any, may THIS tab claim? The pool is shared across all tabs
+/// (Claude http hooks carry no tab_id, so SessionStart can only buffer here), so claiming must
+/// be verifiable, never a blind pop:
+///   1. An entry matching the tab's persisted resume session id — a resume keeps the session
+///      id, so a resumed agent's buffered SessionStart is identifiable even among many
+///      (the mesh-resume case that used to mis-bind).
+///   2. Else, exactly ONE live entry → unambiguous, claim it (the same single-candidate
+///      principle as SSE reconnect recovery). Covers a fresh session whose $MAITERM_SID
+///      parse came up empty, and a Codex tab whose env vars were missing.
+///   3. Else decline — guessing would bind one agent's session to another agent's tab
+///      (the sibling then stays "dormant" forever: per-turn hooks only get_mut an entry).
+fn claim_pending_index(
+    pending: &[(String, Option<String>, std::time::Instant)],
+    tab_resume_sid: Option<&str>,
+) -> Option<usize> {
+    if let Some(want) = tab_resume_sid {
+        if let Some(i) = pending.iter().position(|(sid, _, _)| sid == want) {
+            return Some(i);
+        }
+    }
+    if pending.len() == 1 {
+        return Some(0);
+    }
+    None
+}
+
 /// Resolve the best window label to emit a tool event to.
 /// Checks windowId, then tabId in the tool arguments, then falls back to the first window.
 fn resolve_target_window(state: &Arc<AppState>, arguments: &Value) -> Option<String> {
@@ -1611,45 +1667,61 @@ async fn process_message(
                             );
                         }
 
-                        // Also pop the most recent pending SessionStart hook session and link it
-                        let pending = {
+                        // Claim from the pending SessionStart pool ONLY what verifiably belongs
+                        // to THIS tab. The pool is shared across every tab (Claude http hooks
+                        // carry no tab_id, so SessionStart can't insert an entry directly — it
+                        // buffers here). The old blind LIFO pop let one tab's init claim a
+                        // SIBLING's SessionStart during a mesh/SSH resume: the sibling's session
+                        // got bound to the wrong tab (its hooks then flickered THAT tab's state)
+                        // and the sibling itself could end up with no entry at all — reporting
+                        // "dormant" while live and producing, unrecoverable because the per-turn
+                        // hooks only get_mut an existing entry.
+                        let pending_claim = {
                             let mut pending = state.pending_agent_sessions.write();
                             let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
                             pending.retain(|(_, _, ts)| *ts > cutoff);
-                            pending.pop()
-                        };
-                        if let Some((pending_sid, pending_cwd, _)) = pending {
-                            if session_id.is_empty() || pending_sid != session_id {
-                                // Surface this hook session id when the agent passed none
-                                // (Codex) so the frontend can wire codexSessionId + resume.
-                                if init_session_id.is_empty() {
-                                    init_session_id = pending_sid.clone();
-                                }
-                                let mut sessions = state.agent_sessions.write();
-                                sessions.insert(
-                                    pending_sid.clone(),
-                                    AgentSessionInfo {
-                                        runtime,
-                                        tab_id: tab_id.clone(),
-                                        cwd: pending_cwd,
-                                        state: AgentSessionState::Active,
-                                        tool_name: None,
-                                        tool_detail: None,
-                                        pending_question: None,
-                                        pending_question_at: None,
-                                        transcript_path: None,
-                                        model: None,
-                                        connection_id: Some(connection_id.to_string()),
-                                    },
-                                );
-                                log::debug!("initSession: linked pending session {} → tab {}",
-                                    &pending_sid[..pending_sid.len().min(8)], &tab_id[..tab_id.len().min(8)]);
-                                // Re-emit session start now that we know the tab
-                                emit_dual(app_handle, "agent-hook-session-start", "claude-hook-session-start", serde_json::json!({
-                                    "session_id": pending_sid,
-                                    "tab_id": &tab_id,
-                                }));
+                            if !session_id.is_empty() {
+                                // The entry was already inserted above from the passed sessionId;
+                                // its buffered twin (if the SessionStart hook raced us here) is
+                                // redundant — drop it so no OTHER tab's init can claim it.
+                                pending.retain(|(sid, _, _)| *sid != session_id);
+                                None
+                            } else {
+                                let resume_sid =
+                                    persisted_resume_session_id(state, &tab_id, runtime);
+                                claim_pending_index(&pending, resume_sid.as_deref())
+                                    .map(|i| pending.remove(i))
                             }
+                        };
+                        if let Some((pending_sid, pending_cwd, _)) = pending_claim {
+                            // Only reached when the agent passed no sessionId — surface the
+                            // claimed hook session id so the frontend wires
+                            // <runtime>SessionId + auto-resume.
+                            init_session_id = pending_sid.clone();
+                            let mut sessions = state.agent_sessions.write();
+                            sessions.insert(
+                                pending_sid.clone(),
+                                AgentSessionInfo {
+                                    runtime,
+                                    tab_id: tab_id.clone(),
+                                    cwd: pending_cwd,
+                                    state: AgentSessionState::Active,
+                                    tool_name: None,
+                                    tool_detail: None,
+                                    pending_question: None,
+                                    pending_question_at: None,
+                                    transcript_path: None,
+                                    model: None,
+                                    connection_id: Some(connection_id.to_string()),
+                                },
+                            );
+                            log::debug!("initSession: linked pending session {} → tab {}",
+                                &pending_sid[..pending_sid.len().min(8)], &tab_id[..tab_id.len().min(8)]);
+                            // Re-emit session start now that we know the tab
+                            emit_dual(app_handle, "agent-hook-session-start", "claude-hook-session-start", serde_json::json!({
+                                "session_id": pending_sid,
+                                "tab_id": &tab_id,
+                            }));
                         }
                     }
 
@@ -2436,6 +2508,36 @@ mod tests {
 
     fn norm(name: &str, ev: serde_json::Value) -> HookPhase {
         normalize_hook_event(AgentRuntime::Claude, name, &ev)
+    }
+
+    #[test]
+    fn pending_claim_matches_this_tabs_resume_sid_never_a_siblings() {
+        use super::claim_pending_index;
+        let now = std::time::Instant::now();
+        let pool = |sids: &[&str]| -> Vec<(String, Option<String>, std::time::Instant)> {
+            sids.iter().map(|s| (s.to_string(), None, now)).collect()
+        };
+
+        // Mesh resume: many tabs' SessionStarts buffered. A tab whose persisted resume sid
+        // matches claims exactly ITS entry, regardless of position (the old LIFO pop
+        // would have grabbed "sid-c").
+        let p = pool(&["sid-a", "sid-b", "sid-c"]);
+        assert_eq!(claim_pending_index(&p, Some("sid-b")), Some(1));
+
+        // No resume-sid match + multiple candidates → decline (guessing mis-binds a
+        // sibling's session; the display fallback covers the interim).
+        assert_eq!(claim_pending_index(&p, Some("sid-x")), None);
+        assert_eq!(claim_pending_index(&p, None), None);
+
+        // Exactly one candidate → unambiguous, claim it even without a resume-sid match
+        // (fresh session whose $MAITERM_SID parse failed; Codex without env vars).
+        let single = pool(&["only"]);
+        assert_eq!(claim_pending_index(&single, None), Some(0));
+        assert_eq!(claim_pending_index(&single, Some("other")), Some(0));
+
+        // Empty pool → nothing to claim.
+        assert_eq!(claim_pending_index(&[], Some("sid-a")), None);
+        assert_eq!(claim_pending_index(&[], None), None);
     }
 
     #[test]
