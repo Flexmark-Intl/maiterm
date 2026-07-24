@@ -47,6 +47,52 @@ if [[ "$DETACHED" != "1" ]]; then
     echo "ERROR: no valid maiTerm build at: $SRC" >&2
     exit 1
   fi
+
+  # Refuse a bundle that predates the code. "Deploy" always means "ship what's in
+  # the tree now" — nobody deploys to reinstall what's already installed. The
+  # failure this exists to stop: a leftover .app from an earlier build is valid,
+  # correctly versioned and correctly signed, so every sanity check an agent
+  # thinks to run passes; it gets swapped in, the swap genuinely succeeds, and
+  # the deploy looks clean while silently reinstalling old code. Nothing
+  # downstream can detect that — it has to be caught here, against the source.
+  BIN="$SRC/Contents/MacOS/$PROC_NAME"
+  BUILD_TS=$(stat -f %m "$BIN")
+  if [[ "${ALLOW_STALE:-0}" != "1" ]] && git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
+    HEAD_TS=$(git -C "$REPO" log -1 --format=%ct)
+    if (( BUILD_TS < HEAD_TS )); then
+      {
+        echo "ERROR: this build is older than the code — rebuild before deploying."
+        echo "  build: $(date -r "$BUILD_TS" '+%Y-%m-%d %H:%M:%S')  $SRC"
+        echo "  HEAD:  $(date -r "$HEAD_TS" '+%Y-%m-%d %H:%M:%S')  $(git -C "$REPO" log -1 --format='%h %s')"
+        echo "  commits the build is missing:"
+        # -n, not `| head` — under `set -e -o pipefail` head closing the pipe
+        # SIGPIPEs git and aborts the script with 141 before we reach `exit 1`.
+        git -C "$REPO" log -n 10 --format='    %h %s' --since="@$BUILD_TS"
+        echo "  fix:  npm run tauri build   (deliberate stale deploy: ALLOW_STALE=1)"
+      } >&2
+      exit 1
+    fi
+    # Uncommitted edits count too — committed-ness isn't what makes code deployed.
+    # Ask git which sources actually DIFFER rather than testing mtime alone: a
+    # checkout, a rebase or a stray `touch` refreshes mtimes without changing
+    # content, and a bare `find -newer` would then demand a pointless rebuild.
+    # Content says whether it's unbuilt; mtime only says whether the build saw it.
+    STALE_SRC=""
+    while IFS= read -r f; do
+      [[ -n "$f" && -f "$REPO/$f" ]] || continue
+      if (( $(stat -f %m "$REPO/$f") > BUILD_TS )); then
+        STALE_SRC="${STALE_SRC}    ${f}"$'\n'
+      fi
+    done < <(git -C "$REPO" status --porcelain -- src src-tauri/src | cut -c4-)
+    if [[ -n "$STALE_SRC" ]]; then
+      {
+        echo "ERROR: edited sources are newer than this build — rebuild before deploying."
+        printf '%s' "$STALE_SRC"
+        echo "  fix:  npm run tauri build   (deliberate stale deploy: ALLOW_STALE=1)"
+      } >&2
+      exit 1
+    fi
+  fi
   nohup "$0" "$DETACH_FLAG" "$SRC" >>"$LOG" 2>&1 </dev/null &
   disown || true
   echo "Detached deploy started (pid $!)."
