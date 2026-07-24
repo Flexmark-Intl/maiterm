@@ -802,8 +802,9 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
 }
 
 /// Max simultaneous thread bindings a monitor tab will accept from summons; further
-/// summons queue in-channel (cursor hold) until one closes.
-const MAX_TAB_BINDINGS: usize = 3;
+/// summons queue in-channel (cursor hold) until one closes. Also enforced by
+/// startCommsThread so an agent can't open its way past the cap.
+pub(crate) const MAX_TAB_BINDINGS: usize = 3;
 
 /// In-thread notice posted once when a summon must queue. Excluded from the
 /// "bot already answered" check (summon_already_answered) — a queued summon is

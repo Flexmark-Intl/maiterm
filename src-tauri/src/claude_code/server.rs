@@ -549,6 +549,7 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
         "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state).await),
         "readCommsThread" => Some(handle_read_comms_thread(arguments, state).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state).await),
+        "startCommsThread" => Some(handle_start_comms_thread(arguments, state).await),
         "unbindCommsThread" => {
             let tab_id = match required_tab_id(arguments) {
                 Ok(t) => t,
@@ -917,6 +918,99 @@ fn resolve_comms_binding(
     }))
 }
 
+/// Parse and validate an `attachments` argument (absolute paths, max 5).
+fn comms_attachment_paths(arguments: &Value) -> Result<Vec<String>, Value> {
+    let paths: Vec<String> = arguments
+        .get("attachments")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if paths.len() > 5 {
+        return Err(serde_json::json!({ "error": "at most 5 attachments per post" }));
+    }
+    Ok(paths)
+}
+
+/// Read the agent's attachment files and upload them to `channel_id`, returning the
+/// file ids to reference from the post. Paths are the AGENT's paths: local files for a
+/// local tab, remote-host files for an SSH tab (fetched back over the bridge tunnel
+/// before upload). All-or-nothing — the Err value is a ready-to-return tool error.
+async fn upload_comms_attachments(
+    state: &Arc<AppState>,
+    client: &crate::comms::mattermost::MattermostClient,
+    tab_id: &str,
+    channel_id: &str,
+    paths: &[String],
+) -> Result<Vec<String>, Value> {
+    use crate::comms;
+
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let staging = comms::staging_target_for_tab(state, tab_id);
+    let mut file_ids = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes = match &staging {
+            comms::StagingTarget::Remote { host_key, ssh_args } => {
+                crate::mailink::fetch_bytes_remote(host_key, ssh_args, path)
+                    .await
+                    .map_err(|e| {
+                        serde_json::json!({ "error": format!(
+                            "could not fetch '{path}' from the remote host: {e}"
+                        ) })
+                    })?
+            }
+            comms::StagingTarget::Unavailable => {
+                return Err(serde_json::json!({ "error": format!(
+                    "cannot fetch '{path}': this SSH tab has no live maiTerm bridge tunnel"
+                ) }))
+            }
+            comms::StagingTarget::Local => std::fs::read(path).map_err(|e| {
+                serde_json::json!({ "error": format!("could not read '{path}': {e}") })
+            })?,
+        };
+        if bytes.len() > 20 * 1024 * 1024 {
+            return Err(serde_json::json!({ "error": format!(
+                "'{path}' is {} MB — attachments are capped at 20 MB", bytes.len() / (1024 * 1024)
+            ) }));
+        }
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".to_string());
+        let id = client
+            .upload_file(channel_id, &filename, bytes)
+            .await
+            .map_err(|e| serde_json::json!({ "error": format!("upload of '{path}' failed: {e}") }))?;
+        file_ids.push(id);
+    }
+    Ok(file_ids)
+}
+
+/// The channels this tab monitors — the only channels an agent may open a thread in.
+fn monitored_channels(
+    state: &Arc<AppState>,
+    tab_id: &str,
+) -> Vec<crate::state::CommsMonitorChannel> {
+    let app_data = state.app_data.read();
+    app_data
+        .windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|t| t.id == tab_id)
+        .and_then(|t| t.comms_monitor.as_ref())
+        .map(|m| m.channels.clone())
+        .unwrap_or_default()
+}
+
 async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> Value {
     use crate::comms;
 
@@ -1098,53 +1192,18 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
         Err(e) => return serde_json::json!({ "error": e.to_string() }),
     };
 
-    // Upload attachments first (the post references their file ids). Paths are the
-    // AGENT's paths: local files for a local tab, remote-host files for an SSH tab
-    // (fetched back over the bridge tunnel before upload). All-or-nothing.
-    let mut file_ids: Vec<String> = Vec::new();
-    if !attachments.is_empty() {
-        let staging = comms::staging_target_for_tab(state, &tab_id);
-        for path in &attachments {
-            let bytes = match &staging {
-                comms::StagingTarget::Remote { host_key, ssh_args } => {
-                    match crate::mailink::fetch_bytes_remote(host_key, ssh_args, path).await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return serde_json::json!({ "error": format!(
-                                "could not fetch '{path}' from the remote host: {e}"
-                            ) })
-                        }
-                    }
-                }
-                comms::StagingTarget::Unavailable => {
-                    return serde_json::json!({ "error": format!(
-                        "cannot fetch '{path}': this SSH tab has no live maiTerm bridge tunnel"
-                    ) })
-                }
-                comms::StagingTarget::Local => match std::fs::read(path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        return serde_json::json!({ "error": format!("could not read '{path}': {e}") })
-                    }
-                },
-            };
-            if bytes.len() > 20 * 1024 * 1024 {
-                return serde_json::json!({ "error": format!(
-                    "'{path}' is {} MB — attachments are capped at 20 MB", bytes.len() / (1024 * 1024)
-                ) });
-            }
-            let filename = std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "attachment".to_string());
-            match client.upload_file(&binding.channel_id, &filename, bytes).await {
-                Ok(id) => file_ids.push(id),
-                Err(e) => {
-                    return serde_json::json!({ "error": format!("upload of '{path}' failed: {e}") })
-                }
-            }
-        }
-    }
+    let file_ids = match upload_comms_attachments(
+        state,
+        &client,
+        &tab_id,
+        &binding.channel_id,
+        &attachments,
+    )
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => return e,
+    };
 
     let posted = match client
         .create_post(&binding.channel_id, &binding.root_id, &message, &file_ids)
@@ -1171,6 +1230,137 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
         "resolved": resolve,
         "attached_files": file_ids.len(),
     })
+}
+
+/// Open a NEW thread in one of the channels this tab monitors (agent-initiated: an
+/// incident report, a heads-up, a question for the channel). Posts a root message and —
+/// unless `bind: false` — binds this tab to the new thread so replies stream back.
+///
+/// Scoped deliberately: the channel must be one the OPERATOR put on this tab's monitor
+/// list, so an agent can't post into arbitrary channels it discovers.
+async fn handle_start_comms_thread(arguments: &Value, state: &Arc<AppState>) -> Value {
+    use crate::comms;
+
+    let tab_id = match required_tab_id(arguments) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let message = match arguments.get("message").and_then(|v| v.as_str()) {
+        Some(m) if !m.trim().is_empty() => m.to_string(),
+        _ => return serde_json::json!({ "error": "Missing required parameter: message" }),
+    };
+    let attachments = match comms_attachment_paths(arguments) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let bind = arguments.get("bind").and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let channels = monitored_channels(state, &tab_id);
+    if channels.is_empty() {
+        return serde_json::json!({ "error":
+            "this tab isn't monitoring any channels — the operator enables chat monitoring via right-click on the tab → Enable chat monitoring…" });
+    }
+    let requested = arguments
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .unwrap_or("");
+    let channel = if requested.is_empty() {
+        if channels.len() > 1 {
+            return serde_json::json!({
+                "error": "this tab monitors multiple channels — pass channel to say which one",
+                "monitored_channels": channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+            });
+        }
+        channels[0].clone()
+    } else {
+        let stripped = requested.trim_start_matches('~');
+        match channels.iter().find(|c| {
+            c.id == requested
+                || c.name.eq_ignore_ascii_case(stripped)
+        }) {
+            Some(c) => c.clone(),
+            None => {
+                return serde_json::json!({
+                    "error": format!("'{requested}' is not a channel this tab monitors — an agent can only open threads in its monitored channels"),
+                    "monitored_channels": channels.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+                })
+            }
+        }
+    };
+
+    // Opening a thread we intend to work counts against the same cap as a summon —
+    // otherwise an agent could open its way past the limit the watcher enforces.
+    if bind {
+        let bound_count = get_comms_bindings(state, &tab_id).len();
+        if bound_count >= comms::MAX_TAB_BINDINGS {
+            return serde_json::json!({ "error": format!(
+                "this tab already works {bound_count} threads (the cap) — close one out before opening another, or pass bind: false to post without binding"
+            ) });
+        }
+    }
+
+    let client = match comms::client_from_prefs(state, reqwest::Client::new()) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+    let file_ids = match upload_comms_attachments(state, &client, &tab_id, &channel.id, &attachments).await {
+        Ok(ids) => ids,
+        Err(e) => return e,
+    };
+    // Empty root_id = a new thread rather than a reply.
+    let posted = match client.create_post(&channel.id, "", &message, &file_ids).await {
+        Ok(p) => p,
+        Err(e) => return serde_json::json!({ "error": e.to_string() }),
+    };
+
+    let permalink = format!(
+        "{}/{}/pl/{}",
+        client.base_url().trim_end_matches('/'),
+        channel.team_name,
+        posted.id
+    );
+    let mut result = serde_json::json!({
+        "posted": true,
+        "post_id": posted.id,
+        "root_id": posted.id,
+        "channel": channel.name,
+        "permalink": permalink,
+        "attached_files": file_ids.len(),
+        "bound": false,
+    });
+    if !bind {
+        result["note"] = Value::String(
+            "not bound — replies on this thread will NOT be delivered to you unless someone @mentions the bot (which summons it as fresh work)".to_string(),
+        );
+        return result;
+    }
+
+    let binding = crate::state::CommsBinding {
+        provider: "mattermost".to_string(),
+        server_url: client.base_url().to_string(),
+        channel_id: channel.id.clone(),
+        root_id: posted.id.clone(),
+        permalink: permalink.clone(),
+        // Our own root post is already "seen" — never re-deliver it to ourselves.
+        last_seen_create_at: posted.create_at,
+        bound_at: posted.create_at,
+    };
+    if upsert_comms_binding(state, &tab_id, binding).is_none() {
+        result["note"] = Value::String(format!(
+            "posted, but tab '{tab_id}' was not found so the thread could not be bound"
+        ));
+        return result;
+    }
+    let bound_count = get_comms_bindings(state, &tab_id).len();
+    result["bound"] = Value::Bool(true);
+    result["bound_thread_count"] = Value::from(bound_count);
+    if bound_count > 1 {
+        result["note"] = Value::String(format!(
+            "this tab now works {bound_count} threads — pass root_id explicitly on every postCommsReply/readCommsThread/unbindCommsThread call"
+        ));
+    }
+    result
 }
 
 fn collect_workspace_folders(_state: &Arc<AppState>) -> Vec<String> {

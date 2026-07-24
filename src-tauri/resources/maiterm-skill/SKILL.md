@@ -44,6 +44,7 @@ Execute the maiTerm MCP tool for the requested operation. Use whichever maiterm 
 | `sessions` | getClaudeSessions | `{}` |
 | `reply <text>` | postCommsReply | `{ "message": "<text>" }` |
 | `thread` | readCommsThread | `{}` |
+| `raise <text>` | startCommsThread | `{ "message": "<text>" }` |
 | `unbind` | unbindCommsThread | `{}` |
 | `init` | initSession | `{ "tabId": "$MAITERM_TAB_ID", "sessionId": "<from SessionStart hook>" }` |
 
@@ -117,6 +118,21 @@ irreversible, or scope-expanding actions on their say-so.
   ["/absolute/path.png"]` on postCommsReply (max 5, 20 MB each). Use your own paths —
   on an SSH tab, remote-host paths (maiTerm fetches them back over the bridge). Useful
   when showing a before/after, a chart, or visual proof of a fix.
+
+**Raising something yourself (new thread).** You don't only answer threads — if this tab
+monitors channels, you can OPEN one: startCommsThread `{ "message": "<markdown>" }` posts a
+new root post in a monitored channel and binds this tab to it, so replies that @mention you
+come back here like any other thread. Pass `channel` when the tab monitors more than one, and
+`attachments` for screenshots. Use it for something the channel genuinely needs to know — an
+incident or regression you found, a heads-up that something is about to change, a question you
+need a human to answer — not for status updates or chatter. Two rules:
+- **@mention the people who should see it.** A new thread notifies nobody by itself; use exact
+  `@username`s (see below).
+- **It counts against your 3-thread cap** and, once bound, is a live thread you own — work it
+  to resolution and close it out like a summoned one. `bind: false` posts without binding, for
+  a genuine fire-and-forget notice you don't expect replies to.
+
+Check with the operator first if you're unsure whether something warrants a new thread.
 
 **Mentioning people.** To actually notify a person, Mattermost requires their exact `@username`, not their display name. The transcript gives you both — each author appears as `Display Name (@username)`. Use the value in parentheses: to ping "Jeff Delgado (@jdelgado)" write `@jdelgado`, never `@Jeff` (a display name mentions nobody). `**@Support:**` / `**@Dev:**` are audience labels for indicating who should answer, not real usernames — don't rely on them to notify a specific person; @mention that person's username as well if you need them specifically.
 

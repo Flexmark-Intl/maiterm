@@ -73,6 +73,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | bindCommsThread | Comms (/maiterm resolve): bind this tab to a Mattermost thread by permalink; returns the thread as a [REPORT]-tagged transcript, the bot's `bot_username`, and records `Tab.comms_binding`. Backend-only |
 | readCommsThread | Comms: re-fetch the full bound thread on demand (only @mentions of the bot are auto-injected; the rest is read-on-demand). Backend-only |
 | postCommsReply | Comms: post Mattermost markdown to the bound thread; `resolve: true` clears the binding after posting. Backend-only |
+| startCommsThread | Comms: open a NEW thread in one of this tab's monitored channels (agent-initiated) and bind to it; `bind: false` posts without binding. Backend-only |
 | unbindCommsThread | Comms: clear the tab's thread binding without posting (idempotent). Backend-only |
 
 ## Comms Integration (/maiterm resolve)
@@ -112,6 +113,13 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   Summon candidates require `create_at` past the cursor: Mattermost's `?since=` is
   **update_at-based**, so an EDIT of an old post is re-served — without the guard, editing the
   root of a just-resolved (unbound) thread re-picked the whole thread up as fresh work.
+- **Agent-initiated threads**: `startCommsThread` lets the agent OPEN a thread rather than only
+  answer one — an incident it found, a heads-up, a question for the channel. Scoped to the tab's
+  `comms_monitor` channels (an agent can't post into arbitrary channels it discovers), posts a
+  root post (`create_post` with an empty root_id), and binds the tab to it unless `bind: false`.
+  Enforces the same `comms::MAX_TAB_BINDINGS` cap as summons, and seeds the binding cursor at the
+  new post's `create_at` so the bot's own opener is never injected back into its session. The
+  summon walk can't double-pick it either — bot-authored posts are not summon candidates.
 - **Image attachments (both directions)**: incoming — `Post.file_ids`/`metadata.files` are
   deserialized; `comms::stage_attachments` downloads image files (png/jpg/gif/webp, ≤10 MB,
   ≤8/call) and stages them where the tab's agent can Read them (`staging_target_for_tab`:
