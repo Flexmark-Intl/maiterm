@@ -167,8 +167,9 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
 - **Async dispatch**: the comms tools made `handle_backend_tool` async (awaited at its single
   call site in `process_message`). New arms must never hold a lock guard across an await.
 - **Skill**: the `resolve` section of `resources/maiterm-skill/SKILL.md` is the agent-facing
-  orchestration (silent-while-working, one `**@Support:**`/`**@Dev:**`-addressed question when
-  blocked, two-part resolution post: plain-language for support staff, `---`, technical bullets
+  orchestration (ack-before-investigating — the summon payload repeats it as `FIRST ACTION` since
+  agents act on the injected text, not the skill file; then silent-while-working, one
+  `**@Support:**`/`**@Dev:**`-addressed question when blocked, two-part resolution post: plain-language for support staff, `---`, technical bullets
   for devs). Posting the resolution does NOT unbind — the thread stays bound until a human
   confirms it's resolved; only then does the agent close it (`postCommsReply` with `resolve:true`,
   which posts-and-clears). A still-broken reply keeps the binding live so work continues.
