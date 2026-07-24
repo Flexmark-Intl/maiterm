@@ -1142,6 +1142,13 @@ pub struct CommsBinding {
     /// only forwards posts newer than this.
     pub last_seen_create_at: i64,
     pub bound_at: i64,
+    /// Deliver EVERY human reply on this thread, not just @mentions of the bot. Set on
+    /// threads the agent itself opened (startCommsThread): it asked the question, so the
+    /// answers are for it — humans shouldn't have to @mention a bot they didn't summon.
+    /// Summoned/resolve-bound threads stay mention-gated (they're humans' threads; the
+    /// bot is a participant, not the owner).
+    #[serde(default)]
+    pub deliver_all_replies: bool,
 }
 
 /// A paired maiLink mobile device. The bearer token is stored hashed (never raw); deleting

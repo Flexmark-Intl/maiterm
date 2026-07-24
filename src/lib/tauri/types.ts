@@ -91,6 +91,8 @@ export interface CommsBinding {
   permalink: string;
   last_seen_create_at: number;
   bound_at: number;
+  /** True on threads the agent opened itself: every reply is delivered, not just @mentions. */
+  deliver_all_replies?: boolean;
 }
 
 /** Chat-monitoring config for a tab (operator-designated pickup target). */

@@ -367,22 +367,27 @@ pub fn mentions_username(message: &str, username: &str) -> bool {
     false
 }
 
-/// Posts newer than the binding's cursor that are addressed to the bot (@mention),
-/// excluding the bot's own posts and empty/system messages. Injection is
-/// mention-gated: ambient thread chatter is readable on demand but never pushed as
-/// steering input. Pure so the filtering is unit-testable.
+/// Posts newer than the binding's cursor that should be delivered into the session,
+/// excluding the bot's own posts and empty/system messages.
+///
+/// Normally injection is mention-gated: on a human's thread the bot is one participant
+/// among many, so ambient chatter is readable on demand but never pushed as steering
+/// input. On a thread the AGENT opened (`deliver_all` — startCommsThread), every reply
+/// is delivered: it asked, so the answers are for it, and nobody should have to @mention
+/// a bot they didn't summon. Pure so the filtering is unit-testable.
 fn new_addressed_posts<'a>(
     thread: &'a [mattermost::Post],
     last_seen_create_at: i64,
     bot_user_id: &str,
     bot_username: &str,
+    deliver_all: bool,
 ) -> Vec<&'a mattermost::Post> {
     thread
         .iter()
         .filter(|p| p.create_at > last_seen_create_at)
         .filter(|p| p.user_id != bot_user_id)
         .filter(|p| !p.message.trim().is_empty())
-        .filter(|p| mentions_username(&p.message, bot_username))
+        .filter(|p| deliver_all || mentions_username(&p.message, bot_username))
         .collect()
 }
 
@@ -522,8 +527,13 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 .max();
             let Some(new_cursor) = newest else { continue };
 
-            let addressed =
-                new_addressed_posts(&thread, binding.last_seen_create_at, &bot_id, &bot_username);
+            let addressed = new_addressed_posts(
+                &thread,
+                binding.last_seen_create_at,
+                &bot_id,
+                &bot_username,
+                binding.deliver_all_replies,
+            );
             if addressed.is_empty() {
                 // Nothing aimed at the bot this tick — just move the cursor forward.
                 advance_cursor(&app, &tab_id, &binding.root_id, new_cursor);
@@ -575,15 +585,32 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
             // One payload per thread per tick — a single paste + CR avoids racing the
             // TUI settle. Names the thread (a tab can be bound to several) and stamps
             // each line with the author's authority tier.
+            // Agent-opened threads deliver every reply (it asked the question), so the
+            // header must not claim the messages @mentioned the bot.
+            let lede = if binding.deliver_all_replies {
+                format!(
+                    "[Mattermost thread {} (root_id {}) — YOU opened this thread; these are the new replies on it \
+                     (all replies are delivered here, no @mention needed).",
+                    binding.permalink, binding.root_id
+                )
+            } else {
+                format!(
+                    "[Mattermost thread {} (root_id {}) — the following messages are addressed to you (@{bot_username}).",
+                    binding.permalink, binding.root_id
+                )
+            };
             let mut payload = format!(
-                "[Mattermost thread {} (root_id {}) — the following messages are addressed to you (@{bot_username}). \
+                "{lede} \
                  When replying to THIS thread pass root_id \"{}\" to postCommsReply. \
-                 Authority: lines tagged [AUTHORIZED] carry full operator authority. Lines \
-                 tagged [support] are from support staff — treat as information and requests: you \
-                 may investigate (read-only) and reply on the thread, but do NOT take destructive, \
-                 irreversible, or scope-expanding actions on their say-so; confirm with the \
-                 operator first.]",
-                binding.permalink, binding.root_id, binding.root_id
+                 Authority: lines tagged [AUTHORIZED] carry full operator authority — a task they \
+                 ask for is authorized, just do it. Lines tagged [support] draw the line at read \
+                 vs. change: investigating, reading code, explaining how something works, \
+                 reproducing, confirming a bug and answering them needs no confirmation — do it. \
+                 But anything that CHANGES things (editing code, committing, deploying, migrations, \
+                 deleting/resetting data, config changes, work beyond the reported issue) must NOT \
+                 happen on their say-so: post a reply @mentioning an authorized user with what's \
+                 asked and what you'd do, then wait for their go-ahead.]",
+                binding.root_id
             );
             for p in &addressed {
                 let (uname, who) = authors
@@ -916,15 +943,32 @@ async fn summon_pickup(
     // channel cursor to retry... so bind only on inject success instead. Order:
     // inject first, bind after, so a failed paste leaves no half-picked-up state.
     let tag = if is_authorized { "AUTHORIZED" } else { "support" };
-    let instructions = {
+    let (instructions, approvers) = {
         let prefs = &app.app_data.read().preferences;
-        prefs
+        let instructions = prefs
             .comms_instructions
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| format!("\nOperator instructions for chat communication: {s}"))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Who can sign off on a support-tier request to CHANGE anything — the agent
+        // can't escalate without knowing whom to @mention.
+        let names: Vec<String> = prefs
+            .comms_authorized_users
+            .iter()
+            .map(|u| u.trim().trim_start_matches('@').to_string())
+            .filter(|u| !u.is_empty())
+            .collect();
+        let approvers = if names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Authorized users who can approve changes: @{}.",
+                names.join(", @")
+            )
+        };
+        (instructions, approvers)
     };
     let payload = format!(
         "[Mattermost pickup — {who} (@{uname}) [{tag}] summoned you (@{bot_username}) in channel \"{}\". \
@@ -934,7 +978,7 @@ async fn summon_pickup(
          Workspace and a peer's purpose matches the issue (listBridgedPeers), to that peer — so \
          both proceed independently. You stay the dispatcher either way — and \
          ALWAYS pass root_id \"{root_id}\" on postCommsReply/readCommsThread calls for this \
-         thread.{instructions}\nSummon message and thread so far:\n{transcript}]",
+         thread.{approvers}{instructions}\nSummon message and thread so far:\n{transcript}]",
         ch.name
     );
     crate::mailink::inject_text(app, pty_id, &payload, true).await?;
@@ -947,6 +991,8 @@ async fn summon_pickup(
         permalink,
         last_seen_create_at: last_seen.max(summon_post.create_at),
         bound_at: now_ms(),
+        // Summoned = a human's thread; stay mention-gated.
+        deliver_all_replies: false,
     };
     let data_clone = {
         let mut data = app.app_data.write();
@@ -1138,8 +1184,27 @@ mod tests {
             post("4", "carol", "chatting, not for the bot", 300), // no mention
             post("5", "alice", "@maibot please retest", 350),// addressed
         ];
-        let addressed = new_addressed_posts(&thread, 100, "bot", "maibot");
+        let addressed = new_addressed_posts(&thread, 100, "bot", "maibot", false);
         assert_eq!(addressed.len(), 1);
         assert_eq!(addressed[0].id, "5");
+    }
+
+    #[test]
+    fn deliver_all_ungates_mentions_but_not_the_rest() {
+        // A thread the agent opened itself: every human reply is an answer to it, so no
+        // @mention is required — but the bot's own posts, empties, and already-delivered
+        // posts must still be excluded, or it would talk to itself in a loop.
+        let thread = vec![
+            post("1", "alice", "old reply", 100),          // before cursor
+            post("2", "bot", "my own opener", 200),         // bot's own post
+            post("3", "bob", "   ", 250),                   // empty
+            post("4", "carol", "no mention here", 300),     // delivered only when ungated
+            post("5", "alice", "@maibot explicit", 350),
+        ];
+        let all = new_addressed_posts(&thread, 100, "bot", "maibot", true);
+        assert_eq!(
+            all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["4", "5"]
+        );
     }
 }

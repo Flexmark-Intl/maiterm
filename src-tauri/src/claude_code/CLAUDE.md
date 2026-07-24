@@ -120,6 +120,17 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   Enforces the same `comms::MAX_TAB_BINDINGS` cap as summons, and seeds the binding cursor at the
   new post's `create_at` so the bot's own opener is never injected back into its session. The
   summon walk can't double-pick it either — bot-authored posts are not summon candidates.
+  Such bindings carry `deliver_all_replies: true`: `new_addressed_posts` drops the @mention gate
+  for them, so EVERY human reply is injected (the agent asked the question — nobody should have to
+  @mention a bot they didn't summon). Bot-authored/empty/already-delivered posts are still excluded,
+  or the agent would answer itself in a loop. Summon- and permalink-bound threads stay mention-gated.
+- **Escalation targets**: comms tool results and the summon payload carry `authorized_users` — the
+  agent can't ask for sign-off without knowing whom to @mention. Deliberately read-only exposure:
+  `comms_authorized_users` remains absent from `preference_meta()`, so the list can be seen but
+  never edited by anything the chat can reach. The support-tier rule the agent is given (SKILL.md
+  + every injected header) is **read vs. change**: read-only work on a support/pickup user's
+  say-so needs no confirmation (investigate, read code, explain, reproduce, confirm a bug, answer);
+  anything that changes code/data/config/scope requires an @mentioned authorized user's go-ahead.
 - **Image attachments (both directions)**: incoming — `Post.file_ids`/`metadata.files` are
   deserialized; `comms::stage_attachments` downloads image files (png/jpg/gif/webp, ≤10 MB,
   ≤8/call) and stages them where the tab's agent can Read them (`staging_target_for_tab`:
