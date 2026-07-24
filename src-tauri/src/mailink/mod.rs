@@ -34,6 +34,7 @@ use crate::state::workspace::TabType;
 use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
 pub(crate) mod mirror;
+pub(crate) mod tasks;
 pub(crate) mod transcript;
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
@@ -1046,6 +1047,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut mtimes: HashMap<String, u64> = HashMap::new();
+    // Per-tab task-board change key (tasks::change_key) — the `tasks` WS event fires only when a
+    // board actually changed. Baseline emission on connect is deliberate: the phone gets every
+    // existing board without opening threads, and a reconnect catches changes it slept through.
+    let mut task_keys: HashMap<String, u64> = HashMap::new();
 
     // initial snapshot: one chat_state per chat
     for c in build_chats(&s.app) {
@@ -1072,7 +1077,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     loop {
         tokio::select! {
             _ = msg_ticker.tick() => {
-                if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes).await.is_err() {
+                if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys).await.is_err() {
                     return;
                 }
             }
@@ -1220,9 +1225,17 @@ async fn stream_new_messages(
     app: &AppState,
     seen: &mut HashMap<String, std::collections::HashSet<String>>,
     mtimes: &mut HashMap<String, u64>,
+    task_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
     for t in designated_tabs(app) {
         let Some((rt, sid)) = resolved_session_for_tab(app, &t.tab_id) else { continue };
+        // Task-board diff — BEFORE the transcript-mtime gate: a subagent claiming/completing
+        // tasks rewrites board files without appending to the MAIN transcript, so the board
+        // needs its own change key. Cost per tick per tab is one readdir of a tiny dir (or one
+        // ENOENT stat for the no-board majority). Claude only — no board elsewhere.
+        if rt == AgentRuntime::Claude {
+            stream_tasks_if_changed(socket, &t.tab_id, &sid, task_keys).await?;
+        }
         // mtime gate: an unchanged transcript means no new turns, so skip the tail re-parse.
         if let Some(mt) = transcript::mtime_for(rt, &sid) {
             if mtimes.get(&t.tab_id) == Some(&mt) {
@@ -1261,6 +1274,42 @@ async fn stream_new_messages(
         *entry = window;
     }
     Ok(())
+}
+
+/// Emit a `tasks` WS frame when the tab's Claude task board changed (mailink/tasks.rs).
+/// Full-array replace semantics — boards are tiny, so no per-task diffing. A board that
+/// disappears (session ended, tasks all deleted) emits one final empty array so the phone
+/// clears its strip.
+async fn stream_tasks_if_changed(
+    socket: &mut WebSocket,
+    tab_id: &str,
+    session_id: &str,
+    task_keys: &mut HashMap<String, u64>,
+) -> Result<(), ()> {
+    let event = match tasks::change_key(session_id) {
+        Some(key) => {
+            if task_keys.get(tab_id) == Some(&key) {
+                return Ok(());
+            }
+            task_keys.insert(tab_id.to_string(), key);
+            json!({
+                "type": "tasks",
+                "tabId": tab_id,
+                "tasks": tasks::tasks_for_session(session_id).unwrap_or_default(),
+                "ts": now_ms(),
+            })
+        }
+        None => {
+            if task_keys.remove(tab_id).is_none() {
+                return Ok(());
+            }
+            json!({ "type": "tasks", "tabId": tab_id, "tasks": [], "ts": now_ms() })
+        }
+    };
+    socket
+        .send(Message::Text(event.to_string().into()))
+        .await
+        .map_err(|_| ())
 }
 
 /// Build an `attention` event for a tab, inlining the open prompt (delta 1) so the client can
@@ -2563,6 +2612,15 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         detail["meta"] = agent_meta;
     }
     let ms_meta = ph.elapsed().as_millis(); // locate_jsonl + meta tail read
+
+    // The session's Claude Code task board (TaskCreate/TaskUpdate — the strip above the prompt
+    // in the TUI), invisible in structured chat without this. Present only when non-empty;
+    // live updates ride the WS `tasks` event (see stream_new_messages). mailink/tasks.rs.
+    if let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) {
+        if let Some(board) = tasks::tasks_for_session(&sid) {
+            detail["tasks"] = json!(board);
+        }
+    }
 
     // pendingPrompt: the agent's native human ask (mailink-protocol §12). thread_id == tab_id
     // for a solo thread.

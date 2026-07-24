@@ -326,6 +326,10 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // omitted for idle_done. Lets the app render decision buttons on the
                                                      // live path with no follow-up GET. GET /chats/{tabId} stays source of truth.
 { "type": "chats_changed" }                           // roster/designation, a tab title, a workspace's suspended flag, OR its mesh flag changed; re-GET /chats
+{ "type": "tasks", "tabId": "...", "tasks": [/* AgentTask[] */], "ts": 0 }
+                                                     // the tab's Claude task board changed — REPLACE the whole board (they're
+                                                     // tiny; no per-task diffing). Emitted per board on WS connect (baseline),
+                                                     // then only on change; [] when the board empties/disappears. Claude only.
 ```
 
 Client→server frames are optional conveniences mirroring the REST actions (`message`,
@@ -358,6 +362,9 @@ interface Chat {
 }
 interface ChatDetail extends Chat {
   transcript: Message[];    // distilled turns, newest last
+  tasks?: AgentTask[];      // Claude session task board (the strip above the TUI prompt), sorted
+                            // by numeric id; present only when non-empty. Live updates ride the
+                            // WS `tasks` event (full-array replace). Claude runtime only.
   pendingPrompt?: {         // present iff state==='permission' or a question is open
     prompt_id: string;      // opaque, minted when the agent opens this prompt; echoed in /respond
     kind: 'permission' | 'question';
@@ -373,6 +380,19 @@ interface ChatDetail extends Chat {
 // `message{role:'user'}` WS echo for that turn (mints at accept-time, reused for both) —
 // lets the app reconcile an optimistic local bubble against the echo.
 interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string; ts: number; }
+
+// One entry of a Claude session's task board (~/.claude/tasks/<sid>/<id>.json passed through
+// verbatim — unknown future fields flow to the app unchanged; render what you know).
+interface AgentTask {
+  id: string;               // stringified counter; list is sorted numerically by this
+  subject: string;          // imperative title — the primary display string
+  description: string;      // longer body; show on expand/tap
+  activeForm?: string;      // present-continuous label while in_progress ("Running tests")
+  status: 'pending' | 'in_progress' | 'completed';
+  blocks: string[];         // task ids this task gates
+  blockedBy: string[];      // open task ids that gate this task
+  owner?: string;           // claiming agent id, when a subagent picked it up
+}
 
 // GET /chats/archived — recoverable tabs (NOT in GET /chats). Flat across workspaces; group by
 // workspaceId client-side. tabId is what POST /chats/{tabId}/restore takes.
