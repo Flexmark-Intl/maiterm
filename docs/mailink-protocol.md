@@ -365,6 +365,14 @@ interface ChatDetail extends Chat {
   tasks?: AgentTask[];      // Claude session task board (the strip above the TUI prompt), sorted
                             // by numeric id; present only when non-empty. Live updates ride the
                             // WS `tasks` event (full-array replace). Claude runtime only.
+                            // NOTE: Claude Code DELETES a session's task files once every task
+                            // reaches `completed` — so an all-done board vanishes on its own
+                            // within ~a second, with no user action. A client will see a final
+                            // `tasks: []` and must treat the disappearance as normal completion,
+                            // NOT an error or a dropped session. Practical consequences: an
+                            // "all tasks complete" UI state is only ever a brief flash (don't
+                            // build the design around it), and a session that finished its work
+                            // legitimately reports no board at all.
   pendingPrompt?: {         // present iff state==='permission' or a question is open
     prompt_id: string;      // opaque, minted when the agent opens this prompt; echoed in /respond
     kind: 'permission' | 'question';
