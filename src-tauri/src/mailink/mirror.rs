@@ -140,8 +140,19 @@ async fn fetch_once(host_key: &str, ssh_args: &str, session_id: &str, transcript
 
     // POSIX-quote the remote path; `tail -c +N` is 1-based. `wc -c` rides the same round
     // trip so a replaced/shorter remote file is detected instead of stalling the mirror.
+    //
+    // Line 2 snapshots the session's remote Claude task board (~/.claude/tasks/<sid>/*.json)
+    // as one base64 line — exactly one line even when the dir is absent (the trailing `echo`),
+    // so the newline framing stays: line 1 wc, line 2 board, remainder tail delta. `find` (not
+    // a glob — zsh's nomatch would abort the whole command line) + base64 are POSIX-universal;
+    // a host missing base64 just yields an empty line ⇒ no board. Session ids are UUIDs, so
+    // the unquoted (tilde-expanding) dir path is injection-safe.
     let quoted = format!("'{}'", transcript_path.replace('\'', "'\\''"));
-    let script = format!("wc -c < {quoted}\ntail -c +{} {quoted}", offset + 1);
+    let tasks_dir = format!("~/.claude/tasks/{session_id}");
+    let script = format!(
+        "wc -c < {quoted}\n[ -d {tasks_dir} ] && find {tasks_dir} -maxdepth 1 -name '*.json' -exec cat {{}} + 2>/dev/null | base64 | tr -d '\\n'; echo\ntail -c +{} {quoted}",
+        offset + 1
+    );
 
     // Mux over the bridge tunnel's master — never become one (a dead socket falls
     // through to a plain BatchMode connection, which key-auth hosts still satisfy).
@@ -182,10 +193,14 @@ async fn fetch_once(host_key: &str, ssh_args: &str, session_id: &str, transcript
         return false;
     }
 
-    let Some((remote_size, delta)) = split_size_and_delta(&output.stdout) else {
+    let Some((remote_size, tasks_b64, delta)) = split_fetch_output(&output.stdout) else {
         log::debug!("transcript mirror: unparseable fetch output for {}", session_id_short(session_id));
         return false;
     };
+
+    // Board shadow first — independent of the transcript delta (a subagent can rewrite board
+    // files without the main transcript growing). Never fails the fetch.
+    update_tasks_shadow(session_id, tasks_b64);
 
     if remote_size < offset {
         // Remote file replaced/shorter than our shadow (shouldn't happen for append-only
@@ -229,46 +244,81 @@ fn session_id_short(sid: &str) -> &str {
     &sid[..sid.len().min(8)]
 }
 
-/// Split the fetch script's stdout into (remote file size, transcript delta bytes).
-/// First line is `wc -c` output (whitespace-padded on some hosts); everything after the
-/// first newline is the raw `tail` payload, which may itself contain newlines.
-fn split_size_and_delta(stdout: &[u8]) -> Option<(u64, &[u8])> {
-    let nl = stdout.iter().position(|&b| b == b'\n')?;
-    let size = String::from_utf8_lossy(&stdout[..nl]).trim().parse::<u64>().ok()?;
-    Some((size, &stdout[nl + 1..]))
+/// Split the fetch script's stdout into (remote file size, base64 task-board line, transcript
+/// delta bytes). Line 1 is `wc -c` output (whitespace-padded on some hosts); line 2 is the
+/// board dump (empty ⇒ no board); everything after the second newline is the raw `tail`
+/// payload, which may itself contain newlines.
+fn split_fetch_output(stdout: &[u8]) -> Option<(u64, &[u8], &[u8])> {
+    let nl1 = stdout.iter().position(|&b| b == b'\n')?;
+    let size = String::from_utf8_lossy(&stdout[..nl1]).trim().parse::<u64>().ok()?;
+    let rest = &stdout[nl1 + 1..];
+    let nl2 = rest.iter().position(|&b| b == b'\n')?;
+    Some((size, &rest[..nl2], &rest[nl2 + 1..]))
+}
+
+/// Materialize the remote board dump into the local shadow (`tasks::shadow_path`) that
+/// `tasks_for_session` falls back to for sessions with no local board. Content-compared before
+/// writing — an unchanged board must not bump the shadow's mtime, or the WS change key would
+/// fire a spurious `tasks` event per fetch. Empty/absent board ⇒ shadow removed (the WS diff
+/// then emits one clearing `[]`, matching local semantics).
+fn update_tasks_shadow(session_id: &str, tasks_b64: &[u8]) {
+    use base64::Engine as _;
+    let Some(path) = super::tasks::shadow_path(session_id) else { return };
+    let board = base64::engine::general_purpose::STANDARD
+        .decode(tasks_b64)
+        .map(|bytes| super::tasks::parse_concatenated(&bytes))
+        .unwrap_or_default();
+    if board.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let Ok(json) = serde_json::to_vec(&board) else { return };
+    if std::fs::read(&path).is_ok_and(|prev| prev == json) {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, &json) {
+        log::warn!("transcript mirror: task shadow write failed for {}: {}", session_id_short(session_id), e);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::split_size_and_delta;
+    use super::split_fetch_output;
 
     #[test]
-    fn splits_wc_line_from_delta() {
+    fn splits_wc_board_and_delta() {
         // BSD wc pads with spaces; the delta itself contains newlines.
-        let out = b"   1234\n{\"a\":1}\n{\"b\":2}\n";
-        let (size, delta) = split_size_and_delta(out).expect("parses");
+        let out = b"   1234\nQkFTRTY0\n{\"a\":1}\n{\"b\":2}\n";
+        let (size, board, delta) = split_fetch_output(out).expect("parses");
         assert_eq!(size, 1234);
+        assert_eq!(board, b"QkFTRTY0");
         assert_eq!(delta, b"{\"a\":1}\n{\"b\":2}\n");
     }
 
     #[test]
-    fn empty_delta_is_valid() {
-        // Up-to-date shadow: wc reports the size, tail emits nothing.
-        let (size, delta) = split_size_and_delta(b"98\n").expect("parses");
+    fn empty_board_and_empty_delta_are_valid() {
+        // No remote board (bare echo line) and an up-to-date shadow (tail emits nothing).
+        let (size, board, delta) = split_fetch_output(b"98\n\n").expect("parses");
         assert_eq!(size, 98);
+        assert!(board.is_empty());
         assert!(delta.is_empty());
     }
 
     #[test]
-    fn garbage_and_missing_newline_are_rejected() {
-        assert!(split_size_and_delta(b"").is_none());
-        assert!(split_size_and_delta(b"1234").is_none(), "no newline → can't split");
-        assert!(split_size_and_delta(b"wc: no such file\n").is_none());
+    fn garbage_and_missing_newlines_are_rejected() {
+        assert!(split_fetch_output(b"").is_none());
+        assert!(split_fetch_output(b"1234").is_none(), "no newline → can't split");
+        assert!(split_fetch_output(b"1234\nB64NOEOL").is_none(), "board line must terminate");
+        assert!(split_fetch_output(b"wc: no such file\n\n").is_none());
     }
 }
 
-/// Delete shadow files whose transcript hasn't grown in [`PRUNE_AFTER_SECS`]. Called once at
-/// startup; keeps the shadow dir from accumulating one file per remote session forever.
+/// Delete shadow files whose transcript hasn't grown in [`PRUNE_AFTER_SECS`] — and their
+/// sessions' task-board shadows on the same clock. Called once at startup; keeps the shadow
+/// dirs from accumulating one file per remote session forever.
 pub fn prune_stale_shadows() {
     let Some(dir) = shadow_dir() else { return };
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
@@ -287,6 +337,13 @@ pub fn prune_stale_shadows() {
             .is_some_and(|age| age.as_secs() > PRUNE_AFTER_SECS);
         if stale && std::fs::remove_file(&path).is_ok() {
             pruned += 1;
+            // The board shadow is only ever a companion to a mirrored transcript — an
+            // orphaned one has no session left to serve, so it goes on the same sweep.
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if let Some(tasks) = super::tasks::shadow_path(stem) {
+                    let _ = std::fs::remove_file(tasks);
+                }
+            }
         }
     }
     if pruned > 0 {

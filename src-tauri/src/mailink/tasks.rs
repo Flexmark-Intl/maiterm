@@ -74,6 +74,23 @@ fn task_order(t: &Value) -> (u64, String) {
     (id.parse::<u64>().unwrap_or(u64::MAX), id.to_string())
 }
 
+/// Parse a remote board dump — the task files' bytes CONCATENATED in arbitrary order (the
+/// mirror's `find -exec cat` emits no separators) — into a sorted board. Glob order varies by
+/// host, so sorting here (not remotely) is what makes the shadow deterministic. Stops at the
+/// first malformed value: a torn read mid-rewrite is possible and a partial board heals on the
+/// next fetch.
+pub(crate) fn parse_concatenated(bytes: &[u8]) -> Vec<Value> {
+    let mut tasks = Vec::new();
+    for v in serde_json::Deserializer::from_slice(bytes).into_iter::<Value>() {
+        match v {
+            Ok(v) if v.is_object() => tasks.push(v),
+            _ => break,
+        }
+    }
+    tasks.sort_by_key(task_order);
+    tasks
+}
+
 /// A cheap change key for the session's board: folds each task file's (name, len, mtime) —
 /// or the shadow file's (len, mtime) — into one value. Status flips REWRITE a task file in
 /// place (dir mtime unchanged), so per-file mtimes are required; reading the handful of dirents
