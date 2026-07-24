@@ -57,17 +57,22 @@ if [[ "$DETACHED" != "1" ]]; then
   # downstream can detect that — it has to be caught here, against the source.
   BIN="$SRC/Contents/MacOS/$PROC_NAME"
   BUILD_TS=$(stat -f %m "$BIN")
+  # Only things that actually end up in the binary. Scoping this matters: judged
+  # against *every* commit, a README or script-only change would demand a 10-min
+  # rebuild that cannot alter the output — and a guard that cries wolf just
+  # teaches everyone to pass ALLOW_STALE=1 by reflex, which is no guard at all.
+  BUILD_INPUTS=(src src-tauri package.json package-lock.json)
   if [[ "${ALLOW_STALE:-0}" != "1" ]] && git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
-    HEAD_TS=$(git -C "$REPO" log -1 --format=%ct)
-    if (( BUILD_TS < HEAD_TS )); then
+    HEAD_TS=$(git -C "$REPO" log -1 --format=%ct -- "${BUILD_INPUTS[@]}")
+    if [[ -n "$HEAD_TS" ]] && (( BUILD_TS < HEAD_TS )); then
       {
         echo "ERROR: this build is older than the code — rebuild before deploying."
         echo "  build: $(date -r "$BUILD_TS" '+%Y-%m-%d %H:%M:%S')  $SRC"
-        echo "  HEAD:  $(date -r "$HEAD_TS" '+%Y-%m-%d %H:%M:%S')  $(git -C "$REPO" log -1 --format='%h %s')"
+        echo "  newest code: $(date -r "$HEAD_TS" '+%Y-%m-%d %H:%M:%S')  $(git -C "$REPO" log -1 --format='%h %s' -- "${BUILD_INPUTS[@]}")"
         echo "  commits the build is missing:"
         # -n, not `| head` — under `set -e -o pipefail` head closing the pipe
         # SIGPIPEs git and aborts the script with 141 before we reach `exit 1`.
-        git -C "$REPO" log -n 10 --format='    %h %s' --since="@$BUILD_TS"
+        git -C "$REPO" log -n 10 --format='    %h %s' --since="@$BUILD_TS" -- "${BUILD_INPUTS[@]}"
         echo "  fix:  npm run tauri build   (deliberate stale deploy: ALLOW_STALE=1)"
       } >&2
       exit 1
@@ -83,7 +88,7 @@ if [[ "$DETACHED" != "1" ]]; then
       if (( $(stat -f %m "$REPO/$f") > BUILD_TS )); then
         STALE_SRC="${STALE_SRC}    ${f}"$'\n'
       fi
-    done < <(git -C "$REPO" status --porcelain -- src src-tauri/src | cut -c4-)
+    done < <(git -C "$REPO" status --porcelain -- "${BUILD_INPUTS[@]}" | cut -c4-)
     if [[ -n "$STALE_SRC" ]]; then
       {
         echo "ERROR: edited sources are newer than this build — rebuild before deploying."
