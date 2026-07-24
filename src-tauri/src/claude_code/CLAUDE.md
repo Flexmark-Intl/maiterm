@@ -120,6 +120,12 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   Enforces the same `comms::MAX_TAB_BINDINGS` cap as summons, and seeds the binding cursor at the
   new post's `create_at` so the bot's own opener is never injected back into its session. The
   summon walk can't double-pick it either — bot-authored posts are not summon candidates.
+  Attachment-only replies (3 screenshots, no caption) are delivered too: the empty-body filter in
+  `new_addressed_posts` exists for join/leave noise and was silently eating them — dropped AND
+  cursor-advanced, so they never reached the session and only surfaced on a manual
+  `readCommsThread`. `post_has_content` now counts files as content, and on a mention-gated thread
+  a caption-less upload rides along when the same author @mentioned the bot within 5 minutes
+  (Mattermost splits a drag-and-drop upload from its accompanying text).
   Such bindings carry `deliver_all_replies: true`: `new_addressed_posts` drops the @mention gate
   for them, so EVERY human reply is injected (the agent asked the question — nobody should have to
   @mention a bot they didn't summon). Bot-authored/empty/already-delivered posts are still excluded,

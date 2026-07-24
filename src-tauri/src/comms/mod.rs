@@ -331,7 +331,7 @@ pub async fn build_transcript(
             None => format!("{} ({ts})", p.user_id),
         };
         let tag = if p.id == root_id { "[REPORT] " } else { "" };
-        transcript.push_str(&format!("{tag}— {who}:\n{}\n", p.message.trim()));
+        transcript.push_str(&format!("{tag}— {who}:\n{}\n", body_or_placeholder(p)));
         if let Some(notes) = attachments.get(&p.id) {
             for n in notes {
                 transcript.push_str(n);
@@ -367,6 +367,26 @@ pub fn mentions_username(message: &str, username: &str) -> bool {
     false
 }
 
+/// Whether a post carries anything worth delivering: text, or files with no text.
+/// A screenshot dropped in with no caption is a real message — the empty-body check
+/// exists to skip join/leave/system noise, and must not eat attachment-only posts
+/// (they were silently discarded, cursor and all, and only surfaced on a manual
+/// readCommsThread).
+fn post_has_content(p: &mattermost::Post) -> bool {
+    !p.message.trim().is_empty() || !p.file_ids.is_empty() || !p.metadata.files.is_empty()
+}
+
+/// A post's body for rendering — captionless attachment posts get a stand-in so the
+/// line doesn't read as a blank message (the attachment notes follow underneath).
+fn body_or_placeholder(p: &mattermost::Post) -> &str {
+    let body = p.message.trim();
+    if body.is_empty() {
+        "(no text — attachment only)"
+    } else {
+        body
+    }
+}
+
 /// Posts newer than the binding's cursor that should be delivered into the session,
 /// excluding the bot's own posts and empty/system messages.
 ///
@@ -386,9 +406,35 @@ fn new_addressed_posts<'a>(
         .iter()
         .filter(|p| p.create_at > last_seen_create_at)
         .filter(|p| p.user_id != bot_user_id)
-        .filter(|p| !p.message.trim().is_empty())
-        .filter(|p| deliver_all || mentions_username(&p.message, bot_username))
+        .filter(|p| post_has_content(p))
+        .filter(|p| {
+            // An attachment-only post can't @mention anyone, so on a mention-gated
+            // thread it would never be delivered. Treat images posted right after a
+            // message that DID address the bot as part of that message — the human
+            // typed "@bot look at this", then dragged the screenshots in.
+            deliver_all
+                || mentions_username(&p.message, bot_username)
+                || (p.message.trim().is_empty() && has_recent_mention_by(thread, p, bot_username))
+        })
         .collect()
+}
+
+/// True if the same author addressed the bot shortly before this (caption-less) post —
+/// i.e. the attachments belong to a message that was already aimed at the bot.
+fn has_recent_mention_by(
+    thread: &[mattermost::Post],
+    post: &mattermost::Post,
+    bot_username: &str,
+) -> bool {
+    /// Mattermost splits a drag-and-drop upload from its accompanying text; keep the
+    /// window tight so unrelated later uploads aren't swept in.
+    const WINDOW_MS: i64 = 5 * 60 * 1000;
+    thread.iter().any(|p| {
+        p.user_id == post.user_id
+            && p.create_at < post.create_at
+            && post.create_at - p.create_at <= WINDOW_MS
+            && mentions_username(&p.message, bot_username)
+    })
 }
 
 const WATCH_INTERVAL_SECS: u64 = 5;
@@ -622,7 +668,10 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 } else {
                     "support"
                 };
-                payload.push_str(&format!("\n— {who} (@{uname}) [{tag}]: {}", p.message.trim()));
+                payload.push_str(&format!(
+                    "\n— {who} (@{uname}) [{tag}]: {}",
+                    body_or_placeholder(p)
+                ));
                 if let Some(notes) = attachment_notes.get(&p.id) {
                     for n in notes {
                         payload.push_str(&format!("\n  {n}"));
@@ -1192,6 +1241,53 @@ mod tests {
         let addressed = new_addressed_posts(&thread, 100, "bot", "maibot", false);
         assert_eq!(addressed.len(), 1);
         assert_eq!(addressed[0].id, "5");
+    }
+
+    /// A post carrying only files (no caption) — Mattermost splits a drag-and-drop
+    /// upload from its text, so this is what 3 screenshots with no words look like.
+    fn post_with_files(id: &str, user: &str, ms: i64) -> mattermost::Post {
+        let mut p = post(id, user, "", ms);
+        p.file_ids = vec!["f1".into(), "f2".into(), "f3".into()];
+        p
+    }
+
+    #[test]
+    fn attachment_only_posts_are_delivered_not_dropped_as_empty() {
+        // The empty-body filter exists for join/leave noise; it was also eating
+        // caption-less screenshot posts, which then advanced the cursor and were lost
+        // to the session forever (only a manual readCommsThread showed them).
+        let thread = vec![
+            post("1", "bot", "any update?", 100),
+            post_with_files("2", "alice", 200),
+        ];
+        // Agent-opened thread: delivered on content alone.
+        let all = new_addressed_posts(&thread, 100, "bot", "maibot", true);
+        assert_eq!(all.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["2"]);
+        // Truly empty (system/join) posts are still skipped.
+        let noise = vec![post("3", "alice", "   ", 300)];
+        assert!(new_addressed_posts(&noise, 100, "bot", "maibot", true).is_empty());
+    }
+
+    #[test]
+    fn captionless_uploads_ride_along_with_a_recent_mention() {
+        // Mention-gated thread: an attachment-only post can never @mention, so it is
+        // delivered when the same author addressed the bot just before it — "@maibot
+        // look at this" followed by the dragged-in screenshots.
+        let thread = vec![
+            post("1", "alice", "@maibot look at this", 1_000_000),
+            post_with_files("2", "alice", 1_000_500),
+        ];
+        let out = new_addressed_posts(&thread, 999_999, "bot", "maibot", false);
+        assert_eq!(out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["1", "2"]);
+
+        // Not swept in: a different author's upload, and one long past the window.
+        let unrelated = vec![
+            post("1", "alice", "@maibot look at this", 1_000_000),
+            post_with_files("2", "bob", 1_000_500),
+            post_with_files("3", "alice", 1_000_000 + 6 * 60 * 1000),
+        ];
+        let out = new_addressed_posts(&unrelated, 999_999, "bot", "maibot", false);
+        assert_eq!(out.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["1"]);
     }
 
     #[test]
