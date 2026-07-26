@@ -1,6 +1,7 @@
 import type { Terminal } from '@xterm/xterm';
 import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
+import { launchCommand } from '$lib/agents/descriptor';
 import * as commands from '$lib/tauri/commands';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -2052,6 +2053,60 @@ function createWorkspacesStore() {
         const idx = workspaces.findIndex(w => w.id === workspaceId);
         if (idx >= 0) workspaces[idx] = updatedWs;
       }
+    },
+
+    /**
+     * Start a NEW conversation from an existing tab: a light clone that carries only WHERE to
+     * run — SSH host + cwd — and launches a FRESH agent session there.
+     *
+     * Deliberately not `duplicateTab`, even shallow: duplication copies the session-id trigger
+     * variable (intended, for reload and `/branch` forks), which would make the new tab re-render
+     * the SAME conversation instead of starting one. Same primitive, opposite requirement.
+     *
+     * The runtime launch rides the existing auto-resume replay: the spawn path already sends
+     * `auto_resume_command` after a local shell settles, or after the SSH bridge connects — so a
+     * bare `claude` there yields a tab that comes up connected, in the right directory, with a
+     * live agent. `/maiterm init` needs no help; the SessionStart hook injects it.
+     *
+     * Returns the new tab id, or null if the source tab is gone.
+     */
+    async newConversationFrom(tabId: string): Promise<string | null> {
+      const loc = this._locateTab(tabId);
+      if (!loc) return null;
+      const { workspaceId, paneId, tab: sourceTab } = loc;
+      if (sourceTab.tab_type !== 'terminal') return null;
+
+      const { instance, cwd, sshCommand } = await this._gatherTabContext(tabId);
+      const newTab = await commands.createTab(workspaceId, paneId, sourceTab.name);
+
+      // Where to run — the ONLY thing inherited. Nothing else: no scrollback, notes, history,
+      // trigger variables (so no session id) or the source's own auto-resume command.
+      terminalsStore.markSpawning(newTab.id);
+      this._storeSplitContext(tabId, newTab.id, cwd, sshCommand, instance);
+      // _storeSplitContext is pref-gated (clone_cwd/clone_ssh) and skips writing a context when
+      // both are off; re-read it so the auto-resume fields agree with what will actually be used.
+      const ctx = terminalsStore.peekSplitContext(newTab.id);
+      if (ctx) {
+        terminalsStore.setSplitContext(newTab.id, { ...ctx, fireAutoResume: true });
+      }
+
+      const runtime = sourceTab.runtime ?? 'claude';
+      await this.setTabAutoResumeContext(
+        workspaceId, paneId, newTab.id,
+        ctx?.sshCommand ? null : (ctx?.cwd ?? null),
+        ctx?.sshCommand ?? null,
+        ctx?.remoteCwd ?? null,
+        launchCommand(runtime),
+        false,
+      );
+
+      const data = await commands.getWindowData();
+      const updatedWs = data.workspaces.find(w => w.id === workspaceId);
+      if (updatedWs) {
+        const idx = workspaces.findIndex(w => w.id === workspaceId);
+        if (idx >= 0) workspaces[idx] = updatedWs;
+      }
+      return newTab.id;
     },
 
     async reloadTab(workspaceId: string, paneId: string, tabId: string) {

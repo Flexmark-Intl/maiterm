@@ -21,6 +21,8 @@ export interface RuntimeDescriptorTs {
   /** Trigger-variable name holding the session id. */
   sessionIdVar: string;
   supportsFork: boolean;
+  /** Bare CLI invocation that starts a FRESH session (no resume flags). */
+  launch: string;
   /** How long a reported tool may stay "active" before the indicator is auto-cleared. */
   toolStaleTimeoutMs: number;
   /** Where this runtime's MCP config lives (shown in the Preferences hints). */
@@ -31,6 +33,7 @@ export interface RuntimeDescriptorTs {
 
 const claude: RuntimeDescriptorTs = {
   runtime: 'claude',
+  launch: 'claude',
   displayName: 'Claude Code',
   sessionIdVar: 'claudeSessionId',
   supportsFork: true,
@@ -68,6 +71,7 @@ const claude: RuntimeDescriptorTs = {
 
 const codex: RuntimeDescriptorTs = {
   runtime: 'codex',
+  launch: 'codex',
   displayName: 'Codex',
   sessionIdVar: 'codexSessionId',
   supportsFork: false,
@@ -93,6 +97,7 @@ const codex: RuntimeDescriptorTs = {
 const gemini: RuntimeDescriptorTs = {
   ...codex,
   runtime: 'gemini',
+  launch: 'gemini',
   displayName: 'Gemini',
   sessionIdVar: 'geminiSessionId',
   configHint: '~/.gemini/settings.json',
@@ -108,4 +113,10 @@ export function getDescriptor(runtime: AgentRuntime): RuntimeDescriptorTs {
     default:
       return claude;
   }
+}
+
+/** The command that starts a fresh session for a runtime — used when spawning a NEW conversation
+ *  from an existing tab (host + cwd inherited, session deliberately not). */
+export function launchCommand(runtime: AgentRuntime): string {
+  return getDescriptor(runtime).launch;
 }

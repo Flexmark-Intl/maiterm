@@ -300,6 +300,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
 | `POST /chats/{tabId}/shells/{shellId}/stop` | Terminate one background shell (SIGTERM→SIGKILL on its own pid) | `{}` → `{ok:true, stopped:bool}`; IDEMPOTENT — an already-dead or unknown shell is `ok:true, stopped:false`, never 404 |
+| `POST /chats/{tabId}/new` | Start a NEW conversation from this one (light clone: SSH host + cwd, fresh agent session) | `{}` → `{ok:true, tabId}`; `{ok:false, reason:"timeout"}` if the tab didn't appear in time |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
@@ -500,6 +501,18 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
 - **Activate** (`POST .../activate`): for a dormant maiLink-native tab, run the existing
   auto-resume/spawn path (the same machinery clone/bridge use) and `switchTab` to focus it;
   return the resulting state. For a live tab it's a focus + presence no-op.
+- **New conversation** (`POST .../new`): create a sibling tab that inherits ONLY where the source
+  runs — its SSH command and cwd — and launches a FRESH agent session there (the runtime's bare
+  launch command rides the existing auto-resume replay, so the tab comes up connected, in the
+  right directory, with a live agent; `/maiterm init` needs no help because the SessionStart hook
+  injects it). Explicitly NOT the duplicate path: duplication copies the session-id trigger
+  variable — correct for reload and `/branch` forks, and exactly wrong here, since the copy would
+  re-render the SAME conversation instead of starting one. Nothing else is inherited: no
+  scrollback, notes, shell history, trigger variables or the source's own auto-resume command. The
+  source tab is untouched and need not be idle. Works for SSH tabs (it's just another SSH spawn —
+  no remote inspection needed). Tab creation happens in the owning window, so the endpoint waits
+  for the new tab to exist and returns its id only once it's navigable; the roster picks it up on
+  the next `chats_changed`.
 - **Interrupt**: inject `\x1b` (Esc) — the documented "human interrupts the agent" gesture. A
   single Esc byte, nothing else — it interrupts a running turn, clears a half-typed line, and
   backs out of a TUI menu (including the resume startup menu), so the button is a safe always-on

@@ -283,6 +283,14 @@
       workspacesStore.archiveTabById(event.payload.tabId);
     }).then(unlisten => { unlistenArchiveTab = unlisten; });
 
+    // A maiLink phone tapped "New conversation" on a thread. Light clone of WHERE the source
+    // runs (SSH host + cwd) with a fresh agent session — no scrollback, notes or session id.
+    // Same owning-window contract: newConversationFrom no-ops when this window lacks the tab.
+    let unlistenNewConversation: (() => void) | undefined;
+    listen<{ tabId: string }>('mailink-new-conversation', (event) => {
+      workspacesStore.newConversationFrom(event.payload.tabId);
+    }).then(unlisten => { unlistenNewConversation = unlisten; });
+
     let unlistenCloseTab: (() => void) | undefined;
     listen<{ tabId: string }>('mailink-close-tab', (event) => {
       workspacesStore.closeTabById(event.payload.tabId);
@@ -957,6 +965,7 @@
       unlistenResumeWorkspace?.();
       unlistenMeshInit?.();
       unlistenArchiveTab?.();
+      unlistenNewConversation?.();
       unlistenCloseTab?.();
       unlistenRestoreTab?.();
       unlistenExportState?.();

@@ -286,6 +286,7 @@ fn build_router(api: ApiState) -> Router {
             "/mailink/v1/chats/{tab_id}/shells/{shell_id}/stop",
             post(post_shell_stop),
         )
+        .route("/mailink/v1/chats/{tab_id}/new", post(post_new_conversation))
         .route("/mailink/v1/chats/{tab_id}/rename", post(post_rename))
         .route(
             "/mailink/v1/chats/{tab_id}/resume-workspace",
@@ -684,6 +685,62 @@ fn shell_roster(app: &AppState, tab_id: &str) -> Vec<shells::AgentShell> {
 fn tab_is_ssh(app: &AppState, tab_id: &str) -> bool {
     let tunnels = app.ssh_tunnels.read();
     tunnels.values().any(|t| t.tab_ids.contains(tab_id))
+}
+
+/// POST /chats/{tabId}/new — start a NEW conversation from this one.
+///
+/// A LIGHT clone: the source tab is a template for WHERE to run (SSH host + cwd) and nothing
+/// else — the new tab gets a fresh agent session, not a copy of this one. Deliberately not the
+/// duplicate path, which copies the session-id variable (right for reload/`/branch`, exactly
+/// wrong here — the copy would re-render the same conversation instead of starting one).
+///
+/// The source is never touched and needn't be idle. Creation happens in the owning window (the
+/// Svelte store owns tab state), so this emits and then waits for the new tab to appear, and
+/// returns its id only once the phone can actually navigate to it.
+async fn post_new_conversation(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Snapshot the owning pane's tabs so the newcomer can be identified by difference — the id is
+    // minted by createTab in the frontend, so there's nothing to pass in.
+    let before = sibling_tab_ids(&s.app, &tab_id);
+    let h = s.app_handle.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _ = h.emit("mailink-new-conversation", json!({ "tabId": tab_id }));
+
+    // Spawning involves a round trip through the store and a PTY create; poll briefly rather than
+    // returning an id the phone would 404 on. Failure here is a timeout, not an error state — the
+    // tab may still appear a moment later and the roster will pick it up via chats_changed.
+    for _ in 0..NEW_TAB_WAIT_TICKS {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(new_id) = sibling_tab_ids(&s.app, &tab_id).into_iter().find(|id| !before.contains(id)) {
+            return Ok(Json(json!({ "ok": true, "tabId": new_id })));
+        }
+    }
+    log::warn!("[maiLink] new conversation from {tab_id}: no new tab appeared within the wait window");
+    Ok(Json(json!({ "ok": false, "reason": "timeout" })))
+}
+
+/// How long `post_new_conversation` waits for the frontend to mint the tab (ticks × 100 ms).
+const NEW_TAB_WAIT_TICKS: u32 = 50;
+
+/// Every tab id in the pane that owns `tab_id` (including it). Used to spot a newly created tab.
+fn sibling_tab_ids(app: &AppState, tab_id: &str) -> Vec<String> {
+    let data = app.app_data.read();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            for pane in &ws.panes {
+                if pane.tabs.iter().any(|t| t.id == tab_id) {
+                    return pane.tabs.iter().map(|t| t.id.clone()).collect();
+                }
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// POST /chats/{tabId}/shells/{shellId}/stop — terminate one background shell.

@@ -120,6 +120,11 @@ function createTerminalsStore() {
       splitContexts.set(tabId, ctx);
     },
 
+    /** Read a pending split context WITHOUT consuming it — the spawning pane still needs it. */
+    peekSplitContext(tabId: string): SplitContext | undefined {
+      return splitContexts.get(tabId);
+    },
+
     consumeSplitContext(tabId: string): SplitContext | undefined {
       const ctx = splitContexts.get(tabId);
       if (ctx) splitContexts.delete(tabId);
