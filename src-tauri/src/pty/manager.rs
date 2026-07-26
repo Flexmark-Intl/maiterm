@@ -881,6 +881,71 @@ pub fn get_pty_foreground(state: &Arc<AppState>, pty_id: &str) -> Result<Option<
 /// the readiness probe needn't know a tab's runtime up front.
 const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex", "gemini"];
 
+/// The shell pid backing a PTY, if it's still registered. The root for descendant walks
+/// (agent liveness, background-shell discovery). Takes `&AppState` so callers holding a plain
+/// reference (the maiLink handlers) don't need the `Arc`.
+pub fn pty_child_pid_of(state: &AppState, pty_id: &str) -> Option<u32> {
+    state.pty_registry.read().get(pty_id).and_then(|h| h.child_pid)
+}
+
+/// Direct children of every `claude` process under `shell_pid` — i.e. that tab's background
+/// shells, since Claude Code spawns each `run_in_background` Bash as its own direct child.
+/// Returns `(pid, command line)`; empty when no agent is running. Shares the cached `ps` sweep.
+pub fn agent_background_children(shell_pid: u32) -> Vec<(u32, String)> {
+    // Depth-limited walk: shell → (wrapper) → claude. Small and bounded; the snapshot is cached
+    // so the repeated child lookups cost nothing beyond a filter.
+    let mut frontier = vec![shell_pid];
+    let mut agents: Vec<u32> = Vec::new();
+    for _ in 0..4 {
+        let mut next = Vec::new();
+        for pid in frontier.drain(..) {
+            for (child, cmd) in child_processes(pid) {
+                if is_agent_command(&cmd) {
+                    agents.push(child);
+                } else {
+                    next.push(child);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    agents
+        .into_iter()
+        .flat_map(child_processes)
+        .filter(|(_, cmd)| is_background_shell_command(cmd))
+        .collect()
+}
+
+/// Whether a child of `claude` is one of its BACKGROUND SHELLS rather than something else it
+/// spawns. This filter is load-bearing: a live agent's children also include every stdio MCP
+/// server it launched (`npm exec …-mcp`, `railway mcp`, `node …/server.js`), and matching a
+/// shell's command text against those would let e.g. a `railway mcp` background shell claim the
+/// MCP server's pid — reporting a dead shell as alive, and aiming a kill at the wrong process.
+/// Claude Code wraps every background Bash the same way, sourcing a shell snapshot, so that
+/// wrapper is the signature.
+fn is_background_shell_command(cmd: &str) -> bool {
+    cmd.contains("shell-snapshots/snapshot-")
+}
+
+/// Whether a command line is an agent CLI invocation (`claude`, `claude --resume …`). Matches on
+/// the argv0 basename so a path-qualified launch counts, while a mention of "claude" inside some
+/// other command's arguments does not.
+fn is_agent_command(cmd: &str) -> bool {
+    cmd.split_whitespace()
+        .next()
+        .map(|argv0| {
+            let base = std::path::Path::new(argv0)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(argv0);
+            AGENT_PROCESS_NAMES.contains(&base)
+        })
+        .unwrap_or(false)
+}
+
 /// Liveness signals for the mesh readiness check — see the `get_agent_liveness` command.
 #[derive(serde::Serialize, Clone)]
 pub struct AgentLiveness {
@@ -970,6 +1035,7 @@ const PROC_SNAPSHOT_TTL: Duration = Duration::from_millis(800);
 #[cfg(unix)]
 struct PsRow {
     pid: u32,
+    ppid: u32,
     pgid: u32,
     tpgid: i32,
     cmd: String,
@@ -993,9 +1059,9 @@ fn ps_rows_snapshot() -> Option<Arc<Vec<PsRow>>> {
     // macOS BSD ps uses -x (show processes without controlling terminal)
     // Linux procps uses -e (select all processes) for equivalent behavior
     #[cfg(target_os = "macos")]
-    let args: &[&str] = &["-o", "pid=,pgid=,tpgid=,command=", "-x"];
+    let args: &[&str] = &["-o", "pid=,ppid=,pgid=,tpgid=,command=", "-x"];
     #[cfg(target_os = "linux")]
-    let args: &[&str] = &["-e", "-o", "pid=,pgid=,tpgid=,command="];
+    let args: &[&str] = &["-e", "-o", "pid=,ppid=,pgid=,tpgid=,command="];
 
     let output = std::process::Command::new("ps")
         .args(args)
@@ -1014,6 +1080,10 @@ fn ps_rows_snapshot() -> Option<Arc<Vec<PsRow>>> {
             Some(p) => p,
             None => continue,
         };
+        let ppid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
         let pgid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
             Some(p) => p,
             None => continue,
@@ -1026,12 +1096,37 @@ fn ps_rows_snapshot() -> Option<Arc<Vec<PsRow>>> {
         if cmd.is_empty() {
             continue;
         }
-        rows.push(PsRow { pid, pgid, tpgid, cmd });
+        rows.push(PsRow { pid, ppid, pgid, tpgid, cmd });
     }
 
     let rows = Arc::new(rows);
     *guard = Some((std::time::Instant::now(), rows.clone()));
     Some(rows)
+}
+
+/// `(pid, command)` for every direct child of `parent_pid`, from the shared `ps` snapshot.
+///
+/// Claude Code runs a background shell (`Bash` with `run_in_background`) as a direct child
+/// `/bin/bash -c source …/shell-snapshots/… && eval '<command>' …`, so this is how maiLink
+/// answers "is that shell still alive?" and finds the pid to kill. Rides the SAME cached sweep
+/// as the liveness probes — never its own `ps` — because this is called per tab on a poll path,
+/// which is exactly the pattern that froze the UI before (see the mesh-liveness pinwheel).
+/// Empty on non-unix or if the sweep fails.
+#[cfg(unix)]
+pub fn child_processes(parent_pid: u32) -> Vec<(u32, String)> {
+    ps_rows_snapshot()
+        .map(|rows| {
+            rows.iter()
+                .filter(|r| r.ppid == parent_pid)
+                .map(|r| (r.pid, r.cmd.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(not(unix))]
+pub fn child_processes(_parent_pid: u32) -> Vec<(u32, String)> {
+    Vec::new()
 }
 
 /// Get the foreground process command via ps (Unix)

@@ -142,6 +142,15 @@ fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
 
 /// Build the last `limit` maiLink messages for a Claude session, or `None` if its transcript
 /// can't be found/read (caller falls back to the terminal scrape).
+/// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
+/// For consumers that need the raw entries rather than distilled turns (the background-shell
+/// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
+pub(crate) fn claude_lines(session_id: &str, max_bytes: u64) -> Option<Vec<Value>> {
+    let path = locate_jsonl(session_id)?;
+    let body = read_tail(&path, max_bytes)?;
+    Some(body.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect())
+}
+
 fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
     let path = locate_jsonl(session_id)?;
     // Only the tail can hold the last `limit` turns; bound the read regardless of file size (a 155 MB

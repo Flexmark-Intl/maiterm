@@ -299,6 +299,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
+| `POST /chats/{tabId}/shells/{shellId}/stop` | Terminate one background shell (SIGTERM→SIGKILL on its own pid) | `{}` → `{ok:true, stopped:bool}`; IDEMPOTENT — an already-dead or unknown shell is `ok:true, stopped:false`, never 404 |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
@@ -327,6 +328,11 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // live path with no follow-up GET. GET /chats/{tabId} stays source of truth.
 { "type": "chats_changed" }                           // roster/designation, a tab title, a workspace's suspended flag, OR its mesh flag changed; re-GET /chats
 { "type": "tasks", "tabId": "...", "tasks": [/* AgentTask[] */], "ts": 0 }
+{ "type": "shells", "tabId": "...", "shells": [/* AgentShell[] */], "ts": 0 }
+                                                     // the tab's background-shell roster changed — REPLACE the whole
+                                                     // array. Same baseline-on-connect discipline as `tasks`; [] clears.
+                                                     // Fires on a shell EXITING too, which appends nothing to the
+                                                     // transcript. Claude + local tabs only.
                                                      // the tab's Claude task board changed — REPLACE the whole board (they're
                                                      // tiny; no per-task diffing). Emitted per board on WS connect (baseline),
                                                      // then only on change; [] when the board empties/disappears. Claude only.
@@ -374,6 +380,11 @@ interface ChatDetail extends Chat {
                             // completion, NOT an error or a dropped session — and do NOT design
                             // an "all tasks complete" state; it is unreachable in practice, not
                             // merely brief. A session that finished its work reports no board.
+  shells?: AgentShell[];    // background shells (`Bash run_in_background` — the TUI's /bashes
+                            // list), present only when non-empty. Claude + LOCAL tabs only: an
+                            // SSH tab's shells are the REMOTE host's processes, so their liveness
+                            // can't be confirmed and Stop couldn't signal them — those tabs report
+                            // nothing rather than a roster that can't be stood behind.
   pendingPrompt?: {         // present iff state==='permission' or a question is open
     prompt_id: string;      // opaque, minted when the agent opens this prompt; echoed in /respond
     kind: 'permission' | 'question';
@@ -389,6 +400,25 @@ interface ChatDetail extends Chat {
 // `message{role:'user'}` WS echo for that turn (mints at accept-time, reused for both) —
 // lets the app reconcile an optimistic local bubble against the echo.
 interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string; ts: number; }
+
+// One background shell. Reconstructed from the transcript (identity + observed outcomes) and then
+// SETTLED AGAINST THE OS PROCESS TABLE, because the transcript alone is badly stale: nothing is
+// appended when a background process exits, so its "running" only ever means "was running when
+// last polled". Measured on a real 37-shell session: the transcript claimed 31 running; exactly 1
+// process existed. So `status:"running"` here means a live process was CONFIRMED — it is the only
+// status that offers a Stop button, and it never lies about a dead process.
+interface AgentShell {
+  id: string;               // Claude Code's shell id, e.g. "bkbod6zxj"
+  command: string;          // the command line as the agent wrote it
+  description?: string;     // the agent's own short label, when it gave one
+  status: 'running' | 'completed' | 'failed' | 'killed';
+  exitCode?: number;        // ABSENT on a terminal status means the outcome was never observed —
+                            //   the shell ended without a final poll, so no code was recorded.
+                            //   Never guessed. Render such rows as "ended", NOT as succeeded.
+  startedAt: number;        // unix ms
+  endedAt?: number;         // absent while running, and when the end went unobserved
+  tail?: string;            // last captured output line — a progress hint, not the log
+}
 
 // One entry of a Claude session's task board (~/.claude/tasks/<sid>/<id>.json passed through
 // verbatim — unknown future fields flow to the app unchanged; render what you know).

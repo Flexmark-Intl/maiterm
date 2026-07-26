@@ -34,6 +34,7 @@ use crate::state::workspace::TabType;
 use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
 pub(crate) mod mirror;
+pub(crate) mod shells;
 pub(crate) mod tasks;
 pub(crate) mod transcript;
 
@@ -281,6 +282,10 @@ fn build_router(api: ApiState) -> Router {
         )
         .route("/mailink/v1/chats/{tab_id}/respond", post(post_respond))
         .route("/mailink/v1/chats/{tab_id}/interrupt", post(post_interrupt))
+        .route(
+            "/mailink/v1/chats/{tab_id}/shells/{shell_id}/stop",
+            post(post_shell_stop),
+        )
         .route("/mailink/v1/chats/{tab_id}/rename", post(post_rename))
         .route(
             "/mailink/v1/chats/{tab_id}/resume-workspace",
@@ -657,6 +662,85 @@ async fn post_interrupt(
         let _ = crate::pty::write_pty(&s.app, &pty, COMPOSER_CLEAR);
     }
     Ok(Json(json!({ "ok": true, "settled": settled })))
+}
+
+/// A tab's background-shell roster (mailink/shells.rs), or empty when it has none / can't be
+/// determined. Claude + LOCAL only: an SSH tab's background shells are the REMOTE host's
+/// processes, invisible to the local process table, so their liveness can't be confirmed and a
+/// Stop button couldn't signal them — a roster we can't stand behind is worse than none, so SSH
+/// tabs report nothing (the phone renders no strip).
+fn shell_roster(app: &AppState, tab_id: &str) -> Vec<shells::AgentShell> {
+    let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) else {
+        return Vec::new();
+    };
+    let Some(pty) = pty_for_tab(app, tab_id) else { return Vec::new() };
+    if tab_is_ssh(app, tab_id) {
+        return Vec::new();
+    }
+    shells::roster(&sid, crate::pty::manager::pty_child_pid_of(app, &pty)).unwrap_or_default()
+}
+
+/// Whether the tab rides a live SSH/mosh session (its agent runs on another host).
+fn tab_is_ssh(app: &AppState, tab_id: &str) -> bool {
+    let tunnels = app.ssh_tunnels.read();
+    tunnels.values().any(|t| t.tab_ids.contains(tab_id))
+}
+
+/// POST /chats/{tabId}/shells/{shellId}/stop — terminate one background shell.
+///
+/// IDEMPOTENT by design: a shell that has already exited (or was never live) returns `ok:true`
+/// rather than 404. The phone's roster is up to ~2 s stale, so "stop something that just finished"
+/// is the normal race, not a client error — and reporting failure would only invite a retry loop.
+/// Signals the shell's own pid (SIGTERM, then SIGKILL if it lingers): a real signal to the process
+/// rather than driving the TUI's `/bashes` picker blind. 404 only for an unknown/undesignated tab.
+async fn post_shell_stop(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((tab_id, shell_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let target = shell_roster(&s.app, &tab_id)
+        .into_iter()
+        .find(|sh| sh.id == shell_id)
+        .and_then(|sh| sh.pid);
+    let Some(pid) = target else {
+        // Unknown id, or known but no longer running — nothing to signal, and that IS the
+        // requested end state.
+        return Ok(Json(json!({ "ok": true, "stopped": false })));
+    };
+    let stopped = kill_pid(pid).await;
+    Ok(Json(json!({ "ok": true, "stopped": stopped })))
+}
+
+/// SIGTERM a pid, escalating to SIGKILL if it's still there shortly after. Returns whether the
+/// process is gone by the end. Unix-only signalling; a no-op elsewhere (background shells are a
+/// unix construct here).
+async fn kill_pid(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let alive = || {
+            // signal 0 probes existence without delivering anything.
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        };
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        for _ in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if !alive() {
+                return true;
+            }
+        }
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        !alive()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Ctrl+L — Claude Code's `chat:clearInput` binding (its Chat keymap is
@@ -1079,6 +1163,8 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // board actually changed. Baseline emission on connect is deliberate: the phone gets every
     // existing board without opening threads, and a reconnect catches changes it slept through.
     let mut task_keys: HashMap<String, u64> = HashMap::new();
+    // Same discipline for the background-shell roster.
+    let mut shell_keys: HashMap<String, u64> = HashMap::new();
 
     // initial snapshot: one chat_state per chat
     for c in build_chats(&s.app) {
@@ -1105,7 +1191,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     loop {
         tokio::select! {
             _ = msg_ticker.tick() => {
-                if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys).await.is_err() {
+                if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys).await.is_err() {
                     return;
                 }
             }
@@ -1263,6 +1349,7 @@ async fn stream_new_messages(
     seen: &mut HashMap<String, std::collections::HashSet<String>>,
     mtimes: &mut HashMap<String, u64>,
     task_keys: &mut HashMap<String, u64>,
+    shell_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
     for t in designated_tabs(app) {
         let Some((rt, sid)) = resolved_session_for_tab(app, &t.tab_id) else { continue };
@@ -1272,6 +1359,9 @@ async fn stream_new_messages(
         // ENOENT stat for the no-board majority). Claude only — no board elsewhere.
         if rt == AgentRuntime::Claude {
             stream_tasks_if_changed(socket, &t.tab_id, &sid, task_keys).await?;
+            // Background shells: also outside the transcript-mtime gate — a shell EXITING appends
+            // nothing to the transcript, and that transition is exactly what the strip must show.
+            stream_shells_if_changed(socket, app, &t.tab_id, shell_keys).await?;
         }
         // mtime gate: an unchanged transcript means no new turns, so skip the tail re-parse.
         if let Some(mt) = transcript::mtime_for(rt, &sid) {
@@ -1311,6 +1401,50 @@ async fn stream_new_messages(
         *entry = window;
     }
     Ok(())
+}
+
+/// Emit a `shells` WS frame when the tab's background-shell roster changed. Same full-array
+/// replace + baseline-on-connect discipline as `tasks`; `[]` clears the strip. The change key
+/// folds in each shell's status and pid, so a shell EXITING (which appends nothing to the
+/// transcript) still fires — that transition is the whole point of the strip.
+async fn stream_shells_if_changed(
+    socket: &mut WebSocket,
+    app: &AppState,
+    tab_id: &str,
+    shell_keys: &mut HashMap<String, u64>,
+) -> Result<(), ()> {
+    use std::hash::{Hash, Hasher};
+    let roster = shell_roster(app, tab_id);
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for sh in &roster {
+            sh.id.hash(&mut h);
+            sh.status.as_str().hash(&mut h);
+            sh.pid.hash(&mut h);
+            sh.tail.hash(&mut h);
+        }
+        roster.len().hash(&mut h);
+        h.finish()
+    };
+    if roster.is_empty() {
+        // Nothing to report: emit one clearing frame only if this tab previously had a roster.
+        if shell_keys.remove(tab_id).is_none() {
+            return Ok(());
+        }
+        let ev = json!({ "type": "shells", "tabId": tab_id, "shells": [], "ts": now_ms() });
+        return socket.send(Message::Text(ev.to_string().into())).await.map_err(|_| ());
+    }
+    if shell_keys.get(tab_id) == Some(&key) {
+        return Ok(());
+    }
+    shell_keys.insert(tab_id.to_string(), key);
+    let ev = json!({
+        "type": "shells",
+        "tabId": tab_id,
+        "shells": roster.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
+        "ts": now_ms(),
+    });
+    socket.send(Message::Text(ev.to_string().into())).await.map_err(|_| ())
 }
 
 /// Emit a `tasks` WS frame when the tab's Claude task board changed (mailink/tasks.rs).
@@ -2680,6 +2814,15 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         }
     }
 
+    // Background shells (`Bash run_in_background` — the TUI's /bashes list), with liveness settled
+    // against the process table so no Stop button is offered for a dead process. mailink/shells.rs.
+    let ph = std::time::Instant::now();
+    let shells = shell_roster(app, tab_id);
+    if !shells.is_empty() {
+        detail["shells"] = json!(shells.iter().map(|s| s.to_json()).collect::<Vec<_>>());
+    }
+    let ms_shells = ph.elapsed().as_millis(); // transcript scan + cached ps sweep
+
     // pendingPrompt: the agent's native human ask (mailink-protocol §12). thread_id == tab_id
     // for a solo thread.
     //
@@ -2743,7 +2886,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         // A slow open is near-always lock-wait, not CPU: whichever phase dominates names the
         // contended lock (tabs=app_data, scrollback=scrollback_db) vs real work (transcript/meta).
         log::warn!(
-            "mailink slow chat_detail tab={} total={}ms [tabs(app_data)={} states(sessions)={} scrollback(db)={} activity={} transcript={} meta={}]",
+            "mailink slow chat_detail tab={} total={}ms [tabs(app_data)={} states(sessions)={} scrollback(db)={} activity={} transcript={} meta={} shells={}]",
             &tab_id[..tab_id.len().min(8)],
             ms_total,
             ms_tabs,
@@ -2752,6 +2895,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             ms_activity,
             ms_transcript,
             ms_meta,
+            ms_shells,
         );
     }
 
