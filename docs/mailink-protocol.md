@@ -976,6 +976,15 @@ export interface Turn {
   };
   text: string;                 // source markdown (for kind:"terminal_snapshot", raw newline-delimited grid text, NOT markdown)
   ts: number;
+  queuedAt?: number;            // role:'user' only. Present when the message was typed while the
+                                //   agent was MID-TURN: Claude Code queues those and writes no
+                                //   `user` turn for them at all — only a `queued_command`
+                                //   attachment, at DRAIN time, stamped with the ENQUEUE time.
+                                //   `ts` is therefore the drain position (so the message sorts
+                                //   after the work it waited on, not above it — otherwise it
+                                //   reads as answered before it was sent) and `queuedAt` carries
+                                //   the true send time. A client can show "sent 15:25, answered
+                                //   15:26"; ignoring it is fine.
 }
 
 // kind:"terminal_snapshot" — emitted for tabs with no locatable JSONL (a pruned local session,

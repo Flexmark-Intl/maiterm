@@ -349,6 +349,16 @@ fn real_turn_ts(v: &Value) -> Option<i64> {
         // Any assistant turn (text, tool_use, even thinking-only) exists only from real work — a
         // resume never runs the model, so it never appends one.
         Some("assistant") => ts,
+        // A human message that was QUEUED while the agent was busy — real human activity, and the
+        // only record of it (Claude Code writes no `user` turn for these). Same human-origin gate
+        // as push_line_messages, so recency tracks exactly what the phone renders.
+        Some("attachment") => {
+            let a = v.get("attachment")?;
+            let human = a.get("origin").and_then(|o| o.get("kind")).and_then(|k| k.as_str())
+                == Some("human");
+            let queued = a.get("type").and_then(|t| t.as_str()) == Some("queued_command");
+            (human && queued).then_some(ts).flatten()
+        }
         // A genuine human message is plain-string content that isn't the compaction summary, a
         // tool_result (list content), or injected scaffolding (<system-reminder>, Caveat:, …).
         Some("user") => {
@@ -814,6 +824,41 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
                 }
                 _ => {}
             }
+        }
+        // A message typed while the agent was MID-TURN. Claude Code queues it and never writes a
+        // `user` turn for it — only a pair of `queue-operation` lines (enqueue/remove) and this
+        // `attachment` at consumption time. Without this arm the human's message is absent from
+        // the transcript entirely: the thread shows the agent's reply with nothing it replied to.
+        //
+        // `origin.kind == "human"` is load-bearing, not belt-and-braces: `queued_command` is also
+        // used for machine traffic (a `task-notification` is queued the same way), and rendering
+        // one of those as something the user said would be worse than the gap it fixes.
+        "attachment" => {
+            let a = v.get("attachment");
+            let is_human = a.and_then(|a| a.get("origin")).and_then(|o| o.get("kind")).and_then(|k| k.as_str())
+                == Some("human");
+            let is_queued = a.and_then(|a| a.get("type")).and_then(|t| t.as_str()) == Some("queued_command");
+            let Some(text) = a.and_then(|a| a.get("prompt")).and_then(|p| p.as_str()) else { return };
+            if !(is_human && is_queued) || text.trim().is_empty() || is_system_noise(text) {
+                return;
+            }
+            // ORDERING: the attachment's own timestamp is when the message was ENQUEUED, but the
+            // line is written when the queue is DRAINED — after the tool calls that ran while it
+            // waited. Sorting by the enqueue time would float the message above work that
+            // actually preceded it, so it reads as answered before it was sent. Order by file
+            // position instead: one tick past the last turn emitted so far, which lands it
+            // immediately before the reply it triggered. The true send time is preserved
+            // separately in `queuedAt` for clients that want to show it.
+            let after = out
+                .last()
+                .and_then(|m| m.get("ts"))
+                .and_then(|t| t.as_i64())
+                .map_or(ts, |prev| prev.saturating_add(1).max(ts));
+            let mut m = msg(uuid.to_string(), "user", text, after);
+            if ts > 0 {
+                m["queuedAt"] = json!(ts);
+            }
+            out.push(m);
         }
         // A compaction boundary → one `system` turn so maiLink can draw a divider showing how much
         // context was summarized away (pre → post tokens). Its fields are top-level on the entry
@@ -1697,6 +1742,41 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "user");
         assert_eq!(out[0]["text"], "Please fix the bug.");
+    }
+
+    #[test]
+    fn queued_human_messages_surface_in_order_after_the_work_they_waited_on() {
+        // Verbatim shape from a live session: a message typed mid-turn is written ONLY as this
+        // attachment, at drain time, carrying the ENQUEUE timestamp — which is older than the
+        // tool work that ran while it waited.
+        let queued = |prompt: &str, origin: Value, kind: &str| {
+            json!({ "type": "attachment", "uuid": "att1", "timestamp": "2026-07-26T15:25:16.208Z",
+                "attachment": { "type": kind, "prompt": prompt, "commandMode": "prompt",
+                    "origin": origin, "timestamp": "2026-07-26T15:25:16.208Z" } })
+        };
+        let tool = json!({ "type": "assistant", "uuid": "a1", "timestamp": "2026-07-26T15:25:19.769Z",
+            "message": { "content": [ { "type": "tool_use", "name": "Edit", "input": { "file_path": "x.rs" } } ] } });
+
+        let mut out = Vec::new();
+        push_line_messages(&tool, ToolRender::Marker, &mut out);
+        push_line_messages(&queued("build should not restart", json!({"kind": "human"}), "queued_command"), ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 2, "the queued human message must appear at all");
+        assert_eq!(out[1]["role"], "user");
+        assert_eq!(out[1]["text"], "build should not restart");
+        // Sorted AFTER the tool work despite its older enqueue stamp, so the thread doesn't read
+        // as though the message was answered before it was sent…
+        assert!(
+            out[1]["ts"].as_i64().unwrap() > out[0]["ts"].as_i64().unwrap(),
+            "queued message must sort after the work it waited on"
+        );
+        // …while the true send time survives separately.
+        assert_eq!(out[1]["queuedAt"], json!(rfc3339_to_ms("2026-07-26T15:25:16.208Z")));
+
+        // Machine-queued traffic uses the SAME attachment type — it must not render as a human turn.
+        let mut out2 = Vec::new();
+        push_line_messages(&queued("<task-notification>…", Value::Null, "queued_command"), ToolRender::Marker, &mut out2);
+        push_line_messages(&queued("some delta", json!({"kind": "human"}), "deferred_tools_delta"), ToolRender::Marker, &mut out2);
+        assert!(out2.is_empty(), "non-human / non-queued_command attachments stay out");
     }
 
     #[test]
