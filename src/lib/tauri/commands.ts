@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { AgentRuntime } from '$lib/agents/types';
 import type { AgentBridge, AppData, BotChannel, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -380,6 +381,13 @@ export async function setTabComposerDraft(workspaceId: string, paneId: string, t
 
 export async function setTabMeshPurpose(workspaceId: string, paneId: string, tabId: string, purpose: string | null): Promise<void> {
   return invoke('set_tab_mesh_purpose', { workspaceId, paneId, tabId, purpose });
+}
+
+/** Declare a tab's agent runtime before any agent has registered — see the Rust command. Used
+ *  when we deliberately launch an agent into a fresh tab, so it's maiLink-visible immediately
+ *  instead of only once initSession lands (and visibly dormant if the launch fails). */
+export async function setTabRuntime(workspaceId: string, paneId: string, tabId: string, runtime: AgentRuntime): Promise<void> {
+  return invoke('set_tab_runtime', { workspaceId, paneId, tabId, runtime });
 }
 
 export async function reorderTabs(workspaceId: string, paneId: string, tabIds: string[]): Promise<void> {

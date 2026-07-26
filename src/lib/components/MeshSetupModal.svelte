@@ -187,7 +187,7 @@
   }
   function wake(r: Row) {
     pending[r.tabId] = { started: Date.now(), sentAt: Date.now() };
-    window.dispatchEvent(new CustomEvent('mesh-activate-tab', { detail: r.tabId }));
+    window.dispatchEvent(new CustomEvent('activate-tab', { detail: r.tabId }));
   }
   // Dropped = live shell, agent gone (auto-resume failed/ended). Re-run the tab's auto-resume
   // in its live PTY (same path as the tab context-menu "replay auto-resume" — handles SSH, cwd,

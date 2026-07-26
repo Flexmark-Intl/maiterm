@@ -1065,6 +1065,37 @@ pub fn set_tab_mesh_purpose(
     Ok(())
 }
 
+/// Declare a tab's agent runtime up front, before any agent has registered.
+///
+/// Normally `runtime` is written by `initSession` once the agent is up. That's too late for a tab
+/// we are DELIBERATELY launching an agent into (maiLink's "new conversation"): until it's set the
+/// tab isn't maiLink-designated, so the id the phone was just handed 404s — and if the launch
+/// never lands, it 404s forever and the thread is permanently unreadable. Claiming the runtime we
+/// are about to start makes the tab visible immediately, and visibly dormant if the launch fails
+/// rather than invisible.
+#[tauri::command]
+pub fn set_tab_runtime(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    pane_id: String,
+    tab_id: String,
+    runtime: crate::state::AgentRuntime,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    if let Some(workspace) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
+        if let Some(pane) = workspace.panes.iter_mut().find(|p| p.id == pane_id) {
+            if let Some(tab) = pane.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.runtime = Some(runtime);
+            }
+        }
+    }
+    save_state(&app_data)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn reorder_tabs(
     window: tauri::Window,

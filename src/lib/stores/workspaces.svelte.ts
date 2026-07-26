@@ -2099,6 +2099,10 @@ function createWorkspacesStore() {
         launchCommand(runtime),
         false,
       );
+      // Claim the runtime now rather than waiting for the new agent's initSession to write it.
+      // maiLink designates tabs by `runtime`, so without this the id we hand the phone isn't
+      // addressable yet — and if the launch never lands it never becomes addressable at all.
+      await commands.setTabRuntime(workspaceId, paneId, newTab.id, runtime);
 
       const data = await commands.getWindowData();
       const updatedWs = data.workspaces.find(w => w.id === workspaceId);
@@ -2106,6 +2110,12 @@ function createWorkspacesStore() {
         const idx = workspaces.findIndex(w => w.id === workspaceId);
         if (idx >= 0) workspaces[idx] = updatedWs;
       }
+      // A tab only spawns its PTY when its TerminalPane mounts, and that only happens for a
+      // pane's ACTIVE tab. This one is created in the background — deliberately, so a remote
+      // action doesn't yank the desktop's view out from under whoever is using it — so nothing
+      // would ever mount it: the record would sit there with no terminal attached, forever.
+      // Activate it explicitly (mounts + spawns, stays invisible) rather than stealing focus.
+      window.dispatchEvent(new CustomEvent('activate-tab', { detail: newTab.id }));
       return newTab.id;
     },
 

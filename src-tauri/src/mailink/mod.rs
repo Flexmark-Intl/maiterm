@@ -837,6 +837,15 @@ async fn post_interrupt(
     // be lost — but today it would instead be merged into the next phone message and submitted,
     // which is worse.) Desktop-side ESC is deliberately untouched: the operator SEES the restored
     // text and can edit it; only a blind remote send has the merge problem.
+    // Logged because `settled` is the whole gate, and when a merge is reported afterwards this
+    // line is what says whether the gate was even reached. `registered` distinguishes the two
+    // ways it can read false: a genuinely idle tab, versus a tab with no tracked session at all
+    // (per-turn hooks only mutate an existing row, so an unregistered tab can never go Active and
+    // can never settle). Without this, diagnosing a merge means guessing between them.
+    log::info!(
+        "[maiLink] interrupt {tab_id}: settled={settled} registered={}",
+        tab_registered(&s.app, &tab_id)
+    );
     if settled {
         // Let the TUI process the cancel (and perform the restore) before the clear lands.
         tokio::time::sleep(std::time::Duration::from_millis(COMPOSER_CLEAR_DELAY_MS)).await;
@@ -899,10 +908,19 @@ async fn post_new_conversation(
     // Spawning involves a round trip through the store and a PTY create; poll briefly rather than
     // returning an id the phone would 404 on. Failure here is a timeout, not an error state — the
     // tab may still appear a moment later and the roster will pick it up via chats_changed.
+    //
+    // Existing in state is NOT the readiness condition: a tab record with no runtime isn't
+    // designated, so GET /chats/{id} 404s on it. Wait for designated — the same predicate the
+    // phone's first read will apply — so the id we hand back is addressable when it arrives.
     for _ in 0..NEW_TAB_WAIT_TICKS {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Some(new_id) = sibling_tab_ids(&s.app, &tab_id).into_iter().find(|id| !before.contains(id)) {
-            return Ok(Json(json!({ "ok": true, "tabId": new_id })));
+        let new_id = sibling_tab_ids(&s.app, &tab_id)
+            .into_iter()
+            .find(|id| !before.contains(id));
+        if let Some(new_id) = new_id {
+            if is_designated(&s.app, &new_id) {
+                return Ok(Json(json!({ "ok": true, "tabId": new_id })));
+            }
         }
     }
     log::warn!("[maiLink] new conversation from {tab_id}: no new tab appeared within the wait window");

@@ -369,8 +369,10 @@
     }
     window.addEventListener('deactivate-tabs', handleDeactivateTabs);
 
-    // Wake a suspended tab (mesh setup "Wake all"): activate it so its TerminalPane mounts and
-    // its auto-resume fires; clear any pending-resume gate on its pane so it doesn't sit waiting.
+    // Mount a tab that isn't its pane's active tab, so its TerminalPane spawns a PTY and its
+    // auto-resume fires — without switching what the desktop is showing. Two callers: mesh setup's
+    // "Wake all", and a maiLink-created new conversation (which lands in the background by design).
+    // Also clears any pending-resume gate on its pane so it doesn't sit waiting.
     function handleActivateTab(e: Event) {
       const tabId = (e as CustomEvent<string>).detail;
       if (!tabId) return;
@@ -381,7 +383,7 @@
       }
       activatedTabIds.add(tabId);
     }
-    window.addEventListener('mesh-activate-tab', handleActivateTab);
+    window.addEventListener('activate-tab', handleActivateTab);
 
     // Workspace resume: bring back the tabs that were live when it was suspended,
     // serially like session restore. The gate is raised synchronously — the store
@@ -397,7 +399,7 @@
 
     return () => {
       window.removeEventListener('deactivate-tabs', handleDeactivateTabs);
-      window.removeEventListener('mesh-activate-tab', handleActivateTab);
+      window.removeEventListener('activate-tab', handleActivateTab);
       window.removeEventListener('workspace-resume-tabs', handleWorkspaceResumeTabs);
     };
   });
