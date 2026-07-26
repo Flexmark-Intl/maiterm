@@ -5,6 +5,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { countedListen as listen } from '$lib/utils/listenCounter';
   import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
+  import { wakeTab, type WakeAction } from '$lib/agents/wake';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import Toast from '$lib/components/Toast.svelte';
@@ -290,6 +291,15 @@
     listen<{ tabId: string }>('mailink-new-conversation', (event) => {
       workspacesStore.newConversationFrom(event.payload.tabId);
     }).then(unlisten => { unlistenNewConversation = unlisten; });
+
+    // maiLink is waking one unregistered tab — either explicitly (its Initialize button) or
+    // implicitly, because a message is about to be delivered to it. The backend already probed
+    // the process tree and decided the remedy; we only execute it. wakeTab no-ops in windows
+    // that don't own the tab, and while a wake for it is already in flight.
+    let unlistenWakeTab: (() => void) | undefined;
+    listen<{ tabId: string; action: WakeAction; budgetMs: number }>('mailink-wake-tab', (event) => {
+      void wakeTab(event.payload.tabId, event.payload.action, event.payload.budgetMs);
+    }).then(unlisten => { unlistenWakeTab = unlisten; });
 
     let unlistenCloseTab: (() => void) | undefined;
     listen<{ tabId: string }>('mailink-close-tab', (event) => {
@@ -966,6 +976,7 @@
       unlistenMeshInit?.();
       unlistenArchiveTab?.();
       unlistenNewConversation?.();
+      unlistenWakeTab?.();
       unlistenCloseTab?.();
       unlistenRestoreTab?.();
       unlistenExportState?.();

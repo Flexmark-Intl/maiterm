@@ -295,7 +295,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `GET  /chats` | List maiLink-native chats + state | → `Chat[]` (see §4.3) |
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
 | `GET  /chats/{tabId}/context?lines=N` | Distilled plain-text context | → `{text, truncated}` |
-| `POST /chats/{tabId}/message` | Send a message / proactive command | `{text, submit?:true}` → `{status:"queued"\|"delivered", msg_id}` |
+| `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"unreachable", reason, detail}` |
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
@@ -303,6 +303,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/new` | Start a NEW conversation from this one (light clone: SSH host + cwd, fresh agent session) | `{}` → `{ok:true, tabId}`; `{ok:false, reason:"timeout"}` if the tab didn't appear in time |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
+| `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
 | `GET  /chats/archived` | Archived (recoverable) tabs across all workspaces | → `ArchivedChat[]` |
 | `POST /chats/{tabId}/archive` | Archive a live tab (RECOVERABLE) | `{}` → `{ok}` |
@@ -557,10 +558,9 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
 - **Resume workspace** (`POST .../resume-workspace`): wake the *suspended* workspace that owns
   this tab. Tab-scoped so the phone never has to model workspace ids — the server resolves
   tab→workspace. A **suspended** workspace has its PTYs killed and tabs restore-on-demand, so a
-  per-tab Initialize (`/message` with `/maiterm init`) can't work — it returns `409` (no live PTY,
-  same 409 a plain-dormant tab returns; the two are told apart by the `workspaceSuspended` field,
-  not the error). The UI should therefore key off `workspaceSuspended`: when `true`, show
-  **Resume workspace** instead of Initialize. This endpoint returns `{ ok, resumed }` —
+  per-tab Initialize can't work — `/wake` returns `reason:"no-pty"` and `/message` returns `409`.
+  The UI should therefore key off `workspaceSuspended`: when `true`, show **Resume workspace**
+  instead of Initialize. This endpoint returns `{ ok, resumed }` —
   `resumed:false` (200) if the workspace was already awake (proceed to normal per-tab Initialize),
   `resumed:true` if a resume was kicked off. Suspend/resume is a frontend operation (PTY respawn +
   agent auto-resume live in the desktop app), so the backend signals the owning window to run it;
@@ -568,6 +568,46 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   resume the tab is live on its own — no separate per-tab Initialize needed. The suspended→awake
   transition reaches every phone as a `chats_changed` (≤1.5 s) — re-GET `/chats` and the tabs now
   report their live state.
+- **Wake / per-tab Initialize** (`POST .../wake`): the action to offer whenever a chat reports
+  `registered:false`. It is also applied AUTOMATICALLY, with identical rules, ahead of every
+  `POST .../message` — so a phone that just sends never has to think about registration.
+
+  **Never send `/maiterm init` as a message to do this.** An unregistered tab is not merely
+  untracked: if its agent has *exited*, the PTY is a bash prompt, and anything injected there is
+  run as a shell command. The recovery affordance would be executing shell commands in the tab it
+  was meant to recover. The remedy depends on whether the agent PROCESS is alive, which the phone
+  can't see and shouldn't have to — so the desktop probes the process tree and picks:
+
+  | tab state | remedy | `woke` |
+  |---|---|---|
+  | registered | none needed | `null` |
+  | unregistered, agent alive (or a live ssh hop) | types `/maiterm init`, dialog-safe | `"init"` |
+  | unregistered, agent gone, tab has auto-resume | replays the auto-resume | `"resume"` |
+
+  Getting this wrong is destructive in both directions — a resume replay typed into a running
+  agent injects junk and nests ssh — so a live agent always takes `init`, even when a resume
+  command is also stored.
+
+  **A registered tab is never touched**, which is the point: it may be mid-turn, and typing into
+  a running turn is the one thing guaranteed to corrupt it.
+
+  **It's synchronous, with a 45 s budget** (`WAKE_BUDGET_MS`). A local `claude --resume` is
+  usually up inside 10 s; an ssh hop plus a remote agent boot can take 20–30 s. Design the UI for
+  a long hold rather than a spinner that reads as hung. When the budget expires the wake keeps
+  going, so a retry a few seconds later normally succeeds immediately — word `wake-timeout` as
+  "still starting up, try again", not as a failure.
+
+  Failures are `200` with a machine-readable `reason` plus a human `detail` (same shape as
+  `unsupported` for images — never a "do it on the desktop" deferral):
+  - `no-pty` — no live terminal. A **suspended workspace** lands here: resume it first.
+  - `no-agent` — the agent exited and there is no auto-resume to restart it. On `/message` this
+    means the text was NOT delivered, which is the fix: it would have gone to bash.
+  - `wake-timeout` — the remedy was applied but nothing came up in time. Also not delivered.
+  - `already-registered` — `/wake` only; nothing needed doing.
+
+  If registration hasn't landed by the end of the budget but the agent process *is* up, a
+  `/message` is delivered anyway (`woke` set) rather than lost — being unregistered was never a
+  reason a paste couldn't land, and a runtime that doesn't register has no other signal.
 - **Mesh Initialize-all** (`POST .../mesh-init`): bring the *Mesh Workspace* that owns this tab
   back to ready, typically after a maiTerm restart. Tab-scoped like resume-workspace (server
   resolves tab→workspace; the `mesh` field on `Chat` says when to offer it). Post-restart, mesh
@@ -582,8 +622,7 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   `initiated:false` with `reason:"not-mesh"` (workspace isn't a mesh) or
   `reason:"workspace-suspended"` (resume the workspace first — mesh-init needs live PTYs);
   `initiated:true` with `workspaceId` when the pass was kicked off. Per-member Initialize from
-  the thread view stays what it is today — `/message` with `/maiterm init` — which is exactly
-  what the group action types for running members.
+  the thread view is `POST .../wake` (above) — the same triage, scoped to one tab.
 - **Archive / Close / Restore** (tab lifecycle): two DISTINCT real operations, both reversible-ness
   labelled honestly:
   - **Archive** (`POST .../archive`) — RECOVERABLE. The tab leaves the workspace's live tabs into

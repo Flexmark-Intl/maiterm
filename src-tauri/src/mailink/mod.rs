@@ -286,6 +286,7 @@ fn build_router(api: ApiState) -> Router {
             "/mailink/v1/chats/{tab_id}/shells/{shell_id}/stop",
             post(post_shell_stop),
         )
+        .route("/mailink/v1/chats/{tab_id}/wake", post(post_wake))
         .route("/mailink/v1/chats/{tab_id}/new", post(post_new_conversation))
         .route("/mailink/v1/chats/{tab_id}/rename", post(post_rename))
         .route(
@@ -450,6 +451,20 @@ async fn post_message(
     }
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
 
+    // Auto-wake. An unregistered tab isn't merely untracked — if its agent EXITED, the PTY is a
+    // bash prompt and injecting the message would run it as a shell command. So bring the tab
+    // back to a state where typing is safe before typing (no-op for a registered tab, which is
+    // the whole point: never touch a live, possibly-mid-turn agent).
+    let woke = match wake_tab(&s, &tab_id).await {
+        Wake::AlreadyRegistered => None,
+        Wake::Woke(action) => Some(action),
+        Wake::Unreachable(reason) => {
+            return Ok(Json(
+                json!({ "status": "unreachable", "reason": reason, "detail": wake_detail(reason) }),
+            ))
+        }
+    };
+
     // Image attach: Claude only. Gate BEFORE touching the PTY and return a machine-readable
     // `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app notice — never a
     // "do it on the desktop" deferral. Text-only messages are unchanged for all runtimes.
@@ -498,13 +513,178 @@ async fn post_message(
         inject_image_paths_and_text(&s.app, &pty, &paths, &body)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()) })));
+        return Ok(Json(
+            json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }),
+        ));
     }
 
     inject_text(&s.app, &pty, &body.text, body.submit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()) })))
+    Ok(Json(
+        json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }),
+    ))
+}
+
+/// How long a wake holds its caller. A local `claude --resume` is usually up inside 10 s; an
+/// ssh hop plus a remote agent boot can take 20–30 s. Past this we stop waiting and say so —
+/// the wake itself keeps going, so a retry a few seconds later normally delivers instantly.
+const WAKE_BUDGET_MS: u64 = 45_000;
+/// Registration poll interval. Cheap — an in-memory `agent_sessions` scan, no process probe.
+const WAKE_POLL_MS: u64 = 400;
+
+/// Outcome of a wake attempt (see `wake_tab`).
+enum Wake {
+    /// A tracked session already exists — nothing was done, nothing needed doing.
+    AlreadyRegistered,
+    /// The tab is now reachable. Carries the remedy that was applied, for the wire.
+    Woke(&'static str),
+    /// The tab could not be made safe to type into. Carries the wire `reason`.
+    Unreachable(&'static str),
+}
+
+/// Human-readable companion to an `unreachable` reason. The phone renders these verbatim, so
+/// they must read as a state the user can act on — never as an instruction to go to the desktop.
+fn wake_detail(reason: &str) -> &'static str {
+    match reason {
+        "no-pty" => "This tab has no live terminal — resume its workspace first.",
+        "no-agent" => "This tab's agent has exited and it has no resume command to restart it.",
+        _ => "The agent is still starting up — try again in a moment.",
+    }
+}
+
+/// Which remedy an unregistered tab needs (unit-tested; `wake_tab` wires the real probes).
+///
+/// A live agent ALWAYS takes `init`, even when the tab also has a resume command — replaying
+/// ssh+resume into a running agent injects junk and nests ssh, and no amount of "it also has a
+/// resume stored" makes that the right move. Only a tab whose agent is gone gets `resume`.
+fn wake_remedy(agent_up: bool, has_resume: bool) -> Result<&'static str, &'static str> {
+    if agent_up {
+        Ok("init")
+    } else if has_resume {
+        Ok("resume")
+    } else {
+        Err("no-agent")
+    }
+}
+
+/// Bring an unregistered tab back to a state where a remote message can land in its agent.
+///
+/// The remedy depends on whether the agent PROCESS is still alive, and getting it wrong is
+/// destructive both ways — an ssh+resume replay typed into a running agent injects junk and
+/// nests ssh, `/maiterm init` typed at a bare shell just runs as a command — so the choice is
+/// made here, from a process-tree probe, and the frontend only executes it (`mailink-wake-tab`
+/// → `wakeTab`, which owns the PTY and the dialog-safe delivery).
+///
+/// Four rules, in order:
+///  1. A registered tab is never touched. It may be mid-turn, and typing into a running turn is
+///     the one thing guaranteed to corrupt it. This is exactly the `registered:false` condition
+///     the phone already renders.
+///  2. No live PTY ⇒ unreachable. A suspended workspace has to be resumed first; there is no
+///     terminal to type into.
+///  3. Agent gone with no auto-resume ⇒ unreachable. There is nothing to restart, and typing
+///     into the shell is the bug we're here to prevent.
+///  4. Past the budget, fall back to the process probe. Registration is the goal, but delivery
+///     only needs a live agent — and for a runtime that never registers, that's the only signal
+///     there is. A live agent is safe to type into whether or not it registered.
+async fn wake_tab(s: &ApiState, tab_id: &str) -> Wake {
+    if tab_registered(&s.app, tab_id) {
+        return Wake::AlreadyRegistered;
+    }
+    let Some(pty) = pty_for_tab(&s.app, tab_id) else {
+        return Wake::Unreachable("no-pty");
+    };
+    let action = match wake_remedy(
+        agent_is_up(&s.app, &pty).await,
+        tab_has_resume(&s.app, tab_id),
+    ) {
+        Ok(action) => action,
+        Err(reason) => return Wake::Unreachable(reason),
+    };
+    let Some(h) = s.app_handle.as_ref() else {
+        return Wake::Unreachable("no-pty");
+    };
+    // tab ids are app-unique — the owning window acts, every other window finds no instance.
+    // budgetMs travels with the event so the frontend's settle-wait can't outlive our wait and
+    // paste `/maiterm init` on top of the message we deliver once the budget is spent.
+    let _ = h.emit(
+        "mailink-wake-tab",
+        json!({ "tabId": tab_id, "action": action, "budgetMs": WAKE_BUDGET_MS }),
+    );
+    log::info!("[maiLink] waking tab {tab_id} via {action}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(WAKE_BUDGET_MS);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(WAKE_POLL_MS)).await;
+        if tab_registered(&s.app, tab_id) {
+            return Wake::Woke(action);
+        }
+    }
+    if agent_is_up(&s.app, &pty).await {
+        log::info!("[maiLink] tab {tab_id} woke but never registered — delivering anyway");
+        return Wake::Woke(action);
+    }
+    Wake::Unreachable("wake-timeout")
+}
+
+/// POST /chats/{tabId}/wake — the per-tab Initialize the phone offers on `registered:false`.
+/// Same machinery and same rules as the auto-wake on send, exposed on its own because
+/// `mesh-init` is workspace-scoped AND mesh-only: a lone unregistered tab had no affordance.
+/// Always 200 (`404` only if the tab isn't maiLink-available); `woke` is null when nothing was
+/// done, with `reason` saying why.
+async fn post_wake(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(match wake_tab(&s, &tab_id).await {
+        Wake::AlreadyRegistered => {
+            json!({ "ok": true, "woke": null, "reason": "already-registered" })
+        }
+        Wake::Woke(action) => json!({ "ok": true, "woke": action }),
+        Wake::Unreachable(reason) => {
+            json!({ "ok": true, "woke": null, "reason": reason, "detail": wake_detail(reason) })
+        }
+    }))
+}
+
+/// Whether a tab has a tracked agent session — the same predicate that produces the wire's
+/// `registered` flag, so "the phone shows Initialize" and "a wake will fire" can't disagree.
+fn tab_registered(app: &AppState, tab_id: &str) -> bool {
+    app.agent_sessions
+        .read()
+        .values()
+        .any(|s| s.tab_id == tab_id)
+}
+
+/// Whether the tab has something to replay when its agent is gone. Mirrors what
+/// `replayAutoResume` will actually act on — either arm alone is enough (an ssh command with no
+/// agent command still puts the tab back on the remote host).
+fn tab_has_resume(app: &AppState, tab_id: &str) -> bool {
+    let data = app.app_data.read();
+    data.windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|t| t.id == tab_id)
+        .is_some_and(|t| t.auto_resume_command.is_some() || t.auto_resume_ssh_command.is_some())
+}
+
+/// Is an agent CLI still alive in this PTY? `ssh_foreground` stands in for a REMOTE agent, whose
+/// process isn't in the local tree. Spawns `ps`, so it runs on the blocking pool and is called
+/// twice per wake at most — never on a poll path (see the mesh-liveness pinwheel).
+async fn agent_is_up(app: &Arc<AppState>, pty_id: &str) -> bool {
+    let app = app.clone();
+    let pty_id = pty_id.to_string();
+    tauri::async_runtime::spawn_blocking(move || crate::pty::get_agent_liveness(&app, &pty_id))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .is_some_and(|l| l.agent_running || l.ssh_foreground)
 }
 
 /// The persisted runtime for a tab (Claude/Codex/Gemini), or None if it isn't/was never an agent
@@ -3675,6 +3855,37 @@ mod tests {
         assert!(!live_fallback_decision(true, None, now));
         // A turn timestamp slightly in the future (clock skew) is still "recent", not underflow.
         assert!(live_fallback_decision(true, Some(now + 5000), now));
+    }
+
+    #[test]
+    fn wake_never_replays_a_resume_into_a_running_agent() {
+        // Agent alive → re-register it. Never a resume replay, even with one stored: that would
+        // type an ssh+resume line into the running agent's composer and nest ssh.
+        assert_eq!(wake_remedy(true, true), Ok("init"));
+        assert_eq!(wake_remedy(true, false), Ok("init"));
+        // Agent gone → restart it. `/maiterm init` here would just be run by the shell.
+        assert_eq!(wake_remedy(false, true), Ok("resume"));
+        // Agent gone with nothing to restart → refuse. This is the case that used to type the
+        // user's message straight into bash, which then executed it.
+        assert_eq!(wake_remedy(false, false), Err("no-agent"));
+    }
+
+    #[test]
+    fn every_unreachable_reason_explains_itself_without_deferring_to_the_desktop() {
+        let details: Vec<&str> = ["no-pty", "no-agent", "wake-timeout"]
+            .iter()
+            .map(|r| wake_detail(r))
+            .collect();
+        for d in &details {
+            assert!(!d.is_empty());
+            // maiLink's standing rule: a phone-reachable flow never tells the user to go to the
+            // desktop — that defeats the point of the app.
+            assert!(!d.to_lowercase().contains("desktop"), "{d}");
+        }
+        // Distinct reasons must not collapse to the same sentence — the fallback arm is
+        // wake-timeout's, and a new reason added without a match arm would silently inherit it.
+        let unique: std::collections::HashSet<&&str> = details.iter().collect();
+        assert_eq!(unique.len(), details.len());
     }
 
     #[test]
