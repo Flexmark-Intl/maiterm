@@ -946,6 +946,16 @@ fn is_agent_command(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Millis-since-epoch of the last byte read from this PTY, or None if it has never produced
+/// output (or isn't tracked). Lets a caller wait for a TUI repaint to finish instead of guessing
+/// a delay — the reader thread stamps this on every chunk, ahead of any frame coalescing.
+pub fn last_output_ms(state: &AppState, pty_id: &str) -> Option<u64> {
+    use std::sync::atomic::Ordering;
+    let stats = state.pty_stats.read();
+    let ms = stats.get(pty_id)?.last_read_ms.load(Ordering::Relaxed);
+    (ms > 0).then_some(ms)
+}
+
 /// Liveness signals for the mesh readiness check — see the `get_agent_liveness` command.
 #[derive(serde::Serialize, Clone)]
 pub struct AgentLiveness {

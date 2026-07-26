@@ -846,12 +846,51 @@ async fn post_interrupt(
         "[maiLink] interrupt {tab_id}: settled={settled} registered={}",
         tab_registered(&s.app, &tab_id)
     );
-    if settled {
-        // Let the TUI process the cancel (and perform the restore) before the clear lands.
-        tokio::time::sleep(std::time::Duration::from_millis(COMPOSER_CLEAR_DELAY_MS)).await;
-        let _ = crate::pty::write_pty(&s.app, &pty, COMPOSER_CLEAR);
+    let cleared = if settled {
+        clear_composer_after_cancel(&s.app, &pty).await
+    } else {
+        false
+    };
+    Ok(Json(json!({ "ok": true, "settled": settled, "composerCleared": cleared })))
+}
+
+/// Send the composer clear once the cancel's repaint has landed and finished.
+///
+/// Two phases, both bounded. First wait for the ESC to actually produce output — that repaint IS
+/// the restore, and clearing before it arrives is the bug this exists to fix. Then wait for the
+/// output to stop, so the clear isn't swallowed mid-redraw. No output at all within the cap means
+/// nothing was cancelled and nothing was restored, so we leave the composer alone rather than
+/// wipe whatever is in it.
+///
+/// Returns whether the clear was sent, which the caller reports as `composerCleared` — without it
+/// a merge report can't distinguish "we never cleared" from "we cleared and it didn't take".
+async fn clear_composer_after_cancel(app: &Arc<AppState>, pty: &str) -> bool {
+    let before = crate::pty::last_output_ms(app, pty);
+    let start = std::time::Instant::now();
+    let cap = std::time::Duration::from_millis(COMPOSER_SETTLE_CAP_MS);
+    let poll = std::time::Duration::from_millis(COMPOSER_POLL_MS);
+
+    let mut repainted = false;
+    while start.elapsed() < cap {
+        tokio::time::sleep(poll).await;
+        if crate::pty::last_output_ms(app, pty) != before {
+            repainted = true;
+            break;
+        }
     }
-    Ok(Json(json!({ "ok": true, "settled": settled })))
+    if !repainted {
+        log::info!("[maiLink] interrupt: no repaint after ESC — leaving the composer untouched");
+        return false;
+    }
+    while start.elapsed() < cap {
+        tokio::time::sleep(poll).await;
+        let quiet_for = crate::pty::last_output_ms(app, pty)
+            .map_or(u64::MAX, |last| now_ms().saturating_sub(last));
+        if quiet_for >= COMPOSER_QUIET_MS {
+            break;
+        }
+    }
+    crate::pty::write_pty(app, pty, COMPOSER_CLEAR).is_ok()
 }
 
 /// Tail scanned for the pending input queue. Queue traffic sits near the end of the file, and an
@@ -1008,9 +1047,18 @@ async fn kill_pid(pid: u32) -> bool {
 /// on an already-empty composer.
 const COMPOSER_CLEAR: &[u8] = b"\x0c";
 
-/// Gap between the interrupt ESC and the composer clear, so the TUI has finished cancelling (and
-/// restoring the prompt) before the clear arrives. Same order as the paste settle delay.
-const COMPOSER_CLEAR_DELAY_MS: u64 = 150;
+/// The composer clear has to land AFTER Claude Code has finished cancelling and repainted the
+/// restored prompt — clear too early and it no-ops on a still-empty composer, the restore paints
+/// afterwards, and the next remote message merges into it.
+///
+/// This was a fixed 150 ms delay, and in the field it lost the race: three phone sends, each
+/// followed by Stop, concatenated into one prompt (`test message onetest message twotest message
+/// three`) on a registered tab where `settled` was true and the clear had definitely fired. So
+/// don't guess the interval — watch the PTY. Wait for the cancel to actually produce output, then
+/// for that output to stop, then clear.
+const COMPOSER_QUIET_MS: u64 = 250;
+const COMPOSER_POLL_MS: u64 = 50;
+const COMPOSER_SETTLE_CAP_MS: u64 = 3000;
 
 /// Settle a tab's mid-turn agent sessions to `Stopped` after an interrupt, mirroring the Stop
 /// hook's reset (state + tool + pending-question cleared). Only touches sessions that are actually

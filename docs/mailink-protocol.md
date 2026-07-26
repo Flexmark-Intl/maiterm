@@ -298,7 +298,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"unreachable", reason, detail}` |
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
-| `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle | `{}` → `{ok, settled}` |
+| `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle, clears the restored prompt | `{}` → `{ok, settled, composerCleared}` (may hold up to 3 s — §5) |
 | `POST /chats/{tabId}/shells/{shellId}/stop` | Terminate one background shell (SIGTERM→SIGKILL on its own pid) | `{}` → `{ok:true, stopped:bool}`; IDEMPOTENT — an already-dead or unknown shell is `ok:true, stopped:false`, never 404 |
 | `POST /chats/{tabId}/new` | Start a NEW conversation from this one (light clone: SSH host + cwd, fresh agent session) | `{}` → `{ok:true, tabId}`; `{ok:false, reason:"timeout"}` if the tab didn't appear in time |
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
@@ -542,11 +542,20 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   stopped, `false` when nothing was running. If the Esc didn't land and the agent keeps working,
   the next real tool-use hook flips the state back to `active`, so a spurious idle self-heals.
   **When `settled` is true the endpoint also clears the composer** (Ctrl+L = Claude Code's
-  `chat:clearInput`) ~150 ms after the Esc: cancelling a running turn makes CC restore that turn's
-  prompt into the composer for editing, and since message injection is a bracketed paste APPENDED
-  to whatever the composer holds, the next message from the phone would otherwise land on the
-  restored text and submit both as ONE concatenated prompt. Nothing is cleared when `settled` is
-  false, so a Stop can't wipe a draft being typed at an idle desktop prompt.
+  `chat:clearInput`): cancelling a running turn makes CC restore that turn's prompt into the
+  composer for editing, and since message injection is a bracketed paste APPENDED to whatever the
+  composer holds, the next message from the phone would otherwise land on the restored text and
+  submit both as ONE concatenated prompt. Nothing is cleared when `settled` is false, so a Stop
+  can't wipe a draft being typed at an idle desktop prompt.
+
+  **The clear waits for the restore rather than assuming a delay.** It first waits for the Esc to
+  produce output (that repaint *is* the restore), then for the output to stop, then clears —
+  bounded at 3 s. A fixed 150 ms delay used to lose this race in the field: three phone sends,
+  each followed by Stop, concatenated into a single prompt on a tab where `settled` was true and
+  the clear had definitely fired. No output at all within the cap means nothing was cancelled, so
+  the composer is left alone. `composerCleared: bool` reports what happened, which is what
+  distinguishes "never cleared" from "cleared and it didn't take" in a merge report. Because it
+  waits on a real signal, a Stop that cancels a heavy repaint can hold the response for up to 3 s.
   (This settles maiLink's own view; a *desktop keyboard* Esc bypasses this endpoint and would
   need PTY observation to detect — out of scope here.)
 - **Rename** (`POST .../rename`): set the tab title. The title is trimmed and capped at 120
