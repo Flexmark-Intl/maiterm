@@ -638,8 +638,36 @@ async fn post_interrupt(
     // overwritten within a tick. If the ESC didn't actually land (agent keeps working), the next
     // real PreToolUse hook flips it back to `Active`, so a spurious idle self-heals.
     let settled = settle_tab_interrupt(&s.app, &tab_id);
+
+    // Cancelling a running turn makes Claude Code RESTORE that turn's prompt into the composer so
+    // a human can edit and resubmit it. Our injects are a bracketed paste APPENDED to whatever the
+    // composer holds, so the next message from the phone lands on the restored text and the CR
+    // submits both as ONE concatenated prompt (observed: "what's that show running?what's that
+    // shell running?" as a single user turn). Clear the composer so a remote stop leaves it empty.
+    //
+    // Only when `settled` — i.e. we actually cancelled a running turn, which is exactly when the
+    // restore happens. An already-idle tab is left alone, so a phone Stop can never wipe a draft
+    // the desktop operator is typing at an idle prompt. (With a turn running, a draft could still
+    // be lost — but today it would instead be merged into the next phone message and submitted,
+    // which is worse.) Desktop-side ESC is deliberately untouched: the operator SEES the restored
+    // text and can edit it; only a blind remote send has the merge problem.
+    if settled {
+        // Let the TUI process the cancel (and perform the restore) before the clear lands.
+        tokio::time::sleep(std::time::Duration::from_millis(COMPOSER_CLEAR_DELAY_MS)).await;
+        let _ = crate::pty::write_pty(&s.app, &pty, COMPOSER_CLEAR);
+    }
     Ok(Json(json!({ "ok": true, "settled": settled })))
 }
+
+/// Ctrl+L — Claude Code's `chat:clearInput` binding (its Chat keymap is
+/// `{escape:"chat:cancel", "ctrl+l":"chat:clearInput", "cmd+k":"chat:clearScreen"}`). A single
+/// unambiguous keystroke, unlike the discoverable double-tap-escape, which is overloaded. A no-op
+/// on an already-empty composer.
+const COMPOSER_CLEAR: &[u8] = b"\x0c";
+
+/// Gap between the interrupt ESC and the composer clear, so the TUI has finished cancelling (and
+/// restoring the prompt) before the clear arrives. Same order as the paste settle delay.
+const COMPOSER_CLEAR_DELAY_MS: u64 = 150;
 
 /// Settle a tab's mid-turn agent sessions to `Stopped` after an interrupt, mirroring the Stop
 /// hook's reset (state + tool + pending-question cleared). Only touches sessions that are actually

@@ -483,6 +483,12 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   event to be clobbered by the poll floor). `settled` is `true` when a running turn was actually
   stopped, `false` when nothing was running. If the Esc didn't land and the agent keeps working,
   the next real tool-use hook flips the state back to `active`, so a spurious idle self-heals.
+  **When `settled` is true the endpoint also clears the composer** (Ctrl+L = Claude Code's
+  `chat:clearInput`) ~150 ms after the Esc: cancelling a running turn makes CC restore that turn's
+  prompt into the composer for editing, and since message injection is a bracketed paste APPENDED
+  to whatever the composer holds, the next message from the phone would otherwise land on the
+  restored text and submit both as ONE concatenated prompt. Nothing is cleared when `settled` is
+  false, so a Stop can't wipe a draft being typed at an idle desktop prompt.
   (This settles maiLink's own view; a *desktop keyboard* Esc bypasses this endpoint and would
   need PTY observation to detect — out of scope here.)
 - **Rename** (`POST .../rename`): set the tab title. The title is trimmed and capped at 120
