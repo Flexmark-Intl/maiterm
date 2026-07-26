@@ -911,7 +911,13 @@ export interface Turn {
   thread_id: string;
   author?: Participant;         // absent => the human/user
   role: 'agent' | 'user' | 'tool' | 'system';
-  kind?: 'terminal_snapshot';   // present ONLY on the raw-scrape fallback (see below); absent => distilled turn
+  kind?: 'terminal_snapshot' | 'peer_message';  // typed turns (see below); absent => distilled turn
+  peer?: {                      // present iff kind === 'peer_message'
+    direction: 'in' | 'out';    // the only required field
+    name?: string;              // peer's role name; ABSENT on a 1:1 bridge with nothing to name —
+                                //   render "peer message sent/received", not a placeholder
+    topic?: string;             // mesh topic label; absent on a 1:1 bridge
+  };
   text: string;                 // source markdown (for kind:"terminal_snapshot", raw newline-delimited grid text, NOT markdown)
   ts: number;
 }
@@ -933,6 +939,25 @@ export interface Turn {
 // per-agent meta) — and the snapshot turn does not appear. If the mirror can't fetch (tunnel down,
 // bridge disabled), the tab degrades to exactly the snapshot fallback above. No client-side changes
 // are required either way. Codex/Gemini SSH tabs always use the snapshot path.
+
+// kind:"peer_message" — an agent-to-agent exchange (maiTerm Agent Bridge / Mesh Workspace),
+// surfaced so a peer conversation is visible in the thread instead of silently absent. Render as a
+// THIN notification-style row ("peer message received from X" / "sent to X"), not a message bubble:
+// it is neither party of this thread's conversation. `role` is always "system" for this reason —
+// and because the WS streamer never sends `role:"user"` frames, so a user-roled peer turn would be
+// missing on the live path and appear only on the next GET.
+//
+//   * direction:"in"  — a message this agent RECEIVED. maiTerm delivers these as real user prompts
+//     wrapped in a ⟦AGENT-BRIDGE⟧ / ⟦MESH⟧ envelope; the desktop strips the routing header so `text`
+//     is the peer's actual message body. (Un-stripped, they used to render as giant fake "user"
+//     messages, so they were dropped entirely — hence previously invisible.)
+//   * direction:"out" — a message this agent SENT, from its `sendToBridgedAgent` call. This turn
+//     REPLACES that call's tool chip; the same send never appears twice. `text` is the message sent.
+//
+// Only genuine peer traffic is tagged: bridge openers, ⟦TOPIC COMPLETE⟧ notices and disconnect
+// notices remain filtered as scaffolding, and human/subagent messaging tools (postCommsReply,
+// startCommsThread, SendMessage) keep their ordinary tool chips. Emitted identically on GET and on
+// the WS `message` event, which carries `kind` and `peer` alongside the usual fields.
 
 export interface AskOption { label: string; description?: string; }
 export interface AskQuestion {

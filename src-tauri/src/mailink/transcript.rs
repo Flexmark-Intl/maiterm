@@ -556,6 +556,20 @@ fn push_codex_line_messages(line_no: u64, v: &Value, tools: ToolRender, out: &mu
                     continue;
                 }
                 let text = b.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                // Mesh workspaces mix runtimes, so a Codex agent receives the same envelopes.
+                if out_role == "user" {
+                    if let Some(env) = parse_peer_envelope(text) {
+                        out.push(peer_msg(
+                            format!("cx{line_no}:{bi}"),
+                            "in",
+                            env.name,
+                            env.topic,
+                            env.body,
+                            ts,
+                        ));
+                        continue;
+                    }
+                }
                 if text.trim().is_empty() || (out_role == "user" && is_system_noise(text)) {
                     continue;
                 }
@@ -565,12 +579,15 @@ fn push_codex_line_messages(line_no: u64, v: &Value, tools: ToolRender, out: &mu
         // Tool calls: `arguments` is a JSON-ENCODED STRING (e.g. `{"cmd":"pwd",…}`).
         Some("function_call") if tools == ToolRender::Marker => {
             let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-            let arg = p
+            let input = p
                 .get("arguments")
                 .and_then(|a| a.as_str())
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|input| compact_tool_arg(&input));
-            let text = match arg {
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            if let Some(peer) = peer_send_turn(name, input.as_ref(), format!("cx{line_no}"), ts) {
+                out.push(peer);
+                return;
+            }
+            let text = match input.as_ref().and_then(compact_tool_arg) {
                 Some(a) => format!("{name}({a})"),
                 None => name.to_string(),
             };
@@ -733,7 +750,11 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
                         }
                     }
                     Some("tool_use") if tools == ToolRender::Marker => {
-                        out.push(msg(format!("{uuid}:{i}"), "tool", &tool_label(b), ts));
+                        let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        match peer_send_turn(name, b.get("input"), format!("{uuid}:{i}"), ts) {
+                            Some(peer) => out.push(peer),
+                            None => out.push(msg(format!("{uuid}:{i}"), "tool", &tool_label(b), ts)),
+                        }
                     }
                     _ => {} // thinking, tool_use when None, etc.
                 }
@@ -754,7 +775,12 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
                 // A no-op for ordinary messages.
                 Some(Value::String(text)) => {
                     let cleaned = strip_leading_image_refs(text);
-                    if !cleaned.trim().is_empty() && !is_system_noise(cleaned) {
+                    // A peer envelope arrives as a real user prompt but is NOT a human message —
+                    // surface it as its own thin row instead of letting is_system_noise drop it
+                    // (invisible) or rendering it as a giant fake "user" bubble.
+                    if let Some(env) = parse_peer_envelope(cleaned) {
+                        out.push(peer_msg(uuid.to_string(), "in", env.name, env.topic, env.body, ts));
+                    } else if !cleaned.trim().is_empty() && !is_system_noise(cleaned) {
                         out.push(msg(uuid.to_string(), "user", cleaned, ts));
                     }
                 }
@@ -802,6 +828,98 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
 
 fn msg(msg_id: String, role: &str, text: &str, ts: i64) -> Value {
     json!({ "msg_id": msg_id, "role": role, "text": text, "ts": ts })
+}
+
+/// An agent-to-agent message as a thin `kind:"peer_message"` row (mailink-protocol §4.3).
+/// `role:"system"` deliberately: a peer exchange is neither side of THIS thread's conversation,
+/// and the WS streamer skips `user` turns (the phone owns those optimistically), so a `user`
+/// peer turn would vanish on the live path and only reappear on the next GET.
+fn peer_msg(
+    msg_id: String,
+    direction: &str,
+    name: Option<&str>,
+    topic: Option<&str>,
+    text: &str,
+    ts: i64,
+) -> Value {
+    let mut peer = json!({ "direction": direction });
+    // Both optional: a 1:1 bridge has no addressable peer name and no topic. Omitted rather than
+    // sent empty, so the client renders "peer message sent" instead of a blank placeholder.
+    if let Some(n) = name.map(str::trim).filter(|n| !n.is_empty()) {
+        peer["name"] = json!(n);
+    }
+    if let Some(t) = topic.map(str::trim).filter(|t| !t.is_empty()) {
+        peer["topic"] = json!(t);
+    }
+    json!({
+        "msg_id": msg_id,
+        "role": "system",
+        "kind": "peer_message",
+        "peer": peer,
+        "text": text,
+        "ts": ts,
+    })
+}
+
+/// An INCOMING peer envelope, split into who sent it and what they actually said.
+struct PeerEnvelope<'a> {
+    name: Option<&'a str>,
+    topic: Option<&'a str>,
+    body: &'a str,
+}
+
+/// Parse a bridge/mesh message envelope (see `agentBridge.svelte.ts` / `agentMesh.svelte.ts`
+/// `buildEnvelope`). Matches ONLY real peer messages — the other `⟦…⟧` injections (bridge
+/// openers, `⟦TOPIC COMPLETE⟧`, disconnect notices) are scaffolding with no sender or body and
+/// stay filtered as noise by [`is_system_noise`].
+///
+/// The envelope is two header lines, a blank line, then the message. We strip the header so the
+/// phone shows what the peer said, not maiTerm's routing preamble.
+fn parse_peer_envelope(text: &str) -> Option<PeerEnvelope<'_>> {
+    let t = text.trim_start();
+    let after_from = t
+        .strip_prefix("⟦AGENT-BRIDGE⟧ Message from ")
+        .or_else(|| t.strip_prefix("⟦MESH⟧ Message from "))?;
+    // Header ends at the blank line; degrade to the first newline (then to the whole string) so a
+    // reworded envelope still yields a row rather than disappearing.
+    let (header, body) = match t.split_once("\n\n") {
+        Some((h, b)) => (h, b),
+        None => match t.split_once('\n') {
+            Some((h, b)) => (h, b),
+            None => (t, ""),
+        },
+    };
+    // `Message from "NAME", working in …` — the quoted sender.
+    let name = after_from
+        .strip_prefix('"')
+        .and_then(|r| r.split('"').next())
+        .filter(|s| !s.is_empty());
+    // `[topic: LABEL]` — mesh only.
+    let topic = header
+        .split_once("[topic: ")
+        .and_then(|(_, r)| r.split(']').next())
+        .filter(|s| !s.is_empty());
+    Some(PeerEnvelope { name, topic, body: body.trim() })
+}
+
+/// An OUTGOING peer message for a `sendToBridgedAgent` tool call, or `None` for any other tool.
+/// REPLACES the generic tool chip: the same send must not appear twice, and
+/// `mcp__maiterm__sendToBridgedAgent` as a bare chip in a run of file reads is exactly the
+/// burial this row exists to fix. Matches the MCP-namespaced and bare forms; deliberately not
+/// `postCommsReply`/`startCommsThread` (Mattermost humans) or `SendMessage` (subagents).
+fn peer_send_turn(name: &str, input: Option<&Value>, msg_id: String, ts: i64) -> Option<Value> {
+    if name.rsplit("__").next().unwrap_or(name) != "sendToBridgedAgent" {
+        return None;
+    }
+    let field = |k: &str| input.and_then(|i| i.get(k)).and_then(|v| v.as_str());
+    Some(peer_msg(
+        msg_id,
+        "out",
+        field("recipient"),
+        field("topic"),
+        field("message").unwrap_or(""),
+        ts,
+    ))
 }
 
 /// Caption for a human image-attachment turn: its text blocks joined with spaces, any leading
@@ -876,7 +994,10 @@ fn tool_label(block: &Value) -> String {
 /// the UI truncates for display. Shared by the transcript tool chips and the session's
 /// `tool_detail` (the maiLink permission card).
 pub(crate) fn compact_tool_arg(input: &Value) -> Option<String> {
-    let arg = ["command", "cmd", "file_path", "path", "pattern", "query", "url"]
+    // `recipient` is last of the primary keys: it only wins for agent-messaging tools, and makes
+    // a permission card / non-Marker chip read `sendToBridgedAgent(maiLink App)` instead of a
+    // bare tool name. (The Marker path replaces that chip outright — see peer_send_turn.)
+    let arg = ["command", "cmd", "file_path", "path", "pattern", "query", "url", "recipient"]
         .iter()
         .find_map(|key| match input.get(key) {
             Some(Value::String(s)) => Some(s.clone()),
@@ -1551,21 +1672,95 @@ mod tests {
             "message": { "role": "user", "content": [ { "type": "tool_result", "content": "output" } ] } });
         let noise = json!({ "type": "user", "uuid": "u4", "timestamp": "2026-06-27T21:26:00Z",
             "message": { "role": "user", "content": "<system-reminder>hi</system-reminder>" } });
-        // Agent-to-agent injections (bridge/mesh envelopes) are not human messages.
-        let bridge = json!({ "type": "user", "uuid": "u5", "timestamp": "2026-06-27T21:26:01Z",
+        // Bridge/mesh openers carry no sender or body — still pure scaffolding, still dropped.
+        let opener = json!({ "type": "user", "uuid": "u5", "timestamp": "2026-06-27T21:26:01Z",
             "message": { "role": "user",
-                "content": "⟦AGENT-BRIDGE⟧ Message from \"peer\" — a peer AI agent…" } });
-        let mesh = json!({ "type": "user", "uuid": "u6", "timestamp": "2026-06-27T21:26:02Z",
+                "content": "⟦AGENT-BRIDGE⟧ You are now bridged to \"peer\" — a peer AI agent." } });
+        let complete = json!({ "type": "user", "uuid": "u6", "timestamp": "2026-06-27T21:26:02Z",
             "message": { "role": "user",
-                "content": "⟦MESH⟧ Message from \"reviewer\" [topic: api] [turn 3]…" } });
+                "content": "⟦TOPIC COMPLETE⟧ The topic \"api\" has been marked complete." } });
         let mut out = Vec::new();
         push_line_messages(&real, ToolRender::Marker, &mut out);
         push_line_messages(&toolres, ToolRender::Marker, &mut out);
         push_line_messages(&noise, ToolRender::Marker, &mut out);
-        push_line_messages(&bridge, ToolRender::Marker, &mut out);
-        push_line_messages(&mesh, ToolRender::Marker, &mut out);
+        push_line_messages(&opener, ToolRender::Marker, &mut out);
+        push_line_messages(&complete, ToolRender::Marker, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "user");
         assert_eq!(out[0]["text"], "Please fix the bug.");
+    }
+
+    #[test]
+    fn incoming_peer_envelopes_become_peer_message_turns() {
+        // Verbatim envelope shapes from agentBridge/agentMesh buildEnvelope.
+        let bridge = json!({ "type": "user", "uuid": "p1", "timestamp": "2026-06-27T21:26:01Z",
+            "message": { "role": "user", "content":
+                "⟦AGENT-BRIDGE⟧ Message from \"maiLink App\", working in ~/DATA/IDE/maiLink — a peer AI agent, NOT your human operator. [turn 7]\nReply with the sendToBridgedAgent tool. If this fully answers the request, you can stop — don't reply just to acknowledge.\n\nThe task board UI is built.\n\nSecond paragraph survives." } });
+        let mesh = json!({ "type": "user", "uuid": "p2", "timestamp": "2026-06-27T21:26:02Z",
+            "message": { "role": "user", "content":
+                "⟦MESH⟧ Message from \"reviewer\", working in /srv/api — a peer AI agent, NOT your human operator. [topic: auth-refactor] [turn 3]\nReply with the sendToBridgedAgent tool, tagging topic \"t_9\".\n\nLGTM." } });
+        let mut out = Vec::new();
+        push_line_messages(&bridge, ToolRender::Marker, &mut out);
+        push_line_messages(&mesh, ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 2);
+
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[0]["kind"], "peer_message");
+        assert_eq!(out[0]["peer"]["direction"], "in");
+        assert_eq!(out[0]["peer"]["name"], "maiLink App");
+        // 1:1 bridge has no topic — the key is omitted, not sent empty.
+        assert!(out[0]["peer"].get("topic").is_none());
+        // Routing preamble stripped; the whole body (blank lines and all) kept.
+        assert_eq!(out[0]["text"], "The task board UI is built.\n\nSecond paragraph survives.");
+
+        assert_eq!(out[1]["peer"]["name"], "reviewer");
+        assert_eq!(out[1]["peer"]["topic"], "auth-refactor");
+        assert_eq!(out[1]["text"], "LGTM.");
+    }
+
+    #[test]
+    fn send_to_bridged_agent_replaces_its_tool_chip() {
+        let line = json!({ "type": "assistant", "uuid": "a1", "timestamp": "2026-06-27T21:26:03Z",
+            "message": { "content": [
+                { "type": "tool_use", "name": "Bash", "input": { "command": "ls" } },
+                { "type": "tool_use", "name": "mcp__maiterm__sendToBridgedAgent",
+                  "input": { "message": "Deployed — go ahead.", "recipient": "maiLink App", "topic": "tasks" } },
+            ] } });
+        let mut out = Vec::new();
+        push_line_messages(&line, ToolRender::Marker, &mut out);
+        // Two blocks in, two turns out — the send became a peer row INSTEAD of a chip, not
+        // alongside one (the same event must not appear twice).
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["text"], "Bash(ls)");
+        assert_eq!(out[1]["role"], "system");
+        assert_eq!(out[1]["kind"], "peer_message");
+        assert_eq!(out[1]["peer"]["direction"], "out");
+        assert_eq!(out[1]["peer"]["name"], "maiLink App");
+        assert_eq!(out[1]["peer"]["topic"], "tasks");
+        assert_eq!(out[1]["text"], "Deployed — go ahead.");
+    }
+
+    #[test]
+    fn peer_send_matching_is_narrow_and_name_is_optional() {
+        // Bare (non-MCP) name matches; a 1:1 bridge send carries no recipient/topic.
+        let bare = peer_send_turn(
+            "sendToBridgedAgent",
+            Some(&json!({ "message": "hi" })),
+            "m1".into(),
+            0,
+        )
+        .expect("bare name matches");
+        assert_eq!(bare["peer"]["direction"], "out");
+        assert!(bare["peer"].get("name").is_none(), "no placeholder name on a 1:1 bridge");
+        assert_eq!(bare["text"], "hi");
+
+        // Human/subagent messaging tools are NOT peer messages and keep their tool chips.
+        for name in ["postCommsReply", "mcp__maiterm__startCommsThread", "SendMessage", "Bash"] {
+            assert!(
+                peer_send_turn(name, Some(&json!({ "message": "x" })), "m".into(), 0).is_none(),
+                "{name} must not be treated as a peer message"
+            );
+        }
     }
 }

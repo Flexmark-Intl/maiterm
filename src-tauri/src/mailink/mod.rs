@@ -1204,14 +1204,23 @@ fn chat_state_event(c: &Value) -> Value {
 /// the SAME msg_id/role/text/ts that GET returns for this turn (turns_for_session), so the phone's
 /// dedup-by-msg_id collapses the streamed frame and the REST re-fetch into one entry.
 fn message_event(tab_id: &str, turn: &Value) -> Value {
-    json!({
+    let mut ev = json!({
         "type": "message",
         "tabId": tab_id,
         "role": turn.get("role"),
         "text": turn.get("text"),
         "msg_id": turn.get("msg_id"),
         "ts": turn.get("ts"),
-    })
+    });
+    // Typed turns (`peer_message`, …) must carry their tag on the LIVE path too: a streamed turn
+    // that arrives untagged renders as a plain message and then silently changes shape when the
+    // next GET returns the tagged version.
+    for key in ["kind", "peer"] {
+        if let Some(v) = turn.get(key) {
+            ev[key] = v.clone();
+        }
+    }
+    ev
 }
 
 /// Stream newly-appended agent/tool turns for every designated tab as `message` frames. Never
