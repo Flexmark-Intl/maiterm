@@ -665,6 +665,10 @@ async fn post_interrupt(
     Ok(Json(json!({ "ok": true, "settled": settled })))
 }
 
+/// Tail scanned for the pending input queue. Queue traffic sits near the end of the file, and an
+/// entry older than this window has almost certainly been consumed already.
+const QUEUE_SCAN_BYTES: u64 = 2 * 1024 * 1024;
+
 /// A tab's background-shell roster (mailink/shells.rs), or empty when it has none / can't be
 /// determined. Claude + LOCAL only: an SSH tab's background shells are the REMOTE host's
 /// processes, invisible to the local process table, so their liveness can't be confirmed and a
@@ -2890,6 +2894,19 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     if let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) {
         if let Some(board) = tasks::tasks_for_session(&sid) {
             detail["tasks"] = json!(board);
+        }
+    }
+
+    // Messages typed while the agent was busy and NOT yet consumed. The phone renders these as
+    // genuinely "queued" rather than a spinner, and it's the precondition for offering to pull one
+    // back — an already-consumed message can't be recalled. Same text the queued turn will echo.
+    if let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) {
+        let queued: Vec<Value> = transcript::pending_queue(&sid, QUEUE_SCAN_BYTES)
+            .into_iter()
+            .map(|(text, ts)| json!({ "text": text, "queuedAt": ts }))
+            .collect();
+        if !queued.is_empty() {
+            detail["queued"] = json!(queued);
         }
     }
 

@@ -142,6 +142,52 @@ fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
 
 /// Build the last `limit` maiLink messages for a Claude session, or `None` if its transcript
 /// can't be found/read (caller falls back to the terminal scrape).
+/// Messages currently sitting in a Claude session's input queue — typed while the agent was busy
+/// and not yet consumed. `(text, enqueued_at_ms)`, oldest first.
+///
+/// Claude Code writes four `queue-operation` kinds, and they mean different things:
+///   * `enqueue` — a message went into the queue (carries its text)
+///   * `remove`  — it was CONSUMED by the agent (carries the text; a `queued_command` attachment
+///                 follows, which is what the transcript renders)
+///   * `dequeue` — it was RECALLED into the composer, arrow-up style, and never runs. Carries NO
+///                 text, so the target is positional: measured across 1089 multi-message dequeues
+///                 in real sessions, 1048 left the NEWEST queued message unconsumed → pops LIFO.
+///   * `popAll`  — the whole queue was cleared.
+/// A queue that outlives the scanned tail simply reports what the tail can prove.
+pub fn pending_queue(session_id: &str, max_bytes: u64) -> Vec<(String, u64)> {
+    let Some(lines) = claude_lines(session_id, max_bytes) else { return Vec::new() };
+    let mut queue: Vec<(String, u64)> = Vec::new();
+    for v in &lines {
+        if v.get("type").and_then(|t| t.as_str()) != Some("queue-operation") {
+            continue;
+        }
+        let content = v.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        match v.get("operation").and_then(|o| o.as_str()) {
+            Some("enqueue") if !content.is_empty() => {
+                let ts = v
+                    .get("timestamp")
+                    .and_then(|t| t.as_str())
+                    .map(rfc3339_to_ms)
+                    .unwrap_or(0)
+                    .max(0) as u64;
+                queue.push((content.to_string(), ts));
+            }
+            // Consumed: drop the OLDEST matching entry (the queue drains in order).
+            Some("remove") => {
+                if let Some(i) = queue.iter().position(|(t, _)| t == content) {
+                    queue.remove(i);
+                }
+            }
+            Some("dequeue") => {
+                queue.pop();
+            }
+            Some("popAll") => queue.clear(),
+            _ => {}
+        }
+    }
+    queue
+}
+
 /// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
 /// For consumers that need the raw entries rather than distilled turns (the background-shell
 /// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
@@ -838,8 +884,16 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
             let is_human = a.and_then(|a| a.get("origin")).and_then(|o| o.get("kind")).and_then(|k| k.as_str())
                 == Some("human");
             let is_queued = a.and_then(|a| a.get("type")).and_then(|t| t.as_str()) == Some("queued_command");
-            let Some(text) = a.and_then(|a| a.get("prompt")).and_then(|p| p.as_str()) else { return };
-            if !(is_human && is_queued) || text.trim().is_empty() || is_system_noise(text) {
+            let Some(raw) = a.and_then(|a| a.get("prompt")).and_then(|p| p.as_str()) else { return };
+            if !(is_human && is_queued) {
+                return;
+            }
+            // Same image-ref stripping as a normal user turn: a queued maiLink image send records
+            // its `[Image #N]` chips / `maiterm-mailink-` temp paths in `prompt` too, and the
+            // phone reconciles its optimistic bubble against the bare CAPTION. Without this the
+            // queued path would echo text the phone never sent, so those bubbles would hang.
+            let text = strip_leading_image_refs(raw);
+            if text.trim().is_empty() || is_system_noise(text) {
                 return;
             }
             // ORDERING: the attachment's own timestamp is when the message was ENQUEUED, but the
@@ -1777,6 +1831,18 @@ mod tests {
         push_line_messages(&queued("<task-notification>…", Value::Null, "queued_command"), ToolRender::Marker, &mut out2);
         push_line_messages(&queued("some delta", json!({"kind": "human"}), "deferred_tools_delta"), ToolRender::Marker, &mut out2);
         assert!(out2.is_empty(), "non-human / non-queued_command attachments stay out");
+    }
+
+    #[test]
+    fn queued_image_send_echoes_the_bare_caption() {
+        // A queued maiLink image send records its chips in `prompt` too; the echo must equal the
+        // CAPTION the phone sent, or the optimistic bubble never reconciles.
+        let line = json!({ "type": "attachment", "uuid": "att2", "timestamp": "2026-07-26T15:25:16.208Z",
+            "attachment": { "type": "queued_command", "prompt": "[Image #1]look at this",
+                "origin": { "kind": "human" } } });
+        let mut out = Vec::new();
+        push_line_messages(&line, ToolRender::Marker, &mut out);
+        assert_eq!(out[0]["text"], "look at this");
     }
 
     #[test]

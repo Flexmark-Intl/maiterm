@@ -388,6 +388,13 @@ interface ChatDetail extends Chat {
                             // completion, NOT an error or a dropped session — and do NOT design
                             // an "all tasks complete" state; it is unreachable in practice, not
                             // merely brief. A session that finished its work reports no board.
+  queued?: { text: string; queuedAt: number }[];
+                            // messages typed while the agent was BUSY and not yet consumed, oldest
+                            //   first. Render these as genuinely "queued" (the agent is busy),
+                            //   not as an in-flight spinner — and treat presence here as the
+                            //   precondition for offering to pull one back: an already-consumed
+                            //   message cannot be recalled. `text` matches what the turn will echo
+                            //   once consumed. Claude tabs only; absent when the queue is empty.
   shells?: AgentShell[];    // background shells (`Bash run_in_background` — the TUI's /bashes
                             // list), present only when non-empty. Claude + LOCAL tabs only: an
                             // SSH tab's shells are the REMOTE host's processes, so their liveness
