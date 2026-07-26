@@ -1212,6 +1212,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // Per-tab last-seen mesh flag — enabling/disabling a Mesh Workspace from the desktop must
     // re-badge the phone's inbox group the same way (state/prompt don't move).
     let mut mesh: HashMap<String, bool> = HashMap::new();
+    // Per-tab last-seen registration flag. A tab registering (or losing its registration) changes
+    // the re-initialize affordance without moving state/prompt, so it needs its own diff.
+    let mut registered: HashMap<String, bool> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -1233,6 +1236,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
         titles.insert(tab.clone(), c["title"].as_str().unwrap_or_default().to_string());
         suspended.insert(tab.clone(), c["workspaceSuspended"].as_bool().unwrap_or(false));
         mesh.insert(tab.clone(), c["mesh"].as_bool().unwrap_or(false));
+        registered.insert(tab.clone(), c["registered"].as_bool().unwrap_or(true));
         last.insert(tab, key);
     }
 
@@ -1292,6 +1296,13 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         roster_changed = true;
                     }
                     mesh.insert(tab.clone(), ws_mesh);
+                    // Registration flips when an agent finally re-registers (or a restart drops
+                    // its session entry) — the phone must re-render the re-initialize control.
+                    let reg = c["registered"].as_bool().unwrap_or(true);
+                    if prev.is_some() && registered.get(&tab) != Some(&reg) {
+                        roster_changed = true;
+                    }
+                    registered.insert(tab.clone(), reg);
                     if prev.as_deref() != Some(key.as_str()) {
                         if socket.send(Message::Text(enriched_chat_state_event(&s.app, c).to_string().into())).await.is_err() {
                             return;
@@ -1313,7 +1324,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); registered.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -2684,15 +2695,15 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
     designated_tabs(app)
         .into_iter()
         .map(|t| {
-            let (state, runtime, tool) = match states.get(&t.tab_id) {
-                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
+            let (state, runtime, tool, registered) = match states.get(&t.tab_id) {
+                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone(), true),
                 None => {
                     let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
                         "active"
                     } else {
                         "dormant"
                     };
-                    (st, runtime_key(t.runtime), None)
+                    (st, runtime_key(t.runtime), None, false)
                 }
             };
             // Same prompt-kind rule as build_chats: an open AskUserQuestion outranks permission.
@@ -2710,6 +2721,9 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
                 "mesh": t.mesh,
                 "runtime": runtime,
                 "state": state,
+                // Diffed by the WS ticker like the other flags, so a tab that registers (or
+                // loses its registration) re-renders the re-initialize affordance promptly.
+                "registered": registered,
                 "prompt": prompt_kind,
             })
         })
@@ -2733,15 +2747,15 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let chats: Vec<Value> = tabs
         .into_iter()
         .map(|t| {
-            let (state, runtime, tool) = match states.get(&t.tab_id) {
-                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
+            let (state, runtime, tool, registered) = match states.get(&t.tab_id) {
+                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone(), true),
                 None => {
                     let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
                         "active"
                     } else {
                         "dormant"
                     };
-                    (st, runtime_key(t.runtime), None)
+                    (st, runtime_key(t.runtime), None, false)
                 }
             };
             let ask_open = tool.as_deref() == Some("AskUserQuestion");
@@ -2771,6 +2785,13 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
                 "unread": ask_open || state == "permission" || state == "idle",
+                // `state` alone can't express "a live agent that never registered": the fallback
+                // has to pick a word, and both are wrong — it isn't dormant (there's a live agent)
+                // and it isn't working (it's sitting at a prompt). Reporting it as active also hid
+                // the Initialize affordance, which is the fix for exactly this state. So the claim
+                // is split out: `registered:false` means the state came from the liveness fallback
+                // rather than a tracked session, and the client should offer re-initialize.
+                "registered": registered,
                 "lastActivityTs": last_activity_ts(app, &t.tab_id, scrollback.get(&t.tab_id).copied(), now),
                 "preview": preview_for(state, tool.as_deref()),
             });
@@ -2818,15 +2839,15 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let ph = std::time::Instant::now();
     let last_activity = last_activity_ts(app, tab_id, scrollback_ts, now);
     let ms_activity = ph.elapsed().as_millis(); // locate_jsonl + last-turn tail read
-    let (state, runtime, tool) = match states.get(tab_id) {
-        Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone()),
+    let (state, runtime, tool, registered) = match states.get(tab_id) {
+        Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone(), true),
         None => {
             let st = if tab_looks_live_despite_no_session(app, tab_id, now) {
                 "active"
             } else {
                 "dormant"
             };
-            (st, runtime_key(meta.runtime), None)
+            (st, runtime_key(meta.runtime), None, false)
         }
     };
 
@@ -2851,6 +2872,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "unread": tool.as_deref() == Some("AskUserQuestion")
             || state == "permission"
             || state == "idle",
+        "registered": registered,
         "lastActivityTs": last_activity,
         "transcript": transcript,
     });
@@ -3542,7 +3564,8 @@ mod tests {
 
     #[test]
     fn chat_summaries_carry_every_field_the_tickers_diff() {
-        // The WS ticker diffs title/workspaceSuspended/mesh and keys on attn_key(state, prompt);
+        // The WS ticker diffs title/workspaceSuspended/mesh/registered and keys on attn_key(state,
+        // prompt);
         // the doorbell needs tabId/title/state/prompt; chat_state events need runtime. If a field
         // the tickers consume ever drops out of the summary shape, the diff silently degrades
         // (e.g. every tick looks like a rename) — pin the shape here.
@@ -3571,6 +3594,11 @@ mod tests {
         assert_eq!(s["mesh"], json!(true));
         assert_eq!(s["runtime"], json!("claude"));
         assert_eq!(s["state"], json!("dormant"), "no session entry, no live PTY");
+        assert_eq!(
+            s["registered"], json!(false),
+            "no tracked session ⇒ the state came from the fallback, so the phone must be able to \
+             offer re-initialize instead of trusting the word in `state`"
+        );
         assert!(s["prompt"].is_null());
         // And the heavy fields must NOT be here — their absence is the whole point.
         assert!(s.get("lastActivityTs").is_none() && s.get("meta").is_none());

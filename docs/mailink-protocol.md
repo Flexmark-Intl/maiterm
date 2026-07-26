@@ -363,6 +363,13 @@ interface Chat {
                             // turns but whose session registration was lost (e.g. a mesh/SSH resume
                             // where the hook/init handshake missed) reports 'active' via a
                             // self-correcting liveness fallback — never a stuck 'dormant' over live output.
+  registered: boolean;      // false ⇒ this tab has NO tracked agent session, so `state` was
+                            //   inferred from a liveness fallback (live PTY + a recent transcript
+                            //   turn ⇒ "active", else "dormant") rather than observed. A live
+                            //   agent that never registered is neither dormant nor working, and
+                            //   `state` has no word for it — so don't read too much into the word;
+                            //   offer a re-initialize action instead. Always true when a session
+                            //   is tracked.
   unread: boolean;          // idle/attention not yet seen on a device
   lastActivityTs: number;
   preview: string;          // last line(s) of distilled context
