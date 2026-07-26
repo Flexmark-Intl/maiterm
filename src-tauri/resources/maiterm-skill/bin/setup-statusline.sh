@@ -34,7 +34,7 @@ printf '  %b%s %s%b[%s]%b %b(%s)%b %b%s%b %b%s%b %b%s%%%b\n' \
   "$GREEN" "$host" "$(whoami)" \
   "$CYAN" "~/projects/maiterm" "$RESET" \
   "$ORANGE" "main" "$RESET" \
-  "$BLUE" "opus-4-8[1m]" "$RESET" \
+  "$BLUE" "opus-5[1m]" "$RESET" \
   "$YELLOW" "high" "$RESET" \
   "$MAGENTA" "12.3" "$RESET"
 echo

@@ -28,7 +28,7 @@ model=$(echo "$input" | jq -r '.model.display_name // empty')
 model_id=$(echo "$input" | jq -r '.model.id // empty')
 effort=$(echo "$input" | jq -r '.effort.level // empty')
 
-# Prefer the official model id (e.g. opus-4-8[1m]) over the friendly display name,
+# Prefer the official model id (e.g. opus-5[1m]) over the friendly display name,
 # falling back to the display name if the id isn't present.
 model_label="${model_id#claude-}"
 [ -z "$model_label" ] && model_label="$model"

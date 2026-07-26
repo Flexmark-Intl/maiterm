@@ -2287,17 +2287,36 @@ fn preview_for(state: &str, tool: Option<&str>) -> String {
     }
 }
 
-/// The context window for a model id: 1M-context variants vs the 200k default. The transcript/hook
-/// model id never carries the `[1m]` variant marker (Claude Code exposure gap — see
-/// SessionMeta::model_id), so we can't detect the 1M variant from the id alone. Opus 4.8 defaults to
-/// the 1M variant in this deployment, so assume 1M whenever Opus 4.8 is in use. Mirrors the maiTerm
-/// statusline's limit derivation.
-fn context_limit_for(model_id: &str) -> u64 {
-    if model_id.contains("[1m]") || model_id.contains("-1m") || model_id.contains("opus-4-8") {
-        1_000_000
-    } else {
-        200_000
+/// Model families whose 1M-context variant is the one in use here, keyed by the id as it appears
+/// in the transcript. Needed only because of the exposure gap below; entries are deliberately
+/// specific (`opus-5`, not `opus`) — a blanket family rule would also claim 1M for older Opus
+/// releases that don't have it, and being wrong in that direction UNDERSTATES context usage,
+/// which is the harmful direction (no warning before a surprise compaction).
+const ASSUMED_1M_MODELS: [&str; 2] = ["opus-4-8", "opus-5"];
+
+/// The context window for a model id: 1M-context variants vs the 200k default.
+///
+/// The `[1m]` variant marker exists in Claude Code — its statusLine input carries it on
+/// `.model.id` — but NOT in the transcript's `message.model`, which reports a bare
+/// `claude-opus-5` for 1M and 200k sessions alike (verified across live transcripts). maiTerm
+/// never receives the statusLine, so the transcript is all we have and the variant has to be
+/// inferred. Hence [`ASSUMED_1M_MODELS`].
+///
+/// `observed_tokens` is the session's current context usage and acts as a self-correcting
+/// backstop: a session that has already exceeded 200k is definitively on a larger window,
+/// whatever its id says. That keeps an unrecognized future 1M model merely wrong-until-200k
+/// rather than permanently pegged at 100%, without needing a code change per model.
+fn context_limit_for(model_id: &str, observed_tokens: u64) -> u64 {
+    if model_id.contains("[1m]") || model_id.contains("-1m") {
+        return 1_000_000;
     }
+    if ASSUMED_1M_MODELS.iter().any(|m| model_id.contains(m)) {
+        return 1_000_000;
+    }
+    if observed_tokens > 200_000 {
+        return 1_000_000;
+    }
+    200_000
 }
 
 /// Normalize a model id to a friendly display string, per runtime. Claude ids go through
@@ -2353,7 +2372,9 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     let meta = transcript::meta_for(rt, &sid)?;
     let model_id = meta.model_id.as_deref().unwrap_or("");
     // Codex rollouts carry the window; Claude's is derived from the model id.
-    let limit = meta.context_window.unwrap_or_else(|| context_limit_for(model_id));
+    let limit = meta
+        .context_window
+        .unwrap_or_else(|| context_limit_for(model_id, meta.context_tokens));
     let pct = ((meta.context_tokens as f64 / limit as f64) * 100.0)
         .round()
         .clamp(0.0, 100.0) as u64;
@@ -3055,12 +3076,22 @@ mod tests {
         assert_eq!(display_model("claude-sonnet-4-5"), "Sonnet 4.5");
         assert_eq!(display_model("claude-haiku-4-5-20251001"), "Haiku 4.5.20251001");
         assert_eq!(display_model("opus-4-8-1m"), "Opus 4.8");
-        // 1M-context variants vs the 200k default. Opus 4.8 is assumed 1M even without a marker
-        // (the transcript id never carries one), so the bare id also resolves to 1M.
-        assert_eq!(context_limit_for("claude-opus-4-8[1m]"), 1_000_000);
-        assert_eq!(context_limit_for("claude-opus-4-8-1m"), 1_000_000);
-        assert_eq!(context_limit_for("claude-opus-4-8"), 1_000_000);
-        assert_eq!(context_limit_for("claude-sonnet-4-5"), 200_000);
+        assert_eq!(display_model("claude-opus-5[1m]"), "Opus 5");
+        assert_eq!(display_model("claude-opus-5"), "Opus 5");
+        // 1M-context variants vs the 200k default. The marker resolves 1M outright…
+        assert_eq!(context_limit_for("claude-opus-4-8[1m]", 0), 1_000_000);
+        assert_eq!(context_limit_for("claude-opus-4-8-1m", 0), 1_000_000);
+        // …and the assumed-1M ids resolve without one, since the transcript id never carries it.
+        assert_eq!(context_limit_for("claude-opus-4-8", 0), 1_000_000);
+        assert_eq!(context_limit_for("claude-opus-5", 0), 1_000_000);
+        // Everything else defaults to 200k — including other Opus releases, which a blanket
+        // "any opus is 1M" rule would have wrongly promoted.
+        assert_eq!(context_limit_for("claude-sonnet-4-5", 0), 200_000);
+        assert_eq!(context_limit_for("claude-opus-4-7", 0), 200_000);
+        // Backstop: an unrecognized model already past 200k is definitively on a bigger window,
+        // so the gauge self-corrects instead of pegging at 100% forever.
+        assert_eq!(context_limit_for("claude-something-new", 200_000), 200_000);
+        assert_eq!(context_limit_for("claude-something-new", 200_001), 1_000_000);
     }
 
     #[test]

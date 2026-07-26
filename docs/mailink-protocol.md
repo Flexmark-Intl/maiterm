@@ -874,7 +874,7 @@ export interface Participant { id: string; name: string; runtime: Runtime; meta?
 
 /** Per-agent telemetry strip (thread header). All fields optional; the gauge is driven by contextPct. */
 export interface AgentMeta {
-  model?: string;         // normalized display name: "Opus 4.8", "GPT-5-codex", "Gemini 2.5 Pro"
+  model?: string;         // normalized display name: "Opus 5", "GPT-5-codex", "Gemini 2.5 Pro"
   effort?: string;        // Claude reasoning tier: low | medium | high | xhigh | max. Read from the
                           //   transcript's top-level `effort` field (same assistant line as usage).
                           //   OMITTED for effort-less models, non-Claude runtimes, or before the first turn.
@@ -1035,8 +1035,14 @@ export interface WsAttentionEvent {
   (`mailink/transcript.rs`, dispatched by runtime):
   - *Claude*: the last JSONL line carrying `message.usage`, summed
     `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, over a
-    model-dependent limit (1,000,000 for `[1m]`/`-1m` model ids, else 200,000). `model`
-    normalized from `message.model` ("claude-opus-4-8" → "Opus 4.8").
+    model-dependent limit, and `model` normalized from `message.model`
+    ("claude-opus-5" → "Opus 5"). The limit is 1,000,000 for `[1m]`/`-1m` ids — but note the
+    transcript's `message.model` NEVER carries that marker (Claude Code exposes it only on the
+    statusLine input, which maiTerm doesn't receive), so a 1M session and a 200k one report the
+    same bare id. The desktop therefore infers it: an allowlist of ids whose 1M variant is the
+    one in use (`ASSUMED_1M_MODELS` in `mailink/mod.rs`), plus a backstop that treats any
+    session already past 200,000 tokens as 1M. Clients should treat `contextLimit` as
+    authoritative and not re-derive it from the model name.
   - *Codex*: the rollout's last `token_count` — `last_token_usage.total_tokens` over the
     stated `model_context_window` — and `turn_context.model` ("gpt-5.5" → "GPT-5.5").
   Emitted on the `/chats` object, in `chat_detail`, and on the WS `chat_state` event (so the
