@@ -304,6 +304,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
+| `POST /chats/{tabId}/queue/cancel` | Pull back the ONE message waiting in the input queue (§5) | `{}` → `{ok:true, cancelled:true, text, composerCleared}` \| `{ok:true, cancelled:false, reason}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
 | `GET  /chats/archived` | Archived (recoverable) tabs across all workspaces | → `ArchivedChat[]` |
 | `POST /chats/{tabId}/archive` | Archive a live tab (RECOVERABLE) | `{}` → `{ok}` |
@@ -645,6 +646,25 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   `reason:"workspace-suspended"` (resume the workspace first — mesh-init needs live PTYs);
   `initiated:true` with `workspaceId` when the pass was kicked off. Per-member Initialize from
   the thread view is `POST .../wake` (above) — the same triage, scoped to one tab.
+- **Cancel a queued message** (`POST .../queue/cancel`): pull a message back out of the input
+  queue before the agent reaches it. **Offer it only when `queued` holds exactly one entry** — the
+  endpoint enforces that too, and the reason is mechanical rather than cautious.
+
+  Reading Claude Code 2.1.220: cursor-up in the chat input calls `popAllEditable`, which recalls
+  the WHOLE queue into the composer as one blob. A per-message variant exists (`popEditableAt`,
+  driven by a `queueEditIndex` the arrow keys move) but sits behind `CLAUDE_CODE_KB_COHESION_FIXES`,
+  unset by default. So with two messages queued, one cursor-up recalls BOTH and clearing the
+  composer would silently destroy the message the user didn't pick. With exactly one queued,
+  "pop all" and "pop that one" are the same operation. `multiple-queued` (with `queuedCount`) is
+  the refusal.
+
+  **It verifies rather than assumes.** After the cursor-up it watches the transcript for the queue
+  to actually empty (recalling writes a `popAll` op), and clears the composer only once it has.
+  A recall that didn't happen returns `cancelled:false, reason:"not-recalled"` with the composer
+  untouched — never a false success, and never a clear that could wipe something maiTerm didn't
+  put there. Other refusals: `already-consumed` (the agent got there first — expected, since the
+  affordance renders against a queue that keeps draining), `not-registered`, `unsupported_runtime`
+  (Claude only). `409` if the tab has no live PTY.
 - **Archive / Close / Restore** (tab lifecycle): two DISTINCT real operations, both reversible-ness
   labelled honestly:
   - **Archive** (`POST .../archive`) — RECOVERABLE. The tab leaves the workspace's live tabs into

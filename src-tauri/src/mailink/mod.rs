@@ -287,6 +287,10 @@ fn build_router(api: ApiState) -> Router {
             post(post_shell_stop),
         )
         .route("/mailink/v1/chats/{tab_id}/wake", post(post_wake))
+        .route(
+            "/mailink/v1/chats/{tab_id}/queue/cancel",
+            post(post_queue_cancel),
+        )
         .route("/mailink/v1/chats/{tab_id}/new", post(post_new_conversation))
         .route("/mailink/v1/chats/{tab_id}/rename", post(post_rename))
         .route(
@@ -896,6 +900,98 @@ async fn clear_composer_after_cancel(app: &Arc<AppState>, pty: &str) -> bool {
 /// Tail scanned for the pending input queue. Queue traffic sits near the end of the file, and an
 /// entry older than this window has almost certainly been consumed already.
 const QUEUE_SCAN_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Cursor-up. In Claude Code's chat input this recalls the input queue when one exists (falling
+/// back to prompt history when it doesn't) — see `post_queue_cancel` for why that matters.
+const QUEUE_RECALL: &[u8] = b"\x1b[A";
+/// How long to wait for the recall to show up in the transcript as the queue emptying.
+const QUEUE_RECALL_WAIT_MS: u64 = 2500;
+const QUEUE_RECALL_POLL_MS: u64 = 150;
+
+/// POST /chats/{tabId}/queue/cancel — pull back the message waiting in this tab's input queue,
+/// before the agent gets to it.
+///
+/// **Only when EXACTLY ONE message is queued**, and that isn't caution — it's the contract.
+/// Reading Claude Code 2.1.220: cursor-up in the chat input calls `popAllEditable`, which recalls
+/// the WHOLE queue into the composer as one blob. There is a per-message variant
+/// (`popEditableAt`, driven by a `queueEditIndex` the arrow keys move), but it's behind
+/// `CLAUDE_CODE_KB_COHESION_FIXES`, which is unset by default. So with two messages queued, one
+/// cursor-up recalls BOTH, and clearing the composer would silently destroy the one the user
+/// didn't choose. With exactly one, "pop all" and "pop that one" are the same operation.
+///
+/// It also verifies rather than assumes. We do not depend on knowing which recall variant is
+/// live, or on a keystroke landing: after the cursor-up we watch the transcript for the queue to
+/// actually empty, and the composer is only cleared once it has. If the recall didn't happen the
+/// composer is left untouched and the caller is told `cancelled:false` — never a false success,
+/// and never a clear that could wipe something we didn't put there.
+async fn post_queue_cancel(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Typing into a tab whose agent isn't there is the failure mode the wake work exists to
+    // prevent; here there's nothing to cancel anyway, so refuse rather than wake.
+    if !tab_registered(&s.app, &tab_id) {
+        return Ok(Json(
+            json!({ "ok": true, "cancelled": false, "reason": "not-registered" }),
+        ));
+    }
+    let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
+    let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(&s.app, &tab_id) else {
+        return Ok(Json(
+            json!({ "ok": true, "cancelled": false, "reason": "unsupported_runtime" }),
+        ));
+    };
+
+    let queued = transcript::pending_queue(&sid, QUEUE_SCAN_BYTES);
+    let text = match queued.len() {
+        1 => queued[0].0.clone(),
+        // Consumed between the phone rendering the affordance and the tap landing. Expected, not
+        // an error — the message is already a real turn by now.
+        0 => {
+            return Ok(Json(
+                json!({ "ok": true, "cancelled": false, "reason": "already-consumed" }),
+            ))
+        }
+        n => {
+            return Ok(Json(json!({ "ok": true, "cancelled": false,
+                "reason": "multiple-queued", "queuedCount": n })))
+        }
+    };
+
+    send_key(&s.app, &pty, QUEUE_RECALL, 0)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The recall is observable: emptying the queue writes a `popAll` op, which the replay reads.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(QUEUE_RECALL_WAIT_MS);
+    let mut recalled = false;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(QUEUE_RECALL_POLL_MS)).await;
+        if transcript::pending_queue(&sid, QUEUE_SCAN_BYTES).is_empty() {
+            recalled = true;
+            break;
+        }
+    }
+    if !recalled {
+        log::info!("[maiLink] queue cancel on {tab_id}: queue never emptied — composer untouched");
+        return Ok(Json(
+            json!({ "ok": true, "cancelled": false, "reason": "not-recalled" }),
+        ));
+    }
+
+    // It's out of the queue and sitting in the composer now; clearing is what makes it cancelled
+    // rather than merely deferred. Same settle-then-clear the interrupt uses, for the same reason.
+    let cleared = clear_composer_after_cancel(&s.app, &pty).await;
+    Ok(Json(
+        json!({ "ok": true, "cancelled": true, "text": text, "composerCleared": cleared }),
+    ))
+}
 
 /// A tab's background-shell roster (mailink/shells.rs), or empty when it has none / can't be
 /// determined. Claude + LOCAL only: an SSH tab's background shells are the REMOTE host's
