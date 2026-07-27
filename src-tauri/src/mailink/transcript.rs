@@ -145,19 +145,33 @@ fn tail_facts(path: &PathBuf, parse: fn(&str) -> TailFacts) -> TailFacts {
 /// Messages currently sitting in a Claude session's input queue — typed while the agent was busy
 /// and not yet consumed. `(text, enqueued_at_ms)`, oldest first.
 ///
-/// Claude Code writes four `queue-operation` kinds, and they mean different things:
-///   * `enqueue` — a message went into the queue (carries its text)
-///   * `remove`  — it was CONSUMED by the agent (carries the text; a `queued_command` attachment
-///                 follows, which is what the transcript renders)
-///   * `dequeue` — it was RECALLED into the composer, arrow-up style, and never runs. Carries NO
-///                 text, so the target is positional: measured across 1089 multi-message dequeues
-///                 in real sessions, 1048 left the NEWEST queued message unconsumed → pops LIFO.
+/// Claude Code writes four `queue-operation` kinds. Only `enqueue` and `popAll` carry `content`
+/// at all — `remove` and `dequeue` are bare, so which entry left has to be recovered from what
+/// the transcript records next:
+///   * `enqueue` — a message went into the queue (carries its text).
+///   * `remove`  — DRAINED mid-turn. The `queued_command` attachment that follows names the exact
+///                 prompt, so we match on that rather than guess a position.
+///   * `dequeue` — also a DRAIN, at a turn boundary, becoming a normal user turn. Nothing in the
+///                 record identifies the entry, so we take the oldest.
 ///   * `popAll`  — the whole queue was cleared.
+///
+/// `dequeue` is NOT the arrow-up recall it looks like: 1042 of 1229 in the local corpus are
+/// immediately followed by a normal user turn. Nothing in a transcript marks a genuine recall, so
+/// don't try to infer one from these ops — an earlier attempt read "the newest entry was still
+/// outstanding afterwards" as "the op took the newest", which a FIFO drain produces exactly.
+/// Re-measured by identifying the CONSUMED text, both ops lean oldest-first (remove 61:28,
+/// dequeue 18:6), which is why both drain in order here.
+///
 /// A queue that outlives the scanned tail simply reports what the tail can prove.
 pub fn pending_queue(session_id: &str, max_bytes: u64) -> Vec<(String, u64)> {
     let Some(lines) = claude_lines(session_id, max_bytes) else { return Vec::new() };
+    replay_queue(&lines)
+}
+
+/// The queue replay itself, over already-parsed lines (unit-tested; `pending_queue` reads them).
+fn replay_queue(lines: &[Value]) -> Vec<(String, u64)> {
     let mut queue: Vec<(String, u64)> = Vec::new();
-    for v in &lines {
+    for (i, v) in lines.iter().enumerate() {
         if v.get("type").and_then(|t| t.as_str()) != Some("queue-operation") {
             continue;
         }
@@ -172,20 +186,44 @@ pub fn pending_queue(session_id: &str, max_bytes: u64) -> Vec<(String, u64)> {
                     .max(0) as u64;
                 queue.push((content.to_string(), ts));
             }
-            // Consumed: drop the OLDEST matching entry (the queue drains in order).
+            // Both drain one entry. `remove` names its prompt in the attachment that follows, so
+            // resolve it exactly; `dequeue` names nothing, so take the head.
             Some("remove") => {
-                if let Some(i) = queue.iter().position(|(t, _)| t == content) {
-                    queue.remove(i);
+                let drained = drained_prompt(&lines[i + 1..])
+                    .and_then(|p| queue.iter().position(|(t, _)| texts_match(t, &p)))
+                    .unwrap_or(0);
+                if drained < queue.len() {
+                    queue.remove(drained);
                 }
             }
             Some("dequeue") => {
-                queue.pop();
+                if !queue.is_empty() {
+                    queue.remove(0);
+                }
             }
             Some("popAll") => queue.clear(),
             _ => {}
         }
     }
     queue
+}
+
+/// The prompt named by the `queued_command` attachment that follows a `remove`, if it's close
+/// enough to belong to it. The op record itself carries no text — this is the only thing that
+/// says WHICH queued message was just consumed.
+fn drained_prompt(after: &[Value]) -> Option<String> {
+    after.iter().take(4).find_map(|w| {
+        let a = w.get("attachment")?;
+        (a.get("type").and_then(|t| t.as_str()) == Some("queued_command"))
+            .then(|| a.get("prompt").and_then(|p| p.as_str()).map(str::to_string))
+            .flatten()
+    })
+}
+
+/// Whether a drained prompt refers to a queued entry. The attachment may carry `[Image #N]` chips
+/// the enqueued text didn't, so compare on the bare caption too.
+fn texts_match(queued: &str, drained: &str) -> bool {
+    queued == drained || strip_leading_image_refs(drained) == strip_leading_image_refs(queued)
 }
 
 /// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
@@ -1796,6 +1834,60 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "user");
         assert_eq!(out[0]["text"], "Please fix the bug.");
+    }
+
+    #[test]
+    fn the_queue_replay_drains_on_remove_even_though_the_op_carries_no_text() {
+        let enq = |text: &str, ts: &str| {
+            json!({ "type": "queue-operation", "operation": "enqueue", "content": text, "timestamp": ts })
+        };
+        let op = |kind: &str| json!({ "type": "queue-operation", "operation": kind, "timestamp": "2026-07-26T15:00:09.000Z" });
+        let drained = |prompt: &str| {
+            json!({ "type": "attachment", "attachment": { "type": "queued_command", "prompt": prompt,
+                "origin": { "kind": "human" } } })
+        };
+
+        // `remove` is a bare record — no `content`. Matching it against its own (absent) text
+        // silently drained nothing, so consumed messages stayed listed as pending forever.
+        let lines = vec![
+            enq("first", "2026-07-26T15:00:00.000Z"),
+            enq("second", "2026-07-26T15:00:01.000Z"),
+            op("remove"),
+            drained("first"),
+        ];
+        let q = replay_queue(&lines);
+        assert_eq!(q.len(), 1, "the consumed message must leave the queue");
+        assert_eq!(q[0].0, "second");
+
+        // The attachment names WHICH entry drained, so an out-of-order drain is exact rather
+        // than positional.
+        let lines = vec![
+            enq("first", "2026-07-26T15:00:00.000Z"),
+            enq("second", "2026-07-26T15:00:01.000Z"),
+            op("remove"),
+            drained("second"),
+        ];
+        assert_eq!(replay_queue(&lines)[0].0, "first");
+
+        // An image send's attachment carries `[Image #N]` chips the enqueued caption never had.
+        let lines = vec![
+            enq("look at this", "2026-07-26T15:00:00.000Z"),
+            op("remove"),
+            drained("[Image #1]look at this"),
+        ];
+        assert!(replay_queue(&lines).is_empty(), "an image caption must still match its entry");
+
+        // `dequeue` identifies nothing, so it drains the head — it is an ordinary turn-boundary
+        // drain, NOT the arrow-up recall it was once read as.
+        let lines = vec![
+            enq("first", "2026-07-26T15:00:00.000Z"),
+            enq("second", "2026-07-26T15:00:01.000Z"),
+            op("dequeue"),
+        ];
+        assert_eq!(replay_queue(&lines)[0].0, "second");
+
+        let lines = vec![enq("first", "2026-07-26T15:00:00.000Z"), op("popAll")];
+        assert!(replay_queue(&lines).is_empty());
     }
 
     #[test]

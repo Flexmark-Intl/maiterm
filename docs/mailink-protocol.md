@@ -396,6 +396,14 @@ interface ChatDetail extends Chat {
                             //   precondition for offering to pull one back: an already-consumed
                             //   message cannot be recalled. `text` matches what the turn will echo
                             //   once consumed. Claude tabs only; absent when the queue is empty.
+                            //   GET only — there is no `queued` WS event; re-GET on a state change.
+                            //   Reconstructed by replaying `queue-operation` lines, and only
+                            //   `enqueue`/`popAll` carry text: `remove` and `dequeue` are bare
+                            //   records, so which entry drained comes from the `queued_command`
+                            //   attachment that follows a `remove`, and from FIFO order otherwise.
+                            //   Do NOT read `dequeue` as an arrow-up recall — 1042 of 1229 in a
+                            //   real corpus are followed by an ordinary user turn. Nothing in a
+                            //   transcript marks a genuine recall.
   shells?: AgentShell[];    // background shells (`Bash run_in_background` — the TUI's /bashes
                             // list), present only when non-empty. Claude + LOCAL tabs only: an
                             // SSH tab's shells are the REMOTE host's processes, so their liveness
@@ -423,6 +431,11 @@ interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string;
 // last polled". Measured on a real 37-shell session: the transcript claimed 31 running; exactly 1
 // process existed. So `status:"running"` here means a live process was CONFIRMED — it is the only
 // status that offers a Stop button, and it never lies about a dead process.
+//
+// The confirmation can't just count the agent's children: a live agent's direct children ALSO
+// include its stdio MCP servers, which look exactly like long-running processes and would each be
+// mistaken for a background shell. Matching is therefore keyed on the wrapper Claude Code actually
+// spawns (`bash -c source …/shell-snapshots/… && eval '<command>'`), which no MCP server has.
 interface AgentShell {
   id: string;               // Claude Code's shell id, e.g. "bkbod6zxj"
   command: string;          // the command line as the agent wrote it
