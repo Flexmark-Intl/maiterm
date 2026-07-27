@@ -5,12 +5,13 @@ description: Point an agent at a Mattermost support thread — by permalink or b
 
 A bug report lands in a Mattermost thread. Normally you'd read it, switch to your editor, reproduce it, fix it, then come back and write up what you did. Chat Threads collapses that loop: an agent tab binds to the thread, reads the entire conversation as a bug report, investigates and fixes the issue **in that tab's repository**, and posts the resolution back to the thread — without you leaving maiTerm.
 
-There are two ways a thread reaches an agent, and both end in the same flow:
+There are three ways a tab ends up working a thread, and they all end in the same flow:
 
 - **Paste a permalink.** Run `/maiterm resolve <permalink>` in an agent tab to bind that one thread by hand.
 - **Let the bot get summoned.** Turn a tab into a **monitoring tab** and it watches the channels you choose; when anyone `@mentions` the bot in a thread, maiTerm binds that thread to the tab and hands the agent the request — hands-off, no permalink to copy.
+- **Let the agent raise it.** A monitoring tab can also **open** a thread — an incident it found, a heads-up, a question it needs a human to answer — and stay bound to it for the replies. See [Raising a thread of its own](#raising-a-thread-of-its-own).
 
-You configure a bot account once, and from then on any agent tab can pick up a thread. The agent works silently while it investigates, asks a single addressed question if it gets genuinely stuck, and posts a two-part resolution when it's done — plain language for the support person, technical detail for the devs. Crucially, **you stay in control of what it's allowed to act on**: only messages that `@mention` the bot reach the agent, only people you've listed can summon it, and each message is scoped by who sent it.
+You configure a bot account once, and from then on any agent tab can pick up a thread. The agent acknowledges the thread the moment it takes it, then works silently while it investigates, asks a single addressed question if it gets genuinely stuck, and posts a two-part resolution when it's done — plain language for the support person, technical detail for the devs. Crucially, **you stay in control of what it's allowed to act on**: on a thread someone else started, only messages that `@mention` the bot reach the agent; only people you've listed can summon it; and each message is scoped by who sent it.
 
 :::note
 Chat Threads is part of maiTerm's [agent integration](/features/agents/). It needs a supported agent (Claude Code) running in the tab, works over SSH through the same MCP bridge as the rest of the integration, and reaches you through maiTerm's existing [notifications](/features/agents/) — including a ring on [maiLink](/features/mailink/) when a reply arrives and no session is live to take it.
@@ -47,8 +48,8 @@ From an agent tab whose working directory is the relevant repository, run:
 
 Get the permalink from Mattermost's **⋯ → Copy Link** on the message. From there the agent runs the flow itself:
 
-1. **Bind and announce.** The agent binds the tab to the thread and pulls in the full conversation. Because Mattermost only delivers a notification on an exact `@username`, its **first reply tells the humans how to reach it** — "`@mention` me to send me a message" — using the bot's real username.
-2. **Investigate silently.** While it works, the agent stays quiet on the thread — no progress chatter. It reproduces and fixes the issue in the tab's repo.
+1. **Bind and acknowledge.** The agent binds the tab to the thread and pulls in the full conversation, then — **before it investigates anything** — posts a short acknowledgement: that it's picked the thread up, its one-line read of what's being asked, and a rough sense of what happens next. The read-back matters: a misunderstanding surfaces immediately instead of ten minutes later in the shape of the wrong fix. Because Mattermost only delivers a notification on an exact `@username`, that first reply also **tells the humans how to reach it** — "`@mention` me to send me a message" — using the bot's real username. Handing the work off to a subagent or a [mesh](/features/mesh-workspace/) peer doesn't stand in for the ack, and doesn't happen before it.
+2. **Investigate silently.** After the ack, the agent stays quiet on the thread — no progress chatter. It reproduces and fixes the issue in the tab's repo.
 3. **One question if blocked.** If it genuinely can't proceed without more information, it posts a single concise question, explicitly addressed to the right audience — **`@Support`** for what the customer saw or did, **`@Dev`** for questions about the codebase or release process — so the right person knows to answer.
 4. **Post the resolution.** When the fix is verified, the agent posts it as a normal reply and asks the humans to test and confirm. The post has two parts: a short, jargon-free summary for the support person (what was wrong, what changes for the customer, and when) ending with the ask — an `@mention` of whoever should verify it — then a `---` divider and **Technical details (for devs)**: root cause, what changed, how it was verified. Anything asked of a human sits above the divider, and the technical detail is always the last thing in the post, so the call to action is never buried under a wall of developer detail.
 5. **Stay bound until confirmed.** Posting a fix does **not** close the thread (see below).
@@ -58,6 +59,8 @@ Ambient discussion in the thread isn't pushed at the agent, but it can re-read t
 ## Screenshots, both directions
 
 Bug reports come with pictures. Images attached to a thread message are **staged where the agent can actually open them**: maiTerm downloads the attachment and hands the agent a real file path, so a screenshot of the broken screen becomes something it can look at rather than something it's told about. This works for an agent running on a remote host over SSH too — the image is pushed to the remote machine over the same bridge tunnel the rest of the integration uses.
+
+A reply that is *nothing but* an image counts as a message. Mattermost splits a drag-and-drop upload from the text that introduced it, so the screenshot arrives as a post with an empty body; it's still delivered, and on a mention-gated thread it rides in on the `@mention` its author posted alongside it moments earlier.
 
 The agent can attach images to its own replies as well — a before/after, an annotated screenshot, visual proof that a fix landed — and they're uploaded to Mattermost and posted with the reply like any other attachment. Remote agents can send images back the same way; maiTerm fetches the file from the remote host before uploading it.
 
@@ -77,6 +80,21 @@ From then on, the tab is a **dispatcher**. Whenever someone `@mentions` the bot 
 
 Only people you've authorized can summon the bot — see [Who can summon the bot](#who-can-summon-the-bot) below. An `@mention` from anyone else is never picked up; it just notifies you.
 
+## Raising a thread of its own
+
+Answering is only half a conversation. An agent on a monitoring tab can also **open** a thread: a regression it tripped over while working on something else, a heads-up that a deploy is about to change behaviour, a question only a human can settle. It posts a new root message in one of the channels that tab monitors and binds itself to it, so the answers come back to the same tab.
+
+Ask for one with `/maiterm raise <what to post>`, or let the agent decide it needs to — the rules are the same either way:
+
+- **Only channels you put on that tab's monitor list.** An agent can't post into a channel it happened to discover; the monitored set is the whole of its reach, and you set it from the tab's right-click menu. If the tab monitors more than one, the agent names which.
+- **It counts against the three-thread cap.** A thread the agent opened is a live thread it owns — it works it to resolution and closes it out like a summoned one.
+- **Every reply comes back.** Nobody should have to `@mention` a bot they didn't summon, so on a thread the agent opened, the mention gate is off and all human replies are delivered. Summoned and permalink-bound threads stay mention-gated as before.
+- **It has to `@mention` whoever should see it.** A new root post notifies nobody by itself, so the opening message names the people it's for by their exact Mattermost username.
+
+An agent can also post a genuine fire-and-forget notice — a heads-up it expects no answer to — without binding the thread at all.
+
+Authority is unchanged on a thread the agent opened: an authorized operator's reply still carries your full authority, and everyone else's still buys investigation and answers but not changes. See below.
+
 ## You stay in control
 
 The agent is working against a live customer channel, so the design keeps you — not the chat participants — in charge of what it can do.
@@ -85,6 +103,8 @@ The agent is working against a live customer channel, so the design keeps you �
 
 The thread keeps flowing normally, but **only messages that `@mention` the bot are delivered into the session**. Everything else stays ambient — the agent can read it for context, but it doesn't act on it. That means the agent responds to deliberate asks, not to every message in a busy channel.
 
+The one exception is a thread the agent [opened itself](#raising-a-thread-of-its-own): it asked the question, so every reply is delivered without anyone having to mention it. Threads that reached it by summon or by permalink — which is to say, every thread a human started — stay mention-gated.
+
 ### Who can summon the bot
 
 Two lists under **Preferences → Integrations → Message Authority** decide both *who may summon a monitoring tab* and *how much authority a delivered message carries*. Both take one Mattermost username per line, and both are editable **only** in Preferences — no chat message can rewrite who the agent trusts.
@@ -92,10 +112,15 @@ Two lists under **Preferences → Integrations → Message Authority** decide bo
 There are three tiers:
 
 - **Authorized operators** — usernames under **Authorized usernames**. They can summon the bot, and their `@mentions` carry your **full authority**; the agent treats them as if you'd typed them yourself.
-- **Pickup users** — usernames under **Pickup users**. They can **summon** the bot too, but their work is treated as **investigate-and-report**, not full authority: the agent may reproduce, investigate (read-only), and reply, but it will **not** take destructive, irreversible, or scope-expanding actions on their say-so. Use this tier for people you trust to hand the bot a bug but not to authorize sweeping changes.
-- **Everyone else** — anyone not on either list. Their `@mentions` **cannot summon** a monitoring tab at all; an attempt simply notifies you and is never picked up. When a thread is *already* bound (you resolved it by permalink, say), messages from these channel members are still delivered as context but are treated the same as a pickup user's — **information and requests only**, never a mandate for destructive or scope-expanding work.
+- **Pickup users** — usernames under **Pickup users**. They can **summon** the bot too, but their messages don't carry full authority. Use this tier for people you trust to hand the bot a bug but not to authorize sweeping changes.
+- **Everyone else** — anyone not on either list. Their `@mentions` **cannot summon** a monitoring tab at all; an attempt simply notifies you and is never picked up. When a thread is *already* bound (you resolved it by permalink, say), messages from these channel members are still delivered as context and are treated the same as a pickup user's.
 
-So the two lists layer: authorized operators are the only tier that carries full authority; pickup users extend the *right to summon* to more people without extending that authority; everyone else can neither summon nor direct destructive work. If any delivered message asks for something out of scope ("can we just wipe all that?"), the agent relays it to you and waits for sign-off rather than doing it. Matching is by Mattermost username, so this is only as trustworthy as your server's identities.
+For everyone below the authorized tier, the line the agent draws is **read versus change**:
+
+- **Reading is free.** Investigating, reading the code, explaining how something works, reproducing the report, confirming a bug is real, answering questions, replying on the thread — the agent does all of that on a support person's say-so without asking anyone. That is what support and pickup users are there for, and making them wait for a sign-off to get a question answered would defeat the point.
+- **Changing needs a go-ahead.** Editing code, committing, deploying, running a migration, deleting or resetting data, changing configuration, or working beyond the reported issue — none of that happens on a non-authorized request. The agent replies on the thread `@mentioning` one of your authorized operators, stating what's being asked and what it would do, and waits — and it can raise a notification to you at the terminal as well.
+
+So "can you check whether X is broken?" gets an answer; "can you fix X" — or "can we just wipe all that?" — gets a question put to someone you trust. The two lists layer accordingly: authorized operators are the only tier that carries full authority; pickup users extend the *right to summon* to more people without extending that authority; everyone else can neither summon nor direct a change. The agent is told who your authorized operators are so it knows whom to ask — read-only, like the lists themselves. Matching is by Mattermost username, so this is only as trustworthy as your server's identities.
 
 ### An operator kill switch
 
@@ -118,7 +143,7 @@ If someone `@mentions` the bot on a bound thread while its agent session isn't r
 
 If the monitoring tab is part of a [Mesh Workspace](/features/mesh-workspace/), it doesn't have to work every thread itself. Before it digs in, it checks its peers: when an issue clearly belongs to another agent's repository — a peer whose purpose and working directory match the report — it hands that peer the investigation and fix, while **staying the dispatcher on the thread**.
 
-The bound tab is still the only one connected to the thread, so it keeps ownership of the conversation: it relays the request to the peer (passing the sender's authority through verbatim, so a pickup user's request stays investigate-and-report on the far end too), receives the peer's findings, and posts the resolution back itself. The right specialist does the work in the right repo; the thread only ever hears from the one bot it summoned.
+The bound tab is still the only one connected to the thread, so it keeps ownership of the conversation: it relays the request to the peer (passing the sender's authority through verbatim, so a pickup user's request carries the same limits on the far end too), receives the peer's findings, and posts the resolution back itself. The right specialist does the work in the right repo; the thread only ever hears from the one bot it summoned.
 
 ## Shaping how the agent writes
 
