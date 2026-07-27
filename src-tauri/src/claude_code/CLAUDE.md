@@ -165,6 +165,19 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   framing, not a hard sandbox, since the agent runs in a PTY maiTerm can't intercept).
   **`comms_authorized_users` is deliberately absent from `preference_meta()`** so no chat message
   can edit who is trusted — only the human via Preferences → Integrations.
+- **Binding-set changes must emit**: the `@` badge and its count read `Tab.comms_bindings`, but the
+  Svelte store loads workspaces ONCE at startup and owns its copy — so every binding the backend
+  creates (summon pickup, `startCommsThread`, `bindCommsThread`) or clears (`resolve: true`,
+  `unbindCommsThread`) was invisible to the operator, who saw a stale count while the tab sat at
+  `MAX_TAB_BINDINGS` refusing summons. `comms::emit_bindings_changed` fires `comms-bindings-changed`
+  ({tab_id, bindings}) on every set change (not cursor bumps) → `workspacesStore.applyCommsBindings`.
+  Same class as the maiLink rule: a backend mutation of tab state needs a frontend event.
+  Binding lifecycle is also logged (bind/raise/release + resulting `n/3` occupancy) — previously
+  only summon pickups logged, so slots appeared to be taken and never released.
+- **Queue reasons are distinct**: a held summon logs and notifies as `at_capacity` /`no_session`
+  /`no_pty`, never one merged "busy/offline" — they need different operator actions (close a thread
+  vs. resume the session), and the merged wording had operators waiting on a queue that only a
+  closed thread could drain.
 - **Operator kill switch**: a bound tab shows a green `@` indicator in `TerminalTabs.svelte`; its
   context menu gains "End thread binding" → `clear_tab_comms_binding` command, which clears
   `Tab.comms_binding` directly (no agent involvement, posts nothing). The watcher re-reads

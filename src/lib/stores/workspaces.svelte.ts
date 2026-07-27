@@ -1,5 +1,5 @@
 import type { Terminal } from '@xterm/xterm';
-import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel } from '$lib/tauri/types';
+import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
 import * as commands from '$lib/tauri/commands';
@@ -1434,6 +1434,26 @@ function createWorkspacesStore() {
         ? tab.comms_bindings.filter(b => b.root_id !== rootId)
         : [];
       await commands.clearTabCommsBinding(workspaceId, paneId, tabId, rootId);
+    },
+
+    /**
+     * Backend told us a tab's comms bindings changed (summon pickup, startCommsThread,
+     * bindCommsThread, resolve/unbind). The store loads workspaces once at startup and
+     * owns its copy, so without this the `@` badge and its count stay frozen at the
+     * startup snapshot — the operator sees 2 threads while the tab sits at the 3-thread
+     * cap refusing new summons. No command call: the backend already persisted it.
+     * Silently ignores tabs in other windows (the event is broadcast to all of them).
+     */
+    applyCommsBindings(tabId: string, bindings: CommsBinding[]) {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) {
+            tab.comms_bindings = bindings;
+            return;
+          }
+        }
+      }
     },
 
     /** Enable/update (channels) or disable (null) chat monitoring on a tab. */

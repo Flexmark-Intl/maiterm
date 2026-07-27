@@ -367,6 +367,42 @@ pub fn mentions_username(message: &str, username: &str) -> bool {
     false
 }
 
+/// Tell the frontend a tab's binding SET changed (bound / unbound — not cursor bumps).
+///
+/// The tab strip's `@` badge and its count read `Tab.comms_bindings`, but the Svelte store
+/// loads workspaces once at startup and owns its copy from then on. Every binding the
+/// BACKEND creates (summon pickup, startCommsThread, bindCommsThread) or clears (resolve,
+/// unbindCommsThread) therefore stayed invisible: the operator saw a stale count while the
+/// tab quietly sat at the 3-thread cap. Carries the full list so the store can replace its
+/// array rather than guess at a delta.
+pub(crate) fn emit_bindings_changed(app_handle: &tauri::AppHandle, app: &Arc<AppState>, tab_id: &str) {
+    use tauri::Emitter;
+    let bindings = {
+        let data = app.app_data.read();
+        data.windows
+            .iter()
+            .flat_map(|w| &w.workspaces)
+            .flat_map(|ws| &ws.panes)
+            .flat_map(|p| &p.tabs)
+            .find(|t| t.id == tab_id)
+            .map(|t| t.comms_bindings.clone())
+            .unwrap_or_default()
+    };
+    log::info!(
+        "[comms] tab {tab_id} now holds {}/{MAX_TAB_BINDINGS} thread binding(s): [{}]",
+        bindings.len(),
+        bindings
+            .iter()
+            .map(|b| b.root_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let _ = app_handle.emit(
+        "comms-bindings-changed",
+        serde_json::json!({ "tab_id": tab_id, "bindings": bindings }),
+    );
+}
+
 /// Whether a post carries anything worth delivering: text, or files with no text.
 /// A screenshot dropped in with no caption is a real message — the empty-body check
 /// exists to skip join/leave/system noise, and must not eat attachment-only posts
@@ -819,11 +855,29 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         .any(|s| s.tab_id == tab_id);
                     let pty_id = crate::mailink::pty_for_tab(&app, &tab_id);
                     let bound_count = bindings_count_for_tab(&app, &tab_id);
-                    if !session_live || pty_id.is_none() || bound_count >= MAX_TAB_BINDINGS {
+                    let at_capacity = bound_count >= MAX_TAB_BINDINGS;
+                    if !session_live || pty_id.is_none() || at_capacity {
                         // Can't take it now. Hold the cursor HERE so this summon is
                         // retried when the tab frees up / comes back. Say so once.
+                        //
+                        // The reason decides what the OPERATOR should do, so never
+                        // collapse them into one "busy/offline": at capacity means close
+                        // a thread (waiting achieves nothing — the agent is not going to
+                        // free a slot by itself), offline means resume the session.
+                        let (reason, reason_detail) = if at_capacity {
+                            (
+                                "at_capacity",
+                                format!(
+                                    "the tab is holding all {MAX_TAB_BINDINGS} thread slots — close one out to free a slot"
+                                ),
+                            )
+                        } else if !session_live {
+                            ("no_session", "no agent session is running in that tab".to_string())
+                        } else {
+                            ("no_pty", "that tab has no live terminal".to_string())
+                        };
                         if busy_replied.insert(root.clone()) {
-                            if session_live && bound_count >= MAX_TAB_BINDINGS {
+                            if session_live && at_capacity {
                                 let _ = client
                                     .create_post(&ch.id, &root, BUSY_REPLY_MSG, &[])
                                     .await;
@@ -835,9 +889,13 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                                     "tab_id": tab_id, "kind": "queued",
                                     "channel": ch.name, "from": format!("{who} (@{uname})"),
                                     "preview": preview,
+                                    "reason": reason, "reason_detail": reason_detail,
                                 }),
                             );
-                            log::info!("[comms] summon queued for tab {tab_id} (busy/offline) in {}", ch.name);
+                            log::info!(
+                                "[comms] summon queued for tab {tab_id} ({reason}: {reason_detail}) in {}",
+                                ch.name
+                            );
                         }
                         break; // stop scanning this channel; cursor holds before this post
                     }
@@ -853,6 +911,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                     {
                         Ok(()) => {
                             busy_replied.remove(&root);
+                            emit_bindings_changed(&app_handle, &app, &tab_id);
                             let _ = app_handle.emit(
                                 "comms-summon",
                                 serde_json::json!({

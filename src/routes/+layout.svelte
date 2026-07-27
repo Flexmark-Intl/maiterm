@@ -16,7 +16,7 @@
   import { attachConsole } from '@tauri-apps/plugin-log';
   import { onAction as onNotificationAction } from '@tauri-apps/plugin-notification';
   import * as commands from '$lib/tauri/commands';
-  import type { ClaudeCodeToolRequest, Preferences, Tab } from '$lib/tauri/types';
+  import type { ClaudeCodeToolRequest, Preferences, Tab, CommsBinding } from '$lib/tauri/types';
   import type { ImportPreview } from '$lib/tauri/commands';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
@@ -401,15 +401,33 @@
       );
     }).then(unlisten => { unlistenCommsPending = unlisten; });
 
+    // Backend-side binding changes (summon pickup, startCommsThread, bindCommsThread,
+    // resolve/unbind) — the store owns its copy of the tab, so the `@` badge would
+    // otherwise show whatever was bound at startup.
+    let unlistenCommsBindings: (() => void) | undefined;
+    appWindow.listen<{ tab_id: string; bindings: CommsBinding[] }>('comms-bindings-changed', (event) => {
+      workspacesStore.applyCommsBindings(event.payload.tab_id, event.payload.bindings ?? []);
+    }).then(unlisten => { unlistenCommsBindings = unlisten; });
+
     // Chat-monitor summon events: pickups, queued summons, unauthorized attempts.
     let unlistenCommsSummon: (() => void) | undefined;
-    appWindow.listen<{ tab_id: string; kind: string; channel: string; from: string; preview: string }>('comms-summon', async (event) => {
+    appWindow.listen<{ tab_id: string; kind: string; channel: string; from: string; preview: string; reason?: string; reason_detail?: string }>('comms-summon', async (event) => {
       const { dispatch } = await import('$lib/stores/notificationDispatch');
       const p = event.payload;
       if (p.kind === 'picked_up') {
         dispatch('Thread picked up', `${p.from} summoned the bot in ${p.channel}: "${p.preview}"`, 'info', { tabId: p.tab_id });
       } else if (p.kind === 'queued') {
-        dispatch('Summon queued', `${p.from} summoned the bot in ${p.channel} but the monitoring tab is busy or offline: "${p.preview}". It will be picked up when the tab frees up.`, 'info', { tabId: p.tab_id });
+        // At-capacity needs the operator to close a thread; waiting won't help. The
+        // other reasons do resolve on their own once the session is back.
+        const atCapacity = p.reason === 'at_capacity';
+        dispatch(
+          atCapacity ? 'Summon waiting — tab is full' : 'Summon queued',
+          `${p.from} summoned the bot in ${p.channel}: "${p.preview}". ${
+            p.reason_detail ? `${p.reason_detail[0].toUpperCase()}${p.reason_detail.slice(1)}.` : 'The monitoring tab is busy or offline.'
+          } ${atCapacity ? 'It stays queued until a thread is closed out.' : 'It will be picked up when the tab frees up.'}`,
+          'info',
+          { tabId: p.tab_id },
+        );
       } else if (p.kind === 'unauthorized') {
         dispatch('Summon not allowed', `${p.from} @mentioned the bot in ${p.channel} but isn't on the pickup or authorized list: "${p.preview}". Nothing was posted in the thread.`, 'info', { tabId: p.tab_id });
       }
@@ -988,6 +1006,7 @@
       unlistenClaudeConnection?.();
       unlistenCommsPending?.();
       unlistenCommsSummon?.();
+      unlistenCommsBindings?.();
       claudeStateStore.destroy();
       agentBridgeStore.destroy();
       agentMeshStore.destroy();

@@ -546,10 +546,10 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
 /// Async for the comms tools (outbound HTTP); lock guards must never be held across an await.
 async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
     match tool_name {
-        "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state).await),
+        "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state, app_handle).await),
         "readCommsThread" => Some(handle_read_comms_thread(arguments, state).await),
-        "postCommsReply" => Some(handle_post_comms_reply(arguments, state).await),
-        "startCommsThread" => Some(handle_start_comms_thread(arguments, state).await),
+        "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
+        "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
             let tab_id = match required_tab_id(arguments) {
                 Ok(t) => t,
@@ -563,7 +563,15 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
                 Ok(b) => b,
                 Err(e) => return Some(e),
             };
-            Some(match remove_comms_binding(state, &tab_id, &binding.root_id) {
+            let removed = remove_comms_binding(state, &tab_id, &binding.root_id);
+            if matches!(removed, Some(true)) {
+                log::info!(
+                    "[comms] tab {tab_id} released thread {} (unbindCommsThread)",
+                    binding.root_id
+                );
+                crate::comms::emit_bindings_changed(app_handle, state, &tab_id);
+            }
+            Some(match removed {
                 Some(true) => serde_json::json!({ "unbound": true, "root_id": binding.root_id, "remaining_bound_threads": bindings.len() - 1 }),
                 Some(false) => serde_json::json!({ "unbound": false, "note": "tab was not bound to that thread" }),
                 None => serde_json::json!({ "error": format!("Tab '{tab_id}' not found") }),
@@ -1027,7 +1035,11 @@ fn monitored_channels(
         .unwrap_or_default()
 }
 
-async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> Value {
+async fn handle_bind_comms_thread(
+    arguments: &Value,
+    state: &Arc<AppState>,
+    app_handle: &AppHandle,
+) -> Value {
     use crate::comms;
 
     let tab_id = match required_tab_id(arguments) {
@@ -1113,6 +1125,10 @@ async fn handle_bind_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
         None => return serde_json::json!({ "error": format!("Tab '{tab_id}' not found") }),
     };
     let bound_count = get_comms_bindings(state, &tab_id).len();
+    if !refreshed {
+        log::info!("[comms] tab {tab_id} bound thread {root_id} (bindCommsThread, {url})");
+    }
+    comms::emit_bindings_changed(app_handle, state, &tab_id);
 
     let mut result = serde_json::json!({
         "bound": true,
@@ -1183,7 +1199,11 @@ async fn handle_read_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
     result
 }
 
-async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Value {
+async fn handle_post_comms_reply(
+    arguments: &Value,
+    state: &Arc<AppState>,
+    app_handle: &AppHandle,
+) -> Value {
     use crate::comms;
 
     let tab_id = match required_tab_id(arguments) {
@@ -1242,6 +1262,11 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
 
     if resolve {
         remove_comms_binding(state, &tab_id, &binding.root_id);
+        log::info!(
+            "[comms] tab {tab_id} released thread {} (resolved via postCommsReply)",
+            binding.root_id
+        );
+        comms::emit_bindings_changed(app_handle, state, &tab_id);
     } else {
         // Belt-and-braces cursor advance — the watcher also filters the bot's own
         // posts by user id, but not re-delivering our own reply is cheap certainty.
@@ -1265,7 +1290,11 @@ async fn handle_post_comms_reply(arguments: &Value, state: &Arc<AppState>) -> Va
 ///
 /// Scoped deliberately: the channel must be one the OPERATOR put on this tab's monitor
 /// list, so an agent can't post into arbitrary channels it discovers.
-async fn handle_start_comms_thread(arguments: &Value, state: &Arc<AppState>) -> Value {
+async fn handle_start_comms_thread(
+    arguments: &Value,
+    state: &Arc<AppState>,
+    app_handle: &AppHandle,
+) -> Value {
     use crate::comms;
 
     let tab_id = match required_tab_id(arguments) {
@@ -1383,6 +1412,12 @@ async fn handle_start_comms_thread(arguments: &Value, state: &Arc<AppState>) -> 
         return result;
     }
     let bound_count = get_comms_bindings(state, &tab_id).len();
+    log::info!(
+        "[comms] tab {tab_id} raised and bound thread {} in {} (startCommsThread)",
+        posted.id,
+        channel.name
+    );
+    comms::emit_bindings_changed(app_handle, state, &tab_id);
     result["bound"] = Value::Bool(true);
     result["bound_thread_count"] = Value::from(bound_count);
     result["all_replies_delivered"] = Value::Bool(true);
