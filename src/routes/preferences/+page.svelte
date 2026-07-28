@@ -93,6 +93,55 @@
   let commsTestOk = $state<boolean | null>(null);
   let commsTesting = $state(false);
 
+  // ─── Comms free-text fields: save while typing, not only on blur ────────────
+  // These textareas used to commit on `change`, which fires only on blur — and the
+  // usual way to leave one is closing the preferences window, which tears down the
+  // webview before the change handler's async save lands. Edits silently reverted.
+  // Now: a local draft holds what's typed (so normalizing the value back into the
+  // field can't eat a half-typed line), a debounce persists it, and blur flushes.
+  let commsDrafts = $state<Record<string, string>>({});
+  const commsTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+  const COMMS_SAVE_DEBOUNCE = 400;
+
+  /** Parse a one-per-line username list ("@name" tolerated). */
+  function parseUserList(text: string): string[] {
+    return text
+      .split('\n')
+      .map((u) => u.trim().replace(/^@/, ''))
+      .filter((u) => u.length > 0);
+  }
+
+  function commsEdit(key: string, text: string, commit: (v: string) => void) {
+    commsDrafts[key] = text;
+    clearTimeout(commsTimers[key]);
+    commsTimers[key] = setTimeout(() => commit(text), COMMS_SAVE_DEBOUNCE);
+  }
+
+  /** Blur/unmount: persist immediately and drop the draft so the stored (normalized) value shows. */
+  function commsFlush(key: string, commit: (v: string) => void) {
+    if (commsTimers[key]) clearTimeout(commsTimers[key]);
+    const draft = commsDrafts[key];
+    if (draft === undefined) return;
+    delete commsDrafts[key];
+    commit(draft);
+  }
+
+  // Last-ditch flush: the window can still be closed inside the debounce window.
+  $effect(() => {
+    const flushAll = () => {
+      commsFlush('authorized', (v) => void preferencesStore.setCommsAuthorizedUsers(parseUserList(v)));
+      commsFlush('pickup', (v) => void preferencesStore.setCommsPickupUsers(parseUserList(v)));
+      commsFlush('instructions', (v) => void preferencesStore.setCommsInstructions(v));
+    };
+    window.addEventListener('pagehide', flushAll);
+    window.addEventListener('blur', flushAll);
+    return () => {
+      window.removeEventListener('pagehide', flushAll);
+      window.removeEventListener('blur', flushAll);
+      flushAll();
+    };
+  });
+
   async function handleCommsTest() {
     commsTesting = true;
     commsTestStatus = '';
@@ -2271,13 +2320,11 @@
             id="comms-authorized"
             class="pattern-input comms-field-input"
             placeholder={'darryl\nlead-dev'}
-            value={preferencesStore.commsAuthorizedUsers.join('\n')}
-            onchange={(e) => preferencesStore.setCommsAuthorizedUsers(
-              e.currentTarget.value
-                .split('\n')
-                .map((u) => u.trim().replace(/^@/, ''))
-                .filter((u) => u.length > 0)
-            )}
+            value={commsDrafts['authorized'] ?? preferencesStore.commsAuthorizedUsers.join('\n')}
+            oninput={(e) => commsEdit('authorized', e.currentTarget.value,
+              (v) => void preferencesStore.setCommsAuthorizedUsers(parseUserList(v)))}
+            onblur={() => commsFlush('authorized',
+              (v) => void preferencesStore.setCommsAuthorizedUsers(parseUserList(v)))}
           ></textarea>
         </div>
 
@@ -2295,13 +2342,11 @@
             id="comms-pickup"
             class="pattern-input comms-field-input"
             placeholder={'support-jane\nsupport-bob'}
-            value={preferencesStore.commsPickupUsers.join('\n')}
-            onchange={(e) => preferencesStore.setCommsPickupUsers(
-              e.currentTarget.value
-                .split('\n')
-                .map((u) => u.trim().replace(/^@/, ''))
-                .filter((u) => u.length > 0)
-            )}
+            value={commsDrafts['pickup'] ?? preferencesStore.commsPickupUsers.join('\n')}
+            oninput={(e) => commsEdit('pickup', e.currentTarget.value,
+              (v) => void preferencesStore.setCommsPickupUsers(parseUserList(v)))}
+            onblur={() => commsFlush('pickup',
+              (v) => void preferencesStore.setCommsPickupUsers(parseUserList(v)))}
           ></textarea>
         </div>
 
@@ -2320,8 +2365,11 @@
             class="pattern-input"
             style="width: 100%; max-width: 480px; min-height: 110px;"
             placeholder={'e.g. Address the customer by name if the report includes it. Keep the support-facing summary under 4 sentences and free of jargon. Sign off as "— maiTerm bot".'}
-            value={preferencesStore.commsInstructions}
-            onchange={(e) => preferencesStore.setCommsInstructions(e.currentTarget.value)}
+            value={commsDrafts['instructions'] ?? preferencesStore.commsInstructions}
+            oninput={(e) => commsEdit('instructions', e.currentTarget.value,
+              (v) => void preferencesStore.setCommsInstructions(v))}
+            onblur={() => commsFlush('instructions',
+              (v) => void preferencesStore.setCommsInstructions(v))}
           ></textarea>
         </div>
       {:else if activeSection === 'backup'}
