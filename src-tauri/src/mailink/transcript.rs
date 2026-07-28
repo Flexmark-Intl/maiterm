@@ -226,6 +226,172 @@ fn texts_match(queued: &str, drained: &str) -> bool {
     queued == drained || strip_leading_image_refs(drained) == strip_leading_image_refs(queued)
 }
 
+// ─── /goal ──────────────────────────────────────────────────────────────────────────────
+
+/// Bytes scanned for `goal_status` records. A goal's set record can sit a long way back — the
+/// judge only evaluates at turn end, and a first turn under a goal ran 65 minutes in the local
+/// corpus — so this matches the transcript window rather than the smaller facts one: if the phone
+/// can see the turns, it can see the goal that produced them. Only lines that actually mention
+/// `goal_status` are parsed, so the cost is the read plus a substring scan.
+const GOAL_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A `/goal` condition the session is being held to. `/goal <condition>` installs a session-scoped
+/// Stop hook: the agent cannot end its turn until a judge decides the condition holds, and each
+/// attempt that falls short sends it back to work with a written explanation of what's missing.
+///
+/// The transcript is the only place this state lives — no state file, no hook event, no process to
+/// interrogate — which also means it costs nothing extra on SSH tabs, where the mirrored JSONL
+/// already carries it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalStatus {
+    /// The condition as the operator typed it. Present on every record, so it survives even when
+    /// the set record itself has scrolled out of the scan window.
+    pub condition: String,
+    /// `active` — being enforced right now (freshly set, or evaluated and sent back).
+    /// `met` — the judge accepted it; the hook auto-cleared. `failed` — the judge ruled it
+    /// impossible; the goal was dropped. `cleared` — the operator removed it by hand.
+    /// The three terminal states are reported only until the conversation moves on (see
+    /// `read_goal`), so "goal finished" and "no goal" stay distinguishable.
+    pub state: &'static str,
+    /// Evaluations of THIS goal so far, counted from its set record — 0 before the first turn
+    /// ends. Deliberately not the record's own `iterations` field: that counter lives in process
+    /// memory and restarts at 0 every time a resume re-arms the hook, so on a resumed session it
+    /// under-reports. It also appears only on terminal records, so it can't be shown while a goal
+    /// is still running, which is exactly when the operator wants it.
+    pub attempts: usize,
+    /// The judge's most recent verdict prose — what's done and what's still outstanding. Absent
+    /// until the first evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// When the goal was set. From the sentinel's own timestamp, so it's the real wall-clock start
+    /// rather than the in-memory `setAt`, which a resume also restarts. Absent if the set record
+    /// is older than the scan window (an evaluation still names the condition).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_at: Option<u64>,
+    /// When the judge last ran. Absent until the first evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<u64>,
+    /// Wall-clock and token cost of the goal, as Claude Code measured it. Emitted only on a
+    /// terminal evaluation (met/failed) — a blocked one carries neither — so both stay absent for
+    /// the whole life of a running goal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+}
+
+/// The goal a Claude session is currently under, or `None` if there isn't one.
+///
+/// Scoped to whichever session id is passed in, which is the point: the Stop hook is session-scoped,
+/// so a goal read off some other session is not being enforced anywhere. Resume keeps the same
+/// session id and re-arms the hook from this same transcript (`restoreGoalFromTranscript` in Claude
+/// Code 2.1.220), so a resumed session correctly still reports its goal. A fork gets a new session
+/// id, and this reports a goal for it only if the forked transcript carried the records across.
+pub fn goal_for_session(session_id: &str) -> Option<GoalStatus> {
+    let path = locate_jsonl(session_id)?;
+    let tail = read_tail(&path, GOAL_SCAN_BYTES)?;
+    read_goal(&tail, session_last_turn_ts(session_id).unwrap_or(0))
+}
+
+/// Whether a `goal_status` attachment is a sentinel — a record written by the operator setting or
+/// clearing the goal, as opposed to a verdict from the judge.
+fn goal_is_sentinel(a: &Value) -> bool {
+    a.get("sentinel").and_then(|s| s.as_bool()) == Some(true)
+}
+
+/// The goal state from a transcript tail, given when the session last had a real turn.
+///
+/// Five record shapes, and the flags have to be read TOGETHER — neither identifies a record alone:
+///   * `sentinel:true, met:false`  — the goal was SET.
+///   * `sentinel:true, met:true`   — the goal was CLEARED by hand. A sentinel meaning the exact
+///                                   opposite of the one above, which is why `sentinel` can't be
+///                                   the discriminator on its own.
+///   * `met:false`                 — evaluated and BLOCKED; `reason` says what's missing and the
+///                                   agent is sent back. Carries no metrics, ever.
+///   * `met:false, failed:true`    — evaluated as IMPOSSIBLE. Terminal; the goal is dropped.
+///   * `met:true`                  — evaluated as SATISFIED. Terminal; the hook auto-clears.
+///
+/// Claude Code decides whether a goal is live by walking back to the newest `goal_status` and
+/// treating `met || failed` as "no" (`findGoalToRestore`, 2.1.220). That function is what re-arms
+/// the Stop hook on resume, so it IS the definition of "actually being enforced" — hence the same
+/// rule here, rather than anything inferred from the shape of the records.
+///
+/// A terminal goal is reported until the conversation moves past it (`last_turn_ts` newer than the
+/// record). Without that, "the goal was met" and "there was never a goal" arrive as the same
+/// absence — no clear record follows a met evaluation — and a finished goal would vanish unseen
+/// from a phone that happened not to be polling at that moment.
+fn read_goal(tail: &str, last_turn_ts: u64) -> Option<GoalStatus> {
+    // Parsing every line of an 8 MiB tail to find a handful of records would cost more than the
+    // rest of the detail build put together; a `goal_status` record always names itself.
+    let recs: Vec<(Value, u64)> = tail
+        .lines()
+        .filter(|l| l.contains("\"goal_status\""))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| {
+            let ts = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .map(rfc3339_to_ms)
+                .unwrap_or(0)
+                .max(0) as u64;
+            let a = v.get("attachment")?;
+            (a.get("type").and_then(|t| t.as_str()) == Some("goal_status")).then(|| (a.clone(), ts))
+        })
+        .collect();
+
+    let (last, last_ts) = recs.last()?;
+    let met = last.get("met").and_then(|m| m.as_bool()) == Some(true);
+    let failed = last.get("failed").and_then(|f| f.as_bool()) == Some(true);
+    let state = if goal_is_sentinel(last) {
+        if met {
+            "cleared"
+        } else {
+            "active"
+        }
+    } else if failed {
+        "failed"
+    } else if met {
+        "met"
+    } else {
+        // Blocked: the judge refused this turn, so the goal is still very much live.
+        "active"
+    };
+    if state != "active" && last_turn_ts > *last_ts {
+        return None;
+    }
+
+    // The run this record belongs to starts at the newest set sentinel before it — a session can
+    // hold several goals over its life, and only the current one's attempts and start time count.
+    let set_idx = recs.iter().rposition(|(a, _)| goal_is_sentinel(a) && a.get("met").and_then(|m| m.as_bool()) != Some(true));
+    let first_eval = set_idx.map_or(0, |i| i + 1);
+    let evals: Vec<&(Value, u64)> =
+        recs[first_eval..].iter().filter(|(a, _)| !goal_is_sentinel(a)).collect();
+    let newest_eval = evals.last();
+
+    let num = |a: &Value, k: &str| a.get(k).and_then(|x| x.as_u64());
+    Some(GoalStatus {
+        condition: last
+            .get("condition")
+            .and_then(|c| c.as_str())
+            .filter(|c| !c.trim().is_empty())
+            .or_else(|| set_idx.and_then(|i| recs[i].0.get("condition")).and_then(|c| c.as_str()))
+            .unwrap_or_default()
+            .to_string(),
+        state,
+        attempts: evals.len(),
+        reason: newest_eval
+            .and_then(|(a, _)| a.get("reason"))
+            .and_then(|r| r.as_str())
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty()),
+        set_at: set_idx.map(|i| recs[i].1).filter(|&t| t > 0),
+        last_checked_at: newest_eval.map(|(_, t)| *t).filter(|&t| t > 0),
+        duration_ms: newest_eval.and_then(|(a, _)| num(a, "durationMs")),
+        tokens: newest_eval.and_then(|(a, _)| num(a, "tokens")),
+    })
+}
+
 /// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
 /// For consumers that need the raw entries rather than distilled turns (the background-shell
 /// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
@@ -919,6 +1085,16 @@ fn push_line_messages(v: &Value, tools: ToolRender, out: &mut Vec<Value>) {
         // one of those as something the user said would be worse than the gap it fixes.
         "attachment" => {
             let a = v.get("attachment");
+            // A /goal state change. The judge's verdict prose is the single most useful thing in
+            // the transcript when you're away from the desk — it's a written account of what's
+            // done and what isn't — and it belongs in the conversation, in the place it happened,
+            // rather than only as the current-state summary on the thread.
+            if a.and_then(|a| a.get("type")).and_then(|t| t.as_str()) == Some("goal_status") {
+                if let Some(row) = goal_msg(uuid.to_string(), a.unwrap_or(&Value::Null), ts) {
+                    out.push(row);
+                }
+                return;
+            }
             let is_human = a.and_then(|a| a.get("origin")).and_then(|o| o.get("kind")).and_then(|k| k.as_str())
                 == Some("human");
             let is_queued = a.and_then(|a| a.get("type")).and_then(|t| t.as_str()) == Some("queued_command");
@@ -1005,6 +1181,52 @@ fn peer_msg(
         "text": text,
         "ts": ts,
     })
+}
+
+/// One `/goal` state change as a thin `kind:"goal_status"` row (mailink-protocol §4.3).
+///
+/// `event` is per-record and finer-grained than the thread's `goal.state`: a row says what
+/// happened at that moment (`set`, `blocked`, `met`, `failed`, `cleared`), where the thread field
+/// says where things stand now. `blocked` is the interesting one — it's the judge turning the
+/// agent around, and its `text` is the explanation of what's still missing.
+///
+/// `role:"system"` for the same reason as `peer_msg`: it's neither side of the conversation, and
+/// the WS streamer drops `user` turns (the phone owns those optimistically), so a blocked verdict
+/// tagged `user` would never arrive live.
+fn goal_msg(msg_id: String, a: &Value, ts: i64) -> Option<Value> {
+    let condition = a.get("condition").and_then(|c| c.as_str()).unwrap_or("").trim();
+    let met = a.get("met").and_then(|m| m.as_bool()) == Some(true);
+    let event = if goal_is_sentinel(a) {
+        if met {
+            "cleared"
+        } else {
+            "set"
+        }
+    } else if a.get("failed").and_then(|f| f.as_bool()) == Some(true) {
+        "failed"
+    } else if met {
+        "met"
+    } else {
+        "blocked"
+    };
+    // A verdict's prose is the payload; a sentinel has none, so it shows its condition instead.
+    let text = a
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .unwrap_or(condition);
+    if text.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "msg_id": msg_id,
+        "role": "system",
+        "kind": "goal_status",
+        "goal": { "event": event, "condition": condition },
+        "text": text,
+        "ts": ts,
+    }))
 }
 
 /// An INCOMING peer envelope, split into who sent it and what they actually said.
@@ -1888,6 +2110,133 @@ mod tests {
 
         let lines = vec![enq("first", "2026-07-26T15:00:00.000Z"), op("popAll")];
         assert!(replay_queue(&lines).is_empty());
+    }
+
+    /// One `goal_status` transcript line. Shapes are verbatim from live sessions (2.1.177–2.1.220).
+    fn goal_line(ts: &str, att: Value) -> String {
+        let mut a = json!({ "type": "goal_status" });
+        a.as_object_mut().unwrap().extend(att.as_object().unwrap().clone());
+        json!({ "type": "attachment", "uuid": ts, "timestamp": ts, "attachment": a }).to_string()
+    }
+
+    #[test]
+    fn a_goal_is_live_until_a_verdict_ends_it_and_sentinel_alone_cannot_say_which() {
+        let cond = "ship the feature";
+        let set = goal_line("2026-07-28T10:00:00.000Z", json!({ "met": false, "sentinel": true, "condition": cond }));
+        let blocked = goal_line(
+            "2026-07-28T10:20:00.000Z",
+            json!({ "met": false, "condition": cond, "reason": "Tests still failing." }),
+        );
+
+        // Set, not yet evaluated: live, and honest that no judge has run.
+        let g = read_goal(&set, 0).unwrap();
+        assert_eq!((g.state, g.attempts), ("active", 0));
+        assert_eq!(g.condition, cond);
+        assert!(g.reason.is_none() && g.last_checked_at.is_none());
+
+        // Blocked is NOT terminal — the judge turned the agent around, so the goal is still on.
+        // The verdict prose is the whole point of the feature.
+        let g = read_goal(&format!("{set}\n{blocked}"), 0).unwrap();
+        assert_eq!((g.state, g.attempts), ("active", 1));
+        assert_eq!(g.reason.as_deref(), Some("Tests still failing."));
+        // Blocked evaluations carry no metrics at all — not a version quirk, they're never emitted.
+        assert!(g.duration_ms.is_none() && g.tokens.is_none());
+
+        // met:true ends it, and carries the cost figures.
+        let done = goal_line(
+            "2026-07-28T10:40:00.000Z",
+            json!({ "met": true, "condition": cond, "reason": "Shipped.", "iterations": 2,
+                "durationMs": 2400000, "tokens": 198573 }),
+        );
+        let g = read_goal(&format!("{set}\n{blocked}\n{done}"), 0).unwrap();
+        assert_eq!((g.state, g.attempts), ("met", 2));
+        assert_eq!((g.duration_ms, g.tokens), (Some(2400000), Some(198573)));
+
+        // A judge ruling it impossible is terminal too, and must not read as "still working".
+        let imp = goal_line(
+            "2026-07-28T10:40:00.000Z",
+            json!({ "met": false, "failed": true, "condition": cond, "reason": "Needs prod access." }),
+        );
+        assert_eq!(read_goal(&format!("{set}\n{imp}"), 0).unwrap().state, "failed");
+
+        // THE TRAP: a manual clear is `sentinel:true` too, and means the opposite of the set
+        // record. Keying on `sentinel` alone would show a goal as freshly set at the moment it
+        // was removed.
+        let cleared = goal_line("2026-07-28T10:41:00.000Z", json!({ "met": true, "sentinel": true, "condition": cond }));
+        assert_eq!(read_goal(&format!("{set}\n{cleared}"), 0).unwrap().state, "cleared");
+
+        // No goal_status records at all → no goal.
+        assert!(read_goal("{\"type\":\"assistant\"}", 0).is_none());
+    }
+
+    #[test]
+    fn a_finished_goal_is_reported_until_the_conversation_moves_past_it() {
+        let cond = "ship it";
+        let set = goal_line("2026-07-28T10:00:00.000Z", json!({ "met": false, "sentinel": true, "condition": cond }));
+        let done_ms = rfc3339_to_ms("2026-07-28T10:40:00.000Z") as u64;
+        let done = goal_line("2026-07-28T10:40:00.000Z", json!({ "met": true, "condition": cond, "reason": "Done." }));
+        let tail = format!("{set}\n{done}");
+
+        // No clear record follows a met evaluation, so without this the completion and "there was
+        // never a goal" are the same absence — the phone would watch the goal silently vanish.
+        assert_eq!(read_goal(&tail, done_ms - 1).unwrap().state, "met");
+        // Once the operator says something else, the completion is old news.
+        assert!(read_goal(&tail, done_ms + 1).is_none());
+        // A live goal is never suppressed by activity — activity is the agent working on it.
+        assert_eq!(read_goal(&set, done_ms + 1).unwrap().state, "active");
+    }
+
+    #[test]
+    fn a_second_goal_starts_its_own_attempt_count() {
+        let first = format!(
+            "{}\n{}\n{}",
+            goal_line("2026-07-28T10:00:00.000Z", json!({ "met": false, "sentinel": true, "condition": "one" })),
+            goal_line("2026-07-28T10:10:00.000Z", json!({ "met": false, "condition": "one", "reason": "no" })),
+            goal_line("2026-07-28T10:20:00.000Z", json!({ "met": true, "condition": "one", "reason": "yes" })),
+        );
+        let second = goal_line("2026-07-28T11:00:00.000Z", json!({ "met": false, "sentinel": true, "condition": "two" }));
+
+        let g = read_goal(&format!("{first}\n{second}"), 0).unwrap();
+        assert_eq!((g.condition.as_str(), g.state, g.attempts), ("two", "active", 0));
+        // The second goal's own start, not the first goal's.
+        assert_eq!(g.set_at, Some(rfc3339_to_ms("2026-07-28T11:00:00.000Z") as u64));
+
+        // A goal whose set record has scrolled out of the scan window still reports itself —
+        // every evaluation names the condition. Only the start time is unknowable.
+        let orphan = goal_line("2026-07-28T11:30:00.000Z", json!({ "met": false, "condition": "two", "reason": "not yet" }));
+        let g = read_goal(&orphan, 0).unwrap();
+        assert_eq!((g.condition.as_str(), g.state), ("two", "active"));
+        assert!(g.set_at.is_none());
+    }
+
+    #[test]
+    fn goal_records_render_as_their_own_transcript_rows() {
+        let line: Value = serde_json::from_str(&goal_line(
+            "2026-07-28T10:20:00.000Z",
+            json!({ "met": false, "condition": "ship it", "reason": "Tests still failing." }),
+        ))
+        .unwrap();
+        let mut out = Vec::new();
+        push_line_messages(&line, ToolRender::Marker, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["kind"], "goal_status");
+        assert_eq!(out[0]["role"], "system"); // `user` rows are dropped by the WS streamer
+        assert_eq!(out[0]["goal"]["event"], "blocked");
+        assert_eq!(out[0]["text"], "Tests still failing.");
+
+        // A sentinel has no prose, so it shows the condition it set.
+        let line: Value = serde_json::from_str(&goal_line(
+            "2026-07-28T10:00:00.000Z",
+            json!({ "met": false, "sentinel": true, "condition": "ship it" }),
+        ))
+        .unwrap();
+        let mut out = Vec::new();
+        push_line_messages(&line, ToolRender::Marker, &mut out);
+        assert_eq!(out[0]["goal"]["event"], "set");
+        assert_eq!(out[0]["text"], "ship it");
+
+        // A goal attachment must not fall through to the queued-message arm.
+        assert!(out.iter().all(|m| m["role"] != "user"));
     }
 
     #[test]

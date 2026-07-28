@@ -405,6 +405,12 @@ interface ChatDetail extends Chat {
                             //   Do NOT read `dequeue` as an arrow-up recall — 1042 of 1229 in a
                             //   real corpus are followed by an ordinary user turn. Nothing in a
                             //   transcript marks a genuine recall.
+  goal?: AgentGoal;         // the `/goal` condition the agent is being held to. Claude tabs only;
+                            //   absent when there is no goal. GET only — re-GET on a state change.
+                            //   Scoped to the tab's CURRENT session: the Stop hook is
+                            //   session-scoped, so a goal read off any other session would be one
+                            //   nothing is actually enforcing. Costs a transcript tail read, so it
+                            //   is detail-only and never on the chat list.
   shells?: AgentShell[];    // background shells (`Bash run_in_background` — the TUI's /bashes
                             // list), present only when non-empty. Claude + LOCAL tabs only: an
                             // SSH tab's shells are the REMOTE host's processes, so their liveness
@@ -448,6 +454,53 @@ interface AgentShell {
   startedAt: number;        // unix ms
   endedAt?: number;         // absent while running, and when the end went unobserved
   tail?: string;            // last captured output line — a progress hint, not the log
+}
+
+// The `/goal <condition>` an agent is being held to. The goal installs a session-scoped Stop hook:
+// the agent CANNOT end its turn until a judge decides the condition holds, and each attempt that
+// falls short sends it back to work with a written explanation of what's missing. Away from the
+// desk this is the best available answer to "is it actually going to finish, and what's left".
+//
+// Entirely transcript-derived (`goal_status` attachments in the session JSONL), which means it
+// costs nothing extra on SSH tabs — the remote-JSONL mirror already carries it. No remote process
+// is consulted, unlike `shells`.
+interface AgentGoal {
+  condition: string;        // as the operator typed it
+  state: 'active' | 'met' | 'failed' | 'cleared';
+                            // active  — being enforced right now: freshly set, OR evaluated and
+                            //           sent back. A blocked verdict is NOT an ending; `reason`
+                            //           then holds the judge's account of what's still outstanding.
+                            // met     — the judge accepted it; the hook auto-cleared.
+                            // failed  — the judge ruled the condition IMPOSSIBLE and dropped the
+                            //           goal. Terminal, and NOT the same as met — the agent stopped
+                            //           because it can't get there, which is worth surfacing loudly.
+                            // cleared — the operator removed it by hand (`/goal` with no condition).
+                            //
+                            // The three terminal states are reported until the conversation moves
+                            // past them (the session's next real turn), then the field drops. No
+                            // clear record follows a met verdict, so without that window "the goal
+                            // was met" and "there was never a goal" would arrive as the same
+                            // absence and a completion could vanish unseen between two polls.
+  attempts: number;         // evaluations of THIS goal so far; 0 before the agent's first turn ends.
+                            //   Counted from the goal's set record, NOT taken from the record's own
+                            //   `iterations` field: that counter lives in process memory and
+                            //   restarts at 0 whenever a resume re-arms the hook, and it is written
+                            //   only on terminal records — so it cannot be shown while a goal is
+                            //   still running, which is exactly when it matters. (It is not
+                            //   meaningless, though: it counts evaluations. It reads 1 throughout a
+                            //   real corpus because those goals passed their FIRST check — including
+                            //   one that took 65 minutes, which was one long turn, not many tries.)
+  reason?: string;          // the judge's most recent verdict prose — what's done, what isn't,
+                            //   quoted from the transcript. Absent until the first evaluation.
+                            //   This is the payload of the feature; it is a paragraph, not a label.
+  setAt?: number;           // unix ms the goal was set. Absent only if the set record is older than
+                            //   the scanned transcript window — an evaluation still names the
+                            //   condition, so the goal itself is never lost with it.
+  lastCheckedAt?: number;   // unix ms of the most recent evaluation; absent until the first one.
+  durationMs?: number;      // wall-clock and token cost, as Claude Code measured them. Emitted ONLY
+  tokens?: number;          //   on a terminal verdict — a blocked evaluation carries neither — so
+                            //   both are absent for the entire life of a running goal. Optional by
+                            //   OUTCOME, not by version.
 }
 
 // One entry of a Claude session's task board (~/.claude/tasks/<sid>/<id>.json passed through
@@ -1047,6 +1100,7 @@ export interface ThreadSummary {
 /** GET /threads/{thread_id} -> ThreadDetail */
 export interface ThreadDetail extends ThreadSummary {
   transcript: Turn[];           // ONE ts-ordered authored list, all participants interleaved
+  goal?: AgentGoal;             // the /goal condition being enforced (§4.3) — Claude, GET only
   pendingPrompt?: PendingPrompt;
 }
 
@@ -1055,7 +1109,11 @@ export interface Turn {
   thread_id: string;
   author?: Participant;         // absent => the human/user
   role: 'agent' | 'user' | 'tool' | 'system';
-  kind?: 'terminal_snapshot' | 'peer_message';  // typed turns (see below); absent => distilled turn
+  kind?: 'terminal_snapshot' | 'peer_message' | 'goal_status';  // typed turns (see below); absent => distilled turn
+  goal?: {                      // present iff kind === 'goal_status'
+    event: 'set' | 'blocked' | 'met' | 'failed' | 'cleared';
+    condition: string;
+  };
   peer?: {                      // present iff kind === 'peer_message'
     direction: 'in' | 'out';    // the only required field
     name?: string;              // peer's role name; ABSENT on a 1:1 bridge with nothing to name —
@@ -1111,6 +1169,23 @@ export interface Turn {
 // notices remain filtered as scaffolding, and human/subagent messaging tools (postCommsReply,
 // startCommsThread, SendMessage) keep their ordinary tool chips. Emitted identically on GET and on
 // the WS `message` event, which carries `kind` and `peer` alongside the usual fields.
+
+// kind:"goal_status" — one /goal state change, in the place in the conversation where it happened.
+// The thread-level `goal` field (§4.3) says where things STAND; these rows are the history of how
+// it got there, and on a goal that has been turned around a few times they read as a genuine
+// progress log. Render as a thin marker row like peer_message, not a message bubble; `role` is
+// always "system" for the same two reasons (neither party of the conversation, and the WS streamer
+// drops role:"user" frames).
+//
+//   * event:"set" / "cleared" — the operator installing or removing the goal. No verdict prose
+//     exists for these, so `text` is the condition itself.
+//   * event:"blocked" — the judge refused to let the turn end. `text` is its explanation of what is
+//     still outstanding, which is the single most useful thing in the transcript when you are away
+//     from the desk. NOT an ending: the agent was sent straight back to work.
+//   * event:"met" / "failed" — the goal was satisfied, or ruled impossible. Terminal either way.
+//
+// `event` is deliberately finer-grained than the thread field's `state`: a row is a moment
+// ("blocked"), the field is a condition ("active").
 
 export interface AskOption { label: string; description?: string; }
 export interface AskQuestion {

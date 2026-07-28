@@ -3252,6 +3252,16 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         }
     }
 
+    // The `/goal` condition the agent is being held to, if any — the answer to "is it actually
+    // going to finish, and what's left" from a phone. Detail-only on purpose: it costs a tail read
+    // per call, which is fine for one open thread and is exactly what must never go near the
+    // roster tickers. See transcript::goal_for_session.
+    if let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) {
+        if let Some(goal) = transcript::goal_for_session(&sid) {
+            detail["goal"] = json!(goal);
+        }
+    }
+
     // Background shells (`Bash run_in_background` — the TUI's /bashes list), with liveness settled
     // against the process table so no Stop button is offered for a dead process. mailink/shells.rs.
     let ph = std::time::Instant::now();
