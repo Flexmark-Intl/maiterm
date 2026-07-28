@@ -174,6 +174,15 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   Same class as the maiLink rule: a backend mutation of tab state needs a frontend event.
   Binding lifecycle is also logged (bind/raise/release + resulting `n/3` occupancy) — previously
   only summon pickups logged, so slots appeared to be taken and never released.
+- **Never inject over an open prompt**: `injection_blocked_by_prompt` holds BOTH watcher phases
+  (reply delivery and summon pickup) while the tab's session has an open `pending_question`
+  (AskUserQuestion) or is `WaitingPermission`. Those are modal selection UIs — an injected paste's
+  trailing CR picks an option, so a chat message arriving mid-question answered it on the
+  operator's behalf and was swallowed (both lost). Holding leaves the cursor unadvanced, so the
+  message lands after the human answers. Same rule the bridge/mesh already enforce via
+  `isAwaitingHumanInput` (`agents/adapter.ts`) → `deliverable()` (`agentDelivery.ts`); comms was
+  the only automatic injector missing it. Prompt-holds stay quiet (no toast, no in-channel busy
+  notice) since they clear in seconds — unlike the capacity/offline holds.
 - **Queue reasons are distinct**: a held summon logs and notifies as `at_capacity` /`no_session`
   /`no_pty`, never one merged "busy/offline" — they need different operator actions (close a thread
   vs. resume the session), and the merged wording had operators waiting on a queue that only a

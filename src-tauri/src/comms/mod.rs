@@ -367,6 +367,31 @@ pub fn mentions_username(message: &str, username: &str) -> bool {
     false
 }
 
+/// Why it is unsafe to type into this tab right now, or None when injection is safe.
+///
+/// An open AskUserQuestion or permission gate is a MODAL selection UI, not a text prompt:
+/// injected text lands as keystrokes on the option list and the trailing CR submits it. So
+/// a chat message arriving mid-question picks an answer on the human's behalf AND is
+/// swallowed — the operator loses their choice and the message both. Callers must HOLD
+/// (leave the cursor unadvanced) rather than deliver, so the message lands after the human
+/// answers. `Active` is deliberately safe: Claude buffers input typed while it works.
+///
+/// Same rule the agent bridge/mesh already enforce frontend-side (`isAwaitingHumanInput`
+/// in `agents/adapter.ts` → `deliverable()` in `agentDelivery.ts`); the comms watcher was
+/// the one automatic injector without it.
+fn injection_blocked_by_prompt(app: &Arc<AppState>, tab_id: &str) -> Option<&'static str> {
+    use crate::state::app_state::AgentSessionState;
+    let sessions = app.agent_sessions.read();
+    let session = sessions.values().find(|s| s.tab_id == tab_id)?;
+    if session.pending_question.is_some() {
+        return Some("the agent is waiting on an answer to a question");
+    }
+    if matches!(session.state, AgentSessionState::WaitingPermission) {
+        return Some("a permission prompt is open in that tab");
+    }
+    None
+}
+
 /// Tell the frontend a tab's binding SET changed (bound / unbound — not cursor bumps).
 ///
 /// The tab strip's `@` badge and its count read `Tab.comms_bindings`, but the Svelte store
@@ -632,10 +657,24 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 .values()
                 .any(|s| s.tab_id == tab_id);
             let pty_id = crate::mailink::pty_for_tab(&app, &tab_id);
-            let deliverable = session_live && pty_id.is_some();
+            // A modal ask/permission prompt eats injected text AND its trailing CR picks
+            // an option — the human loses their answer and the message is gone. Hold.
+            let prompt_block = injection_blocked_by_prompt(&app, &tab_id);
+            let hold_reason = if !session_live {
+                Some("no agent session is running in that tab")
+            } else if pty_id.is_none() {
+                Some("that tab has no live terminal")
+            } else {
+                prompt_block
+            };
             let newest_addressed = addressed.iter().map(|p| p.create_at).max().unwrap_or(0);
-            if !deliverable {
-                if pending_notified.get(&key).copied().unwrap_or(0) < newest_addressed {
+            if let Some(reason) = hold_reason {
+                // Notify once per newest post — but a prompt-hold is transient (the human
+                // answers within seconds), so it stays silent unless it persists, or every
+                // question the operator answers would also fire a toast.
+                let notify = prompt_block.is_none()
+                    && pending_notified.get(&key).copied().unwrap_or(0) < newest_addressed;
+                if notify {
                     pending_notified.insert(key.clone(), newest_addressed);
                     let first = addressed[0];
                     let preview: String = first.message.trim().chars().take(120).collect();
@@ -645,14 +684,15 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                             "tab_id": tab_id,
                             "count": addressed.len(),
                             "preview": preview,
+                            "reason": reason,
                         }),
                     );
-                    log::info!(
-                        "[comms] {} addressed repl{} waiting for tab {tab_id} (no live agent session) — operator notified",
-                        addressed.len(),
-                        if addressed.len() == 1 { "y" } else { "ies" }
-                    );
                 }
+                log::info!(
+                    "[comms] holding {} addressed repl{} for tab {tab_id} ({reason})",
+                    addressed.len(),
+                    if addressed.len() == 1 { "y" } else { "ies" }
+                );
                 continue;
             }
             let pty_id = pty_id.expect("deliverable implies pty");
@@ -856,7 +896,8 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                     let pty_id = crate::mailink::pty_for_tab(&app, &tab_id);
                     let bound_count = bindings_count_for_tab(&app, &tab_id);
                     let at_capacity = bound_count >= MAX_TAB_BINDINGS;
-                    if !session_live || pty_id.is_none() || at_capacity {
+                    let prompt_block = injection_blocked_by_prompt(&app, &tab_id);
+                    if !session_live || pty_id.is_none() || at_capacity || prompt_block.is_some() {
                         // Can't take it now. Hold the cursor HERE so this summon is
                         // retried when the tab frees up / comes back. Say so once.
                         //
@@ -873,9 +914,20 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                             )
                         } else if !session_live {
                             ("no_session", "no agent session is running in that tab".to_string())
-                        } else {
+                        } else if pty_id.is_none() {
                             ("no_pty", "that tab has no live terminal".to_string())
+                        } else {
+                            ("prompt_open", prompt_block.unwrap_or("a prompt is open").to_string())
                         };
+                        // A prompt-open hold clears itself in seconds — don't burn the
+                        // once-per-thread in-channel notice or the operator toast on it.
+                        if prompt_block.is_some() {
+                            log::info!(
+                                "[comms] summon held for tab {tab_id} ({reason}: {reason_detail}) in {}",
+                                ch.name
+                            );
+                            break;
+                        }
                         if busy_replied.insert(root.clone()) {
                             if session_live && at_capacity {
                                 let _ = client

@@ -390,12 +390,12 @@
     // running to receive them — ring the operator (dispatch scopes to the
     // window owning the tab; clicking the toast deep-links to it).
     let unlistenCommsPending: (() => void) | undefined;
-    appWindow.listen<{ tab_id: string; count: number; preview: string }>('comms-reply-pending', async (event) => {
+    appWindow.listen<{ tab_id: string; count: number; preview: string; reason?: string }>('comms-reply-pending', async (event) => {
       const { dispatch } = await import('$lib/stores/notificationDispatch');
       const p = event.payload;
       dispatch(
         'Thread reply waiting',
-        `${p.count > 1 ? `${p.count} replies` : 'A reply'} arrived on a bound thread ("${p.preview}") but no agent session is running in that tab. Resume the session to deliver.`,
+        `${p.count > 1 ? `${p.count} replies` : 'A reply'} arrived on a bound thread ("${p.preview}") but ${p.reason ?? 'no agent session is running in that tab'}. It will be delivered once that clears.`,
         'info',
         { tabId: p.tab_id },
       );
