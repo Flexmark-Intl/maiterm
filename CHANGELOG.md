@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.25.1
+
+- **maiLink shows the goal an agent is being held to.** A `/goal` installs a session-scoped check: the agent can't end its turn until a judge decides the condition holds, and each attempt that falls short sends it back with a written account of what's still missing. The phone now shows that condition, how many attempts it has taken, and the judge's latest verdict — the best available answer to "is it going to finish, and what's left" — plus each verdict as its own row in the transcript, so the "not yet, because…" rulings read as a progress log. SSH sessions get it too.
+- **Fix a Mattermost reply answering a question you were in the middle of answering.** A thread message arriving while the agent was showing a multiple-choice question or a permission prompt was typed straight into it — picking an option for you and disappearing, with both your choice and the message lost. The thread watcher now waits while a prompt is open and delivers the message once you've answered.
+- **Fix the tab's chat-thread count going stale.** The `@` badge showed a startup snapshot, so a tab could read "2 connected" while actually holding three threads and refusing further summons. It now follows every binding the backend makes or releases. Held summons also say *why* — at capacity, no session, or no terminal — instead of a blanket "busy/offline", since a capacity hold only clears when someone closes a thread. The full binding lifecycle is logged, so "why is this tab full?" is answerable.
+- **Fix comms preference fields losing an edit.** Typing into **Authorized users**, **Pickup users** or **Instructions** and then closing Preferences discarded the change — those three fields saved only on blur, and closing the window tore it down before the save landed. They now save as you type.
+- **Delegated Mattermost work is held to the same authority as in-tab work.** When a dispatcher hands a thread to a peer agent or a subagent, the sender's authority is now relayed word-for-word from the single source of truth, instead of a summary that had drifted permissive — a support-tier request could be read as "go ahead and change it" once delegated, while the same request worked in-tab would have stopped for a go-ahead.
+
 ## v1.25.0
 
 - **maiLink — see what your agent is actually doing, not just what it said.** The phone gains three live views into a session that previously stopped at the chat transcript:
