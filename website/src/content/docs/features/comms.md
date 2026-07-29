@@ -75,7 +75,7 @@ Turn it on from the tab itself — **right-click the tab → Enable chat monitor
 From then on, the tab is a **dispatcher**. Whenever someone `@mentions` the bot in a thread in one of those channels, maiTerm binds that thread to the tab and hands the agent the request with the full conversation already attached — no `/maiterm resolve`, no permalink. The agent then runs exactly the [end-to-end flow above](#working-a-thread-end-to-end), starting from its first reply.
 
 - **One tab, several threads.** A monitoring tab works **up to three threads at once**. Each binding is independent — the agent keeps their investigations separate — and the tab's `@` indicator shows a live count of how many are bound. The indicator is **dim while the tab is monitoring but idle**, and turns **green with a count** once threads are bound.
-- **Overflow queues.** A summon that arrives while the tab is already at its three-thread capacity, busy, or offline doesn't get dropped — it waits. When the tab is at capacity, the bot posts a **one-time reply** to the waiting thread ("I'm at capacity on other issues right now — I'll pick this up as soon as one closes out") so the humans aren't left wondering, and you get a notification. As soon as a thread closes out or the session comes back, the queued summon is picked up automatically.
+- **Overflow queues.** A summon that arrives while the tab is already at its three-thread capacity, has no agent session, or has no terminal running doesn't get dropped — it waits, and the notification names which of those it was, because they don't clear the same way: a capacity hold only drains when somebody closes a thread out, while the others clear the moment the tab is back. When the tab is at capacity, the bot also posts a **one-time reply** to the waiting thread ("I'm at capacity on other issues right now — I'll pick this up as soon as one closes out") so the humans aren't left wondering. As soon as a thread closes out or the session comes back, the queued summon is picked up automatically.
 - **Only a genuinely new ask summons.** Editing an old message never counts as one — fixing a typo in the root report of a thread you just closed out won't drag the whole thread back in as fresh work. Neither does a mention the bot has already replied to: confirming a fix can't re-open the thread it just closed. A real new `@mention` — "@bot it's broken again" — still summons as normal.
 
 Only people you've authorized can summon the bot — see [Who can summon the bot](#who-can-summon-the-bot) below. An `@mention` from anyone else is never picked up; it just notifies you.
@@ -135,6 +135,10 @@ Posting a resolution no longer closes anything. The binding stays live, and the 
 
 So a thread only closes on a human's confirmation, not on the agent's own belief that it's done.
 
+### A thread message never answers a prompt for you
+
+If a reply arrives while the agent is showing you something to decide — a multiple-choice question or a permission prompt — it isn't delivered yet. Those prompts are selection UIs, not text boxes, so a message typed into one would pick an option on your behalf and then vanish, taking both your answer and the message with it. maiTerm holds the message instead and delivers it the moment you've answered. These holds are silent: they clear in seconds, so they don't raise a notification or a reply on the thread the way a capacity or offline hold does.
+
 ### You're told when a reply can't be delivered
 
 If someone `@mentions` the bot on a bound thread while its agent session isn't running, maiTerm doesn't silently swallow the message. It raises a notification — a toast or OS notification per your [notification mode](/features/agents/), deep-linking to the tab — so you know there's something waiting. The message isn't lost: the backlog is delivered as soon as you resume the session.
@@ -143,7 +147,9 @@ If someone `@mentions` the bot on a bound thread while its agent session isn't r
 
 If the monitoring tab is part of a [Mesh Workspace](/features/mesh-workspace/), it doesn't have to work every thread itself. Before it digs in, it checks its peers: when an issue clearly belongs to another agent's repository — a peer whose purpose and working directory match the report — it hands that peer the investigation and fix, while **staying the dispatcher on the thread**.
 
-The bound tab is still the only one connected to the thread, so it keeps ownership of the conversation: it relays the request to the peer (passing the sender's authority through verbatim, so a pickup user's request carries the same limits on the far end too), receives the peer's findings, and posts the resolution back itself. The right specialist does the work in the right repo; the thread only ever hears from the one bot it summoned.
+The bound tab is still the only one connected to the thread, so it keeps ownership of the conversation: it relays the request to the peer, receives the peer's findings, and posts the resolution back itself. The right specialist does the work in the right repo; the thread only ever hears from the one bot it summoned.
+
+**Delegating never widens what may be done.** Only the bound tab receives a message's authority tag, so a delegate — a mesh peer, or a subagent the dispatcher spins up to work a thread in its own repo — is told the sender's tier *and handed the authority rule word for word*, quoted from the single place it's written down rather than summarized. That matters because the read-versus-change line is easy to summarize permissively: an ordinary bug fix isn't destructive or irreversible, so a loose restatement reads as "go ahead". A support-tier request gets the same answer whether it's worked in the bound tab or one repo over, and a change a delegate wants to make still needs an authorized operator's go-ahead, asked for through the dispatcher.
 
 ## Shaping how the agent writes
 
