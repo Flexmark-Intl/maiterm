@@ -160,9 +160,16 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   failures logged once per config fingerprint.
 - **Authority tiers**: each injected message is stamped `[AUTHORIZED]` or `[support]`. Authorized
   = author's username is in `Preferences.comms_authorized_users` (matched case-insensitively);
-  those messages carry full operator authority. Everyone else is scoped (investigate + reply
-  only; destructive/scope-expanding actions need operator confirmation — enforced by SKILL.md
-  framing, not a hard sandbox, since the agent runs in a PTY maiTerm can't intercept).
+  those messages carry full operator authority. Everyone else is scoped by a **read vs. change**
+  line: read-only work (investigating, explaining, reproducing, confirming a bug, answering,
+  replying) needs no confirmation, while anything that CHANGES things (editing code, committing,
+  deploying, migrations, deleting/resetting data, config changes, work beyond the reported issue)
+  needs an authorized user's go-ahead — enforced by SKILL.md framing and the injected payload
+  text, not a hard sandbox, since the agent runs in a PTY maiTerm can't intercept.
+  The rule is stated canonically in SKILL.md step 4 and mirrored in the injected payload
+  (`comms/mod.rs`); a delegate (mesh peer / subagent) never receives that payload, so SKILL.md
+  requires the dispatcher to relay step 4 **verbatim** rather than paraphrase it. If you change
+  the rule, change all three together.
   **`comms_authorized_users` is deliberately absent from `preference_meta()`** so no chat message
   can edit who is trusted — only the human via Preferences → Integrations.
 - **Binding-set changes must emit**: the `@` badge and its count read `Tab.comms_bindings`, but the
