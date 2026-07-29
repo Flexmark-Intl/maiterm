@@ -91,8 +91,9 @@ pub fn get_pty_info(
 pub fn get_pty_foreground(
     state: State<'_, Arc<AppState>>,
     pty_id: String,
+    fresh: Option<bool>,
 ) -> Result<Option<String>, String> {
-    pty::get_pty_foreground(&*state, &pty_id)
+    pty::get_pty_foreground(&*state, &pty_id, fresh.unwrap_or(false))
 }
 
 #[tauri::command]

@@ -152,7 +152,11 @@ export async function isRemoteShellForeground(ptyId: string): Promise<boolean> {
   try {
     // Foreground-only probe (no lsof cwd) — this runs right before the env-var
     // injection, which races the user's first keystrokes at the remote prompt.
-    const cmd = await commands.getPtyForeground(ptyId);
+    // ALWAYS fresh: this is the guard that keeps the export out of the LOCAL
+    // shell, and the failure it prevents is caused by a *stale positive* — a
+    // cached snapshot still showing the ssh that just exited. Reading that from
+    // the 800ms poll cache is precisely how a remote-port export lands locally.
+    const cmd = await commands.getPtyForeground(ptyId, true);
     return !!cmd && isInteractiveSshSession(cmd);
   } catch {
     return false;

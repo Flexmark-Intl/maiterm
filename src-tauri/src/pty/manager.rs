@@ -869,10 +869,35 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
 /// also does. Used on the SSH-bridge env-injection hot path, where the export
 /// races the user's first keystrokes: the cwd is irrelevant there, so paying for
 /// lsof would only widen that race.
-pub fn get_pty_foreground(state: &Arc<AppState>, pty_id: &str) -> Result<Option<String>, String> {
-    let registry = state.pty_registry.read();
-    let handle = registry.get(pty_id).ok_or("PTY not found")?;
-    let pid = handle.child_pid.ok_or("No child PID")?;
+///
+/// `fresh` bypasses the `PROC_SNAPSHOT_TTL` cache. Pass it for any EDGE-triggered
+/// ssh transition ("did an interactive ssh just come up / just exit in this tab?").
+/// The cache exists for high-frequency POLLING (mesh liveness), where sub-second
+/// staleness is invisible; on an edge it is actively wrong, and wrong in a way that
+/// doesn't recover: a title event is the only detection opportunity, so answering it
+/// from a snapshot taken up to 800ms ago — before the ssh existed — loses the bridge
+/// for the whole session, until the user happens to redraw the prompt by typing.
+pub fn get_pty_foreground(
+    state: &Arc<AppState>,
+    pty_id: &str,
+    fresh: bool,
+) -> Result<Option<String>, String> {
+    // Resolve the pid and DROP the registry lock before the (heavier) process sweep.
+    let pid = {
+        let registry = state.pty_registry.read();
+        let handle = registry.get(pty_id).ok_or("PTY not found")?;
+        handle.child_pid.ok_or("No child PID")?
+    };
+    #[cfg(unix)]
+    {
+        if fresh {
+            invalidate_ps_snapshot();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fresh;
+    }
     Ok(get_foreground_command(pid))
 }
 
@@ -1053,6 +1078,15 @@ struct PsRow {
 
 #[cfg(unix)]
 static PS_SNAPSHOT: Mutex<Option<(std::time::Instant, Arc<Vec<PsRow>>)>> = Mutex::new(None);
+
+/// Drop the cached `ps` snapshot so the next probe runs a real sweep. Used by
+/// edge-triggered ssh detection — see `get_pty_foreground`'s `fresh` flag for why a
+/// stale answer there is unrecoverable rather than merely late.
+#[cfg(unix)]
+fn invalidate_ps_snapshot() {
+    let mut guard = PS_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
 
 /// Full `ps` sweep, cached for PROC_SNAPSHOT_TTL. Holding the lock across the spawn
 /// intentionally serializes concurrent refreshers — the second caller blocks briefly

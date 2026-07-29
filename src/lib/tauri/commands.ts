@@ -96,9 +96,14 @@ export async function getPtyInfo(ptyId: string): Promise<PtyInfo> {
 
 /** Foreground command only — skips the lsof cwd lookup `getPtyInfo` also does.
  *  Used on the SSH-bridge env-injection hot path where cwd is irrelevant and the
- *  export races the user's first keystrokes. */
-export async function getPtyForeground(ptyId: string): Promise<string | null> {
-  const cmd: string | null = await invoke('get_pty_foreground', { ptyId });
+ *  export races the user's first keystrokes.
+ *
+ *  `fresh` bypasses the backend's 800ms process-snapshot cache. Pass it for any
+ *  EDGE-triggered ssh transition (a title event: "did ssh just start/exit here?").
+ *  That cache is for polling; on an edge a stale answer is unrecoverable, because
+ *  the title event is the only detection opportunity that session. */
+export async function getPtyForeground(ptyId: string, fresh = false): Promise<string | null> {
+  const cmd: string | null = await invoke('get_pty_foreground', { ptyId, fresh });
   return cmd ? cleanSshCommand(cmd) : null;
 }
 
