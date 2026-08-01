@@ -89,6 +89,24 @@ impl Drop for WsCoverageGuard {
 /// couple of doorbell ticks) absorbs that blip so a coincident attention transition doesn't ring.
 const WS_COVERAGE_GRACE_MS: u64 = 3000;
 
+/// Heartbeat for a maiLink WS, and the deadline for the answer: one unanswered ping closes it.
+///
+/// This is a correctness constant, not a hygiene one. A live WS SUPPRESSES the doorbell, on the
+/// reasoning that a phone receiving events directly doesn't need a push. That reasoning only holds
+/// while "live" is true, and TCP will not tell us: a phone that leaves the network (or whose app
+/// iOS suspends) leaves the socket ESTABLISHED, so without a heartbeat the desktop believes a phone
+/// is watching when nothing is.
+///
+/// The consequence was worse than a delay. The doorbell records each attention transition as it
+/// observes it, and skips ringing while covered — so a transition that occurred during phantom
+/// coverage is consumed, and no push is ever sent for it even after the socket finally errors out
+/// minutes later. Agent finishes while the phone is in a pocket → notification lost, silently, in
+/// exactly the situation maiLink exists for.
+///
+/// 20s keeps that window to one interval. Answering costs a phone one frame per 20s; not answering
+/// costs it the notification, so the trade is not close.
+const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Doorbell coverage decision: a phone is receiving events directly (suppress the push) if a WS is
 /// live now, OR one disconnected within the grace window (`last_drop_ms == 0` means never dropped).
 fn ws_covered(live: bool, last_drop_ms: u64, now_ms: u64) -> bool {
@@ -1601,8 +1619,43 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // the delta on a slow tick too. schedule_fetch coalesces, so ticks over an idle session
     // cost one no-op ssh mux command; non-SSH tabs are filtered out inside.
     let mut mirror_ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+    // Liveness. Everything else in this loop only writes when something CHANGES, so on a quiet
+    // desktop a dead peer is never written to and never discovered — and even when there is a
+    // write, a half-open TCP socket accepts it into the send buffer and only errors after the
+    // retransmit timeout, minutes later. See WS_PING_INTERVAL for why that matters more here than
+    // it looks.
+    let mut ping_ticker = tokio::time::interval(WS_PING_INTERVAL);
+    ping_ticker.reset(); // don't ping instantly on connect — the snapshot above just proved liveness
+    let mut awaiting_pong = false;
+    // Only a client that has ANSWERED a ping can be judged dead for not answering one. A client
+    // that never pongs at all is not evidence of a dead phone, it's evidence of a client that
+    // doesn't implement pong — and dropping it every interval would churn the connection and ring
+    // the doorbell for a phone that is sitting there working fine. RFC 6455 requires a pong, and
+    // both WKWebView's WebSocket and URLSessionWebSocketTask send one unprompted, so this should
+    // arm on the first interval; it exists so that being wrong about that degrades to today's
+    // behaviour plus a log line, instead of to a reconnect loop.
+    let mut answered_a_ping = false;
+    let mut heartbeat_enabled = true;
     loop {
         tokio::select! {
+            _ = ping_ticker.tick(), if heartbeat_enabled => {
+                if awaiting_pong {
+                    if answered_a_ping {
+                        // It answered before and has stopped. Closing is the SAFE direction: a
+                        // phone that isn't answering isn't receiving events either, so it must go
+                        // back to being reachable by doorbell.
+                        log::info!("[maiLink] ws: no pong within {}s — treating the phone as gone", WS_PING_INTERVAL.as_secs());
+                        break;
+                    }
+                    log::warn!("[maiLink] ws: client never answered a ping — liveness detection off for this connection, so the doorbell stays suppressed while it is connected");
+                    heartbeat_enabled = false;
+                    continue;
+                }
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
+                    return;
+                }
+                awaiting_pong = true;
+            }
             _ = msg_ticker.tick() => {
                 if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys).await.is_err() {
                     return;
@@ -1686,6 +1739,12 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
+                    // The phone is alive and its app is running. (A suspended app answers
+                    // nothing — which is the point; see WS_PING_INTERVAL.)
+                    Some(Ok(Message::Pong(_))) => {
+                        awaiting_pong = false;
+                        answered_a_ping = true;
+                    }
                     // inbound client frames are ignored in v1 — the client uses REST for actions
                     Some(Ok(_)) => {}
                 }

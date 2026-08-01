@@ -360,6 +360,18 @@ Presence: while ≥1 device holds a live WS for a tab, that tab is "covered" and
 is **suppressed** (no redundant push). On WS close, coverage drops and future attention
 events doorbell again.
 
+**Clients MUST answer WebSocket Pings.** The desktop pings every 20s and closes the socket after
+one unanswered ping. This is load-bearing rather than hygiene: coverage suppresses the doorbell, so
+a socket that is dead-but-ESTABLISHED — an iOS app suspended in the background, a phone that walked
+off the LAN — makes the desktop believe a phone is watching when nothing is. Worse than delaying
+the push, it *loses* it: the doorbell records each attention transition as it observes it and skips
+ringing while covered, so anything that happened during phantom coverage is never pushed even after
+the socket finally errors out minutes later. Exactly the away-from-the-desk case maiLink exists for.
+RFC 6455 requires the pong and both WKWebView's `WebSocket` and `URLSessionWebSocketTask` send one
+without app code; a client that never answers any ping is detected on its first interval, logged at
+WARN, and has liveness detection disabled for that connection (degrading to the old behaviour rather
+than reconnect-looping) — but it will not get doorbells while connected.
+
 ### 4.3 Shapes
 
 ```typescript
