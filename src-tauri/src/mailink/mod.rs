@@ -105,6 +105,11 @@ const WS_COVERAGE_GRACE_MS: u64 = 3000;
 ///
 /// 20s keeps that window to one interval. Answering costs a phone one frame per 20s; not answering
 /// costs it the notification, so the trade is not close.
+///
+/// The first ping goes out at connect rather than after an interval, and an unanswered ping always
+/// closes the socket — there is no "maybe this client can't pong" escape hatch. Verified against
+/// both maiLink transports: iOS `URLSessionWebSocketTask` and Android OkHttp `RealWebSocket` both
+/// answer at framework level, with control frames never reaching app code.
 const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Doorbell coverage decision: a phone is receiving events directly (suppress the push) if a WS is
@@ -1624,32 +1629,36 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // write, a half-open TCP socket accepts it into the send buffer and only errors after the
     // retransmit timeout, minutes later. See WS_PING_INTERVAL for why that matters more here than
     // it looks.
+    // First tick fires IMMEDIATELY (tokio's default, deliberately not reset here): the client is
+    // provably awake at the instant it completes a handshake, so pinging now is the only moment a
+    // pong is guaranteed to be answerable. Waiting an interval instead would mean the first ping
+    // routinely lands in a suspended app — open maiLink, glance, pocket the phone — and "this
+    // client has never ponged" would be a race with iOS rather than a fact about the client.
     let mut ping_ticker = tokio::time::interval(WS_PING_INTERVAL);
-    ping_ticker.reset(); // don't ping instantly on connect — the snapshot above just proved liveness
     let mut awaiting_pong = false;
-    // Only a client that has ANSWERED a ping can be judged dead for not answering one. A client
-    // that never pongs at all is not evidence of a dead phone, it's evidence of a client that
-    // doesn't implement pong — and dropping it every interval would churn the connection and ring
-    // the doorbell for a phone that is sitting there working fine. RFC 6455 requires a pong, and
-    // both WKWebView's WebSocket and URLSessionWebSocketTask send one unprompted, so this should
-    // arm on the first interval; it exists so that being wrong about that degrades to today's
-    // behaviour plus a log line, instead of to a reconnect loop.
     let mut answered_a_ping = false;
-    let mut heartbeat_enabled = true;
     loop {
         tokio::select! {
-            _ = ping_ticker.tick(), if heartbeat_enabled => {
+            _ = ping_ticker.tick() => {
                 if awaiting_pong {
+                    // Closing is the SAFE direction either way: a phone that isn't answering
+                    // isn't receiving events either, so it must go back to being reachable by
+                    // doorbell. Both cases below close — only the diagnosis differs.
                     if answered_a_ping {
-                        // It answered before and has stopped. Closing is the SAFE direction: a
-                        // phone that isn't answering isn't receiving events either, so it must go
-                        // back to being reachable by doorbell.
                         log::info!("[maiLink] ws: no pong within {}s — treating the phone as gone", WS_PING_INTERVAL.as_secs());
-                        break;
+                    } else {
+                        // Never answered even the connect-time ping. Most likely a client that
+                        // went away immediately; possibly one that doesn't implement pong. It is
+                        // NOT treated as the latter: an earlier version disabled liveness
+                        // detection on this evidence, which restored the very bug the heartbeat
+                        // fixes — silently, and in the commonest usage pattern. Absence of a pong
+                        // is not proof of a specific cause, and the branch that assumed one
+                        // resolved the ambiguity by switching the check off. A reconnect loop is
+                        // loud and self-announcing; phantom coverage is silent and eats
+                        // notifications. Prefer the loud failure.
+                        log::warn!("[maiLink] ws: client never answered a ping (not even at connect) — closing. If a client legitimately cannot pong, that is a client bug: RFC 6455 requires it and both maiLink transports answer at framework level.");
                     }
-                    log::warn!("[maiLink] ws: client never answered a ping — liveness detection off for this connection, so the doorbell stays suppressed while it is connected");
-                    heartbeat_enabled = false;
-                    continue;
+                    break;
                 }
                 if socket.send(Message::Ping(Default::default())).await.is_err() {
                     return;

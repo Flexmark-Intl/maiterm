@@ -367,10 +367,17 @@ off the LAN — makes the desktop believe a phone is watching when nothing is. W
 the push, it *loses* it: the doorbell records each attention transition as it observes it and skips
 ringing while covered, so anything that happened during phantom coverage is never pushed even after
 the socket finally errors out minutes later. Exactly the away-from-the-desk case maiLink exists for.
-RFC 6455 requires the pong and both WKWebView's `WebSocket` and `URLSessionWebSocketTask` send one
-without app code; a client that never answers any ping is detected on its first interval, logged at
-WARN, and has liveness detection disabled for that connection (degrading to the old behaviour rather
-than reconnect-looping) — but it will not get doorbells while connected.
+The first ping goes out **at connect**, not after an interval: a client is provably awake the
+instant it completes a handshake, which is the only moment a pong is guaranteed to be answerable.
+Ping-after-an-interval would routinely land in an app iOS had already suspended — open maiLink,
+glance, pocket the phone — so "this client has never ponged" would be a race with suspension rather
+than a fact about the client.
+
+An unanswered ping always closes the socket; there is no "maybe this client can't pong" escape
+hatch. A never-ponged connection is logged at WARN and closed anyway, because a reconnect loop is
+loud and self-announcing while phantom coverage is silent and eats notifications. Verified against
+both transports: iOS `URLSessionWebSocketTask` and Android OkHttp `RealWebSocket` answer at
+framework level, with control frames never reaching app code.
 
 ### 4.3 Shapes
 
