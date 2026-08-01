@@ -44,7 +44,22 @@ type SseSessions = Arc<parking_lot::RwLock<HashMap<String, mpsc::UnboundedSender
 
 /// Per-connection tab affinity: maps transport connection ID → tab ID.
 /// Set by `initSession` tool, used to auto-inject `tabId` into tool calls.
-type ConnectionTabMap = Arc<parking_lot::RwLock<HashMap<String, String>>>;
+type ConnectionTabMap = Arc<parking_lot::RwLock<HashMap<String, TabAffinity>>>;
+
+/// Which tab a connection's tool calls belong to, and — load-bearing — HOW WE KNOW.
+///
+/// An MCP tool call carries no identity of its own, so when a reconnect loses the connection's
+/// affinity the only way to restore it is to infer the caller from what else is running. That
+/// inference cannot be made correct: it reasons about counts, not identity. `stated` records the
+/// difference between the agent having told us who it is (`initSession`) and us having deduced it.
+#[derive(Clone)]
+struct TabAffinity {
+    tab_id: String,
+    /// True when the agent named this tab itself. False when affinity was recovered by inference
+    /// after a reconnect — right in the ordinary case, but a guess, and guesses are not allowed to
+    /// carry a message into another agent's terminal.
+    stated: bool,
+}
 
 /// Per-connection runtime: maps transport connection ID → detected agent runtime.
 /// Set on the MCP `initialize` handshake (from `clientInfo.name`); used to
@@ -1779,6 +1794,44 @@ fn recover_affinity(
     }
 }
 
+/// Tools whose effect LEAVES this tab: they hand a message to another agent, or publish to a
+/// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
+/// put this agent's words into a stranger's terminal, or someone else's support thread, under that
+/// tab's identity, with no way to retract.
+const PEER_ADDRESSING_TOOLS: [&str; 8] = [
+    "sendToBridgedAgent",
+    "getBridgedAgent",
+    "listBridgedPeers",
+    "listTopics",
+    "startTopic",
+    "completeTopic",
+    "postCommsReply",
+    "startCommsThread",
+];
+
+/// Whether to refuse a call because the tab it would act as was DEDUCED rather than stated.
+///
+/// `affinity_stated` is `None` when the connection has no affinity at all (a different path
+/// already handles that), `Some(true)` when the agent named its own tab via `initSession`, and
+/// `Some(false)` when a reconnect made us infer it. `tab_id_given` means the caller passed an
+/// explicit tabId, which is a statement of identity in its own right and needs no inference.
+///
+/// The rule: inference may fill in a tab for tools that act ON that tab, but never for tools that
+/// SPEAK AS it. The incident behind this: after a restart, a bridged agent's reconnect inferred a
+/// tab in an unrelated mesh workspace; `listBridgedPeers` duly returned that workspace's 16-agent
+/// roster, and the next step would have been to pick a recipient from it and send. Nothing in the
+/// response hinted it described a different tab. Refusing costs one `/maiterm init` — which is
+/// what recovers the situation today anyway, just after the message has already gone.
+fn refuse_on_inferred_identity(
+    tool_name: &str,
+    affinity_stated: Option<bool>,
+    tab_id_given: bool,
+) -> bool {
+    !tab_id_given
+        && affinity_stated == Some(false)
+        && PEER_ADDRESSING_TOOLS.contains(&tool_name)
+}
+
 /// Process one JSON-RPC message and return the response as a raw JSON string.
 /// Returns `None` for notifications (no id) that don't require a response.
 /// `connection_id` identifies the transport connection (SSE session, WS, or streamable-http)
@@ -1889,8 +1942,12 @@ async fn process_message(
                         .copied()
                         .unwrap_or(crate::state::AgentRuntime::Claude);
 
-                    // Store connection → tab affinity
-                    connection_tabs.write().insert(connection_id.to_string(), tab_id.clone());
+                    // Store connection → tab affinity. `stated` — the agent named this tab, so
+                    // every tool is unlocked on it, including the ones that reach other agents.
+                    connection_tabs.write().insert(
+                        connection_id.to_string(),
+                        TabAffinity { tab_id: tab_id.clone(), stated: true },
+                    );
                     log::debug!("initSession: connection {} → tab {} (claude session: {})",
                         &connection_id[..connection_id.len().min(8)], &tab_id[..tab_id.len().min(8)],
                         if session_id.is_empty() { "none" } else { &session_id[..session_id.len().min(8)] }
@@ -2061,7 +2118,8 @@ async fn process_message(
                 // Falls back to agent_sessions when SSE reconnects cleared the connection affinity.
                 // Snapshot the affinity tab once so the has-affinity check and the injection
                 // use the same value (no TOCTOU race with concurrent connection cleanup).
-                let mut affinity_tab: Option<String> = connection_tabs.read().get(connection_id).cloned();
+                let mut affinity: Option<TabAffinity> =
+                    connection_tabs.read().get(connection_id).cloned();
 
                 // SSE reconnect recovery: if no connection affinity, check if there's
                 // an active claude session whose tab we can restore affinity from.
@@ -2069,7 +2127,7 @@ async fn process_message(
                 // connection_tabs (orphaned by SSE disconnect). If exactly one orphaned
                 // session exists, it's the one reconnecting. Falls back to the simpler
                 // "exactly 1 active session" heuristic if connection_ids aren't set.
-                if affinity_tab.is_none() {
+                if affinity.is_none() {
                     let sessions = state.agent_sessions.read();
                     let ct = connection_tabs.read();
 
@@ -2100,7 +2158,7 @@ async fn process_message(
                     // lacks a live connection affinity (the sole reconnecting one);
                     // otherwise refuse and make the caller re-initSession.
                     let bound: std::collections::HashSet<&str> =
-                        ct.values().map(|s| s.as_str()).collect();
+                        ct.values().map(|a| a.tab_id.as_str()).collect();
                     let recovered = recover_affinity(&active_tabs, &bound);
 
                     let active_count = active_tabs.len();
@@ -2108,7 +2166,11 @@ async fn process_message(
                     drop(sessions);
 
                     if let Some(tab_id) = recovered {
-                        connection_tabs.write().insert(connection_id.to_string(), tab_id.clone());
+                        connection_tabs.write().insert(
+                            connection_id.to_string(),
+                            // Inferred, not stated — see TabAffinity.
+                            TabAffinity { tab_id: tab_id.clone(), stated: false },
+                        );
                         // Update the session's connection_id to the new connection
                         let mut sessions = state.agent_sessions.write();
                         for info in sessions.values_mut() {
@@ -2116,15 +2178,46 @@ async fn process_message(
                                 info.connection_id = Some(connection_id.to_string());
                             }
                         }
-                        log::debug!("Restored connection affinity for {} (sole unbound of {} active agent(s))",
-                            &connection_id[..connection_id.len().min(11)], active_count);
-                        affinity_tab = Some(tab_id);
+                        // INFO, not debug: production runs at INFO, so every one of these
+                        // decisions used to be invisible in exactly the logs you reach for when an
+                        // agent turns out to have been acting as a different tab.
+                        log::info!("Inferred connection affinity for {} → tab {} (sole unbound of {} active agent(s)); peer-routing tools stay locked until initSession",
+                            &connection_id[..connection_id.len().min(11)],
+                            &tab_id[..tab_id.len().min(8)], active_count);
+                        affinity = Some(TabAffinity { tab_id, stated: false });
                     } else if active_count > 1 {
-                        log::debug!("Affinity recovery declined for {}: {} active agents, ambiguous — requiring initSession",
+                        log::info!("Affinity recovery declined for {}: {} active agents, ambiguous — requiring initSession",
                             &connection_id[..connection_id.len().min(11)], active_count);
                     }
                 }
 
+                let tab_id_given = arguments
+                    .get("tabId")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                if refuse_on_inferred_identity(
+                    &tool_name,
+                    affinity.as_ref().map(|a| a.stated),
+                    tab_id_given,
+                ) {
+                    log::warn!("Refusing {tool_name} on inferred affinity for {}: tab identity was deduced, not stated",
+                        &connection_id[..connection_id.len().min(11)]);
+                    let resp = JsonRpcResponse::success(
+                        id,
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text":
+                                "This connection's tab identity was inferred after a reconnect, not \
+                                 stated by you, so it can't be trusted to address another agent — a \
+                                 wrong guess would deliver your message into an unrelated agent's \
+                                 session. Call initSession with your own $MAITERM_TAB_ID (run \
+                                 `/maiterm init`), then retry." }],
+                            "isError": true
+                        }),
+                    );
+                    return Some(serde_json::to_string(&resp).unwrap());
+                }
+
+                let affinity_tab: Option<String> = affinity.map(|a| a.tab_id);
                 if let Some(ref tab) = affinity_tab {
                     if arguments.get("tabId").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
                         if let Some(obj) = arguments.as_object_mut() {
@@ -2777,7 +2870,7 @@ async fn handle_message(
 #[cfg(test)]
 mod tests {
     use super::derive_streamable_connection_id;
-    use super::recover_affinity;
+    use super::{recover_affinity, refuse_on_inferred_identity, PEER_ADDRESSING_TOOLS};
     use super::{normalize_hook_event, HookPhase};
     use crate::state::AgentRuntime;
     use std::collections::HashSet;
@@ -2948,6 +3041,31 @@ mod tests {
         // Both unbound → ambiguous → None.
         let none_bound: HashSet<&str> = HashSet::new();
         assert_eq!(recover_affinity(&active, &none_bound), None);
+    }
+
+    #[test]
+    fn inferred_identity_may_act_on_a_tab_but_never_speak_as_it() {
+        // The incident: a reconnect inferred an unrelated tab, and the roster call answered for
+        // it as if nothing were wrong. Every tool that reaches another agent is now refused.
+        for tool in PEER_ADDRESSING_TOOLS {
+            assert!(
+                refuse_on_inferred_identity(tool, Some(false), false),
+                "{tool} must not run on a deduced identity"
+            );
+            // Stating the tab — by initSession, or by passing tabId outright — is what unlocks it.
+            assert!(!refuse_on_inferred_identity(tool, Some(true), false));
+            assert!(!refuse_on_inferred_identity(tool, Some(false), true));
+        }
+
+        // Tools that only act on the tab itself keep the reconnect convenience: an SSE flap over
+        // an SSH tunnel must not turn every note read into an error.
+        for tool in ["getTabNotes", "openFile", "getActiveTab", "switchTab", "getDiagnostics"] {
+            assert!(!refuse_on_inferred_identity(tool, Some(false), false));
+        }
+
+        // No affinity at all is a different failure with its own message; this gate is only
+        // about affinity that exists but was guessed.
+        assert!(!refuse_on_inferred_identity("sendToBridgedAgent", None, false));
     }
 
     #[test]
