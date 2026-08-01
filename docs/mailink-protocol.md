@@ -191,11 +191,22 @@ pub struct MailinkDevice {
     pub push_platform: PushPlatform,  // Apns | Fcm — which sender the relay uses
     pub push_env: PushEnv,            // Sandbox | Production (APNs); maps to project for FCM
     pub created_at: i64,
-    pub last_seen_at: i64,
+    pub last_seen_at: i64,   // any authenticated request or WS connect, throttled to one write
+                             //   per 5 min. It DOES mean liveness — it previously advanced only
+                             //   on pairing and push-token registration, so a phone talking to
+                             //   the desktop all day could read as two days gone.
 }
 ```
 
 Revocation = remove the record; its bearer token stops validating immediately.
+
+**Rejections are logged.** Every response ≥400 emits a WARN with method, path, status and who the
+caller claimed to be — the device name if the token matches a paired device, otherwise a short hash
+prefix and how many devices exist. Nothing is logged for successful requests (the phone polls every
+couple of seconds). This exists because a rotated or expired token was otherwise *completely*
+silent: the phone showed an empty inbox, the desktop log showed nothing at all, and that combination
+is indistinguishable from "the desktop genuinely has no chats" — which is exactly the wrong
+conclusion. A 401 in the log names the fix (re-pair) directly.
 
 ---
 

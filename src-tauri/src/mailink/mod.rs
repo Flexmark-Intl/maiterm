@@ -307,6 +307,9 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
+        // Outermost, so it sees the final status of every route including the WS upgrade (which
+        // authenticates itself and never calls `authorize`).
+        .layer(axum::middleware::from_fn_with_state(api.clone(), log_rejections))
         .with_state(api)
 }
 
@@ -1532,6 +1535,9 @@ async fn ws_handler(
     if !header_ok && !query_ok {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    // The WS is the connection a phone holds open for hours, so it's the best liveness evidence
+    // there is — and it doesn't go through `authorize`.
+    touch_device(&s, if header_ok { bearer_token(&headers) } else { q.token.as_deref().unwrap_or("") });
     ws.on_upgrade(move |socket| ws_event_loop(socket, s))
 }
 
@@ -2395,10 +2401,106 @@ fn token_valid(s: &ApiState, token: &str) -> bool {
 /// Bearer-token gate for authed endpoints. 401 unless the token is the dev token or a paired
 /// device token.
 fn authorize(s: &ApiState, headers: &HeaderMap) -> Result<(), StatusCode> {
-    if token_valid(s, bearer_token(headers)) {
+    let token = bearer_token(headers);
+    if token_valid(s, token) {
+        touch_device(s, token);
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// How often a device's `last_seen_at` is allowed to cost a state write. The phone polls every
+/// couple of seconds, so this is purely about not saving state on every request.
+const LAST_SEEN_THROTTLE_MS: u64 = 5 * 60 * 1000;
+
+/// Record that a paired device just made an authenticated request.
+///
+/// Until this existed, `last_seen_at` was written ONLY when a device paired or re-registered its
+/// push token — so a phone that had been talking to the desktop all morning could show a
+/// `last_seen_at` two days old, in Preferences and to anything else reading it. A field named
+/// "last seen" that doesn't track being seen isn't a stale value, it's a wrong one: it reads as
+/// "this device is gone" at exactly the moment the device is busiest.
+///
+/// No-op for the dev token, which has no device record.
+fn touch_device(s: &ApiState, token: &str) {
+    if token.is_empty() || token == s.dev_token {
+        return;
+    }
+    let hash = sha256_hex(token.as_bytes());
+    let now = now_ms() as i64;
+    // Read first: the common case is "seen recently", which must not take the write lock or
+    // rewrite state on a 2-second poll.
+    {
+        let data = s.app.app_data.read();
+        match data.preferences.mailink_devices.iter().find(|d| d.token_hash == hash) {
+            Some(d) if now - d.last_seen_at < LAST_SEEN_THROTTLE_MS as i64 => return,
+            Some(_) => {}
+            None => return,
+        }
+    }
+    let data_clone = {
+        let mut data = s.app.app_data.write();
+        let Some(d) =
+            data.preferences.mailink_devices.iter_mut().find(|d| d.token_hash == hash)
+        else {
+            return;
+        };
+        d.last_seen_at = now;
+        data.clone()
+    };
+    let _ = crate::state::save_state(&data_clone);
+}
+
+/// Log every request maiLink turns away.
+///
+/// A rejected maiLink client was previously invisible: no request logging, and `authorize` returned
+/// a bare 401. An expired or rotated device token therefore produced a phone stuck on "no
+/// conversations" and a desktop log with nothing in it at all — the one failure shape you cannot
+/// diagnose from the phone, and the one most likely to happen (tokens are the only thing that can
+/// silently stop matching). Successful requests stay unlogged; the phone polls every couple of
+/// seconds and would drown the log.
+async fn log_rejections(
+    State(s): State<ApiState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let who = describe_caller(&s, req.headers());
+    let res = next.run(req).await;
+    if res.status().as_u16() >= 400 {
+        log::warn!("[maiLink] {} {} → {} ({})", method, path, res.status().as_u16(), who);
+    }
+    res
+}
+
+/// Who a request claims to be, safe to log: never the token itself, only a short hash prefix and
+/// whether anything on this desktop matches it.
+fn describe_caller(s: &ApiState, headers: &HeaderMap) -> String {
+    let Some(raw) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+        return "no Authorization header".to_string();
+    };
+    let Some(token) = raw.strip_prefix("Bearer ") else {
+        return "Authorization header is not a Bearer token".to_string();
+    };
+    if token.is_empty() {
+        return "empty bearer token".to_string();
+    }
+    if token == s.dev_token && !s.dev_token.is_empty() {
+        return "dev token".to_string();
+    }
+    let hash = sha256_hex(token.as_bytes());
+    let short = &hash[..8.min(hash.len())];
+    let data = s.app.app_data.read();
+    match data.preferences.mailink_devices.iter().find(|d| d.token_hash == hash) {
+        Some(d) => format!("device \"{}\" (token {short}…)", d.name),
+        // The actionable one: the phone holds a token this desktop has no record of, so the fix
+        // is re-pairing, not restarting anything.
+        None => format!(
+            "token {short}… matches none of the {} paired device(s) — re-pair the phone",
+            data.preferences.mailink_devices.len()
+        ),
     }
 }
 
