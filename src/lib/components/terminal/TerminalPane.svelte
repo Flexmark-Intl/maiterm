@@ -560,10 +560,19 @@
           // ssh into B) has to re-bridge. Status alone can't see that: it still reads
           // 'connected' for A, which silently skips B forever. Compare the bridged
           // host against the one actually in the foreground now.
+          // Compare parsed HOSTS, not raw arg strings: the bridge's hostKey comes from
+          // a stored/replayed command while this comes from ps, so flag order and
+          // extras differ harmlessly between them. A raw-string compare would fire on
+          // those cosmetic diffs and churn the tunnel (and, before the alt-screen
+          // guard, re-inject). Host-only keeps it to "this tab is now on a different
+          // machine", which is the case that actually needs a new bridge.
+          const bridgedHostKey = getBridgeInfo(tabId)?.hostKey;
+          const bridgedHost = bridgedHostKey ? parseSshHost(bridgedHostKey) : null;
           const hostChanged =
             !!isInteractiveSsh &&
             bridgeStatus === 'connected' &&
-            getBridgeInfo(tabId)?.hostKey !== (cmd ?? '').replace(/^ssh\s+/, '').trim();
+            !!bridgedHost &&
+            parseSshHost(cmd as string) !== bridgedHost;
           if (hostChanged) {
             logInfo(`SSH MCP bridge: tab ${tabId} moved to a different host — re-bridging`);
             disableBridge(tabId)
@@ -1765,6 +1774,14 @@
                 dispatch('MCP Bridge', 'No SSH session in the foreground — not injecting env vars into the local shell', 'error', { tabId });
                 return;
               }
+              // A TUI (an agent, vim, less) owns the screen — the export would be typed
+              // into it as text rather than reaching a shell. Say so instead of
+              // corrupting the session; this action exists for exactly the opposite
+              // case (a fresh shell after tmux attach / sudo / su).
+              if (lastFrameAlternateScreen) {
+                dispatch('MCP Bridge', 'A full-screen app is running in this tab — exit it and retry so the export reaches the shell', 'error', { tabId });
+                return;
+              }
               const bridge = getBridgeInfo(tabId);
               if (bridge?.remotePort) {
                 const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort + "\n";
@@ -1783,6 +1800,12 @@
               // with ECONNREFUSED in every tab).
               if (!(await isRemoteShellForeground(ptyId))) {
                 dispatch('MCP Bridge', 'No SSH session in the foreground — refusing to run the remote MCP setup in the local shell', 'error', { tabId });
+                return;
+              }
+              // Same reason as the env-var inject: a TUI on the screen would swallow
+              // this whole script as keystrokes instead of running it in a shell.
+              if (lastFrameAlternateScreen) {
+                dispatch('MCP Bridge', 'A full-screen app is running in this tab — exit it and retry so the setup runs in the shell', 'error', { tabId });
                 return;
               }
               const script = await buildUserSetupScript(tabId);

@@ -284,6 +284,27 @@ pub fn terminal_bracketed_paste(
         .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE))
 }
 
+/// Whether the terminal is on the alternate screen — i.e. a full-screen TUI owns the
+/// display (an agent's TUI, vim, less). Nothing that expects a SHELL to read it may be
+/// written to such a PTY: the bytes are delivered to the TUI as keystrokes instead.
+/// Used to gate the SSH bridge's `export MAITERM_TAB_ID=…` injection, which otherwise
+/// lands as literal text inside a running agent's prompt (seen when a restart re-inits
+/// tabs and a bridge attempt arrives after the agent has already been auto-resumed).
+/// This is a screen-mode signal, NOT an agent-liveness signal — see `get_agent_liveness`
+/// for the latter; here we only care that *something* full-screen owns the tty.
+#[tauri::command]
+pub fn terminal_is_alt_screen(
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+) -> Result<bool, String> {
+    let registry = state.terminal_registry.read();
+    let handle = registry.get(&pty_id).ok_or("Terminal not found")?;
+    Ok(handle
+        .term
+        .mode()
+        .contains(alacritty_terminal::term::TermMode::ALT_SCREEN))
+}
+
 /// Whether an agent CLI is still running in a tab (for the mesh readiness check).
 /// `agent_running` walks the PTY's local process tree for a claude/codex/gemini
 /// process — ground truth for LOCAL agents (no reliance on screen mode / hooks).

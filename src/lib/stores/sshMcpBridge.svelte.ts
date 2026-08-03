@@ -334,15 +334,37 @@ function buildSetupScript(
   return script.join('\n');
 }
 
+/** In-flight enableBridge attempts, keyed by tab. */
+const inFlightBridges = new Map<string, Promise<boolean>>();
+
 /**
  * Enable the MCP bridge for an SSH tab.
  * Spawns (or reuses) a reverse tunnel, writes lockfile + hooks via background SSH,
  * and injects MAITERM_TAB_ID / MAITERM_PORT env vars into the remote shell.
  *
+ * Concurrent calls for the same tab JOIN the in-flight attempt. That's load-bearing
+ * for ORDERING, not just efficiency: the restore path awaits this and then sends
+ * `claude --resume …`. A tab coming back after a restart gets two callers — the
+ * restore poll and the title event fired by the remote's login prompt — and whichever
+ * lost the race used to return instantly on the other's 'pending' status. The resume
+ * then fired while the injection was still pending, so the export landed as literal
+ * text inside the agent's TUI instead of its shell. Joining makes "bridge is up (and
+ * injected)" a real precondition for everything sequenced after it.
+ *
  * @param ptyId — if provided, injects env vars into the remote shell via PTY write.
  *   Leading space prevents the command from appearing in shell history.
  */
-export async function enableBridge(tabId: string, sshArgs: string, ptyId?: string): Promise<boolean> {
+export function enableBridge(tabId: string, sshArgs: string, ptyId?: string): Promise<boolean> {
+  const inflight = inFlightBridges.get(tabId);
+  if (inflight) return inflight;
+  const attempt = enableBridgeInner(tabId, sshArgs, ptyId).finally(() => {
+    inFlightBridges.delete(tabId);
+  });
+  inFlightBridges.set(tabId, attempt);
+  return attempt;
+}
+
+async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string): Promise<boolean> {
   // Independent per-runtime gates: the tunnel + env injection are runtime-agnostic and
   // run for either; the remote setup writes Claude artifacts only when claudeOn and
   // Codex artifacts only when codexOn (so a Claude-only or Codex-only host both work).
@@ -409,6 +431,14 @@ export async function enableBridge(tabId: string, sshArgs: string, ptyId?: strin
       try {
         if (!(await isRemoteShellForeground(ptyId))) {
           logInfo("SSH MCP bridge: skipping env-var injection — ssh no longer foreground for tab " + tabId);
+        } else if (await commands.terminalIsAltScreen(ptyId)) {
+          // A full-screen TUI owns the tty — in practice an agent that was already
+          // auto-resumed, which is what a restart's tab re-init races: the agent boots
+          // while the bridge is still coming up, so the write lands as literal text in
+          // its prompt. Skipping loses nothing: the export could never have set the env
+          // of an ALREADY-RUNNING process anyway, and the remote ~/.aiterm written by
+          // the background setup ssh still carries the tab id for the hook to source.
+          logInfo("SSH MCP bridge: skipping env-var injection — a TUI owns the screen for tab " + tabId);
         } else {
           const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port + "\n";
           const bytes = Array.from(new TextEncoder().encode(envCmd));
