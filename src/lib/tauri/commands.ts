@@ -154,14 +154,6 @@ export async function terminalBracketedPaste(ptyId: string): Promise<boolean> {
   return invoke('terminal_bracketed_paste', { ptyId });
 }
 
-/** True when a full-screen TUI (an agent's TUI, vim, less) owns the terminal.
- *  Anything written to such a PTY is delivered to that TUI as keystrokes, not to a
- *  shell — so shell-command injection (the bridge's `export MAITERM_TAB_ID=…`) must
- *  be skipped while it's true. */
-export async function terminalIsAltScreen(ptyId: string): Promise<boolean> {
-  return invoke('terminal_is_alt_screen', { ptyId });
-}
-
 /** Liveness signals for the mesh readiness check. `agent_running` = a claude/codex/gemini
  *  process is alive in the tab's LOCAL process tree (ground truth for local agents).
  *  `ssh_foreground` = the tty's foreground job is an ssh session (a live remote session —

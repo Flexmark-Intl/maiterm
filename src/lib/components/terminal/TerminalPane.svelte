@@ -1774,14 +1774,10 @@
                 dispatch('MCP Bridge', 'No SSH session in the foreground — not injecting env vars into the local shell', 'error', { tabId });
                 return;
               }
-              // A TUI (an agent, vim, less) owns the screen — the export would be typed
-              // into it as text rather than reaching a shell. Say so instead of
-              // corrupting the session; this action exists for exactly the opposite
-              // case (a fresh shell after tmux attach / sudo / su).
-              if (lastFrameAlternateScreen) {
-                dispatch('MCP Bridge', 'A full-screen app is running in this tab — exit it and retry so the export reaches the shell', 'error', { tabId });
-                return;
-              }
+              // No alternate-screen guard here on purpose: tmux holds the OUTER
+              // terminal on the alt screen while showing an ordinary inner shell, and
+              // "after tmux attach" is precisely what this action is for. Writing under
+              // tmux works — it forwards the keystrokes to the inner pane's shell.
               const bridge = getBridgeInfo(tabId);
               if (bridge?.remotePort) {
                 const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort + "\n";
@@ -1802,12 +1798,8 @@
                 dispatch('MCP Bridge', 'No SSH session in the foreground — refusing to run the remote MCP setup in the local shell', 'error', { tabId });
                 return;
               }
-              // Same reason as the env-var inject: a TUI on the screen would swallow
-              // this whole script as keystrokes instead of running it in a shell.
-              if (lastFrameAlternateScreen) {
-                dispatch('MCP Bridge', 'A full-screen app is running in this tab — exit it and retry so the setup runs in the shell', 'error', { tabId });
-                return;
-              }
+              // As with the env-var inject: no alt-screen guard, because tmux (the main
+              // reason to run this by hand) reads as alt-screen yet forwards to a shell.
               const script = await buildUserSetupScript(tabId);
               if (script) {
                 const cmd = ' ' + script + '\n';

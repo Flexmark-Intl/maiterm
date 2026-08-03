@@ -14,6 +14,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable } from '$lib/stores/triggers.svelte';
+import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -337,6 +338,9 @@ function buildSetupScript(
 /** In-flight enableBridge attempts, keyed by tab. */
 const inFlightBridges = new Map<string, Promise<boolean>>();
 
+/** Bumped on every teardown so an in-flight setup can tell it was superseded. */
+const bridgeEpoch = new Map<string, number>();
+
 /**
  * Enable the MCP bridge for an SSH tab.
  * Spawns (or reuses) a reverse tunnel, writes lockfile + hooks via background SSH,
@@ -388,16 +392,25 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string)
   const hostKey = extractHostKey(sshArgs);
   bridgeStates = new Map(bridgeStates.set(tabId, { hostKey, remotePort: 0, status: 'pending' }));
 
-  const localPort = await commands.getMcpPort();
-  const authToken = await commands.getMcpAuth();
-  if (!localPort || !authToken) {
-    logError('Cannot enable SSH MCP bridge: MCP server not running');
-    bridgeStates.delete(tabId);
-    bridgeStates = new Map(bridgeStates);
-    return false;
-  }
+  // Snapshot the tab's teardown epoch. A disableBridge() landing while we're still
+  // setting up must win: without this, our completion would re-register 'connected'
+  // for a tab that has since logged out (and whose tunnel refcount was already
+  // decremented), and that resurrected state then blocks the next bridge attempt.
+  const epoch = bridgeEpoch.get(tabId) ?? 0;
 
   try {
+    // Inside the try: these can REJECT, not just return null, and a throw before the
+    // catch would strand the 'pending' status above forever — permanently blocking
+    // both the retry branch and hostChanged, which only act on non-pending states.
+    const localPort = await commands.getMcpPort();
+    const authToken = await commands.getMcpAuth();
+    if (!localPort || !authToken) {
+      logError('Cannot enable SSH MCP bridge: MCP server not running');
+      bridgeStates.delete(tabId);
+      bridgeStates = new Map(bridgeStates);
+      return false;
+    }
+
     // Start or join existing tunnel
     const tunnelInfo = await commands.startSshTunnel(sshArgs, hostKey, tabId, localPort);
     logInfo(`SSH MCP bridge: tunnel to ${hostKey} on remote port ${tunnelInfo.remote_port}`);
@@ -431,14 +444,21 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string)
       try {
         if (!(await isRemoteShellForeground(ptyId))) {
           logInfo("SSH MCP bridge: skipping env-var injection — ssh no longer foreground for tab " + tabId);
-        } else if (await commands.terminalIsAltScreen(ptyId)) {
-          // A full-screen TUI owns the tty — in practice an agent that was already
-          // auto-resumed, which is what a restart's tab re-init races: the agent boots
-          // while the bridge is still coming up, so the write lands as literal text in
-          // its prompt. Skipping loses nothing: the export could never have set the env
-          // of an ALREADY-RUNNING process anyway, and the remote ~/.aiterm written by
-          // the background setup ssh still carries the tab id for the hook to source.
-          logInfo("SSH MCP bridge: skipping env-var injection — a TUI owns the screen for tab " + tabId);
+        } else if (agentStateStore.getState(tabId)) {
+          // An agent session is already live in this tab, so the PTY belongs to its
+          // prompt, not a shell: the write would be typed into the agent as a message
+          // (and the trailing newline would submit it). Skipping loses nothing — an
+          // export cannot change the environment of an ALREADY-RUNNING process — while
+          // the remote ~/.aiterm written by the background setup ssh still carries the
+          // tab id for the SessionStart hook to source.
+          //
+          // Deliberately NOT keyed on the alternate screen: Claude Code renders on the
+          // PRIMARY screen (that's why width changes duplicate its transcript into
+          // scrollback), so alt-screen misses the agent this is meant to protect, while
+          // catching tmux — where writing is fine, because tmux forwards keystrokes to
+          // the inner shell, and where the export is most needed since tmux shells
+          // don't inherit the spawn env.
+          logInfo("SSH MCP bridge: skipping env-var injection — an agent session owns tab " + tabId);
         } else {
           const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port + "\n";
           const bytes = Array.from(new TextEncoder().encode(envCmd));
@@ -472,6 +492,12 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string)
     // Wait for remote setup(s) to finish before flipping to 'connected'.
     // If any setup failed, this throws and the outer catch marks the bridge as failed.
     await Promise.all(setupPromises);
+
+    // A teardown raced us (user logged out mid-setup) — don't resurrect the bridge.
+    if ((bridgeEpoch.get(tabId) ?? 0) !== epoch) {
+      logInfo("SSH MCP bridge: discarding setup result for tab " + tabId + " — bridge was disabled while connecting");
+      return false;
+    }
 
     bridgeStates = new Map(bridgeStates.set(tabId, {
       hostKey,
@@ -508,6 +534,10 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string)
  * Disable the MCP bridge for a tab (called on tab close or SSH disconnect).
  */
 export async function disableBridge(tabId: string): Promise<void> {
+  // Bump first and unconditionally: a setup may be in flight with no state to read
+  // yet, and it must still see that a teardown happened.
+  bridgeEpoch.set(tabId, (bridgeEpoch.get(tabId) ?? 0) + 1);
+
   const bridge = bridgeStates.get(tabId);
   if (!bridge) return;
 

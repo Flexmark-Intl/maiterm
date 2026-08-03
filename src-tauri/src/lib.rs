@@ -483,7 +483,6 @@ pub fn run() {
             commands::terminal::get_terminal_scrollback_info,
             commands::terminal::search_terminal,
             commands::terminal::terminal_bracketed_paste,
-            commands::terminal::terminal_is_alt_screen,
             commands::terminal::get_agent_liveness,
             commands::terminal::serialize_terminal,
             commands::terminal::restore_terminal_scrollback,

@@ -891,11 +891,15 @@ pub fn get_pty_foreground(
     #[cfg(unix)]
     {
         if fresh {
-            invalidate_ps_snapshot();
+            invalidate_stale_ps_snapshot();
         }
     }
     #[cfg(not(unix))]
     {
+        // No-op on Windows: that path reads the separate sysinfo `proc_tree_snapshot`
+        // cache, which has no invalidation hook — so the stale-edge bug this flag
+        // exists to fix is still possible there. Unix is the only platform where the
+        // SSH bridge runs, so this is knowingly left alone rather than half-fixed.
         let _ = fresh;
     }
     Ok(get_foreground_command(pid))
@@ -1079,13 +1083,30 @@ struct PsRow {
 #[cfg(unix)]
 static PS_SNAPSHOT: Mutex<Option<(std::time::Instant, Arc<Vec<PsRow>>)>> = Mutex::new(None);
 
-/// Drop the cached `ps` snapshot so the next probe runs a real sweep. Used by
-/// edge-triggered ssh detection — see `get_pty_foreground`'s `fresh` flag for why a
-/// stale answer there is unrecoverable rather than merely late.
+/// How recent a snapshot has to be to still answer a `fresh` probe. A single ssh
+/// transition fans out into several probes back-to-back (the title handler, the
+/// pre-write foreground guard, the OSC 133 handler); without a floor each would force
+/// its own full sweep. Anything this young necessarily postdates the transition we're
+/// reacting to — the stale-read bug needed a snapshot from before the ssh process
+/// existed, which is the whole connect duration (hundreds of ms at least) before the
+/// title event that triggers us — so honouring it costs no correctness.
 #[cfg(unix)]
-fn invalidate_ps_snapshot() {
+const FRESH_SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(50);
+
+/// Drop the cached `ps` snapshot unless it is younger than `FRESH_SNAPSHOT_MAX_AGE`,
+/// so the next probe runs a real sweep. Used by edge-triggered ssh detection — see
+/// `get_pty_foreground`'s `fresh` flag for why a stale answer there is unrecoverable
+/// rather than merely late.
+#[cfg(unix)]
+fn invalidate_stale_ps_snapshot() {
     let mut guard = PS_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = None;
+    let too_old = guard
+        .as_ref()
+        .map(|(taken, _)| taken.elapsed() > FRESH_SNAPSHOT_MAX_AGE)
+        .unwrap_or(false);
+    if too_old {
+        *guard = None;
+    }
 }
 
 /// Full `ps` sweep, cached for PROC_SNAPSHOT_TTL. Holding the lock across the spawn
