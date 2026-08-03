@@ -120,6 +120,12 @@ Both agents connect to the same MCP server and can call the same tools.
 
 See [Agent Bridge](/features/agent-bridge/) for the full feature.
 
+### Acting as the right tab
+
+An agent states which tab it's running in by calling `initSession` — that's what the SessionStart hook does for you, and what `/maiterm init` does by hand. If its connection drops and reconnects, which happens routinely over an SSH tunnel, maiTerm works the tab out again from what's running rather than making you re-register, and every tool that reads or acts on that tab keeps working.
+
+That recovered identity is a deduction, though, not a statement — an MCP call carries nothing that proves who's calling — so the tools whose effect *leaves* the tab are refused on one: messaging or listing [bridge](/features/agent-bridge/) peers, [mesh](/features/mesh-workspace/) topics, and posting to a [Mattermost](/features/comms/) thread. Those speak under the tab's name into someone else's session, where a wrong guess can't be taken back. The refusal says so and names the fix: run `/maiterm init` in that session, or pass an explicit `tabId`.
+
 ### Tab Context Discovery
 
 The `getTabContext` tool lets your agent peek at what's happening in your tabs — recent terminal output or editor file content. If you have fewer than 10 tabs, it automatically returns context for all of them, making it easy for the agent to find the right tab without you having to specify. For larger workspaces, you can pass specific tab IDs.
