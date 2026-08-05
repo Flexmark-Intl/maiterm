@@ -146,6 +146,7 @@
   let selectionClickCount = 0;
   let selectionClickTimer: ReturnType<typeof setTimeout> | undefined;
   let autoScrollInterval: ReturnType<typeof setInterval> | undefined;
+  let autoScrollDirection: 1 | -1 | undefined;
   let lastMouseCol = 0;
   // Drag coalescing: each update_selection round-trip returns a full-viewport
   // repaint, and xterm's write buffer drains in 12ms slices. Mouse moves arrive
@@ -193,6 +194,7 @@
       clearInterval(autoScrollInterval);
       autoScrollInterval = undefined;
     }
+    autoScrollDirection = undefined;
   }
 
   // Begin a new selection gesture: any in-flight/queued update from the previous
@@ -248,7 +250,13 @@
     // is deduped away whenever scroll_display clamps (already at the live bottom
     // or the top of scrollback) and the offset in the key doesn't change.
     selectionLastCell = '';
-    if (autoScrollInterval) return;
+    // A fast flick from above the pane to below it can produce no in-viewport
+    // sample, so the running interval must be re-aimed — otherwise it keeps
+    // scrolling (and extending) the old way while the cursor sits at the
+    // opposite edge, and never self-corrects until re-entry or release.
+    if (autoScrollInterval && autoScrollDirection === direction) return;
+    stopAutoScroll();
+    autoScrollDirection = direction;
     autoScrollInterval = setInterval(() => {
       if (selectionScrollInFlight) return; // don't queue frames faster than they render
       selectionScrollInFlight = true;
