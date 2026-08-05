@@ -240,10 +240,19 @@
   }
 
   function startAutoScroll(direction: 1 | -1) {
+    // The cursor has left the viewport, so a queued in-viewport target is stale —
+    // draining it later would snap the endpoint back off the auto-scrolled edge.
+    selectionPending = undefined;
+    // Each tick moves the endpoint to the edge row itself, so the last cell we
+    // sent no longer describes the selection. Without this the re-entry update
+    // is deduped away whenever scroll_display clamps (already at the live bottom
+    // or the top of scrollback) and the offset in the key doesn't change.
+    selectionLastCell = '';
     if (autoScrollInterval) return;
     autoScrollInterval = setInterval(() => {
       if (selectionScrollInFlight) return; // don't queue frames faster than they render
       selectionScrollInFlight = true;
+      selectionLastCell = '';
       const gen = selectionGen;
       scrollSelection(ptyId, direction, lastMouseCol)
         .then(frame => {
@@ -282,8 +291,10 @@
     selectionActive = false;
     selectionRect = undefined;
     stopAutoScroll();
-    // Any queued update is kept — it carries the final mouse position and drains
-    // on the in-flight response, so the released selection matches the cursor.
+    // A queued update is kept — it carries the final in-viewport mouse position
+    // and drains on the in-flight response, so the released selection matches
+    // the cursor. (startAutoScroll drops it when the cursor leaves the viewport,
+    // since from then on the edge ticks own the endpoint.)
   }
 
   function updateScrollbar(displayOffset: number, totalLines: number) {
