@@ -147,11 +147,30 @@
   let selectionClickTimer: ReturnType<typeof setTimeout> | undefined;
   let autoScrollInterval: ReturnType<typeof setInterval> | undefined;
   let lastMouseCol = 0;
+  // Drag coalescing: each update_selection round-trip returns a full-viewport
+  // repaint, and xterm's write buffer drains in 12ms slices. Mouse moves arrive
+  // faster than that, so an unthrottled invoke-per-move builds an unbounded
+  // backlog and the highlight lags the cursor by seconds. Keep at most one
+  // request in flight, remember only the newest target, and skip cells we've
+  // already rendered.
+  let selectionInFlight = false;
+  let selectionPending: { col: number; row: number; side: 'left' | 'right' } | undefined;
+  let selectionLastCell = '';
+  let selectionScrollInFlight = false;
+  // Generation counter — a response from a superseded selection must not paint.
+  let selectionGen = 0;
+  // The xterm-screen rect can't change while a mouse button is held, so measure
+  // it once per drag instead of forcing a layout flush on every move.
+  let selectionRect: DOMRect | undefined;
 
-  function getCellPosition(e: MouseEvent): { col: number; row: number; side: 'left' | 'right' } {
+  function measureScreenRect(): DOMRect {
     // Use the xterm-screen element (not containerRef) to avoid padding offset
-    const screenEl = containerRef.querySelector('.xterm-screen') as HTMLElement;
-    const rect = screenEl ? screenEl.getBoundingClientRect() : containerRef.getBoundingClientRect();
+    const screenEl = containerRef.querySelector('.xterm-screen') as HTMLElement | null;
+    return (screenEl ?? containerRef).getBoundingClientRect();
+  }
+
+  function getCellPosition(e: MouseEvent, cachedRect?: DOMRect): { col: number; row: number; side: 'left' | 'right' } {
+    const rect = cachedRect ?? measureScreenRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const cellWidth = rect.width / terminal.cols;
@@ -176,46 +195,95 @@
     }
   }
 
+  // Begin a new selection gesture: any in-flight/queued update from the previous
+  // one is stale and must not paint over the new anchor.
+  function resetSelectionCoalescing(startCell?: { col: number; row: number; side: 'left' | 'right' }) {
+    selectionGen++;
+    selectionInFlight = false;
+    selectionPending = undefined;
+    selectionLastCell = startCell ? cellKey(startCell.col, startCell.row, startCell.side) : '';
+  }
+
+  // Includes the display offset: Rust maps (col,row) to a *buffer* point via the
+  // current offset, so the same viewport cell is a different selection endpoint
+  // once the viewport scrolls (auto-scroll or wheel mid-drag).
+  function cellKey(col: number, row: number, side: 'left' | 'right') {
+    return `${col},${row},${side}@${scrollDisplayOffset}`;
+  }
+
+  // Send at most one update_selection at a time; while one is in flight only the
+  // newest target is remembered, so the request rate self-limits to whatever the
+  // renderer can actually keep up with (and the final position always lands).
+  function sendSelectionUpdate(col: number, row: number, side: 'left' | 'right') {
+    const key = cellKey(col, row, side);
+    if (selectionInFlight) {
+      // Newest target wins. Moving back onto the cell already being rendered
+      // cancels the queued one — otherwise the drag would end on a cell the
+      // cursor has since left.
+      selectionPending = key === selectionLastCell ? undefined : { col, row, side };
+      return;
+    }
+    if (key === selectionLastCell) return; // already rendered for this cell
+    selectionLastCell = key;
+    selectionInFlight = true;
+    const gen = selectionGen;
+    updateSelection(ptyId, col, row, side)
+      .then(frame => { if (gen === selectionGen) applyFrame(frame); })
+      .catch(() => {})
+      .finally(() => {
+        if (gen !== selectionGen) return; // superseded — the new gesture owns the state
+        selectionInFlight = false;
+        const next = selectionPending;
+        selectionPending = undefined;
+        if (next) sendSelectionUpdate(next.col, next.row, next.side);
+      });
+  }
+
+  function startAutoScroll(direction: 1 | -1) {
+    if (autoScrollInterval) return;
+    autoScrollInterval = setInterval(() => {
+      if (selectionScrollInFlight) return; // don't queue frames faster than they render
+      selectionScrollInFlight = true;
+      const gen = selectionGen;
+      scrollSelection(ptyId, direction, lastMouseCol)
+        .then(frame => {
+          if (gen !== selectionGen) return;
+          userScrollOffset = frame.display_offset;
+          applyFrame(frame);
+        })
+        .catch(() => {})
+        .finally(() => { selectionScrollInFlight = false; });
+    }, 50);
+  }
+
   function onSelectionMouseMove(e: MouseEvent) {
     if (!selectionActive || lastFrameAlternateScreen) return;
 
-    const screenEl = containerRef.querySelector('.xterm-screen') as HTMLElement;
-    const rect = screenEl ? screenEl.getBoundingClientRect() : containerRef.getBoundingClientRect();
+    const rect = selectionRect ?? (selectionRect = measureScreenRect());
     const y = e.clientY - rect.top;
-    const { col, row, side } = getCellPosition(e);
+    const { col, row, side } = getCellPosition(e, rect);
     lastMouseCol = col;
 
     // Auto-scroll when mouse is above or below viewport
     if (y < 0) {
-      if (!autoScrollInterval) {
-        autoScrollInterval = setInterval(() => {
-          scrollSelection(ptyId, 1, lastMouseCol).then(frame => {
-            userScrollOffset = frame.display_offset;
-            applyFrame(frame);
-          }).catch(() => {});
-        }, 50);
-      }
+      startAutoScroll(1);
       return;
     } else if (y > rect.height) {
-      if (!autoScrollInterval) {
-        autoScrollInterval = setInterval(() => {
-          scrollSelection(ptyId, -1, lastMouseCol).then(frame => {
-            userScrollOffset = frame.display_offset;
-            applyFrame(frame);
-          }).catch(() => {});
-        }, 50);
-      }
+      startAutoScroll(-1);
       return;
     } else {
       stopAutoScroll();
     }
 
-    updateSelection(ptyId, col, row, side).then(applyFrame).catch(() => {});
+    sendSelectionUpdate(col, row, side);
   }
 
   function onSelectionMouseUp() {
     selectionActive = false;
+    selectionRect = undefined;
     stopAutoScroll();
+    // Any queued update is kept — it carries the final mouse position and drains
+    // on the in-flight response, so the released selection matches the cursor.
   }
 
   function updateScrollbar(displayOffset: number, totalLines: number) {
@@ -988,7 +1056,11 @@
       // Block xterm.js from receiving this mousedown (prevents its selection)
       e.stopPropagation();
 
-      const { col, row, side } = getCellPosition(e);
+      // Measure once here and reuse for the whole drag — the rect can't move
+      // while the button is held, and measuring per mousemove forces a layout
+      // flush against a DOM the incoming frames keep dirtying.
+      selectionRect = measureScreenRect();
+      const { col, row, side } = getCellPosition(e, selectionRect);
       lastMouseCol = col;
 
       // Track click count for double/triple click
@@ -997,13 +1069,20 @@
       selectionClickTimer = setTimeout(() => { selectionClickCount = 0; }, 400);
 
       if (e.shiftKey && hasRustSelection) {
-        updateSelection(ptyId, col, row, side).then(applyFrame).catch(() => {});
+        resetSelectionCoalescing();
+        sendSelectionUpdate(col, row, side);
       } else {
         const selType = selectionClickCount >= 3 ? 'lines'
           : selectionClickCount === 2 ? 'semantic'
           : 'simple';
 
-        startSelection(ptyId, col, row, side, selType).then(applyFrame).catch(() => {});
+        // Anchor the new gesture: the drag starts on this cell, so the first
+        // move that stays inside it needs no round-trip.
+        resetSelectionCoalescing({ col, row, side });
+        const gen = selectionGen;
+        startSelection(ptyId, col, row, side, selType)
+          .then(frame => { if (gen === selectionGen) applyFrame(frame); })
+          .catch(() => {});
         selectionActive = selType === 'simple';
       }
 
