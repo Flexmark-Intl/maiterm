@@ -796,6 +796,18 @@ async fn post_respond(
                 Some(a) if !a.is_empty() => a,
                 _ => return Ok(Json(json!({ "ok": false, "reason": "bad_request" }))),
             };
+            // A SECOND attempt at the same ask is refused, and this is the important guard here.
+            // Navigation is relative and assumes the highlight starts at row 0, which is true only
+            // for an untouched selector. After a failed attempt the highlight is wherever the
+            // keystrokes left it — and it cannot be re-homed, because the selector unbinds ↑/↓
+            // entirely while the free-text row holds focus. So a retry walks from an unknown
+            // origin, and the row it can end up typing into decides what the operator is recorded
+            // as having said. Retrying is strictly more dangerous than declining to.
+            if !claim_question_inject(&tab_id, &cur_id) {
+                log::warn!("[maiLink] refusing a second injection into ask {cur_id} (tab {tab_id}): selector position is unknown after the first attempt");
+                return Ok(Json(json!({ "ok": false, "reason": "selector_dirty",
+                    "detail": "this ask was already injected once; its selector position is now unknown, so send the answer as a message instead" })));
+            }
             if let Err(e) = drive_question_answers(&s.app, &pty, &tool_input, answers).await {
                 log::warn!("[maiLink] AskUserQuestion answer injection failed: {e}");
                 return Ok(Json(json!({ "ok": false, "reason": "inject_failed", "detail": e })));
@@ -2244,6 +2256,26 @@ async fn nav_to(app: &Arc<AppState>, pty_id: &str, from: usize, to: usize) -> Re
     Ok(to)
 }
 
+/// Claim the one permitted keystroke injection into a given open ask. `true` for the first call
+/// per (tab, prompt_id); `false` for every repeat.
+///
+/// One slot per tab, keyed by the ask's prompt_id, so a new ask replaces the old entry and the map
+/// stays bounded by tab count. Deliberately NOT cleared on success: a resolved ask can't be
+/// answered twice anyway, and clearing on failure is exactly the case that must stay refused.
+fn claim_question_inject(tab_id: &str, prompt_id: &str) -> bool {
+    static CLAIMED: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let map = CLAIMED.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let Ok(mut m) = map.lock() else { return true }; // a poisoned lock must not block answering
+    match m.get(tab_id) {
+        Some(seen) if seen == prompt_id => false,
+        _ => {
+            m.insert(tab_id.to_string(), prompt_id.to_string());
+            true
+        }
+    }
+}
+
 /// Replay the phone's per-question answers into Claude Code's open AskUserQuestion selector by
 /// injecting keystrokes, in question order.
 ///
@@ -2258,6 +2290,23 @@ async fn nav_to(app: &Arc<AppState>, pty_id: &str, from: usize, to: usize) -> Re
 ///   (f) the free-text "Other" row (labelled "Type something", at index option_count) is a live
 ///       inline input — navigate to it and TYPE directly (no Enter-to-open). For a single-select
 ///       question, Enter then selects+advances just like a listed pick.                    [VERIFIED e2e]
+///
+/// TYPING INTO THE WRONG ROW IS DESTRUCTIVE, which is why (a) is load-bearing rather than
+/// cosmetic. Read from the 2.1.224 bundle:
+///   * The container's own onKeyDown calls `onRespondToClaude()` — which DISMISSES the ask and
+///     routes the turn to chat, discarding every answer — when the key is the digit
+///     `options.length + 2` ("Chat about this"). It is gated on NOT being focused in the Other
+///     input. So if the highlight is off by one row when the free text is typed, any digit in the
+///     operator's own text that happens to equal `option_count + 2` silently throws the ask away.
+///     That is the reported "it acted like I said Chat about this", and its intermittency is
+///     explained by needing that one particular digit.
+///   * There IS also a literal `{value:"__chat__"}` ROW below Other, but only under
+///     `tlt = useContext(InternalAccessibilityContext)` — i.e. `isScreenReaderEnabled`, which
+///     defaults false. Do not plan around that row for ordinary terminals; do not assume it is
+///     absent for a screen-reader user either.
+///   * `select:next`/`select:previous` are unbound while an input row holds focus, so once the
+///     highlight reaches Other it CANNOT be moved by arrows. A wrong position is therefore not
+///     recoverable by navigating — see `claim_question_inject` for the consequence.
 /// BEST-GUESS (pending device validation): a multiSelect question with BOTH checkbox picks and
 /// Other free-text — typing checks the Other row, then Enter commits/releases the input before →
 /// advances. In probes the raw → was swallowed by the active input; the commit-Enter is the fix,
@@ -4197,6 +4246,21 @@ mod tests {
         assert!(!live_fallback_decision(true, None, now));
         // A turn timestamp slightly in the future (clock skew) is still "recent", not underflow.
         assert!(live_fallback_decision(true, Some(now + 5000), now));
+    }
+
+    #[test]
+    fn an_ask_may_be_injected_once_and_a_retry_is_refused() {
+        let (tab, ask) = ("tab-inject-test", "q_tab-inject-test_1");
+        assert!(claim_question_inject(tab, ask), "the first attempt must run");
+        // The selector cannot be re-homed after a failed attempt (↑/↓ are unbound while the
+        // free-text row holds focus), so a retry navigates from an unknown origin and can type
+        // the operator's answer into a row that discards it.
+        assert!(!claim_question_inject(tab, ask), "a retry on the same ask must be refused");
+        assert!(!claim_question_inject(tab, ask));
+        // A NEW ask on that tab starts a fresh untouched selector.
+        assert!(claim_question_inject(tab, "q_tab-inject-test_2"));
+        // Tabs don't interfere: one tab's spent ask says nothing about another's.
+        assert!(claim_question_inject("other-tab", ask));
     }
 
     #[test]
