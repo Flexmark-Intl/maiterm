@@ -451,6 +451,22 @@ pub struct SessionMeta {
     /// Reasoning-effort level from the last assistant turn (Claude: low/medium/high/xhigh/max —
     /// a top-level `effort` field on each JSONL entry). `None` for a model with no effort param,
     /// an older transcript that predates the field, or a non-Claude runtime.
+    ///
+    /// ALSO `None` for the whole remaining life of a RESUMED session, which is the common case on
+    /// any long-lived tab. Claude Code stops writing the field at the resume boundary and never
+    /// writes it again: measured on one session, 2239 of 2601 assistant lines carry it, the last
+    /// at the turn before a 2.5-day gap, and none of the 100+ after it — same CC version, same
+    /// model. So "does this tab show effort" reduces to "has it been resumed since its last
+    /// effort-bearing turn".
+    ///
+    /// Do NOT fix that by scanning back for the newest line that has one. The value you would find
+    /// is the setting from BEFORE the resume, and the operator may well have changed it since — on
+    /// the session that surfaced this, a backscan reports "medium" for a tab now running "high".
+    /// An absent badge is visibly absent; a stale one is indistinguishable from a live one. There
+    /// is no current-effort record anywhere else in the transcript either: `mode` is thinking mode
+    /// and `permission-mode` is permissions, and no `effort`-typed entry exists. Reporting nothing
+    /// is the correct outcome until a source that reflects live state (not last-recorded state)
+    /// exists.
     pub effort: Option<String>,
 }
 

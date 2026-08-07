@@ -1105,6 +1105,15 @@ export interface AgentMeta {
   effort?: string;        // Claude reasoning tier: low | medium | high | xhigh | max. Read from the
                           //   transcript's top-level `effort` field (same assistant line as usage).
                           //   OMITTED for effort-less models, non-Claude runtimes, or before the first turn.
+                          //   ALSO omitted permanently once a session has been RESUMED: Claude Code
+                          //   stops writing the field at the resume boundary and never resumes it,
+                          //   so any long-lived tab drifts into this state and stays there. There is
+                          //   no other current-effort record in the transcript, and the desktop will
+                          //   NOT backfill from the newest line that had one — that value predates
+                          //   the resume and can be wrong (measured: a tab on "high" would report
+                          //   "medium"). Absent is honest; a stale badge looks identical to a live
+                          //   one. Render the unknown state as an affordance to SET the effort,
+                          //   never as a value.
   contextPct?: number;    // 0–100, normalized — the always-present field
   contextUsed?: number;   // token detail for the "142k / 1M" readout
   contextLimit?: number;  // model-dependent (1,000,000 for [1m] variants, else 200,000)
