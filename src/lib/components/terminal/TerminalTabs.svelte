@@ -1022,6 +1022,22 @@
           })),
         }
       : null;
+    // Agent Bridge, same item as the terminal-body context menu — offered here on any
+    // tab that has (or had) an agent runtime, so bridging doesn't require focusing the
+    // tab first. A bridged tab always keeps the disconnect entry, even if its runtime
+    // was never recorded.
+    const isBridgedTab = agentBridgeStore.isBridged(tabId);
+    const bridgeItem: MenuItem | null = isTerminalTab && (isAgentTab || isBridgedTab)
+      ? isBridgedTab
+        ? {
+            label: 'Disconnect Agent Bridge',
+            action: () => agentBridgeStore.disconnect(tabId),
+          }
+        : {
+            label: 'Create Agent Bridge…',
+            action: () => window.dispatchEvent(new CustomEvent('open-agent-bridge-picker', { detail: { tabId } })),
+          }
+      : null;
     // Copy-path items for editor tabs. For SSH files "Copy Full Path" gives the
     // remote real path; "Copy Local Copy Path" stages a local copy on demand.
     const editorFile = tabObj?.tab_type === 'editor' ? tabObj.editor_file : null;
@@ -1053,6 +1069,7 @@
       ...(mailinkItem ? [mailinkItem] : []),
       ...(commsMonitorItem ? [commsMonitorItem] : []),
       ...(commsItem ? [commsItem] : []),
+      ...(bridgeItem ? [bridgeItem] : []),
       { label: '', separator: true, action: () => {} },
       {
         label: 'Move to New Split Right',
