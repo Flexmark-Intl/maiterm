@@ -605,6 +605,15 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 .collect()
         };
 
+        // At most ONE injection per tab per tick, across both phases. inject_text is
+        // paste → settle → CR; firing a second payload straight after the first lands it
+        // in the TUI while the first is still being absorbed, and only the last one
+        // survives — two queued summons released together produced a single pickup, the
+        // other silently swallowed. Skipping leaves the cursor unadvanced, so the rest
+        // arrive on following ticks (5s apart, well clear of the settle window). Same
+        // serialization the bridge gets from its `injecting` guard + cooldown.
+        let mut injected_tabs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for (tab_id, binding) in bindings {
             let key = format!("{tab_id}|{}", binding.root_id);
             if let Some((_, until)) = backoff.get(&key) {
@@ -660,19 +669,22 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
             // A modal ask/permission prompt eats injected text AND its trailing CR picks
             // an option — the human loses their answer and the message is gone. Hold.
             let prompt_block = injection_blocked_by_prompt(&app, &tab_id);
-            let hold_reason = if !session_live {
-                Some("no agent session is running in that tab")
+            // `transient` holds clear themselves within a tick or two (the human answers,
+            // the other injection lands) — they must not fire an operator toast, or every
+            // answered question and every second thread would ring one.
+            let (hold_reason, transient) = if !session_live {
+                (Some("no agent session is running in that tab"), false)
             } else if pty_id.is_none() {
-                Some("that tab has no live terminal")
+                (Some("that tab has no live terminal"), false)
+            } else if injected_tabs.contains(&tab_id) {
+                // Another thread on this tab already got this tick's injection.
+                (Some("another message is already being delivered to that tab"), true)
             } else {
-                prompt_block
+                (prompt_block, true)
             };
             let newest_addressed = addressed.iter().map(|p| p.create_at).max().unwrap_or(0);
             if let Some(reason) = hold_reason {
-                // Notify once per newest post — but a prompt-hold is transient (the human
-                // answers within seconds), so it stays silent unless it persists, or every
-                // question the operator answers would also fire a toast.
-                let notify = prompt_block.is_none()
+                let notify = !transient
                     && pending_notified.get(&key).copied().unwrap_or(0) < newest_addressed;
                 if notify {
                     pending_notified.insert(key.clone(), newest_addressed);
@@ -758,6 +770,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
             match crate::mailink::inject_text(&app, &pty_id, &payload, true).await {
                 Ok(()) => {
                     advance_cursor(&app, &tab_id, &binding.root_id, new_cursor);
+                    injected_tabs.insert(tab_id.clone());
                     // Delivered — a future undeliverable burst should notify again.
                     pending_notified.remove(&key);
                     log::info!(
@@ -897,6 +910,17 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                     let bound_count = bindings_count_for_tab(&app, &tab_id);
                     let at_capacity = bound_count >= MAX_TAB_BINDINGS;
                     let prompt_block = injection_blocked_by_prompt(&app, &tab_id);
+                    // One injection per tab per tick — see `injected_tabs`. Two summons
+                    // freed at once (the agent closing out several threads) used to be
+                    // picked up back-to-back, and only the last payload survived the TUI.
+                    let tab_busy_injecting = injected_tabs.contains(&tab_id);
+                    if tab_busy_injecting {
+                        log::info!(
+                            "[comms] summon held for tab {tab_id} (delivering another message this tick) in {}",
+                            ch.name
+                        );
+                        break; // cursor holds before this post; retried next tick
+                    }
                     if !session_live || pty_id.is_none() || at_capacity || prompt_block.is_some() {
                         // Can't take it now. Hold the cursor HERE so this summon is
                         // retried when the tab frees up / comes back. Say so once.
@@ -963,6 +987,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                     {
                         Ok(()) => {
                             busy_replied.remove(&root);
+                            injected_tabs.insert(tab_id.clone());
                             emit_bindings_changed(&app_handle, &app, &tab_id);
                             let _ = app_handle.emit(
                                 "comms-summon",
