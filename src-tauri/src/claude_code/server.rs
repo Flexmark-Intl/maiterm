@@ -1050,6 +1050,33 @@ fn monitored_channels(
         .unwrap_or_default()
 }
 
+/// Whether releasing a binding on this channel is safe: only a channel THIS tab monitors
+/// can summon the agent back, so on any other channel unbinding is a one-way door and the
+/// agent must stay bound to hear a follow-up. Drives `can_be_resummoned` in the tool
+/// results — releasing the slot early is only correct advice when re-entry exists.
+fn channel_is_monitored(state: &Arc<AppState>, tab_id: &str, channel_id: &str) -> bool {
+    monitored_channels(state, tab_id)
+        .iter()
+        .any(|c| c.id == channel_id)
+}
+
+/// The `can_be_resummoned` field plus the guidance that goes with it.
+fn resummon_note(resummonable: bool, bot_username: &str) -> (bool, String) {
+    if resummonable {
+        (
+            true,
+            format!(
+                "this thread is in a channel this tab monitors — once you've done the work and posted it, release the binding (postCommsReply with resolve: true) instead of camping on it waiting for a human to confirm. Anyone who replies @{bot_username} here summons you straight back with the full thread, so the slot is free in the meantime."
+            ),
+        )
+    } else {
+        (
+            false,
+            "this thread is NOT in a channel this tab monitors, so nothing can summon you back once you unbind — stay bound until the work is genuinely finished and the humans have what they need.".to_string(),
+        )
+    }
+}
+
 async fn handle_bind_comms_thread(
     arguments: &Value,
     state: &Arc<AppState>,
@@ -1156,6 +1183,12 @@ async fn handle_bind_comms_thread(
         "bound_thread_count": bound_count,
         "thread": transcript,
     });
+    let (resummonable, resummon_guidance) = resummon_note(
+        channel_is_monitored(state, &tab_id, &post.channel_id),
+        &bot_username,
+    );
+    result["can_be_resummoned"] = Value::Bool(resummonable);
+    result["release_guidance"] = Value::String(resummon_guidance);
     if let Some(instr) = comms_instructions(state) {
         result["operator_instructions"] = Value::String(instr);
     }
@@ -1204,6 +1237,12 @@ async fn handle_read_comms_thread(arguments: &Value, state: &Arc<AppState>) -> V
         "thread": transcript,
         "all_replies_delivered": binding.deliver_all_replies,
     });
+    let (resummonable, resummon_guidance) = resummon_note(
+        channel_is_monitored(state, &tab_id, &binding.channel_id),
+        &client.me().await.map(|u| u.username).unwrap_or_default(),
+    );
+    result["can_be_resummoned"] = Value::Bool(resummonable);
+    result["release_guidance"] = Value::String(resummon_guidance);
     if let Some(instr) = comms_instructions(state) {
         result["operator_instructions"] = Value::String(instr);
     }
@@ -1436,6 +1475,12 @@ async fn handle_start_comms_thread(
     result["bound"] = Value::Bool(true);
     result["bound_thread_count"] = Value::from(bound_count);
     result["all_replies_delivered"] = Value::Bool(true);
+    // Always a monitored channel (startCommsThread refuses any other), so the slot can
+    // always be released once the exchange is done.
+    result["can_be_resummoned"] = Value::Bool(true);
+    result["release_guidance"] = Value::String(
+        "when this exchange has served its purpose, release the binding (postCommsReply with resolve: true) rather than leaving it open — an @mention on this thread summons you back. Note that after releasing, replies here only reach you if they @mention the bot.".to_string(),
+    );
     let approvers = authorized_usernames(state);
     if !approvers.is_empty() {
         result["authorized_users"] = Value::from(approvers);

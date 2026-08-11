@@ -1168,7 +1168,10 @@ async fn summon_pickup(
          (listBridgedPeers), to that peer — so both proceed independently; the ack still comes \
          first and is yours to post. You stay the dispatcher either way — and \
          ALWAYS pass root_id \"{root_id}\" on postCommsReply/readCommsThread calls for this \
-         thread.{approvers}{instructions}\nSummon message and thread so far:\n{transcript}]",
+         thread. When the work is done and posted, RELEASE this thread (postCommsReply with \
+         resolve: true) instead of holding the slot waiting for a human to confirm — this \
+         channel is monitored, so an @{bot_username} reply here summons you straight back with \
+         the full thread.{approvers}{instructions}\nSummon message and thread so far:\n{transcript}]",
         ch.name
     );
     crate::mailink::inject_text(app, pty_id, &payload, true).await?;

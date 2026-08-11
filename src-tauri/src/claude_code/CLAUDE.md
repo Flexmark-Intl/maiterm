@@ -181,6 +181,19 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   Same class as the maiLink rule: a backend mutation of tab state needs a frontend event.
   Binding lifecycle is also logged (bind/raise/release + resulting `n/3` occupancy) — previously
   only summon pickups logged, so slots appeared to be taken and never released.
+- **One injection per tab per tick**: `inject_text` is paste → settle → CR, so a second payload
+  fired straight after the first lands mid-absorb and only the last survives — two summons freed
+  together (an agent closing out several threads) produced ONE pickup, the other swallowed. The
+  watcher tracks `injected_tabs` across BOTH phases and holds the rest (cursor unadvanced) for
+  following ticks, 5s apart. Same serialization the bridge gets from its `injecting` + cooldown.
+  Transient holds (this, and prompt-open) never fire the operator toast; only real stalls
+  (no session / no PTY) do.
+- **Release over camp**: an agent that finishes a thread posts and unbinds (`resolve: true`)
+  rather than holding a slot for human confirmation — a confirmation can take hours and there are
+  only 3 slots. Safe because an @mention re-summons it with the full thread, but ONLY on a
+  monitored channel, so bind/read/start results carry `can_be_resummoned` + `release_guidance`
+  (`channel_is_monitored`); on a non-monitored channel (bound by permalink) unbinding is a one-way
+  door and the skill tells the agent to stay bound.
 - **Never inject over an open prompt**: `injection_blocked_by_prompt` holds BOTH watcher phases
   (reply delivery and summon pickup) while the tab's session has an open `pending_question`
   (AskUserQuestion) or is `WaitingPermission`. Those are modal selection UIs — an injected paste's

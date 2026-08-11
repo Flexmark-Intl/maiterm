@@ -569,7 +569,7 @@ pub fn tool_list_response() -> Value {
         },
         {
             "name": "postCommsReply",
-            "description": "Post a reply (Mattermost markdown) to a thread this tab is bound to. Set resolve: true ONLY to close out a thread a human has CONFIRMED is resolved — it posts the message and then clears that thread's binding (stops reply forwarding). Do NOT set resolve when first posting a fix; keep the thread bound until someone confirms it works. The bot must be a member of the channel.",
+            "description": "Post a reply (Mattermost markdown) to a thread this tab is bound to. Set resolve: true when YOUR work on the thread is done — it posts the message and releases that thread's binding, freeing one of this tab's 3 slots. Post-and-release is the normal ending: do NOT hold a finished thread waiting for a human to confirm, since an @mention on the thread summons you straight back with full context (unless the bind result said can_be_resummoned: false — then stay bound). The bot must be a member of the channel.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
