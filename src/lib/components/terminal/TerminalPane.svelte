@@ -19,7 +19,6 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
-  import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { getTheme } from '$lib/themes';
   import { getCompiledPatterns } from '$lib/utils/promptPattern';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -1810,18 +1809,8 @@
           },
         },
       ]),
-      { label: '', separator: true, action: () => {} },
-      ...(agentBridgeStore.isBridged(tabId) ? [
-        {
-          label: 'Disconnect Agent Bridge',
-          action: () => agentBridgeStore.disconnect(tabId),
-        },
-      ] : [
-        {
-          label: 'Create Agent Bridge\u2026',
-          action: () => window.dispatchEvent(new CustomEvent('open-agent-bridge-picker', { detail: { tabId } })),
-        },
-      ]),
+      // Agent Bridge lives in the tab context menu (TerminalTabs.svelte) \u2014 it acts on a
+      // tab, not on the terminal viewport, and there it works without focusing the tab.
       { label: '', separator: true, action: () => {} },
       {
         label: 'Suspend Other Tabs',

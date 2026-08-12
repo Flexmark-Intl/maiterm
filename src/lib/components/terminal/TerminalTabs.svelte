@@ -1022,12 +1022,13 @@
           })),
         }
       : null;
-    // Agent Bridge, same item as the terminal-body context menu — offered here on any
-    // tab that has (or had) an agent runtime, so bridging doesn't require focusing the
-    // tab first. A bridged tab always keeps the disconnect entry, even if its runtime
-    // was never recorded.
+    // Agent Bridge — this is its only home (the terminal-body menu no longer carries it):
+    // it acts on a tab, and from here it works without focusing that tab first. Shown on
+    // any terminal tab that has an agent runtime or a live agent session, plus any bridged
+    // tab (so the disconnect entry survives even if the runtime was never recorded).
     const isBridgedTab = agentBridgeStore.isBridged(tabId);
-    const bridgeItem: MenuItem | null = isTerminalTab && (isAgentTab || isBridgedTab)
+    const hasAgentSession = !!claudeStateStore.getState(tabId);
+    const bridgeItem: MenuItem | null = isTerminalTab && (isAgentTab || hasAgentSession || isBridgedTab)
       ? isBridgedTab
         ? {
             label: 'Disconnect Agent Bridge',
