@@ -378,11 +378,15 @@ function createAgentMeshStore() {
      *  session, and only while that workspace is still the active one. */
     maybeAutoRecheck(wsId: string) {
       const ws = getWorkspace(wsId);
-      if (!ws?.bridge_all || autoRechecked.has(wsId)) return;
+      // A suspended workspace has no agents to be ready — its PTYs are gone by
+      // design. It can still be the active one: suspending the workspace you're
+      // looking at leaves the pointer on it when there's nothing live to move to.
+      // Guard before the latch so a later resume still gets its recheck.
+      if (!ws?.bridge_all || ws.suspended || autoRechecked.has(wsId)) return;
       autoRechecked.add(wsId);
       setTimeout(() => {
         const w = getWorkspace(wsId);
-        if (!w?.bridge_all) return;
+        if (!w?.bridge_all || w.suspended) return;
         if (workspacesStore.activeWorkspaceId !== wsId) return; // user navigated away
         if (hasUnreadyMembers(w)) {
           window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: wsId }));
