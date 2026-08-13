@@ -643,7 +643,12 @@ pub fn run() {
             // clean native quit look like a crash next launch) and MCP/PTY/tunnel
             // cleanup never ran. Converge them on the shared shutdown path here.
             // Idempotent with exit_app via the guard in run_shutdown_cleanup.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+            // Both events: an AppleEvent quit (`osascript … to quit`, the deploy
+            // script's path) tears the app down without ever raising ExitRequested,
+            // so listening for that alone left the running marker behind — every
+            // deploy looked like a crash next launch — and skipped the final state
+            // flush, losing everything since the last command that happened to save.
+            if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                     commands::workspace::run_shutdown_cleanup(&state);
                 } else {
