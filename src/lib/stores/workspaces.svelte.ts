@@ -340,17 +340,27 @@ function createWorkspacesStore() {
       }
 
       // The active workspace is skipped by the loop above (it's never dimmed —
-      // you're looking at it). But if it was persisted suspended — e.g. a single-
-      // workspace window whose only workspace was suspended (which nulls the active
-      // id path), or a stale suspension — nothing would un-suspend it, and
-      // buildRestoreList skips suspended workspaces wholesale, so that window comes
-      // back empty. Un-suspend it here (regardless of mode) and fold its live-at-
-      // suspend tabs into the wake set so restore respawns them.
+      // you're looking at it). It can still come back persisted suspended: you
+      // suspend the workspace you're looking at, and the active id only moves in
+      // memory (a quit that skips the final flush leaves the suspended workspace
+      // as the persisted active one). buildRestoreList skips suspended workspaces
+      // wholesale, so that window would come back empty — but un-suspending is
+      // the wrong repair: it throws away an explicit suspend. Move the active
+      // pointer to a workspace that is actually live instead, and only un-suspend
+      // when there's nothing to move to (every workspace in the window suspended,
+      // e.g. a single-workspace window), folding its live-at-suspend tabs into the
+      // wake set so restore respawns them.
       const activeWs = workspaces.find(w => w.id === activeWorkspaceId);
       if (activeWs?.suspended) {
-        activeWs.suspended = false;
-        const wakeIds = await commands.resumeWorkspace(activeWs.id).catch(() => [] as string[]);
-        for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
+        const live = workspaces.find(w => !w.suspended);
+        if (live) {
+          activeWorkspaceId = live.id;
+          await commands.setActiveWorkspace(live.id).catch(() => {});
+        } else {
+          activeWs.suspended = false;
+          const wakeIds = await commands.resumeWorkspace(activeWs.id).catch(() => [] as string[]);
+          for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
+        }
       }
 
       // Create default workspace if none exist
