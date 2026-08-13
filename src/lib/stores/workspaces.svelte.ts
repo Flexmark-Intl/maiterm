@@ -302,6 +302,30 @@ function createWorkspacesStore() {
       const livePtySet = new Set(livePtyIds);
       terminalsStore.seedReattachPtyIds(livePtyIds);
 
+      const hasLivePty = (ws: Workspace) => ws.panes.some(p => p.tabs.some(t =>
+        (t.tab_type === 'terminal' || !t.tab_type) && t.pty_id && livePtySet.has(t.pty_id)));
+
+      // The active workspace can come back persisted suspended: you suspend the
+      // workspace you're looking at, and the active id only moves in memory (a
+      // quit that skips the final flush, or the all-suspended branch of
+      // suspendWorkspace, leaves the suspended workspace as the persisted active
+      // one). Point at a workspace that is actually live instead — never
+      // un-suspend, which would throw away an explicit suspend and respawn every
+      // tab that was running when it was suspended. If there's nothing live to
+      // point at, leave the pointer alone: `activeWorkspace` is null while its
+      // workspace is suspended, and +page renders the "All workspaces suspended"
+      // resume list, so the window is never actually stranded empty.
+      // Runs BEFORE the pass below, which rewrites suspension states in
+      // last_active mode and would otherwise leave no candidate to find.
+      const staleActiveWs = workspaces.find(w => w.id === activeWorkspaceId);
+      if (staleActiveWs?.suspended) {
+        const live = workspaces.find(w => w.id !== staleActiveWs.id && (!w.suspended || hasLivePty(w)));
+        if (live) {
+          activeWorkspaceId = live.id;
+          await commands.setActiveWorkspace(live.id).catch(() => {});
+        }
+      }
+
       // Decide which non-active workspaces to suspend on load. With "Restore on
       // Relaunch" off we keep the old conservative behavior; with it on, the
       // session_restore_mode preference picks the scope.
@@ -310,9 +334,7 @@ function createWorkspacesStore() {
         if (ws.id === activeWorkspaceId) continue;
         // Window reload: this workspace still has a live PTY — its tab will
         // reattach. Never leave a workspace that's actually running dimmed.
-        const hasLivePty = ws.panes.some(p => p.tabs.some(t =>
-          (t.tab_type === 'terminal' || !t.tab_type) && t.pty_id && livePtySet.has(t.pty_id)));
-        if (hasLivePty) {
+        if (hasLivePty(ws)) {
           // Still-running reload: never leave a workspace that's actually
           // running dimmed — its tabs reattach via the activation pass in +page.
           if (ws.suspended) {
@@ -336,30 +358,6 @@ function createWorkspacesStore() {
         if (!ws.suspended) {
           ws.suspended = true;
           commands.suspendWorkspace(ws.id).catch(() => {});
-        }
-      }
-
-      // The active workspace is skipped by the loop above (it's never dimmed —
-      // you're looking at it). It can still come back persisted suspended: you
-      // suspend the workspace you're looking at, and the active id only moves in
-      // memory (a quit that skips the final flush leaves the suspended workspace
-      // as the persisted active one). buildRestoreList skips suspended workspaces
-      // wholesale, so that window would come back empty — but un-suspending is
-      // the wrong repair: it throws away an explicit suspend. Move the active
-      // pointer to a workspace that is actually live instead, and only un-suspend
-      // when there's nothing to move to (every workspace in the window suspended,
-      // e.g. a single-workspace window), folding its live-at-suspend tabs into the
-      // wake set so restore respawns them.
-      const activeWs = workspaces.find(w => w.id === activeWorkspaceId);
-      if (activeWs?.suspended) {
-        const live = workspaces.find(w => !w.suspended);
-        if (live) {
-          activeWorkspaceId = live.id;
-          await commands.setActiveWorkspace(live.id).catch(() => {});
-        } else {
-          activeWs.suspended = false;
-          const wakeIds = await commands.resumeWorkspace(activeWs.id).catch(() => [] as string[]);
-          for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
         }
       }
 
