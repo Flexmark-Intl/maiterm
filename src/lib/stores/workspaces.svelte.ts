@@ -323,6 +323,15 @@ function createWorkspacesStore() {
         if (live) {
           activeWorkspaceId = live.id;
           await commands.setActiveWorkspace(live.id).catch(() => {});
+          // Picked on live-PTY strength alone: the pass below skips whatever is
+          // active, so its stale suspended flag would never be cleared and the
+          // window would render the suspended empty state over running terminals.
+          // Un-suspend it here, the same way that pass does for a live workspace.
+          if (live.suspended) {
+            live.suspended = false;
+            const wakeIds = await commands.resumeWorkspace(live.id).catch(() => [] as string[]);
+            for (const tabId of wakeIds) pendingWakeTabIds.add(tabId);
+          }
         }
       }
 
