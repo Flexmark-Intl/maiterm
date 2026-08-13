@@ -635,6 +635,14 @@ pub fn set_active_workspace(window: tauri::Window, state: State<'_, Arc<AppState
     if let Some(ws) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) {
         ws.import_highlight = false;
     }
+    // Persist eagerly, like rename_tab: the active workspace otherwise lives only
+    // in memory until some unrelated command saves. Suspending the workspace you're
+    // looking at moves the pointer *after* the suspend has already been written, so
+    // an exit without a final flush would leave a suspended workspace recorded as
+    // the active one — and the next launch has to repair that.
+    let data_clone = app_data.clone();
+    drop(app_data);
+    let _ = save_state(&data_clone);
     Ok(())
 }
 
