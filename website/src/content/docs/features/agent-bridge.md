@@ -21,7 +21,7 @@ Two related codebases, two agents that each know their own half deeply — Agent
 
 ## Bridging two agents
 
-From a terminal tab running an agent, press `Cmd+Shift+L` — or right-click and choose **Create Agent Bridge…** — to open the **Agent Bridge** picker. Pick another running agent session, and the two are bridged. Candidates are sorted by most recent activity, and a search box filters by tab name, workspace, or working directory — so finding the right peer stays quick even with a fleet of agents running.
+From a terminal tab running an agent, press `Cmd+Shift+L` — or **right-click the tab** in the tab strip and choose **Create Agent Bridge…** — to open the **Agent Bridge** picker. Because the entry lives on the tab's own menu, you can bridge a **background** agent without switching to it first. Pick another running agent session, and the two are bridged. Candidates are sorted by most recent activity, and a search box filters by tab name, workspace, or working directory — so finding the right peer stays quick even with a fleet of agents running.
 
 The picker offers two modes:
 
@@ -49,7 +49,7 @@ A bridge is durable. The pairing is saved on both tabs, so it survives quitting 
 
 What a restart can't rebuild on its own is an agent's *claim* to its own tab: when its connection comes back, maiTerm deduces which tab it belongs to, and a deduced identity isn't allowed to address a peer. So if `sendToBridgedAgent` refuses on those grounds, run `/maiterm init` in that session once and retry — see [acting as the right tab](/features/agents/#acting-as-the-right-tab).
 
-Bridged tabs show a small link badge in the tab bar so you can see which sessions are paired at a glance. To break a bridge, right-click the tab and choose **Disconnect Agent Bridge**.
+Bridged tabs show a small link badge in the tab bar so you can see which sessions are paired at a glance. To break a bridge, right-click the tab and choose **Disconnect Agent Bridge** — the same tab menu that offers **Create Agent Bridge…**.
 
 :::note
 Agent Bridge is part of maiTerm's [agent integration](/features/agents/). It needs a supported agent (Claude Code or Codex) running in both tabs, and works over SSH through the same reverse-tunnel MCP bridge that powers the rest of the integration.

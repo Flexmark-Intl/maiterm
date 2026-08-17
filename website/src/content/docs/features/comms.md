@@ -52,7 +52,7 @@ Get the permalink from Mattermost's **⋯ → Copy Link** on the message. From t
 2. **Investigate silently.** After the ack, the agent stays quiet on the thread — no progress chatter. It reproduces and fixes the issue in the tab's repo.
 3. **One question if blocked.** If it genuinely can't proceed without more information, it posts a single concise question, explicitly addressed to the right audience — **`@Support`** for what the customer saw or did, **`@Dev`** for questions about the codebase or release process — so the right person knows to answer.
 4. **Post the resolution.** When the fix is verified, the agent posts it as a normal reply and asks the humans to test and confirm. The post has two parts: a short, jargon-free summary for the support person (what was wrong, what changes for the customer, and when) ending with the ask — an `@mention` of whoever should verify it — then a `---` divider and **Technical details (for devs)**: root cause, what changed, how it was verified. Anything asked of a human sits above the divider, and the technical detail is always the last thing in the post, so the call to action is never buried under a wall of developer detail.
-5. **Stay bound until confirmed.** Posting a fix does **not** close the thread (see below).
+5. **Post and release.** Posting the resolution also releases the binding, freeing the tab's slot — and the post tells the humans how to come back: an `@mention` on the thread summons the agent straight back with the whole conversation. On a thread it *can't* be summoned back to, it stays bound instead (see [below](#a-finished-thread-releases-its-slot)).
 
 Ambient discussion in the thread isn't pushed at the agent, but it can re-read the whole thread on demand at any point to catch up on messages that weren't addressed to it.
 
@@ -75,7 +75,7 @@ Turn it on from the tab itself — **right-click the tab → Enable chat monitor
 From then on, the tab is a **dispatcher**. Whenever someone `@mentions` the bot in a thread in one of those channels, maiTerm binds that thread to the tab and hands the agent the request with the full conversation already attached — no `/maiterm resolve`, no permalink. The agent then runs exactly the [end-to-end flow above](#working-a-thread-end-to-end), starting from its first reply.
 
 - **One tab, several threads.** A monitoring tab works **up to three threads at once**. Each binding is independent — the agent keeps their investigations separate — and the tab's `@` indicator shows a live count of how many are bound. The indicator is **dim while the tab is monitoring but idle**, and turns **green with a count** once threads are bound.
-- **Overflow queues.** A summon that arrives while the tab is already at its three-thread capacity, has no agent session, or has no terminal running doesn't get dropped — it waits, and the notification names which of those it was, because they don't clear the same way: a capacity hold only drains when somebody closes a thread out, while the others clear the moment the tab is back. When the tab is at capacity, the bot also posts a **one-time reply** to the waiting thread ("I'm at capacity on other issues right now — I'll pick this up as soon as one closes out") so the humans aren't left wondering. As soon as a thread closes out or the session comes back, the queued summon is picked up automatically.
+- **Overflow queues.** A summon that arrives while the tab is already at its three-thread capacity, has no agent session, or has no terminal running doesn't get dropped — it waits, and the notification names which of those it was, because they don't clear the same way: a capacity hold only drains when one of the bound threads is released, while the others clear the moment the tab is back. When the tab is at capacity, the bot also posts a **one-time reply** to the waiting thread ("I'm at capacity on other issues right now — I'll pick this up as soon as one closes out") so the humans aren't left wondering. As soon as a thread is released or the session comes back, the queued summon is picked up automatically — and if several slots free at once, the waiting threads are handed over **one per pass** rather than typed into the tab back to back, so none of them is lost.
 - **Only a genuinely new ask summons.** Editing an old message never counts as one — fixing a typo in the root report of a thread you just closed out won't drag the whole thread back in as fresh work. Neither does a mention the bot has already replied to: confirming a fix can't re-open the thread it just closed. A real new `@mention` — "@bot it's broken again" — still summons as normal.
 
 Only people you've authorized can summon the bot — see [Who can summon the bot](#who-can-summon-the-bot) below. An `@mention` from anyone else is never picked up; it just notifies you.
@@ -87,8 +87,8 @@ Answering is only half a conversation. An agent on a monitoring tab can also **o
 Ask for one with `/maiterm raise <what to post>`, or let the agent decide it needs to — the rules are the same either way:
 
 - **Only channels you put on that tab's monitor list.** An agent can't post into a channel it happened to discover; the monitored set is the whole of its reach, and you set it from the tab's right-click menu. If the tab monitors more than one, the agent names which.
-- **It counts against the three-thread cap.** A thread the agent opened is a live thread it owns — it works it to resolution and closes it out like a summoned one.
-- **Every reply comes back.** Nobody should have to `@mention` a bot they didn't summon, so on a thread the agent opened, the mention gate is off and all human replies are delivered. Summoned and permalink-bound threads stay mention-gated as before.
+- **It counts against the three-thread cap.** A thread the agent opened is a live thread it owns — it works it to resolution and then releases it like a summoned one, and an `@mention` brings it back.
+- **Every reply comes back.** Nobody should have to `@mention` a bot they didn't summon, so while the agent holds a thread it opened, the mention gate is off and all human replies are delivered. Summoned and permalink-bound threads stay mention-gated as before — and so does a thread the agent has released, since the gate is a property of the binding.
 - **It has to `@mention` whoever should see it.** A new root post notifies nobody by itself, so the opening message names the people it's for by their exact Mattermost username.
 
 An agent can also post a genuine fire-and-forget notice — a heads-up it expects no answer to — without binding the thread at all.
@@ -124,16 +124,20 @@ So "can you check whether X is broken?" gets an answer; "can you fix X" — or "
 
 ### An operator kill switch
 
-You can end a binding yourself at any time: right-click the tab and choose **End thread binding(s)**. On a tab working several threads at once this clears **all** of them; the agent can also close out a single thread on its own once a human confirms the fix. This is the human override — **severing a binding never depends on the agent cooperating**, and it posts nothing to the thread. Forwarding stops within a few seconds.
+You can end a binding yourself at any time: right-click the tab and choose **End thread binding(s)**. On a tab working several threads at once this clears **all** of them; the agent releases individual threads on its own as it finishes them. This is the human override — **severing a binding never depends on the agent cooperating**, and it posts nothing to the thread. Forwarding stops within a few seconds.
 
-### A fix stays open until a human confirms
+### A finished thread releases its slot
 
-Posting a resolution no longer closes anything. The binding stays live, and the agent asks support to test and confirm:
+Waiting for a human to confirm a fix can take hours, and a tab has only three slots — a finished thread left bound backs up every new report behind it. So posting the resolution and **releasing the binding** is the normal ending: the agent asks support to test and confirm, and lets go of the thread while they do.
 
-- If someone replies that it's **still broken**, the agent keeps working — their messages keep arriving in the tab.
-- If someone confirms it's **resolved**, the agent posts a brief sign-off and closes the thread out.
+Releasing isn't abandoning. The thread stays live for the humans, and an `@mention` of the bot on it **summons the agent straight back with the full conversation**, including everything said while it was away:
 
-So a thread only closes on a human's confirmation, not on the agent's own belief that it's done.
+- If someone replies that it's **still broken** — `@bot it's still doing it` — the thread comes back to the tab as a fresh pickup and the agent keeps working, with all the earlier context.
+- The agent stays bound only while it's **actively working** the thread, **waiting on a question it asked**, or on a thread it **can't be summoned back to**.
+
+That last case is the safeguard, and it's why releasing is safe to do at all: an `@mention` can only re-summon on a channel that tab **monitors**. A thread bound by permalink in a channel the tab doesn't monitor is a one-way door — nothing could bring the agent back — so there it holds the binding until the humans genuinely have what they need. The agent is told which case it's in when it picks the thread up, rather than guessing.
+
+Because a released thread is no longer bound, it's also back to being mention-gated: a follow-up has to `@mention` the bot to reach the agent. You can still end any binding yourself at any time (above).
 
 ### A thread message never answers a prompt for you
 
