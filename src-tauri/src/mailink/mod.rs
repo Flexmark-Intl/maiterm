@@ -3295,6 +3295,9 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
                 v["todos_ts"] = json!(ts);
             }
         }
+        if let Some(ts) = of.last_compact_ts {
+            v["last_compact_ts"] = json!(ts);
+        }
     }
     Some(v)
 }

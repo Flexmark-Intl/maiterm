@@ -984,6 +984,7 @@
 
     // Handle keyboard input — clear selection on any input
     terminal.onData(async (data) => {
+      terminalsStore.noteUserInput(tabId);
       if (hasRustSelection) {
         clearSelection(ptyId).then(applyFrame).catch(() => {});
       }

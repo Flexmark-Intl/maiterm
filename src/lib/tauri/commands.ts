@@ -181,6 +181,8 @@ export interface OverlordTabFacts {
   last_turn_ts?: number;
   /** Unix-ms of the newest `git commit` Bash tool call (Claude-only today). */
   last_commit_ts?: number;
+  /** Unix-ms of the newest compaction boundary (isCompactSummary / compact_boundary). */
+  last_compact_ts?: number;
   /** Newest TodoWrite todos array — the TodoWrite mirror (Claude-only). */
   todos?: OverlordTodoItem[];
   todos_ts?: number;

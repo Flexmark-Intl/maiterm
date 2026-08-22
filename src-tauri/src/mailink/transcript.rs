@@ -113,6 +113,10 @@ struct TailFacts {
     /// The newest TodoWrite `input.todos` array (the TodoWrite mirror), + its timestamp.
     todos: Option<Value>,
     todos_ts: Option<u64>,
+    /// Unix-ms of the newest compaction boundary (`isCompactSummary` / `compact_boundary`).
+    /// Lets the checkpoint ritual's context_below gate resolve immediately — a fresh usage
+    /// line only appears on the NEXT assistant turn after a /compact.
+    last_compact_ts: Option<u64>,
 }
 
 static TAIL_FACTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, TailFacts)>>> =
@@ -487,42 +491,54 @@ fn session_meta(session_id: &str) -> Option<SessionMeta> {
 
 /// Parse both cached facts (last real turn ts + meta) from one Claude JSONL tail.
 fn claude_tail_facts(tail: &str) -> TailFacts {
-    let (last_commit_ts, todos, todos_ts) = claude_overlord_from_tail(tail);
+    let (last_commit_ts, todos, todos_ts, last_compact_ts) = claude_overlord_from_tail(tail);
     TailFacts {
         last_turn_ts: claude_last_turn_from_tail(tail),
         meta: claude_meta_from_tail(tail),
         last_commit_ts,
         todos,
         todos_ts,
+        last_compact_ts,
     }
 }
 
 /// One reversed pass for the Overlord signals: the newest `git commit` Bash tool_use ts and
 /// the newest TodoWrite todos array. Cheap string prefilters keep the JSON parse rare; both
 /// searches stop at their first (i.e. latest) hit.
-fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<u64>) {
+fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<u64>, Option<u64>) {
     let mut last_commit_ts: Option<u64> = None;
     let mut todos: Option<Value> = None;
     let mut todos_ts: Option<u64> = None;
+    let mut last_compact_ts: Option<u64> = None;
     for line in tail.lines().rev() {
-        if last_commit_ts.is_some() && todos.is_some() {
+        if last_commit_ts.is_some() && todos.is_some() && last_compact_ts.is_some() {
             break;
         }
         let want_todo = todos.is_none() && line.contains("\"TodoWrite\"");
         let want_commit = last_commit_ts.is_none() && line.contains("git commit");
-        if !want_todo && !want_commit {
+        let want_compact = last_compact_ts.is_none()
+            && (line.contains("\"isCompactSummary\":true") || line.contains("\"compact_boundary\""));
+        if !want_todo && !want_commit && !want_compact {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
         let ts = v
             .get("timestamp")
             .and_then(|t| t.as_str())
             .map(rfc3339_to_ms)
             .filter(|&t| t > 0)
             .map(|t| t as u64);
+        if want_compact {
+            let is_summary = v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true);
+            let is_boundary = v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary");
+            if is_summary || is_boundary {
+                last_compact_ts = ts;
+                continue;
+            }
+        }
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
         let Some(content) = v
             .get("message")
             .and_then(|m| m.get("content"))
@@ -555,7 +571,7 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
             }
         }
     }
-    (last_commit_ts, todos, todos_ts)
+    (last_commit_ts, todos, todos_ts, last_compact_ts)
 }
 
 /// Overlord signals from a session's transcript tail (docs/overlord.md §5): commit
@@ -565,6 +581,7 @@ pub struct OverlordTailFacts {
     pub last_commit_ts: Option<u64>,
     pub todos: Option<Value>,
     pub todos_ts: Option<u64>,
+    pub last_compact_ts: Option<u64>,
 }
 
 pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<OverlordTailFacts> {
@@ -582,6 +599,7 @@ pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<Overlord
         last_commit_ts: facts.last_commit_ts,
         todos: facts.todos,
         todos_ts: facts.todos_ts,
+        last_compact_ts: facts.last_compact_ts,
     })
 }
 
@@ -1604,14 +1622,16 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-06-27T21:22:00.000Z","message":{"content":"echo git commit in prose must not count"}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-06-27T21:23:00.000Z","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"second","status":"completed"}]}}]}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git add -A && git commit -m 'new'"}}]}}"#, "\n",
+            r#"{"type":"user","isCompactSummary":true,"timestamp":"2026-06-27T21:26:00.000Z","message":{"content":"summary"}}"#, "\n",
         );
-        let (commit_ts, todos, todos_ts) = claude_overlord_from_tail(tail);
+        let (commit_ts, todos, todos_ts, compact_ts) = claude_overlord_from_tail(tail);
+        assert_eq!(compact_ts, Some(1782595560000)); // 21:26 compaction boundary
         assert_eq!(commit_ts, Some(1782595500000)); // 21:25 — the NEWEST commit, not 21:20
         let todos = todos.expect("todos captured");
         assert_eq!(todos[0]["content"], "second"); // newest TodoWrite wins
         assert_eq!(todos_ts, Some(1782595380000)); // 21:23
         // No signals → all None.
-        let (c, t, _) = claude_overlord_from_tail(r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"text","text":"hi"}]}}"#);
+        let (c, t, _, _) = claude_overlord_from_tail(r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"text","text":"hi"}]}}"#);
         assert!(c.is_none() && t.is_none());
     }
 

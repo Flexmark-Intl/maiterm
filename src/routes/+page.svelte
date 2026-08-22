@@ -360,6 +360,8 @@
       agentBridgeStore.rehydrate();
       // Rebuild Mesh routers + topic registries from persisted state.
       import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.rehydrate()).catch(() => {});
+      // Start the Overlord engine for this window (no-ops each tick unless enabled).
+      import('$lib/stores/overlord.svelte').then(m => m.overlordStore.rehydrate()).catch(() => {});
     });
 
     // Listen for tab deactivation requests (e.g. "Suspend Other Tabs")
