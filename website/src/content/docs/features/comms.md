@@ -56,15 +56,22 @@ Get the permalink from Mattermost's **⋯ → Copy Link** on the message. From t
 
 Ambient discussion in the thread isn't pushed at the agent, but it can re-read the whole thread on demand at any point to catch up on messages that weren't addressed to it.
 
-## Screenshots, both directions
+## Attachments, both directions
 
-Bug reports come with pictures. Images attached to a thread message are **staged where the agent can actually open them**: maiTerm downloads the attachment and hands the agent a real file path, so a screenshot of the broken screen becomes something it can look at rather than something it's told about. This works for an agent running on a remote host over SSH too — the image is pushed to the remote machine over the same bridge tunnel the rest of the integration uses.
+Bug reports come with pictures — and with PDFs, spec documents and log files. Anything attached to a thread message is **staged where the agent can actually open it**: maiTerm downloads the file and hands the agent a real file path, so a screenshot of the broken screen becomes something it can look at rather than something it's told about, and a requirements document dropped on the thread becomes something it can read. Nothing is turned away for being the wrong kind of file. This works for an agent running on a remote host over SSH too — the file is pushed to the remote machine over the same bridge tunnel the rest of the integration uses.
 
-A reply that is *nothing but* an image counts as a message. Mattermost splits a drag-and-drop upload from the text that introduced it, so the screenshot arrives as a post with an empty body; it's still delivered, and on a mention-gated thread it rides in on the `@mention` its author posted alongside it moments earlier.
+Each staged file carries a note telling the agent how to open that particular kind:
 
-The agent can attach images to its own replies as well — a before/after, an annotated screenshot, visual proof that a fix landed — and they're uploaded to Mattermost and posted with the reply like any other attachment. Remote agents can send images back the same way; maiTerm fetches the file from the remote host before uploading it.
+- **Images and PDFs** — opened directly, page by page for a long PDF.
+- **Text of any flavour** — markdown, plain text, logs, CSV, JSON, YAML, source files — opened directly too.
+- **Office documents** — Word, Excel, PowerPoint — staged as they arrived; the agent extracts the text itself rather than asking a human to paste it in.
+- **Anything else** — staged as bytes, for the agent to inspect with shell tools.
 
-Both directions cover the usual formats (PNG, JPEG, GIF, WebP), with sensible per-message size and count limits so a thread can't be used to shovel arbitrary files around.
+A reply that is *nothing but* an attachment counts as a message. Mattermost splits a drag-and-drop upload from the text that introduced it, so the file arrives as a post with an empty body; it's still delivered, and on a mention-gated thread it rides in on the `@mention` its author posted alongside it moments earlier.
+
+The agent can attach files to its own replies as well — a before/after screenshot, an annotated image, a log excerpt, a document it was asked to produce — and they're uploaded to Mattermost and posted with the reply like any other attachment. Remote agents can send files back the same way; maiTerm fetches the file from the remote host before uploading it.
+
+Limits are the same both ways: **20 MB per file**, with up to eight files staged from a single delivery and five attached to a reply. An incoming file past those limits is named in the transcript rather than fetched, so the agent knows it exists and can ask for what it needs.
 
 ## Watching channels and getting summoned
 
