@@ -519,6 +519,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
         bridge_all: ws.bridge_all,
         mailink_native: ws.mailink_native,
         mesh_topics: Vec::new(),
+        // Never duplicate an Overlord workspace — at most one per window.
+        overlord: false,
         archived_tabs: Vec::new(),
         import_highlight: false,
         suspended: false,

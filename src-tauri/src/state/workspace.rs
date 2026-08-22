@@ -459,6 +459,11 @@ pub struct Workspace {
     /// workspace_notes (a persisted Vec).
     #[serde(default)]
     pub mesh_topics: Vec<MeshTopic>,
+    /// Overlord workspace flag (docs/overlord.md §11): this workspace hosts the Overlord
+    /// board + agent tab. At most one per window; excluded from the ordinary workspace
+    /// list and reordering. Suspending it stops the agent, never the engine.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overlord: bool,
     #[serde(default)]
     pub archived_tabs: Vec<Tab>,
     /// Transient flag set after merge import — cleared on workspace activation.
@@ -496,6 +501,14 @@ pub struct WindowData {
     /// When monitors change, the window repositions to the saved geometry for that count.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub window_geometry: std::collections::HashMap<String, WindowGeometry>,
+    /// Overlord injection ledger (docs/overlord.md §3): verbatim record of everything the
+    /// engine/agent typed into supervised tabs. Frontend-owned format (Rust never
+    /// interprets entries); ring-buffered at append time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlord_ledger: Vec<serde_json::Value>,
+    /// Overlord board rows (docs/overlord.md §11), grouped by workspace in the UI.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlord_tasks: Vec<OverlordTask>,
     // Legacy flat fields — migrated to window_geometry on first save
     #[serde(default, skip_serializing)]
     window_x: Option<f64>,
@@ -517,6 +530,8 @@ impl WindowData {
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
             window_geometry: std::collections::HashMap::new(),
+            overlord_ledger: Vec::new(),
+            overlord_tasks: Vec::new(),
             window_x: None,
             window_y: None,
             window_width: None,
@@ -843,6 +858,125 @@ pub struct Trigger {
     pub user_modified: bool,
 }
 
+// ─── Overlord (docs/overlord.md) ────────────────────────────────────────────────────────
+//
+// Rule schema for the per-window supervisor. Mirrors Trigger's lifecycle contract
+// (default_id / user_modified / seeded defaults / hidden ids) but fires on semantic
+// state (`when`) instead of output text, and the payload is a directive sequence
+// instead of an action enum. TS mirror in src/lib/overlord/types.ts.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum OverlordCondition {
+    ContextPct { at_or_above: u64 },
+    TurnEnd,
+    Commit,
+    TabIdle { minutes: u64 },
+    TaskStale { days: u64 },
+    AgentUnready,
+    NoTodoList,
+    PermissionPending { minutes: u64 },
+    DirectiveUnacked { minutes: u64 },
+}
+
+/// The mechanical floor that makes envelope-free injection safe. These fields are
+/// deliberately NOT editable via Overlord's proposeRuleChanges MCP surface — only the
+/// preferences UI writes them (docs/overlord.md §10 field tiers).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlordGuards {
+    /// Agent states the target tab may be in ("idle" | "active" | "permission"); default idle-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_quiet_ms: Option<u64>,
+    /// Hard precondition: a live agent REPL in the tab — an absent agent means the
+    /// directive lands in a bash shell.
+    pub require_live_repl: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_hour: Option<u32>,
+    /// Serialize directives per tab (also what keeps ack matching unambiguous).
+    pub only_if_no_outstanding: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "until", rename_all = "snake_case")]
+pub enum OverlordGate {
+    TurnEnd,
+    Ack,
+    ContextBelow { pct: u64 },
+    IdleMs { ms: u64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlordStep {
+    /// "process" (free-text directive) | "slash" (slash command).
+    pub kind: String,
+    pub text: String,
+    /// Slash steps only: runtimes this step is valid for ("claude" | "codex" | "gemini");
+    /// omitted = all. The engine skips + ledgers `skipped_runtime` on mismatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtimes: Option<Vec<String>>,
+    /// Gate to await after injection; None = fire-and-forget.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "await")]
+    pub await_gate: Option<OverlordGate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    /// "abort" | "continue" | "notify_human" | "escalate_to_overlord".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_timeout: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlordRule {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub enabled: bool,
+    /// Workspace ids this rule is scoped to; empty = global (v1 scope: global + workspace).
+    #[serde(default)]
+    pub workspaces: Vec<String>,
+    /// Seconds, per tab.
+    #[serde(default)]
+    pub cooldown: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub user_modified: bool,
+    /// "default" | "user" | "proposed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub when: OverlordCondition,
+    pub guards: OverlordGuards,
+    #[serde(default)]
+    pub sequence: Vec<OverlordStep>,
+    /// Rule ids / default_ids this rule replaces where both are in scope. A scoped
+    /// override can't share the parent's default_id (seeding assumes one rule per id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<Vec<String>>,
+}
+
+/// A row on the Overlord board (docs/overlord.md §11). Per-window (lives on WindowData),
+/// grouped by workspace in the UI. Fed by the human, the TodoWrite mirror, and Overlord.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlordTask {
+    pub id: String,
+    pub title: String,
+    pub workspace_id: String,
+    /// Assignee tab; None = backlog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    /// "backlog" | "active" | "blocked" | "review" | "done".
+    pub state: String,
+    /// "human" | "overlord" | "agent".
+    pub origin: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Mesh topic that is this task's conversation vehicle, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CursorStyle {
@@ -963,6 +1097,20 @@ pub struct Preferences {
     /// Whether the user has been prompted to enable Claude Code integrations.
     #[serde(default)]
     pub claude_triggers_prompted: bool,
+    /// Overlord master switch (docs/overlord.md). Off by default — the per-window engine
+    /// only ticks when enabled.
+    #[serde(default)]
+    pub overlord_enabled: bool,
+    /// Propose-mode (docs/overlord.md §3): rules land on the board as proposed directives
+    /// the human clicks to send, instead of firing autonomously. Default on for trust-building.
+    #[serde(default = "default_true")]
+    pub overlord_propose_mode: bool,
+    /// Overlord ruleset. Global across windows; workspace-scoped rules bind via rule.workspaces.
+    #[serde(default)]
+    pub overlord_rules: Vec<OverlordRule>,
+    /// Default Overlord rule IDs the user has intentionally deleted (prevents re-seeding).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_default_overlord_rules: Vec<String>,
     /// Enable the Claude Code IDE/MCP integration server.
     /// `claude_code_ide` alias migrates state from before the per-runtime key rename.
     #[serde(default = "default_true", alias = "claude_code_ide")]
@@ -1228,6 +1376,10 @@ impl Default for Preferences {
             triggers: Vec::new(),
             hidden_default_triggers: Vec::new(),
             claude_triggers_prompted: false,
+            overlord_enabled: false,
+            overlord_propose_mode: true,
+            overlord_rules: Vec::new(),
+            hidden_default_overlord_rules: Vec::new(),
             claude_ide: true,
             claude_ide_ssh: true,
             claude_hooks: true,
@@ -1429,6 +1581,7 @@ impl Workspace {
             bridge_all: false,
             mailink_native: false,
             mesh_topics: Vec::new(),
+            overlord: false,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,

@@ -4,11 +4,15 @@
 //! already caches. `get_overlord_tab_facts` is the engine's polling surface: per-tab context
 //! gauge + last-real-turn ts from the transcript tail-facts cache (mailink/transcript.rs).
 
-use crate::state::AppState;
+use crate::state::persistence::save_state;
+use crate::state::{AppState, OverlordTask};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
+
+/// Ring cap for the per-window Overlord ledger. Old entries fall off at append time.
+const LEDGER_MAX: usize = 500;
 
 /// Batched per-tab agent facts for the Overlord engine ticker. Tabs with no resolvable
 /// agent session are simply absent from the result map. File I/O (tail stats + occasional
@@ -32,4 +36,85 @@ pub async fn get_overlord_tab_facts(
     })
     .await
     .map_err(|e| format!("overlord facts probe failed to run: {}", e))
+}
+
+/// Append entries to this window's Overlord ledger (verbatim injection record —
+/// docs/overlord.md §3). Frontend-owned entry format; ring-buffered at LEDGER_MAX.
+#[tauri::command]
+pub fn append_overlord_ledger(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    entries: Vec<Value>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        win.overlord_ledger.extend(entries);
+        let len = win.overlord_ledger.len();
+        if len > LEDGER_MAX {
+            win.overlord_ledger.drain(0..len - LEDGER_MAX);
+        }
+        app_data.clone()
+    };
+    save_state(&data_clone)
+}
+
+/// This window's Overlord ledger, oldest first.
+#[tauri::command]
+pub fn get_overlord_ledger(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<Value>, String> {
+    let label = window.label().to_string();
+    let app_data = state.app_data.read();
+    let win = app_data.window(&label).ok_or("Window not found")?;
+    Ok(win.overlord_ledger.clone())
+}
+
+/// Replace this window's Overlord board rows (frontend owns its copy — same
+/// whole-list persistence shape as setWorkspaceMeshTopics).
+#[tauri::command]
+pub fn set_overlord_tasks(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    tasks: Vec<OverlordTask>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        win.overlord_tasks = tasks;
+        app_data.clone()
+    };
+    save_state(&data_clone)
+}
+
+/// Flag/unflag a workspace as this window's Overlord workspace (docs/overlord.md §11).
+#[tauri::command]
+pub fn set_workspace_overlord(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        // At most one Overlord workspace per window: flagging one clears any other.
+        if enabled {
+            for ws in win.workspaces.iter_mut() {
+                ws.overlord = false;
+            }
+        }
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        workspace.overlord = enabled;
+        app_data.clone()
+    };
+    save_state(&data_clone)
 }

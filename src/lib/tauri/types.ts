@@ -179,6 +179,8 @@ export interface Workspace {
   mailink_native?: boolean;
   /** Topic threads (empty for normal workspaces). */
   mesh_topics?: MeshTopic[];
+  /** Overlord workspace flag — hosts the board + agent tab; at most one per window. */
+  overlord?: boolean;
   archived_tabs: Tab[];
   import_highlight?: boolean;
   suspended?: boolean;
@@ -221,6 +223,111 @@ export interface Trigger {
   match_mode?: MatchMode | null;
   default_id?: string | null;
   user_modified?: boolean;
+}
+
+// ─── Overlord (docs/overlord.md) — Rust mirror in state/workspace.rs ─────────────────
+
+export type OverlordCondition =
+  | { event: 'context_pct'; at_or_above: number }
+  | { event: 'turn_end' }
+  | { event: 'commit' }
+  | { event: 'tab_idle'; minutes: number }
+  | { event: 'task_stale'; days: number }
+  | { event: 'agent_unready' }
+  | { event: 'no_todo_list' }
+  | { event: 'permission_pending'; minutes: number }
+  | { event: 'directive_unacked'; minutes: number };
+
+export type OverlordAgentStateName = 'idle' | 'active' | 'permission';
+
+/** The mechanical floor that makes envelope-free injection safe (docs/overlord.md §3).
+ *  NOT proposable via Overlord's MCP surface — only the preferences UI writes these. */
+export interface OverlordGuards {
+  /** Agent states the target tab may be in; default ['idle']. */
+  agent_state?: OverlordAgentStateName[];
+  /** PTY output quiet for this long before injecting; default 3000. */
+  min_quiet_ms?: number;
+  /** Hard precondition: live agent REPL, else the directive lands in a bash shell. */
+  require_live_repl: boolean;
+  max_per_hour?: number;
+  /** Serialize directives per tab (also keeps ack matching unambiguous). */
+  only_if_no_outstanding: boolean;
+}
+
+export type OverlordGate =
+  | { until: 'turn_end' }
+  | { until: 'ack' }
+  | { until: 'context_below'; pct: number }
+  | { until: 'idle_ms'; ms: number };
+
+export type OverlordStepTimeout = 'abort' | 'continue' | 'notify_human' | 'escalate_to_overlord';
+
+export interface OverlordStep {
+  kind: 'process' | 'slash';
+  /** THE tunable field — the directive text. */
+  text: string;
+  /** Slash steps only: runtimes this step is valid for; omit = all. Engine skips + ledgers on mismatch. */
+  runtimes?: ('claude' | 'codex' | 'gemini')[];
+  /** Gate to await after injection; null/omitted = fire-and-forget. */
+  await?: OverlordGate | null;
+  timeout_seconds?: number;
+  on_timeout?: OverlordStepTimeout;
+}
+
+export interface OverlordRule {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  /** Workspace ids; [] = global. v1 scope is global + workspace only. */
+  workspaces: string[];
+  /** Seconds, per tab. */
+  cooldown: number;
+  default_id?: string | null;
+  user_modified?: boolean;
+  origin?: 'default' | 'user' | 'proposed';
+  when: OverlordCondition;
+  guards: OverlordGuards;
+  /** 1+ steps; multi-step = ritual (gated sequence state machine). */
+  sequence: OverlordStep[];
+  /** Rule ids / default_ids this rule replaces in-scope (can't reuse the parent's default_id). */
+  supersedes?: string[];
+}
+
+export type OverlordTaskState = 'backlog' | 'active' | 'blocked' | 'review' | 'done';
+
+/** A row on the per-window Overlord board (docs/overlord.md §11). */
+export interface OverlordTask {
+  id: string;
+  title: string;
+  workspace_id: string;
+  /** Assignee tab; null = backlog. */
+  tab_id?: string | null;
+  state: OverlordTaskState;
+  origin: 'human' | 'overlord' | 'agent';
+  created_at: string;
+  updated_at: string;
+  topic_id?: string | null;
+}
+
+export type OverlordLedgerOutcome =
+  | 'sent' | 'blocked_no_repl' | 'blocked_guard' | 'acked' | 'timed_out'
+  | 'aborted' | 'skipped_runtime' | 'proposed';
+
+/** Verbatim injection record (docs/overlord.md §3) — the only way to reconstruct
+ *  "who told that tab to do what", since injections are indistinguishable from typing. */
+export interface OverlordLedgerEntry {
+  id: string;
+  ts: string;
+  tab_id: string;
+  workspace_id: string;
+  rule_id: string | null;
+  origin: 'rule' | 'human' | 'overlord_judgment';
+  step_index: number;
+  /** VERBATIM injected bytes. */
+  text: string;
+  kind: 'process' | 'slash';
+  outcome: OverlordLedgerOutcome;
 }
 
 export interface Preferences {
@@ -268,6 +375,12 @@ export interface Preferences {
   triggers: Trigger[];
   hidden_default_triggers: string[];
   claude_triggers_prompted: boolean;
+  /** Overlord master switch (per-window engine only ticks when enabled). */
+  overlord_enabled: boolean;
+  /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */
+  overlord_propose_mode: boolean;
+  overlord_rules: OverlordRule[];
+  hidden_default_overlord_rules: string[];
   claude_ide: boolean;
   claude_ide_ssh: boolean;
   claude_hooks: boolean;
@@ -349,6 +462,8 @@ export interface WindowData {
   active_workspace_id: string | null;
   sidebar_width: number;
   sidebar_collapsed: boolean;
+  /** Overlord board rows for this window (absent when empty — serde skip). */
+  overlord_tasks?: OverlordTask[];
 }
 
 export interface DuplicateWorkspaceResult {

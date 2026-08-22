@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, OverlordTask, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -183,6 +183,26 @@ export interface OverlordTabFacts {
 /** Batched facts poll; tabs with no resolvable agent session are absent from the map. */
 export async function getOverlordTabFacts(tabIds: string[]): Promise<Record<string, OverlordTabFacts>> {
   return invoke('get_overlord_tab_facts', { tabIds });
+}
+
+/** Append entries to this window's Overlord ledger (ring-buffered backend-side). */
+export async function appendOverlordLedger(entries: OverlordLedgerEntry[]): Promise<void> {
+  return invoke('append_overlord_ledger', { entries });
+}
+
+/** This window's Overlord ledger, oldest first. */
+export async function getOverlordLedger(): Promise<OverlordLedgerEntry[]> {
+  return invoke('get_overlord_ledger');
+}
+
+/** Replace this window's Overlord board rows. */
+export async function setOverlordTasks(tasks: OverlordTask[]): Promise<void> {
+  return invoke('set_overlord_tasks', { tasks });
+}
+
+/** Flag/unflag a workspace as this window's Overlord workspace (at most one per window). */
+export async function setWorkspaceOverlord(workspaceId: string, enabled: boolean): Promise<void> {
+  return invoke('set_workspace_overlord', { workspaceId, enabled });
 }
 
 export async function serializeTerminal(ptyId: string): Promise<number[]> {

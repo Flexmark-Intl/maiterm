@@ -1,4 +1,4 @@
-import type { CursorStyle, Preferences, Trigger } from '$lib/tauri/types';
+import type { CursorStyle, OverlordRule, Preferences, Trigger } from '$lib/tauri/types';
 import type { Theme } from '$lib/themes';
 import { builtinThemes } from '$lib/themes';
 import * as commands from '$lib/tauri/commands';
@@ -50,6 +50,10 @@ function createPreferencesStore() {
   let triggers = $state<Trigger[]>([]);
   let hiddenDefaultTriggers = $state<string[]>([]);
   let claudeTriggersPrompted = $state(false);
+  let overlordEnabled = $state(false);
+  let overlordProposeMode = $state(true);
+  let overlordRules = $state<OverlordRule[]>([]);
+  let hiddenDefaultOverlordRules = $state<string[]>([]);
   let claudeCodeIde = $state(false);
   let claudeCodeIdeSsh = $state(true);
   let claudeCodeHooks = $state(true);
@@ -131,6 +135,10 @@ function createPreferencesStore() {
     get triggers() { return triggers; },
     get hiddenDefaultTriggers() { return hiddenDefaultTriggers; },
     get claudeTriggersPrompted() { return claudeTriggersPrompted; },
+    get overlordEnabled() { return overlordEnabled; },
+    get overlordProposeMode() { return overlordProposeMode; },
+    get overlordRules() { return overlordRules; },
+    get hiddenDefaultOverlordRules() { return hiddenDefaultOverlordRules; },
     get claudeCodeIde() { return claudeCodeIde; },
     get claudeCodeIdeSsh() { return claudeCodeIdeSsh; },
     get claudeCodeHooks() { return claudeCodeHooks; },
@@ -222,6 +230,10 @@ function createPreferencesStore() {
       triggers = prefs.triggers ?? [];
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
+      overlordEnabled = prefs.overlord_enabled ?? false;
+      overlordProposeMode = prefs.overlord_propose_mode ?? true;
+      overlordRules = prefs.overlord_rules ?? [];
+      hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
       claudeCodeIdeSsh = prefs.claude_ide_ssh ?? true;
       claudeCodeHooks = prefs.claude_hooks ?? true;
@@ -461,6 +473,26 @@ function createPreferencesStore() {
 
     async setHiddenDefaultTriggers(value: string[]) {
       hiddenDefaultTriggers = value;
+      await this.save();
+    },
+
+    async setOverlordEnabled(value: boolean) {
+      overlordEnabled = value;
+      await this.save();
+    },
+
+    async setOverlordProposeMode(value: boolean) {
+      overlordProposeMode = value;
+      await this.save();
+    },
+
+    async setOverlordRules(value: OverlordRule[]) {
+      overlordRules = value;
+      await this.save();
+    },
+
+    async setHiddenDefaultOverlordRules(value: string[]) {
+      hiddenDefaultOverlordRules = value;
       await this.save();
     },
 
@@ -711,6 +743,10 @@ function createPreferencesStore() {
       triggers = prefs.triggers ?? [];
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
+      overlordEnabled = prefs.overlord_enabled ?? false;
+      overlordProposeMode = prefs.overlord_propose_mode ?? true;
+      overlordRules = prefs.overlord_rules ?? [];
+      hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
       claudeCodeIdeSsh = prefs.claude_ide_ssh ?? true;
       claudeCodeHooks = prefs.claude_hooks ?? true;
@@ -793,6 +829,10 @@ function createPreferencesStore() {
         triggers,
         hidden_default_triggers: hiddenDefaultTriggers,
         claude_triggers_prompted: claudeTriggersPrompted,
+        overlord_enabled: overlordEnabled,
+        overlord_propose_mode: overlordProposeMode,
+        overlord_rules: overlordRules,
+        hidden_default_overlord_rules: hiddenDefaultOverlordRules,
         claude_ide: claudeCodeIde,
         claude_ide_ssh: claudeCodeIdeSsh,
         claude_hooks: claudeCodeHooks,
