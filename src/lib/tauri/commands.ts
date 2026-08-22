@@ -167,6 +167,24 @@ export async function getAgentLiveness(ptyId: string): Promise<AgentLiveness> {
   return invoke('get_agent_liveness', { ptyId });
 }
 
+/** Per-tab agent facts for the Overlord engine (docs/overlord.md §5) — cheap cached signals
+ *  from the transcript tail-facts cache. All fields optional: a tab may resolve a session
+ *  before its first assistant turn (no meta yet), and Gemini has no transcript source. */
+export interface OverlordTabFacts {
+  runtime: 'claude' | 'codex' | 'gemini';
+  session_id: string;
+  context_used?: number;
+  context_limit?: number;
+  context_pct?: number;
+  model?: string;
+  /** Unix-ms timestamp of the session's last REAL turn. */
+  last_turn_ts?: number;
+}
+/** Batched facts poll; tabs with no resolvable agent session are absent from the map. */
+export async function getOverlordTabFacts(tabIds: string[]): Promise<Record<string, OverlordTabFacts>> {
+  return invoke('get_overlord_tab_facts', { tabIds });
+}
+
 export async function serializeTerminal(ptyId: string): Promise<number[]> {
   return invoke('serialize_terminal', { ptyId });
 }

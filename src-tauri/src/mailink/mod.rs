@@ -3256,6 +3256,38 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     Some(m)
 }
 
+/// Per-tab agent facts for the Overlord engine (docs/overlord.md §5 detection table) — the
+/// cheap, cached signals the frontend rules engine polls: context gauge, last-real-turn
+/// timestamp, runtime, session id. Everything comes from the (mtime,len)-gated tail-facts
+/// cache in `transcript.rs`, so steady-state cost per tab is one stat. snake_case keys —
+/// this is a maiTerm frontend surface, not the mailink phone protocol.
+pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> {
+    let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
+    let mut v = json!({
+        "runtime": rt.as_key(),
+        "session_id": sid,
+    });
+    if let Some(meta) = transcript::meta_for(rt, &sid) {
+        let model_id = meta.model_id.as_deref().unwrap_or("");
+        let limit = meta
+            .context_window
+            .unwrap_or_else(|| context_limit_for(model_id, meta.context_tokens));
+        let pct = ((meta.context_tokens as f64 / limit as f64) * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u64;
+        v["context_used"] = json!(meta.context_tokens);
+        v["context_limit"] = json!(limit);
+        v["context_pct"] = json!(pct);
+        if !model_id.is_empty() {
+            v["model"] = json!(display_model_for(rt, model_id));
+        }
+    }
+    if let Some(ts) = transcript::last_turn_ts_for(rt, &sid) {
+        v["last_turn_ts"] = json!(ts);
+    }
+    Some(v)
+}
+
 /// tab_id → scrollback `updated_at` in unix ms (one DB read). SQLite stores `datetime('now')` as
 /// `YYYY-MM-DD HH:MM:SS` UTC; normalize to RFC3339 (`T` + `Z`) for the shared transcript parser.
 /// Used as the last-activity fallback for tabs without a Claude transcript (Codex/Gemini, or a

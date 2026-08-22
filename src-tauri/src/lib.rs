@@ -569,6 +569,7 @@ pub fn run() {
             commands::mailink::mailink_set_enabled,
             commands::mailink::mailink_list_devices,
             commands::mailink::mailink_remove_device,
+            commands::overlord::get_overlord_tab_facts,
             commands::comms::comms_test_connection,
             commands::comms::comms_list_bot_channels,
             commands::workspace::set_tab_comms_monitor,

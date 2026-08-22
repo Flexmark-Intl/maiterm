@@ -2,6 +2,7 @@ pub mod claude_code;
 pub mod comms;
 pub mod editor;
 pub mod mailink;
+pub mod overlord;
 pub mod scheduler;
 pub mod ssh_tunnel;
 pub mod system;
