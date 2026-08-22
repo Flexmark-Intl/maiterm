@@ -826,6 +826,15 @@ async fn post_respond(
                     break;
                 }
             }
+            // Log the SUCCESS too, not just the failures. Until now a landed injection was
+            // silent, which made it indistinguishable from the operator having answered on the
+            // desktop — so a live test of this path could never be more than probably-conclusive.
+            // `other` is called out because the free-text row is the fragile case.
+            if submitted {
+                let used_other = answers.iter().any(|a| a.other.as_deref().is_some_and(|t| !t.trim().is_empty()));
+                log::info!("[maiLink] AskUserQuestion answered from a device (tab {tab_id}, {} question(s){})",
+                    answers.len(), if used_other { ", via the Other free-text row" } else { "" });
+            }
             if !submitted {
                 log::warn!("[maiLink] AskUserQuestion still open ~2s after inject — reporting inject_failed (tab {tab_id})");
                 return Ok(Json(json!({ "ok": false, "reason": "inject_failed",
@@ -2307,11 +2316,27 @@ fn claim_question_inject(tab_id: &str, prompt_id: &str) -> bool {
 ///   * `select:next`/`select:previous` are unbound while an input row holds focus, so once the
 ///     highlight reaches Other it CANNOT be moved by arrows. A wrong position is therefore not
 ///     recoverable by navigating — see `claim_question_inject` for the consequence.
-/// BEST-GUESS (pending device validation): a multiSelect question with BOTH checkbox picks and
-/// Other free-text — typing checks the Other row, then Enter commits/releases the input before →
-/// advances. In probes the raw → was swallowed by the active input; the commit-Enter is the fix,
-/// unverified on a real device. All other shapes are verified e2e. All mapping is resolved BEFORE
-/// any keystroke is sent, so a bad answer rejects the whole batch rather than half-answering.
+///   (g) multiSelect + Other free-text leaves via the form's OWN Submit/Next button: Down from
+///       the last row focuses it, Enter activates it. NOT Enter-then-→.        [UNVERIFIED — see below]
+///
+/// (g) was carried for months as a best guess (Enter to "commit", then → to advance) and never
+/// worked. What a device actually shows: both answers land — the box ticked, the Other row CHECKED
+/// with the typed text — and the form just never submits, the highlight still on the Other row.
+/// Typing already selects that row, so there was nothing for the Enter to commit; and both the
+/// Enter and the → were swallowed by the active text input, so the injector never left it. Nothing
+/// was corrupted; the answer was simply complete and unsubmitted, reported as `inject_failed`.
+///
+/// The exit is the form's own button. Down over Tab: both survive the input-focus filter, but Tab
+/// is ALSO the form-level question switcher and the selector does not stop its propagation.
+///
+/// (g) IS ITSELF STILL UNVERIFIED ON A DEVICE — source-derived from 2.1.240, not guessed, but the
+/// swallowed Enter proves the text input can eat a whitelisted key before the select sees it. The
+/// [VERIFIED e2e] tag above is aspirational until a real multiSelect+Other answer arrives from a
+/// phone. Marking a keystroke verified on reasoning alone is exactly how (g) went wrong the first
+/// time.
+///
+/// All mapping is resolved BEFORE any keystroke is sent, so a bad answer rejects the whole batch
+/// rather than half-answering.
 async fn drive_question_answers(
     app: &Arc<AppState>,
     pty_id: &str,
@@ -2374,7 +2399,12 @@ async fn drive_question_answers(
     // Inject, question by question. The form is a row of tabs [Q1..Qn][Submit]; ↑/↓ moves within
     // a question, and the single-select Enter / a multiSelect → moves to the next tab.
     let single_q_single_select = plans.len() == 1 && !plans[0].multi;
-    for plan in &plans {
+    // Set when the FINAL question was committed by pressing the form's own Submit/Next button
+    // (the multiSelect+Other exit), which already submits — so the trailing Enter below must not
+    // fire a second time into whatever the form became.
+    let mut submitted_by_button = false;
+    let last_qi = plans.len() - 1;
+    for (qi, plan) in plans.iter().enumerate() {
         let mut cur = 0usize; // highlight starts at row 0 (a)
         if plan.multi {
             for &idx in &plan.indices {
@@ -2383,17 +2413,45 @@ async fn drive_question_answers(
             }
             if let Some(text) = &plan.other {
                 // The "Type something" row (at option_count) is a live inline input — typing into
-                // it fills and checks it.
+                // it fills it AND selects it (updateInputValue adds `__other__` to the selected
+                // set on any non-empty value). So there is nothing to "commit".
                 cur = nav_to(app, pty_id, cur, plan.option_count).await?;
                 send_text(app, pty_id, text).await?;
-                // BEST-GUESS (multiSelect+Other, pending device validation): commit the typed text
-                // with Enter so the input releases; otherwise the active field swallows the → below.
-                // In probes the raw → was captured by the input mid-edit and the form never
-                // advanced — see docs §12.3.
-                send_key(app, pty_id, b"\r", NAV_SETTLE_MS).await?;
+                // Leave via the form's own Submit/Next button rather than the tab arrow.
+                //
+                // OBSERVED on a device (2.1.240), from a screenshot of the stuck form: both
+                // answers land correctly — the ticked box is ticked and the Other row is CHECKED
+                // and holds the typed text — and the form simply never submits, with the
+                // highlight still on the Other row. So the old trailing `Enter, →` corrupted
+                // nothing; both keys were swallowed by the active text input and we never left
+                // it. The answer was complete, and unsubmitted.
+                //
+                // The select whitelists exactly up/down/escape/tab/return while an input row has
+                // focus, and Down from the LAST row focuses Submit/Next, after which Enter calls
+                // onSubmit. `__other__` IS last: the row array is [...options, otherInput], and
+                // the "Chat about this" line below it is a numeric-shortcut hint (options+2), not
+                // a focusable row — so Down cannot land on the dismiss-the-ask affordance. Down
+                // over Tab because Tab is also the form-level question switcher and the selector
+                // does not stop its propagation.
+                //
+                // UNVERIFIED ON A DEVICE. The whitelist says these keys reach the select, but the
+                // swallowed Enter above is evidence that the text input can consume a whitelisted
+                // key first — so this may still fail to release. It is source-derived rather than
+                // guessed, and a failure is now non-destructive (one attempt per ask, and the
+                // phone keeps the text). Do NOT mark it verified without a real multiSelect+Other
+                // answer sent from a phone.
+                send_key(app, pty_id, b"\x1b[B", NAV_SETTLE_MS).await?; // Down → focus Submit/Next
+                send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?; // activate it
+                // That button IS this question's advance ("Next") or the form's submit ("Submit"
+                // on the last one), so the tab arrow below must not also fire.
+                if qi == last_qi {
+                    submitted_by_button = true;
+                }
+                continue;
             }
             // multiSelect toggles are live and are NOT confirmed with Enter; → advances to the
-            // next tab (the next question, or Submit after the last one).
+            // next tab (the next question, or Submit after the last one). Only reachable when the
+            // highlight is on a listed row — an input row would swallow it.
             send_key(app, pty_id, b"\x1b[C", ADVANCE_SETTLE_MS).await?;
         } else if let Some(text) = &plan.other {
             // single-select via the Other row: navigate to it, type the text, then Enter — which
@@ -2411,7 +2469,7 @@ async fn drive_question_answers(
     // Submit. A lone single-select question submits on its own Enter above (there is no Submit
     // tab). Every other form — multi-question, or any multiSelect — lands on the "Submit" tab,
     // which takes one Enter. (Pinned live — docs §12.3.)
-    if !single_q_single_select {
+    if !single_q_single_select && !submitted_by_button {
         send_key(app, pty_id, b"\r", ADVANCE_SETTLE_MS).await?;
     }
     Ok(())
