@@ -392,6 +392,12 @@ function createOverlordStore() {
           // ritual (it resumes when the gate clears) — deliberately not a failure.
           if (st === 'active') sawActive = true;
           if (sawActive && st === 'idle') return 'ok';
+          // A turn faster than the poll interval never shows 'active' — the transcript's
+          // last-real-turn ts (refreshed by the tick) is the fallback proof it ran.
+          if (!sawActive && st === 'idle') {
+            const f = facts.get(run.tabId);
+            if (f?.last_turn_ts !== undefined && f.last_turn_ts > directive.sentAt) return 'ok';
+          }
           break;
         }
         case 'ack': {
