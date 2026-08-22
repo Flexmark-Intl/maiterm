@@ -13,12 +13,15 @@
  */
 
 :root {
-  /* Faceplate type: condensed grotesque, uppercase, wide-tracked — instrument labelling.
-     Avenir Next Condensed ships on macOS; the fallbacks keep the condensed feel elsewhere. */
-  --ov-face: 'Avenir Next Condensed', 'Avenir Next', 'Helvetica Neue Condensed',
-             'Roboto Condensed', 'Oswald', ui-sans-serif, system-ui, sans-serif;
-  /* Telemetry + verbatim payload. Tabular figures so columns of numbers don't wobble. */
-  --ov-mono: Menlo, 'SF Mono', 'JetBrains Mono', ui-monospace, monospace;
+  /* Faceplate labelling inherits the app's UI font — deliberately NOT a display face.
+     maiTerm has exactly two typefaces (the UI stack and Menlo) and Overlord is a room
+     inside it, not a separate product; a third font read as foreign the moment it
+     appeared next to the rest of Preferences. The instrument feel comes from case,
+     tracking and weight instead. */
+  --ov-face: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Telemetry + verbatim payload — the same Menlo already used across the app.
+     Tabular figures so columns of numbers don't wobble as values change. */
+  --ov-mono: Menlo, 'SF Mono', ui-monospace, monospace;
 
   /* Surfaces — lifted off the app chrome so the deck reads as its own instrument. */
   --ov-deck: color-mix(in srgb, var(--bg-dark) 92%, var(--fg) 8%);
@@ -50,7 +53,7 @@
   font-family: var(--ov-face);
   font-size: 0.72rem;
   font-weight: 600;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
   color: var(--ov-ink-dim);
   line-height: 1;
@@ -58,11 +61,11 @@
 
 .ov-label-lead {
   font-family: var(--ov-face);
-  font-size: 1.35rem;
+  font-size: 1.1rem;
   font-weight: 600;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
-  line-height: 1;
+  line-height: 1.15;
   color: var(--ov-ink);
 }
 
@@ -131,9 +134,9 @@
   border: 1px solid var(--ov-hair);
   background: color-mix(in srgb, var(--bg-dark) 55%, transparent);
   font-family: var(--ov-face);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 600;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--ov-ink-mid);
   white-space: nowrap;
@@ -182,7 +185,7 @@
   font-family: var(--ov-face);
   font-size: 0.78rem;
   font-weight: 600;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 4px 12px;
   border-radius: 2px;
@@ -252,9 +255,8 @@
 .ov-select {
   font-family: var(--ov-face);
   font-size: 0.83rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  font-weight: 600;
+  letter-spacing: 0.01em;
+  font-weight: 500;
   cursor: pointer;
 }
 .ov-textarea { resize: vertical; line-height: 1.5; width: 100%; }
@@ -274,7 +276,6 @@
   gap: 7px;
   font-family: var(--ov-face);
   font-size: 0.83rem;
-  letter-spacing: 0.05em;
   color: var(--ov-ink-mid);
   cursor: pointer;
   user-select: none;

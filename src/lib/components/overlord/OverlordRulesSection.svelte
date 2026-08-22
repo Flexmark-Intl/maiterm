@@ -235,30 +235,58 @@
     </div>
   </div>
 
-  <div class="switches">
-    <button class="switch" class:on={preferencesStore.overlordEnabled}
-            onclick={() => preferencesStore.setOverlordEnabled(!preferencesStore.overlordEnabled)}>
-      <span class="switch-led"></span>
-      <span class="switch-body">
-        <span class="ov-label">Engine</span>
-        <span class="switch-state">{preferencesStore.overlordEnabled ? 'Running' : 'Standby'}</span>
-      </span>
-    </button>
+  <div class="settings">
+    <div class="setting">
+      <div class="setting-copy">
+        <label for="overlord-enabled">Enable Overlord</label>
+        <p class="setting-hint">
+          Runs the supervisor in every window and adds the ♔ row to the sidebar. While this
+          is off nothing is watched and nothing is typed into any tab.
+        </p>
+      </div>
+      <button
+        id="overlord-enabled"
+        class="toggle"
+        class:active={preferencesStore.overlordEnabled}
+        onclick={() => preferencesStore.setOverlordEnabled(!preferencesStore.overlordEnabled)}
+        aria-pressed={preferencesStore.overlordEnabled}
+        aria-label="Toggle Overlord"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
 
-    <button class="switch" class:on={preferencesStore.overlordProposeMode}
-            onclick={() => preferencesStore.setOverlordProposeMode(!preferencesStore.overlordProposeMode)}>
-      <span class="switch-led"></span>
-      <span class="switch-body">
-        <span class="ov-label">Propose first</span>
-        <span class="switch-state">{preferencesStore.overlordProposeMode ? 'You approve each directive' : 'Fires on its own'}</span>
-      </span>
-    </button>
+    <div class="setting">
+      <div class="setting-copy">
+        <label for="overlord-propose">Ask before every directive</label>
+        <p class="setting-hint">
+          Rules land on the Overlord board as proposals you click to send, instead of typing
+          into tabs on their own. Recommended until you trust the ruleset.
+        </p>
+      </div>
+      <button
+        id="overlord-propose"
+        class="toggle"
+        class:active={preferencesStore.overlordProposeMode}
+        onclick={() => preferencesStore.setOverlordProposeMode(!preferencesStore.overlordProposeMode)}
+        aria-pressed={preferencesStore.overlordProposeMode}
+        aria-label="Toggle propose mode"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
 
-    <div class="switch switch-static">
-      <span class="ov-mono switch-count">{activeCount}<span class="of">/{rules.length}</span></span>
-      <span class="switch-body">
-        <span class="ov-label">Rules active</span>
-        <span class="switch-state">{preferencesStore.overlordEnabled ? 'Evaluated every 5s' : 'Not evaluated'}</span>
+    <div class="status" class:live={preferencesStore.overlordEnabled}>
+      <span class="status-led"></span>
+      <span class="status-text">
+        {#if !preferencesStore.overlordEnabled}
+          Standby — {activeCount} of {rules.length} rules would be active.
+        {:else if activeCount === 0}
+          Running, but no rules are enabled — nothing will fire.
+        {:else}
+          Running · {activeCount} of {rules.length} rules evaluated every 5 seconds
+          {#if preferencesStore.overlordProposeMode}· proposals only{/if}
+        {/if}
       </span>
     </div>
   </div>
@@ -519,45 +547,81 @@
   }
   .lede em { color: var(--ov-ink-mid); font-style: italic; }
 
-  /* ── Switches ─────────────────────────────────────────────────────────── */
-  .switches { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* ── Settings rows — deliberately the SAME shape as every other preference row
+     (label + hint on the left, 40x22 pill on the right). An earlier pass styled these
+     as instrument cards with an LED; they read as status readouts and the primary
+     on/off control went unnoticed. Affordance beats atmosphere for a switch. ── */
+  .settings { display: flex; flex-direction: column; gap: 16px; }
 
-  .switch {
+  .setting {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+  }
+
+  .setting-copy label {
+    font-size: 1rem;
+    color: var(--fg);
+    cursor: default;
+  }
+
+  .setting-hint {
+    font-size: 0.846rem;
+    color: var(--fg-dim);
+    line-height: 1.55;
+    max-width: 62ch;
+    margin: 3px 0 0;
+  }
+
+  .toggle {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    background: var(--bg-light);
+    border-radius: 11px;
+    border: none;
+    cursor: pointer;
+    flex-shrink: 0;
+    margin-top: 1px;
+    transition: background-color 0.2s;
+  }
+  .toggle.active { background: var(--accent); }
+
+  .toggle-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+  .toggle.active .toggle-knob { transform: translateX(18px); }
+
+  /* Live status line — a readout, and clearly only a readout. */
+  .status {
     display: flex;
     align-items: center;
-    gap: 11px;
-    flex: 1;
-    min-width: 190px;
-    padding: 11px 13px;
-    text-align: left;
-    background: var(--ov-panel);
+    gap: 9px;
+    padding: 8px 11px;
     border: 1px solid var(--ov-hair);
     border-radius: var(--ov-radius);
-    cursor: pointer;
-    transition: border-color 0.16s ease, background 0.16s ease;
+    background: color-mix(in srgb, var(--bg-dark) 45%, transparent);
   }
-  .switch:hover { border-color: color-mix(in srgb, var(--ov-live) 45%, transparent); }
-  .switch.on { border-color: color-mix(in srgb, var(--ov-live) 55%, transparent); }
-  .switch-static { cursor: default; }
-  .switch-static:hover { border-color: var(--ov-hair); }
-
-  .switch-led {
-    width: 9px; height: 9px;
+  .status-led {
+    width: 8px; height: 8px;
     border-radius: 50%;
-    flex-shrink: 0;
     background: var(--ov-ink-dim);
-    box-shadow: none;
+    flex-shrink: 0;
     transition: background 0.2s ease, box-shadow 0.2s ease;
   }
-  .switch.on .switch-led {
+  .status.live .status-led {
     background: var(--ov-ok);
-    box-shadow: 0 0 10px color-mix(in srgb, var(--ov-ok) 75%, transparent);
+    box-shadow: 0 0 9px color-mix(in srgb, var(--ov-ok) 70%, transparent);
   }
-
-  .switch-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .switch-state { font-size: 0.85rem; color: var(--ov-ink-mid); }
-  .switch-count { font-size: 1.25rem; line-height: 1; color: var(--ov-ink); }
-  .switch-count .of { font-size: 0.8rem; color: var(--ov-ink-dim); }
+  .status-text { font-size: 0.846rem; color: var(--ov-ink-mid); }
 
   .rules-rule { margin: 20px 0 14px; }
 
@@ -597,9 +661,8 @@
     align-items: center;
     gap: 7px;
     font-family: var(--ov-face);
-    font-size: 1.02rem;
+    font-size: 1rem;
     font-weight: 600;
-    letter-spacing: 0.04em;
     color: var(--ov-ink);
   }
   .rule-summary:hover .rule-name { color: var(--ov-live); }
@@ -706,7 +769,7 @@
     font-family: var(--ov-face);
     font-size: 0.76rem;
     font-weight: 600;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     padding: 4px 11px;
     color: var(--ov-ink-dim);
@@ -736,8 +799,7 @@
   .scope-chip {
     font-family: var(--ov-face);
     font-size: 0.8rem;
-    font-weight: 600;
-    letter-spacing: 0.06em;
+    font-weight: 500;
     padding: 4px 11px;
     border-radius: 2px;
     border: 1px solid var(--ov-hair);
@@ -750,7 +812,7 @@
     border-color: color-mix(in srgb, var(--ov-live) 55%, transparent);
     background: color-mix(in srgb, var(--ov-live) 12%, transparent);
   }
-  .scope-chip.small { padding: 3px 9px; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.1em; }
+  .scope-chip.small { padding: 3px 9px; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.06em; }
 
   /* ── Guards: visibly sealed ───────────────────────────────────────────── */
   .guards {

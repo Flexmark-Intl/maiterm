@@ -845,10 +845,9 @@
 
   .overlord-title {
     flex: 1;
-    font-family: var(--ov-face);
-    font-size: 0.92rem;
+    font-size: 0.846rem;
     font-weight: 600;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.5px;
     text-transform: uppercase;
   }
 

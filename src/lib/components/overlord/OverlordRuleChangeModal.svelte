@@ -277,7 +277,7 @@
     background: color-mix(in srgb, var(--ov-ok) 12%, transparent);
   }
   .stamp-mark { font-size: 0.95rem; line-height: 1; }
-  .stamp-word { font-size: 0.62rem; letter-spacing: 0.14em; color: inherit; }
+  .stamp-word { font-size: 0.62rem; letter-spacing: 0.08em; color: inherit; }
 
   .change-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
   .change-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
@@ -286,7 +286,7 @@
     font-family: var(--ov-face);
     font-size: 0.8rem;
     font-weight: 700;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--ov-live);
   }

@@ -587,7 +587,7 @@
     color: var(--ov-live);
     text-shadow: 0 0 14px color-mix(in srgb, var(--ov-live) 55%, transparent);
   }
-  .crest-mode { letter-spacing: 0.2em; }
+  .crest-mode { letter-spacing: 0.14em; }
 
   .segments {
     display: flex;
@@ -606,7 +606,7 @@
     font-family: var(--ov-face);
     font-size: 0.78rem;
     font-weight: 600;
-    letter-spacing: 0.13em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--ov-ink-dim);
     padding: 4px 12px;
