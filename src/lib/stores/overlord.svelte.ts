@@ -87,7 +87,11 @@ export interface OverlordEscalation {
 interface RitualRun {
   runId: string;
   ruleId: string;
+  ruleName: string;
   tabId: string;
+  stepIndex: number;
+  stepCount: number;
+  startedAt: number;
   aborted: boolean;
   /** ms epoch of the ritual's start, then of each injection — the human-input abort
    *  baseline. Any keystroke in the tab newer than this aborts the ritual (§7),
@@ -214,6 +218,10 @@ function createOverlordStore() {
   let pendingRuleChanges = $state<PendingRuleChangeBatch | null>(null);
   // Resolver for the MCP proposeRuleChanges round trip (the modal answers it).
   let ruleChangeResolver: ((res: { approved: string[]; rejected: string[]; pending?: boolean }) => void) | null = null;
+  // Rituals and outstanding directives live in plain Maps (engine-internal, mutated from
+  // async loops). This counter is the reactivity bridge for the board — same bump()
+  // pattern as agentMesh. Every mutation of those maps calls bumpLive().
+  let liveVersion = $state(0);
   // What Overlord already pitched and the human rejected — refuse re-pitches this session.
   const rejectedChangeKeys = new Set<string>();
 
@@ -237,6 +245,10 @@ function createOverlordStore() {
   let tasksDirty = false;
 
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  function bumpLive() { liveVersion++; }
+
+  function setOutstanding(tabId: string, d: OutstandingDirective) { outstanding.set(tabId, d); bumpLive(); }
+  function clearOutstanding(tabId: string) { if (outstanding.delete(tabId)) bumpLive(); }
 
   // ── Tab / workspace helpers ─────────────────────────────────────────────────
 
@@ -574,8 +586,19 @@ function createOverlordStore() {
   /** Run a rule's sequence against a tab. All ledger writes for the run happen here. */
   async function runSequence(rule: OverlordRule, tabId: string, origin: OverlordLedgerEntry['origin']) {
     if (rituals.has(tabId)) return;
-    const run: RitualRun = { runId: crypto.randomUUID(), ruleId: rule.id, tabId, aborted: false, lastInjectionAt: Date.now() };
+    const run: RitualRun = {
+      runId: crypto.randomUUID(),
+      ruleId: rule.id,
+      ruleName: rule.name,
+      tabId,
+      stepIndex: 0,
+      stepCount: rule.sequence.length,
+      startedAt: Date.now(),
+      aborted: false,
+      lastInjectionAt: Date.now(),
+    };
     rituals.set(tabId, run);
+    bumpLive();
     const key = `${rule.id}|${tabId}`;
     lastFiredAt.set(key, Date.now());
     fireLog.set(key, [...(fireLog.get(key) ?? []), Date.now()]);
@@ -625,10 +648,12 @@ function createOverlordStore() {
           sentAt: run.lastInjectionAt,
           acked: false,
         };
-        if (step.await) outstanding.set(tabId, directive);
+        if (step.await) setOutstanding(tabId, directive);
+        run.stepIndex = i;
+        bumpLive();
         ledger(tabId, rule.id, origin, i, step, 'sent');
         const res = await awaitGate(run, step, directive);
-        if (outstanding.get(tabId)?.id === directive.id) outstanding.delete(tabId);
+        if (outstanding.get(tabId)?.id === directive.id) clearOutstanding(tabId);
         if (res === 'aborted') {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
@@ -649,6 +674,7 @@ function createOverlordStore() {
     } finally {
       rituals.delete(tabId);
       if (outstanding.get(tabId)?.ruleId === rule.id) outstanding.delete(tabId);
+      bumpLive();
     }
   }
 
@@ -827,7 +853,7 @@ function createOverlordStore() {
         // turn demonstrably ran (or it was acked) — otherwise it locks the tab.
         const od = outstanding.get(tab.id);
         if (od && od.ruleId === null && (od.acked || (f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))) {
-          outstanding.delete(tab.id);
+          clearOutstanding(tab.id);
         }
         // TodoWrite mirror
         if (f?.todos) everHadTodos.add(`${tab.id}|${f.session_id}`);
@@ -869,8 +895,20 @@ function createOverlordStore() {
     get escalations() { return escalations; },
     get recentLedger() { return recentLedger; },
     /** tabId of any in-flight ritual's target, for board display. */
-    get activeRituals() { return [...rituals.keys()]; },
-    get outstandingDirectives() { return [...outstanding.values()]; },
+    get activeRituals() { void liveVersion; return [...rituals.keys()]; },
+    get outstandingDirectives() { void liveVersion; return [...outstanding.values()]; },
+    /** Live ritual progress per tab — what the deck renders as "step 2/3". */
+    get ritualProgress(): { tabId: string; ruleName: string; step: number; steps: number; startedAt: number }[] {
+      void liveVersion;
+      return [...rituals.values()].map((r) => ({
+        tabId: r.tabId, ruleName: r.ruleName, step: r.stepIndex + 1, steps: r.stepCount, startedAt: r.startedAt,
+      }));
+    },
+    /** The outstanding directive on a tab, if any (board badge). */
+    outstandingFor(tabId: string): OutstandingDirective | null {
+      void liveVersion;
+      return outstanding.get(tabId) ?? null;
+    },
 
     /** Start the engine for this window: seed defaults, load persisted board + ledger,
      *  start the ticker. Idempotent. */
@@ -938,7 +976,8 @@ function createOverlordStore() {
       const d = outstanding.get(tabId);
       if (d) {
         d.acked = true;
-        if (d.ruleId === null) outstanding.delete(tabId);
+        if (d.ruleId === null) clearOutstanding(tabId);
+        else bumpLive();
       }
     },
 
@@ -995,7 +1034,8 @@ function createOverlordStore() {
         d.acked = true;
         // A driveTab directive (no rule, no ritual loop watching it) is DONE on ack —
         // leaving it in the map locks the tab against rules and further driveTabs.
-        if (d.ruleId === null) outstanding.delete(tabId);
+        if (d.ruleId === null) clearOutstanding(tabId);
+        else bumpLive();
       }
       if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
         const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';
@@ -1137,7 +1177,7 @@ function createOverlordStore() {
       } catch {
         return { sent: false, reason: 'no_live_repl' };
       }
-      outstanding.set(tabId, {
+      setOutstanding(tabId, {
         id: crypto.randomUUID(),
         ruleId: null,
         tabId,
@@ -1150,7 +1190,7 @@ function createOverlordStore() {
       // Fire-and-forget from the engine's perspective; the ack/turn-end clears it.
       setTimeout(() => {
         const d = outstanding.get(tabId);
-        if (d && d.text === text && Date.now() - d.sentAt > 15 * 60_000) outstanding.delete(tabId);
+        if (d && d.text === text && Date.now() - d.sentAt > 15 * 60_000) clearOutstanding(tabId);
       }, 15 * 60_000 + 1000);
       return { sent: true };
     },

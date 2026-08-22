@@ -19,6 +19,7 @@
   import { untrack } from 'svelte';
   import { updaterStore } from '$lib/stores/updater.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
+  import '$lib/overlord/deck.css';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
   import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
   import type { Update } from '@tauri-apps/plugin-updater';
@@ -459,10 +460,13 @@
     }
   }
 
-  // Overlord attention count for the accessor-row badge (proposals + unread escalations).
+  // Overlord accessor-row state: how many things want a human, whether anything is
+  // being typed right now, and how loud the badge should be.
   const overlordAttention = $derived(
     overlordStore.proposals.length + overlordStore.escalations.filter(e => !e.read).length
   );
+  const overlordUrgent = $derived(overlordStore.escalations.some(e => !e.read));
+  const overlordBusy = $derived(overlordStore.ritualProgress.length > 0);
 
   async function handleOverlordClick() {
     await workspacesStore.ensureOverlordWorkspace();
@@ -532,12 +536,17 @@
       class="overlord-row"
       class:active={workspacesStore.activeWorkspace?.overlord}
       onclick={handleOverlordClick}
-      title="Overlord — board, proposals, escalations"
+      title={overlordAttention > 0
+        ? `Overlord — ${overlordAttention} item${overlordAttention === 1 ? '' : 's'} waiting on you`
+        : 'Overlord — supervisor board, fleet and ledger'}
     >
       <span class="overlord-glyph">♔</span>
-      <span class="overlord-title">OVERLORD</span>
+      <span class="overlord-title">Overlord</span>
+      {#if overlordBusy}
+        <span class="ov-dot ov-dot-live" style:--tone="var(--accent)"></span>
+      {/if}
       {#if overlordAttention > 0}
-        <span class="overlord-badge">{overlordAttention}</span>
+        <span class="overlord-badge" class:urgent={overlordUrgent}>{overlordAttention}</span>
       {/if}
     </button>
   {/if}
@@ -785,52 +794,81 @@
     justify-content: space-between;
   }
 
+  /* Overlord accessor — deck-styled (see src/lib/overlord/deck.css), sitting above the
+     workspace list because the Overlord workspace is not one of them. */
   .overlord-row {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     width: 100%;
-    padding: 10px 16px;
-    background: none;
+    padding: 11px 16px;
+    background:
+      linear-gradient(90deg,
+        color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 55%);
     border: none;
     border-bottom: 1px solid var(--bg-light);
     color: var(--fg-dim);
-    font-size: 0.846rem;
-    font-weight: 600;
-    letter-spacing: 0.5px;
     cursor: pointer;
     text-align: left;
+    transition: color 0.15s ease, background 0.15s ease;
   }
 
-  .overlord-row:hover {
-    background: var(--bg-medium);
-    color: var(--fg);
+  /* Accent bar that grows in on hover/active — the deck's "live rail" motif. */
+  .overlord-row::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 2px;
+    background: var(--accent);
+    transform: scaleY(0);
+    transform-origin: center;
+    transition: transform 0.18s cubic-bezier(0.3, 0.8, 0.3, 1);
   }
+  .overlord-row:hover::before,
+  .overlord-row.active::before { transform: scaleY(1); }
 
+  .overlord-row:hover { color: var(--fg); }
   .overlord-row.active {
-    background: var(--bg-medium);
-    color: var(--accent);
+    color: var(--fg);
+    background:
+      linear-gradient(90deg,
+        color-mix(in srgb, var(--accent) 16%, transparent) 0%, transparent 70%);
   }
 
   .overlord-glyph {
     font-size: 1rem;
     line-height: 1;
+    color: var(--accent);
+    text-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent);
   }
 
   .overlord-title {
     flex: 1;
+    font-family: var(--ov-face);
+    font-size: 0.92rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
   }
 
   .overlord-badge {
-    background: var(--accent);
-    color: var(--bg-dark);
-    border-radius: 8px;
+    font-family: var(--ov-mono);
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
+    border-radius: 2px;
     padding: 0 6px;
     font-size: 0.692rem;
-    font-weight: 700;
-    line-height: 16px;
+    font-weight: 600;
+    line-height: 15px;
     min-width: 16px;
     text-align: center;
+  }
+  .overlord-badge.urgent {
+    background: color-mix(in srgb, var(--red) 22%, transparent);
+    border-color: color-mix(in srgb, var(--red) 60%, transparent);
+    color: var(--red);
   }
 
   .title {
