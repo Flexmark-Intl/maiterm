@@ -1,9 +1,16 @@
 # Overlord — Per-Window Project & Agent Supervisor
 
-> Status: **design / proposed**. Not a committed plan. Date: 2026-08-22.
+> Status: **implemented (v1)** — all four build stages landed 2026-08-22. Designed 2026-08-22.
 > Owner: Darryl. Scope: a per-window supervisor that tracks projects/tasks across
 > workspaces and drives the agents responsible for them, automating the routine
 > supervision currently done by hand.
+>
+> Implementation map: engine `src/lib/stores/overlord.svelte.ts`; defaults
+> `src/lib/overlord/defaults.ts`; UI `src/lib/components/overlord/` (board, rules
+> section, rule-change modal); Rust facts/commands `src-tauri/src/commands/overlord.rs`
+> + `mailink/transcript.rs` (tail facts); schema `src-tauri/src/state/workspace.rs`;
+> MCP tools `src-tauri/src/claude_code/protocol.rs` + `server.rs`. Off by default —
+> Preferences → Overlord → Enable (propose-mode starts on).
 
 ## TL;DR
 
