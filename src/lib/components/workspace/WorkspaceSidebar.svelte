@@ -18,6 +18,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import { untrack } from 'svelte';
   import { updaterStore } from '$lib/stores/updater.svelte';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
   import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
   import type { Update } from '@tauri-apps/plugin-updater';
@@ -458,8 +459,18 @@
     }
   }
 
+  // Overlord attention count for the accessor-row badge (proposals + unread escalations).
+  const overlordAttention = $derived(
+    overlordStore.proposals.length + overlordStore.escalations.filter(e => !e.read).length
+  );
+
+  async function handleOverlordClick() {
+    await workspacesStore.ensureOverlordWorkspace();
+  }
+
   const sortedWorkspaces = $derived.by(() => {
-    const ws = workspacesStore.workspaces;
+    // The Overlord workspace lives behind its own accessor row, never in the list.
+    const ws = workspacesStore.workspaces.filter(w => !w.overlord);
     const order = preferencesStore.workspaceSortOrder;
     if (order === 'alphabetical') {
       return [...ws].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
@@ -516,6 +527,20 @@
     {/if}
     <span style="margin-left:auto"><IconButton tooltip="Collapse sidebar ({modSymbol}B)" size={20} style="font-size: 1.231rem" onclick={() => workspacesStore.toggleSidebar()}>&#x2039;</IconButton></span>
   </div>
+  {#if preferencesStore.overlordEnabled}
+    <button
+      class="overlord-row"
+      class:active={workspacesStore.activeWorkspace?.overlord}
+      onclick={handleOverlordClick}
+      title="Overlord — board, proposals, escalations"
+    >
+      <span class="overlord-glyph">♔</span>
+      <span class="overlord-title">OVERLORD</span>
+      {#if overlordAttention > 0}
+        <span class="overlord-badge">{overlordAttention}</span>
+      {/if}
+    </button>
+  {/if}
   <div class="sidebar-header">
     <span class="title">WORKSPACES</span>
     <IconButton tooltip="Suspend all other workspaces" size={20} style="font-size: 0.769rem" onclick={handleSuspendAllOthers}><Icon name="pause" size={10} /></IconButton>
@@ -758,6 +783,54 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+
+  .overlord-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 16px;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--bg-light);
+    color: var(--fg-dim);
+    font-size: 0.846rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .overlord-row:hover {
+    background: var(--bg-medium);
+    color: var(--fg);
+  }
+
+  .overlord-row.active {
+    background: var(--bg-medium);
+    color: var(--accent);
+  }
+
+  .overlord-glyph {
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  .overlord-title {
+    flex: 1;
+  }
+
+  .overlord-badge {
+    background: var(--accent);
+    color: var(--bg-dark);
+    border-radius: 8px;
+    padding: 0 6px;
+    font-size: 0.692rem;
+    font-weight: 700;
+    line-height: 16px;
+    min-width: 16px;
+    text-align: center;
   }
 
   .title {

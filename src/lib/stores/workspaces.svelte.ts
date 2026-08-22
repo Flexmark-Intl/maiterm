@@ -157,6 +157,7 @@ function createWorkspacesStore() {
     return workspaces.filter(w => {
       if (w.id === activeWorkspaceId) return false;
       if (w.suspended) return false;
+      if (w.overlord) return false; // Overlord workspace has its own accessor row
       const ts = lastSwitchedAt.get(w.id);
       return ts != null && (now - ts) < RECENT_WINDOW_MS;
     });
@@ -408,6 +409,20 @@ function createWorkspacesStore() {
     async toggleSidebar() {
       sidebarCollapsed = !sidebarCollapsed;
       await commands.setSidebarCollapsed(sidebarCollapsed);
+    },
+
+    /** Switch to this window's Overlord workspace, creating it on first use
+     *  (docs/overlord.md §11). Appended to the end of the list — it's excluded from
+     *  ordinary ordering, Recent, and the normal sidebar list anyway. */
+    async ensureOverlordWorkspace() {
+      let ws = workspaces.find(w => w.overlord);
+      if (!ws) {
+        ws = await commands.createOverlordWorkspace();
+        // The backend may have returned an existing workspace this store already holds.
+        if (!workspaces.some(w => w.id === ws!.id)) workspaces.push(ws);
+      }
+      await this.setActiveWorkspace(ws.id);
+      return ws;
     },
 
     async createWorkspace(name: string) {

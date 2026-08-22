@@ -165,6 +165,8 @@ pub enum TabType {
     Terminal,
     Editor,
     Diff,
+    /// Overlord board (docs/overlord.md §11) — renders OverlordBoard, no PTY/editor state.
+    Board,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

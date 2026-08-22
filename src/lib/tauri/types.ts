@@ -1,6 +1,6 @@
 import type { AgentRuntime } from '$lib/agents/types';
 
-export type TabType = 'terminal' | 'editor' | 'diff';
+export type TabType = 'terminal' | 'editor' | 'diff' | 'board';
 
 export interface EditorFileInfo {
   file_path: string;

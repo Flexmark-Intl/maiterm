@@ -2566,6 +2566,7 @@ pub fn get_app_diagnostics(state: State<'_, Arc<AppState>>) -> serde_json::Value
                             terminal_tabs += 1;
                             all_tab_pty_ids.push(tab.pty_id.clone());
                         }
+                        crate::state::workspace::TabType::Board => {}
                     }
                 }
             }

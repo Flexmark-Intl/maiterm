@@ -219,6 +219,11 @@ export async function setWorkspaceOverlord(workspaceId: string, enabled: boolean
   return invoke('set_workspace_overlord', { workspaceId, enabled });
 }
 
+/** Create (or return the existing) Overlord workspace for this window: board tab + agent tab. */
+export async function createOverlordWorkspace(): Promise<Workspace> {
+  return invoke('create_overlord_workspace');
+}
+
 export async function serializeTerminal(ptyId: string): Promise<number[]> {
   return invoke('serialize_terminal', { ptyId });
 }

@@ -90,6 +90,44 @@ pub fn set_overlord_tasks(
     save_state(&data_clone)
 }
 
+/// Create this window's Overlord workspace (docs/overlord.md §11): overlord flag set,
+/// first pane holding a Board tab (active) + a terminal tab for the agent. Appended to
+/// the end of the workspace list (it's excluded from ordinary ordering anyway). Returns
+/// the existing Overlord workspace unchanged if one is already flagged.
+#[tauri::command]
+pub fn create_overlord_workspace(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::state::Workspace, String> {
+    use crate::state::workspace::{Tab, TabType, Workspace};
+    let label = window.label().to_string();
+    let (ws, data_clone) = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        if let Some(existing) = win.workspaces.iter().find(|w| w.overlord) {
+            return Ok(existing.clone());
+        }
+        let mut ws = Workspace::new("Overlord".to_string());
+        ws.overlord = true;
+        if let Some(pane) = ws.panes.get_mut(0) {
+            if let Some(term) = pane.tabs.get_mut(0) {
+                term.name = "Overlord Agent".to_string();
+                term.custom_name = true;
+            }
+            let mut board = Tab::new("Board".to_string());
+            board.tab_type = TabType::Board;
+            board.custom_name = true;
+            let board_id = board.id.clone();
+            pane.tabs.insert(0, board);
+            pane.active_tab_id = Some(board_id);
+        }
+        win.workspaces.push(ws.clone());
+        (ws, app_data.clone())
+    };
+    save_state(&data_clone)?;
+    Ok(ws)
+}
+
 /// Flag/unflag a workspace as this window's Overlord workspace (docs/overlord.md §11).
 #[tauri::command]
 pub fn set_workspace_overlord(

@@ -12,6 +12,7 @@
   import TerminalPane from '$lib/components/terminal/TerminalPane.svelte';
   import EditorPane from '$lib/components/editor/EditorPane.svelte';
   import DiffPane from '$lib/components/editor/DiffPane.svelte';
+  import OverlordBoard from '$lib/components/overlord/OverlordBoard.svelte';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
   import SessionRestoreModal from '$lib/components/SessionRestoreModal.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -521,6 +522,13 @@
                     tabId={tab.id}
                     visible={!meshStage && tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId}
                     diffContext={tab.diff_context}
+                  />
+                {:else if tab.tab_type === 'board'}
+                  <OverlordBoard
+                    workspaceId={ws.id}
+                    paneId={pane.id}
+                    tabId={tab.id}
+                    visible={!meshStage && tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId}
                   />
                 {:else if tab.tab_type === 'editor' && tab.editor_file}
                   <EditorPane
