@@ -25,6 +25,9 @@
 - **Rules are the product surface.** Declarative `state event → directive`, with
   the directive *text* as the tunable field, seeded and hideable like triggers.
 - **v1 scope: global + workspace.** No labels, no tab ids, no session ids.
+- **Overlord occupies its own workspace** — accessor row above the sidebar's
+  `WORKSPACES` header — so the board gets full main-area real estate and the
+  agent is an ordinary tab inside it.
 
 ---
 
@@ -81,6 +84,27 @@ guards**. The agent gets no privileged path — it physically cannot race a runn
 ritual, and everything it does lands in the same ledger with
 `origin: 'overlord_judgment'`.
 
+### Engine home
+
+The engine is a **frontend per-window Svelte store** (`overlord.svelte.ts`),
+mirroring `agentMesh`: per-window scoping falls out free (each window's webview
+has its own store instance over its own `workspacesStore`), the injection
+primitives (`deliverInit` / `bracketedPasteSubmit`) are frontend, and rules load
+from the preferences store. Rust's only new surface is exposing facts it already
+caches — contextPct, last-real-turn ts, todos — to the frontend via a small
+command or event ticker (mirroring the mailink summary-ticker pattern).
+
+### Agent lifecycle
+
+- **Spawn**: the human creates the Overlord workspace (§11); the agent is a
+  normal Claude tab inside it (Claude-only in v1). No special PTY plumbing.
+- **Priming**: doctrine (§9.2) is injected at initSession, idempotent with a
+  persisted-var guard — same mechanism as mesh priming (`tryPrime`).
+- **Restart / compaction**: re-init → re-primed with doctrine, re-reads board +
+  ledger. The transcript-is-scratch principle makes this loss-free by design.
+- **Absence**: the engine runs regardless. With no live Overlord agent,
+  `escalate_to_overlord` degrades to `notify_human` and escalations stay queued.
+
 ---
 
 ## 3. Authority model
@@ -117,6 +141,25 @@ state machines correct *and* makes `directive_id` optional in the ack protocol
 **`max_per_hour`** — loop-control backstop, same lesson as mesh topic loop
 control.
 
+### The injection tool: `driveTab`
+
+The "one injection tool" both callers share, made concrete:
+
+```ts
+driveTab({ tab_id: string, kind: 'process' | 'slash', text: string })
+→ { sent: true }
+  | { sent: false,
+      reason: 'no_live_repl' | 'outstanding_directive' | 'agent_busy'
+            | 'rate_limited' | 'runtime_mismatch' }
+```
+
+- Guards are evaluated **inside** the tool — a guard failure comes back to the
+  agent as a structured refusal, never a silent drop, and both paths ledger.
+- MCP-exposed to Overlord-the-agent only (never to supervised agents).
+- **Pre-approved via allowlist** — the guards are mechanical, and a
+  permission-prompt-per-injection would make Overlord useless. The contrast is
+  deliberate: `driveTab` is free, `proposeRuleChanges` (§10) always prompts.
+
 ### The ledger
 
 Because injections are *by design* indistinguishable from the human typing,
@@ -131,7 +174,9 @@ export interface OverlordLedgerEntry {
   step_index: number;
   text: string;                      // VERBATIM injected bytes
   kind: 'process' | 'slash';
-  outcome: 'sent' | 'blocked_no_repl' | 'blocked_guard' | 'acked' | 'timed_out';
+  outcome: 'sent' | 'blocked_no_repl' | 'blocked_guard' | 'acked' | 'timed_out'
+         | 'aborted'           // human interrupt or app restart killed the ritual
+         | 'skipped_runtime';  // slash step invalid for the tab's runtime (§6)
 }
 ```
 
@@ -229,6 +274,10 @@ export type OverlordCondition =
    reliable, attributes to the right agent, won't fire on Gemini
 2. poll `git log` per tab cwd — cheap, coarse, can't tell which agent
 3. OSC 133 + command text — breaks on SSH tabs
+
+`turn_end` is defined as the tab's agentState transition `active` → `idle`
+(hook-driven for Claude/Codex), with the transcript-tail last-real-turn
+timestamp as the fallback for hook-less runtimes.
 
 ### Guards
 
@@ -331,8 +380,15 @@ firing `/compact` early truncates the work just asked for.
 `on_timeout: 'abort'` on step 1 is the important default — if the docs pass
 stalls, `/compact` must not fire into a half-finished turn.
 
-The ritual must be **resumable**: a tab can go idle, hit a permission prompt, or
-be interrupted by the human halfway through.
+Interruption semantics (decided 2026-08-22):
+
+- **Pauses resume**: a permission prompt or an idle gap mid-step holds the
+  ritual; it continues when the gate clears.
+- **Human input aborts**: any human-typed input into the target tab aborts the
+  in-flight ritual silently (ledger `aborted`). Human presence means the human
+  is attending the tab; the cooldown refires the rule later if still relevant.
+- **App restart aborts**: in-flight rituals do not survive a restart — never
+  resume a half-ritual into a respawned tab. Ledger `aborted`; cooldown refires.
 
 ---
 
@@ -390,6 +446,13 @@ overlord: {
 }
 ```
 
+### SSH tabs need nothing special
+
+- Injection is ordinary PTY typing — identical over ssh.
+- `replyToOverlord` rides the existing SSH MCP bridge like every maiterm tool.
+- The passive channel works too: the SSH transcript mirror already shadows the
+  remote JSONL locally, so tail facts resolve for SSH tabs.
+
 ### Assume the ack channel is used inconsistently
 
 Same lesson as `completeTopic` — agents rarely call it, hence the existing TTL
@@ -410,6 +473,13 @@ unacked twice, an agent that replied `blocked`, two rules matching one tab with
 conflicting directives, a tab stuck `permission_pending`. Those queue as
 escalations, and the agent picks them up with the ledger and the tab's recent
 tail as context. **The residue, not the routine volume.**
+
+Delivery (decided 2026-08-22): **queue + wake nudge**. The engine queues the
+escalation and injects a single short line into Overlord's PTY — `"2 escalations
+pending — call listEscalations."` The PTY carries only the doorbell; the content
+stays structured behind an MCP pull (`listEscalations`), keeping Overlord's
+transcript lean. Note the no-envelope rule governs *supervised* tabs; the
+supervisor's own tab receiving structured notices is fine.
 
 ### 9.2 The ruleset is also Overlord's own harness
 
@@ -486,7 +556,22 @@ on.** Widening them should require opening Preferences by hand.
 
 ## 11. Board & GUI
 
-More GUI than terminal, evolving the mesh cockpit rather than adding a surface.
+### The Overlord workspace
+
+Overlord is **its own workspace** (decided 2026-08-22) — not a tab type, drawer,
+or companion window. The accessor sits in its own row **above** the sidebar's
+`WORKSPACES ⏸ +` header, outside the ordinary list, so the board takes the full
+main-area real estate and the agent's terminal is just a tab inside the
+workspace — all existing pane/split/PTY machinery applies unchanged.
+
+- `Workspace.overlord?: boolean` — house style of `bridge_all` /
+  `mailink_native` (`src/lib/tauri/types.ts:169`).
+- Excluded from the ordinary workspace list, reordering, and Recent.
+- At most one per window; created lazily on first use.
+- Suspending it stops the *agent*, never the *engine* — the engine is a
+  window-level store, alive as long as the window is.
+- The board view is the workspace's primary surface, grouped by (normal)
+  workspace.
 
 ### Task model — minimum viable
 
@@ -494,6 +579,10 @@ More GUI than terminal, evolving the mesh cockpit rather than adding a surface.
 (`backlog` / `active` / `blocked` / `review` / `done`), `origin`
 (`human` / `overlord` / `agent`), `created_at`, `updated_at`, optional `topic_id`
 linking the mesh conversation that is its vehicle.
+
+Persistence: board rows live in the state file alongside workspaces, keyed by
+`workspace_id` (per-window derivation free). The human can CRUD tasks directly
+on the board; done tasks are TTL-swept like completed topics.
 
 ### Feed it automatically: mirror TodoWrite
 
@@ -526,13 +615,15 @@ AskUserQuestion / permission prompts, plus the board. No status chatter.
    checkpoint ritual. No board, no agent, no kanban, no rules UI. Nearly free
    given `build_meta`, and it kills a large slice of the micromanagement by
    itself.
-2. **TodoWrite mirror + read-only board** in the cockpit. Still no agent — pure
-   visibility.
+2. **TodoWrite mirror + read-only board** in a minimal Overlord workspace
+   (accessor row + board view). Still no agent — pure visibility. (Mirror
+   confirmed in scope, 2026-08-22.)
 3. **Rule engine + preferences UI.** Generalize step 1 into `OverlordRule`, seed
    `DEFAULT_OVERLORD_RULES`, add review-after-commit and doc-drift. Ledger lands
    here. Run in propose-mode.
 4. **Overlord-the-agent**, once the board is rich enough that it can be cheap.
-   `replyToOverlord`, escalations, `proposeRuleChanges`.
+   `replyToOverlord`, escalation queue + wake nudge + `listEscalations`,
+   `driveTab` MCP exposure, `proposeRuleChanges`.
 
 ---
 
@@ -541,13 +632,11 @@ AskUserQuestion / permission prompts, plus the board. No status chatter.
 1. **`only_if_no_outstanding` — global or per-rule?** Global serialization makes
    the protocol clean but queues an urgent nudge behind a slow checkpoint.
    Leaning global for v1.
-2. **`no_todo_list` requires the TodoWrite mirror** — the one prerequisite build
-   in the whole schema. Worth it, or cut the event from v1?
-3. **Global rules span windows.** Preferences are global, so a global-scoped rule
+2. **Global rules span windows.** Preferences are global, so a global-scoped rule
    applies in both the work and personal windows. Judged acceptable: the rules
    worth scoping global are universal hygiene, and intensity differences get
    workspace scope. Revisit only if it bites.
-4. **Does the agent read compaction summaries?** Deliberately not for now — it
+3. **Does the agent read compaction summaries?** Deliberately not for now — it
    asks the target agent instead, which keeps memory where it belongs and stays
    clean across Claude/Codex/Gemini. maiTerm *could* expose summaries later.
 
@@ -565,4 +654,5 @@ Recorded so they don't get re-litigated.
 | Tab-id rule scoping | Tab ids don't survive Cmd+Shift+R (reload = dup + close, new id) — rules silently detach. |
 | Session-id rule scoping | Survives reload and resume, but `/clear` and fork mint new ids, and a fresh duplicate briefly shares one sid across two tabs. Trades one silent breakage for three plus an ambiguity. |
 | Label / runtime scoping in v1 | Deferred, not rejected — additive later with no migration. Runtime survives as an engine capability check. |
+| Board as a tab type, drawer, or companion window | An Overlord *workspace* won: full main-area real estate, agent-terminal-as-tab reuses all pane machinery, accessor row above the workspace list. |
 | Model in the loop for routine nudges | Slow, costly, non-deterministic, and Overlord's own context blows out watching 40 tabs. |
