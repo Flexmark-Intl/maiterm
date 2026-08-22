@@ -131,7 +131,20 @@
     else if (def.param === 'minutes') when = { event, minutes: 10 } as OverlordCondition;
     else if (def.param === 'days') when = { event: 'task_stale', days: 3 };
     else when = { event } as OverlordCondition;
-    updateRule(rule.id, { when });
+    // Some conditions are dead under the default guards — adjust the coupled guard so
+    // picking the condition doesn't silently produce a rule that can never fire.
+    let guards = rule.guards;
+    if (event === 'agent_unready') {
+      // No live agent is the point; a live-REPL requirement contradicts it.
+      guards = { ...guards, require_live_repl: false };
+    } else if (event === 'permission_pending') {
+      const st = guards.agent_state ?? ['idle'];
+      if (!st.includes('permission')) guards = { ...guards, agent_state: [...st, 'permission'] };
+    } else if (event === 'directive_unacked') {
+      // The condition requires an outstanding directive to exist.
+      guards = { ...guards, only_if_no_outstanding: false };
+    }
+    updateRule(rule.id, { when, guards });
   }
 
   function setConditionParam(rule: OverlordRule, value: number) {

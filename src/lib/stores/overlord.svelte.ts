@@ -89,6 +89,10 @@ interface RitualRun {
   ruleId: string;
   tabId: string;
   aborted: boolean;
+  /** ms epoch of the ritual's start, then of each injection — the human-input abort
+   *  baseline. Any keystroke in the tab newer than this aborts the ritual (§7),
+   *  including during the wait BETWEEN steps. */
+  lastInjectionAt: number;
 }
 
 /** One change in a proposeRuleChanges batch (docs/overlord.md §10). */
@@ -220,6 +224,13 @@ function createOverlordStore() {
   const lastFiredAt = new Map<string, number>(); // `${ruleId}|${tabId}` → ms
   const fireLog = new Map<string, number[]>(); // `${ruleId}|${tabId}` → recent fire ts
   const outstanding = new Map<string, OutstandingDirective>(); // tabId → directive
+  // Escalations raised but not yet announced to the agent (it was busy/absent at the
+  // time). The tick keeps retrying the wake nudge until one lands.
+  const unNudged = new Set<string>();
+  // Sessions observed WITH a todo list ("tabId|sessionId"). The facts tail is a bounded
+  // window — once the last TodoWrite scrolls past it, todos read as absent; this keeps
+  // no_todo_list from nagging a session that demonstrably has one.
+  const everHadTodos = new Set<string>();
   const rituals = new Map<string, RitualRun>(); // tabId → active ritual
   let ticker: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -319,10 +330,16 @@ function createOverlordStore() {
     const key = `${rule.id}|${tabId}`;
     const last = lastFiredAt.get(key) ?? 0;
     if (rule.cooldown > 0 && now - last < rule.cooldown * 1000) return false;
-    // agent_state (default idle-only)
-    const allowed = g.agent_state ?? ['idle'];
+    // agent_state (default idle-only). agent_unready rules are the exception: the
+    // condition MEANS "no live agent state", so requiring one would make the rule
+    // dead-on-arrival — for those, pass only when no state exists.
     const st = mappedState(tabId);
-    if (!st || !allowed.includes(st)) return false;
+    if (rule.when.event === 'agent_unready') {
+      if (st) return false;
+    } else {
+      const allowed = g.agent_state ?? ['idle'];
+      if (!st || !allowed.includes(st)) return false;
+    }
     // min_quiet_ms (default 3000)
     const quiet = g.min_quiet_ms ?? 3000;
     const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
@@ -365,6 +382,10 @@ function createOverlordStore() {
     const t0 = Date.now();
     while (Date.now() - t0 < INJECTABLE_WAIT_CAP_MS) {
       if (run.aborted) return false;
+      // Human typed into the tab since our last injection (or ritual start) — their
+      // tab now, even if their turn already finished (§7). Without this, a human turn
+      // between steps gets waited out and the next step steamrolls their conversation.
+      if (humanTypedSince(run.tabId, run.lastInjectionAt)) return false;
       const st = mappedState(run.tabId);
       const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
       if (st && allowed.includes(st) && Date.now() - lastOut >= quiet) return true;
@@ -442,6 +463,7 @@ function createOverlordStore() {
         read: false,
       },
     ];
+    unNudged.add(escalations[escalations.length - 1].id);
     void wakeOverlordAgent();
   }
 
@@ -449,6 +471,7 @@ function createOverlordStore() {
    *  the listEscalations pull, keeping the agent's transcript lean. No live agent →
    *  the queue simply waits (the engine runs regardless; §2 agent lifecycle). */
   async function wakeOverlordAgent() {
+    if (unNudged.size === 0) return;
     const ws = overlordWorkspace();
     if (!ws) return;
     for (const pane of ws.panes) {
@@ -461,6 +484,7 @@ function createOverlordStore() {
         const n = escalations.filter((e) => !e.read).length;
         try {
           await bracketedPasteSubmit(inst.ptyId, `${n} Overlord escalation${n === 1 ? '' : 's'} pending — call listEscalations.`);
+          unNudged.clear();
         } catch (e) {
           logError(`overlord: wake nudge failed: ${e}`);
         }
@@ -550,7 +574,7 @@ function createOverlordStore() {
   /** Run a rule's sequence against a tab. All ledger writes for the run happen here. */
   async function runSequence(rule: OverlordRule, tabId: string, origin: OverlordLedgerEntry['origin']) {
     if (rituals.has(tabId)) return;
-    const run: RitualRun = { runId: crypto.randomUUID(), ruleId: rule.id, tabId, aborted: false };
+    const run: RitualRun = { runId: crypto.randomUUID(), ruleId: rule.id, tabId, aborted: false, lastInjectionAt: Date.now() };
     rituals.set(tabId, run);
     const key = `${rule.id}|${tabId}`;
     lastFiredAt.set(key, Date.now());
@@ -574,9 +598,8 @@ function createOverlordStore() {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
-        const preInject = Date.now();
-        if (humanTypedSince(tabId, preInject - (rule.guards.min_quiet_ms ?? 3000))) {
-          // Human is at the keyboard in this tab right now — their tab, their turn (§7).
+        if (humanTypedSince(tabId, run.lastInjectionAt)) {
+          // Human typed into this tab since our last injection — their tab, their turn (§7).
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
@@ -592,13 +615,14 @@ function createOverlordStore() {
           ledger(tabId, rule.id, origin, i, step, 'blocked_guard');
           return;
         }
+        run.lastInjectionAt = Date.now();
         const directive: OutstandingDirective = {
           id: crypto.randomUUID(),
           ruleId: rule.id,
           tabId,
           stepIndex: i,
           text: step.text,
-          sentAt: Date.now(),
+          sentAt: run.lastInjectionAt,
           acked: false,
         };
         if (step.await) outstanding.set(tabId, directive);
@@ -656,6 +680,7 @@ function createOverlordStore() {
         return !claudeStateStore.getState(tab.id) && !!terminalsStore.get(tab.id);
       case 'no_todo_list': {
         if (!f || f.todos) return false;
+        if (everHadTodos.has(`${tab.id}|${f.session_id}`)) return false;
         if ((f.context_used ?? 0) < NO_TODO_MIN_CONTEXT_TOKENS) return false;
         return f.last_turn_ts !== undefined && now - f.last_turn_ts < NO_TODO_RECENT_TURN_MS;
       }
@@ -730,6 +755,17 @@ function createOverlordStore() {
         changed = true;
       }
     }
+    // A TodoWrite replaces the agent's whole list — mirror rows for items no longer on
+    // it are finished as far as the agent is concerned. Mark them done (the 48h sweep
+    // clears them); leaving them "active" turns every list rewrite into false STALEs.
+    const present = new Set(f.todos.map((t) => t?.content).filter(Boolean));
+    for (const t of tasks) {
+      if (t.origin === 'agent' && t.tab_id === tabId && t.state !== 'done' && !present.has(t.title)) {
+        t.state = 'done';
+        t.updated_at = new Date(now).toISOString();
+        changed = true;
+      }
+    }
     return changed;
   }
 
@@ -787,7 +823,14 @@ function createOverlordStore() {
         if (f?.last_commit_ts !== undefined || prevCommit === undefined) {
           prevCommitTs.set(tab.id, f?.last_commit_ts ?? 0);
         }
+        // A driveTab directive with no ritual watching it is spent once the target's
+        // turn demonstrably ran (or it was acked) — otherwise it locks the tab.
+        const od = outstanding.get(tab.id);
+        if (od && od.ruleId === null && (od.acked || (f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))) {
+          outstanding.delete(tab.id);
+        }
         // TodoWrite mirror
+        if (f?.todos) everHadTodos.add(`${tab.id}|${f.session_id}`);
         if (f && syncMirrorTasks(tab.id, f, now)) boardChanged = true;
         // 2) Rule evaluation
         for (const rule of rulesForWorkspace(ws.id)) {
@@ -803,6 +846,8 @@ function createOverlordStore() {
         }
       }
       void tryPrimeOverlordAgent();
+      // Escalations that arrived while the agent was busy still owe it a doorbell.
+      if (unNudged.size) void wakeOverlordAgent();
       if (sweepDoneTasks(now)) boardChanged = true;
       if (boardChanged || tasksDirty) {
         tasksDirty = false;
@@ -875,8 +920,10 @@ function createOverlordStore() {
     // ── Escalations (§9.1) ───────────────────────────────────────────────────
     /** Pull + mark read — the listEscalations MCP surface (S4) and the board both use this. */
     consumeEscalations(): OverlordEscalation[] {
-      const out = $state.snapshot(escalations) as OverlordEscalation[];
-      escalations = escalations.map((e) => ({ ...e, read: true }));
+      // Unread only — re-delivering handled escalations makes the agent re-resolve
+      // day-old timeouts. Read ones stay on the board until the human dismisses them.
+      const out = ($state.snapshot(escalations) as OverlordEscalation[]).filter((e) => !e.read);
+      escalations = escalations.map((e) => (e.read ? e : { ...e, read: true }));
       return out;
     },
     dismissEscalation(id: string) {
@@ -889,7 +936,10 @@ function createOverlordStore() {
     /** Resolve an 'ack' gate / clear the outstanding directive for a tab (§8). */
     ackOutstanding(tabId: string) {
       const d = outstanding.get(tabId);
-      if (d) d.acked = true;
+      if (d) {
+        d.acked = true;
+        if (d.ruleId === null) outstanding.delete(tabId);
+      }
     },
 
     // ── Board CRUD (human-owned rows; §11) ───────────────────────────────────
@@ -943,6 +993,9 @@ function createOverlordStore() {
       const d = outstanding.get(tabId);
       if (args.kind === 'ack' && d) {
         d.acked = true;
+        // A driveTab directive (no rule, no ritual loop watching it) is DONE on ack —
+        // leaving it in the map locks the tab against rules and further driveTabs.
+        if (d.ruleId === null) outstanding.delete(tabId);
       }
       if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
         const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';

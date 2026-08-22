@@ -101,6 +101,20 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
   },
 };
 
+/** Key-order-insensitive stringify — persisted rules round-trip through serde, whose
+ *  field order need not match the template literals here. Order-sensitive comparison
+ *  would re-report "changed" (and re-save preferences) on every launch. */
+function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const entries = Object.entries(v as Record<string, unknown>)
+      .filter(([, val]) => val !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : 1));
+    return `{${entries.map(([k, val]) => `${JSON.stringify(k)}:${stableStringify(val)}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
 /**
  * Seed default Overlord rules into an existing rule list. Same mechanics as
  * seedDefaultTriggers: removes stale defaults, auto-updates un-modified ones to the
@@ -128,7 +142,19 @@ export function seedDefaultOverlordRules(
 
     const linked = list.find(r => r.default_id === defaultId);
     if (linked) {
-      if (!linked.user_modified) {
+      // Auto-update un-modified defaults — but only when the template actually
+      // differs. An unconditional rewrite makes this function report "changed" on
+      // every call, which turns every window start into a preferences save + full
+      // state-file write + preferences-changed broadcast.
+      const same =
+        linked.name === tmpl.name &&
+        (linked.description ?? null) === (tmpl.description ?? null) &&
+        linked.cooldown === tmpl.cooldown &&
+        stableStringify(linked.when) === stableStringify(tmpl.when) &&
+        stableStringify(linked.guards) === stableStringify(tmpl.guards) &&
+        stableStringify(linked.sequence) === stableStringify(tmpl.sequence) &&
+        stableStringify(linked.supersedes ?? null) === stableStringify(tmpl.supersedes ?? null);
+      if (!linked.user_modified && !same) {
         linked.name = tmpl.name;
         linked.description = tmpl.description ?? null;
         linked.cooldown = tmpl.cooldown;

@@ -36,6 +36,11 @@
       if (c.rule.when) lines.push(`when: ${JSON.stringify(c.rule.when)}`);
       for (const s of c.rule.sequence ?? []) lines.push(`${s.kind}: ${s.text}`);
       if (c.rule.cooldown !== undefined) lines.push(`cooldown: ${c.rule.cooldown}s`);
+      // Fields that change how OTHER rules behave must never be invisible in an
+      // approval: supersedes suppresses existing rules in-scope.
+      if (c.rule.supersedes?.length) lines.push(`⚠ supersedes (disables in-scope): ${c.rule.supersedes.join(', ')}`);
+      lines.push(`scope: ${c.rule.workspaces?.length ? c.rule.workspaces.join(', ') : 'global'}`);
+      if (c.rule.enabled === false) lines.push('enabled: false');
     } else if (c.op === 'update' && c.patch) {
       const { sequence, ...rest } = c.patch;
       for (const s of sequence ?? []) lines.push(`${s.kind}: ${s.text}`);
@@ -83,7 +88,7 @@
             <input type="checkbox" checked={!unchecked.has(i)} onchange={() => toggle(i)} />
             <div class="change-body">
               <div class="change-op">{opLabel(change)}</div>
-              {#each payloadLines(change) as line (line)}
+              {#each payloadLines(change) as line, j (j)}
                 <div class="change-line">{line}</div>
               {/each}
             </div>
