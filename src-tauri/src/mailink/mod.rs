@@ -3285,6 +3285,17 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
     if let Some(ts) = transcript::last_turn_ts_for(rt, &sid) {
         v["last_turn_ts"] = json!(ts);
     }
+    if let Some(of) = transcript::overlord_facts_for(rt, &sid) {
+        if let Some(ts) = of.last_commit_ts {
+            v["last_commit_ts"] = json!(ts);
+        }
+        if let Some(todos) = of.todos {
+            v["todos"] = todos;
+            if let Some(ts) = of.todos_ts {
+                v["todos_ts"] = json!(ts);
+            }
+        }
+    }
     Some(v)
 }
 

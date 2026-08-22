@@ -106,6 +106,13 @@ const FACTS_TAIL_BYTES: u64 = 256 * 1024;
 struct TailFacts {
     last_turn_ts: Option<u64>,
     meta: Option<SessionMeta>,
+    /// Overlord signals (docs/overlord.md §5) — Claude-only today (Codex rollouts record
+    /// tool calls differently and have no TodoWrite; both stay None there).
+    /// Unix-ms of the newest assistant `Bash` tool_use whose command runs `git commit`.
+    last_commit_ts: Option<u64>,
+    /// The newest TodoWrite `input.todos` array (the TodoWrite mirror), + its timestamp.
+    todos: Option<Value>,
+    todos_ts: Option<u64>,
 }
 
 static TAIL_FACTS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, TailFacts)>>> =
@@ -480,10 +487,102 @@ fn session_meta(session_id: &str) -> Option<SessionMeta> {
 
 /// Parse both cached facts (last real turn ts + meta) from one Claude JSONL tail.
 fn claude_tail_facts(tail: &str) -> TailFacts {
+    let (last_commit_ts, todos, todos_ts) = claude_overlord_from_tail(tail);
     TailFacts {
         last_turn_ts: claude_last_turn_from_tail(tail),
         meta: claude_meta_from_tail(tail),
+        last_commit_ts,
+        todos,
+        todos_ts,
     }
+}
+
+/// One reversed pass for the Overlord signals: the newest `git commit` Bash tool_use ts and
+/// the newest TodoWrite todos array. Cheap string prefilters keep the JSON parse rare; both
+/// searches stop at their first (i.e. latest) hit.
+fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<u64>) {
+    let mut last_commit_ts: Option<u64> = None;
+    let mut todos: Option<Value> = None;
+    let mut todos_ts: Option<u64> = None;
+    for line in tail.lines().rev() {
+        if last_commit_ts.is_some() && todos.is_some() {
+            break;
+        }
+        let want_todo = todos.is_none() && line.contains("\"TodoWrite\"");
+        let want_commit = last_commit_ts.is_none() && line.contains("git commit");
+        if !want_todo && !want_commit {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let ts = v
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .map(rfc3339_to_ms)
+            .filter(|&t| t > 0)
+            .map(|t| t as u64);
+        let Some(content) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                continue;
+            }
+            match block.get("name").and_then(|n| n.as_str()) {
+                Some("TodoWrite") if todos.is_none() => {
+                    if let Some(t) = block.get("input").and_then(|i| i.get("todos")) {
+                        todos = Some(t.clone());
+                        todos_ts = ts;
+                    }
+                }
+                Some("Bash") if last_commit_ts.is_none() => {
+                    let cmd = block
+                        .get("input")
+                        .and_then(|i| i.get("command"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    if cmd.contains("git commit") {
+                        last_commit_ts = ts;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (last_commit_ts, todos, todos_ts)
+}
+
+/// Overlord signals from a session's transcript tail (docs/overlord.md §5): commit
+/// detection + the TodoWrite mirror. Served from the same (mtime,len)-gated cache as the
+/// other tail facts. Claude-only today — Codex/Gemini return all-None fields.
+pub struct OverlordTailFacts {
+    pub last_commit_ts: Option<u64>,
+    pub todos: Option<Value>,
+    pub todos_ts: Option<u64>,
+}
+
+pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<OverlordTailFacts> {
+    let path = match rt {
+        AgentRuntime::Claude => locate_jsonl(session_id)?,
+        AgentRuntime::Codex => locate_codex_jsonl(session_id)?,
+        AgentRuntime::Gemini => return None,
+    };
+    let parse = match rt {
+        AgentRuntime::Claude => claude_tail_facts as fn(&str) -> TailFacts,
+        _ => codex_tail_facts as fn(&str) -> TailFacts,
+    };
+    let facts = tail_facts(&path, parse);
+    Some(OverlordTailFacts {
+        last_commit_ts: facts.last_commit_ts,
+        todos: facts.todos,
+        todos_ts: facts.todos_ts,
+    })
 }
 
 /// Parse a Claude JSONL tail (newest lines last) into model id + context tokens + effort, scanning
@@ -908,6 +1007,7 @@ fn codex_tail_facts(tail: &str) -> TailFacts {
     TailFacts {
         last_turn_ts: codex_last_turn_from_tail(tail),
         meta: codex_meta_from_tail(tail),
+        ..TailFacts::default()
     }
 }
 
@@ -1494,6 +1594,25 @@ mod tests {
         let _ = std::fs::remove_file(&path); // clean up before asserting
         assert_eq!(found, Some(path));
         assert!(locate_jsonl(sid).is_none(), "gone once the shadow file is removed");
+    }
+
+    #[test]
+    fn overlord_tail_parses_newest_commit_and_todos() {
+        let tail = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git commit -m 'old'"}}]}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:21:00.000Z","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"first","status":"pending"}]}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:22:00.000Z","message":{"content":"echo git commit in prose must not count"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:23:00.000Z","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"second","status":"completed"}]}}]}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git add -A && git commit -m 'new'"}}]}}"#, "\n",
+        );
+        let (commit_ts, todos, todos_ts) = claude_overlord_from_tail(tail);
+        assert_eq!(commit_ts, Some(1782595500000)); // 21:25 — the NEWEST commit, not 21:20
+        let todos = todos.expect("todos captured");
+        assert_eq!(todos[0]["content"], "second"); // newest TodoWrite wins
+        assert_eq!(todos_ts, Some(1782595380000)); // 21:23
+        // No signals → all None.
+        let (c, t, _) = claude_overlord_from_tail(r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"text","text":"hi"}]}}"#);
+        assert!(c.is_none() && t.is_none());
     }
 
     #[test]

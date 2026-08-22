@@ -179,6 +179,18 @@ export interface OverlordTabFacts {
   model?: string;
   /** Unix-ms timestamp of the session's last REAL turn. */
   last_turn_ts?: number;
+  /** Unix-ms of the newest `git commit` Bash tool call (Claude-only today). */
+  last_commit_ts?: number;
+  /** Newest TodoWrite todos array — the TodoWrite mirror (Claude-only). */
+  todos?: OverlordTodoItem[];
+  todos_ts?: number;
+}
+
+/** One TodoWrite item as recorded in the transcript. */
+export interface OverlordTodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  activeForm?: string;
 }
 /** Batched facts poll; tabs with no resolvable agent session are absent from the map. */
 export async function getOverlordTabFacts(tabIds: string[]): Promise<Record<string, OverlordTabFacts>> {
