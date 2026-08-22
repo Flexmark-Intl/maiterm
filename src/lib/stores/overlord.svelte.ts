@@ -19,6 +19,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
+import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -90,6 +91,113 @@ interface RitualRun {
   aborted: boolean;
 }
 
+/** One change in a proposeRuleChanges batch (docs/overlord.md §10). */
+export interface OverlordRuleChange {
+  op: 'create' | 'update' | 'rescope' | 'enable' | 'disable' | 'delete';
+  rule?: Partial<OverlordRule>;
+  rule_id?: string;
+  patch?: Partial<OverlordRule>;
+  workspaces?: string[];
+}
+
+export interface PendingRuleChangeBatch {
+  id: string;
+  tabId: string;
+  rationale: string;
+  changes: OverlordRuleChange[];
+}
+
+/** Latest replyToOverlord report per tab, for the board. */
+export interface AgentReport {
+  tabId: string;
+  kind: string;
+  state: string;
+  summary: string;
+  task?: string;
+  ts: number;
+}
+
+/** Persisted (per-tab trigger variable) marker that the Overlord agent has been primed
+ *  with its doctrine — same restart-survival trick as MESH_ONBOARDED_VAR. */
+const OVERLORD_PRIMED_VAR = 'overlordPrimed';
+
+/** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
+ *  guards are human-only, unreachable from the MCP surface. */
+const AGENT_RULE_GUARDS = {
+  agent_state: ['idle'] as ('idle' | 'active' | 'permission')[],
+  min_quiet_ms: 3000,
+  require_live_repl: true,
+  max_per_hour: 1,
+  only_if_no_outstanding: true,
+};
+
+/** Stable identity for a proposed change, for the don't-re-pitch-rejections set. */
+function changeKey(c: OverlordRuleChange): string {
+  return JSON.stringify([c.op, c.rule_id ?? c.rule?.name ?? '', c.patch ?? c.workspaces ?? c.rule?.when ?? null]);
+}
+
+function describeChange(c: OverlordRuleChange): string {
+  switch (c.op) {
+    case 'create': return `create "${c.rule?.name ?? 'unnamed'}"`;
+    case 'update': return `update ${c.rule_id}`;
+    case 'rescope': return `rescope ${c.rule_id} → ${c.workspaces?.length ? `${c.workspaces.length} workspace(s)` : 'global'}`;
+    default: return `${c.op} ${c.rule_id}`;
+  }
+}
+
+function matchRule(rules: OverlordRule[], key: string | undefined): OverlordRule | undefined {
+  if (!key) return undefined;
+  return rules.find((r) => r.id === key || r.default_id === key);
+}
+
+/** Apply one approved change. Enforces the field tiers mechanically: guards are never
+ *  taken from the agent (created rules get AGENT_RULE_GUARDS; update patches have any
+ *  guards stripped), and applied edits set user_modified so seeding won't overwrite. */
+function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): OverlordRule[] {
+  switch (c.op) {
+    case 'create': {
+      if (!c.rule?.name || !c.rule.when || !c.rule.sequence?.length) return rules;
+      const rule: OverlordRule = {
+        id: crypto.randomUUID(),
+        name: c.rule.name,
+        description: c.rule.description ?? null,
+        enabled: c.rule.enabled ?? true,
+        workspaces: c.rule.workspaces ?? [],
+        cooldown: c.rule.cooldown ?? 1800,
+        origin: 'proposed',
+        user_modified: true,
+        when: c.rule.when,
+        guards: { ...AGENT_RULE_GUARDS },
+        sequence: c.rule.sequence,
+        supersedes: c.rule.supersedes,
+      };
+      return [rule, ...rules];
+    }
+    case 'update': {
+      const target = matchRule(rules, c.rule_id);
+      if (!target || !c.patch) return rules;
+      const { guards: _guards, id: _id, default_id: _did, ...patch } = c.patch;
+      return rules.map((r) => (r.id === target.id ? { ...r, ...patch, user_modified: true } : r));
+    }
+    case 'rescope': {
+      const target = matchRule(rules, c.rule_id);
+      if (!target) return rules;
+      return rules.map((r) => (r.id === target.id ? { ...r, workspaces: c.workspaces ?? [], user_modified: true } : r));
+    }
+    case 'enable':
+    case 'disable': {
+      const target = matchRule(rules, c.rule_id);
+      if (!target) return rules;
+      return rules.map((r) => (r.id === target.id ? { ...r, enabled: c.op === 'enable' } : r));
+    }
+    case 'delete': {
+      const target = matchRule(rules, c.rule_id);
+      if (!target) return rules;
+      return rules.filter((r) => r.id !== target.id);
+    }
+  }
+}
+
 function createOverlordStore() {
   // ── Reactive surfaces (board + gauges + queues) ─────────────────────────────
   let facts = $state<Map<string, OverlordTabFacts>>(new Map());
@@ -98,6 +206,12 @@ function createOverlordStore() {
   let escalations = $state<OverlordEscalation[]>([]);
   let recentLedger = $state<OverlordLedgerEntry[]>([]);
   let running = $state(false);
+  let agentReports = $state<Map<string, AgentReport>>(new Map());
+  let pendingRuleChanges = $state<PendingRuleChangeBatch | null>(null);
+  // Resolver for the MCP proposeRuleChanges round trip (the modal answers it).
+  let ruleChangeResolver: ((res: { approved: string[]; rejected: string[]; pending?: boolean }) => void) | null = null;
+  // What Overlord already pitched and the human rejected — refuse re-pitches this session.
+  const rejectedChangeKeys = new Set<string>();
 
   // ── Engine bookkeeping (non-reactive) ───────────────────────────────────────
   const prevAgentState = new Map<string, AgentState | undefined>();
@@ -347,6 +461,84 @@ function createOverlordStore() {
         return;
       }
     }
+  }
+
+  // ── Overlord agent priming (§9.2) ───────────────────────────────────────────
+
+  function describeCondition(when: OverlordRule['when']): string {
+    switch (when.event) {
+      case 'context_pct': return `context reaches ${when.at_or_above}%`;
+      case 'turn_end': return 'a turn ends';
+      case 'commit': return 'a git commit lands';
+      case 'tab_idle': return `a tab sits idle ${when.minutes} min`;
+      case 'task_stale': return `a board task goes stale ${when.days} days`;
+      case 'agent_unready': return 'an agent is not running';
+      case 'no_todo_list': return 'sustained work has no todo list';
+      case 'permission_pending': return `a permission waits ${when.minutes} min`;
+      case 'directive_unacked': return `a directive is unacked ${when.minutes} min`;
+    }
+  }
+
+  /** The ruleset rendered as the agent's standing doctrine — one document driving both
+   *  the engine and the agent's judgment, so they can't drift apart (§9.2). */
+  function buildDoctrine(): string {
+    const wsName = (id: string) => workspacesStore.workspaces.find((w) => w.id === id)?.name ?? id.slice(0, 8);
+    const ruleLines = preferencesStore.overlordRules
+      .filter((r) => r.enabled)
+      .map((r) => {
+        const scope = r.workspaces.length ? ` [only: ${r.workspaces.map(wsName).join(', ')}]` : '';
+        const steps = r.sequence.map((s) => `${s.kind === 'slash' ? '' : '"'}${s.text}${s.kind === 'slash' ? '' : '"'}`).join(' → ');
+        return `  - ${r.name}: when ${describeCondition(r.when)} → ${steps}${scope}`;
+      })
+      .join('\n');
+    return (
+      `⟦OVERLORD⟧ You are the Overlord agent for this maiTerm window — the supervisor's judgment layer. ` +
+      `A deterministic engine handles the routine supervision; you handle what it can't resolve, plus conversation with your human.\n\n` +
+      `How this works:\n` +
+      `  - The engine queues escalations and rings you with a one-line nudge. When that happens, call listEscalations for the content, then resolve each one.\n` +
+      `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). Guard refusals (busy, no live REPL, outstanding directive) come back structured; wait and retry or escalate.\n` +
+      `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger.\n` +
+      `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
+      `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
+      `Standing doctrine (the active ruleset — improvise with these same thresholds and phrasings when asked to check on tabs by hand):\n` +
+      `${ruleLines || '  (no rules enabled yet)'}\n\n` +
+      `Nothing to do right now? Check in with your human briefly, then stay silent until an escalation or instruction arrives.`
+    );
+  }
+
+  /** Prime the Overlord agent tab with its doctrine — idempotent within a session and
+   *  across restarts (persisted var), mirroring the mesh tryPrime mechanics. */
+  const primedAgents = new Set<string>();
+  async function tryPrimeOverlordAgent() {
+    const ws = overlordWorkspace();
+    if (!ws) return;
+    for (const pane of ws.panes) {
+      for (const tab of pane.tabs) {
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
+        if (primedAgents.has(tab.id)) continue;
+        if (mappedState(tab.id) !== 'idle') continue;
+        primedAgents.add(tab.id); // mark before await so a racing tick can't double-prime
+        if (getVariables(tab.id)?.get(OVERLORD_PRIMED_VAR) === '1') continue;
+        if (!(await hasLiveRepl(tab.id))) { primedAgents.delete(tab.id); continue; }
+        const inst = terminalsStore.get(tab.id);
+        if (!inst) { primedAgents.delete(tab.id); continue; }
+        try {
+          await bracketedPasteSubmit(inst.ptyId, buildDoctrine());
+          await setVariable(tab.id, OVERLORD_PRIMED_VAR, '1');
+          logInfo(`overlord: primed agent tab ${tab.id.slice(0, 8)} with doctrine`);
+        } catch (e) {
+          primedAgents.delete(tab.id);
+          logError(`overlord: agent priming failed: ${e}`);
+        }
+        return;
+      }
+    }
+  }
+
+  /** Is this tab the Overlord agent (a tab inside the Overlord workspace)? Gates the
+   *  supervisor-only MCP tools — supervised agents never get them. */
+  function isOverlordAgentTab(tabId: string): boolean {
+    return workspaceForTab(tabId)?.overlord === true;
   }
 
   /** Run a rule's sequence against a tab. All ledger writes for the run happen here. */
@@ -604,6 +796,7 @@ function createOverlordStore() {
           break; // one rule fire per tab per tick — directives serialize anyway
         }
       }
+      void tryPrimeOverlordAgent();
       if (sweepDoneTasks(now)) boardChanged = true;
       if (boardChanged || tasksDirty) {
         tasksDirty = false;
@@ -718,6 +911,138 @@ function createOverlordStore() {
     deleteTask(id: string) {
       tasks = tasks.filter((t) => t.id !== id);
       persistTasks();
+    },
+
+    get agentReports() { return agentReports; },
+    get pendingRuleChanges() { return pendingRuleChanges; },
+
+    isOverlordAgentTab,
+
+    /** replyToOverlord (§8) — the active return channel. Called from the MCP tool
+     *  handler with the CALLING tab's id. */
+    handleAgentReply(tabId: string, args: {
+      kind: string; state: string; summary: string; task?: string;
+      blockers?: string[]; next?: string; needs_human?: boolean;
+    }): { received: true; outstanding_directive: string | null } {
+      const summary = (args.summary ?? '').slice(0, 280);
+      agentReports = new Map(agentReports);
+      agentReports.set(tabId, {
+        tabId,
+        kind: args.kind,
+        state: args.state,
+        summary,
+        task: args.task,
+        ts: Date.now(),
+      });
+      const d = outstanding.get(tabId);
+      if (args.kind === 'ack' && d) {
+        d.acked = true;
+      }
+      if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
+        const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';
+        escalate(tabId, null, 'agent_report', `${tabName(tabId)} reports ${args.state}: ${summary}${blockers}`);
+      }
+      return { received: true, outstanding_directive: d && !d.acked ? d.text : null };
+    },
+
+    /** listEscalations (§9.1) — Overlord-agent-only pull; content stays out of the
+     *  wake nudge so the agent's transcript stays lean. */
+    listEscalationsFor(callerTabId: string): { error: string } | { escalations: unknown[] } {
+      if (!isOverlordAgentTab(callerTabId)) {
+        return { error: 'listEscalations is available only to the Overlord agent tab.' };
+      }
+      const items = this.consumeEscalations().map((e) => ({
+        id: e.id,
+        ts: new Date(e.ts).toISOString(),
+        tab_id: e.tabId,
+        tab_name: tabName(e.tabId),
+        workspace: workspaceForTab(e.tabId)?.name ?? null,
+        kind: e.kind,
+        detail: e.detail,
+      }));
+      return { escalations: items };
+    },
+
+    /** proposeRuleChanges (§10): queue the batch for explicit human approval (a modal
+     *  with per-change selection). Resolves when the human decides, or returns
+     *  pending:true if they haven't within the MCP window — the modal stays up and the
+     *  decision applies asynchronously. */
+    async proposeRuleChanges(
+      callerTabId: string,
+      rationale: string,
+      changes: OverlordRuleChange[],
+    ): Promise<Record<string, unknown>> {
+      if (!isOverlordAgentTab(callerTabId)) {
+        return { error: 'proposeRuleChanges is available only to the Overlord agent tab.' };
+      }
+      if (pendingRuleChanges) {
+        return { error: 'A rule-change batch is already awaiting the human. Wait for it to resolve.' };
+      }
+      if (!changes?.length) return { error: 'No changes given.' };
+      const repitched = changes.filter((c) => rejectedChangeKeys.has(changeKey(c)));
+      if (repitched.length === changes.length) {
+        return { error: 'Every change in this batch was already rejected by the human. Do not re-propose.' };
+      }
+      const batch: PendingRuleChangeBatch = {
+        id: crypto.randomUUID(),
+        tabId: callerTabId,
+        rationale: String(rationale ?? '').slice(0, 1000),
+        changes,
+      };
+      pendingRuleChanges = batch;
+      dispatch('Overlord', 'Overlord proposes rule changes — review in the approval prompt.', 'info');
+      const decision = await new Promise<{ approved: string[]; rejected: string[]; pending?: boolean }>((resolve) => {
+        ruleChangeResolver = resolve;
+        // Answer inside the MCP response window; the modal stays up past this.
+        setTimeout(() => {
+          if (ruleChangeResolver === resolve) {
+            ruleChangeResolver = null;
+            resolve({ approved: [], rejected: [], pending: true });
+          }
+        }, 100_000);
+      });
+      if (decision.pending) {
+        return {
+          pending: true,
+          note: 'The human has not decided yet. The approval prompt stays open; check the ruleset later. Do not re-propose.',
+        };
+      }
+      return { approved: decision.approved, rejected: decision.rejected };
+    },
+
+    /** The approval modal's answer: apply the selected change indexes, reject the rest. */
+    resolveRuleChanges(batchId: string, approvedIdx: number[]) {
+      const batch = pendingRuleChanges;
+      if (!batch || batch.id !== batchId) return;
+      pendingRuleChanges = null;
+      const approved: string[] = [];
+      const rejected: string[] = [];
+      let rules = ($state.snapshot(preferencesStore.overlordRules) as OverlordRule[]);
+      batch.changes.forEach((change, i) => {
+        const label = describeChange(change);
+        if (!approvedIdx.includes(i)) {
+          rejectedChangeKeys.add(changeKey(change));
+          rejected.push(label);
+          return;
+        }
+        // Deleting a seeded default must also hide its default_id, or the next
+        // startup re-seeds it right back.
+        if (change.op === 'delete') {
+          const target = matchRule(rules, change.rule_id);
+          if (target?.default_id && !preferencesStore.hiddenDefaultOverlordRules.includes(target.default_id)) {
+            void preferencesStore.setHiddenDefaultOverlordRules([
+              ...preferencesStore.hiddenDefaultOverlordRules,
+              target.default_id,
+            ]);
+          }
+        }
+        rules = applyRuleChange(rules, change);
+        approved.push(label);
+        ledger(batch.tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `rule change approved: ${label}` }, 'sent');
+      });
+      if (approved.length) void preferencesStore.setOverlordRules(rules);
+      ruleChangeResolver?.({ approved, rejected });
+      ruleChangeResolver = null;
     },
 
     /** Drive a tab on the Overlord agent's behalf (S4 driveTab): same guards, same

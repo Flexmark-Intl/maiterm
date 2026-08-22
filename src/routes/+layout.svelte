@@ -34,6 +34,7 @@
   import CommsMonitorModal from '$lib/components/CommsMonitorModal.svelte';
   import MeshCockpit from '$lib/components/MeshCockpit.svelte';
   import MeshSetupModal from '$lib/components/MeshSetupModal.svelte';
+  import OverlordRuleChangeModal from '$lib/components/overlord/OverlordRuleChangeModal.svelte';
   import { detectLanguageFromPath, isImageFile, isPdfFile } from '$lib/utils/languageDetect';
   import { readFile } from '$lib/tauri/commands';
   import type { EditorFileInfo } from '$lib/tauri/types';
@@ -1089,6 +1090,7 @@
   onclose={() => { meshSetupWorkspaceId = null; }}
   onEnabled={() => { showMeshCockpit = true; }}
 />
+<OverlordRuleChangeModal />
 <!-- Right-edge pull-tab: appears when the active workspace is a mesh and the cockpit is closed. -->
 {#if workspacesStore.activeWorkspace?.bridge_all && !showMeshCockpit && meshSetupWorkspaceId === null}
   <button

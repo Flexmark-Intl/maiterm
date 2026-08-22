@@ -1843,7 +1843,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 8] = [
+const PEER_ADDRESSING_TOOLS: [&str; 11] = [
     "sendToBridgedAgent",
     "getBridgedAgent",
     "listBridgedPeers",
@@ -1852,6 +1852,11 @@ const PEER_ADDRESSING_TOOLS: [&str; 8] = [
     "completeTopic",
     "postCommsReply",
     "startCommsThread",
+    // Overlord tools that speak with authority (drive tabs / mutate rules / drain the
+    // escalation queue) must never run on a deduced identity either.
+    "driveTab",
+    "proposeRuleChanges",
+    "listEscalations",
 ];
 
 /// Whether to refuse a call because the tab it would act as was DEDUCED rather than stated.
@@ -2146,13 +2151,33 @@ async fn process_message(
                         }));
                     }
 
+                    // Overlord standing instruction (docs/overlord.md §8): only when the
+                    // feature is on AND this tab's window actually has an Overlord workspace.
+                    let overlord_present = {
+                        let app_data = state.app_data.read();
+                        app_data.preferences.overlord_enabled
+                            && app_data.windows.iter().any(|w| {
+                                w.workspaces.iter().any(|ws| ws.overlord)
+                                    && w.workspaces.iter().any(|ws| {
+                                        ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id))
+                                    })
+                            })
+                    };
+                    let mut init_text = format!(
+                        "Session initialized. All subsequent tool calls on this connection will target tab {}. You no longer need to pass tabId.",
+                        tab_id
+                    );
+                    if overlord_present {
+                        init_text.push_str(
+                            "\n\nThis window has an Overlord coordinating work across tabs. Call replyToOverlord \
+                             with kind:'ready' now. When you finish something you were asked to do, ack it. \
+                             If you're blocked on a human decision, escalate with needs_human.",
+                        );
+                    }
                     let resp = JsonRpcResponse::success(
                         id,
                         serde_json::json!({
-                            "content": [{ "type": "text", "text": format!(
-                                "Session initialized. All subsequent tool calls on this connection will target tab {}. You no longer need to pass tabId.",
-                                tab_id
-                            ) }]
+                            "content": [{ "type": "text", "text": init_text }]
                         }),
                     );
                     return Some(serde_json::to_string(&resp).unwrap());

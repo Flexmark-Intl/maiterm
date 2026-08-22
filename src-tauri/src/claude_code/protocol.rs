@@ -611,6 +611,83 @@ pub fn tool_list_response() -> Value {
         }
     ]).as_array().unwrap().clone());
 
+    // ── Overlord tools (docs/overlord.md §8, §10, §12) ──
+    // replyToOverlord is for every supervised agent; the other three are for the
+    // Overlord agent tab only (the frontend refuses callers outside the Overlord
+    // workspace). All frontend-handled — they round-trip into the window's engine.
+    tools.extend(serde_json::json!([
+        {
+            "name": "replyToOverlord",
+            "description": "Report to this window's Overlord (the supervisor coordinating work across tabs). One shape, four uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked), 'escalate' when you need attention. Set needs_human ONLY for things a human must decide — it raises a real escalation. Keep summary under 280 chars.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "kind": { "type": "string", "enum": ["ready", "ack", "status", "escalate"] },
+                    "state": { "type": "string", "enum": ["working", "blocked", "done", "idle"] },
+                    "summary": { "type": "string", "description": "Plain prose, ≤280 chars" },
+                    "task": { "type": "string", "description": "What you believe you're working on" },
+                    "blockers": { "type": "array", "items": { "type": "string" } },
+                    "next": { "type": "string" },
+                    "needs_human": { "type": "boolean", "description": "true = a human decision is required" },
+                    "directive_id": { "type": "string", "description": "Usually omitted — acks match the tab's most recent outstanding directive" }
+                },
+                "required": ["kind", "state", "summary"]
+            }
+        },
+        {
+            "name": "listEscalations",
+            "description": "Overlord agent only: pull the queued escalations for this window (step timeouts, blocked agents, unacked directives, agents asking for a human). Returns each with its tab, workspace and detail, and marks them read. Call this when a wake nudge says escalations are pending.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "driveTab",
+            "description": "Overlord agent only: inject a directive into another tab in this window, typed with the human's full authority (the target cannot tell it from the human). kind 'process' = free-text directive; 'slash' = a slash command like /compact. The same mechanical guards as automated rules apply — a structured refusal comes back if the target has no live agent REPL, is busy, or already has an outstanding directive. Every call lands verbatim in the ledger.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id (from listWorkspaces)" },
+                    "kind": { "type": "string", "enum": ["process", "slash"] },
+                    "text": { "type": "string", "description": "The exact text to type into the target tab" }
+                },
+                "required": ["tab_id", "kind", "text"]
+            }
+        },
+        {
+            "name": "proposeRuleChanges",
+            "description": "Overlord agent only: propose changes to the Overlord ruleset. Nothing applies without explicit human approval — the human approves or rejects each change individually in a native prompt. Batch related changes into ONE call. Guards (require_live_repl, only_if_no_outstanding, max_per_hour) are not proposable at all. Do not re-propose rejected changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "rationale": { "type": "string", "description": "Why, in one paragraph — shown to the human" },
+                    "changes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "op": { "type": "string", "enum": ["create", "update", "rescope", "enable", "disable", "delete"] },
+                                "rule": { "type": "object", "description": "op create: the full rule (id may be omitted)" },
+                                "rule_id": { "type": "string", "description": "ops other than create: target rule id or default_id" },
+                                "patch": { "type": "object", "description": "op update: partial rule fields (guards are ignored)" },
+                                "workspaces": { "type": "array", "items": { "type": "string" }, "description": "op rescope: new workspace scope ([] = global)" }
+                            },
+                            "required": ["op"]
+                        }
+                    }
+                },
+                "required": ["rationale", "changes"]
+            }
+        }
+    ]).as_array().unwrap().clone());
+
     serde_json::json!({ "tools": tools })
 }
 

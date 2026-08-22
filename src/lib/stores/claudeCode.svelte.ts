@@ -10,6 +10,7 @@ import { dispatch as dispatchNotification } from '$lib/stores/notificationDispat
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
+import { overlordStore } from '$lib/stores/overlord.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -196,6 +197,36 @@ function createClaudeCodeStore() {
           result = handleCompleteTopic(args as { tabId?: string; topicId: string });
           break;
         // getPreferences, setPreference, createBackup, listWindows handled directly on backend
+        case 'replyToOverlord': {
+          const a = args as { tabId?: string; kind: string; state: string; summary: string; task?: string; blockers?: string[]; next?: string; needs_human?: boolean };
+          result = a.tabId
+            ? overlordStore.handleAgentReply(a.tabId, a)
+            : { error: 'No tab identity — call initSession first.' };
+          break;
+        }
+        case 'listEscalations': {
+          const a = args as { tabId?: string };
+          result = a.tabId
+            ? overlordStore.listEscalationsFor(a.tabId)
+            : { error: 'No tab identity — call initSession first.' };
+          break;
+        }
+        case 'driveTab': {
+          const a = args as { tabId?: string; tab_id: string; kind: 'process' | 'slash'; text: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'driveTab is available only to the Overlord agent tab.' };
+          else if (!a.tab_id || !a.text) result = { error: 'tab_id and text are required.' };
+          else if (a.tab_id === a.tabId) result = { sent: false, reason: 'cannot drive your own tab' };
+          else result = await overlordStore.driveTab(a.tab_id, a.kind === 'slash' ? 'slash' : 'process', a.text);
+          break;
+        }
+        case 'proposeRuleChanges': {
+          const a = args as { tabId?: string; rationale: string; changes: import('$lib/stores/overlord.svelte').OverlordRuleChange[] };
+          result = a.tabId
+            ? await overlordStore.proposeRuleChanges(a.tabId, a.rationale, a.changes ?? [])
+            : { error: 'No tab identity — call initSession first.' };
+          break;
+        }
         default:
           result = { error: `Unknown tool: ${tool}` };
       }
