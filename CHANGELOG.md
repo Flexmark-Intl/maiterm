@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.25.4
+
+- **Fix a question with tick-boxes and a free-text answer not submitting from the phone.** An `AskUserQuestion` offering both multiple selections *and* **Other** could be answered but never submitted — the form sat open on the desktop with your answer complete inside it, the box ticked and your text in place, until someone escaped it. The keystrokes maiLink used to leave the free-text row were both being swallowed by the text input, so it never got out of the row to reach the form's Submit. It now leaves the way you would: down to the form's own Submit button, then Enter.
+- **A Mattermost thread can hand an agent any kind of file, not just screenshots.** Attachments were checked against an image allowlist, so a PDF, a markdown spec, or a Word document dropped on a thread was turned away with "not a viewable image; ask a human to describe it" and never reached the agent at all. Every attachment is now staged for the agent to open, with a note on how to read that particular kind — directly for images, PDFs and text, by extracting the text for Office documents, or with shell tools for anything else. The per-file limit is also raised from 10 MB to 20 MB, matching what the agent can already send back.
+
 ## v1.25.3
 
 - **Selecting text with the mouse keeps up with the cursor again.** Dragging a selection across a busy pane fell seconds behind and then snapped into place once you let go. Every mouse move asked the terminal for a full repaint, and at 60–120 moves a second those queued up faster than the renderer could drain them — the backend was never the bottleneck, it answers in well under a millisecond. Updates are now coalesced to what the renderer can actually absorb, and the final cursor position always lands. Two related drag fixes came out of it: dragging past the edge and flicking to the *opposite* edge now reverses the auto-scroll instead of continuing the wrong way, and re-entering the viewport mid-drag no longer leaves the highlight stretched to the edge row.
