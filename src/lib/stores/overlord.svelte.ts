@@ -115,6 +115,18 @@ export interface PendingRuleChangeBatch {
   changes: OverlordRuleChange[];
 }
 
+/** What one scan pass found. `silent` are running tabs with no todo signal — the
+ *  candidates a census would ask, already filtered by the ask-cooldown. */
+export interface ScanSummary {
+  at: number;
+  tabsSeen: number;
+  mirrored: number;
+  adopted: number;
+  silent: string[];
+  /** Set once a census has run against this scan's silent set. */
+  asked?: number;
+}
+
 /** Latest replyToOverlord report per tab, for the board. */
 export interface AgentReport {
   tabId: string;
@@ -215,6 +227,8 @@ function createOverlordStore() {
   let recentLedger = $state<OverlordLedgerEntry[]>([]);
   let running = $state(false);
   let agentReports = $state<Map<string, AgentReport>>(new Map());
+  let lastScan = $state<ScanSummary | null>(null);
+  let scanning = $state(false);
   let pendingRuleChanges = $state<PendingRuleChangeBatch | null>(null);
   // Resolver for the MCP proposeRuleChanges round trip (the modal answers it).
   let ruleChangeResolver: ((res: { approved: string[]; rejected: string[]; pending?: boolean }) => void) | null = null;
@@ -807,6 +821,70 @@ function createOverlordStore() {
     );
   }
 
+  // ── Scan & census: populating the board from what's already running ─────────
+  //
+  // The board's only automatic feeder is the TodoWrite mirror, which sees a tab only
+  // when its transcript tail happens to contain a TodoWrite — so Codex tabs, tabs
+  // working without a todo list, and tabs whose todos scrolled past the tail window are
+  // all invisible. Scanning closes that gap in two deliberately separate phases:
+  //
+  //   ADOPT   free, silent, safe to repeat — mirror todos where they exist, otherwise
+  //           stand up one placeholder row per running tab. No injection at all.
+  //   CENSUS  opt-in, one directive per silent tab, answered through replyToOverlord
+  //           (§8's active channel). Never automatic: asking 40 tabs burns a turn in
+  //           each and writes into 40 transcripts, which must never be a side effect
+  //           of opening a board.
+  //
+  // Both are idempotent. Adopt matches existing rows on (origin, tab_id) so a re-scan
+  // updates instead of duplicating; census stamps a persisted per-tab timestamp so a
+  // re-scan never re-asks the same tab inside the cooldown.
+
+  /** Persisted per-tab marker (trigger variable, like MESH_ONBOARDED_VAR) recording when
+   *  this tab was last asked what it's working on. */
+  const CENSUS_VAR = 'overlordCensusAt';
+  const CENSUS_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+  const CENSUS_TEXT =
+    'Overlord status sweep — no action needed, and please don\'t change anything. ' +
+    'In one line, what are you working on right now? Answer by calling the replyToOverlord ' +
+    "tool with kind:'status', your state, a one-line summary, and `task` set to that one line.";
+
+  /** Find this tab's Overlord-owned board row (the placeholder a scan stands up, later
+   *  retitled by the tab's own census answer). At most one per tab, by construction. */
+  function overlordRowFor(tabId: string): OverlordTask | undefined {
+    return tasks.find((t) => t.origin === 'overlord' && t.tab_id === tabId && t.state !== 'done');
+  }
+
+  /** Create or retitle a tab's Overlord row. Used by both the scan (tab name as a
+   *  placeholder) and an incoming census reply (the agent's own description). */
+  function upsertOverlordRow(tabId: string, title: string, state: OverlordTaskState): boolean {
+    const ws = workspaceForTab(tabId);
+    if (!ws) return false;
+    const stamp = new Date().toISOString();
+    const existing = overlordRowFor(tabId);
+    if (existing) {
+      if (existing.title === title && existing.state === state) return false;
+      existing.title = title;
+      existing.state = state;
+      existing.updated_at = stamp;
+      return true;
+    }
+    tasks.push({
+      id: crypto.randomUUID(),
+      title,
+      workspace_id: ws.id,
+      tab_id: tabId,
+      state,
+      origin: 'overlord',
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    return true;
+  }
+
+  function taskStateForAgent(st: AgentState | undefined): OverlordTaskState {
+    return st === 'permission' ? 'blocked' : 'active';
+  }
+
   // ── The tick ────────────────────────────────────────────────────────────────
 
   async function tick() {
@@ -1009,6 +1087,107 @@ function createOverlordStore() {
     },
 
     get agentReports() { return agentReports; },
+    get lastScan() { return lastScan; },
+    get scanning() { return scanning; },
+    clearScan() { lastScan = null; },
+
+    /** ADOPT pass — populate the board from every currently-running agent tab. Free,
+     *  silent, and safe to run as often as you like. Returns what it found. */
+    async scanWorkspaces(): Promise<ScanSummary> {
+      if (scanning) return lastScan ?? { at: Date.now(), tabsSeen: 0, mirrored: 0, adopted: 0, silent: [] };
+      scanning = true;
+      try {
+        const pairs = agentTabs();
+        // Refresh facts first so a scan reflects reality now, not the last 5s tick.
+        if (pairs.length) {
+          try {
+            const res = await commands.getOverlordTabFacts(pairs.map((p) => p.tab.id));
+            facts = new Map(Object.entries(res));
+          } catch (e) {
+            logError(`overlord: scan facts poll failed: ${e}`);
+          }
+        }
+        const now = Date.now();
+        let mirrored = 0, adopted = 0, tabsSeen = 0, changed = false;
+        const silent: string[] = [];
+        for (const { tab } of pairs) {
+          const live = claudeStateStore.getState(tab.id);
+          if (!live) continue; // only tabs actually running an agent right now
+          tabsSeen++;
+          const f = facts.get(tab.id);
+          if (f?.todos?.length) {
+            if (syncMirrorTasks(tab.id, f, now)) changed = true;
+            mirrored++;
+            continue;
+          }
+          // No todo signal — stand up (or refresh) one row for the tab itself, titled
+          // with the tab name until the tab tells us something better.
+          const had = !!overlordRowFor(tab.id);
+          const title = overlordRowFor(tab.id)?.title ?? tab.name;
+          if (upsertOverlordRow(tab.id, title, taskStateForAgent(live.state))) changed = true;
+          if (!had) adopted++;
+          const askedAt = Number(getVariables(tab.id)?.get(CENSUS_VAR) ?? 0);
+          if (now - askedAt >= CENSUS_COOLDOWN_MS) silent.push(tab.id);
+        }
+        if (changed) {
+          tasks = [...tasks];
+          persistTasks();
+        }
+        lastScan = { at: now, tabsSeen, mirrored, adopted, silent };
+        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} todo lists mirrored, ${adopted} adopted, ${silent.length} silent`);
+        return lastScan;
+      } finally {
+        scanning = false;
+      }
+    },
+
+    /** CENSUS pass — ask the given tabs what they're working on. One short directive
+     *  each, through the same mechanical guards as any rule, ledgered as human-origin
+     *  (you asked for it). Skips anything busy, guarded, or asked recently. */
+    async askCensus(tabIds: string[]): Promise<{ asked: number; skipped: number }> {
+      const step = { kind: 'process' as const, text: CENSUS_TEXT };
+      let asked = 0, skipped = 0;
+      for (const tabId of tabIds) {
+        const askedAt = Number(getVariables(tabId)?.get(CENSUS_VAR) ?? 0);
+        if (Date.now() - askedAt < CENSUS_COOLDOWN_MS) { skipped++; continue; }
+        if (outstanding.has(tabId) || rituals.has(tabId)) {
+          ledger(tabId, null, 'human', 0, step, 'blocked_guard');
+          skipped++; continue;
+        }
+        if (mappedState(tabId) !== 'idle') { skipped++; continue; }
+        if (!(await hasLiveRepl(tabId))) {
+          ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+          skipped++; continue;
+        }
+        const inst = terminalsStore.get(tabId);
+        if (!inst) { skipped++; continue; }
+        // Don't type over a repaint (same quiescence rule as every other injection).
+        const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
+        if (Date.now() - lastOut < 3000) { skipped++; continue; }
+        try {
+          await bracketedPasteSubmit(inst.ptyId, CENSUS_TEXT);
+        } catch (e) {
+          logError(`overlord: census inject failed for ${tabId.slice(0, 8)}: ${e}`);
+          skipped++; continue;
+        }
+        setOutstanding(tabId, {
+          id: crypto.randomUUID(),
+          ruleId: null,
+          tabId,
+          stepIndex: 0,
+          text: CENSUS_TEXT,
+          sentAt: Date.now(),
+          acked: false,
+        });
+        ledger(tabId, null, 'human', 0, step, 'sent');
+        await setVariable(tabId, CENSUS_VAR, String(Date.now()));
+        asked++;
+        await sleep(400); // stagger so a wide sweep doesn't hammer every PTY at once
+      }
+      if (lastScan) lastScan = { ...lastScan, silent: [], asked };
+      logInfo(`overlord: census — asked ${asked}, skipped ${skipped}`);
+      return { asked, skipped };
+    },
     get pendingRuleChanges() { return pendingRuleChanges; },
 
     isOverlordAgentTab,
@@ -1029,6 +1208,14 @@ function createOverlordStore() {
         task: args.task,
         ts: Date.now(),
       });
+      // A census answer (or any status carrying `task`) is what upgrades this tab's
+      // placeholder row into a real description of the work.
+      if (args.task?.trim()) {
+        if (upsertOverlordRow(tabId, args.task.trim().slice(0, 200), taskStateForAgent(mappedState(tabId)))) {
+          tasks = [...tasks];
+          persistTasks();
+        }
+      }
       const d = outstanding.get(tabId);
       if (args.kind === 'ack' && d) {
         d.acked = true;

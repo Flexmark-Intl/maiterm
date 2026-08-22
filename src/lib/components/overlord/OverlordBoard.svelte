@@ -169,6 +169,16 @@
   });
   const needsYou = $derived(signals.length);
   const engineOn = $derived(preferencesStore.overlordEnabled);
+  const scan = $derived(overlordStore.lastScan);
+  let asking = $state(false);
+
+  async function runScan() { await overlordStore.scanWorkspaces(); }
+
+  async function runCensus() {
+    if (!scan?.silent.length || asking) return;
+    asking = true;
+    try { await overlordStore.askCensus(scan.silent); } finally { asking = false; }
+  }
 
   // ── Board helpers ───────────────────────────────────────────────────────────
   function tasksFor(wsId: string, state: OverlordTaskState) {
@@ -244,14 +254,21 @@
         {/each}
       </nav>
 
-      <label class="ov-check mode-toggle" title="Rules land as proposals you approve, instead of firing on their own">
-        <input
-          type="checkbox"
-          checked={preferencesStore.overlordProposeMode}
-          onchange={(e) => preferencesStore.setOverlordProposeMode((e.target as HTMLInputElement).checked)}
-        />
-        Propose first
-      </label>
+      <button class="ov-btn scan-btn" onclick={runScan} disabled={overlordStore.scanning}
+              title="Read every running agent tab and populate the board from it. Safe to repeat — nothing is typed into any tab.">
+        {overlordStore.scanning ? 'Scanning…' : 'Scan tabs'}
+      </button>
+
+      <div class="mode-toggle" title="Rules land as proposals you approve, instead of typing into tabs on their own">
+        <span class="ov-label">Propose first</span>
+        <button
+          class="toggle"
+          class:active={preferencesStore.overlordProposeMode}
+          onclick={() => preferencesStore.setOverlordProposeMode(!preferencesStore.overlordProposeMode)}
+          aria-pressed={preferencesStore.overlordProposeMode}
+          aria-label="Toggle propose mode"
+        ><span class="toggle-knob"></span></button>
+      </div>
     </div>
 
     {#if inFlight > 0}<div class="sweep"><span></span></div>{/if}
@@ -299,6 +316,54 @@
 
     <!-- ── Triage ──────────────────────────────────────────────────────── -->
     {#if view === 'deck'}
+      {#if scan}
+        <article class="signal ov-panel scan-card ov-in" style:--tone="var(--ov-cool)">
+          <div class="signal-rail"></div>
+          <div class="signal-body">
+            <div class="signal-head">
+              <span class="ov-chip ov-chip-tone">scan</span>
+              <span class="signal-title">
+                {scan.tabsSeen} running tab{scan.tabsSeen === 1 ? '' : 's'} ·
+                {scan.mirrored} todo list{scan.mirrored === 1 ? '' : 's'} mirrored
+                {#if scan.adopted > 0}· {scan.adopted} added{/if}
+              </span>
+              <span class="signal-age ov-mono">{fmtAge(scan.at)}</span>
+            </div>
+            {#if scan.silent.length}
+              <p class="signal-text">
+                {scan.silent.length} tab{scan.silent.length === 1 ? ' is' : 's are'} running with no todo list,
+                so the board only knows {scan.silent.length === 1 ? 'its' : 'their'} tab name. Overlord can ask
+                {scan.silent.length === 1 ? 'it' : 'them'} what {scan.silent.length === 1 ? "it's" : "they're"}
+                working on — one short question each, answered back into the board.
+              </p>
+              <div class="signal-actions">
+                <button class="ov-btn ov-btn-primary" onclick={runCensus} disabled={asking}>
+                  {asking ? 'Asking…' : `Ask ${scan.silent.length}`}
+                </button>
+                <button class="ov-btn" onclick={() => overlordStore.clearScan()}>Dismiss</button>
+              </div>
+            {:else if scan.asked !== undefined}
+              <p class="signal-text">
+                {#if scan.asked === 0}
+                  Nothing was asked — every candidate was busy, guarded, or asked recently.
+                {:else}
+                  Asked {scan.asked} tab{scan.asked === 1 ? '' : 's'}. Answers land on the board
+                  as each one replies; nothing else will be sent.
+                {/if}
+              </p>
+              <div class="signal-actions">
+                <button class="ov-btn" onclick={() => overlordStore.clearScan()}>Dismiss</button>
+              </div>
+            {:else}
+              <p class="signal-text">Every running tab is represented on the board.</p>
+              <div class="signal-actions">
+                <button class="ov-btn" onclick={() => overlordStore.clearScan()}>Dismiss</button>
+              </div>
+            {/if}
+          </div>
+        </article>
+      {/if}
+
       {#if signals.length === 0}
         <div class="allclear ov-in">
           <div class="allclear-rule"></div>
@@ -456,6 +521,19 @@
 
     <!-- ── Board ───────────────────────────────────────────────────────── -->
     {#if view === 'board'}
+      {#if overlordStore.tasks.length === 0}
+        <div class="board-empty ov-panel ov-bracket ov-in">
+          <p class="ov-label-lead">The board is empty</p>
+          <p class="board-empty-copy">
+            Scan your running agent tabs to populate it — todo lists are mirrored where they
+            exist, and every other running tab gets a row you can fill in. Nothing is typed
+            into any tab, and it's safe to run again any time.
+          </p>
+          <button class="ov-btn ov-btn-primary" onclick={runScan} disabled={overlordStore.scanning}>
+            {overlordStore.scanning ? 'Scanning…' : 'Scan running tabs'}
+          </button>
+        </div>
+      {/if}
       {#each boardWorkspaces as ws, i (ws.id)}
         {@const open = !collapsed.has(ws.id)}
         <section class="group ov-in" style:--i={i} class:dimmed={ws.suspended}>
@@ -626,7 +704,43 @@
     color: var(--ov-live);
   }
 
-  .mode-toggle { flex-shrink: 0; }
+  .scan-btn { flex-shrink: 0; }
+
+  .mode-toggle { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+  /* Same pill as Preferences — a switch has to look like the app's switches. */
+  .toggle {
+    position: relative;
+    width: 34px;
+    height: 19px;
+    background: var(--bg-light);
+    border-radius: 10px;
+    border: none;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background-color 0.2s;
+  }
+  .toggle.active { background: var(--accent); }
+  .toggle-knob {
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 15px; height: 15px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+  .toggle.active .toggle-knob { transform: translateX(15px); }
+
+  .scan-card { border-color: color-mix(in srgb, var(--ov-cool) 35%, var(--ov-hair)); }
+
+  .board-empty { text-align: center; padding: 30px 24px; margin-bottom: 20px; }
+  .board-empty-copy {
+    color: var(--ov-ink-dim);
+    font-size: 0.92rem;
+    line-height: 1.6;
+    max-width: 54ch;
+    margin: 9px auto 14px;
+  }
 
   /* Radar sweep — present only while a ritual is actually running. */
   .sweep {
