@@ -545,7 +545,7 @@ pub fn tool_list_response() -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "bindCommsThread",
-            "description": "Bind this tab to a Mattermost thread (/maiterm resolve). Fetches the whole thread via the configured bot account and returns it as a transcript ([REPORT] marks the root post — the work item), plus `bot_username` (how humans reach you) and, if the operator configured any, `operator_instructions` (their guidance for how to communicate — follow it). Image attachments (screenshots) are staged to temp files whose paths appear in the transcript — view them with the Read tool. While bound, new human replies that @mention you are injected into this session. Rebinding replaces any prior binding on this tab. After binding, your FIRST action is a short ack posted to the thread (postCommsReply) — before investigating — so the humans know it was picked up.",
+            "description": "Bind this tab to a Mattermost thread (/maiterm resolve). Fetches the whole thread via the configured bot account and returns it as a transcript ([REPORT] marks the root post — the work item), plus `bot_username` (how humans reach you) and, if the operator configured any, `operator_instructions` (their guidance for how to communicate — follow it). Attachments of any type (screenshots, PDFs, markdown, Office documents, logs) are downloaded and staged to temp files whose paths appear in the transcript, each with a note on how to open it — always open them before diagnosing. While bound, new human replies that @mention you are injected into this session. Rebinding replaces any prior binding on this tab. After binding, your FIRST action is a short ack posted to the thread (postCommsReply) — before investigating — so the humans know it was picked up.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -577,7 +577,7 @@ pub fn tool_list_response() -> Value {
                     "message": { "type": "string", "description": "The message to post (Mattermost markdown)" },
                     "root_id": { "type": "string", "description": "Which bound thread to post to — REQUIRED when this tab is bound to more than one thread; omit with a single binding" },
                     "resolve": { "type": "boolean", "description": "true = this is the confirmed-close post; clears that thread's binding after posting" },
-                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute file paths (screenshots/images) to upload and attach to the post — max 5, 20 MB each. Use YOUR paths: local files normally; on an SSH tab, paths on the remote host (fetched back over the bridge)" }
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute file paths of files to upload and attach to the post — any type (screenshots, PDFs, logs, documents), max 5, 20 MB each. Use YOUR paths: local files normally; on an SSH tab, paths on the remote host (fetched back over the bridge)" }
                 },
                 "required": ["message"]
             }
@@ -592,7 +592,7 @@ pub fn tool_list_response() -> Value {
                     "message": { "type": "string", "description": "The opening post (Mattermost markdown). @mention the people who should see it — a new thread notifies nobody otherwise" },
                     "channel": { "type": "string", "description": "Which monitored channel — REQUIRED when this tab monitors more than one; omit with a single channel" },
                     "bind": { "type": "boolean", "description": "Default true: bind this tab to the new thread so replies are delivered. false = fire-and-forget post" },
-                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute file paths (screenshots/images) to attach — max 5, 20 MB each. Use YOUR paths: local files normally; on an SSH tab, paths on the remote host" }
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute file paths of files to attach — any type (screenshots, PDFs, logs, documents), max 5, 20 MB each. Use YOUR paths: local files normally; on an SSH tab, paths on the remote host" }
                 },
                 "required": ["message"]
             }

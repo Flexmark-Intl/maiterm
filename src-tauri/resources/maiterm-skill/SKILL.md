@@ -134,22 +134,33 @@ requested through you.
    - Only stay bound while you are actively working, blocked on an answer you asked for, or `can_be_resummoned` is `false`.
    - If you're abandoning the issue entirely, say so in a brief post first (so nobody waits on you), then unbind: postCommsReply with `resolve: true`, or unbindCommsThread `{}` if there's nothing left to say.
 
-**Screenshots and images.** Both directions work:
-- *Incoming:* image attachments on thread messages (e.g. a screenshot of the bug) are
-  staged to temp files automatically — the transcript and injected messages carry lines
-  like `[attached image "shot.png" staged at /tmp/maiterm-comms-….png — view it with the
-  Read tool]`. ALWAYS Read staged screenshots before diagnosing; they usually contain
-  the actual error.
-- *Outgoing:* to post a screenshot or image, pass `attachments:
-  ["/absolute/path.png"]` on postCommsReply (max 5, 20 MB each). Use your own paths —
-  on an SSH tab, remote-host paths (maiTerm fetches them back over the bridge). Useful
-  when showing a before/after, a chart, or visual proof of a fix.
+**Attachments (screenshots, logs, documents).** Both directions work, for any file type:
+- *Incoming:* attachments on thread messages are downloaded and staged to temp files
+  automatically — the transcript and injected messages carry a line per file saying
+  what it is, where it landed, and how to open it, e.g. `[attached image "shot.png"
+  staged at /tmp/maiterm-comms-….png — view it with the Read tool]`. ALWAYS open a
+  staged attachment before diagnosing; a screenshot usually contains the actual error
+  and a document usually contains the actual requirement. What you get:
+  - **images** (png/jpg/gif/webp) and **PDFs** — Read opens them directly (for a long
+    PDF, pass Read's `pages` parameter).
+  - **text-ish files** (md, txt, log, csv, json, yaml, source) — Read opens them.
+  - **Office documents** (docx, xlsx, pptx, doc, xls, ppt, rtf) — staged raw; Read
+    cannot parse the container, so extract the text yourself: a converter on the host,
+    or unzip the OOXML and strip the tags (`word/document.xml`, `xl/sharedStrings.xml`,
+    `ppt/slides/*.xml`). Do this rather than asking the human to paste it.
+  - **anything else** — staged as bytes; use shell tools on it.
+  Files over 20 MB, and everything past 8 files in one delivery, are named in the
+  transcript but not fetched — ask for what you need if one of those matters.
+- *Outgoing:* to post a file, pass `attachments: ["/absolute/path"]` on postCommsReply
+  (max 5, 20 MB each) — any type, not just images. Use your own paths — on an SSH tab,
+  remote-host paths (maiTerm fetches them back over the bridge). Useful for a
+  before/after screenshot, a log excerpt, or a document you were asked to produce.
 
 **Raising something yourself (new thread).** You don't only answer threads — if this tab
 monitors channels, you can OPEN one: startCommsThread `{ "message": "<markdown>" }` posts a
 new root post in a monitored channel and binds this tab to it, so replies that @mention you
 come back here like any other thread. Pass `channel` when the tab monitors more than one, and
-`attachments` for screenshots. Use it for something the channel genuinely needs to know — an
+`attachments` for screenshots or documents. Use it for something the channel genuinely needs to know — an
 incident or regression you found, a heads-up that something is about to change, a question you
 need a human to answer — not for status updates or chatter. Two rules:
 - **@mention the people who should see it.** A new thread notifies nobody by itself; use exact

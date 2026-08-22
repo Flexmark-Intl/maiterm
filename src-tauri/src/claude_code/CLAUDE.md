@@ -137,15 +137,23 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   + every injected header) is **read vs. change**: read-only work on a support/pickup user's
   say-so needs no confirmation (investigate, read code, explain, reproduce, confirm a bug, answer);
   anything that changes code/data/config/scope requires an @mentioned authorized user's go-ahead.
-- **Image attachments (both directions)**: incoming — `Post.file_ids`/`metadata.files` are
-  deserialized; `comms::stage_attachments` downloads image files (png/jpg/gif/webp, ≤10 MB,
-  ≤8/call) and stages them where the tab's agent can Read them (`staging_target_for_tab`:
-  local temp dir, or remote /tmp over the bridge tunnel via `mailink::push_bytes_remote` for
-  SSH tabs; SSH-without-tunnel degrades to a "cannot be staged" note). Staged paths appear as
-  `[attached image … staged at <path> — view it with the Read tool]` lines in bind/read
-  transcripts, watcher injections, and summon pickups. Outgoing — `postCommsReply` takes
-  `attachments: [paths]` (max 5, ≤20 MB): local tabs read the files directly; SSH tabs fetch
-  the agent's remote paths back over the tunnel (`mailink::fetch_bytes_remote`), then
+- **Attachments (both directions, any file type)**: incoming — `Post.file_ids`/`metadata.files`
+  are deserialized; `comms::stage_attachments` downloads **every** attachment under the caps
+  (≤20 MB each, ≤8 per call) and stages it where the tab's agent can open it
+  (`staging_target_for_tab`: local temp dir, or remote /tmp over the bridge tunnel via
+  `mailink::push_bytes_remote` for SSH tabs; SSH-without-tunnel degrades to a "cannot be
+  staged" note). `classify_attachment(mime, name)` sorts each file into an `AttachmentKind`
+  (Image / Pdf / Text / Office / Binary) — the mime type decides where it's trustworthy, the
+  filename extension fills the gaps (Mattermost commonly reports `application/octet-stream` for
+  ordinary documents). **The kind never gates the download**; it only picks the extension of
+  the staged copy and the guidance line (`kind_noun` + `kind_hint`): Read-it-directly for
+  images/PDFs/text, "Read cannot parse the container, extract the OOXML text yourself" for
+  Office, "inspect with shell tools" for anything else. Extensions are sanitized by `name_ext`
+  (≤8 chars, ASCII alphanumeric) so a filename can never shape the staged path. Notes appear as
+  `[attached <noun> "<name>" staged at <path> — <hint>]` lines in bind/read transcripts, watcher
+  injections, and summon pickups. Outgoing — `postCommsReply`/`startCommsThread` take
+  `attachments: [paths]` (any type, max 5, ≤20 MB): local tabs read the files directly; SSH tabs
+  fetch the agent's remote paths back over the tunnel (`mailink::fetch_bytes_remote`), then
   `upload_file` (multipart POST /api/v4/files) → `create_post` with `file_ids`.
 - **Watcher** (`comms::watcher_loop`, spawned unconditionally in `lib.rs` setup): every 5s scans
   tabs for bindings, fetches each bound thread, and injects **only posts that @mention the bot's

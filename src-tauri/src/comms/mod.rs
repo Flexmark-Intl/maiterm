@@ -172,31 +172,151 @@ pub fn staging_target_for_tab(app: &Arc<AppState>, tab_id: &str) -> StagingTarge
 }
 
 /// Attachment staging caps: per-file byte ceiling and per-call file count. Screenshots
-/// are ~1–3 MB; anything past these is noted in the transcript instead of fetched.
-const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+/// are ~1–3 MB and documents rarely more; anything past these is noted in the
+/// transcript instead of fetched. The byte cap matches the outgoing upload cap.
+const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_STAGED_FILES: usize = 8;
 
-/// File extension Claude Code's Read tool renders as an image, or None for
-/// non-image/unsupported types (noted by name, never fetched).
-fn image_ext(mime: &str, name: &str) -> Option<&'static str> {
-    match mime {
+/// What an attachment is, which decides the guidance the agent gets with its path.
+/// Everything under the caps is staged — the kind never gates the download, it only
+/// tells the agent whether the Read tool can open the file directly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AttachmentKind {
+    /// Read renders it inline.
+    Image,
+    /// Read parses it (with a `pages` parameter for long ones).
+    Pdf,
+    /// Plain text of some flavour — Read opens it as-is.
+    Text,
+    /// Word/Excel/PowerPoint — staged raw; Read cannot parse the container.
+    Office,
+    /// Anything else. Staged as bytes; shell tools may still make sense of it.
+    Binary,
+}
+
+/// Filename extension, lowercased, or None when the name carries nothing usable.
+/// Bounded and alphanumeric-only so it is always safe in a staged temp path.
+fn name_ext(name: &str) -> Option<String> {
+    let (_, e) = name.rsplit_once('.')?;
+    let e = e.to_ascii_lowercase();
+    if e.is_empty() || e.len() > 8 || !e.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(e)
+}
+
+/// Extensions the Read tool opens as text. Not exhaustive by design — anything missed
+/// still gets staged, just described as binary.
+const TEXT_EXTS: &[&str] = &[
+    "md", "markdown", "txt", "text", "log", "csv", "tsv", "json", "yaml", "yml", "toml",
+    "xml", "html", "htm", "ini", "conf", "cfg", "env", "diff", "patch", "sql", "sh",
+    "bash", "zsh", "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rb", "go",
+    "java", "kt", "swift", "c", "h", "cpp", "hpp", "cs", "php", "css", "scss", "svelte",
+    "vue",
+];
+
+const OFFICE_EXTS: &[&str] = &[
+    "doc", "docx", "docm", "dot", "dotx", "xls", "xlsx", "xlsm", "xlsb", "ppt", "pptx",
+    "pptm", "rtf",
+];
+
+/// Classify an attachment and pick the extension its staged copy should carry. The
+/// mime type decides where it is trustworthy; the filename fills the gaps (Mattermost
+/// often reports `application/octet-stream` for perfectly ordinary documents).
+fn classify_attachment(mime: &str, name: &str) -> (AttachmentKind, String) {
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let ext = name_ext(name);
+    let e = ext.as_deref().unwrap_or("");
+
+    // Images: normalise the extension (jpeg → jpg) so Read recognises the staged file.
+    let image = match mime.as_str() {
         "image/png" => Some("png"),
         "image/jpeg" => Some("jpg"),
         "image/gif" => Some("gif"),
         "image/webp" => Some("webp"),
-        _ => match name.rsplit('.').next().map(|e| e.to_ascii_lowercase()) {
-            Some(e) if e == "png" => Some("png"),
-            Some(e) if e == "jpg" || e == "jpeg" => Some("jpg"),
-            Some(e) if e == "gif" => Some("gif"),
-            Some(e) if e == "webp" => Some("webp"),
+        _ => match e {
+            "png" => Some("png"),
+            "jpg" | "jpeg" => Some("jpg"),
+            "gif" => Some("gif"),
+            "webp" => Some("webp"),
             _ => None,
+        },
+    };
+    if let Some(ext) = image {
+        return (AttachmentKind::Image, ext.to_string());
+    }
+
+    if mime == "application/pdf" || e == "pdf" {
+        return (AttachmentKind::Pdf, "pdf".to_string());
+    }
+
+    let office_mime = mime.starts_with("application/vnd.openxmlformats-officedocument")
+        || mime.starts_with("application/vnd.ms-")
+        || mime == "application/msword"
+        || mime == "application/rtf";
+    if office_mime || OFFICE_EXTS.contains(&e) {
+        let ext = ext.clone().unwrap_or_else(|| "docx".to_string());
+        return (AttachmentKind::Office, ext);
+    }
+
+    let text_mime = mime.starts_with("text/")
+        || matches!(
+            mime.as_str(),
+            "application/json" | "application/xml" | "application/x-yaml" | "application/toml"
+        );
+    if text_mime || TEXT_EXTS.contains(&e) {
+        let ext = ext.clone().unwrap_or_else(|| "txt".to_string());
+        return (AttachmentKind::Text, ext);
+    }
+
+    (AttachmentKind::Binary, ext.unwrap_or_else(|| "bin".to_string()))
+}
+
+/// How the attachment is named in the transcript, e.g. `attached Word document "x.docx"`.
+fn kind_noun(kind: AttachmentKind, ext: &str) -> &'static str {
+    match kind {
+        AttachmentKind::Image => "image",
+        AttachmentKind::Pdf => "PDF",
+        AttachmentKind::Text => "file",
+        AttachmentKind::Binary => "file",
+        AttachmentKind::Office => match ext {
+            "doc" | "docx" | "docm" | "dot" | "dotx" | "rtf" => "Word document",
+            "xls" | "xlsx" | "xlsm" | "xlsb" => "Excel spreadsheet",
+            _ => "PowerPoint deck",
         },
     }
 }
 
-/// Download a set of posts' image attachments and stage them where the tab's agent can
-/// Read them. Returns post_id → transcript-ready note lines (staged path, or why not).
-/// Best-effort: a failed download/stage becomes a note, never an error.
+/// What to tell the agent it can do with the staged path.
+fn kind_hint(kind: AttachmentKind, mime: &str) -> String {
+    match kind {
+        AttachmentKind::Image => "view it with the Read tool".to_string(),
+        AttachmentKind::Pdf => {
+            "read it with the Read tool (pass its `pages` parameter for a long one)".to_string()
+        }
+        AttachmentKind::Text => "read it with the Read tool".to_string(),
+        AttachmentKind::Office => concat!(
+            "the Read tool cannot parse Office containers — extract the text yourself ",
+            "(a converter on this host, or unzip the OOXML and strip the tags: ",
+            "word/document.xml, xl/sharedStrings.xml, ppt/slides/*.xml)"
+        )
+        .to_string(),
+        AttachmentKind::Binary => format!(
+            "{} — the Read tool may not render it; inspect it with shell tools",
+            if mime.is_empty() { "unknown type" } else { mime }
+        ),
+    }
+}
+
+/// Download a set of posts' attachments and stage them where the tab's agent can open
+/// them — images, PDFs, text/markdown, Office documents, anything under the caps.
+/// Returns post_id → transcript-ready note lines (staged path + how to open it, or why
+/// not). Best-effort: a failed download/stage becomes a note, never an error.
 pub async fn stage_attachments(
     client: &MattermostClient,
     target: &StagingTarget,
@@ -224,38 +344,37 @@ pub async fn stage_attachments(
 
         for f in &files {
             let label = if f.name.is_empty() { f.id.clone() } else { f.name.clone() };
-            let note = match image_ext(&f.mime_type, &f.name) {
-                None => format!(
-                    "[attachment \"{label}\" ({}) — not a viewable image; ask a human to describe it or handle it out of band]",
-                    if f.mime_type.is_empty() { "unknown type" } else { &f.mime_type }
-                ),
-                Some(_) if matches!(target, StagingTarget::Unavailable) => {
-                    log::warn!(
-                        "[comms] attachment \"{label}\" not staged: ssh foreground but no bridge tunnel registered for this tab"
-                    );
-                    format!(
-                        "[attached image \"{label}\" — cannot be staged for this SSH tab (no live maiTerm bridge tunnel); ask a human to describe it]"
-                    )
-                }
-                Some(_) if staged_count >= MAX_STAGED_FILES => format!(
-                    "[attached image \"{label}\" — not staged (attachment limit reached)]"
-                ),
-                Some(_) if f.size > MAX_ATTACHMENT_BYTES as i64 => format!(
-                    "[attached image \"{label}\" — skipped ({} MB exceeds the 10 MB staging cap)]",
-                    f.size / (1024 * 1024)
-                ),
-                Some(ext) => match stage_one(client, target, &f.id, ext).await {
+            let (kind, ext) = classify_attachment(&f.mime_type, &f.name);
+            let noun = kind_noun(kind, &ext);
+            let note = if matches!(target, StagingTarget::Unavailable) {
+                log::warn!(
+                    "[comms] attachment \"{label}\" not staged: ssh foreground but no bridge tunnel registered for this tab"
+                );
+                format!(
+                    "[attached {noun} \"{label}\" — cannot be staged for this SSH tab (no live maiTerm bridge tunnel); ask a human to describe it or paste its contents]"
+                )
+            } else if staged_count >= MAX_STAGED_FILES {
+                format!("[attached {noun} \"{label}\" — not staged (attachment limit reached)]")
+            } else if f.size > MAX_ATTACHMENT_BYTES as i64 {
+                format!(
+                    "[attached {noun} \"{label}\" — skipped ({} MB exceeds the {} MB staging cap)]",
+                    f.size / (1024 * 1024),
+                    MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                )
+            } else {
+                match stage_one(client, target, &f.id, &ext).await {
                     Ok(path) => {
                         staged_count += 1;
                         format!(
-                            "[attached image \"{label}\" staged at {path} — view it with the Read tool]"
+                            "[attached {noun} \"{label}\" staged at {path} — {}]",
+                            kind_hint(kind, &f.mime_type)
                         )
                     }
                     Err(e) => {
                         log::warn!("[comms] attachment staging failed ({label}): {e}");
-                        format!("[attached image \"{label}\" — staging failed: {e}]")
+                        format!("[attached {noun} \"{label}\" — staging failed: {e}]")
                     }
-                },
+                }
             };
             out.entry(p.id.clone()).or_default().push(note);
         }
@@ -273,8 +392,9 @@ async fn stage_one(
     let bytes = client.get_file(file_id).await.map_err(|e| e.to_string())?;
     if bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(format!(
-            "file is {} MB (cap 10 MB)",
-            bytes.len() / (1024 * 1024)
+            "file is {} MB (cap {} MB)",
+            bytes.len() / (1024 * 1024),
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
         ));
     }
     match target {
@@ -1291,15 +1411,72 @@ mod tests {
     }
 
     #[test]
-    fn image_ext_maps_mime_then_name() {
-        assert_eq!(image_ext("image/png", "x"), Some("png"));
-        assert_eq!(image_ext("image/jpeg", "x"), Some("jpg"));
+    fn classify_maps_mime_then_name() {
+        use AttachmentKind::*;
+        // images: mime wins, extension normalised for the Read tool
+        assert_eq!(classify_attachment("image/png", "x"), (Image, "png".into()));
+        assert_eq!(classify_attachment("image/jpeg", "x"), (Image, "jpg".into()));
         // mime absent/odd → filename extension decides, case-insensitive
-        assert_eq!(image_ext("", "Screen Shot.PNG"), Some("png"));
-        assert_eq!(image_ext("application/octet-stream", "photo.jpeg"), Some("jpg"));
-        // non-images stay None (noted, never fetched)
-        assert_eq!(image_ext("application/zip", "logs.zip"), None);
-        assert_eq!(image_ext("", "notes.txt"), None);
+        assert_eq!(
+            classify_attachment("", "Screen Shot.PNG"),
+            (Image, "png".into())
+        );
+        assert_eq!(
+            classify_attachment("application/octet-stream", "photo.jpeg"),
+            (Image, "jpg".into())
+        );
+    }
+
+    #[test]
+    fn classify_covers_documents_not_just_images() {
+        use AttachmentKind::*;
+        assert_eq!(
+            classify_attachment("application/pdf", "invoice"),
+            (Pdf, "pdf".into())
+        );
+        // Mattermost frequently reports octet-stream — the name has to carry it
+        assert_eq!(
+            classify_attachment("application/octet-stream", "spec.pdf"),
+            (Pdf, "pdf".into())
+        );
+        assert_eq!(classify_attachment("", "NOTES.md"), (Text, "md".into()));
+        assert_eq!(classify_attachment("text/csv", "rows.csv"), (Text, "csv".into()));
+        assert_eq!(
+            classify_attachment(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "report.docx"
+            ),
+            (Office, "docx".into())
+        );
+        assert_eq!(
+            classify_attachment("application/octet-stream", "Q3 numbers.xlsx"),
+            (Office, "xlsx".into())
+        );
+        assert_eq!(classify_attachment("", "deck.pptx"), (Office, "pptx".into()));
+        assert_eq!(classify_attachment("application/msword", "old.doc"), (Office, "doc".into()));
+    }
+
+    #[test]
+    fn unknown_types_are_still_staged_as_binary() {
+        use AttachmentKind::*;
+        // Nothing is refused any more — an unrecognised file is staged and described,
+        // not dropped with "not a viewable image".
+        assert_eq!(classify_attachment("application/zip", "logs.zip"), (Binary, "zip".into()));
+        assert_eq!(classify_attachment("", "coredump"), (Binary, "bin".into()));
+        // a hostile "extension" never reaches the staged path
+        assert_eq!(
+            classify_attachment("", "evil.../../etc/passwd"),
+            (Binary, "bin".into())
+        );
+    }
+
+    #[test]
+    fn kind_noun_names_the_office_flavour() {
+        assert_eq!(kind_noun(AttachmentKind::Office, "xlsx"), "Excel spreadsheet");
+        assert_eq!(kind_noun(AttachmentKind::Office, "docx"), "Word document");
+        assert_eq!(kind_noun(AttachmentKind::Office, "pptx"), "PowerPoint deck");
+        assert_eq!(kind_noun(AttachmentKind::Pdf, "pdf"), "PDF");
+        assert_eq!(kind_noun(AttachmentKind::Text, "md"), "file");
     }
 
     #[test]

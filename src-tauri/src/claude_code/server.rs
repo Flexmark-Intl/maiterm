@@ -1132,7 +1132,7 @@ async fn handle_bind_comms_thread(
     // messages that @mention the bot are forwarded into this session).
     let bot_username = client.me().await.map(|u| u.username).unwrap_or_default();
 
-    // Stage image attachments (screenshots in the bug report) where this tab's agent
+    // Stage attachments (screenshots, PDFs, documents) where this tab's agent
     // can Read them; the transcript carries the staged paths.
     let staging = comms::staging_target_for_tab(state, &tab_id);
     let thread_refs: Vec<_> = thread.iter().collect();
