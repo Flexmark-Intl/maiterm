@@ -12,6 +12,7 @@
   import type { ImportPreview } from '$lib/tauri/commands';
   import qrcode from 'qrcode-generator';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
+  import OverlordRulesSection from '$lib/components/overlord/OverlordRulesSection.svelte';
   import { open as dialogOpen, save as dialogSave } from '@tauri-apps/plugin-dialog';
 
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -80,7 +81,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'claude_code', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -262,6 +263,7 @@
     { id: 'notes' as const, label: 'Notes' },
     { id: 'notifications' as const, label: 'Notifications' },
     { id: 'triggers' as const, label: 'Triggers' },
+    { id: 'overlord' as const, label: 'Overlord' },
     { id: 'claude_code' as const, label: 'AI Agents' },
     { id: 'integrations' as const, label: 'Integrations' },
     { id: 'backup' as const, label: 'Backup' },
@@ -1323,6 +1325,9 @@
             </div>
           </div>
         {/if}
+
+      {:else if activeSection === 'overlord'}
+        <OverlordRulesSection />
 
       {:else if activeSection === 'triggers'}
         <p class="section-desc">
