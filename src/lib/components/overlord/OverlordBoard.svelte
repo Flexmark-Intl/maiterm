@@ -325,6 +325,7 @@
               <span class="signal-title">
                 {scan.tabsSeen} running tab{scan.tabsSeen === 1 ? '' : 's'} ·
                 {scan.mirrored} task list{scan.mirrored === 1 ? '' : 's'} read
+                {#if scan.finished > 0}· {scan.finished} all-done{/if}
                 {#if scan.adopted > 0}· {scan.adopted} added{/if}
               </span>
               <span class="signal-age ov-mono">{fmtAge(scan.at)}</span>

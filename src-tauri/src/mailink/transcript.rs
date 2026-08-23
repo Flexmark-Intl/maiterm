@@ -574,8 +574,108 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
     (last_commit_ts, todos, todos_ts, last_compact_ts)
 }
 
-/// The AUTHORITATIVE todo list for a Claude session, read straight from Claude Code's own
-/// todo store rather than reconstructed from the transcript.
+/// A session's task list, read from Claude Code's own store.
+///
+/// `~/.claude/tasks/<session_id>/<n>.json` is the LIVE store (TaskCreate/TaskUpdate), one
+/// file per task: `{id, subject, description, activeForm, status, blocks, blockedBy, …}`.
+/// It supersedes the older `~/.claude/todos/` TodoWrite store, which on this machine has
+/// had no non-empty write since February — `claude_todo_store` below stays as a fallback
+/// for sessions old enough to predate the change.
+///
+/// Returns a tri-state, because "finished everything" and "never tracked anything" are very
+/// different facts and Claude Code makes them look alike:
+///   * `Some(non-empty)` — the live list.
+///   * `Some(empty)`     — the session HAD a list and completed all of it. Claude Code
+///                         deletes the task files once every task reaches `completed`,
+///                         leaving the directory and its `.highwatermark` behind. Without
+///                         this case the tab would look untracked, so the board would
+///                         freeze its rows half-done and Overlord would nudge an agent to
+///                         "start keeping a list" at the exact moment it finished one.
+///   * `None`            — no directory: this session never tracked anything.
+///
+/// Change detection is a cheap (count, total-bytes, newest-mtime) signature over the
+/// directory — no file contents are read while nothing has moved.
+pub fn claude_task_store(session_id: &str) -> Option<Value> {
+    static TASK_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, ((usize, u64, u64), Option<Value>)>>,
+    > = std::sync::OnceLock::new();
+
+    let dir = dirs::home_dir()?.join(".claude").join("tasks").join(session_id);
+    if !dir.is_dir() {
+        return None;
+    }
+
+    // Signature pass: stat only, and skip the bookkeeping files (.lock/.highwatermark).
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    let mut newest = 0u64;
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(md) = entry.metadata() else { continue };
+        count += 1;
+        bytes += md.len();
+        let m = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        newest = newest.max(m);
+        files.push(path);
+    }
+    let sig = (count, bytes, newest);
+
+    let cache = TASK_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some((cached_sig, value)) = c.get(&dir) {
+            if *cached_sig == sig {
+                return value.clone();
+            }
+        }
+    }
+
+    // Numeric filenames are creation order; sort so the board lists tasks as authored.
+    files.sort_by_key(|p| {
+        p.file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+
+    let mut items: Vec<Value> = Vec::new();
+    for path in &files {
+        let Ok(raw) = std::fs::read_to_string(path) else { continue };
+        let Ok(t) = serde_json::from_str::<Value>(&raw) else { continue };
+        let status = t.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+        if status == "deleted" {
+            continue;
+        }
+        let Some(subject) = t.get("subject").and_then(|s| s.as_str()) else { continue };
+        // A task waiting on an unfinished dependency is genuinely blocked, not merely
+        // pending — the board has a lane for exactly that.
+        let blocked = status != "completed"
+            && t.get("blockedBy").and_then(|b| b.as_array()).is_some_and(|a| !a.is_empty());
+        items.push(json!({
+            "content": subject,
+            "status": status,
+            "activeForm": t.get("activeForm").and_then(|s| s.as_str()).unwrap_or_default(),
+            "blocked": blocked,
+        }));
+    }
+
+    // Directory present but no task files → every task was completed and swept.
+    let value = Some(Value::Array(items));
+    if let Ok(mut c) = cache.lock() {
+        c.insert(dir, (sig, value.clone()));
+    }
+    value
+}
+
+/// LEGACY todo store (`TodoWrite`), kept as a fallback behind `claude_task_store`.
 ///
 /// `~/.claude/todos/<session_id>-agent-<agent_id>.json` holds the session's CURRENT list as
 /// `[{content, status, activeForm}]`, rewritten in full on every TodoWrite. That beats the
@@ -1668,6 +1768,40 @@ mod tests {
         let _ = std::fs::remove_file(&path); // clean up before asserting
         assert_eq!(found, Some(path));
         assert!(locate_jsonl(sid).is_none(), "gone once the shadow file is removed");
+    }
+
+    #[test]
+    fn task_store_distinguishes_finished_from_never_tracked() {
+        let Some(root) = dirs::home_dir().map(|h| h.join(".claude").join("tasks")) else { return };
+        let sid = "taskstore-test-4000-8000-aiterm";
+        let dir = root.join(sid);
+        if std::fs::create_dir_all(&dir).is_err() { return }
+        // Bookkeeping files must be ignored, `deleted` tasks skipped, and a task waiting on
+        // an unfinished dependency reported as blocked rather than merely pending.
+        std::fs::write(dir.join(".highwatermark"), "3").unwrap();
+        std::fs::write(dir.join(".lock"), "").unwrap();
+        std::fs::write(dir.join("1.json"), r#"{"id":"1","subject":"first","status":"completed","activeForm":"Doing first","blockedBy":[]}"#).unwrap();
+        std::fs::write(dir.join("2.json"), r#"{"id":"2","subject":"second","status":"pending","activeForm":"Doing second","blockedBy":["1"]}"#).unwrap();
+        std::fs::write(dir.join("3.json"), r#"{"id":"3","subject":"gone","status":"deleted","blockedBy":[]}"#).unwrap();
+
+        let live = claude_task_store(sid).expect("dir present");
+        let arr = live.as_array().unwrap().clone();
+
+        // All tasks completed → Claude Code sweeps the files but leaves the directory.
+        // That must read as "finished", NOT as "never tracked".
+        for f in ["1.json", "2.json", "3.json"] { let _ = std::fs::remove_file(dir.join(f)); }
+        let swept = claude_task_store(sid);
+        let untracked = claude_task_store("taskstore-test-no-such-session");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(arr.len(), 2, "deleted tasks and bookkeeping files are skipped");
+        assert_eq!(arr[0]["content"], "first");
+        assert_eq!(arr[0]["status"], "completed");
+        assert_eq!(arr[0]["blocked"], false);
+        assert_eq!(arr[1]["content"], "second");
+        assert_eq!(arr[1]["blocked"], true, "blockedBy on an open task means blocked");
+        assert_eq!(swept.as_ref().and_then(|v| v.as_array()).map(|a| a.len()), Some(0), "finished = present but empty");
+        assert!(untracked.is_none(), "never tracked = absent");
     }
 
     #[test]

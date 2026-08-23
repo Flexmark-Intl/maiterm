@@ -183,8 +183,13 @@ export interface OverlordTabFacts {
   last_commit_ts?: number;
   /** Unix-ms of the newest compaction boundary (isCompactSummary / compact_boundary). */
   last_compact_ts?: number;
-  /** The tab's todo list (Claude-only). Read from Claude Code's own todo store when
-   *  available — the complete current list — else reconstructed from the transcript tail. */
+  /** Whether this session has a task list at all. Distinguishes "completed everything"
+   *  (tracked, empty todos — Claude Code sweeps the files once all tasks are done) from
+   *  "never tracked anything" (absent), which otherwise look identical. */
+  tracked?: boolean;
+  /** The tab's task list (Claude-only). Read from Claude Code's own task store when
+   *  available — the complete current list — else reconstructed from the transcript tail.
+   *  Empty with `tracked: true` means every task was finished and swept. */
   todos?: OverlordTodoItem[];
   /** Where `todos` came from: 'store' is authoritative and complete; 'transcript' is
    *  whatever fit in the tail window (SSH tabs, whose store lives on the remote host). */
@@ -197,6 +202,8 @@ export interface OverlordTodoItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
   activeForm?: string;
+  /** Task store only: waiting on an unfinished dependency (`blockedBy`). */
+  blocked?: boolean;
 }
 /** Batched facts poll; tabs with no resolvable agent session are absent from the map. */
 export async function getOverlordTabFacts(tabIds: string[]): Promise<Record<string, OverlordTabFacts>> {

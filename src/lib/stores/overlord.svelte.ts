@@ -131,9 +131,11 @@ export interface ScanSummary {
   tabsSeen: number;
   /** Tabs whose todo list was read (from the store or, for SSH tabs, the transcript). */
   mirrored: number;
-  /** Of those, how many came from Claude Code's authoritative todo store. */
+  /** Of those, how many came from Claude Code's authoritative task store. */
   fromStore: number;
   adopted: number;
+  /** Tabs that keep a list and have completed all of it. */
+  finished: number;
   silent: string[];
   /** Set once an ask-to-track pass has run against this scan's silent set. */
   asked?: number;
@@ -749,7 +751,11 @@ function createOverlordStore() {
       case 'agent_unready':
         return !claudeStateStore.getState(tab.id) && !!terminalsStore.get(tab.id);
       case 'no_todo_list': {
-        if (!f || f.todos) return false;
+        if (!f || f.todos?.length) return false;
+        // `tracked` covers the case Claude Code makes ambiguous: a tab that completed its
+        // entire list has an empty store, and nagging it to "keep a task list" right then
+        // is precisely wrong.
+        if (f.tracked) return false;
         if (everHadTodos.has(`${tab.id}|${f.session_id}`)) return false;
         if ((f.context_used ?? 0) < NO_TODO_MIN_CONTEXT_TOKENS) return false;
         return f.last_turn_ts !== undefined && now - f.last_turn_ts < NO_TODO_RECENT_TURN_MS;
@@ -790,10 +796,26 @@ function createOverlordStore() {
 
   // ── TodoWrite mirror → board (§11) ─────────────────────────────────────────
 
-  function todoState(status: string): OverlordTaskState {
-    if (status === 'completed') return 'done';
-    if (status === 'in_progress') return 'active';
+  function todoState(item: { status: string; blocked?: boolean }): OverlordTaskState {
+    if (item.status === 'completed') return 'done';
+    if (item.blocked) return 'blocked'; // waiting on an unfinished dependency
+    if (item.status === 'in_progress') return 'active';
     return 'backlog';
+  }
+
+  /** Every task finished: Claude Code sweeps the files, leaving a tracked-but-empty store.
+   *  Close out the tab's mirrored rows instead of leaving them frozen mid-flight — a
+   *  half-done row that nothing will ever update becomes a false "stale" card in a few days. */
+  function closeOutMirrorRows(tabId: string, now: number): boolean {
+    let changed = false;
+    for (const t of tasks) {
+      if (t.origin === 'agent' && t.tab_id === tabId && t.state !== 'done') {
+        t.state = 'done';
+        t.updated_at = new Date(now).toISOString();
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   function syncMirrorTasks(tabId: string, f: OverlordTabFacts, now: number): boolean {
@@ -804,7 +826,7 @@ function createOverlordStore() {
     for (const item of f.todos) {
       if (!item?.content) continue;
       const existing = tasks.find((t) => t.origin === 'agent' && t.tab_id === tabId && t.title === item.content);
-      const state = todoState(item.status);
+      const state = todoState(item);
       if (existing) {
         if (existing.state !== state) {
           existing.state = state;
@@ -1037,9 +1059,14 @@ function createOverlordStore() {
           clearOutstanding(tab.id);
         }
         // TodoWrite mirror
-        if (f?.todos) everHadTodos.add(`${tab.id}|${f.session_id}`);
-        if (f && syncMirrorTasks(tab.id, f, now)) boardChanged = true;
-        if (f?.todos?.length && retirePlaceholderIfMirrored(tab.id)) boardChanged = true;
+        if (f?.tracked) everHadTodos.add(`${tab.id}|${f.session_id}`);
+        if (f?.todos?.length) {
+          if (syncMirrorTasks(tab.id, f, now)) boardChanged = true;
+          if (retirePlaceholderIfMirrored(tab.id)) boardChanged = true;
+        } else if (f?.tracked) {
+          // Tracked but empty — the agent finished its whole list.
+          if (closeOutMirrorRows(tab.id, now)) boardChanged = true;
+        }
         // 2) Rule evaluation
         for (const rule of rulesForWorkspace(ws.id)) {
           if (!rule.sequence.length) continue;
@@ -1199,7 +1226,7 @@ function createOverlordStore() {
     /** ADOPT pass — populate the board from every currently-running agent tab. Free,
      *  silent, and safe to run as often as you like. Returns what it found. */
     async scanWorkspaces(): Promise<ScanSummary> {
-      if (scanning) return lastScan ?? { at: Date.now(), tabsSeen: 0, mirrored: 0, fromStore: 0, adopted: 0, silent: [] };
+      if (scanning) return lastScan ?? { at: Date.now(), tabsSeen: 0, mirrored: 0, fromStore: 0, adopted: 0, finished: 0, silent: [] };
       scanning = true;
       try {
         const pairs = agentTabs();
@@ -1213,7 +1240,7 @@ function createOverlordStore() {
           }
         }
         const now = Date.now();
-        let mirrored = 0, fromStore = 0, adopted = 0, tabsSeen = 0, changed = false;
+        let mirrored = 0, fromStore = 0, adopted = 0, finished = 0, tabsSeen = 0, changed = false;
         const silent: string[] = [];
         for (const { tab, ws } of pairs) {
           // The Overlord workspace is excluded from every board surface, so a row created
@@ -1232,6 +1259,13 @@ function createOverlordStore() {
             if (f.todos_source === 'store') fromStore++;
             continue;
           }
+          if (f?.tracked) {
+            // Keeps a list, and has finished everything on it. Nothing to adopt and
+            // nothing to ask — close out its rows and leave it alone.
+            if (closeOutMirrorRows(tab.id, now)) changed = true;
+            finished++;
+            continue;
+          }
           // No todo signal — stand up (or refresh) one row for the tab itself, titled
           // with the tab name until the tab tells us something better.
           const outcome = adoptRow(tab.id, tab.name, live.state);
@@ -1245,8 +1279,8 @@ function createOverlordStore() {
           tasks = [...tasks];
           persistTasks();
         }
-        lastScan = { at: now, tabsSeen, mirrored, fromStore, adopted, silent };
-        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} todo lists read (${fromStore} from the store), ${adopted} adopted, ${silent.length} untracked`);
+        lastScan = { at: now, tabsSeen, mirrored, fromStore, adopted, finished, silent };
+        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} task lists read (${fromStore} from the store), ${finished} finished, ${adopted} adopted, ${silent.length} untracked`);
         return lastScan;
       } finally {
         scanning = false;

@@ -3295,18 +3295,30 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
         if let Some(ts) = of.last_compact_ts {
             v["last_compact_ts"] = json!(ts);
         }
-        // Claude Code's own todo store is the authoritative, COMPLETE current list; the
-        // transcript tail only ever saw whatever fit in its window. Prefer the store and
-        // keep the tail as the fallback — which is what SSH tabs run on, since a remote
-        // session's store lives on the remote host while its transcript is mirrored here.
-        let store = if rt == AgentRuntime::Claude { transcript::claude_todo_store(&sid) } else { None };
+        // Task lists, best source first. Claude Code's own store is authoritative and
+        // COMPLETE; the transcript tail only ever saw whatever fit in its window, and is
+        // what SSH tabs run on (a remote session's store lives on the remote host while
+        // its transcript is mirrored here).
+        //
+        // `tracked` is the fact the tail cannot supply: whether this session has a task
+        // list AT ALL. Claude Code deletes the task files once every task is completed, so
+        // an empty-but-present store means "finished everything", not "never tracked" —
+        // conflating those makes the board freeze finished rows and makes Overlord nudge
+        // an agent to start a list at the moment it completed one.
+        let store = if rt == AgentRuntime::Claude {
+            transcript::claude_task_store(&sid).or_else(|| transcript::claude_todo_store(&sid))
+        } else {
+            None
+        };
         match store {
             Some(todos) => {
+                v["tracked"] = json!(true);
                 v["todos"] = todos;
                 v["todos_source"] = json!("store");
             }
             None => {
                 if let Some(todos) = of.todos {
+                    v["tracked"] = json!(true);
                     v["todos"] = todos;
                     v["todos_source"] = json!("transcript");
                 }
