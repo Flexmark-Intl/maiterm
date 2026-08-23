@@ -1201,8 +1201,13 @@
 
   .lanes {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    /* Six columns don't fit a split pane or a narrow window. A floor per lane makes the
+       grid overflow and scroll instead of crushing every card to an unreadable sliver —
+       the board is the one surface meant for reviewing many tasks at once. */
+    grid-template-columns: repeat(6, minmax(150px, 1fr));
     gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
   }
 
   .lane {
