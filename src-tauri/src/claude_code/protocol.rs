@@ -44,7 +44,10 @@ impl JsonRpcResponse {
     }
 }
 
-pub fn tool_list_response() -> Value {
+/// `tasks_enabled` gates the three task tools (docs/tasks.md §4). An agent that is never
+/// primed to use them shouldn't be carrying their schemas in context either, so the
+/// preference removes the surface rather than just the instruction.
+pub fn tool_list_response(tasks_enabled: bool) -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -610,6 +613,77 @@ pub fn tool_list_response() -> Value {
             }
         }
     ]).as_array().unwrap().clone());
+
+    if tasks_enabled {
+    // ── maiTerm tasks (docs/tasks.md §4) ──
+    // Three batched tools, deliberately no delete: an agent may mark a task done, only a
+    // human removes one. All scoped to the CALLING TAB'S WORKSPACE via connection→tab
+    // affinity, so a tab cannot see or touch another project's list.
+    tools.extend(serde_json::json!([
+        {
+            "name": "listTasks",
+            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to). Returns each task's id, title, detail, status, assignee tab and blockers. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and the unassigned backlog.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "scope": { "type": "string", "enum": ["tab", "workspace"], "description": "Default 'workspace'" }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "createTasks",
+            "description": "Add tasks to this project's list. Batch related items into ONE call. Creation is idempotent: an item whose title matches one already on your tab returns the existing task instead of duplicating it, so re-sending your list is safe. Tasks default to assigned to you; pass assign_to_me false to leave one in the workspace backlog for whoever picks it up.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "One line, imperative — 'Add the auth guard'" },
+                                "detail": { "type": "string", "description": "Optional body: acceptance criteria, links, notes. Markdown." },
+                                "status": { "type": "string", "enum": ["backlog", "active", "blocked", "review", "done"] },
+                                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Task ids that must finish first" },
+                                "assign_to_me": { "type": "boolean", "description": "Default true" }
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["tasks"]
+            }
+        },
+        {
+            "name": "updateTasks",
+            "description": "Update tasks on this project's list — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. There is no delete: mark a task 'done' when it is finished; only a human removes one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "updates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Task id from listTasks/createTasks" },
+                                "status": { "type": "string", "enum": ["backlog", "active", "blocked", "review", "done"] },
+                                "title": { "type": "string" },
+                                "detail": { "type": "string" },
+                                "blocked_by": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["id"]
+                        }
+                    }
+                },
+                "required": ["updates"]
+            }
+        }
+    ]).as_array().unwrap().clone());
+    }
 
     // ── Overlord tools (docs/overlord.md §8, §10, §12) ──
     // replyToOverlord is for every supervised agent; the other three are for the

@@ -50,6 +50,7 @@ function createPreferencesStore() {
   let triggers = $state<Trigger[]>([]);
   let hiddenDefaultTriggers = $state<string[]>([]);
   let claudeTriggersPrompted = $state(false);
+  let tasksEnabled = $state(true);
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
   let overlordRules = $state<OverlordRule[]>([]);
@@ -135,6 +136,7 @@ function createPreferencesStore() {
     get triggers() { return triggers; },
     get hiddenDefaultTriggers() { return hiddenDefaultTriggers; },
     get claudeTriggersPrompted() { return claudeTriggersPrompted; },
+    get tasksEnabled() { return tasksEnabled; },
     get overlordEnabled() { return overlordEnabled; },
     get overlordProposeMode() { return overlordProposeMode; },
     get overlordRules() { return overlordRules; },
@@ -230,6 +232,7 @@ function createPreferencesStore() {
       triggers = prefs.triggers ?? [];
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
+      tasksEnabled = prefs.tasks_enabled ?? true;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       overlordRules = prefs.overlord_rules ?? [];
@@ -473,6 +476,11 @@ function createPreferencesStore() {
 
     async setHiddenDefaultTriggers(value: string[]) {
       hiddenDefaultTriggers = value;
+      await this.save();
+    },
+
+    async setTasksEnabled(value: boolean) {
+      tasksEnabled = value;
       await this.save();
     },
 
@@ -743,6 +751,7 @@ function createPreferencesStore() {
       triggers = prefs.triggers ?? [];
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
+      tasksEnabled = prefs.tasks_enabled ?? true;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       overlordRules = prefs.overlord_rules ?? [];
@@ -829,6 +838,7 @@ function createPreferencesStore() {
         triggers,
         hidden_default_triggers: hiddenDefaultTriggers,
         claude_triggers_prompted: claudeTriggersPrompted,
+        tasks_enabled: tasksEnabled,
         overlord_enabled: overlordEnabled,
         overlord_propose_mode: overlordProposeMode,
         overlord_rules: overlordRules,

@@ -1,4 +1,4 @@
-import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab } from '$lib/tauri/types';
+import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskStatus } from '$lib/tauri/types';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -11,6 +11,8 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
+import { tasksStore } from '$lib/stores/tasks.svelte';
+import { effectiveStatus, normalizeTitle } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -195,6 +197,15 @@ function createClaudeCodeStore() {
           break;
         case 'completeTopic':
           result = handleCompleteTopic(args as { tabId?: string; topicId: string });
+          break;
+        case 'listTasks':
+          result = handleListTasks(args as { tabId?: string; scope?: 'tab' | 'workspace' });
+          break;
+        case 'createTasks':
+          result = handleCreateTasks(args as { tabId?: string; tasks?: TaskToolInput[] });
+          break;
+        case 'updateTasks':
+          result = handleUpdateTasks(args as { tabId?: string; updates?: TaskToolUpdate[] });
           break;
         // getPreferences, setPreference, createBackup, listWindows handled directly on backend
         case 'replyToOverlord': {
@@ -1178,6 +1189,119 @@ function createClaudeCodeStore() {
     if ('error' in loc) return loc;
     if (!args.topicId) return { error: 'topicId is required.' };
     return agentMeshStore.completeTopic(loc.tab.id, args.topicId, false);
+  }
+
+  // --- maiTerm task tools (docs/tasks.md §4) ---
+  //
+  // Every call resolves "this project" from the CALLING TAB's workspace, so a tab can
+  // neither read nor write another project's list. The tools are also listed in
+  // PEER_ADDRESSING_TOOLS server-side, so a deduced (rather than stated) identity is
+  // refused outright before reaching here.
+
+  interface TaskToolInput {
+    title?: string;
+    detail?: string;
+    status?: TaskStatus;
+    blocked_by?: string[];
+    assign_to_me?: boolean;
+  }
+
+  interface TaskToolUpdate {
+    id?: string;
+    status?: TaskStatus;
+    title?: string;
+    detail?: string;
+    blocked_by?: string[];
+  }
+
+  /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
+   *  internal dedup key and would only invite an agent to try to set it. */
+  function taskForAgent(t: Task, all: Task[], selfTabId: string) {
+    return {
+      id: t.id,
+      title: t.title,
+      ...(t.detail ? { detail: t.detail } : {}),
+      status: effectiveStatus(t, all),
+      assignee: t.tab_id === selfTabId ? 'you' : (t.tab_id ?? 'unassigned'),
+      ...(t.blocked_by?.length ? { blocked_by: t.blocked_by } : {}),
+      origin: t.origin,
+      updated_at: t.updated_at,
+    };
+  }
+
+  function handleListTasks(args: { tabId?: string; scope?: 'tab' | 'workspace' }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    const all = tasksStore.forWorkspace(loc.workspace.id);
+    const scoped = args.scope === 'tab' ? all.filter((t) => t.tab_id === loc.tab.id) : all;
+    return {
+      workspace: loc.workspace.name,
+      scope: args.scope === 'tab' ? 'tab' : 'workspace',
+      tasks: scoped.map((t) => taskForAgent(t, all, loc.tab.id)),
+    };
+  }
+
+  function handleCreateTasks(args: { tabId?: string; tasks?: TaskToolInput[] }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    const inputs = (args.tasks ?? []).filter((t) => t?.title?.trim());
+    if (!inputs.length) return { error: 'tasks must be a non-empty array of { title }.' };
+    const before = new Set(tasksStore.forWorkspace(loc.workspace.id).map((t) => t.id));
+    const rows = tasksStore.addMany(
+      loc.workspace.id,
+      inputs.map((t) => ({
+        title: t.title!.trim(),
+        detail: t.detail ?? null,
+        status: t.status ?? 'backlog',
+        // Assigned to the caller unless it explicitly leaves the task in the backlog.
+        tab_id: t.assign_to_me === false ? null : loc.tab.id,
+        blocked_by: t.blocked_by ?? [],
+        origin: 'agent' as const,
+      })),
+    );
+    // Report duplicates honestly rather than silently: an agent re-sending its list after
+    // a compact should be able to tell that nothing new was recorded.
+    const created = rows.filter((r) => !before.has(r.id)).map((r) => r.id);
+    const existing = rows.filter((r) => before.has(r.id)).map((r) => r.id);
+    return {
+      created,
+      ...(existing.length ? { already_tracked: existing } : {}),
+      tasks: rows.map((r) => ({ id: r.id, title: r.title, status: r.status })),
+    };
+  }
+
+  function handleUpdateTasks(args: { tabId?: string; updates?: TaskToolUpdate[] }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    const updates = (args.updates ?? []).filter((u) => u?.id);
+    if (!updates.length) return { error: 'updates must be a non-empty array of { id, ... }.' };
+    const updated: string[] = [];
+    const missing: string[] = [];
+    tasksStore.mutate(loc.workspace.id, (list) => {
+      let changed = false;
+      for (const u of updates) {
+        const idx = list.findIndex((t) => t.id === u.id);
+        // Scoped to this workspace on purpose: an id from another project is "missing"
+        // here, not an invitation to reach across.
+        if (idx < 0) {
+          missing.push(u.id!);
+          continue;
+        }
+        const patch: Partial<Task> = { updated_at: new Date().toISOString() };
+        if (u.status) patch.status = u.status;
+        if (u.title?.trim()) {
+          patch.title = u.title.trim();
+          patch.normalized_title = normalizeTitle(u.title);
+        }
+        if (u.detail !== undefined) patch.detail = u.detail;
+        if (u.blocked_by) patch.blocked_by = u.blocked_by;
+        list[idx] = { ...list[idx], ...patch };
+        updated.push(u.id!);
+        changed = true;
+      }
+      return changed ? list : null;
+    });
+    return { updated, ...(missing.length ? { missing } : {}) };
   }
 
   // --- Trigger variable tools ---

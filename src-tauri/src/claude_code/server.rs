@@ -1843,7 +1843,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 11] = [
+const PEER_ADDRESSING_TOOLS: [&str; 14] = [
     "sendToBridgedAgent",
     "getBridgedAgent",
     "listBridgedPeers",
@@ -1857,6 +1857,12 @@ const PEER_ADDRESSING_TOOLS: [&str; 11] = [
     "driveTab",
     "proposeRuleChanges",
     "listEscalations",
+    // Task tools resolve "this project" from the calling tab, so a deduced identity would
+    // read or write a stranger's task list — the same failure the mesh incident produced,
+    // with writes on top. Every agent calls initSession at session start anyway.
+    "listTasks",
+    "createTasks",
+    "updateTasks",
 ];
 
 /// Whether to refuse a call because the tab it would act as was DEDUCED rather than stated.
@@ -1923,7 +1929,8 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let resp = JsonRpcResponse::success(id, tool_list_response());
+            let tasks_enabled = state.app_data.read().preferences.tasks_enabled;
+            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "tools/call" => {
@@ -2172,6 +2179,23 @@ async fn process_message(
                             "\n\nThis window has an Overlord coordinating work across tabs. Call replyToOverlord \
                              with kind:'ready' now. When you finish something you were asked to do, ack it. \
                              If you're blocked on a human decision, escalate with needs_human.",
+                        );
+                    }
+                    // maiTerm task priming (docs/tasks.md §4) — on EVERY agent tab, not just
+                    // supervised ones, so task state is consistent whether or not anyone is
+                    // watching. The migration clause matters because initSession also fires on
+                    // resume/fork/compact: that is precisely when an agent is mid-project
+                    // holding a live list, and without it the work already in flight stays
+                    // invisible until the agent's next multi-step task. Re-sending is safe —
+                    // createTasks dedups on normalized title within the tab.
+                    if state.app_data.read().preferences.tasks_enabled {
+                        init_text.push_str(
+                            "\n\nTrack multi-step work with the maiTerm task tools (createTasks/updateTasks) \
+                             rather than your runtime's own todo list, so your human and this window's board \
+                             can see it. Keep statuses current as you go. If you ALREADY have a task or todo \
+                             list for this project, migrate it now: one createTasks call with the outstanding \
+                             items, carrying their current status across and skipping anything already \
+                             finished. Then work from the maiTerm list.",
                         );
                     }
                     let resp = JsonRpcResponse::success(

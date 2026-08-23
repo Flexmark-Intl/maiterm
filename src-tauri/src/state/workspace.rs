@@ -1137,6 +1137,12 @@ pub struct Preferences {
     /// Whether the user has been prompted to enable Claude Code integrations.
     #[serde(default)]
     pub claude_triggers_prompted: bool,
+    /// maiTerm task tracking (docs/tasks.md). On by default: task state should be
+    /// consistent whether or not anyone is supervising. Gates BOTH the initSession
+    /// priming and whether the task MCP tools are offered at all — an agent that is
+    /// never told to use them shouldn't be carrying their schemas either.
+    #[serde(default = "default_true")]
+    pub tasks_enabled: bool,
     /// Overlord master switch (docs/overlord.md). Off by default — the per-window engine
     /// only ticks when enabled.
     #[serde(default)]
@@ -1416,6 +1422,7 @@ impl Default for Preferences {
             triggers: Vec::new(),
             hidden_default_triggers: Vec::new(),
             claude_triggers_prompted: false,
+            tasks_enabled: true,
             overlord_enabled: false,
             overlord_propose_mode: true,
             overlord_rules: Vec::new(),

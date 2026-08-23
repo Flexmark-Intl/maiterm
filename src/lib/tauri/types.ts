@@ -389,6 +389,8 @@ export interface Preferences {
   hidden_default_triggers: string[];
   claude_triggers_prompted: boolean;
   /** Overlord master switch (per-window engine only ticks when enabled). */
+  /** maiTerm task tracking (docs/tasks.md) — gates the MCP tools and the priming. */
+  tasks_enabled: boolean;
   overlord_enabled: boolean;
   /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */
   overlord_propose_mode: boolean;

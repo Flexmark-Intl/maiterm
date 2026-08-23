@@ -21,7 +21,7 @@ import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
+import { findDuplicate, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -850,9 +850,10 @@ function createOverlordStore() {
       const next = [...list];
       for (const item of items) {
         const status = statusFromAgent(item.status, item.blocked);
-        const idx = next.findIndex(
-          (t) => t.tab_id === tabId && t.normalized_title === normalizeTitle(item.content),
-        );
+        // Same dedup helper the MCP createTasks path uses — a tab running BOTH its own
+        // todo list and createTasks must converge on one row, not record the work twice.
+        const dup = findDuplicate(next, item.content, tabId);
+        const idx = dup ? next.indexOf(dup) : -1;
         if (idx >= 0) {
           if (next[idx].status !== status) {
             next[idx] = { ...next[idx], status, updated_at: stamp };
