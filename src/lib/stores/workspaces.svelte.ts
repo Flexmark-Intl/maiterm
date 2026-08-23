@@ -131,6 +131,7 @@ function createWorkspacesStore() {
   let lastSwitchedAt = $state<Map<string, number>>(new Map());
   // Frontend-only: set of tab IDs with notes panel visible
   let notesVisible = $state<Set<string>>(new Set());
+  let tasksVisible = $state<Set<string>>(new Set());
   // Workspace IDs currently being suspended — guards pty-close from deleting tabs
   const suspendingWorkspaceIds = new Set<string>();
   // Tab IDs currently being suspended — guards pty-close from deleting the tab
@@ -235,16 +236,19 @@ function createWorkspacesStore() {
       sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, data.sidebar_width || SIDEBAR_DEFAULT_WIDTH));
       sidebarCollapsed = data.sidebar_collapsed ?? false;
 
-      // Seed notesVisible from persisted notes_open state
+      // Seed notesVisible / tasksVisible from the persisted per-tab open flags
       const seeded = new Set<string>();
+      const seededTasks = new Set<string>();
       for (const ws of data.workspaces) {
         for (const pane of ws.panes) {
           for (const tab of pane.tabs) {
             if (tab.notes_open) seeded.add(tab.id);
+            if (tab.tasks_open) seededTasks.add(tab.id);
           }
         }
       }
       notesVisible = seeded;
+      tasksVisible = seededTasks;
 
       // Migration: update old auto-resume commands and backfill missing context
       const OLD_RESUME_COMMANDS = [
@@ -2334,6 +2338,33 @@ function createWorkspacesStore() {
 
     isNotesVisible(tabId: string) {
       return notesVisible.has(tabId);
+    },
+
+    /** Task panel visibility — same lifecycle as notes (docs/tasks.md §5). */
+    toggleTasks(tabId: string) {
+      const updated = new Set(tasksVisible);
+      const isOpen = !updated.has(tabId);
+      if (isOpen) {
+        updated.add(tabId);
+      } else {
+        updated.delete(tabId);
+      }
+      tasksVisible = updated;
+
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) {
+            tab.tasks_open = isOpen;
+            commands.setTabTasksOpen(ws.id, pane.id, tabId, isOpen);
+            return;
+          }
+        }
+      }
+    },
+
+    isTasksVisible(tabId: string) {
+      return tasksVisible.has(tabId);
     },
 
     /** Effective composer open state: explicit per-tab value, else the default-open preference. */

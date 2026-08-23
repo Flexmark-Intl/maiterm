@@ -272,6 +272,10 @@ pub struct Tab {
     /// Whether the notes panel is open for this tab.
     #[serde(default)]
     pub notes_open: bool,
+    /// Whether this tab's task panel is open (docs/tasks.md §5). Same lifecycle as
+    /// `notes_open` — persisted per tab so a reopened tab comes back as it was left.
+    #[serde(default)]
+    pub tasks_open: bool,
     /// Whether the composer dock is open for this tab.
     /// `None` = inherit `composer_default_open` preference; `Some(x)` = user explicitly toggled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -813,6 +817,10 @@ fn default_notes_width() -> u32 {
     320
 }
 
+fn default_tasks_width() -> u32 {
+    320
+}
+
 fn default_toast_font_size() -> u32 {
     14
 }
@@ -1110,6 +1118,9 @@ pub struct Preferences {
     pub notes_font_family: String,
     #[serde(default = "default_notes_width")]
     pub notes_width: u32,
+    /// Width of the task side panel (docs/tasks.md §5).
+    #[serde(default = "default_tasks_width")]
+    pub tasks_width: u32,
     #[serde(default = "default_true")]
     pub notes_word_wrap: bool,
     #[serde(default = "default_toast_font_size")]
@@ -1415,6 +1426,7 @@ impl Default for Preferences {
             notes_font_size: default_notes_font_size(),
             notes_font_family: default_font_family(),
             notes_width: default_notes_width(),
+            tasks_width: default_tasks_width(),
             notes_word_wrap: true,
             toast_font_size: default_toast_font_size(),
             toast_width: default_toast_width(),
@@ -1498,6 +1510,7 @@ impl Tab {
             notes: None,
             notes_mode: None,
             notes_open: false,
+            tasks_open: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -1542,6 +1555,7 @@ impl Tab {
             notes: None,
             notes_mode: None,
             notes_open: false,
+            tasks_open: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -1586,6 +1600,7 @@ impl Tab {
             notes: None,
             notes_mode: None,
             notes_open: false,
+            tasks_open: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,

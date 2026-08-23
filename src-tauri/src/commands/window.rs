@@ -459,6 +459,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 notes: tab.notes.clone(),
                 notes_mode: tab.notes_mode.clone(),
                 notes_open: tab.notes_open,
+                tasks_open: tab.tasks_open,
                 composer_open: tab.composer_open,
                 composer_draft: tab.composer_draft.clone(),
                 mesh_purpose: tab.mesh_purpose.clone(),

@@ -890,6 +890,17 @@
         return;
       }
 
+      // Cmd+Shift+E - Toggle tasks panel (docs/tasks.md §5)
+      if (isMeta && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        e.stopPropagation();
+        const tab = workspacesStore.activeTab;
+        if (tab) {
+          workspacesStore.toggleTasks(tab.id);
+        }
+        return;
+      }
+
       // Cmd+Shift+C - Toggle composer dock
       if (isMeta && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'c') {
         e.preventDefault();

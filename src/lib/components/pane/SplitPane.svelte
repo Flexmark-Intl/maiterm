@@ -5,6 +5,7 @@
   import TerminalTabs from '$lib/components/terminal/TerminalTabs.svelte';
   import SearchBar from '$lib/components/terminal/SearchBar.svelte';
   import NotesPanel from '$lib/components/terminal/NotesPanel.svelte';
+  import TasksPanel from '$lib/components/tasks/TasksPanel.svelte';
   import ComposerDock from '$lib/components/terminal/ComposerDock.svelte';
   import { pendingResumePanes, resumePane } from '$lib/stores/resumeGate.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -174,6 +175,15 @@
           {/if}
         {/if}
       </div>
+
+      {#if pane.active_tab_id && workspacesStore.isTasksVisible(pane.active_tab_id)}
+        {@const tasksTab = pane.tabs.find(t => t.id === pane.active_tab_id)}
+        {#if tasksTab}
+          {#key tasksTab.id}
+            <TasksPanel tabId={tasksTab.id} {workspaceId} onclose={() => workspacesStore.toggleTasks(tasksTab.id)} />
+          {/key}
+        {/if}
+      {/if}
 
       {#if pane.active_tab_id && workspacesStore.isNotesVisible(pane.active_tab_id)}
         {@const activeTab = pane.tabs.find(t => t.id === pane.active_tab_id)}

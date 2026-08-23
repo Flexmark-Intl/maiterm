@@ -48,6 +48,8 @@ export interface Tab {
   notes: string | null;
   notes_mode: string | null;
   notes_open: boolean;
+  /** Whether this tab's task panel is open (docs/tasks.md §5). */
+  tasks_open?: boolean;
   /** Composer dock open state: null/absent = inherit composer_default_open pref. */
   composer_open?: boolean | null;
   /** Persisted in-progress composer draft text. */
@@ -372,6 +374,8 @@ export interface Preferences {
   notes_font_size: number;
   notes_font_family: string;
   notes_width: number;
+  /** Width of the task side panel (docs/tasks.md §5). */
+  tasks_width: number;
   notes_word_wrap: boolean;
   toast_font_size: number;
   toast_width: number;

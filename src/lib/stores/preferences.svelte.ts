@@ -34,6 +34,7 @@ function createPreferencesStore() {
   let notesFontSize = $state(13);
   let notesFontFamily = $state('Menlo');
   let notesWidth = $state(320);
+  let tasksWidth = $state(320);
   let notesWordWrap = $state(true);
   let toastFontSize = $state(14);
   let toastWidth = $state(400);
@@ -120,6 +121,7 @@ function createPreferencesStore() {
     get notesFontSize() { return notesFontSize; },
     get notesFontFamily() { return notesFontFamily; },
     get notesWidth() { return notesWidth; },
+    get tasksWidth() { return tasksWidth; },
     get notesWordWrap() { return notesWordWrap; },
     get toastFontSize() { return toastFontSize; },
     get toastWidth() { return toastWidth; },
@@ -216,6 +218,7 @@ function createPreferencesStore() {
       notesFontSize = prefs.notes_font_size ?? 13;
       notesFontFamily = prefs.notes_font_family ?? 'Menlo';
       notesWidth = prefs.notes_width ?? 320;
+      tasksWidth = prefs.tasks_width ?? 320;
       notesWordWrap = prefs.notes_word_wrap ?? true;
       toastFontSize = prefs.toast_font_size ?? 14;
       toastWidth = prefs.toast_width ?? 400;
@@ -401,6 +404,11 @@ function createPreferencesStore() {
 
     async setNotesWidth(value: number) {
       notesWidth = Math.max(200, value);
+      await this.save();
+    },
+
+    async setTasksWidth(value: number) {
+      tasksWidth = Math.max(200, value);
       await this.save();
     },
 
@@ -735,6 +743,7 @@ function createPreferencesStore() {
       notesFontSize = prefs.notes_font_size ?? 13;
       notesFontFamily = prefs.notes_font_family ?? 'Menlo';
       notesWidth = prefs.notes_width ?? 320;
+      tasksWidth = prefs.tasks_width ?? 320;
       notesWordWrap = prefs.notes_word_wrap ?? true;
       toastFontSize = prefs.toast_font_size ?? 14;
       toastWidth = prefs.toast_width ?? 400;
@@ -822,6 +831,7 @@ function createPreferencesStore() {
         notes_font_size: notesFontSize,
         notes_font_family: notesFontFamily,
         notes_width: notesWidth,
+        tasks_width: tasksWidth,
         notes_word_wrap: notesWordWrap,
         toast_font_size: toastFontSize,
         toast_width: toastWidth,

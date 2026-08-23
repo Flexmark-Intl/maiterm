@@ -119,6 +119,7 @@
         <div class="shortcut-group">
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>O</kbd> <span>Open file</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>E</kbd> <span>Toggle notes panel</span></div>
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd> <span>Toggle tasks panel</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> <span>Toggle composer dock</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>B</kbd> <span>Toggle sidebar</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>F</kbd> <span>Find in terminal</span></div>
