@@ -142,26 +142,87 @@ workspaces leaves tasks behind, so its rows legitimately span two lists.
 This is also the honest model: a task whose assignee is gone belongs to the project, not to
 a ghost.
 
-**Status vocabulary is unchanged** (`backlog/active/blocked/review/done`) so the Overlord
-board's five lanes and every existing helper keep working. Imported/agent statuses map:
-`pending → backlog`, `in_progress → active`, `completed → done`, plus unmet `blocked_by`
-→ `blocked`.
+### The six lanes, and what `backlog` actually means
 
-## 4. MCP surface
+```
+BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE
+   ^         ^
+ parked    new work starts here
+```
+
+`backlog` is a **parking lot**, not a to-do list: next month, future ideas, low-priority.
+It clears mental clutter, keeps good ideas from being lost, and stops low-priority work
+from interrupting what's in flight. `todo` is the not-started-yet lane.
+
+That distinction has teeth, and getting it wrong is what the first version did:
+
+- **New work never starts in `backlog`.** It was the default for every task, which made it
+  an inbox while the name promised a parking lot. `makeTask`, `coerceStatus`, and
+  `statusFromAgent('pending')` all land in `todo`.
+- **Parked tasks are exempt from every "is this in flight" question** — `task_stale`, the
+  board's stale signals, `no_todo_list`, and the scan's tracked/untracked classification
+  (`isInFlight` / `isParked` in `src/lib/tasks/model.ts`). Before this, `task_stale` fired
+  on anything not `done`, so a deliberately shelved item aged into a stale signal and
+  Overlord injected a directive about it. **A backlog that generates interruptions is the
+  opposite of a backlog.**
+- **The done-sweep can't reach them** — it only touches `done` rows, so a shelved idea
+  survives indefinitely. A parking lot that quietly empties itself is not one.
+- **Backlog is LEFTMOST** even though nothing starts there, because parking something is a
+  move *backwards* out of the flow. That is also what makes dragging a card left to shelve
+  it read correctly.
+
+Old rows migrate `backlog` → `todo` behind `tasks_backlog_vocabulary_migrated`. The flag is
+required: re-running that remap would drag genuinely parked tasks back onto the board.
+
+## 4. Workstreams
+
+One agent tab is routinely asked to do two unrelated things. A **workstream** is a named
+job inside a workspace ("Auth refactor", "DB migration"); the workspace is still the
+project. Tasks with no workstream are loose — shown, dimmed, never hidden.
+
+```rust
+pub struct Workstream { id, name, normalized_name, created_at, updated_at }
+// Task.workstream_id: Option<String>   — None = loose
+```
+
+Design decisions worth not re-litigating:
+
+- **Not called a "task list."** In kanban a list *is* a column, and there are six of those.
+  It also collides with the `listTasks` tool.
+- **No `tab_id` on the workstream.** Assignment stays on the `Task`, where the
+  release/remap machinery that survives tab-id churn already lives. Every task in a
+  workstream shares a tab in practice, so the owner is derivable for display; a second
+  source of tab truth would fight that machinery.
+- **Agents pass a NAME, not an id.** Requiring a round trip before recording work would
+  make the common case worse. `ensureWorkstream` creates-or-reuses, deduped on the same
+  normalizer titles use, so one job can't become three spellings.
+- **Empty workstreams are dropped on persist.** They exist only to group tasks; one with no
+  members is a label with no referent, and agents' throwaway names would accumulate.
+- **The dedup key includes the workstream.** "Write the tests" for auth and "write the
+  tests" for the DB migration are two different pieces of work.
+
+Imported and agent statuses map: `pending → todo`, `in_progress → active`,
+`completed → done`, an explicit `backlog → backlog`, plus unmet `blocked_by` → `blocked`.
+
+## 5. MCP surface
 
 Three tools, batched to keep both token cost and round trips down. Registered for every
 runtime; they ride the SSH bridge like every other maiterm tool.
 
 ```ts
 listTasks({ scope?: 'tab' | 'workspace' })   // default 'workspace'
-  → { tasks: [{ id, title, detail?, status, tab_id, blocked_by, origin, updated_at }] }
+  → { workspace, scope, workstreams: [{ workstream: string|null, tasks: [...] }] }
 
-createTasks({ tasks: [{ title, detail?, status?, blocked_by?, assign_to_me? }] })
-  → { created: string[] }                    // ids, in order
+createTasks({ workstream?: string,           // a NAME; created if new, reused if not
+              tasks: [{ title, detail?, status?, blocked_by?, assign_to_me? }] })
+  → { created: string[], workstream?, already_tracked?: string[] }
 
-updateTasks({ updates: [{ id, status?, title?, detail?, blocked_by? }] })
+updateTasks({ updates: [{ id, status?, title?, detail?, workstream?, blocked_by? }] })
   → { updated: string[], missing: string[] }
 ```
+
+`listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
+an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.
 
 - All calls are scoped to the **calling tab's workspace** — a tab cannot read or write
   another project's tasks. Identity comes from the connection→tab affinity that
@@ -211,7 +272,7 @@ Three constraints on that clause:
 
 Gated on a `tasks_enabled` preference (default on) so it can be switched off wholesale.
 
-## 5. Side panel
+## 6. Side panel
 
 Mirrors the notes panel exactly — that pattern is proven and the muscle memory transfers.
 
@@ -225,7 +286,7 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 - Content: this tab's tasks first, then the workspace backlog; inline add, click-to-edit
   title/detail, status cycling, assign/unassign, and a blocked-by indicator.
 
-## 6. As built
+## 7. As built
 
 | Stage | Commits |
 |---|---|
@@ -235,6 +296,9 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 | Review fixes (eight defects across S1/S2) | `f699d91` |
 | Side panel | `39b5545` |
 | Overlord signals retargeted | `c499420` |
+| Review fixes (five defects across S3) | `50dd2e3` |
+| Workstreams + the backlog redefinition | `93c8388` |
+| Board: strips, drag/drop, readable descriptions | `0092900` |
 
 The importer landed with the cutover rather than as its own stage: once Overlord stopped
 owning the rows, `syncMirrorTasks` writing `origin: 'imported'` into the store *was* the
@@ -254,7 +318,7 @@ and the pass cannot run twice. Two details that matter:
   `updated_at` is exactly what the staleness rules read, so inventing one hands the row a
   bogus age.
 
-## 7. Open questions
+## 8. Open questions
 
 1. **Cross-workspace view.** The Overlord board already groups by workspace, so per-window
    aggregation is free. A global "everything, everywhere" view is still deferred.
@@ -269,7 +333,7 @@ and the pass cannot run twice. Two details that matter:
 4. **A tab moved between workspaces** leaves its tasks behind in the old workspace's list.
    Not yet handled — `move_tab_to_workspace` would need to carry them across.
 
-## 8. Rejected
+## 9. Rejected
 
 | Rejected | Why |
 |---|---|

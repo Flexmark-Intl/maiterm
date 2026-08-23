@@ -1,5 +1,5 @@
 <script lang="ts">
-  /** Per-tab task panel (docs/tasks.md §5).
+  /** Per-tab task panel (docs/tasks.md §6).
    *
    *  Deliberately built on the notes-panel pattern — same dock, same drag-resize, same
    *  per-tab persistence — so the muscle memory transfers and there is one mental model
@@ -9,7 +9,7 @@
    *  point: the panel answers "what am I doing here" before "what is going on overall". */
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { effectiveStatus, TASK_STATUSES } from '$lib/tasks/model';
+  import { effectiveStatus, isParked, TASK_STATUSES } from '$lib/tasks/model';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -29,16 +29,60 @@
   let detailValue = $state('');
   let confirmingDelete = $state<string | null>(null);
   let showDone = $state(false);
+  let showParked = $state(false);
 
   const all = $derived(tasksStore.forWorkspace(workspaceId));
-  const mine = $derived(all.filter((t) => t.tab_id === tabId));
-  const others = $derived(all.filter((t) => t.tab_id !== tabId));
-  /** Finished work is collapsed by default — the panel is for what's left. */
-  const visible = (list: Task[]) => (showDone ? list : list.filter((t) => t.status !== 'done'));
+
+  /** Finished and parked work both collapse behind a count — the panel is for what's in
+   *  flight. Parked is separate from done because they mean different things: one is
+   *  finished, the other is deliberately not started. */
+  const visible = (list: Task[]) =>
+    list.filter((t) => (showDone || t.status !== 'done') && (showParked || !isParked(t.status)));
   const doneCount = $derived(all.filter((t) => t.status === 'done').length);
+  const parkedCount = $derived(all.filter((t) => isParked(t.status)).length);
+
+  /** This tab's work first, grouped by job, then the rest of the project.
+   *
+   *  The panel answers "what am I doing here" before "what is going on overall", and
+   *  within that, one tab is routinely running two unrelated jobs — so the grouping has to
+   *  be by workstream or the two blur into one list. */
+  interface Group {
+    key: string;
+    label: string;
+    sub: string | null;
+    list: Task[];
+  }
+
+  const groups = $derived.by<Group[]>(() => {
+    const streams = tasksStore.workstreams(workspaceId);
+    const nameOf = (id: string | null | undefined) =>
+      id ? (streams.find((w) => w.id === id)?.name ?? null) : null;
+    const out: Group[] = [];
+    for (const [scope, label] of [['mine', 'This tab'], ['others', 'Project']] as const) {
+      const scoped = all.filter((t) => (scope === 'mine' ? t.tab_id === tabId : t.tab_id !== tabId));
+      const byStream = new Map<string, Task[]>();
+      for (const t of scoped) {
+        const k = t.workstream_id ?? '';
+        if (!byStream.has(k)) byStream.set(k, []);
+        byStream.get(k)!.push(t);
+      }
+      const keys = [...byStream.keys()].sort((a, b) => {
+        // Loose tasks last; named jobs alphabetical.
+        if (!a) return 1;
+        if (!b) return -1;
+        return (nameOf(a) ?? '').localeCompare(nameOf(b) ?? '');
+      });
+      for (const k of keys) {
+        const list = visible(byStream.get(k)!);
+        if (!list.length) continue;
+        out.push({ key: `${scope}:${k}`, label, sub: nameOf(k || null), list });
+      }
+    }
+    return out;
+  });
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
-    backlog: 'Backlog',
+    backlog: 'Parked',
     todo: 'To-do',
     active: 'Active',
     blocked: 'Blocked',
@@ -46,11 +90,34 @@
     done: 'Done',
   };
 
+  /** Which job a new task lands in. '' = ungrouped, '+' = name a new one.
+   *  Sticky between adds: entering several tasks for one job is the common case. */
+  let addStream = $state('');
+  let newStreamName = $state('');
+
   function addTask() {
     const title = draft.trim();
     if (!title) return;
-    tasksStore.add(workspaceId, { title, tab_id: tabId, origin: 'human' });
+    let workstreamId: string | null = null;
+    if (addStream === '+') {
+      const name = newStreamName.trim();
+      if (!name) return;
+      const created = tasksStore.ensureWorkstream(workspaceId, name);
+      workstreamId = created?.id ?? null;
+      // Switch to the created stream so the next task lands in it too, rather than
+      // re-prompting for a name that now exists.
+      if (created) addStream = created.id;
+      newStreamName = '';
+    } else if (addStream) {
+      workstreamId = addStream;
+    }
+    tasksStore.add(workspaceId, { title, tab_id: tabId, origin: 'human', workstream_id: workstreamId });
     draft = '';
+  }
+
+  /** Move a task into another job from its row. */
+  function setWorkstream(t: Task, id: string) {
+    tasksStore.update(workspaceId, t.id, { workstream_id: id || null });
   }
 
   /** Click the status chip to advance; shift-click to go back. Cycling beats a dropdown
@@ -176,6 +243,11 @@
   <div class="panel-header">
     <span class="title">Tasks</span>
     <span class="spacer"></span>
+    {#if parkedCount > 0}
+      <button class="done-toggle" class:on={showParked} onclick={() => (showParked = !showParked)}>
+        {parkedCount} parked
+      </button>
+    {/if}
     {#if doneCount > 0}
       <button class="done-toggle" class:on={showDone} onclick={() => (showDone = !showDone)}>
         {doneCount} done
@@ -198,6 +270,26 @@
     <button class="add-btn" disabled={!draft.trim()} onclick={addTask} aria-label="Add task">+</button>
   </div>
 
+  <div class="add-row stream-row">
+    <select class="stream-select" bind:value={addStream} aria-label="Workstream for new tasks">
+      <option value="">Ungrouped</option>
+      {#each tasksStore.workstreams(workspaceId) as w (w.id)}
+        <option value={w.id}>{w.name}</option>
+      {/each}
+      <option value="+">New workstream…</option>
+    </select>
+    {#if addStream === '+'}
+      <input
+        class="add-input"
+        placeholder="Name it, e.g. Auth refactor"
+        bind:value={newStreamName}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') addTask();
+        }}
+      />
+    {/if}
+  </div>
+
   <div class="lists">
     {#if all.length === 0}
       <p class="empty">
@@ -206,13 +298,17 @@
       </p>
     {/if}
 
-    {#each [{ label: 'This tab', list: visible(mine) }, { label: 'Project', list: visible(others) }] as group (group.label)}
+    {#each groups as group (group.key)}
       {#if group.list.length}
-        <h4 class="group">{group.label}</h4>
+        <h4 class="group">
+          {group.label}
+          {#if group.sub}<span class="group-stream">· {group.sub}</span>
+          {:else}<span class="group-loose">· ungrouped</span>{/if}
+        </h4>
         <ul class="task-list">
           {#each group.list as t (t.id)}
             {@const eff = effectiveStatus(t, all)}
-            <li class="task" class:done={t.status === 'done'}>
+            <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)}>
               <div class="task-main">
                 <button
                   class="status s-{eff}"
@@ -247,9 +343,20 @@
                       {t.origin === 'imported' ? '⇥' : '◆'}
                     </span>
                   {/if}
+                  <select
+                    class="mini-select"
+                    title="Move to another workstream"
+                    value={t.workstream_id ?? ''}
+                    onchange={(e) => setWorkstream(t, e.currentTarget.value)}
+                  >
+                    <option value="">Ungrouped</option>
+                    {#each tasksStore.workstreams(workspaceId) as w (w.id)}
+                      <option value={w.id}>{w.name}</option>
+                    {/each}
+                  </select>
                   <button
                     class="mini"
-                    title={t.tab_id === tabId ? 'Move to project backlog' : 'Assign to this tab'}
+                    title={t.tab_id === tabId ? 'Unassign (leave for whoever picks it up)' : 'Assign to this tab'}
                     onclick={() => assignToMe(t)}
                   >
                     {t.tab_id === tabId ? '↥' : '↧'}
@@ -385,6 +492,28 @@
     cursor: default;
   }
 
+  .stream-row { padding-top: 0; border-bottom: 1px solid var(--bg-light); }
+  .stream-select {
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light);
+    border-radius: 4px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    max-width: 100%;
+    padding: 3px 4px;
+  }
+  .stream-select:focus { border-color: var(--accent); outline: none; }
+
+  .mini-select {
+    background: none;
+    border: none;
+    color: var(--fg-dim);
+    font-size: 10px;
+    max-width: 60px;
+    padding: 0;
+  }
+  .mini-select:focus { outline: none; }
+
   .lists {
     flex: 1;
     overflow-y: auto;
@@ -397,6 +526,9 @@
     line-height: 1.5;
     margin: 10px 10px 0;
   }
+
+  .group-stream { color: var(--accent); font-weight: 500; }
+  .group-loose { font-style: italic; opacity: 0.7; text-transform: none; letter-spacing: 0; }
 
   .group {
     color: var(--fg-dim);
@@ -418,6 +550,7 @@
     padding: 5px 8px;
   }
   .task.done { opacity: 0.5; }
+  .task.parked { opacity: 0.62; }
 
   .task-main {
     align-items: center;
@@ -436,7 +569,8 @@
     padding: 1px 5px;
     text-transform: uppercase;
   }
-  .s-backlog { color: var(--fg-dim); }
+  .s-backlog { color: var(--fg-dim); opacity: 0.85; }
+  .s-todo { color: var(--fg-dim); }
   .s-active { color: var(--accent); }
   .s-blocked { color: var(--red, #f7768e); }
   .s-review { color: var(--yellow, #e0af68); }

@@ -1191,7 +1191,7 @@ function createClaudeCodeStore() {
     return agentMeshStore.completeTopic(loc.tab.id, args.topicId, false);
   }
 
-  // --- maiTerm task tools (docs/tasks.md §4) ---
+  // --- maiTerm task tools (docs/tasks.md §5) ---
   //
   // Every call resolves "this project" from the CALLING TAB's workspace, so a tab can
   // neither read nor write another project's list. The tools are also listed in

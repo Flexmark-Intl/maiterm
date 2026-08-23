@@ -48,7 +48,7 @@ export interface Tab {
   notes: string | null;
   notes_mode: string | null;
   notes_open: boolean;
-  /** Whether this tab's task panel is open (docs/tasks.md §5). */
+  /** Whether this tab's task panel is open (docs/tasks.md §6). */
   tasks_open?: boolean;
   /** Composer dock open state: null/absent = inherit composer_default_open pref. */
   composer_open?: boolean | null;
@@ -182,7 +182,7 @@ export type TaskOrigin = 'human' | 'agent' | 'overlord' | 'imported';
 /** A unit of work owned by a workspace (docs/tasks.md). maiTerm is the source of truth
  *  for every writer — the side panel, agents over MCP, Overlord, and the Claude
  *  task-store importer. Mirrors the Rust `Task`. */
-/** A named job inside a workspace (docs/tasks.md §5) — one agent tab is routinely asked
+/** A named job inside a workspace (docs/tasks.md §4) — one agent tab is routinely asked
  *  to do two unrelated things, and this is how they stay apart. Mirrors the Rust
  *  `Workstream`. */
 export interface Workstream {
@@ -398,7 +398,7 @@ export interface Preferences {
   notes_font_size: number;
   notes_font_family: string;
   notes_width: number;
-  /** Width of the task side panel (docs/tasks.md §5). */
+  /** Width of the task side panel (docs/tasks.md §6). */
   tasks_width: number;
   notes_word_wrap: boolean;
   toast_font_size: number;

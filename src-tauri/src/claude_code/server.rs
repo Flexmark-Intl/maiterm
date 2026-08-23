@@ -2181,7 +2181,7 @@ async fn process_message(
                              If you're blocked on a human decision, escalate with needs_human.",
                         );
                     }
-                    // maiTerm task priming (docs/tasks.md §4) — on EVERY agent tab, not just
+                    // maiTerm task priming (docs/tasks.md §5) — on EVERY agent tab, not just
                     // supervised ones, so task state is consistent whether or not anyone is
                     // watching. The migration clause matters because initSession also fires on
                     // resume/fork/compact: that is precisely when an agent is mid-project

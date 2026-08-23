@@ -195,7 +195,7 @@ function createTasksStore() {
       return this.update(workspaceId, id, { status });
     },
 
-    /** Delete. Deliberately human-only — no MCP tool reaches this (docs/tasks.md §4).
+    /** Delete. Deliberately human-only — no MCP tool reaches this (docs/tasks.md §5).
      *  Dangling `blocked_by` edges are cleaned up so no task is left blocked forever by
      *  a prerequisite that no longer exists. */
     remove(workspaceId: string, id: string): boolean {

@@ -615,7 +615,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
     ]).as_array().unwrap().clone());
 
     if tasks_enabled {
-    // ── maiTerm tasks (docs/tasks.md §4) ──
+    // ── maiTerm tasks (docs/tasks.md §5) ──
     // Three batched tools, deliberately no delete: an agent may mark a task done, only a
     // human removes one. All scoped to the CALLING TAB'S WORKSPACE via connection→tab
     // affinity, so a tab cannot see or touch another project's list.

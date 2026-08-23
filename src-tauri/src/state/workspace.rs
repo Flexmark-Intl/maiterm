@@ -440,7 +440,7 @@ impl MeshTopic {
     }
 }
 
-/// A named group of tasks inside a workspace (docs/tasks.md §5).
+/// A named group of tasks inside a workspace (docs/tasks.md §4).
 ///
 /// One agent tab is routinely asked to do two unrelated things at once; a workstream is
 /// how those stay apart. The workspace is still the project — this is a *job* within it,
@@ -567,7 +567,7 @@ pub struct Workspace {
     /// no rank field; reordering rewrites the vector.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<Task>,
-    /// Named task groups (docs/tasks.md §5) — one per distinct job in this workspace.
+    /// Named task groups (docs/tasks.md §4) — one per distinct job in this workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workstreams: Vec<Workstream>,
     /// Overlord workspace flag (docs/overlord.md §11): this workspace hosts the Overlord
@@ -1157,7 +1157,7 @@ pub struct Preferences {
     pub notes_font_family: String,
     #[serde(default = "default_notes_width")]
     pub notes_width: u32,
-    /// Width of the task side panel (docs/tasks.md §5).
+    /// Width of the task side panel (docs/tasks.md §6).
     #[serde(default = "default_tasks_width")]
     pub tasks_width: u32,
     #[serde(default = "default_true")]

@@ -891,7 +891,7 @@
         return;
       }
 
-      // Cmd+Shift+E - Toggle tasks panel (docs/tasks.md §5)
+      // Cmd+Shift+E - Toggle tasks panel (docs/tasks.md §6)
       if (isMeta && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'e') {
         e.preventDefault();
         e.stopPropagation();
