@@ -299,6 +299,7 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 | Review fixes (five defects across S3) | `50dd2e3` |
 | Workstreams + the backlog redefinition | `93c8388` |
 | Board: strips, drag/drop, readable descriptions | `0092900` |
+| Board re-indexed by workstream (index + one board) | `e585821` |
 
 The importer landed with the cutover rather than as its own stage: once Overlord stopped
 owning the rows, `syncMirrorTasks` writing `origin: 'imported'` into the store *was* the
@@ -320,8 +321,11 @@ and the pass cannot run twice. Two details that matter:
 
 ## 8. Open questions
 
-1. **Cross-workspace view.** The Overlord board already groups by workspace, so per-window
-   aggregation is free. A global "everything, everywhere" view is still deferred.
+1. **Cross-workspace view.** Resolved per-window (`e585821`): the board is indexed by
+   workstream across every workspace in the window, and its "Everything" entry is the
+   flat aggregate. Workstream is now the navigation axis, so workspace is a grouping
+   header in the index rather than a level you walk through. A *cross-window* view is
+   still deferred — task state is per-window, like the rest of the Overlord engine.
 2. **Conflict handling.** Two agents in one workspace updating the same task is possible
    but rare; last-write-wins, with `updated_at` making it visible. Note the store persists
    a *whole workspace list* per write, so a writer working from a stale in-memory copy

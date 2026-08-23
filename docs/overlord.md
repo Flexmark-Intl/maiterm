@@ -603,8 +603,34 @@ workspace — all existing pane/split/PTY machinery applies unchanged.
 - At most one per window; created lazily on first use.
 - Suspending it stops the *agent*, never the *engine* — the engine is a
   window-level store, alive as long as the window is.
-- The board view is the workspace's primary surface, grouped by (normal)
-  workspace.
+- The board view is the workspace's primary surface, indexed by **workstream** —
+  see "Board view: one job at a time" below.
+
+### Board view: one job at a time
+
+The board originally nested workspace → workstream → six lanes, rendering every
+board in the window at once. At fleet scale that put the human back to walking
+projects to reach a task — the navigation tax the task system exists to remove,
+in kanban clothing. Reshaped 2026-08-23 (`OverlordBoardView.svelte`):
+
+- A workstream **index** on the left, exactly **one** board on the right. The
+  workstream is the unit of attention; which tab owns an item is a chip on the
+  card, not a level of the hierarchy.
+- Each index row carries a proportional **lane spread**, so the shape of a job
+  (all to-do vs all review) reads without a number, plus a worst-first pip
+  (stale → blocked → active) and a stale count.
+- **Everything** merges every stream into one flat grid — one grid, not N nested
+  ones — with a workstream chip per card that jumps to that stream.
+- Drag a card onto a **lane** to change status, onto an **index row** to change
+  job. A cross-workspace drop is refused (the lists persist per workspace) and
+  renders as refused rather than silently no-opping.
+- The index is one O(n) pass over the window's tasks; the previous shape ran
+  lanes×streams filters on every render.
+- Lanes cap at 40 cards and **announce** the overflow — a silent cap reads as
+  "that's all of it".
+- The rail collapses to a horizontal strip via a **container query**: this board
+  lives in a pane that can be narrow inside a wide window, which a media query
+  cannot see.
 
 ### Task model — minimum viable
 
