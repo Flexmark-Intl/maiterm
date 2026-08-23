@@ -2,7 +2,7 @@
   import { workspacesStore, navigateToTab, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { effectiveStatus, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
+  import { effectiveStatus, hasUnmetDeps, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
   import type { TaskStatus } from '$lib/tauri/types';
   import { fmtAge } from '$lib/overlord/format';
 
@@ -33,13 +33,38 @@
 
   const LANES = TASK_STATUSES;
   const STALE_DAYS = 3;
-  /** Cards rendered per lane. A "done" lane on a long-running project, or the everything
-   *  view at fleet scale, otherwise puts thousands of nodes on screen that nobody reads.
-   *  The overflow is always ANNOUNCED — a silent cap reads as "that's all of it". */
+  /** Cards rendered per lane IN THE EVERYTHING VIEW ONLY, which at fleet scale would
+   *  otherwise put thousands of nodes on screen that nobody reads. A single workstream is
+   *  never capped: it is where the overflow message sends you, so it has to actually show
+   *  the rest — a cap there makes those rows unreachable and the message a lie. */
   const LANE_CAP = 40;
   const EVERYTHING = '*';
 
+  /** The Overlord workspace is excluded, so nothing here may ever WRITE to it — a task
+   *  filed there is invisible to this board forever (see `createStream`). */
   const boardWorkspaces = $derived(workspacesStore.workspaces.filter((w) => !w.overlord));
+
+  /** Tasks bucketed by workspace — the one grouping both the index and the dependency
+   *  scan below read, so a fleet-sized board walks the list once rather than per lane. */
+  const grouped = $derived.by<Map<string, TaskRow[]>>(() => {
+    const byWorkspace = new Map<string, TaskRow[]>();
+    for (const t of overlordStore.tasks) {
+      const list = byWorkspace.get(t.workspace_id);
+      if (list) list.push(t);
+      else byWorkspace.set(t.workspace_id, [t]);
+    }
+    return byWorkspace;
+  });
+
+  /** Ids whose lane is DERIVED from an unfinished prerequisite rather than stored.
+   *  Those cards can't be stepped by hand — see the ‹ › controls. */
+  const depBlocked = $derived.by<Set<string>>(() => {
+    const out = new Set<string>();
+    for (const list of grouped.values()) {
+      for (const t of list) if (hasUnmetDeps(t, list)) out.add(t.id);
+    }
+    return out;
+  });
 
   // ── Index ───────────────────────────────────────────────────────────────────
 
@@ -78,16 +103,9 @@
   const index = $derived.by<StreamEntry[]>(() => {
     void now;
     const staleBefore = now - STALE_DAYS * 86_400_000;
-    const byWorkspace = new Map<string, TaskRow[]>();
-    for (const t of overlordStore.tasks) {
-      const list = byWorkspace.get(t.workspace_id);
-      if (list) list.push(t);
-      else byWorkspace.set(t.workspace_id, [t]);
-    }
-
     const out: StreamEntry[] = [];
     for (const ws of boardWorkspaces) {
-      const all = byWorkspace.get(ws.id);
+      const all = grouped.get(ws.id);
       if (!all?.length) continue;
       const buckets = new Map<string, StreamEntry>();
 
@@ -260,9 +278,16 @@
     newTitle = '';
   }
 
+  /** Step a card one lane.
+   *
+   *  Refused for a dependency-blocked card, whose lane is DERIVED rather than stored: it
+   *  renders in Blocked no matter what, so stepping it wrote a new stored status and moved
+   *  nothing on screen — the card sat still and the button read as broken, while the task
+   *  quietly skipped a lane the moment its prerequisite finished. The buttons are disabled
+   *  and say why instead; a drag still works, because that names a destination explicitly. */
   function moveTask(t: TaskRow, dir: 1 | -1) {
-    const all = overlordStore.tasks.filter((x) => x.workspace_id === t.workspace_id);
-    const at = LANES.indexOf(effectiveStatus(t, all));
+    if (depBlocked.has(t.id)) return;
+    const at = LANES.indexOf(t.status);
     const next = LANES[Math.min(LANES.length - 1, Math.max(0, at + dir))];
     if (next !== t.status) tasksStore.setStatus(t.workspace_id, t.id, next);
   }
@@ -274,17 +299,33 @@
   let newFirst = $state('');
   let newWs = $state('');
 
+  /** Which workspace a new job lands in.
+   *
+   *  MUST resolve to a board workspace. `activeWorkspaceId` is not one: reaching this board
+   *  goes through the sidebar accessor, which activates the OVERLORD workspace — and that
+   *  one is filtered out of `boardWorkspaces`, so a stream created there persists into a
+   *  list this board can never render. It counted toward the Board badge, vanished from the
+   *  rail, and resurfaced days later as a stale Triage card for a task with no visible home.
+   */
+  function defaultWorkspace(): string {
+    if (current.wsId) return current.wsId;
+    const active = workspacesStore.activeWorkspaceId;
+    if (active && boardWorkspaces.some((w) => w.id === active)) return active;
+    return boardWorkspaces[0]?.id ?? '';
+  }
+
   function openCreate() {
     creating = true;
     newName = '';
     newFirst = '';
-    newWs = current.wsId || workspacesStore.activeWorkspaceId || boardWorkspaces[0]?.id || '';
+    newWs = defaultWorkspace();
   }
 
   function createStream() {
     const name = newName.trim();
     const title = newFirst.trim();
-    if (!name || !title || !newWs) return;
+    // Never write to a workspace this board cannot show.
+    if (!name || !title || !boardWorkspaces.some((w) => w.id === newWs)) return;
     const stream = tasksStore.ensureWorkstream(newWs, name);
     tasksStore.add(newWs, { title, origin: 'human', workstream_id: stream?.id ?? null });
     selected = `${newWs}|${stream?.id ?? ''}`;
@@ -309,6 +350,9 @@
   // ── Presentation ────────────────────────────────────────────────────────────
 
   const laneLabel = (l: TaskStatus) => (l === 'todo' ? 'to-do' : l);
+
+  const PINNED_WHY =
+    'Held here by an unfinished prerequisite — finish that task, or drag this one to choose where it lands.';
 
   function laneTone(l: TaskStatus): string {
     switch (l) {
@@ -341,6 +385,9 @@
   }
 </script>
 
+<!-- The query container must be an ANCESTOR: an element never matches its own
+     container query, so `.board` carrying container-type could never restyle itself. -->
+<div class="board-frame">
 <div class="board">
 
   <!-- ══ Index ═════════════════════════════════════════════════════════════ -->
@@ -427,8 +474,11 @@
             bind:value={newFirst}
             onkeydown={(e) => e.key === 'Enter' && createStream()}
           />
+          {#if !newWs}
+            <p class="create-none">No ordinary workspace to file this under — Overlord's own workspace can't hold board work.</p>
+          {/if}
           <div class="create-actions">
-            <button class="ov-btn ov-btn-primary" disabled={!newName.trim() || !newFirst.trim()} onclick={createStream}>Create</button>
+            <button class="ov-btn ov-btn-primary" disabled={!newName.trim() || !newFirst.trim() || !newWs} onclick={createStream}>Create</button>
             <button class="ov-btn" onclick={() => (creating = false)}>Cancel</button>
           </div>
         </div>
@@ -503,7 +553,7 @@
       <div class="lanes">
         {#each LANES as lane, li (lane)}
           {@const cards = current.lanes[lane]}
-          {@const shown = cards.slice(0, LANE_CAP)}
+          {@const shown = isEverything ? cards.slice(0, LANE_CAP) : cards}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="lane ov-in"
@@ -557,9 +607,16 @@
                       <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(t.tab_id!)}>{tabDisplayName(t.tab_id)}</button>
                     {/if}
                     <span class="ov-mono card-age">{fmtAge(t.updated_at)}</span>
+                    {#if depBlocked.has(t.id)}
+                      <span class="ov-chip card-dep" title="Waiting on an unfinished prerequisite. It moves on its own once that task is done.">waiting</span>
+                    {/if}
                     <span class="card-ctl">
-                      <button class="tick" title="Back" disabled={lane === 'backlog'} onclick={() => moveTask(t, -1)}>‹</button>
-                      <button class="tick" title="Forward" disabled={lane === 'done'} onclick={() => moveTask(t, 1)}>›</button>
+                      <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Back'}
+                              disabled={depBlocked.has(t.id) || t.status === 'backlog'}
+                              onclick={() => moveTask(t, -1)}>‹</button>
+                      <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Forward'}
+                              disabled={depBlocked.has(t.id) || t.status === 'done'}
+                              onclick={() => moveTask(t, 1)}>›</button>
                       <button class="tick tick-del" title="Delete" onclick={() => tasksStore.remove(t.workspace_id, t.id)}>×</button>
                     </span>
                   </div>
@@ -567,9 +624,11 @@
               {/each}
 
               {#if cards.length > shown.length}
+                <!-- Only reachable in the everything view, where the named workstream is a
+                     real destination that shows all of them. -->
                 <p class="lane-more">
-                  +{cards.length - shown.length} more
-                  {#if isEverything}· open the workstream to see {cards.length - shown.length === 1 ? 'it' : 'them'}{/if}
+                  +{cards.length - shown.length} more · open the workstream to see
+                  {cards.length - shown.length === 1 ? 'it' : 'them'}
                 </p>
               {/if}
             </div>
@@ -596,12 +655,24 @@
     {/if}
   </section>
 </div>
+</div>
 
 <style>
   /* Container queries, not media queries: this board lives in a pane that can be half a
-     window wide while the window itself is huge. */
-  .board {
+     window wide while the window itself is huge. The container has to be an ANCESTOR of
+     everything it restyles — an element never matches its own container query, so putting
+     `container-type` on `.board` left `.board`'s own rule permanently dead while its
+     children reflowed around it. */
+  .board-frame {
     container-type: inline-size;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .board {
     display: flex;
     gap: 14px;
     align-items: stretch;
@@ -720,6 +791,7 @@
   .create { display: flex; flex-direction: column; gap: 5px; }
   .create :global(.ov-input),
   .create :global(.ov-select) { width: 100%; }
+  .create-none { color: var(--ov-critical); font-size: 0.76rem; line-height: 1.45; }
   .create-actions { display: flex; gap: 5px; }
   .create-actions :global(.ov-btn) { flex: 1; }
 
@@ -908,6 +980,11 @@
   }
   .card-stream:hover { color: var(--ov-ink); border-color: var(--ov-hair-strong); }
   .card-age { font-size: 0.7rem; color: var(--ov-ink-dim); margin-left: auto; }
+  /* The lane this card sits in is derived, not chosen — say so, since its steppers are off. */
+  .card-dep {
+    border-color: color-mix(in srgb, var(--ov-critical) 35%, transparent);
+    color: color-mix(in srgb, var(--ov-critical) 80%, var(--fg));
+  }
   .card-ctl { display: flex; gap: 1px; }
 
   .tick {
