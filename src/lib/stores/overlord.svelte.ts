@@ -129,10 +129,13 @@ export interface PendingRuleChangeBatch {
 export interface ScanSummary {
   at: number;
   tabsSeen: number;
+  /** Tabs whose todo list was read (from the store or, for SSH tabs, the transcript). */
   mirrored: number;
+  /** Of those, how many came from Claude Code's authoritative todo store. */
+  fromStore: number;
   adopted: number;
   silent: string[];
-  /** Set once a census has run against this scan's silent set. */
+  /** Set once an ask-to-track pass has run against this scan's silent set. */
   asked?: number;
 }
 
@@ -857,23 +860,36 @@ function createOverlordStore() {
   //
   //   ADOPT   free, silent, safe to repeat — mirror todos where they exist, otherwise
   //           stand up one placeholder row per running tab. No injection at all.
-  //   CENSUS  opt-in, one directive per silent tab, answered through replyToOverlord
-  //           (§8's active channel). Never automatic: asking 40 tabs burns a turn in
-  //           each and writes into 40 transcripts, which must never be a side effect
-  //           of opening a board.
+  //   ASK     opt-in, one directive per untracked tab, asking it to START KEEPING a todo
+  //           list — which then feeds the board on its own, forever, via the store. Never
+  //           automatic: writing into 40 transcripts must not be a side effect of opening
+  //           a board.
   //
   // Both are idempotent. Adopt matches existing rows on (origin, tab_id) so a re-scan
   // updates instead of duplicating; census stamps a persisted per-tab timestamp so a
   // re-scan never re-asks the same tab inside the cooldown.
 
   /** Persisted per-tab marker (trigger variable, like MESH_ONBOARDED_VAR) recording when
-   *  this tab was last asked what it's working on. */
-  const CENSUS_VAR = 'overlordCensusAt';
-  const CENSUS_COOLDOWN_MS = 12 * 60 * 60 * 1000;
-  const CENSUS_TEXT =
-    'Overlord status sweep — no action needed, and please don\'t change anything. ' +
-    'In one line, what are you working on right now? Answer by calling the replyToOverlord ' +
-    "tool with kind:'status', your state, a one-line summary, and `task` set to that one line.";
+   *  this tab was last asked to start tracking its work. */
+  const TRACK_ASK_VAR = 'overlordTrackAskAt';
+  const TRACK_ASK_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+
+  /** What a silent tab is asked to do.
+   *
+   *  Deliberately NOT "tell me in one line what you're working on". A one-line answer is a
+   *  snapshot that is stale the moment it arrives, it collapses an agent juggling several
+   *  threads of work into a single string, and it has to be re-asked forever. Asking the
+   *  agent to keep a todo list instead costs the same single turn and then feeds the board
+   *  continuously and for free, because Claude Code writes that list to its own todo store
+   *  where Overlord reads it directly — structured, complete, multi-task, always current.
+   *  The one-line reply stays available as a fallback for runtimes with no task tool. */
+  const TRACK_REQUEST_TEXT =
+    'Overlord check — this tab is doing multi-step work with no task list, so nothing here ' +
+    'is being tracked. Please create a proper todo list with your task tool now, covering ' +
+    'what you are actually working on (several items if several things are in flight), and ' +
+    'keep it updated as you go. Then carry on with what you were doing — nothing else is ' +
+    'needed. If you have no task tool, instead call replyToOverlord once with kind:\'status\' ' +
+    'and `task` set to a one-line description.';
 
   /** Find this tab's Overlord-owned board row, in ANY state. Matching must include
    *  `done`: filtering it out made "mark done" un-sticky — the next scan couldn't see the
@@ -926,7 +942,8 @@ function createOverlordStore() {
     return 'created';
   }
 
-  /** CENSUS-REPLY path: the tab told us what it's working on, so retitle its placeholder
+  /** REPLY path: a runtime with no task tool answered via replyToOverlord, so retitle its
+   *  placeholder
    *  (or create one). Never touches a row the human already finished. */
   function titleRow(tabId: string, title: string): boolean {
     if (!isBoardableTab(tabId)) return false;
@@ -1182,7 +1199,7 @@ function createOverlordStore() {
     /** ADOPT pass — populate the board from every currently-running agent tab. Free,
      *  silent, and safe to run as often as you like. Returns what it found. */
     async scanWorkspaces(): Promise<ScanSummary> {
-      if (scanning) return lastScan ?? { at: Date.now(), tabsSeen: 0, mirrored: 0, adopted: 0, silent: [] };
+      if (scanning) return lastScan ?? { at: Date.now(), tabsSeen: 0, mirrored: 0, fromStore: 0, adopted: 0, silent: [] };
       scanning = true;
       try {
         const pairs = agentTabs();
@@ -1196,7 +1213,7 @@ function createOverlordStore() {
           }
         }
         const now = Date.now();
-        let mirrored = 0, adopted = 0, tabsSeen = 0, changed = false;
+        let mirrored = 0, fromStore = 0, adopted = 0, tabsSeen = 0, changed = false;
         const silent: string[] = [];
         for (const { tab, ws } of pairs) {
           // The Overlord workspace is excluded from every board surface, so a row created
@@ -1212,6 +1229,7 @@ function createOverlordStore() {
             if (syncMirrorTasks(tab.id, f, now)) changed = true;
             if (retirePlaceholderIfMirrored(tab.id)) changed = true;
             mirrored++;
+            if (f.todos_source === 'store') fromStore++;
             continue;
           }
           // No todo signal — stand up (or refresh) one row for the tab itself, titled
@@ -1220,32 +1238,33 @@ function createOverlordStore() {
           if (outcome !== 'skipped') changed = true;
           if (outcome === 'created') adopted++;
           if (outcome === 'skipped') continue; // finished by hand, or not boardable
-          const askedAt = Number(getVariables(tab.id)?.get(CENSUS_VAR) ?? 0);
-          if (now - askedAt >= CENSUS_COOLDOWN_MS) silent.push(tab.id);
+          const askedAt = Number(getVariables(tab.id)?.get(TRACK_ASK_VAR) ?? 0);
+          if (now - askedAt >= TRACK_ASK_COOLDOWN_MS) silent.push(tab.id);
         }
         if (changed) {
           tasks = [...tasks];
           persistTasks();
         }
-        lastScan = { at: now, tabsSeen, mirrored, adopted, silent };
-        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} todo lists mirrored, ${adopted} adopted, ${silent.length} silent`);
+        lastScan = { at: now, tabsSeen, mirrored, fromStore, adopted, silent };
+        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} todo lists read (${fromStore} from the store), ${adopted} adopted, ${silent.length} untracked`);
         return lastScan;
       } finally {
         scanning = false;
       }
     },
 
-    /** CENSUS pass — ask the given tabs what they're working on. One short directive
-     *  each, through the same mechanical guards as any rule, ledgered as human-origin
-     *  (you asked for it). Skips anything busy, guarded, or asked recently. */
-    async askCensus(tabIds: string[]): Promise<{ asked: number; skipped: number }> {
-      const step = { kind: 'process' as const, text: CENSUS_TEXT };
+    /** ASK-TO-TRACK pass — nudge the given tabs to start keeping a todo list, which then
+     *  feeds the board on its own via Claude Code's todo store. One short directive each,
+     *  through the same mechanical guards as any rule, ledgered as human-origin (you asked
+     *  for it). Skips anything busy, guarded, or asked recently. */
+    async askTabsToTrack(tabIds: string[]): Promise<{ asked: number; skipped: number }> {
+      const step = { kind: 'process' as const, text: TRACK_REQUEST_TEXT };
       let asked = 0, skipped = 0;
       for (const tabId of tabIds) {
         // Never interrogate the supervisor's own agent (its row wouldn't render anyway).
         if (!isBoardableTab(tabId)) { skipped++; continue; }
-        const askedAt = Number(getVariables(tabId)?.get(CENSUS_VAR) ?? 0);
-        if (Date.now() - askedAt < CENSUS_COOLDOWN_MS) { skipped++; continue; }
+        const askedAt = Number(getVariables(tabId)?.get(TRACK_ASK_VAR) ?? 0);
+        if (Date.now() - askedAt < TRACK_ASK_COOLDOWN_MS) { skipped++; continue; }
         if (outstanding.has(tabId) || rituals.has(tabId)) {
           ledger(tabId, null, 'human', 0, step, 'blocked_guard');
           skipped++; continue;
@@ -1261,9 +1280,9 @@ function createOverlordStore() {
         const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
         if (Date.now() - lastOut < 3000) { skipped++; continue; }
         try {
-          await bracketedPasteSubmit(inst.ptyId, CENSUS_TEXT);
+          await bracketedPasteSubmit(inst.ptyId, TRACK_REQUEST_TEXT);
         } catch (e) {
-          logError(`overlord: census inject failed for ${tabId.slice(0, 8)}: ${e}`);
+          logError(`overlord: track-request inject failed for ${tabId.slice(0, 8)}: ${e}`);
           skipped++; continue;
         }
         setOutstanding(tabId, {
@@ -1271,17 +1290,17 @@ function createOverlordStore() {
           ruleId: null,
           tabId,
           stepIndex: 0,
-          text: CENSUS_TEXT,
+          text: TRACK_REQUEST_TEXT,
           sentAt: Date.now(),
           acked: false,
         });
         ledger(tabId, null, 'human', 0, step, 'sent');
-        await setVariable(tabId, CENSUS_VAR, String(Date.now()));
+        await setVariable(tabId, TRACK_ASK_VAR, String(Date.now()));
         asked++;
         await sleep(400); // stagger so a wide sweep doesn't hammer every PTY at once
       }
       if (lastScan) lastScan = { ...lastScan, silent: [], asked };
-      logInfo(`overlord: census — asked ${asked}, skipped ${skipped}`);
+      logInfo(`overlord: track request — asked ${asked}, skipped ${skipped}`);
       return { asked, skipped };
     },
     get pendingRuleChanges() { return pendingRuleChanges; },

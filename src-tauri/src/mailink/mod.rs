@@ -3289,14 +3289,28 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
         if let Some(ts) = of.last_commit_ts {
             v["last_commit_ts"] = json!(ts);
         }
-        if let Some(todos) = of.todos {
-            v["todos"] = todos;
-            if let Some(ts) = of.todos_ts {
-                v["todos_ts"] = json!(ts);
-            }
+        if let Some(ts) = of.todos_ts {
+            v["todos_ts"] = json!(ts);
         }
         if let Some(ts) = of.last_compact_ts {
             v["last_compact_ts"] = json!(ts);
+        }
+        // Claude Code's own todo store is the authoritative, COMPLETE current list; the
+        // transcript tail only ever saw whatever fit in its window. Prefer the store and
+        // keep the tail as the fallback — which is what SSH tabs run on, since a remote
+        // session's store lives on the remote host while its transcript is mirrored here.
+        let store = if rt == AgentRuntime::Claude { transcript::claude_todo_store(&sid) } else { None };
+        match store {
+            Some(todos) => {
+                v["todos"] = todos;
+                v["todos_source"] = json!("store");
+            }
+            None => {
+                if let Some(todos) = of.todos {
+                    v["todos"] = todos;
+                    v["todos_source"] = json!("transcript");
+                }
+            }
         }
     }
     Some(v)

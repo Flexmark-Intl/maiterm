@@ -183,8 +183,12 @@ export interface OverlordTabFacts {
   last_commit_ts?: number;
   /** Unix-ms of the newest compaction boundary (isCompactSummary / compact_boundary). */
   last_compact_ts?: number;
-  /** Newest TodoWrite todos array — the TodoWrite mirror (Claude-only). */
+  /** The tab's todo list (Claude-only). Read from Claude Code's own todo store when
+   *  available — the complete current list — else reconstructed from the transcript tail. */
   todos?: OverlordTodoItem[];
+  /** Where `todos` came from: 'store' is authoritative and complete; 'transcript' is
+   *  whatever fit in the tail window (SSH tabs, whose store lives on the remote host). */
+  todos_source?: 'store' | 'transcript';
   todos_ts?: number;
 }
 

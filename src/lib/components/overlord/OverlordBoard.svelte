@@ -174,10 +174,10 @@
 
   async function runScan() { await overlordStore.scanWorkspaces(); }
 
-  async function runCensus() {
+  async function runTrackRequest() {
     if (!scan?.silent.length || asking) return;
     asking = true;
-    try { await overlordStore.askCensus(scan.silent); } finally { asking = false; }
+    try { await overlordStore.askTabsToTrack(scan.silent); } finally { asking = false; }
   }
 
   // ── Board helpers ───────────────────────────────────────────────────────────
@@ -324,21 +324,21 @@
               <span class="ov-chip ov-chip-tone">scan</span>
               <span class="signal-title">
                 {scan.tabsSeen} running tab{scan.tabsSeen === 1 ? '' : 's'} ·
-                {scan.mirrored} todo list{scan.mirrored === 1 ? '' : 's'} mirrored
+                {scan.mirrored} task list{scan.mirrored === 1 ? '' : 's'} read
                 {#if scan.adopted > 0}· {scan.adopted} added{/if}
               </span>
               <span class="signal-age ov-mono">{fmtAge(scan.at)}</span>
             </div>
             {#if scan.silent.length}
               <p class="signal-text">
-                {scan.silent.length} tab{scan.silent.length === 1 ? ' is' : 's are'} running with no todo list,
+                {scan.silent.length} tab{scan.silent.length === 1 ? ' is' : 's are'} working with no task list,
                 so the board only knows {scan.silent.length === 1 ? 'its' : 'their'} tab name. Overlord can ask
-                {scan.silent.length === 1 ? 'it' : 'them'} what {scan.silent.length === 1 ? "it's" : "they're"}
-                working on — one short question each, answered back into the board.
+                {scan.silent.length === 1 ? 'it' : 'them'} to start keeping one — a single nudge each, after
+                which {scan.silent.length === 1 ? 'its' : 'their'} tasks flow onto the board on their own.
               </p>
               <div class="signal-actions">
-                <button class="ov-btn ov-btn-primary" onclick={runCensus} disabled={asking}>
-                  {asking ? 'Asking…' : `Ask ${scan.silent.length}`}
+                <button class="ov-btn ov-btn-primary" onclick={runTrackRequest} disabled={asking}>
+                  {asking ? 'Asking…' : `Ask ${scan.silent.length} to track`}
                 </button>
                 <button class="ov-btn" onclick={() => overlordStore.clearScan()}>Dismiss</button>
               </div>
@@ -347,15 +347,15 @@
                 {#if scan.asked === 0}
                   Nothing was asked — every candidate was busy, guarded, or asked recently.
                 {:else}
-                  Asked {scan.asked} tab{scan.asked === 1 ? '' : 's'}. Answers land on the board
-                  as each one replies; nothing else will be sent.
+                  Asked {scan.asked} tab{scan.asked === 1 ? '' : 's'} to start tracking. Their tasks
+                  appear here as each one writes its list; nothing else will be sent.
                 {/if}
               </p>
               <div class="signal-actions">
                 <button class="ov-btn" onclick={() => overlordStore.clearScan()}>Dismiss</button>
               </div>
             {:else}
-              <p class="signal-text">Every running tab is represented on the board.</p>
+              <p class="signal-text">Every running tab is tracked and on the board.</p>
               <div class="signal-actions">
                 <button class="ov-btn" onclick={() => overlordStore.clearScan()}>Dismiss</button>
               </div>

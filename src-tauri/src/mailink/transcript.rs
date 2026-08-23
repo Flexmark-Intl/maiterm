@@ -574,6 +574,62 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
     (last_commit_ts, todos, todos_ts, last_compact_ts)
 }
 
+/// The AUTHORITATIVE todo list for a Claude session, read straight from Claude Code's own
+/// todo store rather than reconstructed from the transcript.
+///
+/// `~/.claude/todos/<session_id>-agent-<agent_id>.json` holds the session's CURRENT list as
+/// `[{content, status, activeForm}]`, rewritten in full on every TodoWrite. That beats the
+/// transcript tail on every axis that matters here: it is complete (the tail only sees what
+/// fits in FACTS_TAIL_BYTES, so a list built early in a long session scrolls out of view),
+/// it is current rather than a historical snapshot, and it costs one small read instead of a
+/// 256 KB scan — which is what makes watching 100+ sessions viable.
+///
+/// Only the MAIN thread's file is read (`session_id == agent_id`). Subagent runs get their
+/// own `-agent-<other-id>` files, and folding a Task call's internal checklist into the
+/// human's board would bury the real work under scaffolding.
+///
+/// `None` when the file is absent (session never used TodoWrite), unreadable, or empty —
+/// callers then fall back to the transcript tail, which is what SSH-mirrored sessions rely
+/// on since their store lives on the remote host.
+pub fn claude_todo_store(session_id: &str) -> Option<Value> {
+    static TODO_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, (u64, u64, Option<Value>)>>,
+    > = std::sync::OnceLock::new();
+
+    let path = dirs::home_dir()?
+        .join(".claude")
+        .join("todos")
+        .join(format!("{session_id}-agent-{session_id}.json"));
+    let md = std::fs::metadata(&path).ok()?;
+    let mtime_ms = md
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let len = md.len();
+    // An empty list serializes as "[]" (2 bytes) — skip the read entirely.
+    if len <= 2 {
+        return None;
+    }
+    let cache = TODO_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some((m, l, todos)) = c.get(&path) {
+            if *m == mtime_ms && *l == len {
+                return todos.clone();
+            }
+        }
+    }
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+    if let Ok(mut c) = cache.lock() {
+        c.insert(path, (mtime_ms, len, parsed.clone()));
+    }
+    parsed
+}
+
 /// Overlord signals from a session's transcript tail (docs/overlord.md §5): commit
 /// detection + the TodoWrite mirror. Served from the same (mtime,len)-gated cache as the
 /// other tail facts. Claude-only today — Codex/Gemini return all-None fields.
@@ -1612,6 +1668,36 @@ mod tests {
         let _ = std::fs::remove_file(&path); // clean up before asserting
         assert_eq!(found, Some(path));
         assert!(locate_jsonl(sid).is_none(), "gone once the shadow file is removed");
+    }
+
+    #[test]
+    fn todo_store_reads_the_main_thread_list_and_ignores_subagents() {
+        let Some(dir) = dirs::home_dir().map(|h| h.join(".claude").join("todos")) else { return };
+        if std::fs::create_dir_all(&dir).is_err() { return }
+        let sid = "todostore-test-4000-8000-aiterm";
+        let main = dir.join(format!("{sid}-agent-{sid}.json"));
+        // A subagent's list lives under a DIFFERENT agent id and must never be picked up —
+        // a Task call's internal checklist would bury the human's real work on the board.
+        let sub = dir.join(format!("subagent-9999-agent-{sid}.json"));
+        std::fs::write(&main, r#"[{"content":"real work","status":"in_progress","activeForm":"Doing real work"}]"#).unwrap();
+        std::fs::write(&sub, r#"[{"content":"subagent scaffolding","status":"pending"}]"#).unwrap();
+
+        let got = claude_todo_store(sid);
+        // An empty list ("[]") reads as absent, so the caller falls back to the transcript.
+        std::fs::write(&main, "[]").unwrap();
+        let empty = claude_todo_store(sid);
+        let missing = claude_todo_store("todostore-test-no-such-session");
+
+        let _ = std::fs::remove_file(&main);
+        let _ = std::fs::remove_file(&sub);
+
+        let got = got.expect("main-thread list is read");
+        let arr = got.as_array().expect("array");
+        assert_eq!(arr.len(), 1, "subagent list must not be merged in");
+        assert_eq!(arr[0]["content"], "real work");
+        assert_eq!(arr[0]["status"], "in_progress");
+        assert!(empty.is_none(), "an empty list reads as absent");
+        assert!(missing.is_none(), "a session with no store file reads as absent");
     }
 
     #[test]
