@@ -1,7 +1,7 @@
 /** Pure task helpers (docs/tasks.md). No runes here — the reactive surface lives in
  *  `stores/tasks.svelte.ts`, so this stays unit-testable and importable from anywhere. */
 
-import type { Task, TaskStatus, TaskOrigin } from '$lib/tauri/types';
+import type { Task, TaskStatus, TaskOrigin, Workstream } from '$lib/tauri/types';
 
 /** A task tagged with the workspace it came from. A *view* type only — `workspace_id` is
  *  never persisted, since the workspace already owns the list it is nested in. Used where
@@ -10,7 +10,25 @@ export interface TaskRow extends Task {
   workspace_id: string;
 }
 
-export const TASK_STATUSES: TaskStatus[] = ['backlog', 'active', 'blocked', 'review', 'done'];
+/** Board order. `backlog` sits LEFTMOST even though new tasks start in `todo`, because
+ *  parking something is a move backwards out of the active flow — which is also what makes
+ *  dragging a card left to shelve it read correctly. */
+export const TASK_STATUSES: TaskStatus[] = ['backlog', 'todo', 'active', 'blocked', 'review', 'done'];
+
+/** The parking lot (docs/tasks.md §3): next month, future ideas, low-priority.
+ *
+ *  Exempt from every "is this work in flight" question — staleness rules, the untracked
+ *  check, the scan's classification. A parked item is *supposed* to sit untouched for
+ *  months; treating it as a stalled task would turn the backlog into a source of
+ *  interruptions, which is the opposite of what it is for. */
+export function isParked(status: TaskStatus): boolean {
+  return status === 'backlog';
+}
+
+/** Work that is neither finished nor deliberately shelved — what "in flight" means. */
+export function isInFlight(task: Task): boolean {
+  return task.status !== 'done' && !isParked(task.status);
+}
 
 /** Case/whitespace-normalized title — the dedup key within a tab.
  *
@@ -66,7 +84,11 @@ export function statusFromAgent(status: string | undefined, blocked?: boolean): 
   if (blocked) return 'blocked';
   if (status === 'in_progress' || status === 'active') return 'active';
   if (status === 'review') return 'review';
-  return 'backlog';
+  if (status === 'backlog') return 'backlog';
+  // Anything else — including Claude's "pending" — is not-started work, which is `todo`.
+  // It must NOT land in `backlog`: that is the parking lot, exempt from staleness, so
+  // filing live work there would hide it from the board and from Overlord.
+  return 'todo';
 }
 
 /** Coerce whatever a caller sent into our vocabulary.
@@ -78,10 +100,32 @@ export function statusFromAgent(status: string | undefined, blocked?: boolean): 
  *  is invisible on the board — `tasksFor` matches lane by equality — and permanently
  *  unfinished to `hasUnmetDeps`, which wedges everything blocked on it. */
 export function coerceStatus(status: string | undefined): TaskStatus {
-  if (!status) return 'backlog';
+  if (!status) return 'todo';
   return (TASK_STATUSES as string[]).includes(status)
     ? (status as TaskStatus)
     : statusFromAgent(status);
+}
+
+/** Same normalization as titles — one rule for every human-typed name here, so
+ *  "Auth refactor", "auth refactor" and "Auth Refactor." are one workstream, not three.
+ *  Mirrors `Workstream::normalize_name` in Rust. */
+export function normalizeWorkstreamName(name: string): string {
+  return normalizeTitle(name);
+}
+
+export function findWorkstream(list: Workstream[], name: string): Workstream | undefined {
+  const key = normalizeWorkstreamName(name);
+  return list.find((w) => (w.normalized_name || normalizeWorkstreamName(w.name)) === key);
+}
+
+export function makeWorkstream(name: string, now = new Date().toISOString()): Workstream {
+  return {
+    id: crypto.randomUUID(),
+    name: name.trim(),
+    normalized_name: normalizeWorkstreamName(name),
+    created_at: now,
+    updated_at: now,
+  };
 }
 
 export interface TaskInput {
@@ -91,6 +135,7 @@ export interface TaskInput {
   tab_id?: string | null;
   blocked_by?: string[];
   origin?: TaskOrigin;
+  workstream_id?: string | null;
   topic_id?: string | null;
 }
 
@@ -102,10 +147,11 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
     title: input.title,
     normalized_title: normalizeTitle(input.title),
     detail: input.detail ?? null,
-    status: input.status ?? 'backlog',
+    status: input.status ?? 'todo',
     tab_id: input.tab_id ?? null,
     blocked_by: input.blocked_by ?? [],
     origin: input.origin ?? 'human',
+    workstream_id: input.workstream_id ?? null,
     created_at: now,
     updated_at: now,
     topic_id: input.topic_id ?? null,
@@ -125,14 +171,26 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
  *  to the backlog (`tasksStore.releaseTab`), and matching them here lets the new tab
  *  reclaim its own work instead of creating a second copy of every item, forever, once
  *  per reload. */
-export function findDuplicate(list: Task[], title: string, tabId: string | null | undefined): Task | undefined {
+export function findDuplicate(
+  list: Task[],
+  title: string,
+  tabId: string | null | undefined,
+  workstreamId?: string | null,
+): Task | undefined {
   const key = normalizeTitle(title);
   const tab = tabId ?? null;
+  const stream = workstreamId ?? null;
   const sameTitle = (t: Task) => (t.normalized_title || normalizeTitle(t.title)) === key;
+  // The workstream is part of the key: "write the tests" for the auth refactor and "write
+  // the tests" for the DB migration are two different pieces of work, and collapsing them
+  // would hide one job's task behind another's.
+  const sameStream = (t: Task) => (t.workstream_id ?? null) === stream;
   return (
-    list.find((t) => (t.tab_id ?? null) === tab && sameTitle(t)) ??
+    list.find((t) => (t.tab_id ?? null) === tab && sameStream(t) && sameTitle(t)) ??
     // Only reclaim unfinished work: a task someone already closed out shouldn't be
     // resurrected and re-owned just because a new tab restated it.
-    (tab === null ? undefined : list.find((t) => !t.tab_id && t.status !== 'done' && sameTitle(t)))
+    (tab === null
+      ? undefined
+      : list.find((t) => !t.tab_id && t.status !== 'done' && sameStream(t) && sameTitle(t)))
   );
 }

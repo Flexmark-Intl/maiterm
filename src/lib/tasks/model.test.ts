@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   coerceStatus,
   effectiveStatus,
+  isInFlight,
+  isParked,
+  normalizeWorkstreamName,
   findDuplicate,
   hasUnmetDeps,
   makeTask,
   normalizeTitle,
   statusFromAgent,
+  TASK_STATUSES,
 } from './model';
 import type { Task } from '$lib/tauri/types';
 
@@ -106,6 +110,42 @@ describe('findDuplicate — what the unassigned fallback must NOT do', () => {
   });
 });
 
+describe('the backlog is a parking lot, not a to-do list', () => {
+  it('starts new work in todo, never in the parking lot', () => {
+    // If new tasks defaulted to backlog it would be an inbox, and everything that exempts
+    // backlog from staleness would silently hide live work.
+    expect(makeTask({ title: 'x' }).status).toBe('todo');
+    expect(coerceStatus(undefined)).toBe('todo');
+    expect(coerceStatus('nonsense')).toBe('todo');
+  });
+
+  it("maps a runtime's not-started state to todo, not backlog", () => {
+    expect(statusFromAgent('pending')).toBe('todo');
+    // ...but an explicit backlog is honoured: the agent meant to shelve it.
+    expect(statusFromAgent('backlog')).toBe('backlog');
+  });
+
+  it('treats parked work as neither finished nor in flight', () => {
+    expect(isParked('backlog')).toBe(true);
+    expect(isParked('todo')).toBe(false);
+    expect(isInFlight(task({ status: 'backlog' }))).toBe(false);
+    expect(isInFlight(task({ status: 'done' }))).toBe(false);
+    expect(isInFlight(task({ status: 'todo' }))).toBe(true);
+  });
+
+  it('orders the lanes with backlog leftmost, so parking is a move backwards', () => {
+    expect(TASK_STATUSES).toEqual(['backlog', 'todo', 'active', 'blocked', 'review', 'done']);
+  });
+});
+
+describe('workstream names', () => {
+  it('dedups the spellings one agent will produce for one job', () => {
+    for (const name of ['Auth refactor', 'auth refactor', '  Auth   Refactor ', 'Auth refactor.']) {
+      expect(normalizeWorkstreamName(name)).toBe('auth refactor');
+    }
+  });
+});
+
 describe('coerceStatus', () => {
   it('accepts our own vocabulary unchanged', () => {
     for (const s of ['backlog', 'active', 'blocked', 'review', 'done'] as const) {
@@ -118,9 +158,11 @@ describe('coerceStatus', () => {
     // permanently unfinished to the dependency check, which wedges its dependents.
     expect(coerceStatus('completed')).toBe('done');
     expect(coerceStatus('in_progress')).toBe('active');
-    expect(coerceStatus('pending')).toBe('backlog');
-    expect(coerceStatus('nonsense')).toBe('backlog');
-    expect(coerceStatus(undefined)).toBe('backlog');
+    // 'pending' is not-started work, which is `todo`. It must NOT land in `backlog`:
+    // that is the parking lot, exempt from staleness, so live work would go invisible.
+    expect(coerceStatus('pending')).toBe('todo');
+    expect(coerceStatus('nonsense')).toBe('todo');
+    expect(coerceStatus(undefined)).toBe('todo');
   });
 });
 
@@ -154,9 +196,9 @@ describe('statusFromAgent', () => {
   it('maps the runtimes\' vocabulary onto ours', () => {
     expect(statusFromAgent('completed')).toBe('done');
     expect(statusFromAgent('in_progress')).toBe('active');
-    expect(statusFromAgent('pending')).toBe('backlog');
-    expect(statusFromAgent(undefined)).toBe('backlog');
-    expect(statusFromAgent('something-new')).toBe('backlog');
+    expect(statusFromAgent('pending')).toBe('todo');
+    expect(statusFromAgent(undefined)).toBe('todo');
+    expect(statusFromAgent('something-new')).toBe('todo');
   });
 
   it('lets an unmet dependency win over pending/in_progress', () => {

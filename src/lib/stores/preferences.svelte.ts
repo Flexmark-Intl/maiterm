@@ -52,6 +52,7 @@ function createPreferencesStore() {
   let hiddenDefaultTriggers = $state<string[]>([]);
   let claudeTriggersPrompted = $state(false);
   let tasksEnabled = $state(true);
+  let tasksBacklogVocabularyMigrated = $state(false);
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
   let overlordRules = $state<OverlordRule[]>([]);
@@ -236,6 +237,7 @@ function createPreferencesStore() {
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
       tasksEnabled = prefs.tasks_enabled ?? true;
+      tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       overlordRules = prefs.overlord_rules ?? [];
@@ -761,6 +763,7 @@ function createPreferencesStore() {
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
       tasksEnabled = prefs.tasks_enabled ?? true;
+      tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       overlordRules = prefs.overlord_rules ?? [];
@@ -849,6 +852,8 @@ function createPreferencesStore() {
         hidden_default_triggers: hiddenDefaultTriggers,
         claude_triggers_prompted: claudeTriggersPrompted,
         tasks_enabled: tasksEnabled,
+        // Round-tripped, never set here: Rust owns this one-time flip.
+        tasks_backlog_vocabulary_migrated: tasksBacklogVocabularyMigrated,
         overlord_enabled: overlordEnabled,
         overlord_propose_mode: overlordProposeMode,
         overlord_rules: overlordRules,

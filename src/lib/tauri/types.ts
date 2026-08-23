@@ -168,13 +168,33 @@ export interface MeshTopic {
   updated_at: string;
 }
 
-export type TaskStatus = 'backlog' | 'active' | 'blocked' | 'review' | 'done';
+/** The six board lanes, in board order — `backlog` is LEFTMOST even though new tasks
+ *  start in `todo`, because parking a task is a move BACKWARDS out of the active flow.
+ *
+ *  `backlog` is a parking lot, not a to-do list: next month, future ideas, low-priority.
+ *  It is deliberately exempt from staleness signals — a parked item is *supposed* to sit
+ *  untouched, and nagging about it would make the backlog a source of interruptions
+ *  instead of the thing that protects focus. `todo` is the not-started-yet lane. */
+export type TaskStatus = 'backlog' | 'todo' | 'active' | 'blocked' | 'review' | 'done';
 
 export type TaskOrigin = 'human' | 'agent' | 'overlord' | 'imported';
 
 /** A unit of work owned by a workspace (docs/tasks.md). maiTerm is the source of truth
  *  for every writer — the side panel, agents over MCP, Overlord, and the Claude
  *  task-store importer. Mirrors the Rust `Task`. */
+/** A named job inside a workspace (docs/tasks.md §5) — one agent tab is routinely asked
+ *  to do two unrelated things, and this is how they stay apart. Mirrors the Rust
+ *  `Workstream`. */
+export interface Workstream {
+  id: string;
+  name: string;
+  /** Case/whitespace-normalized name — the dedup key within a workspace. Recomputed by
+   *  Rust on persist. */
+  normalized_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -191,6 +211,8 @@ export interface Task {
   origin: TaskOrigin;
   created_at: string;
   updated_at: string;
+  /** The named job this task belongs to; null = a loose task on the workspace. */
+  workstream_id?: string | null;
   /** Mesh topic that is this task's conversation vehicle, if any. */
   topic_id?: string | null;
 }
@@ -210,6 +232,8 @@ export interface Workspace {
   mesh_topics?: MeshTopic[];
   /** This workspace's task list (docs/tasks.md). Order is the array order. */
   tasks?: Task[];
+  /** Named task groups — one per distinct job in this workspace. */
+  workstreams?: Workstream[];
   /** Overlord workspace flag — hosts the board + agent tab; at most one per window. */
   overlord?: boolean;
   archived_tabs: Tab[];
@@ -395,6 +419,7 @@ export interface Preferences {
   /** Overlord master switch (per-window engine only ticks when enabled). */
   /** maiTerm task tracking (docs/tasks.md) — gates the MCP tools and the priming. */
   tasks_enabled: boolean;
+  tasks_backlog_vocabulary_migrated: boolean;
   overlord_enabled: boolean;
   /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */
   overlord_propose_mode: boolean;

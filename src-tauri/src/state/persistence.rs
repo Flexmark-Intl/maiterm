@@ -380,10 +380,17 @@ pub fn migrate_app_data(data: &mut AppData) {
                 normalized_title: Task::normalize_title(&title),
                 title,
                 detail: None,
-                // `state` was the old field name for what is now `status`.
-                status: str_at("state").unwrap_or_else(|| "backlog".to_string()),
+                // `state` was the old field name for what is now `status`. The old
+                // "backlog" meant "not started", which is `todo` in the six-lane
+                // vocabulary — today's `backlog` is a deliberate parking lot, and filing
+                // live work there would hide it from every staleness signal.
+                status: match str_at("state").as_deref() {
+                    Some("backlog") | None => "todo".to_string(),
+                    Some(other) => other.to_string(),
+                },
                 tab_id: str_at("tab_id"),
                 blocked_by: Vec::new(),
+                workstream_id: None,
                 // The old board's "agent" rows were mirrored from Claude's private todo
                 // store, which is what "imported" means now; "agent" has been redefined
                 // as work an agent created through createTasks. Carrying the old label
@@ -406,6 +413,29 @@ pub fn migrate_app_data(data: &mut AppData) {
                 "Migration: moved {} Overlord board rows onto their workspaces ({} dropped as orphaned/malformed) in window '{}'",
                 moved, dropped, win.label
             );
+        }
+    }
+
+    // One-time vocabulary flip (docs/tasks.md §3). `backlog` was the default status for
+    // every task written before the six-lane board — it meant "not started", which is now
+    // `todo`. Today's `backlog` is a deliberate parking lot that is exempt from staleness
+    // signals, so leaving old rows there would silently hide live work from the board and
+    // from Overlord. Flag-guarded: re-running it would drag genuinely parked tasks back.
+    if !data.preferences.tasks_backlog_vocabulary_migrated {
+        let mut moved = 0u32;
+        for win in data.windows.iter_mut() {
+            for ws in win.workspaces.iter_mut() {
+                for t in ws.tasks.iter_mut() {
+                    if t.status == "backlog" {
+                        t.status = "todo".to_string();
+                        moved += 1;
+                    }
+                }
+            }
+        }
+        data.preferences.tasks_backlog_vocabulary_migrated = true;
+        if moved > 0 {
+            log::info!("Migration: moved {} tasks from the old default 'backlog' to 'todo'", moved);
         }
     }
 

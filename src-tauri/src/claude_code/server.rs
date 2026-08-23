@@ -2192,10 +2192,12 @@ async fn process_message(
                         init_text.push_str(
                             "\n\nTrack multi-step work with the maiTerm task tools (createTasks/updateTasks) \
                              rather than your runtime's own todo list, so your human and this window's board \
-                             can see it. Keep statuses current as you go. If you ALREADY have a task or todo \
-                             list for this project, migrate it now: one createTasks call with the outstanding \
-                             items, carrying their current status across and skipping anything already \
-                             finished. Then work from the maiTerm list.",
+                             can see it. Keep statuses current as you go. If you are working on more than one \
+                             distinct thing, give each its own `workstream` name on createTasks so the jobs \
+                             stay separate. If you ALREADY have a task or todo list for this project, migrate \
+                             it now: one createTasks call with the outstanding items, carrying their current \
+                             status across and skipping anything already finished. Then work from the maiTerm \
+                             list.",
                         );
                     }
                     let resp = JsonRpcResponse::success(

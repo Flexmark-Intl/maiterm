@@ -21,7 +21,7 @@ import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { findDuplicate, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
+import { findDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -739,8 +739,12 @@ function createOverlordStore() {
         return last !== undefined && now - last >= w.minutes * 60_000;
       }
       case 'task_stale':
+        // Parked tasks are exempt. A backlog item is SUPPOSED to sit untouched for months
+        // — that is the whole point of having one — so ageing it into a stale signal would
+        // make the parking lot a source of directives instead of the thing that keeps them
+        // out of the way.
         return tasksForTab(tab.id).some(
-          (t) => t.status !== 'done' && now - Date.parse(t.updated_at) >= w.days * 86_400_000,
+          (t) => isInFlight(t) && now - Date.parse(t.updated_at) >= w.days * 86_400_000,
         );
       case 'agent_unready':
         return !claudeStateStore.getState(tab.id) && !!terminalsStore.get(tab.id);
@@ -757,7 +761,9 @@ function createOverlordStore() {
         //
         // Overlord's own placeholder rows don't count: a scan stands those up for every
         // running tab, so counting them would suppress the rule everywhere.
-        if (tasksForTab(tab.id).some((t) => t.origin !== 'overlord')) return false;
+        // Parked work doesn't count as tracking what you're doing now — a tab whose only
+        // tasks are shelved for next month is, for this rule's purposes, untracked.
+        if (tasksForTab(tab.id).some((t) => t.origin !== 'overlord' && !isParked(t.status))) return false;
         if ((f?.context_used ?? 0) < NO_TODO_MIN_CONTEXT_TOKENS) return false;
         return f?.last_turn_ts !== undefined && now - f.last_turn_ts < NO_TODO_RECENT_TURN_MS;
       }
@@ -855,7 +861,9 @@ function createOverlordStore() {
         const status = statusFromAgent(item.status, item.blocked);
         // Same dedup helper the MCP createTasks path uses — a tab running BOTH its own
         // runtime todo list and createTasks must converge on one row, not record it twice.
-        const dup = findDuplicate(next, item.content, tabId);
+        // Imports are loose tasks (no workstream) — a runtime's own list has no
+        // grouping to carry across.
+        const dup = findDuplicate(next, item.content, tabId, null);
         const idx = dup ? next.indexOf(dup) : -1;
         if (idx >= 0) {
           // The importer only ever drives rows it owns. Once a row belongs to the agent
@@ -915,6 +923,8 @@ function createOverlordStore() {
             t.origin === 'human' ||
             now - Date.parse(t.updated_at) < TASK_DONE_RETENTION_MS,
         );
+        // (Parked rows are never 'done', so the sweep cannot reach them — a shelved idea
+        // must survive indefinitely or the backlog stops being a place to put things.)
         return next.length === list.length ? null : next;
       });
       changed = changed || swept;
@@ -1285,7 +1295,9 @@ function createOverlordStore() {
           // has a store to read) as it does for Claude, and it counts work an agent
           // recorded through createTasks — which the old test could not see at all.
           // Overlord's placeholders don't count as tracking; they're what a scan creates.
-          const tracked = tasksForTab(tab.id).filter((t) => t.origin !== 'overlord');
+          // Parked rows are excluded: a tab whose only tasks are shelved for next month
+          // is not tracking its current work, and asking it to would be right.
+          const tracked = tasksForTab(tab.id).filter((t) => t.origin !== 'overlord' && !isParked(t.status));
           if (tracked.length) {
             retirePlaceholderIfMirrored(tab.id);
             if (tracked.every((t) => t.status === 'done')) finished++;

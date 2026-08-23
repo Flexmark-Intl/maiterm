@@ -518,6 +518,21 @@ pub(crate) fn clone_workspace_with_id_mapping(
         .iter()
         .map(|t| (t.id.clone(), uuid::Uuid::new_v4().to_string()))
         .collect();
+    // Workstreams are copied with fresh ids for the same reason task ids are: the copy's
+    // grouping must point at the copy.
+    let workstream_id_map: std::collections::HashMap<String, String> = ws
+        .workstreams
+        .iter()
+        .map(|w| (w.id.clone(), uuid::Uuid::new_v4().to_string()))
+        .collect();
+    let new_workstreams: Vec<crate::state::Workstream> = ws
+        .workstreams
+        .iter()
+        .map(|w| crate::state::Workstream {
+            id: workstream_id_map[&w.id].clone(),
+            ..w.clone()
+        })
+        .collect();
     let new_tasks: Vec<crate::state::Task> = ws
         .tasks
         .iter()
@@ -536,6 +551,11 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 .filter_map(|id| task_id_map.get(id))
                 .cloned()
                 .collect(),
+            workstream_id: t
+                .workstream_id
+                .as_ref()
+                .and_then(|id| workstream_id_map.get(id))
+                .cloned(),
             topic_id: None,
             ..t.clone()
         })
@@ -554,6 +574,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
         mailink_native: ws.mailink_native,
         mesh_topics: Vec::new(),
         tasks: new_tasks,
+        workstreams: new_workstreams,
         // Never duplicate an Overlord workspace — at most one per window.
         overlord: false,
         archived_tabs: Vec::new(),

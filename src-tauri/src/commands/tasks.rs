@@ -6,7 +6,7 @@
 //! `updated_at`) and durability.
 
 use crate::state::persistence::save_state;
-use crate::state::{AppState, Task};
+use crate::state::{AppState, Task, Workstream};
 use std::sync::Arc;
 use tauri::State;
 
@@ -23,6 +23,7 @@ pub fn set_workspace_tasks(
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     mut tasks: Vec<Task>,
+    mut workstreams: Vec<Workstream>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
     for t in tasks.iter_mut() {
@@ -33,16 +34,21 @@ pub fn set_workspace_tasks(
         // too; this is the same defense-in-depth as recomputing normalized_title.
         if !matches!(
             t.status.as_str(),
-            "backlog" | "active" | "blocked" | "review" | "done"
+            "backlog" | "todo" | "active" | "blocked" | "review" | "done"
         ) {
-            log::warn!(
-                "task {}: unknown status {:?} coerced to backlog",
-                t.id,
-                t.status
-            );
-            t.status = "backlog".to_string();
+            // Unknown lands in `todo`, not `backlog`: backlog is the deliberate parking
+            // lot, and silently filing live work there would hide it (docs/tasks.md §3).
+            log::warn!("task {}: unknown status {:?} coerced to todo", t.id, t.status);
+            t.status = "todo".to_string();
         }
     }
+    for w in workstreams.iter_mut() {
+        w.normalized_name = Workstream::normalize_name(&w.name);
+    }
+    // Drop workstreams nothing points at any more. They exist only to group tasks, so an
+    // empty one is a label with no referent — and leaving them would let an agent's
+    // throwaway names accumulate on the board forever.
+    workstreams.retain(|w| tasks.iter().any(|t| t.workstream_id.as_deref() == Some(w.id.as_str())));
     let data_clone = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
@@ -52,6 +58,7 @@ pub fn set_workspace_tasks(
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
         workspace.tasks = tasks;
+        workspace.workstreams = workstreams;
         app_data.clone()
     };
     save_state(&data_clone)
@@ -63,13 +70,13 @@ pub fn set_workspace_tasks(
 pub fn get_window_tasks(
     window: tauri::Window,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<(String, Vec<Task>)>, String> {
+) -> Result<Vec<(String, Vec<Task>, Vec<Workstream>)>, String> {
     let label = window.label().to_string();
     let app_data = state.app_data.read();
     let win = app_data.window(&label).ok_or("Window not found")?;
     Ok(win
         .workspaces
         .iter()
-        .map(|w| (w.id.clone(), w.tasks.clone()))
+        .map(|w| (w.id.clone(), w.tasks.clone(), w.workstreams.clone()))
         .collect())
 }

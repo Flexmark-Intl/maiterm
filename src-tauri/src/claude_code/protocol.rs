@@ -622,7 +622,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "listTasks",
-            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to). Returns each task's id, title, detail, status, assignee tab and blockers. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and the unassigned backlog.",
+            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to), grouped by workstream. Returns each task's id, title, detail, status, workstream, assignee tab and blockers. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and unassigned tasks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -634,11 +634,12 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "createTasks",
-            "description": "Add tasks to this project's list. Batch related items into ONE call. Creation is idempotent: an item whose title matches one already on your tab returns the existing task instead of duplicating it, so re-sending your list is safe. Tasks default to assigned to you; pass assign_to_me false to leave one in the workspace backlog for whoever picks it up.",
+            "description": "Add tasks to this project. Batch related items into ONE call. If you are working on more than one distinct thing, pass a `workstream` name per call so each job stays separate — that name is what your human sees as the group heading. Creation is idempotent: an item whose title matches one already on your tab in the same workstream returns the existing task instead of duplicating it, so re-sending your list is safe. Tasks default to assigned to you; pass assign_to_me false to leave one unassigned for whoever picks it up. Status defaults to 'todo' — use 'backlog' ONLY to park something you are deliberately deferring (next month, a future idea), since parked tasks are excluded from progress tracking.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "workstream": { "type": "string", "description": "Name of the job these tasks belong to, e.g. 'Auth refactor'. Reused if it already exists; created if not. Omit for loose tasks." },
                     "tasks": {
                         "type": "array",
                         "items": {
@@ -646,7 +647,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                             "properties": {
                                 "title": { "type": "string", "description": "One line, imperative — 'Add the auth guard'" },
                                 "detail": { "type": "string", "description": "Optional body: acceptance criteria, links, notes. Markdown." },
-                                "status": { "type": "string", "enum": ["backlog", "active", "blocked", "review", "done"] },
+                                "status": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done"], "description": "Defaults to 'todo'. 'backlog' means deliberately parked, not 'not started yet'." },
                                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Task ids that must finish first" },
                                 "assign_to_me": { "type": "boolean", "description": "Default true" }
                             },
@@ -659,7 +660,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "updateTasks",
-            "description": "Update tasks on this project's list — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. There is no delete: mark a task 'done' when it is finished; only a human removes one.",
+            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job. There is no delete: mark a task 'done' when it is finished, or 'backlog' to park it for later; only a human removes one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -670,9 +671,10 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                             "type": "object",
                             "properties": {
                                 "id": { "type": "string", "description": "Task id from listTasks/createTasks" },
-                                "status": { "type": "string", "enum": ["backlog", "active", "blocked", "review", "done"] },
+                                "status": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done"] },
                                 "title": { "type": "string" },
                                 "detail": { "type": "string" },
+                                "workstream": { "type": "string", "description": "Move this task into the named job (created if new)" },
                                 "blocked_by": { "type": "array", "items": { "type": "string" } }
                             },
                             "required": ["id"]

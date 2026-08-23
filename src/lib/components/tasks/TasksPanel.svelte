@@ -39,6 +39,7 @@
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
     backlog: 'Backlog',
+    todo: 'To-do',
     active: 'Active',
     blocked: 'Blocked',
     review: 'Review',

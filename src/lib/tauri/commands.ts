@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, Task, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, Task, Workstream, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -222,12 +222,16 @@ export async function getOverlordLedger(): Promise<OverlordLedgerEntry[]> {
 
 /** Replace one workspace's task list (docs/tasks.md). Whole-list persistence, like
  *  setWorkspaceMeshTopics; Rust recomputes `normalized_title` on the way in. */
-export async function setWorkspaceTasks(workspaceId: string, tasks: Task[]): Promise<void> {
-  return invoke('set_workspace_tasks', { workspaceId, tasks });
+export async function setWorkspaceTasks(
+  workspaceId: string,
+  tasks: Task[],
+  workstreams: Workstream[],
+): Promise<void> {
+  return invoke('set_workspace_tasks', { workspaceId, tasks, workstreams });
 }
 
-/** Every task in this window as [workspaceId, tasks] pairs, in workspace order. */
-export async function getWindowTasks(): Promise<[string, Task[]][]> {
+/** Every task in this window as [workspaceId, tasks, workstreams] triples, in workspace order. */
+export async function getWindowTasks(): Promise<[string, Task[], Workstream[]][]> {
   return invoke('get_window_tasks');
 }
 

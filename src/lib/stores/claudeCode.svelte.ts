@@ -202,7 +202,7 @@ function createClaudeCodeStore() {
           result = handleListTasks(args as { tabId?: string; scope?: 'tab' | 'workspace' });
           break;
         case 'createTasks':
-          result = handleCreateTasks(args as { tabId?: string; tasks?: TaskToolInput[] });
+          result = handleCreateTasks(args as { tabId?: string; workstream?: string; tasks?: TaskToolInput[] });
           break;
         case 'updateTasks':
           result = handleUpdateTasks(args as { tabId?: string; updates?: TaskToolUpdate[] });
@@ -1199,6 +1199,7 @@ function createClaudeCodeStore() {
   // refused outright before reaching here.
 
   interface TaskToolInput {
+    /** Only on updates — creates carry the workstream once, at the call level. */
     title?: string;
     detail?: string;
     /** Declared as an enum in the schema, but nothing enforces it at runtime — typed as a
@@ -1213,15 +1214,17 @@ function createClaudeCodeStore() {
     status?: string;
     title?: string;
     detail?: string;
+    workstream?: string;
     blocked_by?: string[];
   }
 
   /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
    *  internal dedup key and would only invite an agent to try to set it. */
-  function taskForAgent(t: Task, all: Task[], selfTabId: string) {
+  function taskForAgent(t: Task, all: Task[], selfTabId: string, workstream?: string) {
     return {
       id: t.id,
       title: t.title,
+      ...(workstream ? { workstream } : {}),
       ...(t.detail ? { detail: t.detail } : {}),
       status: effectiveStatus(t, all),
       assignee: t.tab_id === selfTabId ? 'you' : (t.tab_id ?? 'unassigned'),
@@ -1236,18 +1239,31 @@ function createClaudeCodeStore() {
     if ('error' in loc) return loc;
     const all = tasksStore.forWorkspace(loc.workspace.id);
     const scoped = args.scope === 'tab' ? all.filter((t) => t.tab_id === loc.tab.id) : all;
+    const nameOf = (id: string | null | undefined) =>
+      tasksStore.workstream(loc.workspace.id, id)?.name;
+    // Grouped by workstream, because that is the structure the agent is meant to work in:
+    // a flat list would invite it to treat two separate jobs as one.
+    const groups = new Map<string, { workstream: string | null; tasks: unknown[] }>();
+    for (const t of scoped) {
+      const key = t.workstream_id ?? '';
+      if (!groups.has(key)) groups.set(key, { workstream: nameOf(t.workstream_id) ?? null, tasks: [] });
+      groups.get(key)!.tasks.push(taskForAgent(t, all, loc.tab.id, nameOf(t.workstream_id)));
+    }
     return {
       workspace: loc.workspace.name,
       scope: args.scope === 'tab' ? 'tab' : 'workspace',
-      tasks: scoped.map((t) => taskForAgent(t, all, loc.tab.id)),
+      workstreams: [...groups.values()],
     };
   }
 
-  function handleCreateTasks(args: { tabId?: string; tasks?: TaskToolInput[] }) {
+  function handleCreateTasks(args: { tabId?: string; workstream?: string; tasks?: TaskToolInput[] }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
     const inputs = (args.tasks ?? []).filter((t) => t?.title?.trim());
     if (!inputs.length) return { error: 'tasks must be a non-empty array of { title }.' };
+    // Agents pass a workstream NAME, not an id — requiring a round trip just to record
+    // work would make the common case worse. Reused if it exists, created if not.
+    const stream = args.workstream ? tasksStore.ensureWorkstream(loc.workspace.id, args.workstream) : null;
     const before = new Set(tasksStore.forWorkspace(loc.workspace.id).map((t) => t.id));
     const rows = tasksStore.addMany(
       loc.workspace.id,
@@ -1255,10 +1271,11 @@ function createClaudeCodeStore() {
         title: t.title!.trim(),
         detail: t.detail ?? null,
         status: coerceStatus(t.status),
-        // Assigned to the caller unless it explicitly leaves the task in the backlog.
+        // Assigned to the caller unless it explicitly leaves the task unassigned.
         tab_id: t.assign_to_me === false ? null : loc.tab.id,
         blocked_by: t.blocked_by ?? [],
         origin: 'agent' as const,
+        workstream_id: stream?.id ?? null,
       })),
     );
     // Report duplicates honestly rather than silently: an agent re-sending its list after
@@ -1270,6 +1287,7 @@ function createClaudeCodeStore() {
     const existing = [...new Set(rows.filter((r) => before.has(r.id)).map((r) => r.id))];
     return {
       created,
+      ...(stream ? { workstream: stream.name } : {}),
       ...(existing.length ? { already_tracked: existing } : {}),
       tasks: [...new Map(rows.map((r) => [r.id, r])).values()].map((r) => ({
         id: r.id,
@@ -1303,6 +1321,11 @@ function createClaudeCodeStore() {
           patch.normalized_title = normalizeTitle(u.title);
         }
         if (u.detail !== undefined) patch.detail = u.detail;
+        if (u.workstream !== undefined) {
+          patch.workstream_id = u.workstream.trim()
+            ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)
+            : null;
+        }
         if (u.blocked_by) patch.blocked_by = u.blocked_by;
         list[idx] = { ...list[idx], ...patch };
         updated.push(u.id!);

@@ -440,6 +440,30 @@ impl MeshTopic {
     }
 }
 
+/// A named group of tasks inside a workspace (docs/tasks.md §5).
+///
+/// One agent tab is routinely asked to do two unrelated things at once; a workstream is
+/// how those stay apart. The workspace is still the project — this is a *job* within it,
+/// named by whoever started it ("Auth refactor", "DB migration").
+///
+/// Deliberately NOT called a "task list": in kanban a list IS a column, and the board has
+/// six of those. Deliberately carries no `tab_id` either — assignment stays on the Task,
+/// where the release/remap machinery that survives tab-id churn already lives. In practice
+/// every task in a workstream shares one tab, so the owner can be derived for display; a
+/// second source of tab truth would fight that machinery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Workstream {
+    pub id: String,
+    pub name: String,
+    /// Case/whitespace-normalized name — the dedup key within a workspace, so an agent
+    /// can't coin "Auth refactor" and "auth-refactor" as two separate jobs. Recomputed on
+    /// persist, same contract as `Task::normalized_title`.
+    #[serde(default)]
+    pub normalized_name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// A unit of work owned by a workspace (docs/tasks.md). A workspace IS a project, so
 /// tasks live here rather than on the window: they survive window moves and travel with a
 /// duplicated or exported workspace. Tabs are an *assignee*, not an owner — a tab id dies
@@ -471,9 +495,21 @@ pub struct Task {
     pub origin: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The named job this task belongs to; None = a loose task on the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workstream_id: Option<String>,
     /// Mesh topic that is this task's conversation vehicle, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
+}
+
+impl Workstream {
+    /// Same normalization as `Task::normalize_title` — one rule for every human-typed name
+    /// in this subsystem, so "Auth refactor", "auth refactor" and "Auth Refactor." are one
+    /// workstream rather than three.
+    pub fn normalize_name(name: &str) -> String {
+        Task::normalize_title(name)
+    }
 }
 
 impl Task {
@@ -531,6 +567,9 @@ pub struct Workspace {
     /// no rank field; reordering rewrites the vector.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<Task>,
+    /// Named task groups (docs/tasks.md §5) — one per distinct job in this workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workstreams: Vec<Workstream>,
     /// Overlord workspace flag (docs/overlord.md §11): this workspace hosts the Overlord
     /// board + agent tab. At most one per window; excluded from the ordinary workspace
     /// list and reordering. Suspending it stops the agent, never the engine.
@@ -1157,6 +1196,12 @@ pub struct Preferences {
     /// Whether the user has been prompted to enable Claude Code integrations.
     #[serde(default)]
     pub claude_triggers_prompted: bool,
+    /// One-time flip of the pre-six-lane `backlog` rows to `todo`. MUST be a flag, not an
+    /// unconditional remap: `backlog` used to be the default for every new task ("not
+    /// started"), but is now a deliberate parking lot, so running the remap twice would
+    /// drag every task a human or agent had parked back into the active board.
+    #[serde(default)]
+    pub tasks_backlog_vocabulary_migrated: bool,
     /// maiTerm task tracking (docs/tasks.md). On by default: task state should be
     /// consistent whether or not anyone is supervising. Gates BOTH the initSession
     /// priming and whether the task MCP tools are offered at all — an agent that is
@@ -1443,6 +1488,7 @@ impl Default for Preferences {
             triggers: Vec::new(),
             hidden_default_triggers: Vec::new(),
             claude_triggers_prompted: false,
+            tasks_backlog_vocabulary_migrated: false,
             tasks_enabled: true,
             overlord_enabled: false,
             overlord_propose_mode: true,
@@ -1653,6 +1699,7 @@ impl Workspace {
             mailink_native: false,
             mesh_topics: Vec::new(),
             tasks: Vec::new(),
+            workstreams: Vec::new(),
             overlord: false,
             archived_tabs: Vec::new(),
             import_highlight: false,

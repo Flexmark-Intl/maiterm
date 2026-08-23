@@ -12,11 +12,12 @@
 
 import { error as logError } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
-import type { Task, TaskStatus } from '$lib/tauri/types';
-import { findDuplicate, makeTask, normalizeTitle, type TaskInput } from '$lib/tasks/model';
+import type { Task, TaskStatus, Workstream } from '$lib/tauri/types';
+import { findDuplicate, findWorkstream, makeTask, makeWorkstream, normalizeTitle, type TaskInput } from '$lib/tasks/model';
 
 function createTasksStore() {
   let byWorkspace = $state<Map<string, Task[]>>(new Map());
+  let streamsByWorkspace = $state<Map<string, Workstream[]>>(new Map());
   let loaded = $state(false);
 
   /** Persist one workspace's list. Fire-and-forget: the in-memory copy is authoritative
@@ -24,7 +25,8 @@ function createTasksStore() {
    *  the Overlord ledger and mesh topics). */
   function persist(workspaceId: string) {
     const list = ($state.snapshot(byWorkspace.get(workspaceId) ?? []) as Task[]);
-    commands.setWorkspaceTasks(workspaceId, list).catch((e) =>
+    const streams = ($state.snapshot(streamsByWorkspace.get(workspaceId) ?? []) as Workstream[]);
+    commands.setWorkspaceTasks(workspaceId, list, streams).catch((e) =>
       logError(`tasks: persist failed for workspace ${workspaceId}: ${e}`),
     );
   }
@@ -55,6 +57,49 @@ function createTasksStore() {
       return this.forWorkspace(workspaceId).filter((t) => !t.tab_id);
     },
 
+    workstreams(workspaceId: string): Workstream[] {
+      return streamsByWorkspace.get(workspaceId) ?? [];
+    },
+
+    workstream(workspaceId: string, id: string | null | undefined): Workstream | undefined {
+      return id ? this.workstreams(workspaceId).find((w) => w.id === id) : undefined;
+    },
+
+    /** Resolve a workstream NAME to its id, creating it if new. Agents pass names, not
+     *  ids — requiring a round trip just to record work would make the common case worse.
+     *  Deduped on the normalized name so near-duplicate spellings stay one job. */
+    ensureWorkstream(workspaceId: string, name: string): Workstream | null {
+      const trimmed = name.trim();
+      if (!trimmed) return null;
+      const existing = findWorkstream(this.workstreams(workspaceId), trimmed);
+      if (existing) return existing;
+      const created = makeWorkstream(trimmed);
+      streamsByWorkspace.set(workspaceId, [...this.workstreams(workspaceId), created]);
+      streamsByWorkspace = new Map(streamsByWorkspace);
+      return created;
+    },
+
+    renameWorkstream(workspaceId: string, id: string, name: string): boolean {
+      const list = this.workstreams(workspaceId);
+      if (!list.some((w) => w.id === id)) return false;
+      streamsByWorkspace.set(
+        workspaceId,
+        list.map((w) =>
+          w.id === id
+            ? { ...w, name: name.trim(), normalized_name: normalizeTitle(name), updated_at: new Date().toISOString() }
+            : w,
+        ),
+      );
+      streamsByWorkspace = new Map(streamsByWorkspace);
+      persist(workspaceId);
+      return true;
+    },
+
+    /** Tasks in one workstream; pass null for the workspace's loose tasks. */
+    inWorkstream(workspaceId: string, workstreamId: string | null): Task[] {
+      return this.forWorkspace(workspaceId).filter((t) => (t.workstream_id ?? null) === workstreamId);
+    },
+
     find(workspaceId: string, id: string): Task | undefined {
       return this.forWorkspace(workspaceId).find((t) => t.id === id);
     },
@@ -72,8 +117,9 @@ function createTasksStore() {
     /** Load every workspace's list for this window. Idempotent; safe to call on remount. */
     async rehydrate() {
       try {
-        const pairs = await commands.getWindowTasks();
-        byWorkspace = new Map(pairs.map(([wsId, list]) => [wsId, list]));
+        const rows = await commands.getWindowTasks();
+        byWorkspace = new Map(rows.map(([wsId, list]) => [wsId, list]));
+        streamsByWorkspace = new Map(rows.map(([wsId, , streams]) => [wsId, streams]));
         loaded = true;
       } catch (e) {
         logError(`tasks: load failed: ${e}`);
@@ -85,7 +131,7 @@ function createTasksStore() {
      *  re-primed agent re-sending its list is a no-op rather than a duplication. */
     add(workspaceId: string, input: TaskInput): Task {
       const list = this.forWorkspace(workspaceId);
-      const dup = findDuplicate(list, input.title, input.tab_id);
+      const dup = findDuplicate(list, input.title, input.tab_id, input.workstream_id);
       if (dup) {
         // Reclaimed from the backlog (the caller's previous tab id died) — take ownership
         // so it shows as this tab's work again rather than sitting unassigned.
@@ -104,7 +150,7 @@ function createTasksStore() {
       const out: Task[] = [];
       let added = false;
       for (const input of inputs) {
-        const dup = findDuplicate(list, input.title, input.tab_id);
+        const dup = findDuplicate(list, input.title, input.tab_id, input.workstream_id);
         if (dup) {
           if (!dup.tab_id && input.tab_id) {
             const claimed = { ...dup, tab_id: input.tab_id, updated_at: new Date().toISOString() };
