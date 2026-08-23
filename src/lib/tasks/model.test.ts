@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  coerceStatus,
   effectiveStatus,
   findDuplicate,
   hasUnmetDeps,
@@ -21,6 +22,20 @@ describe('normalizeTitle', () => {
     for (const input of ['Add auth guard', 'add auth guard', '  Add   auth  guard ', 'Add auth guard.', 'ADD AUTH GUARD:']) {
       expect(normalizeTitle(input)).toBe('add auth guard');
     }
+  });
+
+  it('agrees with the Rust normalizer on the whitespace both languages get wrong', () => {
+    // U+0085 NEL: whitespace to Rust, not to JS's \s. U+FEFF BOM: the reverse.
+    // Both must collapse, or a pasted title re-duplicates on every restart.
+    expect(normalizeTitle('a\u0085b')).toBe('a b');
+    expect(normalizeTitle('a\uFEFFb')).toBe('a b');
+    expect(normalizeTitle('\uFEFFAdd auth guard')).toBe('add auth guard');
+    expect(normalizeTitle('ab\u0085')).toBe('ab');
+    expect(normalizeTitle('ab\uFEFF')).toBe('ab');
+  });
+
+  it('strips a trailing separator left behind after collapsing', () => {
+    expect(normalizeTitle('Add auth guard .')).toBe('add auth guard');
   });
 
   it('keeps genuinely different titles apart', () => {
@@ -49,6 +64,49 @@ describe('findDuplicate', () => {
   it('falls back to hashing the title when normalized_title was never stored', () => {
     const list = [task({ title: 'Legacy row', tab_id: 'a', normalized_title: '' })];
     expect(findDuplicate(list, 'legacy row', 'a')).toBeDefined();
+  });
+});
+
+describe('findDuplicate — reclaiming work after a tab id change', () => {
+  it('reclaims an unassigned row so a reloaded tab does not duplicate its whole list', () => {
+    // A reload is duplicate-then-close: the replacement tab has a new id, and the closing
+    // tab released its tasks to the backlog.
+    const released = task({ title: 'Wire the parser', tab_id: null, status: 'active' });
+    expect(findDuplicate([released], 'Wire the parser', 'new-tab-id')?.id).toBe(released.id);
+  });
+
+  it('will not resurrect a finished backlog task for a new claimant', () => {
+    const done = task({ title: 'Wire the parser', tab_id: null, status: 'done' });
+    expect(findDuplicate([done], 'Wire the parser', 'new-tab-id')).toBeUndefined();
+  });
+
+  it('prefers the caller\'s own row over an unassigned one with the same title', () => {
+    const backlog = task({ id: 'b', title: 'Ship it', tab_id: null, status: 'active' });
+    const mine = task({ id: 'm', title: 'Ship it', tab_id: 'a', status: 'active' });
+    expect(findDuplicate([backlog, mine], 'Ship it', 'a')?.id).toBe('m');
+  });
+
+  it('does not let an unassigned create claim another tab\'s row', () => {
+    const theirs = task({ title: 'Ship it', tab_id: 'other', status: 'active' });
+    expect(findDuplicate([theirs], 'Ship it', null)).toBeUndefined();
+  });
+});
+
+describe('coerceStatus', () => {
+  it('accepts our own vocabulary unchanged', () => {
+    for (const s of ['backlog', 'active', 'blocked', 'review', 'done'] as const) {
+      expect(coerceStatus(s)).toBe(s);
+    }
+  });
+
+  it('translates the runtimes\' vocabulary rather than storing it raw', () => {
+    // A raw "completed" is invisible on the board (lanes match by equality) and
+    // permanently unfinished to the dependency check, which wedges its dependents.
+    expect(coerceStatus('completed')).toBe('done');
+    expect(coerceStatus('in_progress')).toBe('active');
+    expect(coerceStatus('pending')).toBe('backlog');
+    expect(coerceStatus('nonsense')).toBe('backlog');
+    expect(coerceStatus(undefined)).toBe('backlog');
   });
 });
 

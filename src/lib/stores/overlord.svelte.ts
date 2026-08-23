@@ -855,6 +855,12 @@ function createOverlordStore() {
         const dup = findDuplicate(next, item.content, tabId);
         const idx = dup ? next.indexOf(dup) : -1;
         if (idx >= 0) {
+          // The importer only ever drives rows it owns. Once a row belongs to the agent
+          // (createTasks) or the human, this must not touch its status: the runtime's
+          // private store is a stale copy the agent has been told to stop maintaining, so
+          // re-reading it every 5s would drag a task the agent just marked done — or the
+          // human just dragged to review — straight back to whatever the file still says.
+          if (next[idx].origin !== 'imported') continue;
           if (next[idx].status !== status) {
             next[idx] = { ...next[idx], status, updated_at: stamp };
             changed = true;
@@ -868,6 +874,7 @@ function createOverlordStore() {
       // longer on it is finished as far as the agent is concerned. Only `imported` rows
       // are swept — a human's or another agent's task must never vanish because some
       // runtime rewrote its private list.
+      // Titles the runtime still lists — imported rows outside this set are finished.
       const present = new Set(items.map((i) => normalizeTitle(i.content)));
       for (let i = 0; i < next.length; i++) {
         const t = next[i];

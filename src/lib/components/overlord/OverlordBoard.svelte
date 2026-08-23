@@ -560,7 +560,10 @@
                     <span class="ov-mono lane-count">{cards.length}</span>
                   </div>
                   {#each cards as t (t.id)}
-                    <div class="card" class:from-agent={t.origin === 'agent'} class:from-overlord={t.origin === 'overlord'}>
+                    <!-- The accent marks "an agent put this here", covering both a task created over
+                         MCP ('agent') and one imported from a runtime's own list ('imported').
+                         Testing for 'agent' alone would miss every importer row. -->
+                    <div class="card" class:from-agent={t.origin === 'agent' || t.origin === 'imported'} class:from-overlord={t.origin === 'overlord'}>
                       <div class="card-title">{t.title}</div>
                       <div class="card-foot">
                         {#if t.tab_id}

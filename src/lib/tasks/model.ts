@@ -16,15 +16,24 @@ export const TASK_STATUSES: TaskStatus[] = ['backlog', 'active', 'blocked', 'rev
  *
  *  MUST stay in lockstep with `Task::normalize_title` in state/workspace.rs, which
  *  recomputes it on every persist. If the two ever disagree, re-migration stops being
- *  idempotent and a compacted agent duplicates its own list. */
+ *  idempotent and a compacted agent duplicates its own list once per restart.
+ *
+ *  The whitespace class is spelled out because the defaults do NOT agree: Rust's
+ *  `char::is_whitespace` (Unicode White_Space) includes U+0085 NEL but not U+FEFF, while
+ *  JS `\s` is the mirror image — it matches U+FEFF but not U+0085. Titles arrive pasted
+ *  from terminals and transcripts, so a stray BOM is not hypothetical. Both sides use the
+ *  union of the two sets. */
+const TITLE_WS = /[\s\u0085\uFEFF]+/g;
+/** Trailing separators an agent tacks on when restating an item; stripped after whitespace
+ *  collapsing so "guard ." and "guard." land on the same key. */
+const TITLE_TRAILING = /[.,;:\s\u0085\uFEFF]+$/;
+
 export function normalizeTitle(title: string): string {
   return title
-    .trim()
-    .replace(/[.,;:]+$/, '')
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .join(' ');
+    .replace(TITLE_WS, ' ')
+    .replace(TITLE_TRAILING, '')
+    .replace(/^ /, '')
+    .toLowerCase();
 }
 
 /** Statuses that mean "this is not work in flight". */
@@ -60,6 +69,21 @@ export function statusFromAgent(status: string | undefined, blocked?: boolean): 
   return 'backlog';
 }
 
+/** Coerce whatever a caller sent into our vocabulary.
+ *
+ *  The MCP layer is a hand-rolled JSON-RPC server: `TaskStatus` is a compile-time union
+ *  and the declared enum is never enforced at runtime, so an agent carrying its own
+ *  vocabulary across (which the migration priming explicitly asks it to do) would
+ *  otherwise persist "in_progress"/"completed" verbatim. A status outside the five lanes
+ *  is invisible on the board — `tasksFor` matches lane by equality — and permanently
+ *  unfinished to `hasUnmetDeps`, which wedges everything blocked on it. */
+export function coerceStatus(status: string | undefined): TaskStatus {
+  if (!status) return 'backlog';
+  return (TASK_STATUSES as string[]).includes(status)
+    ? (status as TaskStatus)
+    : statusFromAgent(status);
+}
+
 export interface TaskInput {
   title: string;
   detail?: string | null;
@@ -88,13 +112,27 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
   };
 }
 
-/** Find the existing row an incoming item refers to: same normalized title, same tab.
+/** Find the existing row an incoming item refers to: same normalized title, on the same
+ *  tab or sitting unclaimed in the project backlog.
  *
- *  Scoped to the tab rather than the workspace on purpose — two agents in one project
- *  legitimately both have a "write the tests" task, and collapsing those would hide one
- *  agent's work behind another's. */
+ *  Tab scoping is deliberate — two agents in one project legitimately both have a "write
+ *  the tests" task, and collapsing those would hide one agent's work behind another's.
+ *
+ *  The unassigned fallback is what makes re-migration survive a tab id change. Tab ids are
+ *  not stable across the very events the priming fires on: a reload is a duplicate-then-
+ *  close, and a fork mints a new id too, so the resumed agent re-sends a list whose rows
+ *  are all tagged with an id that no longer exists. Closing a tab releases its tasks back
+ *  to the backlog (`tasksStore.releaseTab`), and matching them here lets the new tab
+ *  reclaim its own work instead of creating a second copy of every item, forever, once
+ *  per reload. */
 export function findDuplicate(list: Task[], title: string, tabId: string | null | undefined): Task | undefined {
   const key = normalizeTitle(title);
   const tab = tabId ?? null;
-  return list.find((t) => (t.tab_id ?? null) === tab && (t.normalized_title || normalizeTitle(t.title)) === key);
+  const sameTitle = (t: Task) => (t.normalized_title || normalizeTitle(t.title)) === key;
+  return (
+    list.find((t) => (t.tab_id ?? null) === tab && sameTitle(t)) ??
+    // Only reclaim unfinished work: a task someone already closed out shouldn't be
+    // resurrected and re-owned just because a new tab restated it.
+    (tab === null ? undefined : list.find((t) => !t.tab_id && t.status !== 'done' && sameTitle(t)))
+  );
 }

@@ -86,7 +86,12 @@ function createTasksStore() {
     add(workspaceId: string, input: TaskInput): Task {
       const list = this.forWorkspace(workspaceId);
       const dup = findDuplicate(list, input.title, input.tab_id);
-      if (dup) return dup;
+      if (dup) {
+        // Reclaimed from the backlog (the caller's previous tab id died) — take ownership
+        // so it shows as this tab's work again rather than sitting unassigned.
+        if (!dup.tab_id && input.tab_id) this.update(workspaceId, dup.id, { tab_id: input.tab_id });
+        return dup;
+      }
       const task = makeTask(input);
       commit(workspaceId, [...list, task]);
       return task;
@@ -101,7 +106,14 @@ function createTasksStore() {
       for (const input of inputs) {
         const dup = findDuplicate(list, input.title, input.tab_id);
         if (dup) {
-          out.push(dup);
+          if (!dup.tab_id && input.tab_id) {
+            const claimed = { ...dup, tab_id: input.tab_id, updated_at: new Date().toISOString() };
+            list[list.indexOf(dup)] = claimed;
+            out.push(claimed);
+            added = true;
+          } else {
+            out.push(dup);
+          }
           continue;
         }
         const task = makeTask(input);
@@ -167,6 +179,28 @@ function createTasksStore() {
       if (!next) return false;
       commit(workspaceId, next);
       return true;
+    },
+
+    /** Release a closing tab's tasks back to the project backlog.
+     *
+     *  Tab ids are not durable: a reload is duplicate-then-close and a fork mints a new
+     *  id, so tasks tagged with the old id would otherwise be stranded on a tab that no
+     *  longer exists — invisible under "this tab", permanently unfinished, and passed over
+     *  by the dedup when the resumed agent re-sends the same list. Unassigning them makes
+     *  them reclaimable (`findDuplicate`) and honest: a task whose assignee is gone belongs
+     *  to the project, not to a ghost. Finished rows are left alone; the sweep handles them.
+     *
+     *  Returns the workspace id it touched, if any. */
+    releaseTab(tabId: string): string | null {
+      for (const [workspaceId, list] of byWorkspace) {
+        if (!list.some((t) => t.tab_id === tabId && t.status !== 'done')) continue;
+        commit(
+          workspaceId,
+          list.map((t) => (t.tab_id === tabId && t.status !== 'done' ? { ...t, tab_id: null } : t)),
+        );
+        return workspaceId;
+      }
+      return null;
     },
 
     /** Drop a workspace's list from memory when the workspace itself goes away. Does not

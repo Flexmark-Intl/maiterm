@@ -27,6 +27,21 @@ pub fn set_workspace_tasks(
     let label = window.label().to_string();
     for t in tasks.iter_mut() {
         t.normalized_title = Task::normalize_title(&t.title);
+        // Last gate before disk. A status outside the five lanes is invisible on the board
+        // (lanes match by equality) and permanently unfinished to the dependency check, so
+        // one bad write wedges every task blocked on it — persisted. The frontend coerces
+        // too; this is the same defense-in-depth as recomputing normalized_title.
+        if !matches!(
+            t.status.as_str(),
+            "backlog" | "active" | "blocked" | "review" | "done"
+        ) {
+            log::warn!(
+                "task {}: unknown status {:?} coerced to backlog",
+                t.id,
+                t.status
+            );
+            t.status = "backlog".to_string();
+        }
     }
     let data_clone = {
         let mut app_data = state.app_data.write();

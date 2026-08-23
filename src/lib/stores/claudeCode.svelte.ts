@@ -12,7 +12,7 @@ import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { effectiveStatus, normalizeTitle } from '$lib/tasks/model';
+import { coerceStatus, effectiveStatus, normalizeTitle } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1201,14 +1201,16 @@ function createClaudeCodeStore() {
   interface TaskToolInput {
     title?: string;
     detail?: string;
-    status?: TaskStatus;
+    /** Declared as an enum in the schema, but nothing enforces it at runtime — typed as a
+     *  plain string so the coercion is visibly required rather than assumed. */
+    status?: string;
     blocked_by?: string[];
     assign_to_me?: boolean;
   }
 
   interface TaskToolUpdate {
     id?: string;
-    status?: TaskStatus;
+    status?: string;
     title?: string;
     detail?: string;
     blocked_by?: string[];
@@ -1252,7 +1254,7 @@ function createClaudeCodeStore() {
       inputs.map((t) => ({
         title: t.title!.trim(),
         detail: t.detail ?? null,
-        status: t.status ?? 'backlog',
+        status: coerceStatus(t.status),
         // Assigned to the caller unless it explicitly leaves the task in the backlog.
         tab_id: t.assign_to_me === false ? null : loc.tab.id,
         blocked_by: t.blocked_by ?? [],
@@ -1260,13 +1262,20 @@ function createClaudeCodeStore() {
       })),
     );
     // Report duplicates honestly rather than silently: an agent re-sending its list after
-    // a compact should be able to tell that nothing new was recorded.
-    const created = rows.filter((r) => !before.has(r.id)).map((r) => r.id);
-    const existing = rows.filter((r) => before.has(r.id)).map((r) => r.id);
+    // a compact should be able to tell that nothing new was recorded. De-duplicated by id
+    // because two entries in ONE batch can collapse onto the same row ("Add the auth
+    // guard" and "add auth guard.") — reporting that id twice under `created` would tell
+    // the agent it made two tasks, and an agent reconciling counts would retry forever.
+    const created = [...new Set(rows.filter((r) => !before.has(r.id)).map((r) => r.id))];
+    const existing = [...new Set(rows.filter((r) => before.has(r.id)).map((r) => r.id))];
     return {
       created,
       ...(existing.length ? { already_tracked: existing } : {}),
-      tasks: rows.map((r) => ({ id: r.id, title: r.title, status: r.status })),
+      tasks: [...new Map(rows.map((r) => [r.id, r])).values()].map((r) => ({
+        id: r.id,
+        title: r.title,
+        status: r.status,
+      })),
     };
   }
 
@@ -1288,7 +1297,7 @@ function createClaudeCodeStore() {
           continue;
         }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
-        if (u.status) patch.status = u.status;
+        if (u.status) patch.status = coerceStatus(u.status);
         if (u.title?.trim()) {
           patch.title = u.title.trim();
           patch.normalized_title = normalizeTitle(u.title);

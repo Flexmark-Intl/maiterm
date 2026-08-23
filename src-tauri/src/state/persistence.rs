@@ -384,7 +384,17 @@ pub fn migrate_app_data(data: &mut AppData) {
                 status: str_at("state").unwrap_or_else(|| "backlog".to_string()),
                 tab_id: str_at("tab_id"),
                 blocked_by: Vec::new(),
-                origin: str_at("origin").unwrap_or_else(|| "human".to_string()),
+                // The old board's "agent" rows were mirrored from Claude's private todo
+                // store, which is what "imported" means now; "agent" has been redefined
+                // as work an agent created through createTasks. Carrying the old label
+                // across would strand those rows: the importer only ever retires
+                // `imported` rows, so a mislabeled mirror could never be closed out and
+                // would age into a permanent false "stale" card driving task_stale rules.
+                origin: match str_at("origin").as_deref() {
+                    Some("agent") => "imported".to_string(),
+                    Some(other) => other.to_string(),
+                    None => "human".to_string(),
+                },
                 created_at,
                 updated_at,
                 topic_id: str_at("topic_id"),

@@ -1096,6 +1096,12 @@ function createWorkspacesStore() {
       // Dynamic import avoids a static cycle (agentBridge imports this store).
       import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.handleTabClosed(tabId)).catch(() => {});
       import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.handleTabClosed(tabId)).catch(() => {});
+      // Release this tab's unfinished tasks back to the project backlog (docs/tasks.md).
+      // Same permanent-removal reasoning as the bridge teardown above: a reload is
+      // duplicate-then-close, so the replacement tab has a NEW id and would otherwise fail
+      // to recognize its own list and create a second copy of every item. Unassigned rows
+      // are reclaimable by title, so the resumed agent picks its work back up.
+      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.releaseTab(tabId)).catch(() => {});
 
       // If closing a diff tab with a pending Claude request, respond with rejection
       // so Claude Code doesn't hang waiting for accept/reject.
@@ -2009,6 +2015,15 @@ function createWorkspacesStore() {
       // 5. Reload all workspaces to get consistent state
       const data = await commands.getWindowData();
       workspaces = data.workspaces;
+
+      // The backend copied this workspace's tasks onto the duplicate (with fresh ids),
+      // but the tasks store has no entry for a workspace id it has never seen — and
+      // `forWorkspace` returns [] for an unknown key, which the next write would persist
+      // over the copies. Re-read so the duplicate's list is present before anything can
+      // mutate it. (Duplication is the only path that creates a workspace already
+      // carrying tasks; backup import reloads the whole window.)
+      const { tasksStore } = await import('$lib/stores/tasks.svelte');
+      await tasksStore.rehydrate();
     },
 
     async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean }) {

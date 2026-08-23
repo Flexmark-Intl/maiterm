@@ -473,19 +473,28 @@ pub struct Task {
 }
 
 impl Task {
-    /// Normalize a title for dedup: trim, lowercase, collapse internal whitespace, and
-    /// drop trailing punctuation. Agents restate the same item with cosmetic drift
-    /// ("Add auth guard" / "add auth guard." / "Add  auth   guard"), and both the importer
-    /// and `createTasks` re-run over lists they have already recorded, so this key is what
-    /// keeps re-migration idempotent (docs/tasks.md §4, §7.3).
+    /// Normalize a title for dedup: collapse whitespace, drop trailing separators,
+    /// lowercase. Agents restate the same item with cosmetic drift ("Add auth guard" /
+    /// "add auth guard." / "Add  auth   guard"), and both the importer and `createTasks`
+    /// re-run over lists they have already recorded, so this key is what keeps
+    /// re-migration idempotent (docs/tasks.md §4, §7.3).
+    ///
+    /// MUST stay in lockstep with `normalizeTitle` in src/lib/tasks/model.ts. The two
+    /// languages' whitespace defaults do NOT agree — `char::is_whitespace` covers U+0085
+    /// NEL but not U+FEFF, and JS `\s` is the mirror image — so the class is spelled out
+    /// on both sides as the union. A pasted BOM is not hypothetical here: titles come from
+    /// terminals and transcripts.
     pub fn normalize_title(title: &str) -> String {
+        fn is_title_ws(c: char) -> bool {
+            c.is_whitespace() || c == '\u{feff}'
+        }
         title
-            .trim()
-            .trim_end_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ':')
-            .to_lowercase()
-            .split_whitespace()
+            .split(is_title_ws)
+            .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
+            .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':') || is_title_ws(c))
+            .to_lowercase()
     }
 }
 
@@ -1653,6 +1662,20 @@ mod task_tests {
         ] {
             assert_eq!(Task::normalize_title(input), "add auth guard", "input: {input:?}");
         }
+    }
+
+    /// The TS twin in src/lib/tasks/model.test.ts asserts these same strings. Both
+    /// languages' whitespace defaults disagree here (U+0085 is whitespace to Rust only,
+    /// U+FEFF to JS only), and a mismatch silently re-duplicates a pasted title on every
+    /// restart, so the parity is pinned on both sides.
+    #[test]
+    fn normalize_title_matches_the_ts_normalizer_on_contested_whitespace() {
+        assert_eq!(Task::normalize_title("a\u{85}b"), "a b");
+        assert_eq!(Task::normalize_title("a\u{feff}b"), "a b");
+        assert_eq!(Task::normalize_title("\u{feff}Add auth guard"), "add auth guard");
+        assert_eq!(Task::normalize_title("ab\u{85}"), "ab");
+        assert_eq!(Task::normalize_title("ab\u{feff}"), "ab");
+        assert_eq!(Task::normalize_title("Add auth guard ."), "add auth guard");
     }
 
     #[test]
