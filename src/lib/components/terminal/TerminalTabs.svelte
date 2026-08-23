@@ -1340,6 +1340,14 @@
 
   {#if pane.active_tab_id}
     <IconButton
+      tooltip="Toggle tasks ({modLabel}+Shift+E)"
+      size={26}
+      style="flex-shrink:0;-webkit-app-region:no-drag"
+      onclick={() => workspacesStore.toggleTasks(pane.active_tab_id!)}
+    >
+      <Icon name="list" />
+    </IconButton>
+    <IconButton
       tooltip="Toggle notes ({modLabel}+E)"
       size={26}
       style="margin-right:4px;flex-shrink:0;-webkit-app-region:no-drag"
