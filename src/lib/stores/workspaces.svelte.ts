@@ -2462,6 +2462,22 @@ function createWorkspacesStore() {
 export const workspacesStore = createWorkspacesStore();
 
 /**
+ * The name to show for a tab id, falling back to a short id when the tab is gone.
+ *
+ * Task rows, ledger entries and escalations all outlive the tab they name — an id that no
+ * longer resolves is normal, not an error, so this never returns empty.
+ */
+export function tabDisplayName(tabId: string): string {
+  for (const ws of workspacesStore.workspaces) {
+    for (const pane of ws.panes) {
+      const tab = pane.tabs.find(t => t.id === tabId);
+      if (tab) return tab.name;
+    }
+  }
+  return tabId.slice(0, 8);
+}
+
+/**
  * Navigate to a specific tab by finding its workspace and pane.
  * Used by toast clicks and OS notification deep-links.
  */

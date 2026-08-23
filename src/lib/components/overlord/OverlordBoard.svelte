@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
+  import { workspacesStore, navigateToTab, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import type { TaskStatus, Workspace, Tab } from '$lib/tauri/types';
-  import { effectiveStatus, isInFlight, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
+  import type { Workspace, Tab } from '$lib/tauri/types';
+  import { isInFlight, type TaskRow } from '$lib/tasks/model';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
+  import OverlordBoardView from './OverlordBoardView.svelte';
   import '$lib/overlord/deck.css';
 
   /**
@@ -62,29 +63,11 @@
   const clock = setInterval(() => { now = Date.now(); }, 20_000);
 
   // ── Constants ───────────────────────────────────────────────────────────────
-  /** The lane order IS the shared vocabulary — never re-declare it here. A local copy
-   *  silently dropped `todo` when the sixth lane landed, and since lanes match by equality,
-   *  every new and every migrated task rendered in no column at all. */
-  const LANES = TASK_STATUSES;
   const PRESSURE_PCT = 50;
   const STALE_DAYS = 3;
 
   type View = 'deck' | 'fleet' | 'board' | 'ledger';
   let view = $state<View>('deck');
-  let newTaskTitles = $state<Record<string, string>>({});
-  let collapsed = $state<Set<string>>(new Set());
-
-  try {
-    const saved = localStorage.getItem('overlord-collapsed');
-    if (saved) collapsed = new Set(JSON.parse(saved) as string[]);
-  } catch { /* first run / storage blocked */ }
-
-  function toggleCollapse(id: string) {
-    const next = new Set(collapsed);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    collapsed = next;
-    try { localStorage.setItem('overlord-collapsed', JSON.stringify([...next])); } catch { /* ignore */ }
-  }
 
   // ── Fleet derivation ────────────────────────────────────────────────────────
   const boardWorkspaces = $derived(workspacesStore.workspaces.filter((w) => !w.overlord));
@@ -187,76 +170,6 @@
     try { await overlordStore.askTabsToTrack(scan.silent); } finally { asking = false; }
   }
 
-  // ── Board helpers ───────────────────────────────────────────────────────────
-  /** Lane membership uses the EFFECTIVE status, so a task waiting on an unfinished
-   *  prerequisite shows up under `blocked` without anyone having to restate it there. */
-  function tasksFor(wsId: string, lane: TaskStatus, workstreamId: string | null) {
-    const all = overlordStore.tasks.filter((t) => t.workspace_id === wsId);
-    return all.filter(
-      (t) => (t.workstream_id ?? null) === workstreamId && effectiveStatus(t, all) === lane,
-    );
-  }
-
-  /** The workstream strips to render for a workspace: every named job that still has
-   *  tasks, plus an unlabelled strip for loose ones. Ordered by name, with loose last —
-   *  named work is what someone deliberately organized, so it leads. */
-  function stripsFor(wsId: string): { id: string | null; name: string | null }[] {
-    const tasks = overlordStore.tasks.filter((t) => t.workspace_id === wsId);
-    const named = tasksStore
-      .workstreams(wsId)
-      .filter((w) => tasks.some((t) => t.workstream_id === w.id))
-      .map((w) => ({ id: w.id as string | null, name: w.name as string | null }))
-      .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-    const hasLoose = tasks.some((t) => !t.workstream_id);
-    return hasLoose ? [...named, { id: null, name: null }] : named;
-  }
-
-  /** Open task count for one strip — what the strip header reports. */
-  function stripCount(wsId: string, workstreamId: string | null) {
-    return overlordStore.tasks.filter(
-      (t) => t.workspace_id === wsId && (t.workstream_id ?? null) === workstreamId && isInFlight(t),
-    ).length;
-  }
-
-  // ── Drag and drop ──────────────────────────────────────────────────────────
-  //
-  // Dragging is the fast path; the ‹ › buttons stay as the keyboard-reachable one, since
-  // a drag is unusable without a pointer. A drop carries both lane and strip, so one
-  // gesture can reassign a task's status AND its workstream.
-
-  let dragging = $state<string | null>(null);
-  let dragOver = $state<string | null>(null);
-
-  const dropKey = (wsId: string, workstreamId: string | null, lane: TaskStatus) =>
-    `${wsId}|${workstreamId ?? ''}|${lane}`;
-
-  function onDragStart(e: DragEvent, taskId: string) {
-    dragging = taskId;
-    e.dataTransfer?.setData('text/plain', taskId);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
-  }
-
-  function onDrop(e: DragEvent, wsId: string, workstreamId: string | null, lane: TaskStatus) {
-    e.preventDefault();
-    const id = dragging ?? e.dataTransfer?.getData('text/plain');
-    dragging = null;
-    dragOver = null;
-    if (!id) return;
-    const t = overlordStore.tasks.find((x) => x.id === id);
-    // Refuse a cross-workspace drop rather than silently moving a task between projects:
-    // the lists persist per workspace, and the tab assignment would be meaningless there.
-    if (!t || t.workspace_id !== wsId) return;
-    // Compare against the EFFECTIVE status — the lane the card is actually rendered in.
-    // Comparing the stored one meant dropping a dependency-blocked card back on Blocked
-    // rewrote its stored status to 'blocked', so it never returned to Active when the
-    // prerequisite finished: stuck in Blocked with nothing blocking it.
-    const shown = effectiveStatus(t, overlordStore.tasks.filter((x) => x.workspace_id === wsId));
-    if (shown !== lane) tasksStore.setStatus(wsId, id, lane);
-    if ((t.workstream_id ?? null) !== workstreamId) {
-      tasksStore.update(wsId, id, { workstream_id: workstreamId });
-    }
-  }
-
   function workstreamName(t: TaskRow): string | null {
     return tasksStore.workstream(t.workspace_id, t.workstream_id)?.name ?? null;
   }
@@ -296,63 +209,6 @@
     } finally {
       recoveringAll = false;
     }
-  }
-
-  /** Expanded card — click to read the description an agent or human wrote. */
-  let openCard = $state<string | null>(null);
-  /** "Open" means in flight — parked work is deliberately NOT on the plate, so counting it
-   *  would put the thing you shelved back in the number you're trying to bring down. */
-  function taskCount(wsId: string) {
-    return overlordStore.tasks.filter((t) => t.workspace_id === wsId && isInFlight(t)).length;
-  }
-  function moveTask(task: TaskRow, dir: 1 | -1) {
-    const i = LANES.indexOf(effectiveStatus(task, overlordStore.tasks.filter((t) => t.workspace_id === task.workspace_id)));
-    const next = LANES[Math.min(LANES.length - 1, Math.max(0, i + dir))];
-    if (next !== task.status) overlordStore.updateTaskState(task.id, next);
-  }
-  /** Add straight into a workstream. Keyed by workspace+strip so each strip has its own
-   *  input — adding to "the workspace" and then dragging into the right job is two steps
-   *  for something that should be one. */
-  function addToStrip(wsId: string, workstreamId: string | null) {
-    const key = dropKey(wsId, workstreamId, 'todo');
-    const title = (newTaskTitles[key] ?? '').trim();
-    if (!title) return;
-    tasksStore.add(wsId, { title, origin: 'human', workstream_id: workstreamId });
-    newTaskTitles = { ...newTaskTitles, [key]: '' };
-  }
-
-  /** Start a new named job, seeded with its first task — a workstream with no tasks is
-   *  dropped on persist, so the two have to be created together. */
-  let newStreamFor = $state<string | null>(null);
-  let newStreamName = $state('');
-  let newStreamTask = $state('');
-
-  function createWorkstream(wsId: string) {
-    const name = newStreamName.trim();
-    const title = newStreamTask.trim();
-    if (!name || !title) return;
-    const stream = tasksStore.ensureWorkstream(wsId, name);
-    tasksStore.add(wsId, { title, origin: 'human', workstream_id: stream?.id ?? null });
-    newStreamFor = null;
-    newStreamName = '';
-    newStreamTask = '';
-  }
-
-  function addTask(wsId: string) {
-    const title = (newTaskTitles[wsId] ?? '').trim();
-    if (!title) return;
-    overlordStore.addTask(title, wsId);
-    newTaskTitles = { ...newTaskTitles, [wsId]: '' };
-  }
-
-  function tabName(id: string): string {
-    for (const ws of workspacesStore.workspaces) {
-      for (const pane of ws.panes) {
-        const t = pane.tabs.find((t) => t.id === id);
-        if (t) return t.name;
-      }
-    }
-    return id.slice(0, 8);
   }
 
   /** Context ring geometry — r=13 → circumference 81.68. */
@@ -452,7 +308,9 @@
   </header>
 
   <!-- ══ Body ══════════════════════════════════════════════════════════════ -->
-  <div class="body">
+  <!-- Every view but the board is a vertical list that scrolls as one. The board is a
+       fixed frame with its own scrollers inside it, so it takes the height instead. -->
+  <div class="body" class:body-fill={view === 'board'}>
 
     {#if !engineOn}
       <div class="standby ov-panel ov-bracket ov-in">
@@ -546,7 +404,7 @@
             {#if s.type === 'escalation'}
               <div class="signal-head">
                 <span class="ov-chip ov-chip-tone">escalation</span>
-                <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.e.tabId)}>{tabName(s.e.tabId)}</button>
+                <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.e.tabId)}>{tabDisplayName(s.e.tabId)}</button>
                 <span class="signal-age ov-mono">{fmtAge(s.e.ts)}</span>
               </div>
               <p class="signal-text">{s.e.detail}</p>
@@ -600,7 +458,7 @@
                   <span class="ov-chip">{workstreamName(s.t)}</span>
                 {/if}
                 {#if s.t.tab_id}
-                  <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.t.tab_id!)}>{tabName(s.t.tab_id)}</button>
+                  <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.t.tab_id!)}>{tabDisplayName(s.t.tab_id)}</button>
                 {/if}
               </div>
               {#if s.t.detail}
@@ -716,142 +574,10 @@
     {/if}
 
     <!-- ── Board ───────────────────────────────────────────────────────── -->
+    <!-- Indexed by workstream, not by workspace→tab. The component owns its own
+         scrolling, so the deck body stops scrolling while it is on screen. -->
     {#if view === 'board'}
-      {#if overlordStore.tasks.length === 0}
-        <div class="board-empty ov-panel ov-bracket ov-in">
-          <p class="ov-label-lead">The board is empty</p>
-          <p class="board-empty-copy">
-            Scan your running agent tabs to populate it — their tasks come across where they
-            exist, and every other running tab gets a row you can fill in. Nothing is typed
-            into any tab, and it's safe to run again any time.
-          </p>
-          <button class="ov-btn ov-btn-primary" onclick={runScan} disabled={overlordStore.scanning}>
-            {overlordStore.scanning ? 'Scanning…' : 'Scan running tabs'}
-          </button>
-        </div>
-      {/if}
-      {#each boardWorkspaces as ws, i (ws.id)}
-        {@const open = !collapsed.has(ws.id)}
-        <section class="group ov-in" style:--i={i} class:dimmed={ws.suspended}>
-          <button class="group-head" onclick={() => toggleCollapse(ws.id)}>
-            <span class="group-caret" class:open>▸</span>
-            <span class="ov-label-lead group-name">{ws.name}</span>
-            {#if taskCount(ws.id) > 0}<span class="ov-chip">{taskCount(ws.id)} open</span>{/if}
-            {#if ws.suspended}<span class="ov-chip">suspended</span>{/if}
-            <span class="group-rule"></span>
-          </button>
-
-          {#if open}
-            {#each stripsFor(ws.id) as strip (strip.id ?? '')}
-              <div class="strip">
-                <div class="strip-head">
-                  <span class="strip-name" class:loose={!strip.name}>{strip.name ?? 'Ungrouped'}</span>
-                  {#if stripCount(ws.id, strip.id) > 0}
-                    <span class="ov-mono strip-count">{stripCount(ws.id, strip.id)}</span>
-                  {/if}
-                  <span class="strip-rule"></span>
-                </div>
-                <div class="lanes">
-                  {#each LANES as lane (lane)}
-                    {@const cards = tasksFor(ws.id, lane, strip.id)}
-                    {@const key = dropKey(ws.id, strip.id, lane)}
-                    <!-- svelte-ignore a11y_no_static_element_interactions -->
-                    <div
-                      class="lane"
-                      class:parked={lane === 'backlog'}
-                      class:drop-target={dragOver === key}
-                      ondragover={(e) => { e.preventDefault(); dragOver = key; }}
-                      ondragleave={() => { if (dragOver === key) dragOver = null; }}
-                      ondrop={(e) => onDrop(e, ws.id, strip.id, lane)}
-                    >
-                      <div class="lane-head">
-                        <span class="ov-label">{lane === 'todo' ? 'to-do' : lane}</span>
-                        <span class="ov-mono lane-count">{cards.length}</span>
-                      </div>
-                      {#each cards as t (t.id)}
-                        <!-- The accent marks "an agent put this here", covering both a task created over
-                             MCP ('agent') and one imported from a runtime's own list ('imported').
-                             Testing for 'agent' alone would miss every importer row. -->
-                        <div
-                          class="card"
-                          class:from-agent={t.origin === 'agent' || t.origin === 'imported'}
-                          class:from-overlord={t.origin === 'overlord'}
-                          class:dragging={dragging === t.id}
-                          draggable="true"
-                          ondragstart={(e) => onDragStart(e, t.id)}
-                          ondragend={() => { dragging = null; dragOver = null; }}
-                        >
-                          <button
-                            class="card-title"
-                            title={t.detail ? 'Click to read the description' : 'No description'}
-                            onclick={() => (openCard = openCard === t.id ? null : t.id)}
-                          >
-                            {t.title}
-                            {#if t.detail}<span class="has-detail" class:open={openCard === t.id}>▾</span>{/if}
-                          </button>
-                          {#if openCard === t.id}
-                            <p class="card-detail">{t.detail || 'No description was recorded for this task.'}</p>
-                          {/if}
-                          <div class="card-foot">
-                            {#if t.tab_id}
-                              <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(t.tab_id!)}>{tabName(t.tab_id)}</button>
-                            {/if}
-                            <span class="ov-mono card-age">{fmtAge(t.updated_at)}</span>
-                            <span class="card-ctl">
-                              <button class="tick" title="Back" disabled={lane === 'backlog'} onclick={() => moveTask(t, -1)}>‹</button>
-                              <button class="tick" title="Forward" disabled={lane === 'done'} onclick={() => moveTask(t, 1)}>›</button>
-                              <button class="tick tick-del" title="Delete" onclick={() => overlordStore.deleteTask(t.id)}>×</button>
-                            </span>
-                          </div>
-                        </div>
-                      {/each}
-                    </div>
-                  {/each}
-                </div>
-                <input
-                  class="ov-input strip-add"
-                  type="text"
-                  placeholder="Add to {strip.name ?? 'ungrouped'}…"
-                  bind:value={newTaskTitles[dropKey(ws.id, strip.id, 'todo')]}
-                  onkeydown={(e) => e.key === 'Enter' && addToStrip(ws.id, strip.id)}
-                />
-              </div>
-            {/each}
-            {#if newStreamFor === ws.id}
-              <div class="new-stream">
-                <input
-                  class="ov-input"
-                  type="text"
-                  placeholder="Workstream name, e.g. Auth refactor"
-                  bind:value={newStreamName}
-                />
-                <input
-                  class="ov-input"
-                  type="text"
-                  placeholder="Its first task…"
-                  bind:value={newStreamTask}
-                  onkeydown={(e) => e.key === 'Enter' && createWorkstream(ws.id)}
-                />
-                <button class="ov-btn ov-btn-primary" disabled={!newStreamName.trim() || !newStreamTask.trim()} onclick={() => createWorkstream(ws.id)}>Create</button>
-                <button class="ov-btn" onclick={() => (newStreamFor = null)}>Cancel</button>
-              </div>
-            {:else}
-              <div class="ws-add">
-                <input
-                  class="ov-input add-task"
-                  type="text"
-                  placeholder="Add an ungrouped task to {ws.name}…"
-                  bind:value={newTaskTitles[ws.id]}
-                  onkeydown={(e) => e.key === 'Enter' && addTask(ws.id)}
-                />
-                <button class="ov-btn" onclick={() => { newStreamFor = ws.id; newStreamName = ''; newStreamTask = ''; }}>
-                  + Workstream
-                </button>
-              </div>
-            {/if}
-          {/if}
-        </section>
-      {/each}
+      <OverlordBoardView {now} />
     {/if}
 
     <!-- ── Ledger ──────────────────────────────────────────────────────── -->
@@ -873,7 +599,7 @@
             <span class="entry-tick"></span>
             <span class="ov-mono entry-time">{new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             <span class="ov-label entry-outcome">{outcomeLabel(e.outcome)}</span>
-            <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(e.tab_id)}>{tabName(e.tab_id)}</button>
+            <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(e.tab_id)}>{tabDisplayName(e.tab_id)}</button>
             <span class="ov-mono entry-text" title={e.text}>{e.text}</span>
           </div>
         {/each}
@@ -1000,16 +726,6 @@
   }
   .toggle.active .toggle-knob { transform: translateX(15px); }
 
-  .scan-card { border-color: color-mix(in srgb, var(--ov-cool) 35%, var(--ov-hair)); }
-
-  .board-empty { text-align: center; padding: 30px 24px; margin-bottom: 20px; }
-  .board-empty-copy {
-    color: var(--ov-ink-dim);
-    font-size: 0.92rem;
-    line-height: 1.6;
-    max-width: 54ch;
-    margin: 9px auto 14px;
-  }
 
   /* Radar sweep — present only while a ritual is actually running. */
   .sweep {
@@ -1056,6 +772,14 @@
     flex: 1;
     overflow-y: auto;
     padding: 16px var(--ov-gutter) 40px;
+  }
+
+  .body.body-fill {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 16px;
   }
 
   .standby {
@@ -1219,185 +943,6 @@
   }
 
   .unit-flag { align-self: flex-start; }
-
-  /* ── Board ────────────────────────────────────────────────────────────── */
-  .group { margin-bottom: 20px; }
-  .group.dimmed { opacity: 0.5; }
-
-  .group-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    width: 100%;
-    padding: 5px 0 9px;
-    text-align: left;
-  }
-  .group-caret {
-    color: var(--ov-ink-dim);
-    font-size: 0.7rem;
-    transition: transform 0.16s ease;
-  }
-  .group-caret.open { transform: rotate(90deg); }
-  .group-name { font-size: 1.05rem; }
-  .group-head:hover .group-name { color: var(--ov-live); }
-  .group-rule { flex: 1; height: 1px; background: var(--ov-hair); }
-
-  /* One strip per workstream — the named job a set of tasks belongs to. */
-  .strip { margin-bottom: 14px; }
-  .strip-add {
-    margin-top: 7px;
-    width: 100%;
-    font-size: 0.8rem;
-    opacity: 0;
-    transition: opacity 0.14s ease;
-  }
-  .strip:hover .strip-add,
-  .strip-add:focus { opacity: 1; }
-
-  .ws-add,
-  .new-stream {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    margin-top: 10px;
-  }
-  .ws-add .add-task,
-  .new-stream .ov-input { flex: 1; min-width: 0; }
-  .strip:last-of-type { margin-bottom: 4px; }
-
-  .strip-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 0 0 7px;
-  }
-  .strip-name {
-    font-size: 0.78rem;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--ov-ink);
-  }
-  /* Loose tasks are real work too, just unorganized — dimmed, not hidden. */
-  .strip-name.loose {
-    color: var(--ov-ink-dim);
-    font-weight: 500;
-    font-style: italic;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-  .strip-count {
-    font-size: 0.72rem;
-    color: var(--ov-ink-dim);
-  }
-  .strip-rule {
-    flex: 1;
-    height: 1px;
-    background: var(--ov-hair);
-  }
-
-  .lanes {
-    display: grid;
-    /* Six columns don't fit a split pane or a narrow window. A floor per lane makes the
-       grid overflow and scroll instead of crushing every card to an unreadable sliver —
-       the board is the one surface meant for reviewing many tasks at once. */
-    grid-template-columns: repeat(6, minmax(150px, 1fr));
-    gap: 8px;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-
-  .lane {
-    min-width: 0;
-    border-radius: 3px;
-    transition: background 0.12s ease, box-shadow 0.12s ease;
-  }
-  /* The parking lot reads as set-aside rather than as the first step of the flow. */
-  .lane.parked { opacity: 0.72; }
-  .lane.parked:hover { opacity: 1; }
-  .lane.drop-target {
-    background: color-mix(in srgb, var(--ov-live) 9%, transparent);
-    box-shadow: inset 0 0 0 1px var(--ov-live);
-    opacity: 1;
-  }
-  .lane-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    padding-bottom: 5px;
-    margin-bottom: 7px;
-    border-bottom: 1px solid var(--ov-hair);
-  }
-  .lane-count { font-size: 0.75rem; color: var(--ov-ink-dim); }
-
-  .card {
-    background: var(--ov-panel);
-    border: 1px solid var(--ov-hair);
-    border-left: 2px solid var(--ov-hair-strong);
-    border-radius: 2px;
-    padding: 7px 9px;
-    margin-bottom: 6px;
-    transition: border-color 0.14s ease, background 0.14s ease;
-  }
-  .card:hover { background: var(--ov-panel-lift); }
-  .card.from-agent { border-left-color: var(--ov-live); }
-  .card.from-overlord { border-left-color: var(--ov-note); }
-
-  .card { cursor: grab; }
-  .card:active { cursor: grabbing; }
-  .card.dragging { opacity: 0.4; }
-
-  .card-title {
-    background: none;
-    border: none;
-    color: inherit;
-    display: block;
-    font: inherit;
-    font-size: 0.86rem;
-    line-height: 1.4;
-    padding: 0;
-    text-align: left;
-    width: 100%;
-    word-break: break-word;
-    cursor: pointer;
-  }
-  .has-detail {
-    color: var(--ov-ink-dim);
-    display: inline-block;
-    font-size: 0.7rem;
-    margin-left: 3px;
-    transition: transform 0.14s ease;
-  }
-  .has-detail.open { transform: rotate(180deg); }
-
-  .card-detail {
-    border-top: 1px solid var(--ov-hair);
-    color: var(--ov-ink-dim);
-    font-size: 0.78rem;
-    line-height: 1.5;
-    margin: 6px 0 0;
-    padding-top: 6px;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .card-foot { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
-  .card-age { font-size: 0.7rem; color: var(--ov-ink-dim); margin-left: auto; }
-  .card-ctl { display: flex; gap: 1px; }
-
-  .tick {
-    color: var(--ov-ink-dim);
-    font-size: 0.95rem;
-    line-height: 1;
-    padding: 0 3px;
-    border-radius: 2px;
-    transition: color 0.12s ease;
-  }
-  .tick:hover { color: var(--ov-live); }
-  .tick:disabled { opacity: 0.2; cursor: default; }
-  .tick:disabled:hover { color: var(--ov-ink-dim); }
-  .tick-del:hover { color: var(--ov-critical); }
-
-  .add-task { width: 100%; }
 
   /* ── Ledger ───────────────────────────────────────────────────────────── */
   .ledger-intro {

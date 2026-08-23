@@ -12,7 +12,7 @@ import type {
   Workspace,
 } from '$lib/tauri/types';
 import type { AgentState } from '$lib/agents/types';
-import { workspacesStore } from '$lib/stores/workspaces.svelte';
+import { workspacesStore, tabDisplayName } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -319,16 +319,6 @@ function createOverlordStore() {
       }
     }
     return null;
-  }
-
-  function tabName(tabId: string): string {
-    for (const ws of workspacesStore.workspaces) {
-      for (const pane of ws.panes) {
-        const t = pane.tabs.find((t) => t.id === tabId);
-        if (t) return t.name;
-      }
-    }
-    return tabId.slice(0, 8);
   }
 
   /** This window's Overlord workspace, if one exists. */
@@ -722,9 +712,9 @@ function createOverlordStore() {
           const behavior = step.on_timeout ?? 'abort';
           if (behavior === 'continue') continue;
           if (behavior === 'notify_human') {
-            dispatch('Overlord', `"${rule.name}" stalled on ${tabName(tabId)} — step ${i + 1} timed out.`, 'error', { tabId });
+            dispatch('Overlord', `"${rule.name}" stalled on ${tabDisplayName(tabId)} — step ${i + 1} timed out.`, 'error', { tabId });
           } else if (behavior === 'escalate_to_overlord') {
-            escalate(tabId, rule.id, 'step_timeout', `"${rule.name}" step ${i + 1} (${step.text.slice(0, 80)}) timed out on ${tabName(tabId)}.`);
+            escalate(tabId, rule.id, 'step_timeout', `"${rule.name}" step ${i + 1} (${step.text.slice(0, 80)}) timed out on ${tabDisplayName(tabId)}.`);
           }
           return;
         }
@@ -807,7 +797,7 @@ function createOverlordStore() {
         ruleId: rule.id,
         ruleName: rule.name,
         tabId,
-        tabName: tabName(tabId),
+        tabName: tabDisplayName(tabId),
         workspaceId: ws?.id ?? '',
         workspaceName: ws?.name ?? '',
         preview: rule.sequence[0]?.text ?? '',
@@ -1549,7 +1539,7 @@ function createOverlordStore() {
       }
       if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
         const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';
-        escalate(tabId, null, 'agent_report', `${tabName(tabId)} reports ${args.state}: ${summary}${blockers}`);
+        escalate(tabId, null, 'agent_report', `${tabDisplayName(tabId)} reports ${args.state}: ${summary}${blockers}`);
       }
       return { received: true, outstanding_directive: d && !d.acked ? d.text : null };
     },
@@ -1564,7 +1554,7 @@ function createOverlordStore() {
         id: e.id,
         ts: new Date(e.ts).toISOString(),
         tab_id: e.tabId,
-        tab_name: tabName(e.tabId),
+        tab_name: tabDisplayName(e.tabId),
         workspace: workspaceForTab(e.tabId)?.name ?? null,
         kind: e.kind,
         detail: e.detail,
