@@ -1,6 +1,6 @@
 # maiTerm Tasks — a first-class project & task system
 
-> Status: **planned**. Date: 2026-08-23. Owner: Darryl.
+> Status: **implemented** 2026-08-23 (all eight build tasks). Owner: Darryl.
 > Scope: maiTerm owns task state for every agent tab, across every runtime, instead of
 > reading each runtime's private task store. Overlord becomes one consumer of it.
 
@@ -76,6 +76,9 @@ never written back, and never required for correctness.
 pub struct Task {
     pub id: String,
     pub title: String,
+    /// Case/whitespace-normalized title — the dedup key within a tab. Recomputed by Rust
+    /// on every persist so it can never drift from `title`.
+    pub normalized_title: String,
     /// Longer body: acceptance criteria, links, notes. Markdown, human- and agent-editable.
     pub detail: Option<String>,
     /// "backlog" | "active" | "blocked" | "review" | "done"
@@ -93,12 +96,39 @@ pub struct Task {
 }
 ```
 
+**`origin` is load-bearing, not decoration.** The importer only ever *retires* rows it owns
+(`imported`); it will not close out or restate work an agent created over MCP (`agent`) or
+a human typed (`human`). Without that line the 5s import tick drags a task the agent just
+marked done — or the human just moved to review — back to whatever the runtime's stale
+file still says. The done-sweep is asymmetric for the same reason: machine rows age out
+after 48h, human rows never do.
+
+**Two normalizers, one key.** `Task::normalize_title` (Rust) and `normalizeTitle`
+(`src/lib/tasks/model.ts`) must agree exactly, and their language defaults do *not*:
+`char::is_whitespace` counts U+0085 NEL but not U+FEFF, and JS `\s` is the mirror image.
+Both spell the class out as the union. Matching tests pin it on each side — if they drift,
+a pasted title re-duplicates on every restart.
+
 Ordering is the `Vec` order — no separate rank field; reordering rewrites the vector.
 
 **Storage moves from `WindowData.overlord_tasks` to `Workspace.tasks`** because a workspace
 is a project: tasks then survive window moves, travel with a duplicated/exported workspace,
 and are naturally scoped for the panel. A one-time migration reassigns existing rows by
 their `workspace_id`.
+
+### Tab ids are not durable — tasks survive that
+
+A tab id dies more often than the work does: a reload is duplicate-then-close, and a fork
+mints a new id too. Both are events `initSession` fires on, so a resumed agent re-sends a
+list whose rows all carry an id that no longer exists — and would create a second copy of
+everything, once per reload, forever.
+
+Closing a tab therefore **releases** its unfinished tasks to the workspace backlog
+(`tasksStore.releaseTab`), and `findDuplicate` will reclaim an unassigned row for a caller
+that restates its title. The replacement tab picks its own work back up. This is also the
+honest model: a task whose assignee is gone belongs to the project, not to a ghost.
+Finished rows are left assigned — a closed-out task should not be resurrected and re-owned
+because a new tab happened to mention it.
 
 **Status vocabulary is unchanged** (`backlog/active/blocked/review/done`) so the Overlord
 board's five lanes and every existing helper keep working. Imported/agent statuses map:
@@ -125,6 +155,12 @@ updateTasks({ updates: [{ id, status?, title?, detail?, blocked_by? }] })
   another project's tasks. Identity comes from the connection→tab affinity that
   `initSession` establishes, same as every other tab-scoped tool.
 - `assign_to_me` defaults true on create, so an agent's own tasks land on its lane.
+- **Statuses are coerced, not trusted.** The MCP layer is hand-rolled JSON-RPC; the
+  declared enum is never enforced at runtime, and the priming explicitly asks agents to
+  carry their own statuses across. A raw `"completed"` would render in no lane (lanes match
+  by equality), never be swept, and read as permanently unfinished to the dependency check —
+  wedging everything blocked on it. `coerceStatus` maps it at the handler and Rust clamps
+  again before disk.
 - Deletion is deliberately **not** exposed. An agent may mark `done`; only the human
   deletes. Cheap insurance against an agent tidying away work it didn't understand.
 
@@ -177,29 +213,49 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 - Content: this tab's tasks first, then the workspace backlog; inline add, click-to-edit
   title/detail, status cycling, assign/unassign, and a blocked-by indicator.
 
-## 6. Build order
+## 6. As built
 
-1. **Model + storage.** `Task` on `Workspace`, migration off `WindowData.overlord_tasks`,
-   Tauri commands, TS mirrors.
-2. **Store.** `tasks.svelte.ts` — per-window view across workspaces, CRUD, reactive.
-   Overlord board reads from it; its own list is deleted.
-3. **Importer.** The Claude task-store mirror writes into it as `origin: 'imported'`.
-4. **MCP.** Three tools + frontend handlers + initSession priming.
-5. **Panel.** `TasksPanel.svelte`, visibility, preference, shortcut.
-6. **Overlord follow-up.** `task_stale` and the ask-to-track nudge retarget to maiTerm
-   tasks; the scan's "untracked" bucket means "no maiTerm tasks" rather than "no todos".
+| Stage | Commits |
+|---|---|
+| Model + storage (`Task` on `Workspace`, migration off `WindowData`, commands, TS mirrors) | `8b4e7ff` |
+| Store + cutover (`tasks.svelte.ts`, `model.ts`; Overlord becomes a consumer; `OverlordTask` pruned) | `73b4b23` |
+| MCP tools + priming (incl. the migration clause) | `c0b2b3f` |
+| Review fixes (eight defects across S1/S2) | `f699d91` |
+| Side panel | `39b5545` |
+| Overlord signals retargeted | `c499420` |
 
-Stages 1–2 are a refactor with no user-visible change; 3–5 are the feature.
+The importer landed with the cutover rather than as its own stage: once Overlord stopped
+owning the rows, `syncMirrorTasks` writing `origin: 'imported'` into the store *was* the
+importer.
+
+### Migration
+
+`migrate_app_data` drains `WindowData.overlord_tasks` onto the workspace named by each
+row's `workspace_id`; the field is deserialize-only raw JSON, so the next save clears it
+and the pass cannot run twice. Two details that matter:
+
+- Legacy `origin: "agent"` rows are relabelled **`imported`**. That origin has been
+  redefined as MCP-created work, and the importer only retires `imported` — a mislabelled
+  mirror could never be closed out and would age into a permanent false "stale" card
+  driving `task_stale` rules.
+- A row missing any required field is dropped rather than given a fabricated timestamp.
+  `updated_at` is exactly what the staleness rules read, so inventing one hands the row a
+  bogus age.
 
 ## 7. Open questions
 
 1. **Cross-workspace view.** The Overlord board already groups by workspace, so per-window
-   aggregation is free. A global "everything, everywhere" view is deferred.
+   aggregation is free. A global "everything, everywhere" view is still deferred.
 2. **Conflict handling.** Two agents in one workspace updating the same task is possible
-   but rare; last-write-wins for v1, with `updated_at` making it visible.
-3. **Importer collisions.** A Claude tab that also uses `createTasks` could double-record
-   one piece of work. Dedup on normalized title within a tab, same approach the TodoWrite
-   mirror already uses.
+   but rare; last-write-wins, with `updated_at` making it visible. Note the store persists
+   a *whole workspace list* per write, so a writer working from a stale in-memory copy
+   overwrites concurrent rows — every mutation path reads and commits synchronously, which
+   is what keeps that safe. Anything that mutates after an `await` must re-read first.
+3. **Importer collisions.** Resolved: `findDuplicate` (normalized title, scoped to the tab,
+   falling back to unclaimed backlog rows) is shared by the importer and `createTasks`, and
+   the `origin` rule above decides who may then edit the row.
+4. **A tab moved between workspaces** leaves its tasks behind in the old workspace's list.
+   Not yet handled — `move_tab_to_workspace` would need to carry them across.
 
 ## 8. Rejected
 

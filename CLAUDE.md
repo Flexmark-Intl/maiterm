@@ -34,6 +34,7 @@ src/                          # Frontend (Svelte/TypeScript)
 │   │   ├── claudeState.svelte.ts  # Claude session state from hooks (active/idle/permission)
 │   │   ├── sshMcpBridge.svelte.ts # SSH MCP bridge orchestration, reactive status
 │   │   ├── overlord.svelte.ts     # Overlord engine: per-window supervisor rules/rituals/board (docs/overlord.md)
+│   │   ├── tasks.svelte.ts        # maiTerm task store: per-workspace task lists (docs/tasks.md)
 │   │   ├── editorRegistry.svelte.ts # Editor state tracking (dirty, view refs)
 │   │   ├── notifications.svelte.ts  # Command completion notification logic
 │   │   ├── toasts.svelte.ts       # In-app toast notification store
@@ -64,6 +65,7 @@ src-tauri/src/                # Backend (Rust)
 - `src/lib/components/editor/CLAUDE.md` — CodeMirror, diff tabs, editor registry
 - `src-tauri/src/claude_code/CLAUDE.md` — Claude Code IDE integration, SSH MCP bridge
 - `src/lib/triggers/CLAUDE.md` — Trigger engine, defaults, variables, dedup
+- `docs/tasks.md` — maiTerm Tasks: maiTerm owns agent task state for every runtime; `Workspace.tasks`, the MCP tools (listTasks/createTasks/updateTasks), the side panel, and the Claude-store importer
 - `docs/overlord.md` — Overlord per-window supervisor: engine/agent split, rule schema, checkpoint ritual, MCP tools (replyToOverlord/driveTab/listEscalations/proposeRuleChanges)
 
 ## Commands
@@ -160,6 +162,7 @@ Tab
 ├── diff_context (diff tabs — DiffContext)
 ├── scrollback (serialized terminal state)
 ├── notes, notes_open, notes_mode (per-tab markdown notes)
+├── tasks_open (per-tab task panel visibility)
 └── trigger_variables (persisted variable map from triggers)
 
 SplitNode = SplitLeaf { pane_id } | SplitBranch { id, direction, ratio, children }
@@ -172,6 +175,7 @@ Preferences
 ├── clone_cwd, clone_scrollback, clone_ssh, clone_history, clone_notes
 ├── claude_code_ide, claude_code_ide_ssh
 ├── triggers, hidden_default_triggers
+├── tasks_enabled (gates the task MCP tools AND the initSession priming), tasks_width
 ├── overlord_enabled, overlord_propose_mode, overlord_rules, hidden_default_overlord_rules
 ├── comms_provider, comms_server_url, comms_bot_token, comms_authorized_users, comms_pickup_users, comms_instructions (Mattermost bot; token + user lists + instructions never in preference_meta)
 └── (see state/workspace.rs for full list)
