@@ -713,3 +713,82 @@ pub fn reconcile_tab_liveness(data: &mut AppData, db: &super::scrollback_db::Scr
     }
 }
 
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use crate::state::workspace::Workspace;
+
+    fn window_with_legacy(workspace_id: &str, rows: serde_json::Value) -> AppData {
+        let mut ws = Workspace::new("Project".to_string());
+        ws.id = workspace_id.to_string();
+        let mut win = WindowData::new("main".to_string());
+        win.workspaces.push(ws);
+        win.overlord_tasks = rows.as_array().unwrap().clone();
+        let mut data = AppData::default();
+        data.windows.push(win);
+        data
+    }
+
+    fn legacy_row(id: &str, workspace_id: &str, origin: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "title": "  Wire   the parser. ",
+            "workspace_id": workspace_id,
+            "tab_id": "tab-1",
+            "state": "active",
+            "origin": origin,
+            "created_at": "2026-08-01T00:00:00Z",
+            "updated_at": "2026-08-02T00:00:00Z",
+        })
+    }
+
+    #[test]
+    fn moves_board_rows_onto_their_workspace_and_normalizes() {
+        let mut data = window_with_legacy("ws-1", serde_json::json!([legacy_row("t1", "ws-1", "human")]));
+        migrate_app_data(&mut data);
+        let ws = &data.windows[0].workspaces[0];
+        assert_eq!(ws.tasks.len(), 1);
+        let t = &ws.tasks[0];
+        assert_eq!(t.id, "t1");
+        assert_eq!(t.status, "active", "the old `state` field becomes `status`");
+        assert_eq!(t.tab_id.as_deref(), Some("tab-1"));
+        assert_eq!(t.normalized_title, "wire the parser");
+        assert_eq!(t.updated_at, "2026-08-02T00:00:00Z", "age must survive — staleness reads it");
+        assert!(data.windows[0].overlord_tasks.is_empty(), "drained, so it cannot run twice");
+    }
+
+    #[test]
+    fn relabels_legacy_agent_rows_as_imported() {
+        // The old board's "agent" rows were mirrored from Claude's private store, which is
+        // what "imported" means now. Left as "agent" the importer could never retire them
+        // and they would age into permanent false stale cards.
+        let mut data = window_with_legacy("ws-1", serde_json::json!([legacy_row("t1", "ws-1", "agent")]));
+        migrate_app_data(&mut data);
+        assert_eq!(data.windows[0].workspaces[0].tasks[0].origin, "imported");
+    }
+
+    #[test]
+    fn drops_orphans_and_malformed_rows_rather_than_inventing_data() {
+        let mut malformed = legacy_row("t2", "ws-1", "human");
+        malformed.as_object_mut().unwrap().remove("updated_at");
+        let mut data = window_with_legacy(
+            "ws-1",
+            serde_json::json!([
+                legacy_row("t1", "ws-gone", "human"), // workspace no longer exists
+                malformed,                            // no timestamp to age it by
+                legacy_row("t3", "ws-1", "human"),
+            ]),
+        );
+        migrate_app_data(&mut data);
+        let tasks = &data.windows[0].workspaces[0].tasks;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "t3");
+    }
+
+    #[test]
+    fn is_a_no_op_with_nothing_to_migrate() {
+        let mut data = window_with_legacy("ws-1", serde_json::json!([]));
+        migrate_app_data(&mut data);
+        assert!(data.windows[0].workspaces[0].tasks.is_empty());
+    }
+}
