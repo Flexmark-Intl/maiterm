@@ -1833,6 +1833,30 @@
           is configured independently below. Requires restart to take effect.
         </p>
 
+        <h3 class="section-heading">Task tracking</h3>
+
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="tasks-enabled">Track agent tasks in maiTerm</label>
+            <p class="setting-hint">
+              Gives every agent tab tools to record what it's working on, and asks it to use
+              them instead of its own runtime's todo list — so the work is visible to you in
+              the tasks panel ({modLabel}+Shift+E) and on the Overlord board, in every
+              runtime. Turning this off removes both the tools and the instruction.
+            </p>
+          </div>
+          <button
+            id="tasks-enabled"
+            class="toggle"
+            class:active={preferencesStore.tasksEnabled}
+            onclick={() => preferencesStore.setTasksEnabled(!preferencesStore.tasksEnabled)}
+            aria-pressed={preferencesStore.tasksEnabled}
+            aria-label="Toggle maiTerm task tracking"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+
         <h3 class="section-heading">Claude Code</h3>
 
         <div class="setting" style="align-items: flex-start;">
