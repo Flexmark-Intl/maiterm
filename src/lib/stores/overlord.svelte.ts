@@ -271,7 +271,6 @@ function createOverlordStore() {
   const rituals = new Map<string, RitualRun>(); // tabId → active ritual
   let ticker: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
-  let tasksDirty = false;
 
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   function bumpLive() { liveVersion++; }
@@ -1041,8 +1040,7 @@ function createOverlordStore() {
       // Escalations that arrived while the agent was busy still owe it a doorbell.
       if (unNudged.size) void wakeOverlordAgent();
       if (sweepDoneTasks(now)) boardChanged = true;
-      if (boardChanged || tasksDirty) {
-        tasksDirty = false;
+      if (boardChanged) {
         tasks = [...tasks]; // Map/array reactivity: new array so $derived consumers re-read
         persistTasks();
       }
