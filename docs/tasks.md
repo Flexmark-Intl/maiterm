@@ -136,7 +136,30 @@ consistent whether or not anyone is supervising:
 
 > "Track multi-step work with the maiTerm task tools (`createTasks`/`updateTasks`) rather
 > than your runtime's own todo list, so your human and this window's board can see it.
-> Keep statuses current as you go."
+> Keep statuses current as you go.
+>
+> **If you already have a task or todo list for this project, migrate it now**: call
+> `createTasks` once with the outstanding items (carry their current status across; skip
+> anything already finished), then keep working from the maiTerm list."
+
+The migration clause matters because `initSession` fires on **resume, fork and compact**,
+not just on a fresh session — which is exactly when an agent is mid-project with a live
+list. Without it, adoption waits for the agent's next multi-step task and everything
+already in flight stays invisible to the human and the board. With it, a tab that resumes
+into a half-finished plan publishes that plan on its first turn.
+
+Three constraints on that clause:
+
+- **Once, not every turn.** Re-priming on each compact must not re-create the same rows.
+  The agent is told to migrate *outstanding* items, and the importer's dedup (§7.3,
+  normalized title within a tab) is the mechanical backstop — the instruction alone is not
+  relied on for correctness.
+- **It overlaps the importer, deliberately.** For a Claude tab both paths can fire: the
+  agent ports its list, and the importer mirrors the same store. They converge on the same
+  dedup key, so the overlap is redundancy rather than duplication — and it is the only
+  route at all for Codex and Gemini, which have no store to import from.
+- **Finished work is not migrated.** Items already `completed` stay behind; porting them
+  would fill a fresh board with history nobody asked for.
 
 Gated on a `tasks_enabled` preference (default on) so it can be switched off wholesale.
 
