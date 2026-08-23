@@ -507,6 +507,39 @@ pub(crate) fn clone_workspace_with_id_mapping(
 
     let new_split_root = ws.split_root.as_ref().map(|root| clone_split_node(root, &id_map));
 
+    // Tasks travel with the workspace — a duplicated workspace is a duplicated project,
+    // and its work list is the point. Ids can't travel, though: task ids are minted fresh
+    // (a `blocked_by` edge in the copy must point at the copy, not the original), tab
+    // assignees are remapped through the same id_map the panes used, and topic_id is
+    // dropped because mesh topics are not carried over.
+    let task_id_map: std::collections::HashMap<String, String> = ws
+        .tasks
+        .iter()
+        .map(|t| (t.id.clone(), uuid::Uuid::new_v4().to_string()))
+        .collect();
+    let new_tasks: Vec<crate::state::Task> = ws
+        .tasks
+        .iter()
+        .map(|t| crate::state::Task {
+            id: task_id_map[&t.id].clone(),
+            tab_id: t
+                .tab_id
+                .as_ref()
+                .and_then(|id| tab_id_map.get(id))
+                .cloned(),
+            // Drop edges to tasks that aren't in this workspace rather than leaving a
+            // dangling id, which would render as permanently blocked.
+            blocked_by: t
+                .blocked_by
+                .iter()
+                .filter_map(|id| task_id_map.get(id))
+                .cloned()
+                .collect(),
+            topic_id: None,
+            ..t.clone()
+        })
+        .collect();
+
     let cloned = Workspace {
         id: new_ws_id,
         name: ws.name.clone(),
@@ -519,6 +552,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
         bridge_all: ws.bridge_all,
         mailink_native: ws.mailink_native,
         mesh_topics: Vec::new(),
+        tasks: new_tasks,
         // Never duplicate an Overlord workspace — at most one per window.
         overlord: false,
         archived_tabs: Vec::new(),

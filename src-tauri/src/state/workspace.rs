@@ -436,6 +436,59 @@ impl MeshTopic {
     }
 }
 
+/// A unit of work owned by a workspace (docs/tasks.md). A workspace IS a project, so
+/// tasks live here rather than on the window: they survive window moves and travel with a
+/// duplicated or exported workspace. Tabs are an *assignee*, not an owner — a tab id dies
+/// on reload, a project does not.
+///
+/// Written by the human (side panel), by agents over MCP, by Overlord, and by the Claude
+/// task-store importer. maiTerm is the source of truth for all of them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    /// Case/whitespace-normalized title, the dedup key within a tab. Recomputed on
+    /// persist so it can never drift from `title` (same contract as
+    /// `MeshTopic::normalized_label`).
+    #[serde(default)]
+    pub normalized_title: String,
+    /// Longer body: acceptance criteria, links, notes. Markdown; human- and agent-editable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// "backlog" | "active" | "blocked" | "review" | "done".
+    pub status: String,
+    /// Assignee tab; None = workspace backlog, unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    /// Task ids that must finish first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// "human" | "agent" | "overlord" | "imported".
+    pub origin: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Mesh topic that is this task's conversation vehicle, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+}
+
+impl Task {
+    /// Normalize a title for dedup: trim, lowercase, collapse internal whitespace, and
+    /// drop trailing punctuation. Agents restate the same item with cosmetic drift
+    /// ("Add auth guard" / "add auth guard." / "Add  auth   guard"), and both the importer
+    /// and `createTasks` re-run over lists they have already recorded, so this key is what
+    /// keeps re-migration idempotent (docs/tasks.md §4, §7.3).
+    pub fn normalize_title(title: &str) -> String {
+        title
+            .trim()
+            .trim_end_matches(|c: char| c == '.' || c == ',' || c == ';' || c == ':')
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: String,
@@ -461,6 +514,10 @@ pub struct Workspace {
     /// workspace_notes (a persisted Vec).
     #[serde(default)]
     pub mesh_topics: Vec<MeshTopic>,
+    /// This workspace's task list (docs/tasks.md). Ordering is the Vec order — there is
+    /// no rank field; reordering rewrites the vector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<Task>,
     /// Overlord workspace flag (docs/overlord.md §11): this workspace hosts the Overlord
     /// board + agent tab. At most one per window; excluded from the ordinary workspace
     /// list and reordering. Suspending it stops the agent, never the engine.
@@ -1583,12 +1640,41 @@ impl Workspace {
             bridge_all: false,
             mailink_native: false,
             mesh_topics: Vec::new(),
+            tasks: Vec::new(),
             overlord: false,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,
             pane_sizes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::Task;
+
+    #[test]
+    fn normalize_title_collapses_cosmetic_drift() {
+        for input in [
+            "Add auth guard",
+            "add auth guard",
+            "  Add   auth  guard  ",
+            "Add auth guard.",
+            "ADD AUTH GUARD:",
+        ] {
+            assert_eq!(Task::normalize_title(input), "add auth guard", "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_title_keeps_distinct_titles_distinct() {
+        assert_ne!(
+            Task::normalize_title("Add auth guard"),
+            Task::normalize_title("Add auth guards")
+        );
+        // Interior punctuation is meaningful — only trailing separators are trimmed.
+        assert_eq!(Task::normalize_title("Fix v1.2 parser"), "fix v1.2 parser");
     }
 }
 

@@ -166,6 +166,33 @@ export interface MeshTopic {
   updated_at: string;
 }
 
+export type TaskStatus = 'backlog' | 'active' | 'blocked' | 'review' | 'done';
+
+export type TaskOrigin = 'human' | 'agent' | 'overlord' | 'imported';
+
+/** A unit of work owned by a workspace (docs/tasks.md). maiTerm is the source of truth
+ *  for every writer — the side panel, agents over MCP, Overlord, and the Claude
+ *  task-store importer. Mirrors the Rust `Task`. */
+export interface Task {
+  id: string;
+  title: string;
+  /** Case/whitespace-normalized title — the dedup key within a tab. Recomputed by Rust
+   *  on persist, so never hand-set it expecting it to survive. */
+  normalized_title: string;
+  /** Markdown body: acceptance criteria, links, notes. */
+  detail?: string | null;
+  status: TaskStatus;
+  /** Assignee tab; null = workspace backlog, unassigned. */
+  tab_id?: string | null;
+  /** Task ids that must finish first. */
+  blocked_by?: string[];
+  origin: TaskOrigin;
+  created_at: string;
+  updated_at: string;
+  /** Mesh topic that is this task's conversation vehicle, if any. */
+  topic_id?: string | null;
+}
+
 export interface Workspace {
   id: string;
   name: string;
@@ -179,6 +206,8 @@ export interface Workspace {
   mailink_native?: boolean;
   /** Topic threads (empty for normal workspaces). */
   mesh_topics?: MeshTopic[];
+  /** This workspace's task list (docs/tasks.md). Order is the array order. */
+  tasks?: Task[];
   /** Overlord workspace flag — hosts the board + agent tab; at most one per window. */
   overlord?: boolean;
   archived_tabs: Tab[];

@@ -575,6 +575,8 @@ pub fn run() {
             commands::overlord::set_overlord_tasks,
             commands::overlord::set_workspace_overlord,
             commands::overlord::create_overlord_workspace,
+            commands::tasks::set_workspace_tasks,
+            commands::tasks::get_window_tasks,
             commands::comms::comms_test_connection,
             commands::comms::comms_list_bot_channels,
             commands::workspace::set_tab_comms_monitor,
