@@ -256,7 +256,7 @@ export type OverlordCondition =
   | { event: 'commit' }
   | { event: 'tab_idle';          minutes: number }
   | { event: 'task_stale';        days: number }
-  | { event: 'agent_unready' }                                // dormant, PTY alive
+  | { event: 'agent_unready' }                                // agent alive, no binding
   | { event: 'no_todo_list' }
   | { event: 'permission_pending'; minutes: number }
   | { event: 'directive_unacked';  minutes: number };         // the TTL sweep
@@ -269,7 +269,7 @@ export type OverlordCondition =
 | `context_pct` | `build_meta` → `contextPct` | free, cached |
 | `turn_end` | `transcript.rs` tail | free, cached |
 | `tab_idle` | last-real-turn ts (already in mailink) | free |
-| `agent_unready` | `agentState` + `get_agent_liveness` | free |
+| `agent_unready` | `agentState` + `get_agent_liveness_batch` | cheap (batched, candidates only) |
 | `permission_pending` | `agentState` | free |
 | `task_stale` / `directive_unacked` | board timers | trivial |
 | `no_todo_list` | **TodoWrite mirror — needs building** | medium |
@@ -510,6 +510,32 @@ Overlord's token spend goes *down*.
 
 The checkpoint rule applies to **Overlord's own tab** too — it has a context
 window like everything else.
+
+### 9.4 Dormancy: classify, then fix — never advise
+
+A tab that was an agent and reports no agent state is ambiguous, and the two cases
+have opposite remedies:
+
+| Kind | Process state | Remedy |
+|---|---|---|
+| `unbound` | agent alive (or an SSH session in the foreground) | `/maiterm init` — restores tool routing and reply delivery |
+| `stopped` | nothing running; the tab is at a shell | relaunch the agent with its resume command |
+
+The engine classifies with `get_agent_liveness_batch` over the dormant candidates only
+(a full process-tree walk per tab per tick is the shape that froze the UI once already —
+see the mesh readiness pinwheel), and `agent_unready` fires **only on `unbound`**.
+Narrowing it matters: on a `stopped` tab, `/maiterm init` types a slash command into
+bash — noise in the user's terminal, and no closer to recovery.
+
+`unbound` is handled automatically by the `reinit_unbound_agent` default rule (still
+subject to propose-mode). `stopped` is never automatic — relaunching an agent is a
+bigger action than re-binding one — but the triage deck offers it as one click, and
+resumes the tab's own session rather than starting a fresh one.
+
+**The deck must never print advice it could act on.** It used to say "resume it or run
+`/maiterm init`" and leave the human to do it, on every dormant tab, forever — which is
+a supervisor that supervises nothing. Recovery injections are ledgered verbatim like
+every other directive, and a recovery that can't run says why instead of failing quietly.
 
 ---
 

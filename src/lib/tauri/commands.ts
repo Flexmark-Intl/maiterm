@@ -167,6 +167,11 @@ export async function getAgentLiveness(ptyId: string): Promise<AgentLiveness> {
   return invoke('get_agent_liveness', { ptyId });
 }
 
+/** Liveness for many PTYs in one pass — PTYs that no longer exist are simply absent. */
+export async function getAgentLivenessBatch(ptyIds: string[]): Promise<Record<string, AgentLiveness>> {
+  return invoke('get_agent_liveness_batch', { ptyIds });
+}
+
 /** Per-tab agent facts for the Overlord engine (docs/overlord.md §5) — cheap cached signals
  *  from the transcript tail-facts cache. All fields optional: a tab may resolve a session
  *  before its first assistant turn (no meta yet), and Gemini has no transcript source. */

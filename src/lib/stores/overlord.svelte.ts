@@ -19,7 +19,8 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
-import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
+import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
+import { getResumeCommand } from '$lib/agents/resume';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { findImportedDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -99,10 +100,10 @@ interface RitualRun {
   stepCount: number;
   startedAt: number;
   aborted: boolean;
-  /** True for an `agent_unready` rule. Its whole premise is that NO agent is running,
-   *  so the pre-injection window must invert: wait for the absence of an agent state,
-   *  not the presence of one. Without this the ritual fires, spins the full 5-minute
-   *  injectable cap, and wedges the tab's serialization slot the entire time. */
+  /** True for an `agent_unready` rule. Its whole premise is that maiTerm has NO binding
+   *  for the tab's agent, so the pre-injection window must invert: wait for the absence of
+   *  an agent state, not the presence of one. Without this the ritual fires, spins the
+   *  full 5-minute injectable cap, and wedges the tab's serialization slot the whole time. */
   targetsUnready: boolean;
   /** ms epoch of the ritual's start, then of each injection — the human-input abort
    *  baseline. Any keystroke in the tab newer than this aborts the ritual (§7),
@@ -270,6 +271,21 @@ function createOverlordStore() {
   // Escalations raised but not yet announced to the agent (it was busy/absent at the
   // time). The tick keeps retrying the wake nudge until one lands.
   const unNudged = new Set<string>();
+  /** Why a tab that was an agent has no live agent state (docs/overlord.md §9.4).
+   *
+   *  "Dormant" conflates two situations with opposite remedies, and treating them as one
+   *  is why the triage deck could only ever print advice:
+   *
+   *    unbound — the agent process IS running; maiTerm just has no MCP binding for it
+   *              (the usual case after a restart, resume or fork). One `/maiterm init`
+   *              fixes it, and that is something Overlord can simply do.
+   *    stopped — nothing is running; the tab is sitting at a shell. Re-initializing would
+   *              type a slash command into bash. The remedy is to relaunch the agent,
+   *              which is a bigger action and stays opt-in.
+   */
+  type UnreadyKind = 'unbound' | 'stopped';
+  const liveness = new Map<string, { kind: UnreadyKind; at: number }>();
+
   const rituals = new Map<string, RitualRun>(); // tabId → active ritual
   let ticker: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -747,7 +763,10 @@ function createOverlordStore() {
           (t) => isInFlight(t) && now - Date.parse(t.updated_at) >= w.days * 86_400_000,
         );
       case 'agent_unready':
-        return !claudeStateStore.getState(tab.id) && !!terminalsStore.get(tab.id);
+        // Narrowed to the case a directive can actually fix: the agent is running but
+        // unbound. Firing on a tab sitting at a shell would type `/maiterm init` into
+        // bash — noise in the user's terminal, and no closer to recovery.
+        return unreadyKind(tab.id) === 'unbound';
       case 'no_todo_list': {
         // "No maiTerm tasks", not "no Claude todos". Reading the runtime's private store
         // meant this could never fire for Codex or Gemini, which have no such store —
@@ -1064,6 +1083,46 @@ function createOverlordStore() {
     return tasksStore.remove(ws.id, existing.id);
   }
 
+  /** Tabs that were agents, still have a live PTY, but report no agent state. */
+  function dormantCandidates(): { tab: Tab; ptyId: string }[] {
+    const out: { tab: Tab; ptyId: string }[] = [];
+    for (const { tab } of agentTabs()) {
+      if (claudeStateStore.getState(tab.id)) continue;
+      const inst = terminalsStore.get(tab.id);
+      if (inst) out.push({ tab, ptyId: inst.ptyId });
+    }
+    return out;
+  }
+
+  /** Refresh the dormancy classification. Batched into one pass and only for candidates —
+   *  this walks the process tree, and doing it per tab per tick is the shape that froze
+   *  the UI once already (mesh readiness pinwheel). */
+  async function probeLiveness(now: number) {
+    const candidates = dormantCandidates();
+    // Drop entries for tabs that are no longer candidates, so a recovered tab stops
+    // being reported as unready the moment its agent comes back.
+    const live = new Set(candidates.map((c) => c.tab.id));
+    for (const id of [...liveness.keys()]) if (!live.has(id)) liveness.delete(id);
+    if (!candidates.length) return;
+    try {
+      const res = await commands.getAgentLivenessBatch(candidates.map((c) => c.ptyId));
+      for (const { tab, ptyId } of candidates) {
+        const l = res[ptyId];
+        if (!l) continue;
+        // ssh_foreground stands in for a remote agent we cannot see in the local process
+        // tree — an SSH tab with a live session is treated as unbound, which is the case
+        // that actually happens after a restart.
+        liveness.set(tab.id, { kind: l.agent_running || l.ssh_foreground ? 'unbound' : 'stopped', at: now });
+      }
+    } catch (e) {
+      logError(`overlord: liveness probe failed: ${e}`);
+    }
+  }
+
+  function unreadyKind(tabId: string): UnreadyKind | null {
+    return liveness.get(tabId)?.kind ?? null;
+  }
+
   function taskStateForAgent(st: AgentState | undefined): TaskStatus {
     return st === 'permission' ? 'blocked' : 'active';
   }
@@ -1088,6 +1147,9 @@ function createOverlordStore() {
       } else {
         facts = new Map();
       }
+      // Classify dormant tabs BEFORE rules evaluate, so agent_unready reads this tick's
+      // state rather than the previous one's.
+      await probeLiveness(now);
       for (const { tab, ws } of pairs) {
         const f = facts.get(tab.id);
         const st = mappedState(tab.id);
@@ -1379,6 +1441,79 @@ function createOverlordStore() {
       logInfo(`overlord: track request — asked ${asked}, skipped ${skipped}`);
       return { asked, skipped };
     },
+    /** Why this tab has no live agent, if it doesn't. Drives the triage deck's copy AND
+     *  which remedy it offers — the two must agree. */
+    unreadyKind,
+
+    /** Recover a tab that was an agent and isn't responding.
+     *
+     *  This is the point of a supervisor: the deck used to print "resume it or run
+     *  /maiterm init" and leave the human to do it, on every dormant tab, forever. The
+     *  remedy is chosen from the process state, not guessed:
+     *
+     *    unbound — agent alive, no binding → type `/maiterm init`. Cheap and safe.
+     *    stopped — nothing running → type the runtime's resume command, relaunching the
+     *              agent. Bigger, so it is never automatic: only this explicit call.
+     *
+     *  Deliberately does NOT go through driveTab, whose guards require a live REPL and an
+     *  idle agent — both false here by definition. It keeps the quiescence rule (never
+     *  type over a repaint) and ledgers verbatim like every other injection. */
+    async recoverTab(tabId: string): Promise<{ sent: boolean; kind?: UnreadyKind; reason?: string }> {
+      const kind = unreadyKind(tabId);
+      if (!kind) return { sent: false, reason: 'not_unready' };
+      const inst = terminalsStore.get(tabId);
+      if (!inst) return { sent: false, reason: 'no_terminal' };
+
+      let text: string;
+      if (kind === 'unbound') {
+        text = '/maiterm init';
+      } else {
+        const runtime = workspacesStore.getTabRuntime(tabId);
+        if (!runtime) return { sent: false, reason: 'unknown_runtime' };
+        // Interpolates %<runtime>SessionId from the tab's trigger variables, the same way
+        // auto-resume does — so this resumes the tab's own session, not a fresh one.
+        text = interpolateVariables(tabId, getResumeCommand(runtime));
+        if (text.includes('%')) return { sent: false, reason: 'no_session_id' };
+      }
+
+      const step: OverlordStep = { kind: kind === 'unbound' ? 'slash' : 'process', text };
+      const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
+      if (Date.now() - lastOut < 1500) {
+        ledger(tabId, null, 'human', 0, step, 'blocked_guard');
+        return { sent: false, kind, reason: 'output_in_flight' };
+      }
+      try {
+        await bracketedPasteSubmit(inst.ptyId, text);
+      } catch (e) {
+        logError(`overlord: recover inject failed for ${tabId.slice(0, 8)}: ${e}`);
+        ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+        return { sent: false, kind, reason: 'inject_failed' };
+      }
+      ledger(tabId, null, 'human', 0, step, 'sent');
+      logInfo(`overlord: recover ${tabId.slice(0, 8)} (${kind}) — sent ${JSON.stringify(text)}`);
+      // Clear the classification so the deck stops showing it immediately; the next tick
+      // re-probes and will re-raise it if the remedy didn't take.
+      liveness.delete(tabId);
+      bumpLive();
+      return { sent: true, kind };
+    },
+
+    /** Recover every unready tab in one pass — the deck's bulk action. Staggered so a
+     *  window with dozens of dormant tabs doesn't hammer every PTY at once. */
+    async recoverAllUnbound(): Promise<{ sent: number; skipped: number }> {
+      let sent = 0, skipped = 0;
+      for (const [tabId, entry] of [...liveness]) {
+        // Only the safe remedy in bulk. Relaunching agents en masse is not something to
+        // trigger from one button click.
+        if (entry.kind !== 'unbound') continue;
+        const r = await this.recoverTab(tabId);
+        if (r.sent) sent++;
+        else skipped++;
+        await sleep(400);
+      }
+      return { sent, skipped };
+    },
+
     get pendingRuleChanges() { return pendingRuleChanges; },
 
     isOverlordAgentTab,

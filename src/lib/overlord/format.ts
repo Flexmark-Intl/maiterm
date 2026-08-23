@@ -25,7 +25,7 @@ export function describeCondition(when: OverlordCondition): string {
     case 'commit': return 'a commit lands';
     case 'tab_idle': return `a tab idles ${fmtMinutes(when.minutes)}`;
     case 'task_stale': return `a task goes stale ${when.days}d`;
-    case 'agent_unready': return 'an agent stops running';
+    case 'agent_unready': return 'an agent is running but unbound';
     case 'no_todo_list': return 'real work is not on the task list';
     case 'permission_pending': return `a permission waits ${fmtMinutes(when.minutes)}`;
     case 'directive_unacked': return `a directive goes unacked ${fmtMinutes(when.minutes)}`;

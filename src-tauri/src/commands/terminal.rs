@@ -317,6 +317,31 @@ pub async fn get_agent_liveness(
         .map_err(|e| format!("liveness probe failed to run: {}", e))?
 }
 
+/// Batched liveness for many tabs at once (Overlord's dormancy triage).
+///
+/// One call per tab would rebuild the parent→child map and re-run the BFS per tab; the
+/// underlying process sweep is TTL-cached but that per-call work is not. Batching keeps a
+/// window with dozens of dormant tabs to a single pass. PTYs that no longer exist are
+/// simply absent from the result, the same contract as `get_overlord_tab_facts`.
+#[tauri::command]
+pub async fn get_agent_liveness_batch(
+    state: State<'_, Arc<AppState>>,
+    pty_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, pty::AgentLiveness>, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = std::collections::HashMap::new();
+        for pty_id in pty_ids {
+            if let Ok(l) = pty::get_agent_liveness(&app_state, &pty_id) {
+                out.insert(pty_id, l);
+            }
+        }
+        out
+    })
+    .await
+    .map_err(|e| format!("liveness probe failed to run: {}", e))
+}
+
 /// Search the terminal buffer.
 #[tauri::command]
 pub fn search_terminal(

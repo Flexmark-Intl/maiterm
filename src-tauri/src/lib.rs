@@ -484,6 +484,7 @@ pub fn run() {
             commands::terminal::search_terminal,
             commands::terminal::terminal_bracketed_paste,
             commands::terminal::get_agent_liveness,
+            commands::terminal::get_agent_liveness_batch,
             commands::terminal::serialize_terminal,
             commands::terminal::restore_terminal_scrollback,
             commands::terminal::resize_terminal_grid,

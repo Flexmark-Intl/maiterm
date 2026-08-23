@@ -76,6 +76,31 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     ],
   },
 
+  reinit_unbound_agent: {
+    name: 'Re-bind a running agent',
+    description:
+      'A tab whose agent is running but not bound to maiTerm gets a /maiterm init, which restores tool routing and reply delivery. Only fires when the agent process is confirmed alive — a tab sitting at a shell is left alone.',
+    cooldown: 900,
+    when: { event: 'agent_unready' },
+    guards: {
+      // There is no live REPL binding by definition — that IS the condition. Requiring
+      // one would make this rule unfireable, which is how it stayed advice-only.
+      require_live_repl: false,
+      min_quiet_ms: 3000,
+      max_per_hour: 3,
+      only_if_no_outstanding: true,
+    },
+    sequence: [
+      {
+        kind: 'slash',
+        text: '/maiterm init',
+        await: { until: 'turn_end' },
+        timeout_seconds: 120,
+        on_timeout: 'continue',
+      },
+    ],
+  },
+
   todo_hygiene: {
     name: 'Keep a task list',
     description:

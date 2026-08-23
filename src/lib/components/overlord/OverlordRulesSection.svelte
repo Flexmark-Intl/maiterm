@@ -108,7 +108,7 @@
     { value: 'tab_idle', label: 'Tab goes idle for', unit: 'min', param: 'minutes' },
     { value: 'no_todo_list', label: 'Work is not on the task list', unit: '', param: null },
     { value: 'task_stale', label: 'Board task stale for', unit: 'days', param: 'days' },
-    { value: 'agent_unready', label: 'Agent stops running', unit: '', param: null },
+    { value: 'agent_unready', label: 'Agent running but unbound', unit: '', param: null },
     { value: 'permission_pending', label: 'Permission waits for', unit: 'min', param: 'minutes' },
     { value: 'directive_unacked', label: 'Directive unacked for', unit: 'min', param: 'minutes' },
   ] as const;

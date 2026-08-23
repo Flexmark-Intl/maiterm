@@ -261,6 +261,43 @@
     return tasksStore.workstream(t.workspace_id, t.workstream_id)?.name ?? null;
   }
 
+  // ── Recovery ───────────────────────────────────────────────────────────────
+  let recovering = $state<string | null>(null);
+  let recoveringAll = $state(false);
+  let recoverNote = $state<string | null>(null);
+
+  async function recover(tabId: string) {
+    recovering = tabId;
+    try {
+      const r = await overlordStore.recoverTab(tabId);
+      // Say what happened rather than failing silently — a button that does nothing
+      // visible is the problem this whole change exists to fix.
+      recoverNote = r.sent
+        ? null
+        : r.reason === 'output_in_flight'
+          ? 'That tab is mid-output — try again in a moment.'
+          : r.reason === 'no_session_id'
+            ? "No saved session for that tab, so there's nothing to resume."
+            : `Couldn't recover that tab (${r.reason}).`;
+    } finally {
+      recovering = null;
+    }
+  }
+
+  const unboundCount = $derived(
+    fleet.filter((u) => u.state === 'dormant' && overlordStore.unreadyKind(u.tab.id) === 'unbound').length,
+  );
+
+  async function recoverAll() {
+    recoveringAll = true;
+    try {
+      const r = await overlordStore.recoverAllUnbound();
+      recoverNote = r.sent ? `Re-bound ${r.sent} tab${r.sent === 1 ? '' : 's'}.` : 'Nothing could be re-bound.';
+    } finally {
+      recoveringAll = false;
+    }
+  }
+
   /** Expanded card — click to read the description an agent or human wrote. */
   let openCard = $state<string | null>(null);
   /** "Open" means in flight — parked work is deliberately NOT on the plate, so counting it
@@ -363,6 +400,12 @@
         {/each}
       </nav>
 
+      {#if unboundCount > 1}
+        <button class="ov-btn scan-btn" onclick={recoverAll} disabled={recoveringAll}
+                title="Send /maiterm init to every tab whose agent is running but unbound. Nothing is sent to tabs that aren't running an agent.">
+          {recoveringAll ? 'Re-binding…' : `Re-bind ${unboundCount}`}
+        </button>
+      {/if}
       <button class="ov-btn scan-btn" onclick={runScan} disabled={overlordStore.scanning}
               title="Read every running agent tab and populate the board from it. Safe to repeat — nothing is typed into any tab.">
         {overlordStore.scanning ? 'Scanning…' : 'Scan tabs'}
@@ -425,6 +468,14 @@
 
     <!-- ── Triage ──────────────────────────────────────────────────────── -->
     {#if view === 'deck'}
+      {#if recoverNote}
+        <!-- A recovery that couldn't run has to say so. A button that silently does
+             nothing is the exact failure this whole section was built to remove. -->
+        <div class="deck-note ov-in">
+          <span>{recoverNote}</span>
+          <button class="ov-btn" onclick={() => (recoverNote = null)}>Dismiss</button>
+        </div>
+      {/if}
       {#if scan}
         <article class="signal ov-panel scan-card ov-in" style:--tone="var(--ov-cool)">
           <div class="signal-rail"></div>
@@ -565,11 +616,37 @@
 
             {:else}
               <div class="signal-head">
-                <span class="ov-chip ov-chip-tone">not running</span>
+                <span class="ov-chip ov-chip-tone">
+                  {overlordStore.unreadyKind(s.u.tab.id) === 'unbound' ? 'not responding' : 'not running'}
+                </span>
                 <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.u.tab.id)}>{s.u.tab.name}</button>
                 <span class="ov-chip">{s.u.ws.name}</span>
               </div>
-              <p class="signal-text">This tab was an agent but nothing is running in it now — resume it or run <code>/maiterm init</code>.</p>
+              {#if overlordStore.unreadyKind(s.u.tab.id) === 'unbound'}
+                <p class="signal-text">
+                  Its agent is running but isn't bound to maiTerm, so tools and replies don't
+                  reach it. Re-binding is one command.
+                </p>
+                <div class="signal-actions">
+                  <button class="ov-btn ov-btn-primary" disabled={recovering === s.u.tab.id}
+                          onclick={() => recover(s.u.tab.id)}>
+                    {recovering === s.u.tab.id ? 'Re-binding…' : 'Re-bind'}
+                  </button>
+                </div>
+              {:else if overlordStore.unreadyKind(s.u.tab.id) === 'stopped'}
+                <p class="signal-text">
+                  Nothing is running in this tab — the agent exited. Restarting resumes its
+                  own session, not a fresh one.
+                </p>
+                <div class="signal-actions">
+                  <button class="ov-btn" disabled={recovering === s.u.tab.id}
+                          onclick={() => recover(s.u.tab.id)}>
+                    {recovering === s.u.tab.id ? 'Restarting…' : 'Restart agent'}
+                  </button>
+                </div>
+              {:else}
+                <p class="signal-text">Checking what's running in this tab…</p>
+              {/if}
             {/if}
 
           </div>
@@ -1033,10 +1110,20 @@
   .signal-title { font-weight: 600; font-size: 0.95rem; }
   .signal-age { font-size: 0.75rem; color: var(--ov-ink-dim); margin-left: auto; }
   .signal-text { color: var(--ov-ink-mid); font-size: 0.9rem; line-height: 1.5; }
-  .signal-text code {
-    font-family: var(--ov-mono);
-    font-size: 0.82rem;
-    color: var(--ov-live);
+
+  .deck-note {
+    align-items: center;
+    background: var(--ov-panel);
+    border: 1px solid var(--ov-hair);
+    border-left: 2px solid var(--ov-warn);
+    border-radius: 2px;
+    color: var(--ov-ink-mid);
+    display: flex;
+    font-size: 0.88rem;
+    gap: 10px;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    padding: 8px 12px;
   }
   .signal-note { color: var(--ov-ink-dim); font-size: 0.8rem; margin-top: 5px; }
   .signal-actions { display: flex; gap: 6px; margin-top: 9px; }
