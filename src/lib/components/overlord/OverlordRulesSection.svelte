@@ -106,7 +106,7 @@
     { value: 'commit', label: 'A commit lands', unit: '', param: null },
     { value: 'turn_end', label: 'Every turn ends', unit: '', param: null },
     { value: 'tab_idle', label: 'Tab goes idle for', unit: 'min', param: 'minutes' },
-    { value: 'no_todo_list', label: 'Work has no todo list', unit: '', param: null },
+    { value: 'no_todo_list', label: 'Work is not on the task list', unit: '', param: null },
     { value: 'task_stale', label: 'Board task stale for', unit: 'days', param: 'days' },
     { value: 'agent_unready', label: 'Agent stops running', unit: '', param: null },
     { value: 'permission_pending', label: 'Permission waits for', unit: 'min', param: 'minutes' },

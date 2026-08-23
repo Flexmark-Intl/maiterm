@@ -126,17 +126,17 @@ export interface PendingRuleChangeBatch {
   changes: OverlordRuleChange[];
 }
 
-/** What one scan pass found. `silent` are running tabs with no todo signal — the
- *  candidates a census would ask, already filtered by the ask-cooldown. */
+/** What one scan pass found. `silent` are running tabs with nothing on the task list —
+ *  the candidates a census would ask, already filtered by the ask-cooldown. */
 export interface ScanSummary {
   at: number;
   tabsSeen: number;
-  /** Tabs whose todo list was read (from the store or, for SSH tabs, the transcript). */
+  /** Tabs with tasks in flight on the maiTerm list. */
   mirrored: number;
-  /** Of those, how many came from Claude Code's authoritative task store. */
+  /** How many tabs contributed an import from Claude Code's own task store this pass. */
   fromStore: number;
   adopted: number;
-  /** Tabs that keep a list and have completed all of it. */
+  /** Tabs that have tasks and have completed all of them. */
   finished: number;
   silent: string[];
   /** Set once an ask-to-track pass has run against this scan's silent set. */
@@ -270,10 +270,6 @@ function createOverlordStore() {
   // Escalations raised but not yet announced to the agent (it was busy/absent at the
   // time). The tick keeps retrying the wake nudge until one lands.
   const unNudged = new Set<string>();
-  // Sessions observed WITH a todo list ("tabId|sessionId"). The facts tail is a bounded
-  // window — once the last TodoWrite scrolls past it, todos read as absent; this keeps
-  // no_todo_list from nagging a session that demonstrably has one.
-  const everHadTodos = new Set<string>();
   const rituals = new Map<string, RitualRun>(); // tabId → active ritual
   let ticker: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -561,7 +557,7 @@ function createOverlordStore() {
       case 'tab_idle': return `a tab sits idle ${when.minutes} min`;
       case 'task_stale': return `a board task goes stale ${when.days} days`;
       case 'agent_unready': return 'an agent is not running';
-      case 'no_todo_list': return 'sustained work has no todo list';
+      case 'no_todo_list': return 'sustained work is not on the task list';
       case 'permission_pending': return `a permission waits ${when.minutes} min`;
       case 'directive_unacked': return `a directive is unacked ${when.minutes} min`;
     }
@@ -749,14 +745,21 @@ function createOverlordStore() {
       case 'agent_unready':
         return !claudeStateStore.getState(tab.id) && !!terminalsStore.get(tab.id);
       case 'no_todo_list': {
-        if (!f || f.todos?.length) return false;
-        // `tracked` covers the case Claude Code makes ambiguous: a tab that completed its
-        // entire list has an empty store, and nagging it to "keep a task list" right then
-        // is precisely wrong.
-        if (f.tracked) return false;
-        if (everHadTodos.has(`${tab.id}|${f.session_id}`)) return false;
-        if ((f.context_used ?? 0) < NO_TODO_MIN_CONTEXT_TOKENS) return false;
-        return f.last_turn_ts !== undefined && now - f.last_turn_ts < NO_TODO_RECENT_TURN_MS;
+        // "No maiTerm tasks", not "no Claude todos". Reading the runtime's private store
+        // meant this could never fire for Codex or Gemini, which have no such store —
+        // the rule was silently Claude-only. Against our own tasks it works everywhere.
+        //
+        // It also removes the ambiguity Claude Code created by deleting its files on
+        // completion, which made "finished everything" indistinguishable from "never
+        // tracked" and would have nudged an agent to START a list at the moment it
+        // finished one. Our finished rows persist, so having ANY task — done included —
+        // is proof the tab tracks its work.
+        //
+        // Overlord's own placeholder rows don't count: a scan stands those up for every
+        // running tab, so counting them would suppress the rule everywhere.
+        if (tasksForTab(tab.id).some((t) => t.origin !== 'overlord')) return false;
+        if ((f?.context_used ?? 0) < NO_TODO_MIN_CONTEXT_TOKENS) return false;
+        return f?.last_turn_ts !== undefined && now - f.last_turn_ts < NO_TODO_RECENT_TURN_MS;
       }
       case 'permission_pending': {
         const since = permissionSince.get(tab.id);
@@ -940,17 +943,20 @@ function createOverlordStore() {
    *  Deliberately NOT "tell me in one line what you're working on". A one-line answer is a
    *  snapshot that is stale the moment it arrives, it collapses an agent juggling several
    *  threads of work into a single string, and it has to be re-asked forever. Asking the
-   *  agent to keep a todo list instead costs the same single turn and then feeds the board
-   *  continuously and for free, because Claude Code writes that list to its own todo store
-   *  where Overlord reads it directly — structured, complete, multi-task, always current.
-   *  The one-line reply stays available as a fallback for runtimes with no task tool. */
+   *  agent to record its work as maiTerm tasks costs the same single turn and then feeds
+   *  the board continuously and for free — structured, multi-task, always current, and
+   *  editable by the human.
+   *
+   *  This used to ask for the runtime's OWN todo list, which made the census Claude-only:
+   *  Codex has no task store and Gemini none at all, so their answer could never reach the
+   *  board. createTasks is available to every runtime over the same MCP bridge. */
   const TRACK_REQUEST_TEXT =
-    'Overlord check — this tab is doing multi-step work with no task list, so nothing here ' +
-    'is being tracked. Please create a proper todo list with your task tool now, covering ' +
-    'what you are actually working on (several items if several things are in flight), and ' +
-    'keep it updated as you go. Then carry on with what you were doing — nothing else is ' +
-    'needed. If you have no task tool, instead call replyToOverlord once with kind:\'status\' ' +
-    'and `task` set to a one-line description.';
+    'Overlord check — this tab is doing multi-step work that is not on the task list, so ' +
+    'nothing here is being tracked. Please call createTasks now with what you are actually ' +
+    'working on (several items if several things are in flight), and keep the statuses ' +
+    'current with updateTasks as you go. Then carry on with what you were doing — nothing ' +
+    "else is needed. If you have no task tools, instead call replyToOverlord once with " +
+    "kind:'status' and `task` set to a one-line description.";
 
   /** Find this tab's Overlord-owned board row, in ANY state. Matching must include
    *  `done`: filtering it out made "mark done" un-sticky — the next scan couldn't see the
@@ -1085,7 +1091,6 @@ function createOverlordStore() {
           clearOutstanding(tab.id);
         }
         // Claude task-store importer — one-way, into maiTerm's own store.
-        if (f?.tracked) everHadTodos.add(`${tab.id}|${f.session_id}`);
         if (f?.todos?.length) {
           syncMirrorTasks(tab.id, f, now);
           retirePlaceholderIfMirrored(tab.id);
@@ -1258,21 +1263,29 @@ function createOverlordStore() {
           if (!live) continue; // only tabs actually running an agent right now
           tabsSeen++;
           const f = facts.get(tab.id);
+          // Import whatever the runtime's own store holds first — free, and it is what
+          // makes a Claude tab that never learned our tools still land on the board.
           if (f?.todos?.length) {
-            if (syncMirrorTasks(tab.id, f, now)) changed = true;
-            if (retirePlaceholderIfMirrored(tab.id)) changed = true;
-            mirrored++;
+            syncMirrorTasks(tab.id, f, now);
             if (f.todos_source === 'store') fromStore++;
+          } else if (f?.tracked) {
+            // Keeps a list and has finished everything on it — close out its imports.
+            closeOutMirrorRows(tab.id, now);
+          }
+          // Classification is against maiTerm's OWN tasks, not the runtime's store. That
+          // is what makes "untracked" mean the same thing for Codex and Gemini (neither
+          // has a store to read) as it does for Claude, and it counts work an agent
+          // recorded through createTasks — which the old test could not see at all.
+          // Overlord's placeholders don't count as tracking; they're what a scan creates.
+          const tracked = tasksForTab(tab.id).filter((t) => t.origin !== 'overlord');
+          if (tracked.length) {
+            retirePlaceholderIfMirrored(tab.id);
+            if (tracked.every((t) => t.status === 'done')) finished++;
+            else mirrored++;
+            changed = true;
             continue;
           }
-          if (f?.tracked) {
-            // Keeps a list, and has finished everything on it. Nothing to adopt and
-            // nothing to ask — close out its rows and leave it alone.
-            if (closeOutMirrorRows(tab.id, now)) changed = true;
-            finished++;
-            continue;
-          }
-          // No todo signal — stand up (or refresh) one row for the tab itself, titled
+          // Nothing tracked — stand up (or refresh) one row for the tab itself, titled
           // with the tab name until the tab tells us something better.
           const outcome = adoptRow(tab.id, tab.name, live.state);
           if (outcome !== 'skipped') changed = true;
@@ -1282,7 +1295,7 @@ function createOverlordStore() {
           if (now - askedAt >= TRACK_ASK_COOLDOWN_MS) silent.push(tab.id);
         }
         lastScan = { at: now, tabsSeen, mirrored, fromStore, adopted, finished, silent };
-        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} task lists read (${fromStore} from the store), ${finished} finished, ${adopted} adopted, ${silent.length} untracked`);
+        logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} tracking work (${fromStore} imported from a runtime store), ${finished} finished, ${adopted} adopted, ${silent.length} untracked`);
         return lastScan;
       } finally {
         scanning = false;

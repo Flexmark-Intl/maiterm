@@ -26,7 +26,7 @@ export function describeCondition(when: OverlordCondition): string {
     case 'tab_idle': return `a tab idles ${fmtMinutes(when.minutes)}`;
     case 'task_stale': return `a task goes stale ${when.days}d`;
     case 'agent_unready': return 'an agent stops running';
-    case 'no_todo_list': return 'real work has no todo list';
+    case 'no_todo_list': return 'real work is not on the task list';
     case 'permission_pending': return `a permission waits ${fmtMinutes(when.minutes)}`;
     case 'directive_unacked': return `a directive goes unacked ${fmtMinutes(when.minutes)}`;
   }
@@ -41,7 +41,7 @@ export function conditionChip(when: OverlordCondition): string {
     case 'tab_idle': return `IDLE ${when.minutes}M`;
     case 'task_stale': return `STALE ${when.days}D`;
     case 'agent_unready': return 'UNREADY';
-    case 'no_todo_list': return 'NO TODOS';
+    case 'no_todo_list': return 'UNTRACKED';
     case 'permission_pending': return `PERM ${when.minutes}M`;
     case 'directive_unacked': return `UNACKED ${when.minutes}M`;
   }
@@ -55,7 +55,7 @@ export function conditionSource(when: OverlordCondition): string {
     case 'turn_end':
     case 'permission_pending': return 'agent hooks';
     case 'commit': return 'git commit tool calls · Claude only';
-    case 'no_todo_list': return 'TodoWrite mirror · Claude only';
+    case 'no_todo_list': return 'maiTerm tasks · every runtime';
     case 'task_stale': return 'board timers';
     case 'agent_unready': return 'agent state + liveness probe';
     case 'directive_unacked': return 'directive ledger';

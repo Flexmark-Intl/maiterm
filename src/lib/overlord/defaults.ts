@@ -77,9 +77,9 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
   },
 
   todo_hygiene: {
-    name: 'Keep a todo list',
+    name: 'Keep a task list',
     description:
-      'A tab doing sustained work with no todo list gets nudged to create one with its native task tooling.',
+      'A tab doing sustained work with nothing on the maiTerm task list gets nudged to record it.',
     cooldown: 14400,
     when: { event: 'no_todo_list' },
     guards: {
@@ -92,7 +92,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     sequence: [
       {
         kind: 'process',
-        text: "If the current work is multi-step, track it: create a proper task/todo list with your task tooling so nothing gets lost. If it's a one-off, ignore this.",
+        text: "If the current work is multi-step, track it: call createTasks with what you're actually working on, so nothing gets lost and your human can see it. If it's a one-off, ignore this.",
         await: { until: 'turn_end' },
         timeout_seconds: 600,
         on_timeout: 'continue',

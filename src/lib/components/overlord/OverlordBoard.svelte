@@ -328,7 +328,7 @@
               <span class="ov-chip ov-chip-tone">scan</span>
               <span class="signal-title">
                 {scan.tabsSeen} running tab{scan.tabsSeen === 1 ? '' : 's'} ·
-                {scan.mirrored} task list{scan.mirrored === 1 ? '' : 's'} read
+                {scan.mirrored} tracking work
                 {#if scan.finished > 0}· {scan.finished} all-done{/if}
                 {#if scan.adopted > 0}· {scan.adopted} added{/if}
               </span>
@@ -530,7 +530,7 @@
         <div class="board-empty ov-panel ov-bracket ov-in">
           <p class="ov-label-lead">The board is empty</p>
           <p class="board-empty-copy">
-            Scan your running agent tabs to populate it — todo lists are mirrored where they
+            Scan your running agent tabs to populate it — their tasks come across where they
             exist, and every other running tab gets a row you can fill in. Nothing is typed
             into any tab, and it's safe to run again any time.
           </p>
