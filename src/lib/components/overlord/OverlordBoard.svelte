@@ -5,7 +5,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import type { TaskStatus, Workspace, Tab } from '$lib/tauri/types';
-  import { effectiveStatus, isInFlight, type TaskRow } from '$lib/tasks/model';
+  import { effectiveStatus, isInFlight, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
   import '$lib/overlord/deck.css';
@@ -62,7 +62,10 @@
   const clock = setInterval(() => { now = Date.now(); }, 20_000);
 
   // ── Constants ───────────────────────────────────────────────────────────────
-  const LANES: TaskStatus[] = ['backlog', 'active', 'blocked', 'review', 'done'];
+  /** The lane order IS the shared vocabulary — never re-declare it here. A local copy
+   *  silently dropped `todo` when the sixth lane landed, and since lanes match by equality,
+   *  every new and every migrated task rendered in no column at all. */
+  const LANES = TASK_STATUSES;
   const PRESSURE_PCT = 50;
   const STALE_DAYS = 3;
 
@@ -211,7 +214,7 @@
   /** Open task count for one strip — what the strip header reports. */
   function stripCount(wsId: string, workstreamId: string | null) {
     return overlordStore.tasks.filter(
-      (t) => t.workspace_id === wsId && (t.workstream_id ?? null) === workstreamId && t.status !== 'done',
+      (t) => t.workspace_id === wsId && (t.workstream_id ?? null) === workstreamId && isInFlight(t),
     ).length;
   }
 
@@ -243,7 +246,12 @@
     // Refuse a cross-workspace drop rather than silently moving a task between projects:
     // the lists persist per workspace, and the tab assignment would be meaningless there.
     if (!t || t.workspace_id !== wsId) return;
-    if (t.status !== lane) tasksStore.setStatus(wsId, id, lane);
+    // Compare against the EFFECTIVE status — the lane the card is actually rendered in.
+    // Comparing the stored one meant dropping a dependency-blocked card back on Blocked
+    // rewrote its stored status to 'blocked', so it never returned to Active when the
+    // prerequisite finished: stuck in Blocked with nothing blocking it.
+    const shown = effectiveStatus(t, overlordStore.tasks.filter((x) => x.workspace_id === wsId));
+    if (shown !== lane) tasksStore.setStatus(wsId, id, lane);
     if ((t.workstream_id ?? null) !== workstreamId) {
       tasksStore.update(wsId, id, { workstream_id: workstreamId });
     }
@@ -255,8 +263,10 @@
 
   /** Expanded card — click to read the description an agent or human wrote. */
   let openCard = $state<string | null>(null);
+  /** "Open" means in flight — parked work is deliberately NOT on the plate, so counting it
+   *  would put the thing you shelved back in the number you're trying to bring down. */
   function taskCount(wsId: string) {
-    return overlordStore.tasks.filter((t) => t.workspace_id === wsId && t.status !== 'done').length;
+    return overlordStore.tasks.filter((t) => t.workspace_id === wsId && isInFlight(t)).length;
   }
   function moveTask(task: TaskRow, dir: 1 | -1) {
     const i = LANES.indexOf(effectiveStatus(task, overlordStore.tasks.filter((t) => t.workspace_id === task.workspace_id)));
@@ -345,7 +355,7 @@
       </div>
 
       <nav class="segments">
-        {#each [['deck', 'Triage', needsYou], ['fleet', 'Fleet', fleet.length], ['board', 'Board', overlordStore.tasks.filter(t => t.status !== 'done').length], ['ledger', 'Ledger', 0]] as [id, label, count] (id)}
+        {#each [['deck', 'Triage', needsYou], ['fleet', 'Fleet', fleet.length], ['board', 'Board', overlordStore.tasks.filter(isInFlight).length], ['ledger', 'Ledger', 0]] as [id, label, count] (id)}
           <button class="segment" class:on={view === id} onclick={() => (view = id as View)}>
             {label}
             {#if (count as number) > 0}<span class="segment-count">{count}</span>{/if}

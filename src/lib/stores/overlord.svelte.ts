@@ -21,7 +21,7 @@ import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { findDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
+import { findImportedDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -834,7 +834,9 @@ function createOverlordStore() {
     return tasksStore.mutate(ws.id, (list) => {
       let changed = false;
       const next = list.map((t) => {
-        if (t.origin === 'imported' && t.tab_id === tabId && t.status !== 'done') {
+        // Parked rows are left alone: if a human shelved an imported task, closing it out
+        // as "done" would erase that decision and claim work happened that didn't.
+        if (t.origin === 'imported' && t.tab_id === tabId && isInFlight(t)) {
           changed = true;
           return { ...t, status: 'done' as TaskStatus, updated_at: stamp };
         }
@@ -861,9 +863,10 @@ function createOverlordStore() {
         const status = statusFromAgent(item.status, item.blocked);
         // Same dedup helper the MCP createTasks path uses — a tab running BOTH its own
         // runtime todo list and createTasks must converge on one row, not record it twice.
-        // Imports are loose tasks (no workstream) — a runtime's own list has no
-        // grouping to carry across.
-        const dup = findDuplicate(next, item.content, tabId, null);
+        // Grouping-agnostic on purpose: the runtime's list has no workstreams, but a
+        // human may have filed this row into one, and the importer must keep recognizing
+        // it or it re-imports the same task every tick.
+        const dup = findImportedDuplicate(next, item.content, tabId);
         const idx = dup ? next.indexOf(dup) : -1;
         if (idx >= 0) {
           // The importer only ever drives rows it owns. Once a row belongs to the agent
@@ -898,7 +901,7 @@ function createOverlordStore() {
         if (
           t.origin === 'imported' &&
           t.tab_id === tabId &&
-          t.status !== 'done' &&
+          isInFlight(t) &&
           !present.has(t.normalized_title)
         ) {
           next[i] = { ...t, status: 'done' as TaskStatus, updated_at: stamp };
@@ -986,7 +989,11 @@ function createOverlordStore() {
    *  imported from its runtime's own list? Once it is, the scan's placeholder is redundant:
    *  the tab's work is there in detail, and a stand-in titled with the tab name is noise. */
   function hasMirrorRows(tabId: string): boolean {
-    return tasksForTab(tabId).some((t) => t.origin !== 'overlord' && t.status !== 'done');
+    // Must use the SAME test as the scan's `tracked` and `no_todo_list`. When it didn't,
+    // a tab whose only tasks were parked was judged untracked by those two (so it got
+    // nudged to start tracking) while this said it was represented — so its census answer
+    // was thrown away and it was re-nudged every 12 hours, forever.
+    return tasksForTab(tabId).some((t) => t.origin !== 'overlord' && isInFlight(t));
   }
 
   /** Board rows are only rendered for non-Overlord workspaces, so creating one for the

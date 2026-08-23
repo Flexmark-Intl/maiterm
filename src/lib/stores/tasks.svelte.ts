@@ -133,9 +133,19 @@ function createTasksStore() {
       const list = this.forWorkspace(workspaceId);
       const dup = findDuplicate(list, input.title, input.tab_id, input.workstream_id);
       if (dup) {
+        const patch: Partial<Task> = {};
         // Reclaimed from the backlog (the caller's previous tab id died) — take ownership
-        // so it shows as this tab's work again rather than sitting unassigned.
-        if (!dup.tab_id && input.tab_id) this.update(workspaceId, dup.id, { tab_id: input.tab_id });
+        // so it shows as this tab's work again rather than sitting unassigned. The caller's
+        // status wins: it describes the work as it stands now, where the released row's is
+        // a snapshot from before its old tab went away.
+        if (!dup.tab_id && input.tab_id) {
+          patch.tab_id = input.tab_id;
+          patch.status = input.status ?? dup.status;
+        }
+        // Matched a loose row while naming a job — file it, rather than leaving the same
+        // work in two places depending on which call happened to record it.
+        if (input.workstream_id && !dup.workstream_id) patch.workstream_id = input.workstream_id;
+        if (Object.keys(patch).length) this.update(workspaceId, dup.id, patch);
         return dup;
       }
       const task = makeTask(input);
@@ -152,8 +162,24 @@ function createTasksStore() {
       for (const input of inputs) {
         const dup = findDuplicate(list, input.title, input.tab_id, input.workstream_id);
         if (dup) {
+          const claimed = { ...dup };
+          let touched = false;
+          // Reclaimed from the backlog — take ownership back, honouring the caller's
+          // status: it describes the work now, where the released row's is a snapshot
+          // from before its old tab went away.
           if (!dup.tab_id && input.tab_id) {
-            const claimed = { ...dup, tab_id: input.tab_id, updated_at: new Date().toISOString() };
+            claimed.tab_id = input.tab_id;
+            claimed.status = input.status ?? dup.status;
+            touched = true;
+          }
+          // Matched a loose row while naming a job — file it under that job, rather than
+          // leaving the same work in two places depending on which call recorded it.
+          if (input.workstream_id && !dup.workstream_id) {
+            claimed.workstream_id = input.workstream_id;
+            touched = true;
+          }
+          if (touched) {
+            claimed.updated_at = new Date().toISOString();
             list[list.indexOf(dup)] = claimed;
             out.push(claimed);
             added = true;

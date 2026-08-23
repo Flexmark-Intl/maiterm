@@ -6,6 +6,7 @@ import {
   isParked,
   normalizeWorkstreamName,
   findDuplicate,
+  findImportedDuplicate,
   hasUnmetDeps,
   makeTask,
   normalizeTitle,
@@ -143,6 +144,54 @@ describe('workstream names', () => {
     for (const name of ['Auth refactor', 'auth refactor', '  Auth   Refactor ', 'Auth refactor.']) {
       expect(normalizeWorkstreamName(name)).toBe('auth refactor');
     }
+  });
+});
+
+describe('dedup survives an agent changing how it groups its work', () => {
+  it('adopts a loose row when the same title is re-sent under a workstream', () => {
+    // The priming asks agents to name their jobs, and initSession fires on every compact,
+    // so a list recorded loose and re-sent grouped is the expected flip — not an edge case.
+    const loose = task({ title: 'Wire the parser', tab_id: 'T1', workstream_id: null });
+    expect(findDuplicate([loose], 'Wire the parser', 'T1', 'ws-auth')?.id).toBe(loose.id);
+  });
+
+  it('reuses a grouped row when the same title is re-sent loose', () => {
+    const grouped = task({ title: 'Wire the parser', tab_id: 'T1', workstream_id: 'ws-auth' });
+    expect(findDuplicate([grouped], 'Wire the parser', 'T1', null)?.id).toBe(grouped.id);
+  });
+
+  it('refuses to guess when the title exists in several jobs', () => {
+    // Merging these would silently collapse two genuinely different pieces of work.
+    const a = task({ title: 'Write the tests', tab_id: 'T1', workstream_id: 'ws-auth' });
+    const b = task({ title: 'Write the tests', tab_id: 'T1', workstream_id: 'ws-db' });
+    expect(findDuplicate([a, b], 'Write the tests', 'T1', null)).toBeUndefined();
+  });
+
+  it('keeps two jobs\' same-titled tasks apart on an exact match', () => {
+    const a = task({ id: 'a', title: 'Write the tests', tab_id: 'T1', workstream_id: 'ws-auth' });
+    const b = task({ id: 'b', title: 'Write the tests', tab_id: 'T1', workstream_id: 'ws-db' });
+    expect(findDuplicate([a, b], 'Write the tests', 'T1', 'ws-db')?.id).toBe('b');
+  });
+
+  it('never adopts a row that belongs to a different job', () => {
+    const other = task({ title: 'Wire the parser', tab_id: 'T1', workstream_id: 'ws-db' });
+    // Incoming names ws-auth; the existing row is filed under ws-db, so moving it would
+    // be a guess. A new row is correct here.
+    expect(findDuplicate([other], 'Wire the parser', 'T1', 'ws-auth')).toBeUndefined();
+  });
+});
+
+describe('findImportedDuplicate', () => {
+  it('still recognizes a row a human has filed into a workstream', () => {
+    // The importer re-reads the runtime's store every 5s. If filing a card into a job hid
+    // it from this lookup, the same task would be re-imported forever.
+    const filed = task({ title: 'Add the auth guard', tab_id: 'T1', workstream_id: 'ws-auth' });
+    expect(findImportedDuplicate([filed], 'Add the auth guard', 'T1')?.id).toBe(filed.id);
+  });
+
+  it('still reclaims a released row regardless of grouping', () => {
+    const released = task({ title: 'Add the auth guard', tab_id: null, workstream_id: 'ws-auth', status: 'active' });
+    expect(findImportedDuplicate([released], 'Add the auth guard', 'T1')?.id).toBe(released.id);
   });
 });
 

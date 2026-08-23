@@ -181,16 +181,48 @@ export function findDuplicate(
   const tab = tabId ?? null;
   const stream = workstreamId ?? null;
   const sameTitle = (t: Task) => (t.normalized_title || normalizeTitle(t.title)) === key;
-  // The workstream is part of the key: "write the tests" for the auth refactor and "write
-  // the tests" for the DB migration are two different pieces of work, and collapsing them
-  // would hide one job's task behind another's.
-  const sameStream = (t: Task) => (t.workstream_id ?? null) === stream;
+  const mine = (t: Task) => (t.tab_id ?? null) === tab && sameTitle(t);
+  const inStream = (t: Task) => (t.workstream_id ?? null) === stream;
+
+  // 1. Exact match: same tab, same job. Two jobs may each own a task called "write the
+  //    tests" — those are different pieces of work and must not collapse.
+  const exact = list.find((t) => mine(t) && inStream(t));
+  if (exact) return exact;
+
+  // 2. Grouping drift. An agent records its list loose, then after a compact re-sends the
+  //    same items under a workstream name (the priming asks it to name its jobs) — or the
+  //    reverse. Without this the documented promise that "re-sending your list is safe"
+  //    fails on the very flip the priming encourages, and the whole list duplicates.
+  //    Only LOOSE rows are adopted: a row already filed under a different job belongs to
+  //    that job, and moving it would be a guess.
+  const drifted = stream
+    ? list.find((t) => mine(t) && !t.workstream_id)
+    : // Incoming is loose: reuse a grouped row only when exactly one candidate exists, so
+      // an ambiguous title spread across several jobs isn't arbitrarily merged into one.
+      ((c) => (c.length === 1 ? c[0] : undefined))(list.filter(mine));
+  if (drifted) return drifted;
+
+  // 3. Reclaim work released to the backlog when its previous tab closed (docs/tasks.md
+  //    §3). Unfinished only: a closed-out task shouldn't be resurrected and re-owned
+  //    because a new tab restated it.
+  if (tab === null) return undefined;
+  return list.find((t) => !t.tab_id && t.status !== 'done' && inStream(t) && sameTitle(t));
+}
+
+/** Dedup for the Claude-store importer, which must ignore grouping entirely.
+ *
+ *  Its source has no workstreams, but a human may since have dragged an imported card into
+ *  one. Matching strictly on "loose" would stop recognizing that row and re-import it every
+ *  five seconds, forever, leaving the same task on the board twice. */
+export function findImportedDuplicate(
+  list: Task[],
+  title: string,
+  tabId: string,
+): Task | undefined {
+  const key = normalizeTitle(title);
+  const sameTitle = (t: Task) => (t.normalized_title || normalizeTitle(t.title)) === key;
   return (
-    list.find((t) => (t.tab_id ?? null) === tab && sameStream(t) && sameTitle(t)) ??
-    // Only reclaim unfinished work: a task someone already closed out shouldn't be
-    // resurrected and re-owned just because a new tab restated it.
-    (tab === null
-      ? undefined
-      : list.find((t) => !t.tab_id && t.status !== 'done' && sameStream(t) && sameTitle(t)))
+    list.find((t) => t.tab_id === tabId && sameTitle(t)) ??
+    list.find((t) => !t.tab_id && t.status !== 'done' && sameTitle(t))
   );
 }
