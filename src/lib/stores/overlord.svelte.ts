@@ -46,6 +46,10 @@ const NO_TODO_RECENT_TURN_MS = 30 * 60_000;
 /** Done board rows are swept after this long (same hygiene as completed mesh topics). */
 const TASK_DONE_RETENTION_MS = 48 * 60 * 60 * 1000;
 const GATE_POLL_MS = 1_000;
+/** turn_end fallback (see awaitGate): how long after injection, and how long the PTY must
+ *  have been silent, before an idle tab counts as having finished a sub-poll turn. */
+const TURN_FALLBACK_MIN_MS = 4_000;
+const TURN_FALLBACK_QUIET_MS = 3_000;
 
 export interface OutstandingDirective {
   id: string;
@@ -93,6 +97,11 @@ interface RitualRun {
   stepCount: number;
   startedAt: number;
   aborted: boolean;
+  /** True for an `agent_unready` rule. Its whole premise is that NO agent is running,
+   *  so the pre-injection window must invert: wait for the absence of an agent state,
+   *  not the presence of one. Without this the ritual fires, spins the full 5-minute
+   *  injectable cap, and wedges the tab's serialization slot the entire time. */
+  targetsUnready: boolean;
   /** ms epoch of the ritual's start, then of each injection — the human-input abort
    *  baseline. Any keystroke in the tab newer than this aborts the ritual (§7),
    *  including during the wait BETWEEN steps. */
@@ -187,7 +196,13 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
         origin: 'proposed',
         user_modified: true,
         when: c.rule.when,
-        guards: { ...AGENT_RULE_GUARDS },
+        // Guards are chosen here, never taken from the agent (§10 field tiers). The one
+        // condition-dependent choice: an `agent_unready` rule targets tabs with NO live
+        // agent, so requiring a live REPL would make it permanently unfireable.
+        guards: {
+          ...AGENT_RULE_GUARDS,
+          ...(c.rule.when.event === 'agent_unready' ? { require_live_repl: false } : {}),
+        },
         sequence: c.rule.sequence,
         supersedes: c.rule.supersedes,
       };
@@ -414,7 +429,8 @@ function createOverlordStore() {
       if (humanTypedSince(run.tabId, run.lastInjectionAt)) return false;
       const st = mappedState(run.tabId);
       const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
-      if (st && allowed.includes(st) && Date.now() - lastOut >= quiet) return true;
+      const stateOk = run.targetsUnready ? st === undefined : !!st && allowed.includes(st);
+      if (stateOk && Date.now() - lastOut >= quiet) return true;
       await sleep(500);
     }
     return false;
@@ -439,11 +455,16 @@ function createOverlordStore() {
           // ritual (it resumes when the gate clears) — deliberately not a failure.
           if (st === 'active') sawActive = true;
           if (sawActive && st === 'idle') return 'ok';
-          // A turn faster than the poll interval never shows 'active' — the transcript's
-          // last-real-turn ts (refreshed by the tick) is the fallback proof it ran.
+          // A turn shorter than one poll never shows 'active', which would strand the
+          // ritual until its timeout. The fallback proof must be something the DIRECTIVE
+          // ITSELF cannot satisfy: last_turn_ts counts plain user lines, and the injected
+          // directive is one, so it advances on delivery rather than on completion (and on
+          // an SSH tab it carries the remote clock). PTY silence is the honest signal — a
+          // working TUI agent repaints continuously.
           if (!sawActive && st === 'idle') {
-            const f = facts.get(run.tabId);
-            if (f?.last_turn_ts !== undefined && f.last_turn_ts > directive.sentAt) return 'ok';
+            const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
+            if (Date.now() - directive.sentAt >= TURN_FALLBACK_MIN_MS
+              && Date.now() - lastOut >= TURN_FALLBACK_QUIET_MS) return 'ok';
           }
           break;
         }
@@ -497,6 +518,12 @@ function createOverlordStore() {
    *  the listEscalations pull, keeping the agent's transcript lean. No live agent →
    *  the queue simply waits (the engine runs regardless; §2 agent lifecycle). */
   async function wakeOverlordAgent() {
+    if (unNudged.size === 0) return;
+    // The human may have cleared the queue while the agent was busy — an escalation
+    // dismissed from the board must not still ring "0 escalations pending" later.
+    for (const id of [...unNudged]) {
+      if (!escalations.some((e) => e.id === id && !e.read)) unNudged.delete(id);
+    }
     if (unNudged.size === 0) return;
     const ws = overlordWorkspace();
     if (!ws) return;
@@ -605,6 +632,7 @@ function createOverlordStore() {
       ruleId: rule.id,
       ruleName: rule.name,
       tabId,
+      targetsUnready: rule.when.event === 'agent_unready',
       stepIndex: 0,
       stepCount: rule.sequence.length,
       startedAt: Date.now(),
@@ -848,36 +876,95 @@ function createOverlordStore() {
     'In one line, what are you working on right now? Answer by calling the replyToOverlord ' +
     "tool with kind:'status', your state, a one-line summary, and `task` set to that one line.";
 
-  /** Find this tab's Overlord-owned board row (the placeholder a scan stands up, later
-   *  retitled by the tab's own census answer). At most one per tab, by construction. */
+  /** Find this tab's Overlord-owned board row, in ANY state. Matching must include
+   *  `done`: filtering it out made "mark done" un-sticky — the next scan couldn't see the
+   *  finished row and pushed a fresh duplicate beside it. */
   function overlordRowFor(tabId: string): OverlordTask | undefined {
-    return tasks.find((t) => t.origin === 'overlord' && t.tab_id === tabId && t.state !== 'done');
+    return tasks.find((t) => t.origin === 'overlord' && t.tab_id === tabId);
   }
 
-  /** Create or retitle a tab's Overlord row. Used by both the scan (tab name as a
-   *  placeholder) and an incoming census reply (the agent's own description). */
-  function upsertOverlordRow(tabId: string, title: string, state: OverlordTaskState): boolean {
+  /** Does the TodoWrite mirror already represent this tab? Once it does, the scan's
+   *  placeholder is redundant — the tab's real work is on the board in detail. */
+  function hasMirrorRows(tabId: string): boolean {
+    return tasks.some((t) => t.origin === 'agent' && t.tab_id === tabId && t.state !== 'done');
+  }
+
+  /** Board rows are only rendered for non-Overlord workspaces, so creating one for the
+   *  supervisor's own tab produces an invisible row that still counts in the segment
+   *  badge and eventually surfaces as a phantom "stale" card. */
+  function isBoardableTab(tabId: string): boolean {
+    const ws = workspaceForTab(tabId);
+    return !!ws && !ws.overlord;
+  }
+
+  /** SCAN path: stand up a placeholder row for a running tab, or keep an existing one
+   *  fresh. Deliberately does NOT rewrite `state` or `title` on an existing row — a scan
+   *  is an observation, and silently reverting a card the human dragged to `review`
+   *  (or retitled by answering a census) makes the board untrustworthy. */
+  function adoptRow(tabId: string, tabName: string, live: AgentState): 'created' | 'refreshed' | 'skipped' {
+    if (!isBoardableTab(tabId)) return 'skipped';
+    const existing = overlordRowFor(tabId);
+    if (existing) {
+      // A finished row stays finished; a scan must not resurrect it.
+      if (existing.state === 'done') return 'skipped';
+      // Bump recency so a tab that is demonstrably alive never ages into "stale".
+      existing.updated_at = new Date().toISOString();
+      return 'refreshed';
+    }
+    const ws = workspaceForTab(tabId);
+    if (!ws) return 'skipped';
+    const stamp = new Date().toISOString();
+    tasks.push({
+      id: crypto.randomUUID(),
+      title: tabName,
+      workspace_id: ws.id,
+      tab_id: tabId,
+      state: taskStateForAgent(live),
+      origin: 'overlord',
+      created_at: stamp,
+      updated_at: stamp,
+    });
+    return 'created';
+  }
+
+  /** CENSUS-REPLY path: the tab told us what it's working on, so retitle its placeholder
+   *  (or create one). Never touches a row the human already finished. */
+  function titleRow(tabId: string, title: string): boolean {
+    if (!isBoardableTab(tabId)) return false;
+    // If the mirror already carries this tab's real todos, a one-line summary row on top
+    // of them is noise, not information.
+    if (hasMirrorRows(tabId)) return false;
+    const existing = overlordRowFor(tabId);
+    if (existing) {
+      if (existing.state === 'done' || existing.title === title) return false;
+      existing.title = title;
+      existing.updated_at = new Date().toISOString();
+      return true;
+    }
     const ws = workspaceForTab(tabId);
     if (!ws) return false;
     const stamp = new Date().toISOString();
-    const existing = overlordRowFor(tabId);
-    if (existing) {
-      if (existing.title === title && existing.state === state) return false;
-      existing.title = title;
-      existing.state = state;
-      existing.updated_at = stamp;
-      return true;
-    }
     tasks.push({
       id: crypto.randomUUID(),
       title,
       workspace_id: ws.id,
       tab_id: tabId,
-      state,
+      state: taskStateForAgent(mappedState(tabId)),
       origin: 'overlord',
       created_at: stamp,
       updated_at: stamp,
     });
+    return true;
+  }
+
+  /** Retire a tab's placeholder once the TodoWrite mirror has taken over. Without this a
+   *  tab that starts a todo list after being scanned keeps its stand-in row forever —
+   *  frozen, then permanently "stale", and a live target for task_stale rules. */
+  function retirePlaceholderIfMirrored(tabId: string): boolean {
+    if (!hasMirrorRows(tabId)) return false;
+    const existing = overlordRowFor(tabId);
+    if (!existing || existing.state === 'done') return false;
+    tasks = tasks.filter((t) => t.id !== existing.id);
     return true;
   }
 
@@ -936,6 +1023,7 @@ function createOverlordStore() {
         // TodoWrite mirror
         if (f?.todos) everHadTodos.add(`${tab.id}|${f.session_id}`);
         if (f && syncMirrorTasks(tab.id, f, now)) boardChanged = true;
+        if (f?.todos?.length && retirePlaceholderIfMirrored(tab.id)) boardChanged = true;
         // 2) Rule evaluation
         for (const rule of rulesForWorkspace(ws.id)) {
           if (!rule.sequence.length) continue;
@@ -1040,10 +1128,12 @@ function createOverlordStore() {
       // day-old timeouts. Read ones stay on the board until the human dismisses them.
       const out = ($state.snapshot(escalations) as OverlordEscalation[]).filter((e) => !e.read);
       escalations = escalations.map((e) => (e.read ? e : { ...e, read: true }));
+      unNudged.clear(); // delivered by the pull itself; no doorbell owed
       return out;
     },
     dismissEscalation(id: string) {
       escalations = escalations.filter((e) => e.id !== id);
+      unNudged.delete(id);
     },
     /** An agent reported blocked / needs_human via replyToOverlord (S4 wiring). */
     reportFromAgent(tabId: string, detail: string) {
@@ -1110,22 +1200,28 @@ function createOverlordStore() {
         const now = Date.now();
         let mirrored = 0, adopted = 0, tabsSeen = 0, changed = false;
         const silent: string[] = [];
-        for (const { tab } of pairs) {
+        for (const { tab, ws } of pairs) {
+          // The Overlord workspace is excluded from every board surface, so a row created
+          // for the supervisor's own agent would be invisible — and asking it "what are
+          // you working on" is a category error. Rules still evaluate against it (§9.3:
+          // the checkpoint rule applies to Overlord too); only the board does not.
+          if (ws.overlord) continue;
           const live = claudeStateStore.getState(tab.id);
           if (!live) continue; // only tabs actually running an agent right now
           tabsSeen++;
           const f = facts.get(tab.id);
           if (f?.todos?.length) {
             if (syncMirrorTasks(tab.id, f, now)) changed = true;
+            if (retirePlaceholderIfMirrored(tab.id)) changed = true;
             mirrored++;
             continue;
           }
           // No todo signal — stand up (or refresh) one row for the tab itself, titled
           // with the tab name until the tab tells us something better.
-          const had = !!overlordRowFor(tab.id);
-          const title = overlordRowFor(tab.id)?.title ?? tab.name;
-          if (upsertOverlordRow(tab.id, title, taskStateForAgent(live.state))) changed = true;
-          if (!had) adopted++;
+          const outcome = adoptRow(tab.id, tab.name, live.state);
+          if (outcome !== 'skipped') changed = true;
+          if (outcome === 'created') adopted++;
+          if (outcome === 'skipped') continue; // finished by hand, or not boardable
           const askedAt = Number(getVariables(tab.id)?.get(CENSUS_VAR) ?? 0);
           if (now - askedAt >= CENSUS_COOLDOWN_MS) silent.push(tab.id);
         }
@@ -1148,6 +1244,8 @@ function createOverlordStore() {
       const step = { kind: 'process' as const, text: CENSUS_TEXT };
       let asked = 0, skipped = 0;
       for (const tabId of tabIds) {
+        // Never interrogate the supervisor's own agent (its row wouldn't render anyway).
+        if (!isBoardableTab(tabId)) { skipped++; continue; }
         const askedAt = Number(getVariables(tabId)?.get(CENSUS_VAR) ?? 0);
         if (Date.now() - askedAt < CENSUS_COOLDOWN_MS) { skipped++; continue; }
         if (outstanding.has(tabId) || rituals.has(tabId)) {
@@ -1211,7 +1309,7 @@ function createOverlordStore() {
       // A census answer (or any status carrying `task`) is what upgrades this tab's
       // placeholder row into a real description of the work.
       if (args.task?.trim()) {
-        if (upsertOverlordRow(tabId, args.task.trim().slice(0, 200), taskStateForAgent(mappedState(tabId)))) {
+        if (titleRow(tabId, args.task.trim().slice(0, 200))) {
           tasks = [...tasks];
           persistTasks();
         }
