@@ -123,12 +123,24 @@ mints a new id too. Both are events `initSession` fires on, so a resumed agent r
 list whose rows all carry an id that no longer exists — and would create a second copy of
 everything, once per reload, forever.
 
-Closing a tab therefore **releases** its unfinished tasks to the workspace backlog
-(`tasksStore.releaseTab`), and `findDuplicate` will reclaim an unassigned row for a caller
-that restates its title. The replacement tab picks its own work back up. This is also the
-honest model: a task whose assignee is gone belongs to the project, not to a ghost.
-Finished rows are left assigned — a closed-out task should not be resurrected and re-owned
-because a new tab happened to mention it.
+Two mechanisms, and the order matters:
+
+- **Remap where the new id is known.** `reloadTab` mints the replacement itself, so it
+  calls `tasksStore.remapTab(old, new)` — exact, keeps the tasks visible as the tab's
+  throughout, and cannot be intercepted by another tab using the same title. Reload does
+  *not* go through the store's `deleteTab`, so nothing else would have moved them.
+- **Release and reclaim where it isn't.** A genuine close (`deleteTab`) releases the tab's
+  unfinished tasks to the workspace backlog, and `findDuplicate` reclaims an unassigned row
+  for a caller that restates its title — via `createTasks`, or via the importer, which must
+  take ownership back as well (every completion path is tab-scoped, so a row left
+  unassigned can never be closed out). Finished rows stay assigned: a closed-out task
+  should not be resurrected and re-owned because a new tab happened to mention it.
+
+`releaseTab` checks every workspace rather than stopping at the first — a tab moved between
+workspaces leaves tasks behind, so its rows legitimately span two lists.
+
+This is also the honest model: a task whose assignee is gone belongs to the project, not to
+a ghost.
 
 **Status vocabulary is unchanged** (`backlog/active/blocked/review/done`) so the Overlord
 board's five lanes and every existing helper keep working. Imported/agent statuses map:

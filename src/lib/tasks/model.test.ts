@@ -92,6 +92,20 @@ describe('findDuplicate — reclaiming work after a tab id change', () => {
   });
 });
 
+describe('findDuplicate — what the unassigned fallback must NOT do', () => {
+  it('never matches a row still tagged to a live tab', () => {
+    // Reload remaps ids directly (tasksStore.remapTab); the backlog fallback exists only
+    // for genuinely closed tabs, and must not let one tab adopt another's active work.
+    const theirs = task({ title: 'Wire the parser', tab_id: 'T1', status: 'active' });
+    expect(findDuplicate([theirs], 'Wire the parser', 'T2')).toBeUndefined();
+  });
+
+  it('matches by normalized title, so cosmetic drift still reclaims', () => {
+    const released = task({ title: 'Wire the parser', tab_id: null, status: 'active' });
+    expect(findDuplicate([released], 'wire  the parser.', 'T2')?.id).toBe(released.id);
+  });
+});
+
 describe('coerceStatus', () => {
   it('accepts our own vocabulary unchanged', () => {
     for (const s of ['backlog', 'active', 'blocked', 'review', 'done'] as const) {

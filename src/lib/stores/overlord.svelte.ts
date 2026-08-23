@@ -864,8 +864,14 @@ function createOverlordStore() {
           // re-reading it every 5s would drag a task the agent just marked done — or the
           // human just dragged to review — straight back to whatever the file still says.
           if (next[idx].origin !== 'imported') continue;
-          if (next[idx].status !== status) {
-            next[idx] = { ...next[idx], status, updated_at: stamp };
+          // Reclaim a row this session left in the backlog when its previous tab closed.
+          // Without taking ownership back, every completion path stays out of reach —
+          // closeOutMirrorRows, the present-set sweep and tasksForTab are all tab-scoped —
+          // so the list would sit unassigned and "active" forever while the tab that owns
+          // it is simultaneously judged untracked and nagged to start a list.
+          const reclaimed = !next[idx].tab_id;
+          if (reclaimed || next[idx].status !== status) {
+            next[idx] = { ...next[idx], tab_id: tabId, status, updated_at: stamp };
             changed = true;
           }
         } else {
@@ -897,7 +903,8 @@ function createOverlordStore() {
 
   /** Age out finished rows so the board doesn't accumulate history. Human-authored tasks
    *  are exempt: someone typed those, and silently deleting them two days later is a
-   *  surprise. Only machine-authored rows (imported/overlord placeholders) are swept. */
+   *  surprise. Everything machine-authored is swept — imported mirrors, agent-created
+   *  tasks, and Overlord's own placeholders alike. */
   function sweepDoneTasks(now: number): boolean {
     let changed = false;
     for (const ws of workspacesStore.workspaces) {

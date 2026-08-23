@@ -53,9 +53,15 @@
   }
 
   /** Click the status chip to advance; shift-click to go back. Cycling beats a dropdown
-   *  here — status changes are the panel's most frequent action by far. */
+   *  here — status changes are the panel's most frequent action by far.
+   *
+   *  Steps from the status the chip DISPLAYS, not the stored one. On a task blocked by an
+   *  unfinished dependency those differ, and stepping from the stored value made the chip
+   *  look frozen: three clicks would silently walk the stored status through the whole
+   *  vocabulary while the label stayed "BLOCKED", then jump to "DONE" on the fourth. */
   function cycleStatus(t: Task, back: boolean) {
-    const i = TASK_STATUSES.indexOf(t.status);
+    const shown = effectiveStatus(t, all);
+    const i = TASK_STATUSES.indexOf(shown);
     const next = TASK_STATUSES[(i + (back ? -1 : 1) + TASK_STATUSES.length) % TASK_STATUSES.length];
     tasksStore.setStatus(workspaceId, t.id, next);
   }
@@ -65,11 +71,37 @@
     editValue = t.title;
   }
 
+  /** Edits save as you type, not only on blur.
+   *
+   *  Closing the panel destroys it with the field still focused, and a browser fires no
+   *  blur event when the focused element is removed from the document — so a blur-only
+   *  commit loses whatever was typed. Cmd+Shift+E is exactly that path: it toggles
+   *  visibility without moving focus first. NotesPanel debounces for the same reason. */
+  const SAVE_DEBOUNCE_MS = 400;
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function queueSave(fn: () => void) {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(fn, SAVE_DEBOUNCE_MS);
+  }
+
+  function saveTitle(id: string, title: string) {
+    if (title.trim()) tasksStore.update(workspaceId, id, { title: title.trim() });
+  }
+
+  function saveDetail(id: string, detail: string) {
+    const current = all.find((t) => t.id === id);
+    const next = detail.trim();
+    if (current && (current.detail ?? '') !== next) {
+      tasksStore.update(workspaceId, id, { detail: next || null });
+    }
+  }
+
   function commitEdit() {
     const id = editingId;
     if (!id) return;
-    const title = editValue.trim();
-    if (title) tasksStore.update(workspaceId, id, { title });
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTitle(id, editValue);
     editingId = null;
   }
 
@@ -85,11 +117,8 @@
   function commitDetail() {
     const id = detailFor;
     if (!id) return;
-    const current = all.find((t) => t.id === id);
-    const next = detailValue.trim();
-    if (current && (current.detail ?? '') !== next) {
-      tasksStore.update(workspaceId, id, { detail: next || null });
-    }
+    if (saveTimer) clearTimeout(saveTimer);
+    saveDetail(id, detailValue);
     detailFor = null;
   }
 
@@ -198,6 +227,7 @@
                     class="edit-input"
                     autofocus
                     bind:value={editValue}
+                    oninput={() => editingId && queueSave(() => saveTitle(editingId!, editValue))}
                     onblur={commitEdit}
                     onkeydown={(e) => {
                       if (e.key === 'Enter') commitEdit();
@@ -248,6 +278,7 @@
                   class="detail"
                   placeholder="Notes, acceptance criteria, links…"
                   bind:value={detailValue}
+                  oninput={() => detailFor && queueSave(() => saveDetail(detailFor!, detailValue))}
                   onblur={commitDetail}
                 ></textarea>
               {:else if t.detail}

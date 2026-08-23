@@ -2277,6 +2277,13 @@ function createWorkspacesStore() {
       // teardown, so the transfer must be done explicitly here.
       import('$lib/stores/agentBridge.svelte').then(m => m.agentBridgeStore.remapTab(tabId, newTab.id)).catch(() => {});
       import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.remapTab(tabId, newTab.id)).catch(() => {});
+      // Same reason, and the reason release-and-reclaim is not enough here: this path
+      // never reaches store deleteTab, so nothing releases the old tab's tasks. Left
+      // alone they stay tagged with a dead id — invisible under "this tab", never
+      // closeable by the importer (its completion paths are tab-scoped), and not matched
+      // by the dedup, so the resumed session would mirror its whole list a second time
+      // on the very next tick, and again on every subsequent reload.
+      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.remapTab(tabId, newTab.id)).catch(() => {});
     },
 
     async duplicateWindow() {

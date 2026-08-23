@@ -181,6 +181,23 @@ function createTasksStore() {
       return true;
     },
 
+    /** Reassign a tab's tasks to its replacement, for paths that mint a new id for the
+     *  SAME work — reload, and anything else that rebuilds a tab in place.
+     *
+     *  Preferred over release-and-reclaim whenever the new id is known: it is exact, it
+     *  keeps the tasks visible as this tab's throughout, and it cannot be intercepted by
+     *  another tab that happens to use the same title. Mirrors agentBridge/agentMesh
+     *  `remapTab`, which exist for the same reason. */
+    remapTab(oldTabId: string, newTabId: string) {
+      for (const [workspaceId, list] of [...byWorkspace]) {
+        if (!list.some((t) => t.tab_id === oldTabId)) continue;
+        commit(
+          workspaceId,
+          list.map((t) => (t.tab_id === oldTabId ? { ...t, tab_id: newTabId } : t)),
+        );
+      }
+    },
+
     /** Release a closing tab's tasks back to the project backlog.
      *
      *  Tab ids are not durable: a reload is duplicate-then-close and a fork mints a new
@@ -190,24 +207,19 @@ function createTasksStore() {
      *  them reclaimable (`findDuplicate`) and honest: a task whose assignee is gone belongs
      *  to the project, not to a ghost. Finished rows are left alone; the sweep handles them.
      *
-     *  Returns the workspace id it touched, if any. */
-    releaseTab(tabId: string): string | null {
-      for (const [workspaceId, list] of byWorkspace) {
+     *  Every workspace is checked, not just the first match: a tab moved between
+     *  workspaces leaves tasks behind in the old one, so its rows legitimately span two
+     *  lists and stopping early would strand half of them on an id that no longer exists —
+     *  unreachable by the panel, by the importer, and by the dedup. */
+    releaseTab(tabId: string) {
+      // Snapshot the entries: commit() reassigns the Map underneath the iteration.
+      for (const [workspaceId, list] of [...byWorkspace]) {
         if (!list.some((t) => t.tab_id === tabId && t.status !== 'done')) continue;
         commit(
           workspaceId,
           list.map((t) => (t.tab_id === tabId && t.status !== 'done' ? { ...t, tab_id: null } : t)),
         );
-        return workspaceId;
       }
-      return null;
-    },
-
-    /** Drop a workspace's list from memory when the workspace itself goes away. Does not
-     *  persist — the workspace record carrying the tasks is already gone. */
-    forget(workspaceId: string) {
-      if (!byWorkspace.delete(workspaceId)) return;
-      byWorkspace = new Map(byWorkspace);
     },
   };
 }
