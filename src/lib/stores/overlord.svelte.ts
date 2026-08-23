@@ -854,7 +854,7 @@ function createOverlordStore() {
       for (const item of items) {
         const status = statusFromAgent(item.status, item.blocked);
         // Same dedup helper the MCP createTasks path uses — a tab running BOTH its own
-        // todo list and createTasks must converge on one row, not record the work twice.
+        // runtime todo list and createTasks must converge on one row, not record it twice.
         const dup = findDuplicate(next, item.content, tabId);
         const idx = dup ? next.indexOf(dup) : -1;
         if (idx >= 0) {
@@ -917,17 +917,17 @@ function createOverlordStore() {
 
   // ── Scan & census: populating the board from what's already running ─────────
   //
-  // The board's only automatic feeder is the TodoWrite mirror, which sees a tab only
-  // when its transcript tail happens to contain a TodoWrite — so Codex tabs, tabs
-  // working without a todo list, and tabs whose todos scrolled past the tail window are
-  // all invisible. Scanning closes that gap in two deliberately separate phases:
+  // The board's automatic feeders are the agent itself (createTasks) and the Claude-store
+  // importer. A tab that has learned neither — a Codex tab that was never primed, a tab
+  // working without recording anything — is invisible. Scanning closes that gap in two
+  // deliberately separate phases:
   //
-  //   ADOPT   free, silent, safe to repeat — mirror todos where they exist, otherwise
-  //           stand up one placeholder row per running tab. No injection at all.
-  //   ASK     opt-in, one directive per untracked tab, asking it to START KEEPING a todo
-  //           list — which then feeds the board on its own, forever, via the store. Never
-  //           automatic: writing into 40 transcripts must not be a side effect of opening
-  //           a board.
+  //   ADOPT   free, silent, safe to repeat — import a runtime's own list where one exists,
+  //           otherwise stand up one placeholder row per running tab. No injection at all.
+  //   ASK     opt-in, one directive per untracked tab, asking it to START RECORDING its
+  //           work with createTasks — which then keeps the board current on its own,
+  //           forever. Never automatic: writing into 40 transcripts must not be a side
+  //           effect of opening a board.
   //
   // Both are idempotent. Adopt matches existing rows on (origin, tab_id) so a re-scan
   // updates instead of duplicating; census stamps a persisted per-tab timestamp so a
@@ -965,8 +965,9 @@ function createOverlordStore() {
     return tasksForTab(tabId).find((t) => t.origin === 'overlord');
   }
 
-  /** Does the TodoWrite mirror already represent this tab? Once it does, the scan's
-   *  placeholder is redundant — the tab's real work is on the board in detail. */
+  /** Is this tab's real work already on the board — recorded by the agent (createTasks) or
+   *  imported from its runtime's own list? Once it is, the scan's placeholder is redundant:
+   *  the tab's work is there in detail, and a stand-in titled with the tab name is noise. */
   function hasMirrorRows(tabId: string): boolean {
     return tasksForTab(tabId).some((t) => t.origin !== 'overlord' && t.status !== 'done');
   }
@@ -1028,9 +1029,9 @@ function createOverlordStore() {
     return true;
   }
 
-  /** Retire a tab's placeholder once the TodoWrite mirror has taken over. Without this a
-   *  tab that starts a todo list after being scanned keeps its stand-in row forever —
-   *  frozen, then permanently "stale", and a live target for task_stale rules. */
+  /** Retire a tab's placeholder once its real tasks have taken over. Without this a tab
+   *  that starts tracking after being scanned keeps its stand-in row forever — frozen, then
+   *  permanently "stale", and a live target for task_stale rules. */
   function retirePlaceholderIfMirrored(tabId: string): boolean {
     if (!hasMirrorRows(tabId)) return false;
     const ws = workspaceForTab(tabId);
@@ -1302,7 +1303,7 @@ function createOverlordStore() {
       }
     },
 
-    /** ASK-TO-TRACK pass — nudge the given tabs to start keeping a todo list, which then
+    /** ASK-TO-TRACK pass — nudge the given tabs to start recording their work, which then
      *  feeds the board on its own via Claude Code's todo store. One short directive each,
      *  through the same mechanical guards as any rule, ledgered as human-origin (you asked
      *  for it). Skips anything busy, guarded, or asked recently. */
