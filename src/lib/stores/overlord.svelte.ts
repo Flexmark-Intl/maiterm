@@ -6,8 +6,8 @@ import type {
   OverlordLedgerOutcome,
   OverlordRule,
   OverlordStep,
-  OverlordTask,
-  OverlordTaskState,
+  Task,
+  TaskStatus,
   Tab,
   Workspace,
 } from '$lib/tauri/types';
@@ -20,6 +20,8 @@ import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { getVariables, setVariable } from '$lib/stores/triggers.svelte';
+import { tasksStore } from '$lib/stores/tasks.svelte';
+import { makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -241,7 +243,6 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
 function createOverlordStore() {
   // ── Reactive surfaces (board + gauges + queues) ─────────────────────────────
   let facts = $state<Map<string, OverlordTabFacts>>(new Map());
-  let tasks = $state<OverlordTask[]>([]);
   let proposals = $state<OverlordProposal[]>([]);
   let escalations = $state<OverlordEscalation[]>([]);
   let recentLedger = $state<OverlordLedgerEntry[]>([]);
@@ -742,11 +743,8 @@ function createOverlordStore() {
         return last !== undefined && now - last >= w.minutes * 60_000;
       }
       case 'task_stale':
-        return tasks.some(
-          (t) =>
-            t.tab_id === tab.id &&
-            t.state !== 'done' &&
-            now - Date.parse(t.updated_at) >= w.days * 86_400_000,
+        return tasksForTab(tab.id).some(
+          (t) => t.status !== 'done' && now - Date.parse(t.updated_at) >= w.days * 86_400_000,
         );
       case 'agent_unready':
         return !claudeStateStore.getState(tab.id) && !!terminalsStore.get(tab.id);
@@ -794,83 +792,116 @@ function createOverlordStore() {
     ledger(tabId, rule.id, 'rule', 0, rule.sequence[0] ?? { kind: 'process', text: '' }, 'proposed');
   }
 
-  // ── TodoWrite mirror → board (§11) ─────────────────────────────────────────
+  // ── Board rows (§11) — owned by the tasks store ────────────────────────────
+  //
+  // Overlord does not own task state; maiTerm does (docs/tasks.md). The engine is one
+  // writer among several — the human's panel, agents over MCP, and the Claude task-store
+  // importer write the same rows. So every helper below goes through `tasksStore`, which
+  // owns persistence: a mutation persists the workspace it touched, and there is no
+  // separate "did the board change" bookkeeping to keep in sync.
 
-  function todoState(item: { status: string; blocked?: boolean }): OverlordTaskState {
-    if (item.status === 'completed') return 'done';
-    if (item.blocked) return 'blocked'; // waiting on an unfinished dependency
-    if (item.status === 'in_progress') return 'active';
-    return 'backlog';
+  /** Every task in this window, tagged with its workspace — the board's flat view. */
+  function allTasks(): TaskRow[] {
+    const out: TaskRow[] = [];
+    for (const ws of workspacesStore.workspaces) {
+      for (const t of tasksStore.forWorkspace(ws.id)) out.push({ ...t, workspace_id: ws.id });
+    }
+    return out;
+  }
+
+  /** Every task in this window belonging to `tabId`, regardless of workspace. */
+  function tasksForTab(tabId: string): Task[] {
+    const ws = workspaceForTab(tabId);
+    return ws ? tasksStore.forWorkspace(ws.id).filter((t) => t.tab_id === tabId) : [];
   }
 
   /** Every task finished: Claude Code sweeps the files, leaving a tracked-but-empty store.
-   *  Close out the tab's mirrored rows instead of leaving them frozen mid-flight — a
+   *  Close out the tab's imported rows instead of leaving them frozen mid-flight — a
    *  half-done row that nothing will ever update becomes a false "stale" card in a few days. */
   function closeOutMirrorRows(tabId: string, now: number): boolean {
-    let changed = false;
-    for (const t of tasks) {
-      if (t.origin === 'agent' && t.tab_id === tabId && t.state !== 'done') {
-        t.state = 'done';
-        t.updated_at = new Date(now).toISOString();
-        changed = true;
-      }
-    }
-    return changed;
+    const ws = workspaceForTab(tabId);
+    if (!ws) return false;
+    const stamp = new Date(now).toISOString();
+    return tasksStore.mutate(ws.id, (list) => {
+      let changed = false;
+      const next = list.map((t) => {
+        if (t.origin === 'imported' && t.tab_id === tabId && t.status !== 'done') {
+          changed = true;
+          return { ...t, status: 'done' as TaskStatus, updated_at: stamp };
+        }
+        return t;
+      });
+      return changed ? next : null;
+    });
   }
 
+  /** Import the tab's runtime task list into maiTerm's own store. One-way: rows are marked
+   *  `imported` and never written back to the runtime (docs/tasks.md §2). Matching is by
+   *  normalized title within the tab, which is also what keeps an agent that ALSO uses
+   *  createTasks from double-recording the same work. */
   function syncMirrorTasks(tabId: string, f: OverlordTabFacts, now: number): boolean {
     if (!f.todos) return false;
     const ws = workspaceForTab(tabId);
     if (!ws) return false;
-    let changed = false;
-    for (const item of f.todos) {
-      if (!item?.content) continue;
-      const existing = tasks.find((t) => t.origin === 'agent' && t.tab_id === tabId && t.title === item.content);
-      const state = todoState(item);
-      if (existing) {
-        if (existing.state !== state) {
-          existing.state = state;
-          existing.updated_at = new Date(now).toISOString();
+    const stamp = new Date(now).toISOString();
+    const items = f.todos.filter((i) => i?.content);
+    return tasksStore.mutate(ws.id, (list) => {
+      let changed = false;
+      const next = [...list];
+      for (const item of items) {
+        const status = statusFromAgent(item.status, item.blocked);
+        const idx = next.findIndex(
+          (t) => t.tab_id === tabId && t.normalized_title === normalizeTitle(item.content),
+        );
+        if (idx >= 0) {
+          if (next[idx].status !== status) {
+            next[idx] = { ...next[idx], status, updated_at: stamp };
+            changed = true;
+          }
+        } else {
+          next.push(makeTask({ title: item.content, status, tab_id: tabId, origin: 'imported' }, stamp));
           changed = true;
         }
-      } else {
-        tasks.push({
-          id: crypto.randomUUID(),
-          title: item.content,
-          workspace_id: ws.id,
-          tab_id: tabId,
-          state,
-          origin: 'agent',
-          created_at: new Date(now).toISOString(),
-          updated_at: new Date(now).toISOString(),
-        });
-        changed = true;
       }
-    }
-    // A TodoWrite replaces the agent's whole list — mirror rows for items no longer on
-    // it are finished as far as the agent is concerned. Mark them done (the 48h sweep
-    // clears them); leaving them "active" turns every list rewrite into false STALEs.
-    const present = new Set(f.todos.map((t) => t?.content).filter(Boolean));
-    for (const t of tasks) {
-      if (t.origin === 'agent' && t.tab_id === tabId && t.state !== 'done' && !present.has(t.title)) {
-        t.state = 'done';
-        t.updated_at = new Date(now).toISOString();
-        changed = true;
+      // The runtime's list is authoritative for ITS OWN rows: an imported item that is no
+      // longer on it is finished as far as the agent is concerned. Only `imported` rows
+      // are swept — a human's or another agent's task must never vanish because some
+      // runtime rewrote its private list.
+      const present = new Set(items.map((i) => normalizeTitle(i.content)));
+      for (let i = 0; i < next.length; i++) {
+        const t = next[i];
+        if (
+          t.origin === 'imported' &&
+          t.tab_id === tabId &&
+          t.status !== 'done' &&
+          !present.has(t.normalized_title)
+        ) {
+          next[i] = { ...t, status: 'done' as TaskStatus, updated_at: stamp };
+          changed = true;
+        }
       }
+      return changed ? next : null;
+    });
+  }
+
+  /** Age out finished rows so the board doesn't accumulate history. Human-authored tasks
+   *  are exempt: someone typed those, and silently deleting them two days later is a
+   *  surprise. Only machine-authored rows (imported/overlord placeholders) are swept. */
+  function sweepDoneTasks(now: number): boolean {
+    let changed = false;
+    for (const ws of workspacesStore.workspaces) {
+      const swept = tasksStore.mutate(ws.id, (list) => {
+        const next = list.filter(
+          (t) =>
+            t.status !== 'done' ||
+            t.origin === 'human' ||
+            now - Date.parse(t.updated_at) < TASK_DONE_RETENTION_MS,
+        );
+        return next.length === list.length ? null : next;
+      });
+      changed = changed || swept;
     }
     return changed;
-  }
-
-  function sweepDoneTasks(now: number): boolean {
-    const before = tasks.length;
-    tasks = tasks.filter((t) => t.state !== 'done' || now - Date.parse(t.updated_at) < TASK_DONE_RETENTION_MS);
-    return tasks.length !== before;
-  }
-
-  function persistTasks() {
-    commands.setOverlordTasks($state.snapshot(tasks) as OverlordTask[]).catch((e) =>
-      logError(`overlord: task persist failed: ${e}`),
-    );
   }
 
   // ── Scan & census: populating the board from what's already running ─────────
@@ -916,14 +947,14 @@ function createOverlordStore() {
   /** Find this tab's Overlord-owned board row, in ANY state. Matching must include
    *  `done`: filtering it out made "mark done" un-sticky — the next scan couldn't see the
    *  finished row and pushed a fresh duplicate beside it. */
-  function overlordRowFor(tabId: string): OverlordTask | undefined {
-    return tasks.find((t) => t.origin === 'overlord' && t.tab_id === tabId);
+  function overlordRowFor(tabId: string): Task | undefined {
+    return tasksForTab(tabId).find((t) => t.origin === 'overlord');
   }
 
   /** Does the TodoWrite mirror already represent this tab? Once it does, the scan's
    *  placeholder is redundant — the tab's real work is on the board in detail. */
   function hasMirrorRows(tabId: string): boolean {
-    return tasks.some((t) => t.origin === 'agent' && t.tab_id === tabId && t.state !== 'done');
+    return tasksForTab(tabId).some((t) => t.origin !== 'overlord' && t.status !== 'done');
   }
 
   /** Board rows are only rendered for non-Overlord workspaces, so creating one for the
@@ -940,26 +971,21 @@ function createOverlordStore() {
    *  (or retitled by answering a census) makes the board untrustworthy. */
   function adoptRow(tabId: string, tabName: string, live: AgentState): 'created' | 'refreshed' | 'skipped' {
     if (!isBoardableTab(tabId)) return 'skipped';
+    const ws = workspaceForTab(tabId);
+    if (!ws) return 'skipped';
     const existing = overlordRowFor(tabId);
     if (existing) {
       // A finished row stays finished; a scan must not resurrect it.
-      if (existing.state === 'done') return 'skipped';
+      if (existing.status === 'done') return 'skipped';
       // Bump recency so a tab that is demonstrably alive never ages into "stale".
-      existing.updated_at = new Date().toISOString();
+      tasksStore.update(ws.id, existing.id, {});
       return 'refreshed';
     }
-    const ws = workspaceForTab(tabId);
-    if (!ws) return 'skipped';
-    const stamp = new Date().toISOString();
-    tasks.push({
-      id: crypto.randomUUID(),
+    tasksStore.add(ws.id, {
       title: tabName,
-      workspace_id: ws.id,
+      status: taskStateForAgent(live),
       tab_id: tabId,
-      state: taskStateForAgent(live),
       origin: 'overlord',
-      created_at: stamp,
-      updated_at: stamp,
     });
     return 'created';
   }
@@ -972,25 +998,18 @@ function createOverlordStore() {
     // If the mirror already carries this tab's real todos, a one-line summary row on top
     // of them is noise, not information.
     if (hasMirrorRows(tabId)) return false;
-    const existing = overlordRowFor(tabId);
-    if (existing) {
-      if (existing.state === 'done' || existing.title === title) return false;
-      existing.title = title;
-      existing.updated_at = new Date().toISOString();
-      return true;
-    }
     const ws = workspaceForTab(tabId);
     if (!ws) return false;
-    const stamp = new Date().toISOString();
-    tasks.push({
-      id: crypto.randomUUID(),
+    const existing = overlordRowFor(tabId);
+    if (existing) {
+      if (existing.status === 'done' || existing.title === title) return false;
+      return tasksStore.update(ws.id, existing.id, { title });
+    }
+    tasksStore.add(ws.id, {
       title,
-      workspace_id: ws.id,
+      status: taskStateForAgent(mappedState(tabId)),
       tab_id: tabId,
-      state: taskStateForAgent(mappedState(tabId)),
       origin: 'overlord',
-      created_at: stamp,
-      updated_at: stamp,
     });
     return true;
   }
@@ -1000,13 +1019,13 @@ function createOverlordStore() {
    *  frozen, then permanently "stale", and a live target for task_stale rules. */
   function retirePlaceholderIfMirrored(tabId: string): boolean {
     if (!hasMirrorRows(tabId)) return false;
+    const ws = workspaceForTab(tabId);
     const existing = overlordRowFor(tabId);
-    if (!existing || existing.state === 'done') return false;
-    tasks = tasks.filter((t) => t.id !== existing.id);
-    return true;
+    if (!ws || !existing || existing.status === 'done') return false;
+    return tasksStore.remove(ws.id, existing.id);
   }
 
-  function taskStateForAgent(st: AgentState | undefined): OverlordTaskState {
+  function taskStateForAgent(st: AgentState | undefined): TaskStatus {
     return st === 'permission' ? 'blocked' : 'active';
   }
 
@@ -1030,7 +1049,6 @@ function createOverlordStore() {
       } else {
         facts = new Map();
       }
-      let boardChanged = false;
       for (const { tab, ws } of pairs) {
         const f = facts.get(tab.id);
         const st = mappedState(tab.id);
@@ -1058,14 +1076,14 @@ function createOverlordStore() {
         if (od && od.ruleId === null && (od.acked || (f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))) {
           clearOutstanding(tab.id);
         }
-        // TodoWrite mirror
+        // Claude task-store importer — one-way, into maiTerm's own store.
         if (f?.tracked) everHadTodos.add(`${tab.id}|${f.session_id}`);
         if (f?.todos?.length) {
-          if (syncMirrorTasks(tab.id, f, now)) boardChanged = true;
-          if (retirePlaceholderIfMirrored(tab.id)) boardChanged = true;
+          syncMirrorTasks(tab.id, f, now);
+          retirePlaceholderIfMirrored(tab.id);
         } else if (f?.tracked) {
           // Tracked but empty — the agent finished its whole list.
-          if (closeOutMirrorRows(tab.id, now)) boardChanged = true;
+          closeOutMirrorRows(tab.id, now);
         }
         // 2) Rule evaluation
         for (const rule of rulesForWorkspace(ws.id)) {
@@ -1083,11 +1101,7 @@ function createOverlordStore() {
       void tryPrimeOverlordAgent();
       // Escalations that arrived while the agent was busy still owe it a doorbell.
       if (unNudged.size) void wakeOverlordAgent();
-      if (sweepDoneTasks(now)) boardChanged = true;
-      if (boardChanged) {
-        tasks = [...tasks]; // Map/array reactivity: new array so $derived consumers re-read
-        persistTasks();
-      }
+      sweepDoneTasks(now);
     } finally {
       ticking = false;
     }
@@ -1098,7 +1112,8 @@ function createOverlordStore() {
   return {
     get running() { return running; },
     get facts() { return facts; },
-    get tasks() { return tasks; },
+    /** Flat board view: every task in this window, tagged with its workspace. */
+    get tasks(): TaskRow[] { return allTasks(); },
     get proposals() { return proposals; },
     get escalations() { return escalations; },
     get recentLedger() { return recentLedger; },
@@ -1129,12 +1144,9 @@ function createOverlordStore() {
         preferencesStore.hiddenDefaultOverlordRules,
       );
       if (seeded) await preferencesStore.setOverlordRules(seeded);
-      try {
-        const win = await commands.getWindowData();
-        tasks = win.overlord_tasks ?? [];
-      } catch (e) {
-        logError(`overlord: board load failed: ${e}`);
-      }
+      // Board rows live in the tasks store now — hydrate it if nothing else has yet
+      // (the engine can start before any panel has mounted).
+      if (!tasksStore.loaded) await tasksStore.rehydrate();
       try {
         recentLedger = await commands.getOverlordLedger();
       } catch { /* fresh window */ }
@@ -1193,29 +1205,15 @@ function createOverlordStore() {
 
     // ── Board CRUD (human-owned rows; §11) ───────────────────────────────────
     addTask(title: string, workspaceId: string, tabId?: string | null) {
-      const now = new Date().toISOString();
-      tasks = [
-        ...tasks,
-        {
-          id: crypto.randomUUID(),
-          title,
-          workspace_id: workspaceId,
-          tab_id: tabId ?? null,
-          state: 'backlog',
-          origin: 'human',
-          created_at: now,
-          updated_at: now,
-        },
-      ];
-      persistTasks();
+      tasksStore.add(workspaceId, { title, tab_id: tabId ?? null, origin: 'human' });
     },
-    updateTaskState(id: string, state: OverlordTaskState) {
-      tasks = tasks.map((t) => (t.id === id ? { ...t, state, updated_at: new Date().toISOString() } : t));
-      persistTasks();
+    updateTaskState(id: string, status: TaskStatus) {
+      const hit = tasksStore.findAnywhere(id);
+      if (hit) tasksStore.setStatus(hit.workspaceId, id, status);
     },
     deleteTask(id: string) {
-      tasks = tasks.filter((t) => t.id !== id);
-      persistTasks();
+      const hit = tasksStore.findAnywhere(id);
+      if (hit) tasksStore.remove(hit.workspaceId, id);
     },
 
     get agentReports() { return agentReports; },
@@ -1274,10 +1272,6 @@ function createOverlordStore() {
           if (outcome === 'skipped') continue; // finished by hand, or not boardable
           const askedAt = Number(getVariables(tab.id)?.get(TRACK_ASK_VAR) ?? 0);
           if (now - askedAt >= TRACK_ASK_COOLDOWN_MS) silent.push(tab.id);
-        }
-        if (changed) {
-          tasks = [...tasks];
-          persistTasks();
         }
         lastScan = { at: now, tabsSeen, mirrored, fromStore, adopted, finished, silent };
         logInfo(`overlord: scan — ${tabsSeen} running tabs, ${mirrored} task lists read (${fromStore} from the store), ${finished} finished, ${adopted} adopted, ${silent.length} untracked`);
@@ -1360,10 +1354,7 @@ function createOverlordStore() {
       // A census answer (or any status carrying `task`) is what upgrades this tab's
       // placeholder row into a real description of the work.
       if (args.task?.trim()) {
-        if (titleRow(tabId, args.task.trim().slice(0, 200))) {
-          tasks = [...tasks];
-          persistTasks();
-        }
+        titleRow(tabId, args.task.trim().slice(0, 200));
       }
       const d = outstanding.get(tabId);
       if (args.kind === 'ack' && d) {

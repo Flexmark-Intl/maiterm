@@ -4,7 +4,8 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import type { OverlordTask, OverlordTaskState, Workspace, Tab } from '$lib/tauri/types';
+  import type { TaskStatus, Workspace, Tab } from '$lib/tauri/types';
+  import { effectiveStatus, type TaskRow } from '$lib/tasks/model';
   import { fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
   import '$lib/overlord/deck.css';
 
@@ -60,7 +61,7 @@
   const clock = setInterval(() => { now = Date.now(); }, 20_000);
 
   // ── Constants ───────────────────────────────────────────────────────────────
-  const LANES: OverlordTaskState[] = ['backlog', 'active', 'blocked', 'review', 'done'];
+  const LANES: TaskStatus[] = ['backlog', 'active', 'blocked', 'review', 'done'];
   const PRESSURE_PCT = 50;
   const STALE_DAYS = 3;
 
@@ -138,7 +139,7 @@
     | { sev: number; id: string; type: 'proposal'; p: (typeof overlordStore.proposals)[number] }
     | { sev: number; id: string; type: 'escalation'; e: (typeof overlordStore.escalations)[number] }
     | { sev: number; id: string; type: 'permission' | 'pressure' | 'unready'; u: FleetUnit }
-    | { sev: number; id: string; type: 'stale'; t: OverlordTask };
+    | { sev: number; id: string; type: 'stale'; t: TaskRow };
 
   const signals = $derived.by<Signal[]>(() => {
     const out: Signal[] = [];
@@ -150,7 +151,7 @@
       else if (u.state === 'dormant') out.push({ sev: 5, id: `dead-${u.tab.id}`, type: 'unready', u });
     }
     for (const t of overlordStore.tasks) {
-      if (t.state !== 'done' && now - Date.parse(t.updated_at) > STALE_DAYS * 86_400_000) {
+      if (t.status !== 'done' && now - Date.parse(t.updated_at) > STALE_DAYS * 86_400_000) {
         out.push({ sev: 4, id: `stale-${t.id}`, type: 'stale', t });
       }
     }
@@ -181,16 +182,19 @@
   }
 
   // ── Board helpers ───────────────────────────────────────────────────────────
-  function tasksFor(wsId: string, state: OverlordTaskState) {
-    return overlordStore.tasks.filter((t) => t.workspace_id === wsId && t.state === state);
+  /** Lane membership uses the EFFECTIVE status, so a task waiting on an unfinished
+   *  prerequisite shows up under `blocked` without anyone having to restate it there. */
+  function tasksFor(wsId: string, lane: TaskStatus) {
+    const all = overlordStore.tasks.filter((t) => t.workspace_id === wsId);
+    return all.filter((t) => effectiveStatus(t, all) === lane);
   }
   function taskCount(wsId: string) {
-    return overlordStore.tasks.filter((t) => t.workspace_id === wsId && t.state !== 'done').length;
+    return overlordStore.tasks.filter((t) => t.workspace_id === wsId && t.status !== 'done').length;
   }
-  function moveTask(task: OverlordTask, dir: 1 | -1) {
-    const i = LANES.indexOf(task.state);
+  function moveTask(task: TaskRow, dir: 1 | -1) {
+    const i = LANES.indexOf(task.status);
     const next = LANES[Math.min(LANES.length - 1, Math.max(0, i + dir))];
-    if (next !== task.state) overlordStore.updateTaskState(task.id, next);
+    if (next !== task.status) overlordStore.updateTaskState(task.id, next);
   }
   function addTask(wsId: string) {
     const title = (newTaskTitles[wsId] ?? '').trim();
@@ -246,7 +250,7 @@
       </div>
 
       <nav class="segments">
-        {#each [['deck', 'Triage', needsYou], ['fleet', 'Fleet', fleet.length], ['board', 'Board', overlordStore.tasks.filter(t => t.state !== 'done').length], ['ledger', 'Ledger', 0]] as [id, label, count] (id)}
+        {#each [['deck', 'Triage', needsYou], ['fleet', 'Fleet', fleet.length], ['board', 'Board', overlordStore.tasks.filter(t => t.status !== 'done').length], ['ledger', 'Ledger', 0]] as [id, label, count] (id)}
           <button class="segment" class:on={view === id} onclick={() => (view = id as View)}>
             {label}
             {#if (count as number) > 0}<span class="segment-count">{count}</span>{/if}

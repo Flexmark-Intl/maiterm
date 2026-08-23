@@ -323,22 +323,6 @@ export interface OverlordRule {
   supersedes?: string[];
 }
 
-export type OverlordTaskState = 'backlog' | 'active' | 'blocked' | 'review' | 'done';
-
-/** A row on the per-window Overlord board (docs/overlord.md §11). */
-export interface OverlordTask {
-  id: string;
-  title: string;
-  workspace_id: string;
-  /** Assignee tab; null = backlog. */
-  tab_id?: string | null;
-  state: OverlordTaskState;
-  origin: 'human' | 'overlord' | 'agent';
-  created_at: string;
-  updated_at: string;
-  topic_id?: string | null;
-}
-
 export type OverlordLedgerOutcome =
   | 'sent' | 'blocked_no_repl' | 'blocked_guard' | 'acked' | 'timed_out'
   | 'aborted' | 'skipped_runtime' | 'proposed';
@@ -492,7 +476,6 @@ export interface WindowData {
   sidebar_width: number;
   sidebar_collapsed: boolean;
   /** Overlord board rows for this window (absent when empty — serde skip). */
-  overlord_tasks?: OverlordTask[];
 }
 
 export interface DuplicateWorkspaceResult {

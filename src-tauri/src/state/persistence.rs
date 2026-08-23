@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::workspace::{AppData, Layout, SplitDirection, SplitNode, TabType, WindowData};
+use super::workspace::{AppData, Layout, SplitDirection, SplitNode, TabType, Task, WindowData};
 
 /// Tracks whether the last load_state() successfully parsed a real state file.
 /// When false, save_state() will NOT overwrite the backup — preserving the last
@@ -339,6 +339,63 @@ pub fn migrate_app_data(data: &mut AppData) {
                     }
                 }
             }
+        }
+    }
+
+    // Overlord board rows move from the window to the workspace that owns them
+    // (docs/tasks.md §3): tasks belong to a project, not to whichever window happens to
+    // be showing it. Drained rather than copied, and `overlord_tasks` is deserialize-only
+    // from here on, so the next save clears the old field and this can never run twice.
+    // Read as raw JSON so the retired OverlordTask struct doesn't have to be kept alive
+    // just to be deleted once.
+    for win in data.windows.iter_mut() {
+        let legacy = std::mem::take(&mut win.overlord_tasks);
+        if legacy.is_empty() {
+            continue;
+        }
+        let (mut moved, mut dropped) = (0u32, 0u32);
+        for row in legacy {
+            let str_at = |k: &str| row.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            // Every one of these was non-optional on the old struct, so a row missing any
+            // of them is corrupt rather than merely old. Drop it: inventing a timestamp
+            // would hand it a bogus age, and `updated_at` is exactly what the staleness
+            // rules read.
+            let (Some(id), Some(title), Some(workspace_id), Some(created_at), Some(updated_at)) = (
+                str_at("id"),
+                str_at("title"),
+                str_at("workspace_id"),
+                str_at("created_at"),
+                str_at("updated_at"),
+            ) else {
+                dropped += 1;
+                continue;
+            };
+            let Some(ws) = win.workspaces.iter_mut().find(|w| w.id == workspace_id) else {
+                // The workspace is gone — so is the project. Nothing to attach to.
+                dropped += 1;
+                continue;
+            };
+            ws.tasks.push(Task {
+                id,
+                normalized_title: Task::normalize_title(&title),
+                title,
+                detail: None,
+                // `state` was the old field name for what is now `status`.
+                status: str_at("state").unwrap_or_else(|| "backlog".to_string()),
+                tab_id: str_at("tab_id"),
+                blocked_by: Vec::new(),
+                origin: str_at("origin").unwrap_or_else(|| "human".to_string()),
+                created_at,
+                updated_at,
+                topic_id: str_at("topic_id"),
+            });
+            moved += 1;
+        }
+        if moved > 0 || dropped > 0 {
+            log::info!(
+                "Migration: moved {} Overlord board rows onto their workspaces ({} dropped as orphaned/malformed) in window '{}'",
+                moved, dropped, win.label
+            );
         }
     }
 

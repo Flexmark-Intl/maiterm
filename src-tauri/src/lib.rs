@@ -572,7 +572,6 @@ pub fn run() {
             commands::overlord::get_overlord_tab_facts,
             commands::overlord::append_overlord_ledger,
             commands::overlord::get_overlord_ledger,
-            commands::overlord::set_overlord_tasks,
             commands::overlord::set_workspace_overlord,
             commands::overlord::create_overlord_workspace,
             commands::tasks::set_workspace_tasks,

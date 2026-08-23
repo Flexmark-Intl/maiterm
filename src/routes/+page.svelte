@@ -361,6 +361,10 @@
       agentBridgeStore.rehydrate();
       // Rebuild Mesh routers + topic registries from persisted state.
       import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.rehydrate()).catch(() => {});
+      // Load this window's tasks (docs/tasks.md). Hydrated unconditionally: the panel,
+      // the MCP tools and the Overlord board all read the same store, and MCP calls can
+      // arrive before any of those surfaces has been opened.
+      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
       // Start the Overlord engine for this window (no-ops each tick unless enabled).
       import('$lib/stores/overlord.svelte').then(m => m.overlordStore.rehydrate()).catch(() => {});
     });

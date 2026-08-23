@@ -8,4 +8,4 @@ pub use agent_runtime::AgentRuntime;
 pub use app_state::{AppState, FileWatcherHandle, PendingResize, PtyCommand, PtyHandle, PtyStats, RemoteFileWatch};
 pub use persistence::{load_state, save_state};
 pub use scrollback_db::ScrollbackDb;
-pub use workspace::{AgentBridge, OverlordTask, AppData, CommsBinding, CommsMonitor, CommsMonitorChannel, DiffContext, EditorFileInfo, MailinkDevice, MeshTopic, Pane, Preferences, Tab, Task, WindowData, WindowGeometry, Workspace};
+pub use workspace::{AgentBridge, AppData, CommsBinding, CommsMonitor, CommsMonitorChannel, DiffContext, EditorFileInfo, MailinkDevice, MeshTopic, Pane, Preferences, Tab, Task, WindowData, WindowGeometry, Workspace};

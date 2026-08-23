@@ -5,7 +5,7 @@
 //! gauge + last-real-turn ts from the transcript tail-facts cache (mailink/transcript.rs).
 
 use crate::state::persistence::save_state;
-use crate::state::{AppState, OverlordTask};
+use crate::state::AppState;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -70,24 +70,6 @@ pub fn get_overlord_ledger(
     let app_data = state.app_data.read();
     let win = app_data.window(&label).ok_or("Window not found")?;
     Ok(win.overlord_ledger.clone())
-}
-
-/// Replace this window's Overlord board rows (frontend owns its copy — same
-/// whole-list persistence shape as setWorkspaceMeshTopics).
-#[tauri::command]
-pub fn set_overlord_tasks(
-    window: tauri::Window,
-    state: State<'_, Arc<AppState>>,
-    tasks: Vec<OverlordTask>,
-) -> Result<(), String> {
-    let label = window.label().to_string();
-    let data_clone = {
-        let mut app_data = state.app_data.write();
-        let win = app_data.window_mut(&label).ok_or("Window not found")?;
-        win.overlord_tasks = tasks;
-        app_data.clone()
-    };
-    save_state(&data_clone)
 }
 
 /// Create this window's Overlord workspace (docs/overlord.md §11): overlord flag set,

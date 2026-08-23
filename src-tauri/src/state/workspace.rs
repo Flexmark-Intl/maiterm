@@ -565,9 +565,11 @@ pub struct WindowData {
     /// interprets entries); ring-buffered at append time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overlord_ledger: Vec<serde_json::Value>,
-    /// Overlord board rows (docs/overlord.md §11), grouped by workspace in the UI.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlord_tasks: Vec<OverlordTask>,
+    /// Legacy Overlord board rows. Deserialize-only: `migrate_app_data` drains these onto
+    /// the workspaces that own them (docs/tasks.md §3) and the next save drops the field.
+    /// Kept as raw JSON so the retired `OverlordTask` struct doesn't have to live on.
+    #[serde(default, skip_serializing)]
+    pub overlord_tasks: Vec<serde_json::Value>,
     // Legacy flat fields — migrated to window_geometry on first save
     #[serde(default, skip_serializing)]
     window_x: Option<f64>,
@@ -1013,27 +1015,6 @@ pub struct OverlordRule {
     /// override can't share the parent's default_id (seeding assumes one rule per id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<Vec<String>>,
-}
-
-/// A row on the Overlord board (docs/overlord.md §11). Per-window (lives on WindowData),
-/// grouped by workspace in the UI. Fed by the human, the TodoWrite mirror, and Overlord.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OverlordTask {
-    pub id: String,
-    pub title: String,
-    pub workspace_id: String,
-    /// Assignee tab; None = backlog.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
-    /// "backlog" | "active" | "blocked" | "review" | "done".
-    pub state: String,
-    /// "human" | "overlord" | "agent".
-    pub origin: String,
-    pub created_at: String,
-    pub updated_at: String,
-    /// Mesh topic that is this task's conversation vehicle, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
