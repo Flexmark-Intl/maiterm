@@ -44,6 +44,23 @@
   // `/maiterm init` typed at a shell, vs. injecting ssh+resume into a running agent.
   let running = $state<Record<string, boolean>>({});
 
+  /**
+   * Tabs where `/maiterm init` was sent and no session ever came back.
+   *
+   * `running` is a GUESS for SSH tabs, and a systematically wrong one for a whole class:
+   * `ssh_foreground` only means ssh is the tty's foreground job, which says nothing about
+   * what runs on the far side. An SSH tab whose REMOTE agent exited looks exactly like a
+   * live remote agent that lost its binding — both read `running`, both show
+   * "Running · needs init", and Init types a line of junk at a remote shell. Such a tab
+   * could never reach 'dropped', so Resume — the remedy that would actually fix it — was
+   * unreachable, and the only hint was a "no response" tag that never resolved.
+   *
+   * Init stays the first move (cheap, safe, non-destructive at a live agent), but its
+   * OUTCOME now decides: a send that times out reclassifies the tab as dropped, which is
+   * evidence rather than inference. Mirrors `rebindFailed` in the Overlord engine.
+   */
+  let rebindFailed = $state<Record<string, true>>({});
+
   async function refreshLiveness() {
     const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
     if (!ws) return;
@@ -58,8 +75,10 @@
         catch { /* PTY may have just closed — keep the prior reading */ }
       }
     }
-    // Drop tabs that are no longer ambiguous so a stale `true` can't linger as a false "running".
+    // Drop tabs that are no longer ambiguous so a stale `true` can't linger as a false
+    // "running" — and so a tab that came back gets a fresh verdict next time it doesn't.
     for (const id of Object.keys(running)) if (!seen.has(id)) delete running[id];
+    for (const id of Object.keys(rebindFailed)) if (!seen.has(id)) delete rebindFailed[id];
   }
 
   // 1s tick (only while open) so the inventory re-reads live/registration state + the waiter
@@ -108,11 +127,13 @@
         //  • agent process still running (or a live remote ssh session) → it's just unregistered
         //    (hook lost after restart) → 'needs-init' (offer `/maiterm init`, non-destructive);
         //  • back at a shell prompt → the agent really exited → 'dropped' (offer full Resume).
+        // `rebindFailed` overrides the probe: we typed init, watched, and nothing came
+        // back, so the agent is gone however alive the ssh looks (see its declaration).
         const status: Status =
           suspended ? 'suspended'
           : !named ? 'unnamed'
           : agentLive ? 'ready'
-          : wasAgent ? (running[tab.id] ? 'needs-init' : 'dropped')
+          : wasAgent ? (running[tab.id] && !rebindFailed[tab.id] ? 'needs-init' : 'dropped')
           : 'not-registered';
         out.push({ tabId: tab.id, paneId: pane.id, name: tab.name, role, status, live: termLive, hasResume: !!tab.auto_resume_command, ptyId: inst?.ptyId ?? null, generic: named && isGeneric(role) });
       }
@@ -147,10 +168,27 @@
     return since > limit ? 'timeout' : 'waiting';
   }
 
-  // Prune pending entries once their tab reaches 'ready' (keeps the map from lingering).
+  // Prune pending entries once their tab reaches 'ready' (keeps the map from lingering), and
+  // clear any failed-rebind verdict with it — the tab is live, whatever we concluded before.
   $effect(() => {
     const readyIds = new Set(rows.filter((r) => r.status === 'ready').map((r) => r.tabId));
     for (const id of Object.keys(pending)) if (readyIds.has(id)) delete pending[id];
+    for (const id of Object.keys(rebindFailed)) if (readyIds.has(id)) delete rebindFailed[id];
+  });
+
+  // An init that timed out on a "running" tab is the evidence that it wasn't running after
+  // all. Record the verdict so the row becomes 'dropped' and offers Resume — the row used to
+  // sit on "no response" with a Retry that could only ever fail the same way.
+  $effect(() => {
+    void tick;
+    for (const r of rows) {
+      if (r.status !== 'needs-init' || rebindFailed[r.tabId]) continue;
+      if (waitState(r) !== 'timeout') continue;
+      rebindFailed[r.tabId] = true;
+      // The verdict replaces the waiter: leaving it would keep "no response" on a row that
+      // now says Dropped and offers the remedy that fits.
+      delete pending[r.tabId];
+    }
   });
 
   const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
@@ -195,6 +233,9 @@
   async function resumeDropped(r: Row) {
     if (!r.hasResume) return;
     pending[r.tabId] = { started: Date.now(), sentAt: Date.now() };
+    // Give up the verdict: a resume was just typed, so the next reading judges what
+    // happens now rather than inheriting the conclusion that led here.
+    delete rebindFailed[r.tabId];
     try { await replayAutoResume(r.tabId); }
     catch (e) { logError(`mesh setup: resume failed for ${r.tabId.slice(0, 8)}: ${e}`); delete pending[r.tabId]; }
   }
@@ -286,7 +327,10 @@
                 <span class="role">{r.role}</span>
                 {#if r.generic}<span class="nudge" title="A generic name is a poor address — rename for clarity">generic name</span>{/if}
               {/if}
-              <span class="status-tag {r.status}">{statusLabel(r.status)}</span>
+              <span class="status-tag {r.status}"
+                    title={rebindFailed[r.tabId]
+                      ? 'Init was sent and no session came back, so the agent is gone rather than unregistered. On an SSH tab that only shows up once it has been tried — the ssh session stays alive after the remote agent exits.'
+                      : undefined}>{statusLabel(r.status)}</span>
             </div>
             <div class="action">
               {#if w === 'waiting'}

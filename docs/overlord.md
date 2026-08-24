@@ -562,9 +562,12 @@ says. That surfaces the real remedy, stops the re-type loop, and the card says w
 kind of `stopped` it is, because "the agent exited" is not what the human sees on a tab
 whose ssh is plainly alive. The verdict is dropped as soon as the tab stops being dormant.
 
-The same guess lives in `MeshSetupModal.refreshLiveness`, which is why a dead remote
-agent shows there as *Running · needs init* and its Init never completes — the modal's
-30s timeout warning is the only thing that says so.
+`MeshSetupModal` had the same guess and the same dead end — a dead remote agent showed
+as *Running · needs init*, its Init never completed, and the row sat on a "no response"
+tag beside a Retry that could only fail identically. It now draws the same conclusion
+from its own 30s waiter: a timed-out init reclassifies the row as **Dropped**, which
+surfaces Resume and folds the tab into *Resume all dropped*. Both surfaces reach the
+verdict independently — they share the reasoning, not state.
 
 ---
 
