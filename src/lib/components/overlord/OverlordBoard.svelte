@@ -248,7 +248,13 @@
     recoveringAll = true;
     try {
       const r = await overlordStore.recoverAllUnbound();
-      recoverNote = r.sent ? `Re-bound ${r.sent} tab${r.sent === 1 ? '' : 's'}.` : 'Nothing could be re-bound.';
+      // Says what it KNOWS. This claimed "Re-bound N" the instant the last paste went out,
+      // which is delivery, not outcome — and a re-bind typed at a tab whose agent is gone
+      // is delivered perfectly. Unlike Run all, this button doesn't hold open to verify
+      // (it's usually a tab or two, and a 45s spinner would be worse); the cards say.
+      recoverNote = r.sent
+        ? `Sent /maiterm init to ${r.sent} tab${r.sent === 1 ? '' : 's'} — any that don't answer come back as needing a restart.`
+        : 'Nothing could be re-bound.';
     } finally {
       recoveringAll = false;
     }
@@ -327,11 +333,19 @@
     } finally { archivingAll = false; }
   }
 
+  /** Reports the OUTCOME, not the delivery. "Sent 69" was true and useless: a re-bind typed
+   *  at a tab whose agent is gone is delivered perfectly and achieves nothing, which is the
+   *  normal failure for SSH tabs. The tabs that never answered are named as needing a
+   *  restart, because that is the remedy their cards now offer. */
   async function runAll() {
     const r = await overlordStore.runTriage();
-    recoverNote = r.sent === 0 && r.skipped === 0
-      ? null
-      : `Run all: sent ${r.sent}${r.skipped ? `, skipped ${r.skipped}` : ''}.`;
+    if (r.sent === 0 && r.skipped === 0) { recoverNote = null; return; }
+    const parts = [`Run all: sent ${r.sent}`];
+    if (r.skipped) parts.push(`skipped ${r.skipped}`);
+    if (r.bound) parts.push(`re-bound ${r.bound}`);
+    recoverNote = r.silent
+      ? `${parts.join(', ')} — ${r.silent} never answered and ${r.silent === 1 ? 'needs' : 'need'} a restart.`
+      : `${parts.join(', ')}.`;
   }
 
   /** Context ring geometry — r=13 → circumference 81.68. */
@@ -457,6 +471,7 @@
             <span class="ov-label runbar-lead">
               {#if runProgress.phase === 'running'}sending
               {:else if runProgress.phase === 'waiting'}pacing
+              {:else if runProgress.phase === 'verifying'}verifying
               {:else}holding{/if}
             </span>
             <span class="ov-mono runbar-count">{runProgress.done}/{runProgress.total}</span>
@@ -465,6 +480,10 @@
                 {runProgress.label ?? ''}
               {:else if runProgress.phase === 'waiting'}
                 wave {runProgress.wave} of {runProgress.waves} done · next in {resumeIn}s
+              {:else if runProgress.phase === 'verifying'}
+                <!-- Everything is sent; this is watching whether it took. A re-bind that
+                     lands on a tab whose agent is gone looks identical to one that works. -->
+                {runProgress.label ?? ''} · giving up in {resumeIn}s
               {:else}
                 waiting for the fleet to drain before the next wave
               {/if}

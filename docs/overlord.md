@@ -958,6 +958,28 @@ The hold is the one that matters: turns run for minutes, so a gap alone just
 spreads the starts and the waves stack into the burst the pacing existed to
 avoid. It is capped so one wedged ritual cannot strand the rest of the run.
 
+**Sent is not an outcome.** After the last wave the run enters a fourth phase,
+`verifying`, and stays open until every re-bind target has either registered or
+run out of time (`REBIND_VERIFY_MS`). This exists because a `/maiterm init`
+typed at a tab whose agent is gone is *delivered perfectly and achieves nothing*
+— and for SSH tabs that is the normal failure, since `ssh_foreground` cannot see
+the far side (§9.4). The run that exposed this reported **"sent 69, skipped 0"**
+while 14 tabs never came back, 13 of them SSH.
+
+So `runTriage` returns `{ sent, skipped, bound, silent }`: `sent` is delivery,
+`bound` is outcome, and `silent` is the gap — re-binds that landed and were never
+answered, each of which is now a `stopped` card offering a restart. The deck says
+so: *"sent 69, re-bound 55 — 14 never answered and need a restart."* A cancelled
+run has no verdict and reports only what it sent.
+
+Only re-binds are verifiable this way. A proposal starts a ritual whose completion
+is a different thing entirely, and is reported as sent.
+
+`recoverAllUnbound` (the smaller "Re-bind all" button) deliberately does **not**
+hold open — it is usually a tab or two, and a 45s spinner would be worse than the
+cards correcting themselves. It now says what it knows ("sent … — any that don't
+answer come back as needing a restart") rather than claiming it re-bound them.
+
 One worklist function (`triageJobs`) backs both the button's label and the run, so the
 label cannot promise work the run then skips. It also resolves a collision: the default
 `reinit_unbound_agent` rule fires on the same `agent_unready` signal the re-bind reads, so

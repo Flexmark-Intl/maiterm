@@ -207,13 +207,29 @@ export interface TriageRunProgress {
   skipped: number;
   wave: number;
   waves: number;
-  /** `waiting` is the pacing gap; `holding` is waiting on the fleet to drain. */
-  phase: 'running' | 'waiting' | 'holding';
+  /** `waiting` is the pacing gap; `holding` is waiting on the fleet to drain;
+   *  `verifying` is watching the re-bound tabs actually come back. */
+  phase: 'running' | 'waiting' | 'holding' | 'verifying';
   /** Epoch ms the pacing gap ends — a countdown, so a paused deck isn't mistaken for a
    *  hung one. Null while running or holding (a hold has no predictable end). */
   resumeAt: number | null;
   /** What is being sent right now, for the progress line. */
   label: string | null;
+}
+
+/** What a "run all" pass actually achieved.
+ *
+ *  `sent` is delivery; `bound` is OUTCOME. They are different numbers and the gap between
+ *  them is the interesting one: a `/maiterm init` typed at a tab whose agent is gone is
+ *  delivered perfectly and achieves nothing. `silent` counts exactly those — re-binds that
+ *  landed and were never answered. Zero after a cancelled run, which has no verdict. */
+export interface TriageResult {
+  sent: number;
+  skipped: number;
+  /** Re-bind targets that registered before the run gave up watching. */
+  bound: number;
+  /** Re-bind targets that never came back — each now a `stopped` card wanting a restart. */
+  silent: number;
 }
 
 export interface ScanSummary {
@@ -2517,8 +2533,8 @@ function createOverlordStore() {
      * changing underneath a run that takes minutes, and firing a proposal the human
      * dismissed thirty seconds ago would be indistinguishable from ignoring them.
      */
-    async runTriage(opts?: { batch?: number; gapMs?: number }): Promise<{ sent: number; skipped: number }> {
-      if (triageRun) return { sent: 0, skipped: 0 };
+    async runTriage(opts?: { batch?: number; gapMs?: number }): Promise<TriageResult> {
+      if (triageRun) return { sent: 0, skipped: 0, bound: 0, silent: 0 };
       const batch = Math.max(1, opts?.batch ?? TRIAGE_BATCH);
       const gapMs = Math.max(0, opts?.gapMs ?? TRIAGE_GAP_MS);
 
@@ -2528,7 +2544,7 @@ function createOverlordStore() {
         ...rebinds.map((tabId): Job => ({ kind: 'rebind', tabId })),
         ...proposalIds.map((id): Job => ({ kind: 'proposal', id })),
       ];
-      if (!jobs.length) return { sent: 0, skipped: 0 };
+      if (!jobs.length) return { sent: 0, skipped: 0, bound: 0, silent: 0 };
 
       // Drop the proposals the re-bind replaces, rather than leaving stale cards on the
       // deck offering a remedy this run is about to deliver a better way.
@@ -2540,6 +2556,10 @@ function createOverlordStore() {
 
       triageCancelled = false;
       let sent = 0, skipped = 0;
+      /** Re-bind targets whose injection was delivered — the set we will actually verify.
+       *  Entries are removed as they register, so what remains at the end is the silence. */
+      const awaitingRebind = new Set<string>();
+      let rebindSent = 0;
       const waves = Math.ceil(jobs.length / batch);
       triageRun = {
         total: jobs.length, done: 0, sent: 0, skipped: 0,
@@ -2558,6 +2578,7 @@ function createOverlordStore() {
             let ok = false;
             if (job.kind === 'rebind') {
               ok = (await this.recoverTab(job.tabId)).sent;
+              if (ok) { awaitingRebind.add(job.tabId); rebindSent++; }
             } else {
               // Re-read: the human may have dismissed it, or the rule may have been edited
               // away, since the snapshot.
@@ -2588,11 +2609,45 @@ function createOverlordStore() {
             await sleep(1_000);
           }
         }
+
+        // ── Verify ────────────────────────────────────────────────────────────
+        //
+        // "Sent" is not an outcome. A `/maiterm init` typed at a tab whose agent is gone
+        // is delivered perfectly and achieves nothing — and for an SSH tab that is the
+        // NORMAL failure, because `ssh_foreground` cannot see the far side (§9.4). A real
+        // run over 69 tabs reported "sent 69, skipped 0" while 14 never came back.
+        //
+        // So the run stays open until every re-bind target has either registered or run out
+        // of time. Only re-binds are verifiable this way: a proposal starts a ritual whose
+        // completion is a different thing entirely, and is reported as sent.
+        if (awaitingRebind.size) {
+          const until = Date.now() + REBIND_VERIFY_MS;
+          while (!triageCancelled && Date.now() < until) {
+            for (const id of [...awaitingRebind]) {
+              if (claudeStateStore.getState(id)) awaitingRebind.delete(id);
+            }
+            if (!awaitingRebind.size) break;
+            triageRun = {
+              ...triageRun!,
+              phase: 'verifying',
+              resumeAt: until,
+              label: `${awaitingRebind.size} tab${awaitingRebind.size === 1 ? '' : 's'} still coming back`,
+            };
+            await sleep(1_000);
+          }
+        }
       } finally {
         triageRun = null;
       }
-      logInfo(`overlord: run-all — sent ${sent}, skipped ${skipped}${triageCancelled ? ' (cancelled)' : ''}`);
-      return { sent, skipped };
+      // Cancelling stops the watching, not the tabs — a cancelled run has no verdict to
+      // report, so it says how many were sent and leaves the deck to classify the rest.
+      const silent = triageCancelled ? 0 : awaitingRebind.size;
+      const bound = Math.max(0, rebindSent - silent);
+      logInfo(
+        `overlord: run-all — sent ${sent}, skipped ${skipped}` +
+          (triageCancelled ? ' (cancelled)' : `, re-bound ${bound}, no answer from ${silent}`),
+      );
+      return { sent, skipped, bound, silent };
     },
 
     /** Recover every unready tab in one pass — the deck's bulk action. Staggered so a
