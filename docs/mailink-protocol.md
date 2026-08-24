@@ -329,7 +329,15 @@ Bidirectional, opened while the app is foreground. Server→client events:
 
 ```jsonc
 { "type": "chat_state", "tabId": "...", "state": "active|idle|permission",
-  "runtime": "claude", "tool": "Bash", "detail": "rm -rf ./dist", "ts": 0 }
+  "runtime": "claude", "tool": "Bash", "detail": "rm -rf ./dist",
+  "registered": true, "ts": 0 }
+                                                     // `registered` mirrors the field on Chat/ThreadDetail. It is the ONLY
+                                                     // live signal an already-open thread gets about registration, so bind
+                                                     // the "running but not registered" banner to it rather than to the
+                                                     // value fetched when the thread opened. A frame is emitted whenever it
+                                                     // flips, even though `state` does not move: a live agent reads "active"
+                                                     // both before and after it registers, so the init that clears the
+                                                     // banner changes nothing else on the wire.
 { "type": "message", "tabId": "...", "role": "agent|user|system",
   "text": "...", "msg_id": "...", "ts": 0 }          // a new transcript turn
                                                      // for a user echo, msg_id === the id POST /message returned
@@ -340,7 +348,10 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // `prompt` mirrors pendingPrompt; present for permission/question,
                                                      // omitted for idle_done. Lets the app render decision buttons on the
                                                      // live path with no follow-up GET. GET /chats/{tabId} stays source of truth.
-{ "type": "chats_changed" }                           // roster/designation, a tab title, a workspace's suspended flag, OR its mesh flag changed; re-GET /chats
+{ "type": "chats_changed" }                           // roster/designation, a tab title, a workspace's suspended flag, its mesh
+                                                     // flag, OR a tab's `registered` flag changed; re-GET /chats. This is a
+                                                     // ROSTER signal only — it does not refresh an open thread, which is why
+                                                     // `registered` also rides on `chat_state`.
 { "type": "tasks", "tabId": "...", "tasks": [/* AgentTask[] */], "ts": 0 }
 { "type": "shells", "tabId": "...", "shells": [/* AgentShell[] */], "ts": 0 }
                                                      // the tab's background-shell roster changed — REPLACE the whole

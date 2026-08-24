@@ -1800,11 +1800,19 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     // Registration flips when an agent finally re-registers (or a restart drops
                     // its session entry) — the phone must re-render the re-initialize control.
                     let reg = c["registered"].as_bool().unwrap_or(true);
-                    if prev.is_some() && registered.get(&tab) != Some(&reg) {
+                    let reg_changed = prev.is_some() && registered.get(&tab) != Some(&reg);
+                    if reg_changed {
                         roster_changed = true;
                     }
                     registered.insert(tab.clone(), reg);
-                    if prev.as_deref() != Some(key.as_str()) {
+                    // `chats_changed` alone is a ROSTER signal — it says "re-GET /chats", which
+                    // refreshes the inbox but not an already-open thread. Registration usually
+                    // flips with the attention key UNCHANGED (the live-agent fallback already
+                    // reported "active", and a registered session reports "active" too), so
+                    // without the `|| reg_changed` arm an open thread got no frame at all and
+                    // the "Running but not registered" banner survived the very init that fixed
+                    // it, until the user backed out and re-opened the thread.
+                    if state_frame_needed(prev.as_deref(), &key, reg_changed) {
                         if socket.send(Message::Text(enriched_chat_state_event(&s.app, c).to_string().into())).await.is_err() {
                             return;
                         }
@@ -1867,6 +1875,16 @@ fn enriched_chat_state_event(app: &AppState, c: &Value) -> Value {
     chat_state_event(&c)
 }
 
+/// Whether the roster ticker owes a tab a `chat_state` frame this tick (unit-tested; the ticker
+/// wires the real diffs).
+///
+/// The attention key is the usual trigger, but registration flips independently of it: the
+/// live-agent fallback already reports "active", and a tab that registers reports "active" too,
+/// so a key-only test emitted nothing on the one transition the phone's banner is bound to.
+fn state_frame_needed(prev: Option<&str>, key: &str, reg_changed: bool) -> bool {
+    prev != Some(key) || reg_changed
+}
+
 fn chat_state_event(c: &Value) -> Value {
     // Carry the chat's REAL per-tab last-activity (build_chats computed it) as both `ts` and
     // `lastActivityTs`. The initial WS snapshot replays one chat_state per existing chat, so
@@ -1878,6 +1896,11 @@ fn chat_state_event(c: &Value) -> Value {
         "tabId": c["tabId"],
         "state": c["state"],
         "runtime": c["runtime"],
+        // The banner an unregistered chat renders lives INSIDE the thread, and `state` cannot
+        // express registration (a live agent reads "active" whether or not it registered). This
+        // is the only live signal an open thread gets, so the phone binds the banner to it and
+        // the affordance disappears the moment the init it asked for actually lands.
+        "registered": c.get("registered").cloned().unwrap_or_else(|| json!(true)),
         "ts": ts.clone(),
         "lastActivityTs": ts,
     });
@@ -4480,6 +4503,36 @@ mod tests {
         assert!(!live_fallback_decision(true, None, now));
         // A turn timestamp slightly in the future (clock skew) is still "recent", not underflow.
         assert!(live_fallback_decision(true, Some(now + 5000), now));
+    }
+
+    #[test]
+    fn registering_reaches_an_open_thread_even_when_the_state_word_never_moves() {
+        // The reported failure: a live-but-unregistered tab already reads "active" (the liveness
+        // fallback), so the init that registers it moves nothing the attention key can see. A
+        // key-only test emitted no frame, `chats_changed` only refreshes the ROSTER, and the
+        // "Running but not registered" banner outlived the init the operator asked for.
+        assert!(
+            state_frame_needed(Some("active"), "active", true),
+            "a registration flip must reach the open thread on its own"
+        );
+        // And the flip must be the only extra reason — a settled tab still stays quiet.
+        assert!(!state_frame_needed(Some("active"), "active", false));
+        // The ordinary trigger is untouched.
+        assert!(state_frame_needed(Some("active"), "idle_done", false));
+        assert!(state_frame_needed(None, "active", false), "a tab we've never seen");
+    }
+
+    #[test]
+    fn a_state_frame_says_whether_the_tab_is_registered() {
+        // `state` cannot carry this: a live agent reads "active" registered or not, which is why
+        // the banner needs its own field on the live path rather than a re-GET of the thread.
+        let ev = chat_state_event(&json!({
+            "tabId": "t1", "state": "active", "runtime": "claude", "registered": false,
+        }));
+        assert_eq!(ev["registered"], json!(false));
+        // Absent (a caller that never computed it) must not read as "needs re-initialize".
+        let ev = chat_state_event(&json!({ "tabId": "t1", "state": "active", "runtime": "claude" }));
+        assert_eq!(ev["registered"], json!(true));
     }
 
     #[test]
