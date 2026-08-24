@@ -48,15 +48,6 @@ function createTasksStore() {
       return byWorkspace.get(workspaceId) ?? [];
     },
 
-    forTab(workspaceId: string, tabId: string): Task[] {
-      return this.forWorkspace(workspaceId).filter((t) => t.tab_id === tabId);
-    },
-
-    /** Workspace backlog: everything in the workspace with no assignee. */
-    unassigned(workspaceId: string): Task[] {
-      return this.forWorkspace(workspaceId).filter((t) => !t.tab_id);
-    },
-
     workstreams(workspaceId: string): Workstream[] {
       return streamsByWorkspace.get(workspaceId) ?? [];
     },
