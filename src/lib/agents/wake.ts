@@ -40,19 +40,20 @@ const INIT_QUIET_POLL_MS = 300;
  *  `deadline` is the caller's budget, not a nicety: whoever asked for the wake delivers a
  *  message of its own once the budget expires, so an init pasted after that point would land
  *  ON TOP of that message. Past the deadline we skip the paste rather than race it. */
-async function settleAndSendInit(tabId: string, ptyId: string, deadline: number) {
+async function settleAndSendInit(tabId: string, ptyId: string, deadline: number): Promise<boolean> {
   await writeTerminal(ptyId, [0x0d]);
   while (Date.now() < deadline) {
     const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
     if (Date.now() - lastOut >= INIT_QUIET_MS) break;
     await new Promise((res) => setTimeout(res, INIT_QUIET_POLL_MS));
   }
-  if (claudeStateStore.getState(tabId)) return; // re-registered on its own while settling
+  if (claudeStateStore.getState(tabId)) return false; // re-registered on its own while settling
   if (Date.now() >= deadline) {
     logInfo(`wake: ${tabId.slice(0, 8)} never went quiet within budget — skipping init paste`);
-    return;
+    return false;
   }
   await bracketedPasteSubmit(ptyId, '/maiterm init');
+  return true;
 }
 
 /** Run one wake. Resolves when the remedy has been DELIVERED, not when the agent is ready —
@@ -63,12 +64,17 @@ export async function wakeTab(tabId: string, action: WakeAction, budgetMs: numbe
   if (!inst) return; // no live PTY — nothing to wake (a suspended workspace is resumed first)
   inFlight.add(tabId);
   try {
+    // Only claim delivery when something was actually typed. A busy tab that never goes quiet
+    // exits settleAndSendInit having sent nothing, and the old unconditional "init delivered"
+    // line read as proof the remedy ran — the exact wrong starting point for diagnosing why a
+    // tab is still unregistered afterwards.
+    let delivered = true;
     if (action === 'init') {
-      await settleAndSendInit(tabId, inst.ptyId, Date.now() + budgetMs);
+      delivered = await settleAndSendInit(tabId, inst.ptyId, Date.now() + budgetMs);
     } else {
       await replayAutoResume(tabId);
     }
-    logInfo(`wake: ${action} delivered to tab ${tabId.slice(0, 8)}`);
+    if (delivered) logInfo(`wake: ${action} delivered to tab ${tabId.slice(0, 8)}`);
   } catch (e) {
     logError(`wake: ${action} failed for tab ${tabId.slice(0, 8)}: ${e}`);
   } finally {
