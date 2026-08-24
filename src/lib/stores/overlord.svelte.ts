@@ -452,6 +452,14 @@ function createOverlordStore() {
    */
   type UnreadyKind = 'unbound' | 'stopped';
   const liveness = new Map<string, { kind: UnreadyKind; at: number }>();
+  /** Tabs typed `/maiterm init` at, waiting to see whether a binding actually arrives. */
+  const rebindWatch = new Map<string, number>(); // tabId → sentAt
+  /** Tabs where it demonstrably did not: treated as `stopped` from then on, whatever the
+   *  process probe says (see the classification in `probeLiveness`). */
+  const rebindFailed = new Set<string>();
+  /** How long a re-bind gets. An agent that is alive and merely unbound answers a slash
+   *  command in a second or two; this is slack for a busy TUI, not for a resume. */
+  const REBIND_VERIFY_MS = 45_000;
 
   /** Board tasks the human handed to the agent ("Send" on a card) → when. In memory only,
    *  like `escalations` itself: the handoff IS the escalation, and once the agent has
@@ -1441,6 +1449,21 @@ function createOverlordStore() {
     for (const id of [...liveness.keys()]) {
       if (!live.has(id)) { liveness.delete(id); changed = true; }
     }
+    // A tab that came back (or closed) settles its re-bind verdict — it is no longer a
+    // candidate, so nothing below would ever clear these.
+    for (const id of [...rebindWatch.keys()]) if (!live.has(id)) rebindWatch.delete(id);
+    for (const id of [...rebindFailed]) if (!live.has(id)) rebindFailed.delete(id);
+    // Re-binds that never landed. `/maiterm init` is a cheap, safe thing to type at an
+    // agent that is running unbound — and a no-op typed at a shell prompt, which is what
+    // an SSH tab whose REMOTE agent has exited looks like from here (see the classification
+    // below). Waiting for the outcome is the only way to tell those apart from this side.
+    for (const [id, sentAt] of [...rebindWatch]) {
+      if (now - sentAt < REBIND_VERIFY_MS) continue;
+      rebindWatch.delete(id);
+      rebindFailed.add(id);
+      changed = true;
+      logInfo(`overlord: re-bind on ${id.slice(0, 8)} did not take — reclassifying as stopped`);
+    }
     if (!candidates.length) {
       if (changed) bumpLive();
       return;
@@ -1453,7 +1476,23 @@ function createOverlordStore() {
         // ssh_foreground stands in for a remote agent we cannot see in the local process
         // tree — an SSH tab with a live session is treated as unbound, which is the case
         // that actually happens after a restart.
-        const kind: UnreadyKind = l.agent_running || l.ssh_foreground ? 'unbound' : 'stopped';
+        //
+        // But it is a GUESS, and a systematically wrong one for a whole class: `ssh` being
+        // the foreground job says nothing about what runs on the far side, so an SSH tab
+        // sitting at a REMOTE SHELL PROMPT — agent long gone — is indistinguishable from a
+        // live remote agent that merely lost its binding. Both read `unbound`, both get
+        // `/maiterm init`, and for the dead one that is a line of junk typed at bash. It
+        // can never be classified `stopped`, so the remedy that would actually fix it
+        // (replay auto-resume) is unreachable, and every run-all re-types the same no-op.
+        //
+        // `rebindFailed` is the correction, and it is evidence rather than inference: we
+        // typed the cheap remedy, watched, and it did not take. Verdict wins over the
+        // guess until the tab is no longer dormant.
+        const kind: UnreadyKind = rebindFailed.has(tab.id)
+          ? 'stopped'
+          : l.agent_running || l.ssh_foreground
+            ? 'unbound'
+            : 'stopped';
         if (liveness.get(tab.id)?.kind !== kind) changed = true;
         liveness.set(tab.id, { kind, at: now });
       }
@@ -2130,6 +2169,14 @@ function createOverlordStore() {
      *  which remedy it offers — the two must agree. */
     unreadyKind,
 
+    /** Was this tab classified `stopped` because a re-bind was tried and didn't land,
+     *  rather than because the process probe saw nothing? The card says which, since
+     *  "the agent exited" is not what the human sees on an SSH tab whose ssh is alive. */
+    rebindDidNotTake(tabId: string): boolean {
+      void liveVersion;
+      return rebindFailed.has(tabId);
+    },
+
     /**
      * Is this tab loaded in the DOM — i.e. can anything here classify or recover it?
      *
@@ -2195,6 +2242,17 @@ function createOverlordStore() {
       }
       ledger(tabId, null, 'human', 0, step, 'sent');
       logInfo(`overlord: recover ${tabId.slice(0, 8)} (${kind}) — sent ${JSON.stringify(text)}`);
+      if (kind === 'unbound') {
+        // Watch for the outcome. Without this the deck could only ever re-ask the process
+        // probe, which returns the same `unbound` guess forever for an SSH tab whose remote
+        // agent is gone — so run-all reported "sent 69, skipped 0" while a dozen tabs took
+        // a line of junk at a bash prompt and nothing ever said so.
+        rebindWatch.set(tabId, Date.now());
+      } else {
+        // A resume was just typed; give the previous verdict up so the next probe judges
+        // the tab on what happens now.
+        rebindFailed.delete(tabId);
+      }
       // Clear the classification so the deck stops showing it immediately; the next tick
       // re-probes and will re-raise it if the remedy didn't take.
       liveness.delete(tabId);

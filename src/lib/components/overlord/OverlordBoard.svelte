@@ -750,8 +750,14 @@
                 </div>
               {:else if overlordStore.unreadyKind(s.u.tab.id) === 'stopped'}
                 <p class="signal-text">
-                  Nothing is running in this tab — the agent exited. Restarting resumes its
-                  own session, not a fresh one.
+                  {#if overlordStore.rebindDidNotTake(s.u.tab.id)}
+                    Re-binding was tried here and nothing came back, so the agent is gone
+                    rather than unbound — on an SSH tab that is invisible from this side
+                    until it's attempted. Restarting resumes its own session, not a fresh one.
+                  {:else}
+                    Nothing is running in this tab — the agent exited. Restarting resumes its
+                    own session, not a fresh one.
+                  {/if}
                 </p>
                 <div class="signal-actions">
                   <button class="ov-btn" disabled={recovering === s.u.tab.id}

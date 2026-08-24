@@ -522,7 +522,7 @@ have opposite remedies:
 | Kind | Process state | Remedy |
 |---|---|---|
 | `unbound` | agent alive (or an SSH session in the foreground) | `/maiterm init` — restores tool routing and reply delivery |
-| `stopped` | nothing running; the tab is at a shell | relaunch the agent with its resume command |
+| `stopped` | nothing running; the tab is at a shell — **or** a re-bind was tried and never landed | relaunch the agent with its resume command |
 
 The engine classifies with `get_agent_liveness_batch` over the dormant candidates only
 (a full process-tree walk per tab per tick is the shape that froze the UI once already —
@@ -539,6 +539,32 @@ resumes the tab's own session rather than starting a fresh one.
 `/maiterm init`" and leave the human to do it, on every dormant tab, forever — which is
 a supervisor that supervises nothing. Recovery injections are ledgered verbatim like
 every other directive, and a recovery that can't run says why instead of failing quietly.
+
+#### The classification is a guess for SSH tabs — so verify it (2026-08-24)
+
+`ssh_foreground` is true whenever `ssh` is the tty's foreground job. It says **nothing
+about what runs on the far side**. So an SSH tab sitting at a *remote shell prompt* —
+its agent long gone — is indistinguishable from a live remote agent that merely lost its
+binding: both read `unbound`, both get `/maiterm init`, and for the dead one that is a
+line of junk typed at bash. Worse, such a tab can never be classified `stopped`, so the
+remedy that would actually fix it is unreachable and every run-all re-types the same
+no-op.
+
+Found in a real run-all over 69 tabs: 55 re-bound, 14 did not, 13 of those SSH — and the
+deck reported "sent 69, skipped 0" and went quiet. The prod log shows most of those 14
+never bound again for the rest of the day.
+
+The fix is evidence over inference. `/maiterm init` is cheap and safe to type at a
+running-but-unbound agent, so it stays the first move — but the tab goes into
+`rebindWatch`, and if no binding arrives within `REBIND_VERIFY_MS` (45s) it lands in
+`rebindFailed` and is classified **`stopped` from then on**, whatever the process probe
+says. That surfaces the real remedy, stops the re-type loop, and the card says which
+kind of `stopped` it is, because "the agent exited" is not what the human sees on a tab
+whose ssh is plainly alive. The verdict is dropped as soon as the tab stops being dormant.
+
+The same guess lives in `MeshSetupModal.refreshLiveness`, which is why a dead remote
+agent shows there as *Running · needs init* and its Init never completes — the modal's
+30s timeout warning is the only thing that says so.
 
 ---
 
