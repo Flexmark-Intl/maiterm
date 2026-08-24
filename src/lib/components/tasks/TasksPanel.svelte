@@ -5,8 +5,15 @@
    *  per-tab persistence — so the muscle memory transfers and there is one mental model
    *  for "side panel" in maiTerm.
    *
-   *  Shows this tab's work first, then the rest of the project. That ordering is the
-   *  point: the panel answers "what am I doing here" before "what is going on overall". */
+   *  THIS TAB'S WORK ONLY. It answers one question — "what am I doing here" — and hands
+   *  every other question to the board.
+   *
+   *  It used to also list the rest of the project, offer a workstream picker for new tasks,
+   *  a per-row workstream dropdown, and an assign/unassign control. All of that is
+   *  ORGANIZING work, and organizing now has a proper home: the board is indexed by
+   *  workstream (docs/overlord.md), where a drag moves a task between jobs and the whole
+   *  window is visible at once. Duplicating it in a 280px dock made the panel a worse
+   *  version of the board and buried the one list the tab actually needs. */
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { effectiveStatus, isParked, TASK_STATUSES } from '$lib/tasks/model';
@@ -31,55 +38,49 @@
   let showDone = $state(false);
   let showParked = $state(false);
 
+  /** The whole workspace list — needed ONLY as the dependency universe for
+   *  `effectiveStatus`, since a prerequisite can live on another tab. Never rendered. */
   const all = $derived(tasksStore.forWorkspace(workspaceId));
+  const mine = $derived(all.filter((t) => t.tab_id === tabId));
 
   /** Finished and parked work both collapse behind a count — the panel is for what's in
    *  flight. Parked is separate from done because they mean different things: one is
    *  finished, the other is deliberately not started. */
   const visible = (list: Task[]) =>
     list.filter((t) => (showDone || t.status !== 'done') && (showParked || !isParked(t.status)));
-  const doneCount = $derived(all.filter((t) => t.status === 'done').length);
-  const parkedCount = $derived(all.filter((t) => isParked(t.status)).length);
+  const doneCount = $derived(mine.filter((t) => t.status === 'done').length);
+  const parkedCount = $derived(mine.filter((t) => isParked(t.status)).length);
 
-  /** This tab's work first, grouped by job, then the rest of the project.
-   *
-   *  The panel answers "what am I doing here" before "what is going on overall", and
-   *  within that, one tab is routinely running two unrelated jobs — so the grouping has to
-   *  be by workstream or the two blur into one list. */
+  /** How much of the project this panel is deliberately not showing. One line, not a list —
+   *  enough to say "the board has more", never enough to become a second board. */
+  const elsewhere = $derived(all.length - mine.length);
+
+  /** This tab's work, grouped by job. One tab routinely runs two unrelated jobs, which is
+   *  the whole reason workstreams exist — without grouping they blur into one list. */
   interface Group {
     key: string;
-    label: string;
-    sub: string | null;
+    name: string | null;
     list: Task[];
   }
 
   const groups = $derived.by<Group[]>(() => {
     const streams = tasksStore.workstreams(workspaceId);
-    const nameOf = (id: string | null | undefined) =>
-      id ? (streams.find((w) => w.id === id)?.name ?? null) : null;
-    const out: Group[] = [];
-    for (const [scope, label] of [['mine', 'This tab'], ['others', 'Project']] as const) {
-      const scoped = all.filter((t) => (scope === 'mine' ? t.tab_id === tabId : t.tab_id !== tabId));
-      const byStream = new Map<string, Task[]>();
-      for (const t of scoped) {
-        const k = t.workstream_id ?? '';
-        if (!byStream.has(k)) byStream.set(k, []);
-        byStream.get(k)!.push(t);
-      }
-      const keys = [...byStream.keys()].sort((a, b) => {
-        // Loose tasks last; named jobs alphabetical.
-        if (!a) return 1;
-        if (!b) return -1;
-        return (nameOf(a) ?? '').localeCompare(nameOf(b) ?? '');
-      });
-      for (const k of keys) {
-        const list = visible(byStream.get(k)!);
-        if (!list.length) continue;
-        out.push({ key: `${scope}:${k}`, label, sub: nameOf(k || null), list });
-      }
+    const nameOf = (id: string) => streams.find((w) => w.id === id)?.name ?? null;
+    const byStream = new Map<string, Task[]>();
+    for (const t of mine) {
+      const k = t.workstream_id ?? '';
+      if (!byStream.has(k)) byStream.set(k, []);
+      byStream.get(k)!.push(t);
     }
-    return out;
+    return [...byStream.keys()]
+      // Loose tasks last; named jobs alphabetical.
+      .sort((a, b) => (!a ? 1 : !b ? -1 : (nameOf(a) ?? '').localeCompare(nameOf(b) ?? '')))
+      .map((k) => ({ key: k, name: k ? nameOf(k) : null, list: visible(byStream.get(k)!) }))
+      .filter((g) => g.list.length);
   });
+
+  /** Headings only earn their space when there is more than one job in view. */
+  const showGroupHeadings = $derived(groups.length > 1);
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
     backlog: 'Parked',
@@ -90,34 +91,24 @@
     done: 'Done',
   };
 
-  /** Which job a new task lands in. '' = ungrouped, '+' = name a new one.
-   *  Sticky between adds: entering several tasks for one job is the common case. */
-  let addStream = $state('');
-  let newStreamName = $state('');
-
+  /** Where a new task lands, with no picker to answer.
+   *
+   *  If everything this tab is working on belongs to ONE job, a task typed here obviously
+   *  belongs to it too. If the tab is juggling two, guessing would be wrong, so it goes
+   *  loose and the board is where it gets filed. That covers both cases without asking a
+   *  question the panel used to ask on every single add. */
   function addTask() {
     const title = draft.trim();
     if (!title) return;
-    let workstreamId: string | null = null;
-    if (addStream === '+') {
-      const name = newStreamName.trim();
-      if (!name) return;
-      const created = tasksStore.ensureWorkstream(workspaceId, name);
-      workstreamId = created?.id ?? null;
-      // Switch to the created stream so the next task lands in it too, rather than
-      // re-prompting for a name that now exists.
-      if (created) addStream = created.id;
-      newStreamName = '';
-    } else if (addStream) {
-      workstreamId = addStream;
-    }
-    tasksStore.add(workspaceId, { title, tab_id: tabId, origin: 'human', workstream_id: workstreamId });
+    const streams = new Set(mine.filter((t) => t.status !== 'done').map((t) => t.workstream_id ?? ''));
+    const only = streams.size === 1 ? [...streams][0] : '';
+    tasksStore.add(workspaceId, {
+      title,
+      tab_id: tabId,
+      origin: 'human',
+      workstream_id: only || null,
+    });
     draft = '';
-  }
-
-  /** Move a task into another job from its row. */
-  function setWorkstream(t: Task, id: string) {
-    tasksStore.update(workspaceId, t.id, { workstream_id: id || null });
   }
 
   /** Click the status chip to advance; shift-click to go back. Cycling beats a dropdown
@@ -188,10 +179,6 @@
     if (saveTimer) clearTimeout(saveTimer);
     saveDetail(id, detailValue);
     detailFor = null;
-  }
-
-  function assignToMe(t: Task) {
-    tasksStore.update(workspaceId, t.id, { tab_id: t.tab_id === tabId ? null : tabId });
   }
 
   function remove(id: string) {
@@ -270,42 +257,21 @@
     <button class="add-btn" disabled={!draft.trim()} onclick={addTask} aria-label="Add task">+</button>
   </div>
 
-  <div class="add-row stream-row">
-    <select class="stream-select" bind:value={addStream} aria-label="Workstream for new tasks">
-      <option value="">Ungrouped</option>
-      {#each tasksStore.workstreams(workspaceId) as w (w.id)}
-        <option value={w.id}>{w.name}</option>
-      {/each}
-      <option value="+">New workstream…</option>
-    </select>
-    {#if addStream === '+'}
-      <input
-        class="add-input"
-        placeholder="Name it, e.g. Auth refactor"
-        bind:value={newStreamName}
-        onkeydown={(e) => {
-          if (e.key === 'Enter') addTask();
-        }}
-      />
-    {/if}
-  </div>
-
   <div class="lists">
-    {#if all.length === 0}
+    {#if mine.length === 0}
       <p class="empty">
-        Nothing tracked for this project yet. Add a task above — agents in this workspace can
-        read and update the same list.
+        Nothing tracked on this tab yet. Add a task above — the agent here reads and updates
+        the same list.
       </p>
     {/if}
 
     {#each groups as group (group.key)}
-      {#if group.list.length}
+      {#if showGroupHeadings}
         <h4 class="group">
-          {group.label}
-          {#if group.sub}<span class="group-stream">· {group.sub}</span>
-          {:else}<span class="group-loose">· ungrouped</span>{/if}
+          {#if group.name}{group.name}{:else}<span class="group-loose">Ungrouped</span>{/if}
         </h4>
-        <ul class="task-list">
+      {/if}
+      <ul class="task-list">
           {#each group.list as t (t.id)}
             {@const eff = effectiveStatus(t, all)}
             <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)}>
@@ -343,24 +309,6 @@
                       {t.origin === 'imported' ? '⇥' : '◆'}
                     </span>
                   {/if}
-                  <select
-                    class="mini-select"
-                    title="Move to another workstream"
-                    value={t.workstream_id ?? ''}
-                    onchange={(e) => setWorkstream(t, e.currentTarget.value)}
-                  >
-                    <option value="">Ungrouped</option>
-                    {#each tasksStore.workstreams(workspaceId) as w (w.id)}
-                      <option value={w.id}>{w.name}</option>
-                    {/each}
-                  </select>
-                  <button
-                    class="mini"
-                    title={t.tab_id === tabId ? 'Unassign (leave for whoever picks it up)' : 'Assign to this tab'}
-                    onclick={() => assignToMe(t)}
-                  >
-                    {t.tab_id === tabId ? '↥' : '↧'}
-                  </button>
                   {#if confirmingDelete === t.id}
                     <button class="mini danger" title="Confirm delete" onclick={() => remove(t.id)}>✓</button>
                     <button class="mini" title="Cancel" onclick={() => (confirmingDelete = null)}>✕</button>
@@ -395,8 +343,15 @@
             </li>
           {/each}
         </ul>
-      {/if}
     {/each}
+
+    {#if elsewhere > 0}
+      <!-- A pointer, never a list. The moment this shows other tabs' work it stops being a
+           per-tab panel and starts being a cramped second board. -->
+      <p class="elsewhere">
+        {elsewhere} more task{elsewhere === 1 ? '' : 's'} elsewhere in this project — see the board.
+      </p>
+    {/if}
   </div>
 </div>
 
@@ -492,28 +447,6 @@
     cursor: default;
   }
 
-  .stream-row { padding-top: 0; border-bottom: 1px solid var(--bg-light); }
-  .stream-select {
-    background: var(--bg-dark);
-    border: 1px solid var(--bg-light);
-    border-radius: 4px;
-    color: var(--fg-dim);
-    font-size: 11px;
-    max-width: 100%;
-    padding: 3px 4px;
-  }
-  .stream-select:focus { border-color: var(--accent); outline: none; }
-
-  .mini-select {
-    background: none;
-    border: none;
-    color: var(--fg-dim);
-    font-size: 10px;
-    max-width: 60px;
-    padding: 0;
-  }
-  .mini-select:focus { outline: none; }
-
   .lists {
     flex: 1;
     overflow-y: auto;
@@ -527,7 +460,6 @@
     margin: 10px 10px 0;
   }
 
-  .group-stream { color: var(--accent); font-weight: 500; }
   .group-loose { font-style: italic; opacity: 0.7; text-transform: none; letter-spacing: 0; }
 
   .group {
@@ -537,6 +469,15 @@
     letter-spacing: 0.08em;
     margin: 10px 10px 4px;
     text-transform: uppercase;
+  }
+
+  .elsewhere {
+    border-top: 1px solid var(--bg-light);
+    color: var(--fg-dim);
+    font-size: 11px;
+    line-height: 1.5;
+    margin: 12px 10px 0;
+    padding-top: 8px;
   }
 
   .task-list {

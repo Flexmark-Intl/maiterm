@@ -283,8 +283,26 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 - Width persisted as a `tasks_width` preference, drag-resized from the left edge like
   `NotesPanel.svelte:198`.
 - Keyboard: **Cmd+Shift+E** (Cmd+E is notes).
-- Content: this tab's tasks first, then the workspace backlog; inline add, click-to-edit
-  title/detail, status cycling, assign/unassign, and a blocked-by indicator.
+
+**Scope: THIS TAB'S WORK ONLY** (trimmed 2026-08-24). The panel answers one question —
+"what am I doing here" — and hands every other question to the board.
+
+Content: this tab's tasks grouped by workstream (headings only when there is more than
+one job in view), inline add, click-to-edit title/detail, status cycling, delete, a
+blocked-by indicator, and `N parked` / `N done` collapses. One closing line reports how
+many tasks exist elsewhere in the project, as a pointer to the board — never a list.
+
+Removed, and why: it also listed **the rest of the project**, offered a **workstream
+picker** on every add, a **per-row workstream dropdown**, and an **assign/unassign**
+control. All four are *organizing* work, and organizing has a proper home now — the board
+is indexed by workstream (`docs/overlord.md`), where a drag moves a task between jobs and
+the whole window is legible at once. Reproducing that in a 280px dock made the panel a
+worse board and buried the one list the tab actually needs.
+
+A new task inherits the workstream when every unfinished task on the tab shares one, and
+goes loose otherwise — which covers both cases without the picker asking on every add.
+`effectiveStatus` still resolves against the whole workspace list, since a prerequisite
+can live on another tab; that list is simply never rendered.
 
 ## 7. As built
 
@@ -300,6 +318,7 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 | Workstreams + the backlog redefinition | `93c8388` |
 | Board: strips, drag/drop, readable descriptions | `0092900` |
 | Board re-indexed by workstream (index + one board) | `e585821` |
+| Side panel trimmed back to this-tab-only | `00afb21` |
 
 The importer landed with the cutover rather than as its own stage: once Overlord stopped
 owning the rows, `syncMirrorTasks` writing `origin: 'imported'` into the store *was* the
