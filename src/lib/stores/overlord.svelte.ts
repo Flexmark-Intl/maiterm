@@ -1890,7 +1890,14 @@ function createOverlordStore() {
       // there anything to say about work already finished or parked: the agent isn't going
       // to re-add what it has closed out, and clearing out done rows is routine tidying
       // that would otherwise type a line into a tab for every card swept.
-      if (!tabId || !isInFlight(task)) return { removed: true, told: 'nobody' };
+      //
+      // And nothing at all with the supervisor switched off. The task panel routes its
+      // deletes through here too, and it is available whether or not Overlord is enabled —
+      // maiTerm must not type into a terminal on behalf of a supervisor the human turned
+      // off. There is no agent to escalate to in that state either.
+      if (!tabId || !isInFlight(task) || !preferencesStore.overlordEnabled) {
+        return { removed: true, told: 'nobody' };
+      }
 
       const text =
         `Board update: I removed the task "${task.title}" from the board — it is no longer ` +

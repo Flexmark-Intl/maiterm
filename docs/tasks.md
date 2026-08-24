@@ -236,6 +236,14 @@ an agent to treat two separate jobs as one, which is the thing workstreams exist
   again before disk.
 - Deletion is deliberately **not** exposed. An agent may mark `done`; only the human
   deletes. Cheap insurance against an agent tidying away work it didn't understand.
+- But a human deletion has to REACH the agent. `findDuplicate` only sees rows that exist,
+  so a task the human removed comes straight back on the agent's next list re-send
+  (re-prime, resume, compaction). Both delete paths — the board card and the side panel —
+  route through `overlordStore.deleteTask`, which tells the owning tab directly when it is
+  idle and hands the notice to the Overlord agent to relay when it isn't. With Overlord
+  disabled it is exactly the old silent remove: maiTerm does not type into a terminal on
+  behalf of a supervisor that is switched off. See `docs/overlord.md` for why this is a
+  notice rather than a directive, and why it is not a tombstone.
 
 ### Priming (decided 2026-08-23: every agent tab)
 

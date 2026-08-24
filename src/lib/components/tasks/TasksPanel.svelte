@@ -15,6 +15,7 @@
    *  window is visible at once. Duplicating it in a 280px dock made the panel a worse
    *  version of the board and buried the one list the tab actually needs. */
   import { tasksStore } from '$lib/stores/tasks.svelte';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { effectiveStatus, isInFlight, isParked, TASK_STATUSES } from '$lib/tasks/model';
   import type { Task, TaskStatus } from '$lib/tauri/types';
@@ -209,8 +210,12 @@
     tasksStore.update(workspaceId, t.id, { tab_id: mineNow ? tabId : null });
   }
 
+  /** Through the engine, like the board's delete — a task the human removes has to reach
+   *  whoever was carrying it, or the agent puts it back on its next list re-send. With
+   *  Overlord disabled this is exactly the old silent remove; maiTerm does not type into
+   *  a terminal on behalf of a supervisor that has been turned off. */
   function remove(id: string) {
-    tasksStore.remove(workspaceId, id);
+    void overlordStore.deleteTask(id);
     confirmingDelete = null;
   }
 
