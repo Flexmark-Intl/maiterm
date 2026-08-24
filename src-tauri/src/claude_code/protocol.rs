@@ -705,8 +705,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                     "task": { "type": "string", "description": "What you believe you're working on" },
                     "blockers": { "type": "array", "items": { "type": "string" } },
                     "next": { "type": "string" },
-                    "needs_human": { "type": "boolean", "description": "true = a human decision is required" },
-                    "directive_id": { "type": "string", "description": "Usually omitted — acks match the tab's most recent outstanding directive" }
+                    "needs_human": { "type": "boolean", "description": "true = a human decision is required" }
                 },
                 "required": ["kind", "state", "summary"]
             }
