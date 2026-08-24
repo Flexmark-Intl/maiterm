@@ -149,11 +149,14 @@
     // its re-bind here while the deck offers Archive/Close would hand the human a button
     // that kills a running agent. Do not widen that predicate without revisiting this.
     const spentIds = new Set(spent.map((s) => s.tabId));
-    // `drive_reply` is addressed to the Overlord AGENT, not the human — it's a tab
-    // answering a question the agent asked it. Showing it here would turn every ordinary
-    // exchange between Overlord and a tab into a red card on the human's triage queue.
+    // Some escalations are addressed to the Overlord AGENT, not to the human:
+    //  - `drive_reply`   a tab answering a question the agent asked it. Showing it would
+    //                    turn every ordinary Overlord↔tab exchange into a red card here.
+    //  - `permission_stuck`  routing information for the agent, which is blocked waiting.
+    //                    The human already has a first-class `permission` card for that
+    //                    tab, with the button that actually goes there.
     for (const e of overlordStore.escalations) {
-      if (e.kind === 'drive_reply') continue;
+      if (e.kind === 'drive_reply' || e.kind === 'permission_stuck') continue;
       out.push({ sev: 0, id: e.id, type: 'escalation', e });
     }
     for (const p of overlordStore.proposals) out.push({ sev: 1, id: p.id, type: 'proposal', p });

@@ -631,6 +631,26 @@ The fix is a **watch registered at send time** (`driveWatch`), harvested each ti
 4. The reply is queued as an escalation with kind **`drive_reply`**, so it rides the
    existing doorbell + `listEscalations` plumbing — no new MCP surface.
 
+**A permission prompt is not an answer, and the naive test gets it wrong.** When a driven
+tab stops at a permission gate, the `tool_use` block that *raised* the prompt is itself an
+assistant turn (see `real_turn_ts`), so `last_turn_ts` has already advanced while the agent
+sits blocked. Harvesting on "the turn moved" alone captures the half-sentence before the
+tool call, drops the watch, and guarantees the real reply is never seen. So:
+
+- `permission` state **suspends** the harvest and keeps the watch.
+- The give-up clock is **paused** while blocked — a prompt can sit for hours and the
+  directive is not stale, it is waiting on a human. Capped at `now`, so the worst case on
+  resume is a fresh full window rather than instant expiry.
+- A **`permission_stuck`** escalation is raised once (never per tick — re-alarming would
+  bury the supervisor in its own noise). Overlord cannot answer a permission prompt; the
+  doctrine tells it to take that to the human via `AskUserQuestion`.
+- Once answered, the tab finishes and the reply harvests normally.
+
+Scoped to tabs Overlord **drove**, where it is actively blocked waiting. A permission
+prompt on any other tab is the human's own `permission` card on the deck; escalating every
+one to the agent would spend its context on things nobody asked it to watch. A rule on the
+`permission_pending` condition covers that case for anyone who wants it.
+
 Three consequences worth keeping:
 
 - **The human's deck filters `drive_reply` out.** A tab answering a question is not a

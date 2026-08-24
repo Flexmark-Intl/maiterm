@@ -225,7 +225,15 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  is persisted, so an already-primed agent is never re-primed at the same version — and
  *  an agent running last version's doctrine believes last version's rules. v2 added the
  *  promise that driven tabs' replies come back on their own. */
-const DOCTRINE_VERSION = '2';
+const DOCTRINE_VERSION = '3';
+
+/** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
+ *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
+ *  delivery instead of marking them read, or they accumulate for the life of the window. */
+const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
+  'drive_reply',
+  'permission_stuck',
+]);
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
  *  guards are human-only, unreachable from the MCP surface. */
@@ -354,6 +362,9 @@ function createOverlordStore() {
     baseline: number;
     sentAt: number;
     text: string;
+    /** Raised the permission escalation once — the prompt sits until a human answers, and
+     *  re-escalating every tick would bury the supervisor in its own alarm. */
+    permissionNotified?: boolean;
   }
   const driveWatch = new Map<string, DriveWatch>();
   /** Give up harvesting after the same window driveTab's own directive cleanup uses. */
@@ -689,6 +700,7 @@ function createOverlordStore() {
       `  - The engine queues escalations and rings you with a one-line nudge. When that happens, call listEscalations for the content, then resolve each one.\n` +
       `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). Guard refusals (busy, no live REPL, outstanding directive) come back structured; wait and retry or escalate.\n` +
       `  - You WILL get the answer back: when a tab you drove finishes its turn, its reply is queued for you and you are rung the same way as an escalation. So it is fine to ask a tab a question and wait — you do not need to ask it to report back, and you should not poll it.\n` +
+      `  - If that tab stops at a permission prompt instead, you are told that too. You cannot answer a permission prompt for the human — that is what it exists to prevent — so take it to them with AskUserQuestion. The reply still reaches you once they answer and the tab finishes.\n` +
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
@@ -1305,13 +1317,46 @@ function createOverlordStore() {
    */
   async function harvestDriveReplies(now: number) {
     for (const [tabId, w] of [...driveWatch]) {
+      const st = mappedState(tabId);
+
+      // Stopped at a permission prompt. This is NOT an answer, and it is the case the
+      // naive "turn moved on" test gets wrong: the tool_use block that RAISED the prompt
+      // is itself an assistant turn (see real_turn_ts), so `last_turn_ts` has already
+      // advanced while the agent sits blocked. Harvesting here would capture the
+      // half-sentence before the tool call, drop the watch, and guarantee the real reply
+      // is never seen.
+      //
+      // Overlord also has to be TOLD. It cannot answer a permission prompt — that is what
+      // the prompt exists to prevent — but a supervisor that silently waits forever on a
+      // tab stopped behind a gate is the failure this whole return leg exists to remove.
+      if (st === 'permission') {
+        if (!w.permissionNotified) {
+          w.permissionNotified = true;
+          escalate(
+            tabId,
+            null,
+            'permission_stuck',
+            `${tabDisplayName(tabId)} is stopped at a permission prompt and cannot continue ` +
+              `until a human answers it. It was working on your directive ` +
+              `${JSON.stringify(w.text.slice(0, 120))}. You cannot answer a permission prompt ` +
+              `on the human's behalf — raise it with them. The reply still reaches you once ` +
+              `they answer and the tab finishes.`,
+          );
+        }
+        // Pause the give-up clock. A prompt can sit for hours, and the directive is not
+        // stale — it is waiting on a human. Capped at `now`, so the worst case after a long
+        // block is a fresh full window rather than an instant expiry the moment it resumes.
+        w.sentAt = Math.min(now, w.sentAt + TICK_MS);
+        continue;
+      }
+
       if (now - w.sentAt > DRIVE_WATCH_MS) {
         driveWatch.delete(tabId);
         continue;
       }
       const ts = facts.get(tabId)?.last_turn_ts;
       if (!ts || ts <= w.baseline) continue;
-      if (mappedState(tabId) === 'active') continue;
+      if (st === 'active') continue;
 
       let reply: string | null = null;
       try {
@@ -1514,7 +1559,7 @@ function createOverlordStore() {
       // filtered off that board, so nobody would ever dismiss one and they would pile up
       // for the life of the window. Handing it to the agent IS its disposal.
       escalations = escalations
-        .filter((e) => !(e.kind === 'drive_reply' && !e.read))
+        .filter((e) => !(AGENT_ONLY_ESCALATIONS.has(e.kind) && !e.read))
         .map((e) => (e.read ? e : { ...e, read: true }));
       unNudged.clear(); // delivered by the pull itself; no doorbell owed
       return out;
