@@ -90,6 +90,8 @@
     todosTotal: number;
     topTodo: string | null;
     ritual: { ruleName: string; step: number; steps: number } | null;
+    /** Its TerminalPane is mounted, so it can be probed, classified and typed into. */
+    loaded: boolean;
     awaiting: boolean;
     report: string | null;
   }
@@ -117,6 +119,7 @@
             todosTotal: todos.length,
             topTodo: active?.content ?? todos.find((t) => t.status === 'pending')?.content ?? null,
             ritual: r ? { ruleName: r.ruleName, step: r.step, steps: r.steps } : null,
+            loaded: overlordStore.tabLoaded(tab.id),
             awaiting: !!overlordStore.outstandingFor(tab.id),
             report: overlordStore.agentReports.get(tab.id)?.summary ?? null,
           });
@@ -165,7 +168,13 @@
     for (const u of fleet) {
       if (u.state === 'permission') out.push({ sev: 2, id: `perm-${u.tab.id}`, type: 'permission', u });
       else if ((u.pct ?? 0) >= PRESSURE_PCT) out.push({ sev: 3, id: `ctx-${u.tab.id}`, type: 'pressure', u });
-      else if (u.state === 'dormant' && !spentIds.has(u.tab.id)) {
+      // `loaded` gates this, not just dormancy. A tab in a suspended or never-opened
+      // workspace has no mounted pane, so nothing can probe it, classify it or type into
+      // it — it would raise a permanent card that describes a problem and offers nothing,
+      // one per agent tab in the window. It isn't unready; it isn't loaded, which is what
+      // a suspended workspace means. Opening the workspace mounts the pane and the card
+      // appears with a remedy that works.
+      else if (u.state === 'dormant' && u.loaded && !spentIds.has(u.tab.id)) {
         out.push({ sev: 5, id: `dead-${u.tab.id}`, type: 'unready', u });
       }
     }
@@ -773,6 +782,11 @@
               <span class="ov-mono unit-age">{fmtAge(u.lastTurn)}</span>
             </div>
             <div class="unit-ws ov-label">{u.ws.name}</div>
+            {#if u.state === 'dormant' && !u.loaded}
+              <!-- Says why the gauges are empty. Nothing can read this tab until its pane
+                   mounts, and reading "dormant" with no numbers looks like a dead agent. -->
+              <div class="unit-note">not loaded — open its workspace to check on it</div>
+            {/if}
 
             <div class="unit-gauge">
               <svg viewBox="0 0 32 32" class="ring" aria-hidden="true">
@@ -1160,6 +1174,7 @@
   }
   .unit-age { font-size: 0.73rem; color: var(--ov-ink-dim); margin-left: auto; }
   .unit-ws { opacity: 0.75; margin-top: -4px; }
+  .unit-note { color: var(--ov-ink-dim); font-size: 0.74rem; line-height: 1.4; }
 
   .unit-gauge { display: flex; align-items: center; gap: 11px; }
   .ring { width: 34px; height: 34px; transform: rotate(-90deg); flex-shrink: 0; }

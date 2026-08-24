@@ -2014,6 +2014,25 @@ function createOverlordStore() {
      *  which remedy it offers — the two must agree. */
     unreadyKind,
 
+    /**
+     * Is this tab loaded in the DOM — i.e. can anything here classify or recover it?
+     *
+     * A TerminalPane mounts only for activated workspaces and tabs, and every dormancy
+     * probe and every injection goes through its terminal instance. So a tab in a
+     * suspended or never-visited workspace can never be classified: `unreadyKind` stays
+     * null and `recoverTab` refuses with `no_terminal`.
+     *
+     * Which made "unready" the deck's worst card at fleet scale: every agent tab in every
+     * unopened workspace produced one that described a problem and offered nothing, and
+     * nothing about opening the app was ever going to change that. Those tabs are not
+     * unready — they are not loaded, which is what a suspended workspace MEANS. The signal
+     * is gated on this instead, and appears with a working remedy the moment the workspace
+     * is opened and the pane mounts.
+     */
+    tabLoaded(tabId: string): boolean {
+      return !!terminalsStore.get(tabId);
+    },
+
     /** Recover a tab that was an agent and isn't responding.
      *
      *  This is the point of a supervisor: the deck used to print "resume it or run
