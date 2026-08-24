@@ -55,6 +55,40 @@ pub async fn get_agent_reply_since(
     .map_err(|e| format!("agent reply read failed to run: {}", e))
 }
 
+/// What is currently blocking a tab: a tool permission gate, or an AskUserQuestion the agent
+/// raised. `None` when nothing is open. Overlord needs the distinction to decide whether it
+/// may answer or must put the decision to the human.
+#[tauri::command]
+pub fn get_tab_prompt(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<Value>, String> {
+    Ok(crate::mailink::tab_prompt_view(state.inner(), &tab_id))
+}
+
+/// Answer a tab's open prompt, through the SAME hardened path the phone uses — the
+/// runtime-specific permission keymap, the one-shot selector guard, and the
+/// did-it-actually-submit check. `prompt_id` is the stale-guard: pass the one from
+/// `get_tab_prompt` so a slow decision can never answer a prompt that opened since.
+#[tauri::command]
+pub async fn answer_tab_prompt(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    prompt_id: Option<String>,
+    choice: Option<String>,
+    answers: Option<Vec<crate::mailink::Answer>>,
+) -> Result<Value, String> {
+    let app = state.inner().clone();
+    Ok(crate::mailink::respond_to_prompt(
+        &app,
+        &tab_id,
+        prompt_id.as_deref(),
+        choice.as_deref(),
+        answers.as_deref(),
+    )
+    .await)
+}
+
 /// Append entries to this window's Overlord ledger (verbatim injection record —
 /// docs/overlord.md §3). Frontend-owned entry format; ring-buffered at LEDGER_MAX.
 #[tauri::command]

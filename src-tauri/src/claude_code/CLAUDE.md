@@ -10,7 +10,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled)` (53 tools; the 3 task tools are gated on the `tasks_enabled` preference), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled)` (55 tools; the 3 task tools are gated on the `tasks_enabled` preference), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
@@ -75,6 +75,8 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | postCommsReply | Comms: post Mattermost markdown to the bound thread; `resolve: true` clears the binding after posting. Backend-only |
 | startCommsThread | Comms: open a NEW thread in one of this tab's monitored channels (agent-initiated) and bind to it; `bind: false` posts without binding. Backend-only |
 | unbindCommsThread | Comms: clear the tab's thread binding without posting (idempotent). Backend-only |
+| getTabPrompt | Overlord agent only: what is blocking a tab — `permission` (tool gate: tool + detail) or `question` (AskUserQuestion: the questions and options), plus the `prompt_id` stale-guard |
+| answerTabPrompt | Overlord agent only: answer that prompt with the human's authority, through the SAME responder the phone uses (runtime-specific permission keymap, one-shot selector guard, submit confirmation). Ledgered. Doctrine requires escalating consequential decisions to the human instead |
 
 ## Comms Integration (/maiterm resolve)
 

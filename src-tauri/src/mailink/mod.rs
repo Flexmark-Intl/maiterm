@@ -747,11 +747,141 @@ struct RespondBody {
 /// verbatim from `questions[i].options[].label`; multiSelect ⇒ 0..n; a chosen "Other" ⇒ `other`
 /// is set (and for single-select, `selected` is empty when Other is used).
 #[derive(serde::Deserialize)]
-struct Answer {
+pub(crate) struct Answer {
     #[serde(default)]
-    selected: Vec<String>,
+    pub(crate) selected: Vec<String>,
     #[serde(default)]
-    other: Option<String>,
+    pub(crate) other: Option<String>,
+}
+
+/// What is currently blocking a tab, if anything — the read half of the prompt surface.
+///
+/// Distinguishes the two kinds, which look alike in the agent-state machine but are not the
+/// same decision: `permission` is a tool gate ("allow this Bash command?"), `question` is an
+/// AskUserQuestion the agent raised. Overlord needs the difference to judge whether it may
+/// answer or must escalate, so the caller gets the tool being approved (permission) or the
+/// structured questions and options (question) rather than just a state word.
+pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
+    let (kind, prompt_id, runtime) = current_prompt(app, tab_id)?;
+    let mut v = json!({ "kind": kind, "prompt_id": prompt_id, "runtime": runtime.as_key() });
+    if kind == "question" {
+        if let Some(t) = pending_question_for_tab(app, tab_id) {
+            if let Some(q) = t.get("questions") {
+                v["questions"] = q.clone();
+            }
+        }
+        if let Some(at) = pending_question_at_for_tab(app, tab_id) {
+            v["asked_at"] = json!(at);
+        }
+    } else {
+        let sessions = app.agent_sessions.read();
+        if let Some((_, s)) = sessions
+            .iter()
+            .filter(|(_, s)| s.tab_id == tab_id)
+            .max_by_key(|(_, s)| rank(s.state))
+        {
+            if let Some(t) = &s.tool_name {
+                v["tool"] = json!(t);
+            }
+            if let Some(d) = &s.tool_detail {
+                v["detail"] = json!(d);
+            }
+        }
+    }
+    Some(v)
+}
+
+/// Answer a tab's currently-open prompt.
+///
+/// Shared by the phone's `POST /chats/{id}/respond` and by Overlord, which supervises the
+/// same tabs and hits exactly the same fragile TUI affordances. One implementation on
+/// purpose: the runtime-specific keymaps, the one-shot selector guard and the
+/// did-it-actually-submit check are all hard-won, and a second copy would drift.
+///
+/// `prompt_id` is the stale-guard — a mismatch refuses rather than injecting a keystroke
+/// into whatever prompt happens to be open NOW.
+pub(crate) async fn respond_to_prompt(
+    app: &Arc<AppState>,
+    tab_id: &str,
+    prompt_id: Option<&str>,
+    choice: Option<&str>,
+    answers: Option<&[Answer]>,
+) -> Value {
+    let Some((kind, cur_id, runtime)) = current_prompt(app, tab_id) else {
+        return json!({ "ok": false, "reason": "stale" });
+    };
+    if let Some(pid) = prompt_id {
+        if pid != cur_id {
+            return json!({ "ok": false, "reason": "stale" });
+        }
+    }
+    let Some(pty) = pty_for_tab(app, tab_id) else {
+        return json!({ "ok": false, "reason": "no_pty" });
+    };
+    match kind {
+        // permission menu: a single keystroke selects the option (no bracketed paste);
+        // the key is runtime-specific — see permission_key.
+        "permission" => {
+            let key = permission_key(runtime, choice.unwrap_or(""));
+            if crate::pty::write_pty(app, &pty, key.as_bytes()).is_err() {
+                return json!({ "ok": false, "reason": "inject_failed" });
+            }
+        }
+        // AskUserQuestion: replay per-question answers into the open selector.
+        "question" => {
+            let Some(tool_input) = pending_question_for_tab(app, tab_id) else {
+                return json!({ "ok": false, "reason": "stale" });
+            };
+            let answers = match answers {
+                Some(a) if !a.is_empty() => a,
+                _ => return json!({ "ok": false, "reason": "bad_request" }),
+            };
+            // A SECOND attempt at the same ask is refused, and this is the important guard.
+            // Navigation is relative and assumes the highlight starts at row 0, true only for
+            // an untouched selector. After a failed attempt the highlight is wherever the
+            // keystrokes left it, and it cannot be re-homed (the selector unbinds ↑/↓ while
+            // the free-text row holds focus). A retry walks from an unknown origin, and the
+            // row it lands on decides what the operator is recorded as having said.
+            if !claim_question_inject(tab_id, &cur_id) {
+                log::warn!("[maiLink] refusing a second injection into ask {cur_id} (tab {tab_id}): selector position is unknown after the first attempt");
+                return json!({ "ok": false, "reason": "selector_dirty",
+                    "detail": "this ask was already injected once; its selector position is now unknown, so send the answer as a message instead" });
+            }
+            if let Err(e) = drive_question_answers(app, &pty, &tool_input, answers).await {
+                log::warn!("[maiLink] AskUserQuestion answer injection failed: {e}");
+                return json!({ "ok": false, "reason": "inject_failed", "detail": e });
+            }
+            // Confirm the selector actually submitted before claiming success: the PostToolUse
+            // hook clears pending_question when the ask resolves, so if it is still open after
+            // a grace window the keystrokes didn't drive it to Submit.
+            let mut submitted = false;
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if pending_question_for_tab(app, tab_id).is_none() {
+                    submitted = true;
+                    break;
+                }
+            }
+            if submitted {
+                let used_other = answers.iter().any(|a| a.other.as_deref().is_some_and(|t| !t.trim().is_empty()));
+                log::info!("[maiLink] AskUserQuestion answered (tab {tab_id}, {} question(s){})",
+                    answers.len(), if used_other { ", via the Other free-text row" } else { "" });
+            } else {
+                log::warn!("[maiLink] AskUserQuestion still open ~2s after inject — reporting inject_failed (tab {tab_id})");
+                return json!({ "ok": false, "reason": "inject_failed",
+                    "detail": "selector still open after injection" });
+            }
+        }
+        // free-text fallback: treat choice as a plain message → paste + submit
+        _ => {
+            if let Some(c) = choice {
+                if inject_text(app, &pty, c, true).await.is_err() {
+                    return json!({ "ok": false, "reason": "inject_failed" });
+                }
+            }
+        }
+    }
+    json!({ "ok": true })
 }
 
 /// POST /chats/{tabId}/respond — answer the tab's currently-open prompt. `prompt_id` is the
@@ -767,90 +897,19 @@ async fn post_respond(
     if !is_designated(&s.app, &tab_id) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let current = current_prompt(&s.app, &tab_id);
-    let (kind, cur_id, runtime) = match current {
-        Some(p) => p,
-        None => return Ok(Json(json!({ "ok": false, "reason": "stale" }))),
-    };
-    if let Some(pid) = &body.prompt_id {
-        if pid != &cur_id {
-            return Ok(Json(json!({ "ok": false, "reason": "stale" })));
-        }
-    }
-    let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
-    match kind {
-        // permission menu: a single keystroke selects the option (no bracketed paste);
-        // the key is runtime-specific — see permission_key.
-        "permission" => {
-            let key = permission_key(runtime, body.choice.as_deref().unwrap_or(""));
-            crate::pty::write_pty(&s.app, &pty, key.as_bytes())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        }
-        // AskUserQuestion: replay the phone's per-question answers into the open selector.
-        "question" => {
-            let tool_input = match pending_question_for_tab(&s.app, &tab_id) {
-                Some(t) => t,
-                None => return Ok(Json(json!({ "ok": false, "reason": "stale" }))),
-            };
-            let answers = match body.answers.as_deref() {
-                Some(a) if !a.is_empty() => a,
-                _ => return Ok(Json(json!({ "ok": false, "reason": "bad_request" }))),
-            };
-            // A SECOND attempt at the same ask is refused, and this is the important guard here.
-            // Navigation is relative and assumes the highlight starts at row 0, which is true only
-            // for an untouched selector. After a failed attempt the highlight is wherever the
-            // keystrokes left it — and it cannot be re-homed, because the selector unbinds ↑/↓
-            // entirely while the free-text row holds focus. So a retry walks from an unknown
-            // origin, and the row it can end up typing into decides what the operator is recorded
-            // as having said. Retrying is strictly more dangerous than declining to.
-            if !claim_question_inject(&tab_id, &cur_id) {
-                log::warn!("[maiLink] refusing a second injection into ask {cur_id} (tab {tab_id}): selector position is unknown after the first attempt");
-                return Ok(Json(json!({ "ok": false, "reason": "selector_dirty",
-                    "detail": "this ask was already injected once; its selector position is now unknown, so send the answer as a message instead" })));
-            }
-            if let Err(e) = drive_question_answers(&s.app, &pty, &tool_input, answers).await {
-                log::warn!("[maiLink] AskUserQuestion answer injection failed: {e}");
-                return Ok(Json(json!({ "ok": false, "reason": "inject_failed", "detail": e })));
-            }
-            // Confirm the selector actually submitted before claiming success. The PostToolUse hook
-            // clears the tab's pending_question when the AskUserQuestion resolves; if it's still
-            // open after a grace window, the keystrokes didn't drive it to Submit (e.g. an unhandled
-            // selector variant like multiSelect+Other). Return inject_failed instead of a false
-            // ok:true — otherwise the phone optimistically marks it answered while the agent got
-            // nothing ("phone says done, agent never advanced"). The app recovers on !ok.
-            let mut submitted = false;
-            for _ in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if pending_question_for_tab(&s.app, &tab_id).is_none() {
-                    submitted = true;
-                    break;
-                }
-            }
-            // Log the SUCCESS too, not just the failures. Until now a landed injection was
-            // silent, which made it indistinguishable from the operator having answered on the
-            // desktop — so a live test of this path could never be more than probably-conclusive.
-            // `other` is called out because the free-text row is the fragile case.
-            if submitted {
-                let used_other = answers.iter().any(|a| a.other.as_deref().is_some_and(|t| !t.trim().is_empty()));
-                log::info!("[maiLink] AskUserQuestion answered from a device (tab {tab_id}, {} question(s){})",
-                    answers.len(), if used_other { ", via the Other free-text row" } else { "" });
-            }
-            if !submitted {
-                log::warn!("[maiLink] AskUserQuestion still open ~2s after inject — reporting inject_failed (tab {tab_id})");
-                return Ok(Json(json!({ "ok": false, "reason": "inject_failed",
-                    "detail": "selector still open after injection" })));
-            }
-        }
-        // free-text fallback: treat choice as a plain message → paste + submit
-        _ => {
-            if let Some(choice) = body.choice.as_deref() {
-                inject_text(&s.app, &pty, choice, true)
-                    .await
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            }
-        }
-    }
-    Ok(Json(json!({ "ok": true })))
+    // The tab must still have a PTY — kept here so the phone's HTTP contract still answers
+    // 409 for that case rather than the shared function's `{ok:false}`.
+    pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
+    Ok(Json(
+        respond_to_prompt(
+            &s.app,
+            &tab_id,
+            body.prompt_id.as_deref(),
+            body.choice.as_deref(),
+            body.answers.as_deref(),
+        )
+        .await,
+    ))
 }
 
 /// POST /chats/{tabId}/interrupt — send Esc to the agent (the documented "human interrupts"

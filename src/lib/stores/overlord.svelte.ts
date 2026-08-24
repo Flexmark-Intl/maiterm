@@ -225,7 +225,7 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  is persisted, so an already-primed agent is never re-primed at the same version — and
  *  an agent running last version's doctrine believes last version's rules. v2 added the
  *  promise that driven tabs' replies come back on their own. */
-const DOCTRINE_VERSION = '3';
+const DOCTRINE_VERSION = '4';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -700,7 +700,8 @@ function createOverlordStore() {
       `  - The engine queues escalations and rings you with a one-line nudge. When that happens, call listEscalations for the content, then resolve each one.\n` +
       `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). Guard refusals (busy, no live REPL, outstanding directive) come back structured; wait and retry or escalate.\n` +
       `  - You WILL get the answer back: when a tab you drove finishes its turn, its reply is queued for you and you are rung the same way as an escalation. So it is fine to ask a tab a question and wait — you do not need to ask it to report back, and you should not poll it.\n` +
-      `  - If that tab stops at a permission prompt instead, you are told that too. You cannot answer a permission prompt for the human — that is what it exists to prevent — so take it to them with AskUserQuestion. The reply still reaches you once they answer and the tab finishes.\n` +
+      `  - If that tab stops at a prompt instead, you are told. Call getTabPrompt to see it, then ANSWER IT with answerTabPrompt — unblocking your own fleet is your job, and a tab left sitting at a prompt is the failure you exist to prevent. Pass back the prompt_id you were given.\n` +
+      `  - ESCALATE INSTEAD OF ANSWERING when the decision is consequential: anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion, and you answer the tab once they tell you. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, it is the escalating side.\n` +
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
@@ -1336,11 +1337,13 @@ function createOverlordStore() {
             tabId,
             null,
             'permission_stuck',
-            `${tabDisplayName(tabId)} is stopped at a permission prompt and cannot continue ` +
-              `until a human answers it. It was working on your directive ` +
-              `${JSON.stringify(w.text.slice(0, 120))}. You cannot answer a permission prompt ` +
-              `on the human's behalf — raise it with them. The reply still reaches you once ` +
-              `they answer and the tab finishes.`,
+            `${tabDisplayName(tabId)} is stopped at a prompt and cannot continue until it is ` +
+              `answered. It was working on your directive ${JSON.stringify(w.text.slice(0, 120))}. ` +
+              `Call getTabPrompt on that tab to see what it is asking, then answerTabPrompt — ` +
+              `unless the decision is consequential (destructive or irreversible, money, ` +
+              `credentials, production, an external party, or a question about what the human ` +
+              `WANTS rather than how to do what they already asked), in which case put it to ` +
+              `the human with AskUserQuestion first. Its reply reaches you once it finishes.`,
           );
         }
         // Pause the give-up clock. A prompt can sit for hours, and the directive is not
@@ -2253,6 +2256,44 @@ function createOverlordStore() {
       ruleChangeResolver = null;
     },
 
+    /** What is blocking a tab, if anything — the read half of the prompt surface. */
+    async tabPrompt(tabId: string) {
+      return commands.getTabPrompt(tabId);
+    },
+
+    /**
+     * Answer a tab's open prompt with the human's authority.
+     *
+     * Goes through maiLink's hardened responder, not a raw paste: a permission menu takes a
+     * single runtime-specific keystroke, and an AskUserQuestion selector is driven by
+     * relative navigation that can only be attempted ONCE (a retry starts from an unknown
+     * highlight position and can record the operator as having said something they didn't).
+     * Bracketed-paste text would answer neither correctly.
+     *
+     * Ledgered like every other injection — an approval made on the human's behalf has to
+     * be as auditable as a directive typed on their behalf.
+     */
+    async answerPrompt(
+      tabId: string,
+      promptId: string | null,
+      choice: string | null,
+      answers: commands.PromptAnswer[] | null,
+    ): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+      const shown = choice ?? (answers ?? []).map((a) => [...(a.selected ?? []), a.other ?? ''].filter(Boolean).join(', ')).join(' | ');
+      const step: OverlordStep = { kind: 'process', text: `[prompt] ${shown}` };
+      let res: { ok: boolean; reason?: string; detail?: string };
+      try {
+        res = await commands.answerTabPrompt(tabId, promptId, choice, answers);
+      } catch (e) {
+        logError(`overlord: prompt answer failed for ${tabId.slice(0, 8)}: ${e}`);
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
+        return { ok: false, reason: 'inject_failed' };
+      }
+      ledger(tabId, null, 'overlord_judgment', 0, step, res.ok ? 'sent' : 'blocked_guard');
+      logInfo(`overlord: answered ${tabId.slice(0, 8)} prompt — ${JSON.stringify(shown)} (${res.ok ? 'ok' : res.reason})`);
+      return res;
+    },
+
     /** Drive a tab on the Overlord agent's behalf (S4 driveTab): same guards, same
      *  ledger, structured refusal. */
     async driveTab(
@@ -2289,10 +2330,10 @@ function createOverlordStore() {
               sent: false,
               reason: 'awaiting_permission',
               detail:
-                'That tab is stopped at a permission prompt. Retrying will not clear it — ' +
-                'and you cannot answer it, which is what the prompt exists to prevent. ' +
-                'Put the decision to the human with AskUserQuestion; the tab resumes when ' +
-                'they answer, and its reply reaches you then.',
+                'That tab is stopped at a prompt, so there is nothing to type a directive ' +
+                'into — retrying will not clear it. Use getTabPrompt to see what it is ' +
+                'asking and answerTabPrompt to answer it (escalate to the human first if ' +
+                'the decision is consequential). The tab resumes once it is answered.',
             }
           : { sent: false, reason: 'agent_busy' };
       }

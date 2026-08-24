@@ -223,6 +223,45 @@ export async function getAgentReplySince(tabId: string, sinceMs: number): Promis
   return invoke('get_agent_reply_since', { tabId, sinceMs });
 }
 
+/** One question's answer: chosen option labels, and/or free text via the Other row. */
+export interface PromptAnswer {
+  selected?: string[];
+  other?: string | null;
+}
+
+/** What is currently blocking a tab. `kind: 'permission'` is a tool gate (carries `tool` and
+ *  `detail`); `kind: 'question'` is an AskUserQuestion (carries `questions`). */
+export interface TabPrompt {
+  kind: 'permission' | 'question';
+  prompt_id: string;
+  runtime: string;
+  tool?: string;
+  detail?: string;
+  questions?: unknown;
+  asked_at?: number;
+}
+
+export async function getTabPrompt(tabId: string): Promise<TabPrompt | null> {
+  return invoke('get_tab_prompt', { tabId });
+}
+
+/** Answer a tab's open prompt through the same hardened path the phone uses. Pass the
+ *  `prompt_id` from `getTabPrompt` — it is the stale-guard against answering a prompt that
+ *  opened while the decision was being made. */
+export async function answerTabPrompt(
+  tabId: string,
+  prompt_id?: string | null,
+  choice?: string | null,
+  answers?: PromptAnswer[] | null,
+): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+  return invoke('answer_tab_prompt', {
+    tabId,
+    promptId: prompt_id ?? null,
+    choice: choice ?? null,
+    answers: answers ?? null,
+  });
+}
+
 /** Append entries to this window's Overlord ledger (ring-buffered backend-side). */
 export async function appendOverlordLedger(entries: OverlordLedgerEntry[]): Promise<void> {
   return invoke('append_overlord_ledger', { entries });

@@ -642,9 +642,46 @@ tool call, drops the watch, and guarantees the real reply is never seen. So:
   directive is not stale, it is waiting on a human. Capped at `now`, so the worst case on
   resume is a fresh full window rather than instant expiry.
 - A **`permission_stuck`** escalation is raised once (never per tick — re-alarming would
-  bury the supervisor in its own noise). Overlord cannot answer a permission prompt; the
-  doctrine tells it to take that to the human via `AskUserQuestion`.
+  bury the supervisor in its own noise), telling Overlord to go and answer it.
 - Once answered, the tab finishes and the reply harvests normally.
+
+### Overlord answers prompts (decided 2026-08-24)
+
+Overlord unblocks its own fleet. A tab left sitting at a prompt is the failure the
+supervisor exists to prevent, and "go to the tab yourself" is the answer this whole
+surface keeps having to unlearn.
+
+Two MCP tools, Overlord-agent-gated like `driveTab`:
+
+- **`getTabPrompt`** — what is blocking a tab. `kind: 'permission'` is a tool gate (with
+  the `tool` and the `detail` being approved); `kind: 'question'` is an AskUserQuestion
+  (with the questions and their options). Both carry a `prompt_id`.
+- **`answerTabPrompt`** — answers it, with the human's authority, ledgered like any other
+  injection. `prompt_id` is the stale-guard: a slow decision can never answer a prompt that
+  opened since.
+
+**It goes through maiLink's responder, not a paste.** `respond_to_prompt` is now shared by
+the phone's `POST /chats/{id}/respond` and by Overlord — one implementation, because the
+runtime-specific permission keymap (Claude's numeric menu vs Codex's letter shortcuts over
+a variable-length overlay), the one-shot selector guard, and the did-it-actually-submit
+check are all hard-won and a second copy would drift. A bracketed-paste of "yes" answers
+neither kind correctly.
+
+**The line Overlord must not cross** — in the doctrine, the tool description, and the
+escalation text, so it reads the same wherever the agent meets it:
+
+> Escalate instead of answering when the decision is consequential: anything destructive
+> or irreversible (deleting data, force-push, dropping a database, `rm -rf`), anything
+> touching money, credentials, production, or an external party, or any question about
+> what the human **wants** rather than how to carry out what they already asked for.
+> Routine approvals in service of work already underway are Overlord's to make. If it is
+> genuinely unsure which side a decision falls on, it is the escalating side.
+
+This is **doctrine, not a mechanical guard** — the engine cannot classify a decision's
+consequence, and §3's "guards must be mechanical" does not reach here. What *is* mechanical:
+the Overlord-only gate, the stale-guard, the one-shot selector claim, the refusal to answer
+its own prompt (which would resolve the very ask it raised to reach the human), and the
+ledger entry for every answer.
 
 Scoped to tabs Overlord **drove**, where it is actively blocked waiting. A permission
 prompt on any other tab is the human's own `permission` card on the deck; escalating every

@@ -231,6 +231,32 @@ function createClaudeCodeStore() {
           else result = await overlordStore.driveTab(a.tab_id, a.kind === 'slash' ? 'slash' : 'process', a.text);
           break;
         }
+        case 'getTabPrompt': {
+          const a = args as { tabId?: string; tab_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'getTabPrompt is available only to the Overlord agent tab.' };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else result = { prompt: await overlordStore.tabPrompt(a.tab_id) };
+          break;
+        }
+        case 'answerTabPrompt': {
+          const a = args as {
+            tabId?: string;
+            tab_id: string;
+            prompt_id?: string;
+            choice?: string;
+            answers?: import('$lib/tauri/commands').PromptAnswer[];
+          };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'answerTabPrompt is available only to the Overlord agent tab.' };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          // Answering your own prompt is a loop: the agent would resolve the very ask it
+          // raised to reach the human, and the human would never see it.
+          else if (a.tab_id === a.tabId) result = { ok: false, reason: 'cannot answer your own prompt' };
+          else if (!a.choice && !a.answers?.length) result = { ok: false, reason: 'bad_request', detail: 'pass choice (permission) or answers (question)' };
+          else result = await overlordStore.answerPrompt(a.tab_id, a.prompt_id ?? null, a.choice ?? null, a.answers ?? null);
+          break;
+        }
         case 'proposeRuleChanges': {
           const a = args as { tabId?: string; rationale: string; changes: import('$lib/stores/overlord.svelte').OverlordRuleChange[] };
           result = a.tabId

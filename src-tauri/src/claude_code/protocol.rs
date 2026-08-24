@@ -724,7 +724,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "driveTab",
-            "description": "Overlord agent only: inject a directive into another tab in this window, typed with the human's full authority (the target cannot tell it from the human). kind 'process' = free-text directive; 'slash' = a slash command like /compact. The same mechanical guards as automated rules apply — a structured refusal comes back if the target has no live agent REPL, is busy, or already has an outstanding directive. Refusal reasons: no_live_repl, agent_busy, outstanding_directive, runtime_mismatch, and awaiting_permission — that last one means the tab is stopped at a permission prompt, which retrying will NOT clear and which you cannot answer; put the decision to the human with AskUserQuestion instead. Every call lands verbatim in the ledger.",
+            "description": "Overlord agent only: inject a directive into another tab in this window, typed with the human's full authority (the target cannot tell it from the human). kind 'process' = free-text directive; 'slash' = a slash command like /compact. The same mechanical guards as automated rules apply — a structured refusal comes back if the target has no live agent REPL, is busy, or already has an outstanding directive. Refusal reasons: no_live_repl, agent_busy, outstanding_directive, runtime_mismatch, and awaiting_permission — that last one means the tab is stopped at a prompt, which retrying will NOT clear; use getTabPrompt + answerTabPrompt to answer it instead. Every call lands verbatim in the ledger.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -734,6 +734,43 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                     "text": { "type": "string", "description": "The exact text to type into the target tab" }
                 },
                 "required": ["tab_id", "kind", "text"]
+            }
+        },
+        {
+            "name": "getTabPrompt",
+            "description": "Overlord agent only: what is currently BLOCKING a tab, if anything. Returns null when nothing is open. kind 'permission' = a tool gate (fields: tool, detail — the command or argument being approved). kind 'question' = an AskUserQuestion the agent raised (field: questions[] with each question's options). Always carries prompt_id — pass it back to answerTabPrompt so a slow decision can never answer a prompt that opened since.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id (from listWorkspaces)" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
+            "name": "answerTabPrompt",
+            "description": "Overlord agent only: answer a tab's open prompt, with the human's authority. For kind 'permission' pass `choice` ('1' approve / '2' approve and don't ask again / '3' deny, or the option label). For kind 'question' pass `answers` — one entry per question in order, each with `selected` (option labels verbatim) and/or `other` (free text). ALWAYS read getTabPrompt first and pass its prompt_id. ESCALATE INSTEAD OF ANSWERING when the decision is consequential — anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion. Routine approvals in service of work already underway are yours to make. Every answer is recorded in the ledger.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id" },
+                    "prompt_id": { "type": "string", "description": "From getTabPrompt — the stale-guard" },
+                    "choice": { "type": "string", "description": "kind 'permission': '1' | '2' | '3' or the option label" },
+                    "answers": {
+                        "type": "array",
+                        "description": "kind 'question': one entry per question, in order",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "selected": { "type": "array", "items": { "type": "string" }, "description": "Chosen option labels, verbatim" },
+                                "other": { "type": "string", "description": "Free-text answer via the Other row" }
+                            }
+                        }
+                    }
+                },
+                "required": ["tab_id"]
             }
         },
         {
