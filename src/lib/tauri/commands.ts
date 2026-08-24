@@ -215,6 +215,14 @@ export async function getOverlordTabFacts(tabIds: string[]): Promise<Record<stri
   return invoke('get_overlord_tab_facts', { tabIds });
 }
 
+/** What a tab's agent has said since `sinceMs`, joined oldest-first — how Overlord reads
+ *  the answer to a directive it typed. `sinceMs` MUST come from the transcript's own clock
+ *  (the tab's previous `last_turn_ts`): an SSH tab's transcript is written on the remote
+ *  host, so comparing against this machine's wall clock skews. */
+export async function getAgentReplySince(tabId: string, sinceMs: number): Promise<string | null> {
+  return invoke('get_agent_reply_since', { tabId, sinceMs });
+}
+
 /** Append entries to this window's Overlord ledger (ring-buffered backend-side). */
 export async function appendOverlordLedger(entries: OverlordLedgerEntry[]): Promise<void> {
   return invoke('append_overlord_ledger', { entries });

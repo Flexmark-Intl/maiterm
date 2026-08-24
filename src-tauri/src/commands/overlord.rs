@@ -38,6 +38,23 @@ pub async fn get_overlord_tab_facts(
     .map_err(|e| format!("overlord facts probe failed to run: {}", e))
 }
 
+/// What the tab's agent has said since `since_ms` — how Overlord harvests the answer to a
+/// directive it typed, rather than depending on the agent volunteering `replyToOverlord`.
+/// Transcript I/O, so it runs on the blocking pool like the facts poll.
+#[tauri::command]
+pub async fn get_agent_reply_since(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    since_ms: i64,
+) -> Result<Option<String>, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::mailink::agent_reply_since(&app_state, &tab_id, since_ms)
+    })
+    .await
+    .map_err(|e| format!("agent reply read failed to run: {}", e))
+}
+
 /// Append entries to this window's Overlord ledger (verbatim injection record —
 /// docs/overlord.md §3). Frontend-owned entry format; ring-buffered at LEDGER_MAX.
 #[tauri::command]

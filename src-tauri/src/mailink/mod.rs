@@ -3261,6 +3261,40 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
 /// timestamp, runtime, session id. Everything comes from the (mtime,len)-gated tail-facts
 /// cache in `transcript.rs`, so steady-state cost per tab is one stat. snake_case keys —
 /// this is a maiTerm frontend surface, not the mailink phone protocol.
+/// Everything the tab's agent has SAID since `since_ms`, joined oldest-first.
+///
+/// This is the tail Overlord reads to harvest an answer to a directive it typed. Overlord
+/// injects raw text with no envelope (docs/overlord.md §3), so the agent on the other end
+/// answers in its own terminal exactly as it would answer the human — it has no reason to
+/// call `replyToOverlord` unless the directive asked it to. Without this, a directive that
+/// asks a question gets answered into a void.
+///
+/// `since_ms` must come from the same clock as the transcript (pass the tab's previous
+/// `last_turn_ts`, not the local wall clock): an SSH tab's transcript is written on the
+/// REMOTE host, so comparing its timestamps against this machine's clock skews.
+pub(crate) fn agent_reply_since(app: &AppState, tab_id: &str, since_ms: i64) -> Option<String> {
+    let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
+    let turns = transcript::turns_for(rt, &sid, 40, transcript::ToolRender::Marker)?;
+    let mut parts: Vec<String> = Vec::new();
+    for t in turns.iter() {
+        if t.get("role").and_then(|r| r.as_str()) != Some("agent") {
+            continue;
+        }
+        if t.get("ts").and_then(|v| v.as_i64()).unwrap_or(0) <= since_ms {
+            continue;
+        }
+        if let Some(text) = t.get("text").and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("\n\n"))
+}
+
 pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let mut v = json!({

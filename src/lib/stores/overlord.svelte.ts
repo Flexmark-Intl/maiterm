@@ -104,7 +104,15 @@ export interface OverlordEscalation {
   tabId: string;
   workspaceId: string;
   ruleId: string | null;
-  kind: 'step_timeout' | 'blocked' | 'directive_unacked' | 'permission_stuck' | 'agent_report';
+  kind:
+    | 'step_timeout'
+    | 'blocked'
+    | 'directive_unacked'
+    | 'permission_stuck'
+    | 'agent_report'
+    /** A tab answered a directive Overlord typed. For the AGENT, not the human — the deck
+     *  filters these out, since a normal answer is not a problem needing triage. */
+    | 'drive_reply';
   detail: string;
   /** Consumed by listEscalations (S4); stays visible on the board until dismissed. */
   read: boolean;
@@ -213,6 +221,11 @@ export interface AgentReport {
 /** Persisted (per-tab trigger variable) marker that the Overlord agent has been primed
  *  with its doctrine — same restart-survival trick as MESH_ONBOARDED_VAR. */
 const OVERLORD_PRIMED_VAR = 'overlordPrimed';
+/** Bump when the doctrine's CONTRACT changes, not when its wording is tidied. The marker
+ *  is persisted, so an already-primed agent is never re-primed at the same version — and
+ *  an agent running last version's doctrine believes last version's rules. v2 added the
+ *  promise that driven tabs' replies come back on their own. */
+const DOCTRINE_VERSION = '2';
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
  *  guards are human-only, unreachable from the MCP surface. */
@@ -324,6 +337,30 @@ function createOverlordStore() {
   const prevCommitTs = new Map<string, number | undefined>();
   const permissionSince = new Map<string, number>();
   const lastFiredAt = new Map<string, number>(); // `${ruleId}|${tabId}` → ms
+
+  /**
+   * Tabs Overlord has typed a directive into and is waiting to hear back from.
+   *
+   * Overlord injects raw text with no envelope (§3), so the agent on the other end answers
+   * in its own terminal exactly as it would answer the human — it has no reason to call
+   * `replyToOverlord` unless the directive asked it to. `replyToOverlord` is voluntary;
+   * this is not. Without it, "give me more info" gets answered into a void: the agent does
+   * the work, writes the reply, and nothing carries it back.
+   *
+   * `baseline` is the tab's `last_turn_ts` at send time, NOT the wall clock — an SSH tab's
+   * transcript is written on the remote host, so the two clocks are not comparable.
+   */
+  interface DriveWatch {
+    baseline: number;
+    sentAt: number;
+    text: string;
+  }
+  const driveWatch = new Map<string, DriveWatch>();
+  /** Give up harvesting after the same window driveTab's own directive cleanup uses. */
+  const DRIVE_WATCH_MS = 15 * 60_000;
+  /** Enough of the answer to act on. The rest stays in the tab, which Overlord can drive
+   *  again — the point is to keep the supervisor's context small (§2). */
+  const DRIVE_REPLY_MAX = 4000;
   const fireLog = new Map<string, number[]>(); // `${ruleId}|${tabId}` → recent fire ts
   const outstanding = new Map<string, OutstandingDirective>(); // tabId → directive
   // Escalations raised but not yet announced to the agent (it was busy/absent at the
@@ -599,9 +636,15 @@ function createOverlordStore() {
         if (!(await hasLiveRepl(tab.id))) continue;
         const inst = terminalsStore.get(tab.id);
         if (!inst) return;
-        const n = escalations.filter((e) => !e.read).length;
+        const unread = escalations.filter((e) => !e.read);
+        const n = unread.length;
+        // Word it for what's actually queued: calling a tab's answer an "escalation" makes
+        // the agent open it braced for a problem.
+        const what = unread.every((e) => e.kind === 'drive_reply')
+          ? `${n} repl${n === 1 ? 'y' : 'ies'} from tabs you drove`
+          : `${n} Overlord item${n === 1 ? '' : 's'} pending`;
         try {
-          await bracketedPasteSubmit(inst.ptyId, `${n} Overlord escalation${n === 1 ? '' : 's'} pending — call listEscalations.`);
+          await bracketedPasteSubmit(inst.ptyId, `${what} — call listEscalations.`);
           unNudged.clear();
         } catch (e) {
           logError(`overlord: wake nudge failed: ${e}`);
@@ -645,6 +688,7 @@ function createOverlordStore() {
       `How this works:\n` +
       `  - The engine queues escalations and rings you with a one-line nudge. When that happens, call listEscalations for the content, then resolve each one.\n` +
       `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). Guard refusals (busy, no live REPL, outstanding directive) come back structured; wait and retry or escalate.\n` +
+      `  - You WILL get the answer back: when a tab you drove finishes its turn, its reply is queued for you and you are rung the same way as an escalation. So it is fine to ask a tab a question and wait — you do not need to ask it to report back, and you should not poll it.\n` +
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
@@ -666,13 +710,13 @@ function createOverlordStore() {
         if (primedAgents.has(tab.id)) continue;
         if (mappedState(tab.id) !== 'idle') continue;
         primedAgents.add(tab.id); // mark before await so a racing tick can't double-prime
-        if (getVariables(tab.id)?.get(OVERLORD_PRIMED_VAR) === '1') continue;
+        if (getVariables(tab.id)?.get(OVERLORD_PRIMED_VAR) === DOCTRINE_VERSION) continue;
         if (!(await hasLiveRepl(tab.id))) { primedAgents.delete(tab.id); continue; }
         const inst = terminalsStore.get(tab.id);
         if (!inst) { primedAgents.delete(tab.id); continue; }
         try {
           await bracketedPasteSubmit(inst.ptyId, buildDoctrine());
-          await setVariable(tab.id, OVERLORD_PRIMED_VAR, '1');
+          await setVariable(tab.id, OVERLORD_PRIMED_VAR, DOCTRINE_VERSION);
           logInfo(`overlord: primed agent tab ${tab.id.slice(0, 8)} with doctrine`);
         } catch (e) {
           primedAgents.delete(tab.id);
@@ -1250,6 +1294,54 @@ function createOverlordStore() {
     return best;
   }
 
+  /**
+   * Deliver any answers to directives Overlord typed — the return leg of `driveTab`.
+   *
+   * A tab has answered when its `last_turn_ts` has moved past the baseline we recorded at
+   * send time AND it is no longer mid-turn (harvesting while `active` would capture half a
+   * thought). The reply is queued as an escalation so it rides the existing doorbell and
+   * `listEscalations` plumbing, tagged `drive_reply` so the human's deck ignores it: an
+   * agent answering a question is not a problem needing triage.
+   */
+  async function harvestDriveReplies(now: number) {
+    for (const [tabId, w] of [...driveWatch]) {
+      if (now - w.sentAt > DRIVE_WATCH_MS) {
+        driveWatch.delete(tabId);
+        continue;
+      }
+      const ts = facts.get(tabId)?.last_turn_ts;
+      if (!ts || ts <= w.baseline) continue;
+      if (mappedState(tabId) === 'active') continue;
+
+      let reply: string | null = null;
+      try {
+        reply = await commands.getAgentReplySince(tabId, w.baseline);
+      } catch (e) {
+        logError(`overlord: reply read failed for ${tabId.slice(0, 8)}: ${e}`);
+      }
+      driveWatch.delete(tabId);
+      if (!reply?.trim()) continue;
+
+      // The answer is proof the directive completed. Clearing here matters beyond
+      // tidiness: a driveTab directive otherwise holds the tab's outstanding slot for a
+      // full 15 minutes after it was already served, blocking every rule with
+      // only_if_no_outstanding and every further driveTab at that tab.
+      clearOutstanding(tabId);
+
+      const clipped =
+        reply.length > DRIVE_REPLY_MAX
+          ? `${reply.slice(0, DRIVE_REPLY_MAX)}\n\n[…truncated — drive the tab again if you need the rest]`
+          : reply;
+      escalate(
+        tabId,
+        null,
+        'drive_reply',
+        `${tabDisplayName(tabId)} answered your directive ${JSON.stringify(w.text.slice(0, 120))}:\n\n${clipped}`,
+      );
+      logInfo(`overlord: harvested reply from ${tabId.slice(0, 8)} (${reply.length} chars)`);
+    }
+  }
+
   function unreadyKind(tabId: string): UnreadyKind | null {
     void liveVersion; // see probeLiveness — `liveness` is a plain Map
     return liveness.get(tabId)?.kind ?? null;
@@ -1282,6 +1374,10 @@ function createOverlordStore() {
       // Classify dormant tabs BEFORE rules evaluate, so agent_unready reads this tick's
       // state rather than the previous one's.
       await probeLiveness(now);
+      // Then collect answers to directives already sent — this clears outstanding slots,
+      // so running it before the rule loop lets a tab that just replied be driven again
+      // this tick instead of waiting for the next one.
+      await harvestDriveReplies(now);
       for (const { tab, ws } of pairs) {
         const f = facts.get(tab.id);
         const st = mappedState(tab.id);
@@ -1413,7 +1509,13 @@ function createOverlordStore() {
       // Unread only — re-delivering handled escalations makes the agent re-resolve
       // day-old timeouts. Read ones stay on the board until the human dismisses them.
       const out = ($state.snapshot(escalations) as OverlordEscalation[]).filter((e) => !e.read);
-      escalations = escalations.map((e) => (e.read ? e : { ...e, read: true }));
+      // Drop delivered replies rather than marking them read. Read escalations linger on
+      // purpose — they stay on the human's board until dismissed — but a `drive_reply` is
+      // filtered off that board, so nobody would ever dismiss one and they would pile up
+      // for the life of the window. Handing it to the agent IS its disposal.
+      escalations = escalations
+        .filter((e) => !(e.kind === 'drive_reply' && !e.read))
+        .map((e) => (e.read ? e : { ...e, read: true }));
       unNudged.clear(); // delivered by the pull itself; no doorbell owed
       return out;
     },
@@ -2149,6 +2251,14 @@ function createOverlordStore() {
         acked: false,
       });
       ledger(tabId, null, 'overlord_judgment', 0, step, 'sent');
+      // Watch for the answer. `replyToOverlord` is voluntary and the directive is raw text
+      // with no envelope, so an agent that simply answers in its terminal — the normal
+      // case — would otherwise never reach the supervisor that asked.
+      driveWatch.set(tabId, {
+        baseline: facts.get(tabId)?.last_turn_ts ?? 0,
+        sentAt: Date.now(),
+        text,
+      });
       // Fire-and-forget from the engine's perspective; the ack/turn-end clears it.
       setTimeout(() => {
         const d = outstanding.get(tabId);

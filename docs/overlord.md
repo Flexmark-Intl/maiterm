@@ -606,6 +606,50 @@ workspace — all existing pane/split/PTY machinery applies unchanged.
 - The board view is the workspace's primary surface, indexed by **workstream** —
   see "Board view: one job at a time" below.
 
+### driveTab has a return leg
+
+`driveTab` types raw text into a tab with the human's authority and **no envelope** (§3).
+That is what preserves its ability to command — and it is also why the agent on the other
+end has no idea a supervisor is waiting. It answers in its own terminal exactly as it
+would answer the human.
+
+`replyToOverlord` is **voluntary**. An agent only calls it if the directive asked it to.
+So a directive that asks a question — "give me more info" — got answered into a void: the
+agent did the work, wrote the reply, and nothing carried it back. The engine escalates on
+blocked/timeout states, and an agent that finished and is waiting on a go-ahead trips
+neither.
+
+The fix is a **watch registered at send time** (`driveWatch`), harvested each tick:
+
+1. `driveTab` records the tab's `last_turn_ts` as a `baseline`. Not the wall clock — an
+   SSH tab's transcript is written on the **remote host**, so the two clocks aren't
+   comparable.
+2. Each tick, a watched tab whose `last_turn_ts` has moved past its baseline **and** is no
+   longer `active` (mid-turn would harvest half a thought) has answered.
+3. `get_agent_reply_since` reads everything the agent said after the baseline, via the
+   same `transcript::turns_for` tail maiLink's phone chat uses.
+4. The reply is queued as an escalation with kind **`drive_reply`**, so it rides the
+   existing doorbell + `listEscalations` plumbing — no new MCP surface.
+
+Three consequences worth keeping:
+
+- **The human's deck filters `drive_reply` out.** A tab answering a question is not a
+  problem needing triage; showing it would turn every ordinary Overlord↔tab exchange into
+  a red card on the triage queue.
+- **`consumeEscalations` deletes them rather than marking them read.** Read escalations
+  linger deliberately (they stay on the board until a human dismisses them), but nobody
+  can dismiss a card the board never shows — they would accumulate for the life of the
+  window. Handing one to the agent *is* its disposal.
+- **Harvesting clears the outstanding directive.** The answer proves it completed. Left
+  set, a `driveTab` directive holds the tab's outstanding slot for a full 15 minutes after
+  it was already served, blocking every `only_if_no_outstanding` rule and every further
+  `driveTab` at that tab.
+
+The doctrine now promises this explicitly ("you WILL get the answer back… you do not need
+to ask it to report back, and you should not poll it"), which is a **contract** change —
+hence `DOCTRINE_VERSION`. The primed marker is persisted, so without a version bump every
+existing Overlord agent would keep running the doctrine that had no such promise.
+
 ### Every triage card carries its own remedy
 
 The deck's standing rule, learned twice the hard way (the `unready` cards that printed

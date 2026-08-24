@@ -571,6 +571,7 @@ pub fn run() {
             commands::mailink::mailink_list_devices,
             commands::mailink::mailink_remove_device,
             commands::overlord::get_overlord_tab_facts,
+            commands::overlord::get_agent_reply_since,
             commands::overlord::append_overlord_ledger,
             commands::overlord::get_overlord_ledger,
             commands::overlord::set_workspace_overlord,
