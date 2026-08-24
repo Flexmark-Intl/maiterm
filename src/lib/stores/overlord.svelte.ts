@@ -49,6 +49,9 @@ const NO_TODO_RECENT_TURN_MS = 30 * 60_000;
 /** Done board rows are swept after this long (same hygiene as completed mesh topics). */
 const TASK_DONE_RETENTION_MS = 48 * 60 * 60 * 1000;
 const GATE_POLL_MS = 1_000;
+/** A directive nobody acknowledged for this long is reported (§8's TTL sweep). Longer than
+ *  a working turn, shorter than the drive watch that covers driveTab's own directives. */
+const DIRECTIVE_UNACKED_MS = 10 * 60_000;
 /** turn_end fallback (see awaitGate): how long after injection, and how long the PTY must
  *  have been silent, before an idle tab counts as having finished a sub-poll turn. */
 const TURN_FALLBACK_MIN_MS = 4_000;
@@ -82,6 +85,9 @@ export interface OutstandingDirective {
   sentAt: number;
   /** 'ack' gates resolve via replyToOverlord; others resolve inside the ritual loop. */
   acked: boolean;
+  /** Raised the unacked-TTL escalation once. The directive keeps sitting there, and
+   *  re-raising every tick would bury the queue in one stuck tab. */
+  unackedNotified?: boolean;
 }
 
 export interface OverlordProposal {
@@ -351,6 +357,32 @@ function createOverlordStore() {
   // ── Engine bookkeeping (non-reactive) ───────────────────────────────────────
   const prevAgentState = new Map<string, AgentState | undefined>();
   const prevCommitTs = new Map<string, number | undefined>();
+
+  /**
+   * Edges waiting to be consumed, per tab.
+   *
+   * An edge is a MOMENT — a turn ended, a commit landed — but every guard is about a
+   * WINDOW: the agent idle, the PTY quiet for 3s, no ritual running, no outstanding
+   * directive. The two rarely coincide on the same 5s tick, and the edge used to be
+   * recomputed from a single-tick state delta and then dropped, so it was thrown away
+   * exactly when the guards were most likely to reject it:
+   *
+   *   - `commit` is recorded when the git `tool_use` block is emitted, i.e. MID-TURN,
+   *     when the agent is by definition not idle and the PTY is not quiet. So
+   *     `review_after_commit` — a DEFAULT rule — could effectively never fire.
+   *   - a `turn_end` inside the quiet window (any turn ending in the 3s before a tick)
+   *     was lost permanently.
+   *   - `break` after one rule fire per tab ate that tick's edge for every other rule.
+   *
+   * Latching fixes all three: the edge is re-offered on every tick until a rule consumes
+   * it or it ages past EDGE_LATCH_MS. The rule still runs no earlier than its guards
+   * allow — it just no longer misses its one chance.
+   */
+  const pendingEdges = new Map<string, { turnEnded?: number; committed?: number }>();
+  /** How long a latched edge stays offerable. Long enough to outlast a working turn and
+   *  a cooldown wait; short enough that a rule enabled tomorrow doesn't fire on today's
+   *  commit. */
+  const EDGE_LATCH_MS = 5 * 60_000;
   const permissionSince = new Map<string, number>();
   const lastFiredAt = new Map<string, number>(); // `${ruleId}|${tabId}` → ms
 
@@ -615,6 +647,37 @@ function createOverlordStore() {
       await sleep(GATE_POLL_MS);
     }
     return 'timeout';
+  }
+
+  /** Record this tick's edges and report which are still offerable (§ `pendingEdges`). */
+  function latchEdges(
+    tabId: string,
+    now: number,
+    turnEnded: boolean,
+    committed: boolean,
+  ): { turnEnded: boolean; committed: boolean } {
+    const e = pendingEdges.get(tabId) ?? {};
+    if (turnEnded) e.turnEnded = now;
+    if (committed) e.committed = now;
+    if (e.turnEnded !== undefined && now - e.turnEnded >= EDGE_LATCH_MS) delete e.turnEnded;
+    if (e.committed !== undefined && now - e.committed >= EDGE_LATCH_MS) delete e.committed;
+    if (e.turnEnded === undefined && e.committed === undefined) {
+      pendingEdges.delete(tabId);
+      return { turnEnded: false, committed: false };
+    }
+    pendingEdges.set(tabId, e);
+    return { turnEnded: e.turnEnded !== undefined, committed: e.committed !== undefined };
+  }
+
+  /** Spend the edge a rule just fired on, so it fires once per edge and not once per
+   *  tick for as long as the latch lives. Other rules on other edges keep theirs. */
+  function consumeEdge(tabId: string, event: OverlordRule['when']['event']) {
+    const e = pendingEdges.get(tabId);
+    if (!e) return;
+    if (event === 'turn_end') delete e.turnEnded;
+    else if (event === 'commit') delete e.committed;
+    else return;
+    if (e.turnEnded === undefined && e.committed === undefined) pendingEdges.delete(tabId);
   }
 
   function escalate(
@@ -1507,11 +1570,39 @@ function createOverlordStore() {
         if (f?.last_commit_ts !== undefined || prevCommit === undefined) {
           prevCommitTs.set(tab.id, f?.last_commit_ts ?? 0);
         }
+        // Hold both edges until a rule spends one or they age out — the guards almost
+        // never pass on the same tick the edge appears (see `pendingEdges`).
+        const edges = latchEdges(tab.id, now, turnEnded, committed);
         // A driveTab directive with no ritual watching it is spent once the target's
         // turn demonstrably ran (or it was acked) — otherwise it locks the tab.
         const od = outstanding.get(tab.id);
         if (od && od.ruleId === null && (od.acked || (f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))) {
           clearOutstanding(tab.id);
+        } else if (
+          od &&
+          !od.acked &&
+          !od.unackedNotified &&
+          !driveWatch.has(tab.id) &&
+          now - od.sentAt >= DIRECTIVE_UNACKED_MS
+        ) {
+          // The TTL sweep the design called for on day one. A directive Overlord typed and
+          // nobody answered is the supervisor's blind spot: it holds the tab's outstanding
+          // slot, blocks every `only_if_no_outstanding` rule behind it, and reports nothing.
+          //
+          // Scoped to directives with no drive watch — a driveTab directive has its own
+          // return leg, which reports both the answer and its own expiry, so escalating here
+          // too would double-report every one of them. What's left is rule-issued directives,
+          // whose only feedback channel is the ack that never came.
+          od.unackedNotified = true;
+          escalate(
+            tab.id,
+            od.ruleId,
+            'directive_unacked',
+            `${tabDisplayName(tab.id)} has not acknowledged a directive for ` +
+              `${Math.round((now - od.sentAt) / 60_000)} min: ${JSON.stringify(od.text.slice(0, 160))}. ` +
+              `Nothing else can be sent to that tab until it clears. Check whether the agent is ` +
+              `still running there — driveTab it, or recover the tab — then clear this.`,
+          );
         }
         // Claude task-store importer — one-way, into maiTerm's own store.
         if (f?.todos?.length) {
@@ -1524,13 +1615,16 @@ function createOverlordStore() {
         // 2) Rule evaluation
         for (const rule of rulesForWorkspace(ws.id)) {
           if (!rule.sequence.length) continue;
-          if (!conditionFires(rule, tab, now, turnEnded, committed)) continue;
+          if (!conditionFires(rule, tab, now, edges.turnEnded, edges.committed)) continue;
           if (!guardsPassSync(rule, tab.id, now)) continue;
           if (preferencesStore.overlordProposeMode) {
             propose(rule, tab.id);
           } else {
             void runSequence(rule, tab.id, 'rule');
           }
+          // Spent, whether it ran or was proposed: a proposal the human sits on must not
+          // re-propose itself every 5 seconds for the life of the latch.
+          consumeEdge(tab.id, rule.when.event);
           break; // one rule fire per tab per tick — directives serialize anyway
         }
       }
@@ -2318,7 +2412,12 @@ function createOverlordStore() {
       }
       if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
         const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';
-        escalate(tabId, null, 'agent_report', `${tabDisplayName(tabId)} reports ${args.state}: ${summary}${blockers}`);
+        // "I am stuck" and "I need you" are different cards. Filing both as `agent_report`
+        // left the `blocked` kind with no producer at all and flattened the deck's only
+        // distinction between a tab that has hit a wall and one asking for a decision — so
+        // an explicit ask wins, and a bare blocked state gets the kind the doctrine names.
+        const kind = args.needs_human || args.kind === 'escalate' ? 'agent_report' : 'blocked';
+        escalate(tabId, null, kind, `${tabDisplayName(tabId)} reports ${args.state}: ${summary}${blockers}`);
       }
       return { received: true, outstanding_directive: d && !d.acked ? d.text : null };
     },

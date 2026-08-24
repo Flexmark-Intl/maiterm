@@ -62,6 +62,19 @@ export function conditionSource(when: OverlordCondition): string {
   }
 }
 
+/** What kind of thing a deck escalation card is. Every card used to be chipped
+ *  "escalation", which made a tab that hit a wall look identical to one that asked for a
+ *  decision and to a step that timed out — three different next moves under one word. */
+export function escalationLabel(kind: string): string {
+  switch (kind) {
+    case 'blocked': return 'blocked';
+    case 'step_timeout': return 'timed out';
+    case 'directive_unacked': return 'unacked';
+    case 'agent_report': return 'from agent';
+    default: return 'escalation';
+  }
+}
+
 // ── Steps & gates ─────────────────────────────────────────────────────────────
 
 export function describeGate(gate: OverlordGate | null | undefined): string {

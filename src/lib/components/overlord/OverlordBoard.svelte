@@ -7,7 +7,7 @@
   import type { Workspace, Tab } from '$lib/tauri/types';
   import { isInFlight, type TaskRow } from '$lib/tasks/model';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
+  import { escalationLabel, fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
   import OverlordBoardView from './OverlordBoardView.svelte';
   import '$lib/overlord/deck.css';
 
@@ -149,14 +149,16 @@
     // its re-bind here while the deck offers Archive/Close would hand the human a button
     // that kills a running agent. Do not widen that predicate without revisiting this.
     const spentIds = new Set(spent.map((s) => s.tabId));
-    // Some escalations are addressed to the Overlord AGENT, not to the human:
-    //  - `drive_reply`   a tab answering a question the agent asked it. Showing it would
-    //                    turn every ordinary Overlord↔tab exchange into a red card here.
-    //  - `permission_stuck`  routing information for the agent, which is blocked waiting.
-    //                    The human already has a first-class `permission` card for that
-    //                    tab, with the button that actually goes there.
-    for (const e of overlordStore.escalations) {
-      if (e.kind === 'drive_reply' || e.kind === 'permission_stuck') continue;
+    // Some escalations are addressed to the Overlord AGENT, not to the human — a tab
+    // answering a question the agent asked it, routing information for an agent that is
+    // blocked waiting, a task the human handed over. Showing those would turn every
+    // ordinary Overlord↔tab exchange into a red card on the triage queue.
+    //
+    // Which kinds those are is the STORE's list (`AGENT_ONLY_ESCALATIONS`), read through
+    // `humanEscalations`. This used to name them inline, so every kind added to the set
+    // afterwards leaked onto the deck — and the sidebar badge, which already read
+    // `humanEscalations`, disagreed with the deck about what was waiting.
+    for (const e of overlordStore.humanEscalations) {
       out.push({ sev: 0, id: e.id, type: 'escalation', e });
     }
     for (const p of overlordStore.proposals) out.push({ sev: 1, id: p.id, type: 'proposal', p });
@@ -571,7 +573,7 @@
 
             {#if s.type === 'escalation'}
               <div class="signal-head">
-                <span class="ov-chip ov-chip-tone">escalation</span>
+                <span class="ov-chip ov-chip-tone">{escalationLabel(s.e.kind)}</span>
                 <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.e.tabId)}>{tabDisplayName(s.e.tabId)}</button>
                 <span class="signal-age ov-mono">{fmtAge(s.e.ts)}</span>
               </div>
