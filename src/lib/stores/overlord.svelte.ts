@@ -1165,8 +1165,21 @@ function createOverlordStore() {
     if (existing) {
       // A finished row stays finished; a scan must not resurrect it.
       if (existing.status === 'done') return 'skipped';
+      // The placeholder's title is a COPY of the tab name taken at first scan, so renaming
+      // the tab left the board showing a name that exists nowhere else in the app — every
+      // other surface (ledger, triage chips, task tab-chips) resolves live through
+      // tabDisplayName. Re-sync it here.
+      //
+      // Unless the tab has since REPORTED: titleRow replaces the placeholder with the
+      // agent's own one-line summary, and it is written alongside `agentReports`, so that
+      // map is the reliable "this title is real work, not a stand-in" marker. Clobbering it
+      // with a tab name would throw away the only thing the agent said about itself.
+      const patch: Partial<Task> = {};
+      if (existing.origin === 'overlord' && !agentReports.has(tabId) && existing.title !== tabName) {
+        patch.title = tabName;
+      }
       // Bump recency so a tab that is demonstrably alive never ages into "stale".
-      tasksStore.update(ws.id, existing.id, {});
+      tasksStore.update(ws.id, existing.id, patch);
       return 'refreshed';
     }
     tasksStore.add(ws.id, {
