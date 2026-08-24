@@ -200,7 +200,10 @@
       (e) => e.outcome === 'sent' && Date.parse(e.ts) > cutoff,
     ).length;
   });
-  const needsYou = $derived(signals.length);
+  /** Excludes the put-away group. A finished session offered for archiving needs nothing
+   *  from anyone — counting it made "needs you: 64" mostly a count of work that went
+   *  well, which is the readout people glance at to decide whether to open this tab. */
+  const needsYou = $derived(signals.filter((s) => s.sev < 6).length);
   const engineOn = $derived(preferencesStore.overlordEnabled);
   const scan = $derived(overlordStore.lastScan);
   let asking = $state(false);
@@ -588,8 +591,24 @@
         </div>
       {/if}
 
+      <!-- The queue TILES once there is room for it. A triage card is card-shaped work —
+           a chip row, a sentence or two, a couple of buttons — and in a 1800px window a
+           one-column stack turned every one of them into a banner with 1500px of dead
+           space and a line length nobody can read back. Proposals are the exception: they
+           carry a verbatim block of what would be typed, so they keep the wider measure. -->
+      <div class="queue">
       {#each signals as s, i (s.id)}
-        <article class="signal ov-panel ov-in" style:--i={i}
+        {#if s.sev === 6 && (i === 0 || signals[i - 1].sev !== 6)}
+          <!-- The one grouping the severity ramp already implies: everything above is a
+               problem, everything below is a finished session waiting to be put away.
+               In a stack that read as "further down the list"; tiled, a green card next
+               to a red one needs the line drawn. -->
+          <div class="queue-break">
+            <span class="ov-label">put away · nothing here is wrong</span>
+            <div class="allclear-rule"></div>
+          </div>
+        {/if}
+        <article class="signal ov-panel ov-in" class:wide={s.type === 'proposal'} style:--i={i}
                  style:--tone={s.sev === 0 ? 'var(--ov-critical)'
                    : s.sev === 1 ? 'var(--ov-live)'
                    : s.sev === 2 ? 'var(--ov-warn)'
@@ -792,6 +811,7 @@
           </div>
         </article>
       {/each}
+      </div>
     {/if}
 
     <!-- ── Fleet ───────────────────────────────────────────────────────── -->
@@ -1055,10 +1075,15 @@
   .readout-bar span { display: block; height: 100%; transition: width 0.5s cubic-bezier(0.2, 0.7, 0.3, 1); }
 
   /* ── Body ─────────────────────────────────────────────────────────────── */
+  /* A container, not a media query: the deck is a tab, so it can be half of a split in a
+     huge window or the whole of a small one — the window's width says nothing about how
+     much room these cards actually have. Queried by `.queue` below; `.body` itself is
+     never restyled by it, because an element can't match its own container. */
   .body {
     flex: 1;
     overflow-y: auto;
     padding: 16px var(--ov-gutter) 40px;
+    container-type: inline-size;
   }
 
   .body.body-fill {
@@ -1093,6 +1118,37 @@
   .allclear-rule { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--ov-hair), transparent); }
 
   /* ── Signals ──────────────────────────────────────────────────────────── */
+  /* One column until there is room for two. `align-items: start` matters: a stretched
+     card would grow its severity rail to the height of the tallest card in its row and
+     hold that much empty body, which reads as a card with something missing. */
+  .queue {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 8px;
+  }
+  .queue .signal { margin-bottom: 0; }
+
+  .queue-break {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 0 4px;
+  }
+
+  @container (min-width: 980px) {
+    .queue { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .queue .signal.wide { grid-column: 1 / -1; }
+  }
+  @container (min-width: 1460px) {
+    .queue { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    /* Two of three, not the full row: a proposal wants the measure for its verbatim
+       block, and taking the whole row back would undo the tiling at exactly the widths
+       that made it worth doing. */
+    .queue .signal.wide { grid-column: span 2; }
+  }
+
   .signal {
     display: flex;
     margin-bottom: 8px;
@@ -1120,7 +1176,10 @@
   }
   .signal-title { font-weight: 600; font-size: 0.95rem; }
   .signal-age { font-size: 0.75rem; color: var(--ov-ink-dim); margin-left: auto; }
-  .signal-text { color: var(--ov-ink-mid); font-size: 0.9rem; line-height: 1.5; }
+  /* Caps the line, not the card. Matters for the two things that still span the full
+     width — the scan headline and a wide proposal — where an uncapped paragraph became a
+     single 200-character line. */
+  .signal-text { color: var(--ov-ink-mid); font-size: 0.9rem; line-height: 1.5; max-width: 82ch; }
 
   /* ── Run all ──────────────────────────────────────────────────────────── */
   .runbar { margin-bottom: 10px; padding: 9px 12px; }
