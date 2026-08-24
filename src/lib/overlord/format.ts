@@ -47,18 +47,26 @@ export function conditionChip(when: OverlordCondition): string {
   }
 }
 
-/** The signal each condition reads — shown as a hint so a rule's cost is legible. */
+/**
+ * The signal each condition reads — shown as a hint so a rule's cost is legible.
+ *
+ * It also has to be honest about WHICH RUNTIMES resolve it, because a rule that silently
+ * covers two of your three agent kinds is the same defect as one that can't fire at all.
+ * `overlord_facts_for` returns nothing for Gemini, so every tail-derived signal is blind
+ * there; Codex's tail carries turns and token usage but no commit markers and no todos.
+ * Only `commit` used to disclose its limit, and it named the wrong set.
+ */
 export function conditionSource(when: OverlordCondition): string {
   switch (when.event) {
     case 'context_pct':
-    case 'tab_idle': return 'transcript tail · cached';
+    case 'tab_idle': return 'transcript tail · cached · not Gemini';
     case 'turn_end':
     case 'permission_pending': return 'agent hooks';
     case 'commit': return 'git commit tool calls · Claude only';
-    case 'no_todo_list': return 'maiTerm tasks · every runtime';
-    case 'task_stale': return 'board timers';
-    case 'agent_unready': return 'agent state + liveness probe';
-    case 'directive_unacked': return 'directive ledger';
+    case 'no_todo_list': return 'maiTerm tasks + context size · not Gemini';
+    case 'task_stale': return 'board timers · every runtime';
+    case 'agent_unready': return 'agent state + liveness probe · every runtime';
+    case 'directive_unacked': return 'directive ledger · every runtime';
   }
 }
 
@@ -159,10 +167,11 @@ export function ruleWarnings(rule: OverlordRule): string[] {
   if (!rule.sequence.length || rule.sequence.every((s) => !s.text.trim())) {
     out.push('No directive text — nothing would be sent.');
   }
-  if (rule.when.event === 'commit' || rule.when.event === 'no_todo_list') {
-    const nonClaude = rule.sequence.some((s) => s.runtimes?.some((r) => r !== 'claude'));
-    if (nonClaude) out.push('This signal is only detected for Claude tabs today.');
-  }
+  // Runtime coverage is NOT warned about here. It belongs to `conditionSource`, which
+  // states it neutrally where the condition is picked: every context_pct rule — including
+  // the shipped default — is blind to Gemini, and turning that into a red warning on rules
+  // that are working perfectly for the tabs the human actually runs is how a warning stops
+  // being read. A warning here means the rule cannot fire AT ALL.
   return out;
 }
 

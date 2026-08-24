@@ -207,6 +207,27 @@
       : [...rule.workspaces, wsId];
     updateRule(rule.id, { workspaces: next });
   }
+  /** The key a rule is superseded BY. `rulesForWorkspace` matches on either the id or the
+   *  default_id, and a default rule's id is re-minted when it is re-seeded — so pin to the
+   *  default_id where there is one, or the override outlives exactly one update. */
+  function supersedeKey(r: OverlordRule): string {
+    return r.default_id ?? r.id;
+  }
+
+  /**
+   * A scoped override: this rule REPLACES another wherever it applies.
+   *
+   * The field has always existed and the engine has always honoured it, but nothing in the
+   * editor could set it — the only way to get one was to ask the agent to propose it, for
+   * something the doc presents as the human's own escape hatch for scoped overrides.
+   */
+  function toggleSupersedes(rule: OverlordRule, other: OverlordRule) {
+    const key = supersedeKey(other);
+    const cur = rule.supersedes ?? [];
+    const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
+    updateRule(rule.id, { supersedes: next.length ? next : undefined });
+  }
+
   function toggleStepRuntime(rule: OverlordRule, idx: number, rt: (typeof RUNTIMES)[number]) {
     const step = rule.sequence[idx];
     const cur = step.runtimes ?? [...RUNTIMES];
@@ -462,6 +483,25 @@
                         onclick={() => toggleWorkspace(rule, ws.id)}>{ws.name}</button>
               {/each}
             </div>
+
+            <!-- The override half of scoping. Without this the field was reachable only by
+                 asking the agent to propose it — for the human's own escape hatch. -->
+            {#if rules.length > 1}
+              <div class="row supersede-row">
+                <span class="ov-label">Replaces</span>
+                <div class="scope">
+                  {#each rules.filter((r) => r.id !== rule.id) as other (other.id)}
+                    <button class="scope-chip small"
+                            class:on={(rule.supersedes ?? []).includes(supersedeKey(other))}
+                            onclick={() => toggleSupersedes(rule, other)}>{other.name}</button>
+                  {/each}
+                </div>
+              </div>
+              <p class="hint">
+                A replaced rule stops running wherever this one applies — that is how a
+                workspace rule overrides a global one instead of both firing.
+              </p>
+            {/if}
           </section>
 
           <!-- 04 GUARDS -->
@@ -719,6 +759,8 @@
   .stage-rule { flex: 1; height: 1px; background: var(--ov-hair); }
 
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 7px 0; }
+  .supersede-row { align-items: flex-start; margin-top: 12px; }
+  .supersede-row .ov-label { padding-top: 4px; }
   .spacer { flex: 1; min-width: 8px; }
   .unit { font-size: 0.82rem; color: var(--ov-ink-dim); }
 
