@@ -594,8 +594,12 @@
       <!-- The queue TILES once there is room for it. A triage card is card-shaped work —
            a chip row, a sentence or two, a couple of buttons — and in a 1800px window a
            one-column stack turned every one of them into a banner with 1500px of dead
-           space and a line length nobody can read back. Proposals are the exception: they
-           carry a verbatim block of what would be typed, so they keep the wider measure. -->
+           space and a line length nobody can read back.
+           Every card is one tile, including proposals: giving those the wider measure for
+           their verbatim block meant consecutive ones each claimed two of three columns
+           and grid placement left the third empty — a re-bind sweep raises five at once,
+           so the common case was a column-wide hole down the page. The block is pre-wrap
+           and breaks words, so it reads at a tile's width. -->
       <div class="queue">
       {#each signals as s, i (s.id)}
         {#if s.sev === 6 && (i === 0 || signals[i - 1].sev !== 6)}
@@ -608,7 +612,7 @@
             <div class="allclear-rule"></div>
           </div>
         {/if}
-        <article class="signal ov-panel ov-in" class:wide={s.type === 'proposal'} style:--i={i}
+        <article class="signal ov-panel ov-in" style:--i={i}
                  style:--tone={s.sev === 0 ? 'var(--ov-critical)'
                    : s.sev === 1 ? 'var(--ov-live)'
                    : s.sev === 2 ? 'var(--ov-warn)'
@@ -1137,17 +1141,9 @@
     padding: 14px 0 4px;
   }
 
-  @container (min-width: 980px) {
-    .queue { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .queue .signal.wide { grid-column: 1 / -1; }
-  }
-  @container (min-width: 1460px) {
-    .queue { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    /* Two of three, not the full row: a proposal wants the measure for its verbatim
-       block, and taking the whole row back would undo the tiling at exactly the widths
-       that made it worth doing. */
-    .queue .signal.wide { grid-column: span 2; }
-  }
+  @container (min-width: 980px) { .queue { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @container (min-width: 1460px) { .queue { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+  @container (min-width: 1960px) { .queue { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 
   .signal {
     display: flex;
