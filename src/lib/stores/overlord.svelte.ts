@@ -19,6 +19,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
+import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { getResumeCommand } from '$lib/agents/resume';
 import { tasksStore } from '$lib/stores/tasks.svelte';
@@ -250,8 +251,9 @@ const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
 ]);
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
- *  guards are human-only, unreachable from the MCP surface. */
-const AGENT_RULE_GUARDS = {
+ *  guards are human-only, unreachable from the MCP surface. Exported so the approval modal
+ *  can warn about the rule the human would ACTUALLY get, not the one the agent asked for. */
+export const AGENT_RULE_GUARDS = {
   agent_state: ['idle'] as ('idle' | 'active' | 'permission')[],
   min_quiet_ms: 3000,
   require_live_repl: true,
@@ -295,13 +297,13 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
         origin: 'proposed',
         user_modified: true,
         when: c.rule.when,
-        // Guards are chosen here, never taken from the agent (§10 field tiers). The one
-        // condition-dependent choice: an `agent_unready` rule targets tabs with NO live
-        // agent, so requiring a live REPL would make it permanently unfireable.
-        guards: {
-          ...AGENT_RULE_GUARDS,
-          ...(c.rule.when.event === 'agent_unready' ? { require_live_repl: false } : {}),
-        },
+        // Guards are chosen here, never taken from the agent (§10 field tiers) — but the
+        // default set contradicts three conditions outright, so the coupled guard is
+        // repaired the same way the human editor repairs it. This handled `agent_unready`
+        // alone, which meant an agent-proposed `permission_pending` or `directive_unacked`
+        // rule arrived permanently unfireable and the approval modal asked the human to
+        // approve it anyway.
+        guards: guardsForCondition(AGENT_RULE_GUARDS, c.rule.when.event),
         sequence: c.rule.sequence,
         supersedes: c.rule.supersedes,
       };
@@ -311,7 +313,11 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
       const target = matchRule(rules, c.rule_id);
       if (!target || !c.patch) return rules;
       const { guards: _guards, id: _id, default_id: _did, ...patch } = c.patch;
-      return rules.map((r) => (r.id === target.id ? { ...r, ...patch, user_modified: true } : r));
+      // Guards never come from the agent — but changing the CONDITION can contradict the
+      // guards already on the rule, which would leave an existing, working rule dead after
+      // an approved edit. Repair the coupled guard here, exactly as create does.
+      const guards = patch.when ? guardsForCondition(target.guards, patch.when.event) : target.guards;
+      return rules.map((r) => (r.id === target.id ? { ...r, ...patch, guards, user_modified: true } : r));
     }
     case 'rescope': {
       const target = matchRule(rules, c.rule_id);

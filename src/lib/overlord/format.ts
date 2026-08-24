@@ -114,6 +114,34 @@ export function scopeLabel(rule: OverlordRule, nameOf: (id: string) => string): 
   return `${rule.workspaces.length} workspaces`;
 }
 
+/**
+ * Repair the guards a condition would otherwise contradict.
+ *
+ * Three conditions describe a state the DEFAULT guards exclude by definition, so a rule
+ * carrying both is born dead. The human editor applied this coupling and the MCP path did
+ * not — `AGENT_RULE_GUARDS` handled only `agent_unready` — so an agent-proposed
+ * `permission_pending` or `directive_unacked` rule arrived unfireable, and the approval
+ * modal cheerfully asked the human to approve it.
+ *
+ * This is the repair; `ruleWarnings` below is the same knowledge stated as a diagnosis.
+ * They must agree — every warning here has a matching clause there.
+ */
+export function guardsForCondition(
+  guards: OverlordRule['guards'],
+  event: OverlordCondition['event'],
+): OverlordRule['guards'] {
+  // The condition MEANS no agent is running; requiring a live REPL makes it unfireable.
+  if (event === 'agent_unready') return { ...guards, require_live_repl: false };
+  // The condition needs the agent stopped at a prompt, which `idle` excludes.
+  if (event === 'permission_pending') {
+    const st = guards.agent_state ?? ['idle'];
+    return st.includes('permission') ? guards : { ...guards, agent_state: [...st, 'permission'] };
+  }
+  // The condition needs an outstanding directive; "serialize" requires there be none.
+  if (event === 'directive_unacked') return { ...guards, only_if_no_outstanding: false };
+  return guards;
+}
+
 /** Guard combinations that make a condition unreachable — surfaced inline so a rule
  *  can never be silently dead (the engine inverts agent_state for agent_unready). */
 export function ruleWarnings(rule: OverlordRule): string[] {

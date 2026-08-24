@@ -6,7 +6,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import {
     conditionChip, conditionSource, describeCondition, describeGate,
-    fmtSeconds, ruleWarnings, scopeLabel, sequenceSummary,
+    fmtSeconds, guardsForCondition, ruleWarnings, scopeLabel, sequenceSummary,
   } from '$lib/overlord/format';
   import '$lib/overlord/deck.css';
   import type {
@@ -132,14 +132,9 @@
     else if (def.param === 'days') when = { event: 'task_stale', days: 3 };
     else when = { event } as OverlordCondition;
     // Some conditions are dead under the default guards — adjust the coupled guard so
-    // picking a condition never silently produces a rule that can't fire.
-    let guards = rule.guards;
-    if (event === 'agent_unready') guards = { ...guards, require_live_repl: false };
-    else if (event === 'permission_pending') {
-      const st = guards.agent_state ?? ['idle'];
-      if (!st.includes('permission')) guards = { ...guards, agent_state: [...st, 'permission'] };
-    } else if (event === 'directive_unacked') guards = { ...guards, only_if_no_outstanding: false };
-    updateRule(rule.id, { when, guards });
+    // picking a condition never silently produces a rule that can't fire. Shared with the
+    // MCP create path, which used to know about only one of the three.
+    updateRule(rule.id, { when, guards: guardsForCondition(rule.guards, when.event) });
   }
 
   function setConditionParam(rule: OverlordRule, value: number) {

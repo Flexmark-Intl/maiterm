@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { AGENT_RULE_GUARDS, overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import type { OverlordRuleChange } from '$lib/stores/overlord.svelte';
-  import { describeCondition, describeGate } from '$lib/overlord/format';
+  import type { OverlordRule } from '$lib/tauri/types';
+  import { describeCondition, describeGate, guardsForCondition, ruleWarnings } from '$lib/overlord/format';
   import '$lib/overlord/deck.css';
 
   /**
@@ -39,6 +40,32 @@
   function wsName(id: string): string {
     for (const w of workspacesStore.workspaces) if (w.id === id) return w.name;
     return id.slice(0, 8);
+  }
+
+  /**
+   * What would be wrong with this rule ONCE APPLIED — not with the rule as pitched.
+   *
+   * The agent doesn't choose guards (§10 field tiers), so the rule the human approves is
+   * the agent's condition and steps under maiTerm's guards, and that combination can be
+   * dead on arrival. `ruleWarnings` has always been able to say so; this screen simply
+   * never asked it, so the human was invited to approve a rule the app already knew could
+   * not fire. Rebuild the effective rule exactly as `applyRuleChange` would, then ask.
+   */
+  function warningsFor(c: OverlordRuleChange): string[] {
+    if (c.op === 'create' && c.rule?.when && c.rule.sequence?.length) {
+      return ruleWarnings({
+        ...c.rule,
+        guards: guardsForCondition(AGENT_RULE_GUARDS, c.rule.when.event),
+      } as OverlordRule);
+    }
+    if (c.op === 'update' && c.patch) {
+      const base = preferencesStore.overlordRules.find((r) => r.id === c.rule_id || r.default_id === c.rule_id);
+      if (!base) return [];
+      const { guards: _g, ...patch } = c.patch;
+      const guards = patch.when ? guardsForCondition(base.guards, patch.when.event) : base.guards;
+      return ruleWarnings({ ...base, ...patch, guards } as OverlordRule);
+    }
+    return [];
   }
 
   interface Line { kind: 'text' | 'meta' | 'danger'; label: string; value: string; }
@@ -166,6 +193,10 @@
                     <span class="ov-mono line-value">{line.value}</span>
                   </div>
                 {/if}
+              {/each}
+
+              {#each warningsFor(change) as w (w)}
+                <p class="warn">{w}</p>
               {/each}
             </div>
           </div>
@@ -299,6 +330,18 @@
   .line-value { color: var(--ov-ink-dim); word-break: break-word; }
   .line-meta.danger .line-value { color: color-mix(in srgb, var(--ov-critical) 85%, var(--fg)); }
   .line-meta.danger .line-label { color: var(--ov-critical); }
+
+  /* "This never fires" — the one thing on this screen the human cannot see for
+     themselves, since the guards it contradicts are chosen by maiTerm, not shown here. */
+  .warn {
+    border-left: 2px solid color-mix(in srgb, var(--ov-warn) 70%, transparent);
+    background: color-mix(in srgb, var(--ov-warn) 10%, transparent);
+    color: color-mix(in srgb, var(--ov-warn) 88%, var(--fg));
+    font-size: 0.82rem;
+    line-height: 1.5;
+    padding: 5px 9px;
+    border-radius: 0 2px 2px 0;
+  }
 
   .slip-foot {
     display: flex;
