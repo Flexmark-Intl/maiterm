@@ -338,6 +338,15 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // flips, even though `state` does not move: a live agent reads "active"
                                                      // both before and after it registers, so the init that clears the
                                                      // banner changes nothing else on the wire.
+                                                     // MERGE RULE — apply `registered` only when the field is PRESENT
+                                                     // (`if (ev.registered !== undefined)`). A desktop older than this
+                                                     // field omits it from every frame, and frames fire constantly during
+                                                     // a turn; merging absent-as-true would clear a `registered:false`
+                                                     // the GET had just established and hide the banner on exactly the
+                                                     // desktops that still need it. Absence means "this server can't say",
+                                                     // never "registered". Read in ISOLATION (a lone frame, no prior
+                                                     // state) an absent field still defaults to `true` — it must never
+                                                     // manufacture a re-initialize prompt.
 { "type": "message", "tabId": "...", "role": "agent|user|system",
   "text": "...", "msg_id": "...", "ts": 0 }          // a new transcript turn
                                                      // for a user echo, msg_id === the id POST /message returned
