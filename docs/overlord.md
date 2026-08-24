@@ -420,7 +420,6 @@ replyToOverlord({
   blockers?: string[],
   next?: string,
   needs_human?: boolean,     // → AskUserQuestion, never a status note
-  directive_id?: string,     // usually omitted — see below
 })
 → { received: true, outstanding_directive: string | null }
 ```
@@ -429,16 +428,20 @@ One shape, four uses (ready / ack / status / escalate). Bounded so it stays chea
 and parseable, and defined as a **protocol rather than a file format** — which is
 what keeps it clean across Claude, Codex and Gemini.
 
-### Why `directive_id` is optional
+### There is no `directive_id` (removed 2026-08-24)
 
-It falls out of `only_if_no_outstanding`. With directives serialized per tab
-there is at most one outstanding directive per tab, so an ack matches on
-`(tab_id, most recent outstanding)` unambiguously.
+Acks match on `(tab_id, most recent outstanding)`, which is unambiguous because
+`only_if_no_outstanding` serializes directives per tab. **That is what keeps
+injection genuinely envelope-free** — no `(ack: d_7f3a)` marker riding along in
+the injected text to re-trigger the "this isn't my operator" instinct the design
+exists to avoid.
 
-**That is what keeps injection genuinely envelope-free** — no `(ack: d_7f3a)`
-marker riding along in the injected text to re-trigger the "this isn't my
-operator" instinct the design exists to avoid. Keep the field for the rare
-parallel case; leave it unset in normal operation.
+The field shipped anyway, "for the rare parallel case". It was declared in the
+MCP schema, absent from the frontend arg type, and read by nothing — an agent
+that supplied one was silently ignored. It could not have worked in principle
+either: the id is never told to the answering agent, precisely *because* the
+injection carries no envelope. A parameter nothing can populate and nothing
+reads is a promise to the agent that the tool does not keep, so it is gone.
 
 ### initSession extension
 

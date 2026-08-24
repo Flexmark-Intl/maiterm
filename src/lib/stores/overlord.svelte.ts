@@ -53,6 +53,8 @@ const GATE_POLL_MS = 1_000;
 /** A directive nobody acknowledged for this long is reported (§8's TTL sweep). Longer than
  *  a working turn, shorter than the drive watch that covers driveTab's own directives. */
 const DIRECTIVE_UNACKED_MS = 10 * 60_000;
+/** How long an agent-only escalation waits for an agent that no longer exists. */
+const AGENT_ESCALATION_TTL_MS = 30 * 60_000;
 /** turn_end fallback (see awaitGate): how long after injection, and how long the PTY must
  *  have been silent, before an idle tab counts as having finished a sub-poll turn. */
 const TURN_FALLBACK_MIN_MS = 4_000;
@@ -707,6 +709,37 @@ function createOverlordStore() {
     ];
     unNudged.add(escalations[escalations.length - 1].id);
     void wakeOverlordAgent();
+  }
+
+  /** Does this window still have an Overlord agent tab that could ever pull the queue? */
+  function hasOverlordAgentTab(): boolean {
+    const ws = overlordWorkspace();
+    if (!ws) return false;
+    return ws.panes.some((p) => p.tabs.some((t) => !!t.runtime));
+  }
+
+  /**
+   * Drop agent-only escalations nobody can deliver.
+   *
+   * They are hidden from the human deck by design, so the human can never dismiss one;
+   * `consumeEscalations` is their only disposal, and only the agent calls it. Close the
+   * agent tab after driving a few tabs and the queue grows for the life of the window,
+   * with the doorbell retrying each one on every tick forever.
+   *
+   * Only swept while there is no agent tab at all. A live agent that is merely busy will
+   * pull them when it comes up for air, and throwing away an answer it asked for would be
+   * worse than keeping it.
+   */
+  function sweepUndeliverableEscalations(now: number) {
+    if (hasOverlordAgentTab()) return;
+    const dead = escalations.filter(
+      (e) => AGENT_ONLY_ESCALATIONS.has(e.kind) && !e.read && now - e.ts > AGENT_ESCALATION_TTL_MS,
+    );
+    if (!dead.length) return;
+    const ids = new Set(dead.map((e) => e.id));
+    escalations = escalations.filter((e) => !ids.has(e.id));
+    for (const id of ids) unNudged.delete(id);
+    logInfo(`overlord: dropped ${ids.size} undeliverable agent escalation(s) — no agent tab in this window`);
   }
 
   /** One-line doorbell into the Overlord agent's PTY (§9.1) — content stays behind
@@ -1637,6 +1670,7 @@ function createOverlordStore() {
       void tryPrimeOverlordAgent();
       // Escalations that arrived while the agent was busy still owe it a doorbell.
       if (unNudged.size) void wakeOverlordAgent();
+      sweepUndeliverableEscalations(now);
       sweepDoneTasks(now);
     } finally {
       ticking = false;
@@ -1737,10 +1771,6 @@ function createOverlordStore() {
     dismissEscalation(id: string) {
       escalations = escalations.filter((e) => e.id !== id);
       unNudged.delete(id);
-    },
-    /** An agent reported blocked / needs_human via replyToOverlord (S4 wiring). */
-    reportFromAgent(tabId: string, detail: string) {
-      escalate(tabId, null, 'agent_report', detail);
     },
     /** Resolve an 'ack' gate / clear the outstanding directive for a tab (§8). */
     ackOutstanding(tabId: string) {
