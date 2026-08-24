@@ -606,6 +606,45 @@ workspace — all existing pane/split/PTY machinery applies unchanged.
 - The board view is the workspace's primary surface, indexed by **workstream** —
   see "Board view: one job at a time" below.
 
+### Triage: run all
+
+One button clears the deck of everything Overlord already decided on — added
+2026-08-23, `overlordStore.runTriage()`. It covers exactly two actions:
+
+1. re-bind every `unbound` agent, then
+2. approve every pending proposal.
+
+Re-binds go **first**: a directive aimed at an unbound tab lands nowhere, so
+fixing the binding is what makes the proposals behind it worth sending.
+
+Deliberately excluded: restarting `stopped` agents (relaunching a fleet is not a
+one-click action — same reasoning as `recoverAllUnbound`), and the stale-task and
+escalation buttons. Marking work done, parking it, dropping it, or clearing an
+escalation are judgement calls; a bulk control that quietly made them would be
+the worst kind of convenience.
+
+**Pacing.** Every action ends with an agent starting a turn, so a deck of forty
+signals is forty concurrent API streams against one org's rate limit. Three
+brakes, bounding different things:
+
+| Brake | Default | Bounds |
+|---|---|---|
+| `TRIAGE_STAGGER_MS` | 1s between sends | the shape of a wave — a ramp, not a spike |
+| `TRIAGE_GAP_MS` | 5s between waves of `TRIAGE_BATCH` (10) | sustained *start* rate |
+| `TRIAGE_HOLD_CAP_MS` | hold up to 2min | **concurrency** — waits while ≥1 wave of rituals is still in flight |
+
+The hold is the one that matters: turns run for minutes, so a gap alone just
+spreads the starts and the waves stack into the burst the pacing existed to
+avoid. It is capped so one wedged ritual cannot strand the rest of the run.
+
+The worklist is snapshotted up front and **re-validated at send time** — a run
+takes minutes and the deck changes underneath it, so firing a proposal the human
+dismissed thirty seconds ago would be indistinguishable from ignoring them.
+Cancellable at any point via `cancelTriageRun()`.
+
+Note `liveness` is a plain Map: every mutation path must call `bumpLive()`, or
+the run-all count — a promise about what the click will do — goes stale.
+
 ### Board view: one job at a time
 
 The board originally nested workspace → workstream → six lanes, rendering every

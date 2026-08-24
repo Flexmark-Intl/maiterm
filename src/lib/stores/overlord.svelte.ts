@@ -54,6 +54,25 @@ const GATE_POLL_MS = 1_000;
 const TURN_FALLBACK_MIN_MS = 4_000;
 const TURN_FALLBACK_QUIET_MS = 3_000;
 
+/**
+ * Triage "run all" pacing.
+ *
+ * Every action this fires ends with an agent starting a turn, so clearing a deck of forty
+ * signals in one click means forty concurrent API streams against one org's rate limit.
+ * Three separate brakes, because they bound different things:
+ *
+ *   STAGGER — one second between individual sends, so a wave is a ramp, not a spike.
+ *   GAP     — a pause between waves, holding the sustained *start* rate down.
+ *   HOLD    — the only one that bounds CONCURRENCY: after the gap, keep waiting while the
+ *             fleet still has a wave's worth of rituals in flight. A gap alone just spreads
+ *             the starts; turns run for minutes, so without this the waves stack. Capped so
+ *             one wedged ritual can't strand the run forever.
+ */
+const TRIAGE_BATCH = 10;
+const TRIAGE_STAGGER_MS = 1_000;
+const TRIAGE_GAP_MS = 5_000;
+const TRIAGE_HOLD_CAP_MS = 2 * 60_000;
+
 export interface OutstandingDirective {
   id: string;
   ruleId: string | null;
@@ -129,6 +148,23 @@ export interface PendingRuleChangeBatch {
 
 /** What one scan pass found. `silent` are running tabs with nothing on the task list —
  *  the candidates a census would ask, already filtered by the ask-cooldown. */
+/** Live progress of a triage "run all" pass, for the deck's progress bar. */
+export interface TriageRunProgress {
+  total: number;
+  done: number;
+  sent: number;
+  skipped: number;
+  wave: number;
+  waves: number;
+  /** `waiting` is the pacing gap; `holding` is waiting on the fleet to drain. */
+  phase: 'running' | 'waiting' | 'holding';
+  /** Epoch ms the pacing gap ends — a countdown, so a paused deck isn't mistaken for a
+   *  hung one. Null while running or holding (a hold has no predictable end). */
+  resumeAt: number | null;
+  /** What is being sent right now, for the progress line. */
+  label: string | null;
+}
+
 export interface ScanSummary {
   at: number;
   tabsSeen: number;
@@ -252,6 +288,8 @@ function createOverlordStore() {
   let lastScan = $state<ScanSummary | null>(null);
   let scanning = $state(false);
   let pendingRuleChanges = $state<PendingRuleChangeBatch | null>(null);
+  let triageRun = $state<TriageRunProgress | null>(null);
+  let triageCancelled = false;
   // Resolver for the MCP proposeRuleChanges round trip (the modal answers it).
   let ruleChangeResolver: ((res: { approved: string[]; rejected: string[]; pending?: boolean }) => void) | null = null;
   // Rituals and outstanding directives live in plain Maps (engine-internal, mutated from
@@ -1092,8 +1130,18 @@ function createOverlordStore() {
     // Drop entries for tabs that are no longer candidates, so a recovered tab stops
     // being reported as unready the moment its agent comes back.
     const live = new Set(candidates.map((c) => c.tab.id));
-    for (const id of [...liveness.keys()]) if (!live.has(id)) liveness.delete(id);
-    if (!candidates.length) return;
+    // `liveness` is a plain Map, so every mutation path has to bump the reactivity
+    // counter itself. Without it the deck's classification — and the count on the run-all
+    // button, which is a promise about what the click will do — only refreshed when some
+    // unrelated state happened to change.
+    let changed = false;
+    for (const id of [...liveness.keys()]) {
+      if (!live.has(id)) { liveness.delete(id); changed = true; }
+    }
+    if (!candidates.length) {
+      if (changed) bumpLive();
+      return;
+    }
     try {
       const res = await commands.getAgentLivenessBatch(candidates.map((c) => c.ptyId));
       for (const { tab, ptyId } of candidates) {
@@ -1102,14 +1150,18 @@ function createOverlordStore() {
         // ssh_foreground stands in for a remote agent we cannot see in the local process
         // tree — an SSH tab with a live session is treated as unbound, which is the case
         // that actually happens after a restart.
-        liveness.set(tab.id, { kind: l.agent_running || l.ssh_foreground ? 'unbound' : 'stopped', at: now });
+        const kind: UnreadyKind = l.agent_running || l.ssh_foreground ? 'unbound' : 'stopped';
+        if (liveness.get(tab.id)?.kind !== kind) changed = true;
+        liveness.set(tab.id, { kind, at: now });
       }
     } catch (e) {
       logError(`overlord: liveness probe failed: ${e}`);
     }
+    if (changed) bumpLive();
   }
 
   function unreadyKind(tabId: string): UnreadyKind | null {
+    void liveVersion; // see probeLiveness — `liveness` is a plain Map
     return liveness.get(tabId)?.kind ?? null;
   }
 
@@ -1486,6 +1538,110 @@ function createOverlordStore() {
       liveness.delete(tabId);
       bumpLive();
       return { sent: true, kind };
+    },
+
+    // ── Triage: run everything actionable ────────────────────────────────────
+
+    get triageRun() { return triageRun; },
+
+    /** What "run all" would do right now, for the button's own label. Counting it here
+     *  keeps the promise and the execution reading from one list. */
+    get triageActionable(): { rebinds: number; proposals: number; total: number } {
+      void liveVersion;
+      let rebinds = 0;
+      for (const e of liveness.values()) if (e.kind === 'unbound') rebinds++;
+      return { rebinds, proposals: proposals.length, total: rebinds + proposals.length };
+    },
+
+    cancelTriageRun() { triageCancelled = true; },
+
+    /**
+     * Clear the triage deck in one pass, paced for an API rate limit.
+     *
+     * Only the two actions that are Overlord's own call to make:
+     *   1. re-bind every `unbound` agent, and
+     *   2. approve every pending proposal.
+     *
+     * Re-binds go FIRST because a proposal aimed at an unbound tab lands nowhere — fixing
+     * the binding first is what makes the directives that follow it worth sending.
+     *
+     * Deliberately NOT included: restarting `stopped` agents (relaunching a fleet is not a
+     * one-click action), and the stale-task and escalation buttons — marking work done,
+     * parking it, dropping it or clearing an escalation are judgement calls, and a bulk
+     * control that silently makes them would be the worst kind of convenience.
+     *
+     * The worklist is snapshotted up front, then re-validated at send time: the deck keeps
+     * changing underneath a run that takes minutes, and firing a proposal the human
+     * dismissed thirty seconds ago would be indistinguishable from ignoring them.
+     */
+    async runTriage(opts?: { batch?: number; gapMs?: number }): Promise<{ sent: number; skipped: number }> {
+      if (triageRun) return { sent: 0, skipped: 0 };
+      const batch = Math.max(1, opts?.batch ?? TRIAGE_BATCH);
+      const gapMs = Math.max(0, opts?.gapMs ?? TRIAGE_GAP_MS);
+
+      type Job = { kind: 'rebind'; tabId: string } | { kind: 'proposal'; id: string };
+      const jobs: Job[] = [];
+      for (const [tabId, e] of [...liveness]) {
+        if (e.kind === 'unbound') jobs.push({ kind: 'rebind', tabId });
+      }
+      for (const p of [...proposals]) jobs.push({ kind: 'proposal', id: p.id });
+      if (!jobs.length) return { sent: 0, skipped: 0 };
+
+      triageCancelled = false;
+      let sent = 0, skipped = 0;
+      const waves = Math.ceil(jobs.length / batch);
+      triageRun = {
+        total: jobs.length, done: 0, sent: 0, skipped: 0,
+        wave: 1, waves, phase: 'running', resumeAt: null, label: null,
+      };
+
+      try {
+        for (let w = 0; w < waves && !triageCancelled; w++) {
+          for (const job of jobs.slice(w * batch, (w + 1) * batch)) {
+            if (triageCancelled) break;
+            const label = job.kind === 'rebind'
+              ? `re-bind ${tabDisplayName(job.tabId)}`
+              : (proposals.find((p) => p.id === job.id)?.ruleName ?? 'proposal');
+            triageRun = { ...triageRun!, wave: w + 1, phase: 'running', resumeAt: null, label };
+
+            let ok = false;
+            if (job.kind === 'rebind') {
+              ok = (await this.recoverTab(job.tabId)).sent;
+            } else {
+              // Re-read: the human may have dismissed it, or the rule may have been edited
+              // away, since the snapshot.
+              const p = proposals.find((x) => x.id === job.id);
+              const rule = p && preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
+              if (p && rule && !rituals.has(p.tabId)) {
+                proposals = proposals.filter((x) => x.id !== p.id);
+                void runSequence($state.snapshot(rule) as OverlordRule, p.tabId, 'rule');
+                ok = true;
+              }
+            }
+            if (ok) sent++; else skipped++;
+            triageRun = { ...triageRun!, done: sent + skipped, sent, skipped };
+            await sleep(TRIAGE_STAGGER_MS);
+          }
+          if (w === waves - 1 || triageCancelled) break;
+
+          const until = Date.now() + gapMs;
+          triageRun = { ...triageRun!, phase: 'waiting', resumeAt: until, label: null };
+          while (Date.now() < until && !triageCancelled) await sleep(250);
+
+          // The gap only spread the STARTS. Turns run for minutes, so hold here while the
+          // fleet is still saturated or the waves stack into exactly the burst we paced to
+          // avoid. Capped — a wedged ritual must not strand the rest of the run.
+          const holdUntil = Date.now() + TRIAGE_HOLD_CAP_MS;
+          while (!triageCancelled && rituals.size >= batch && Date.now() < holdUntil) {
+            triageRun = { ...triageRun!, phase: 'holding', resumeAt: null };
+            await sleep(1_000);
+          }
+        }
+      } finally {
+        triageRun = null;
+      }
+      logInfo(`overlord: run-all — sent ${sent}, skipped ${skipped}${triageCancelled ? ' (cancelled)' : ''}`);
+      return { sent, skipped };
     },
 
     /** Recover every unready tab in one pass — the deck's bulk action. Staggered so a

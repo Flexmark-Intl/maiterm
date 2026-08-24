@@ -211,6 +211,31 @@
     }
   }
 
+  // ── Run all ────────────────────────────────────────────────────────────────
+  const runnable = $derived(overlordStore.triageActionable);
+  const runProgress = $derived(overlordStore.triageRun);
+
+  /** Seconds left in the pacing gap. Re-derived off `now`… which ticks every 20s, far too
+   *  slow for a 5s countdown — so the run drives its own 1s clock while it is live. */
+  let runTick = $state(0);
+  $effect(() => {
+    if (!runProgress) return;
+    const t = setInterval(() => { runTick = Date.now(); }, 500);
+    return () => clearInterval(t);
+  });
+  const resumeIn = $derived.by(() => {
+    void runTick;
+    const at = runProgress?.resumeAt;
+    return at ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : 0;
+  });
+
+  async function runAll() {
+    const r = await overlordStore.runTriage();
+    recoverNote = r.sent === 0 && r.skipped === 0
+      ? null
+      : `Run all: sent ${r.sent}${r.skipped ? `, skipped ${r.skipped}` : ''}.`;
+  }
+
   /** Context ring geometry — r=13 → circumference 81.68. */
   const RING_C = 81.68;
   function ringDash(pct: number | null): string {
@@ -326,6 +351,46 @@
 
     <!-- ── Triage ──────────────────────────────────────────────────────── -->
     {#if view === 'deck'}
+      <!-- Run all: the two actions Overlord already decided on, paced for a rate limit.
+           Stale tasks and escalations are deliberately absent — those are judgement. -->
+      {#if runProgress}
+        <div class="runbar ov-panel running ov-in">
+          <div class="runbar-line">
+            <span class="ov-label runbar-lead">
+              {#if runProgress.phase === 'running'}sending
+              {:else if runProgress.phase === 'waiting'}pacing
+              {:else}holding{/if}
+            </span>
+            <span class="ov-mono runbar-count">{runProgress.done}/{runProgress.total}</span>
+            <span class="runbar-what">
+              {#if runProgress.phase === 'running'}
+                {runProgress.label ?? ''}
+              {:else if runProgress.phase === 'waiting'}
+                wave {runProgress.wave} of {runProgress.waves} done · next in {resumeIn}s
+              {:else}
+                waiting for the fleet to drain before the next wave
+              {/if}
+            </span>
+            <button class="ov-btn ov-btn-danger runbar-stop" onclick={() => overlordStore.cancelTriageRun()}>Stop</button>
+          </div>
+          <div class="runbar-track">
+            <span style:width="{Math.round((runProgress.done / Math.max(1, runProgress.total)) * 100)}%"></span>
+          </div>
+        </div>
+      {:else if runnable.total > 0}
+        <div class="runbar ov-panel ov-in">
+          <div class="runbar-line">
+            <button class="ov-btn ov-btn-primary" onclick={runAll}>Run all {runnable.total}</button>
+            <span class="runbar-what">
+              {#if runnable.rebinds}re-bind {runnable.rebinds} agent{runnable.rebinds === 1 ? '' : 's'}{/if}
+              {#if runnable.rebinds && runnable.proposals}, then {/if}
+              {#if runnable.proposals}send {runnable.proposals} proposed directive{runnable.proposals === 1 ? '' : 's'}{/if}
+              · 10 at a time, 1s apart, 5s between waves
+            </span>
+          </div>
+        </div>
+      {/if}
+
       {#if recoverNote}
         <!-- A recovery that couldn't run has to say so. A button that silently does
              nothing is the exact failure this whole section was built to remove. -->
@@ -834,6 +899,36 @@
   .signal-title { font-weight: 600; font-size: 0.95rem; }
   .signal-age { font-size: 0.75rem; color: var(--ov-ink-dim); margin-left: auto; }
   .signal-text { color: var(--ov-ink-mid); font-size: 0.9rem; line-height: 1.5; }
+
+  /* ── Run all ──────────────────────────────────────────────────────────── */
+  .runbar { margin-bottom: 10px; padding: 9px 12px; }
+  .runbar.running { border-color: color-mix(in srgb, var(--ov-live) 45%, var(--ov-hair)); }
+  .runbar-line { display: flex; align-items: center; gap: 10px; }
+  .runbar-lead { color: var(--ov-live); flex-shrink: 0; }
+  .runbar-count { font-size: 0.85rem; color: var(--ov-ink); flex-shrink: 0; }
+  .runbar-what {
+    color: var(--ov-ink-dim);
+    font-size: 0.82rem;
+    line-height: 1.4;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .runbar-stop { margin-left: auto; flex-shrink: 0; }
+  .runbar-track {
+    height: 2px;
+    margin-top: 8px;
+    border-radius: 1px;
+    background: var(--ov-hair);
+    overflow: hidden;
+  }
+  .runbar-track span {
+    display: block;
+    height: 100%;
+    background: var(--ov-live);
+    transition: width 0.3s cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
 
   .deck-note {
     align-items: center;
