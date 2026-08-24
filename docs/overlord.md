@@ -635,6 +635,11 @@ need a new step kind, editor UI and migration. Deliberately deferred.
 **What qualifies as spent** (`overlordStore.spentTabs`):
 - a boardable agent tab — never the Overlord agent's own;
 - not `active`, not `permission`, no outstanding directive, no ritual in flight;
+- if it has **no agent state at all**, it must be classified `stopped`. `unbound` means
+  the agent process is still alive and merely unbound from maiTerm, and archiving or
+  closing destroys the TerminalPane — which kills the PTY. Treating unbound as finished
+  would silently kill a running agent while the deck hid its re-bind button. Unclassified
+  (`null`) waits rather than guesses;
 - has **tracked** tasks (a tab with nothing on the board has told us nothing —
   "no tasks" is not evidence of being finished), none in flight, ≥1 actually
   done (so a tab holding only parked work never counts);
@@ -643,12 +648,21 @@ need a new step kind, editor UI and migration. Deliberately deferred.
   packing the session away — the human is usually still reading the result;
 - not marked Keep within `SPENT_KEEP_MS` (7d), persisted as a trigger variable.
 
+Keep is read and written through the tab's **persisted** `trigger_variables`, not just the
+trigger store's live map: that map only exists while a `TerminalPane` is mounted, and a
+finished session is exactly the kind of tab nobody has open. Writing via `setVariable`
+alone left the marker in memory, discarded on the next mount — so the card came back well
+inside the week the button promises.
+
 A spent tab that has also gone dormant suppresses its own `unready` signal: its
 agent exited having done everything asked of it, so waking it up is not the
 useful move.
 
-Archiving releases unfinished rows to the project (`tasksStore.releaseTab`) —
-work owned by a tab nobody can see is work nobody will do. Done rows keep their
+Archiving releases unfinished rows to the project (`tasksStore.releaseTab`) **after** the
+archive succeeds, never before: releasing first meant a failed archive left the tab in
+place with its parked rows already persisted back to the project, silently, with nothing
+to undo it. The release itself is right — work owned by a tab nobody can see is work
+nobody will do — it just has to follow the archive. Done rows keep their
 tab id, and `tabDisplayName` now resolves archived tabs so those chips keep
 reading as the session's name rather than a truncated id.
 
@@ -682,6 +696,16 @@ brakes, bounding different things:
 The hold is the one that matters: turns run for minutes, so a gap alone just
 spreads the starts and the waves stack into the burst the pacing existed to
 avoid. It is capped so one wedged ritual cannot strand the rest of the run.
+
+One worklist function (`triageJobs`) backs both the button's label and the run, so the
+label cannot promise work the run then skips. It also resolves a collision: the default
+`reinit_unbound_agent` rule fires on the same `agent_unready` signal the re-bind reads, so
+every unbound tab yields BOTH a re-bind job and a proposal whose sequence is the identical
+`/maiterm init`. Running both types it twice — or, once the re-bind lands and the tab is no
+longer unready, leaves `waitInjectable` spinning for its full 5-minute cap while holding
+the tab's ritual lock, blocking every `only_if_no_outstanding` rule and stalling the run's
+own drain check on rituals that will never inject. The re-bind wins (it bypasses guards
+that are false by definition on an unbound tab) and the superseded proposals are dropped.
 
 The worklist is snapshotted up front and **re-validated at send time** — a run
 takes minutes and the deck changes underneath it, so firing a proposal the human

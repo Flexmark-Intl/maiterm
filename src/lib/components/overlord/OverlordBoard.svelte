@@ -133,9 +133,13 @@
 
   const signals = $derived.by<Signal[]>(() => {
     const out: Signal[] = [];
-    // A finished session that has also gone dormant must NOT also be offered a re-bind:
-    // its agent exited having done everything asked of it, so the useful move is to pack
-    // it away, not to wake it up.
+    // A finished session that has also gone dormant is not offered a re-bind: its agent
+    // EXITED having done everything asked of it, so packing it away is the useful move.
+    //
+    // This is only safe because `spentTabs` admits a stateless tab solely when it is
+    // classified `stopped`. An `unbound` tab still has a live agent process, and hiding
+    // its re-bind here while the deck offers Archive/Close would hand the human a button
+    // that kills a running agent. Do not widen that predicate without revisiting this.
     const spentIds = new Set(spent.map((s) => s.tabId));
     for (const e of overlordStore.escalations) out.push({ sev: 0, id: e.id, type: 'escalation', e });
     for (const p of overlordStore.proposals) out.push({ sev: 1, id: p.id, type: 'proposal', p });

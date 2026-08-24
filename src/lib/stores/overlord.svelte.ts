@@ -1024,6 +1024,22 @@ function createOverlordStore() {
    *  human is usually still reading the result. */
   const SPENT_IDLE_MS = 30 * 60_000;
 
+  /**
+   * Read the Keep marker for a tab that may have no mounted TerminalPane.
+   *
+   * `getVariables` is backed by a map the trigger store builds on mount and clears on
+   * destroy, so for a suspended or never-visited workspace it returns undefined — which is
+   * exactly the population this feature offers up, since a finished session is precisely
+   * the kind of tab nobody has open. Falling back to the tab's own persisted record is what
+   * makes a week-long "keep this" survive the restart it is meant to survive.
+   */
+  function keptAt(tab: Tab): number {
+    const live = getVariables(tab.id)?.get(SPENT_KEEP_VAR);
+    const raw = live ?? tab.trigger_variables?.[SPENT_KEEP_VAR];
+    const n = Number(raw ?? 0);
+    return Number.isFinite(n) ? n : 0;
+  }
+
   /** What a silent tab is asked to do.
    *
    *  Deliberately NOT "tell me in one line what you're working on". A one-line answer is a
@@ -1177,6 +1193,37 @@ function createOverlordStore() {
       logError(`overlord: liveness probe failed: ${e}`);
     }
     if (changed) bumpLive();
+  }
+
+  /**
+   * The triage worklist, shared by the run-all button's label and the run itself.
+   *
+   * `superseded` is the collision that made this a shared function: the default
+   * `reinit_unbound_agent` rule fires on the same `agent_unready` signal the re-bind reads,
+   * so every unbound tab produces BOTH a re-bind job and a proposal whose sequence is the
+   * identical `/maiterm init`. Running both types it twice — or, once the re-bind lands and
+   * the tab is no longer unready, leaves `waitInjectable` spinning for its full five-minute
+   * cap while holding the tab's ritual lock, blocking every `only_if_no_outstanding` rule
+   * and stalling the run's own drain check on rituals that will never inject.
+   *
+   * The re-bind wins: it is the same remedy delivered by the path that actually works on an
+   * unbound tab (it bypasses guards that are false by definition there).
+   */
+  function triageJobs(): { rebinds: string[]; proposalIds: string[]; superseded: string[] } {
+    const rebinds: string[] = [];
+    for (const [tabId, e] of liveness) if (e.kind === 'unbound') rebinds.push(tabId);
+    const rebinding = new Set(rebinds);
+    const proposalIds: string[] = [];
+    const superseded: string[] = [];
+    for (const p of proposals) {
+      const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
+      if (rebinding.has(p.tabId) && rule?.when.event === 'agent_unready') {
+        superseded.push(p.id);
+        continue;
+      }
+      proposalIds.push(p.id);
+    }
+    return { rebinds, proposalIds, superseded };
   }
 
   function unreadyKind(tabId: string): UnreadyKind | null {
@@ -1581,6 +1628,14 @@ function createOverlordStore() {
         if (!isBoardableTab(tab.id)) continue;
         const st = mappedState(tab.id);
         if (st === 'active' || st === 'permission') continue;
+        if (!st) {
+          // No agent state is NOT the same as no agent. `unbound` means the process is
+          // alive and merely unbound from maiTerm — archiving or closing it destroys the
+          // TerminalPane, which kills the PTY, so treating it as finished would silently
+          // kill a running agent. `null` means not yet classified: wait, don't guess.
+          // Only a tab positively classified as `stopped` has actually exited.
+          if (unreadyKind(tab.id) !== 'stopped') continue;
+        }
         if (outstanding.has(tab.id) || rituals.has(tab.id)) continue;
 
         const tasks = tasksForTab(tab.id);
@@ -1598,8 +1653,7 @@ function createOverlordStore() {
         }
         if (lastActivity && now - lastActivity < SPENT_IDLE_MS) continue;
 
-        const keptAt = Number(getVariables(tab.id)?.get(SPENT_KEEP_VAR) ?? 0);
-        if (now - keptAt < SPENT_KEEP_MS) continue;
+        if (now - keptAt(tab) < SPENT_KEEP_MS) continue;
 
         out.push({
           tabId: tab.id,
@@ -1624,13 +1678,16 @@ function createOverlordStore() {
      */
     async archiveSpentTab(tabId: string): Promise<boolean> {
       if (!isBoardableTab(tabId)) return false;
-      tasksStore.releaseTab(tabId);
       try {
         await workspacesStore.archiveTabById(tabId);
       } catch (e) {
         logError(`overlord: archive failed for ${tabId.slice(0, 8)}: ${e}`);
         return false;
       }
+      // AFTER the archive, never before: releasing first meant a failed archive left the
+      // tab in place with its parked rows already persisted back to the project, silently
+      // and with nothing to undo it. Nothing in the archive path depends on the release.
+      tasksStore.releaseTab(tabId);
       liveness.delete(tabId);
       bumpLive();
       logInfo(`overlord: archived spent tab ${tabId.slice(0, 8)}`);
@@ -1663,7 +1720,27 @@ function createOverlordStore() {
     /** "I'm keeping this one." Persisted, so the deck stops offering it for a week rather
      *  than re-asking on the next tick. */
     async keepSpentTab(tabId: string) {
-      await setVariable(tabId, SPENT_KEEP_VAR, String(Date.now()));
+      const stamp = String(Date.now());
+      const inst = terminalsStore.get(tabId);
+      if (inst) {
+        // Mounted: the trigger store owns the live map and persists through it.
+        await setVariable(tabId, SPENT_KEEP_VAR, stamp);
+      } else {
+        // Unmounted — `setVariable` would update an in-memory map that is discarded on the
+        // next mount and never reaches disk, so the card would return within the week the
+        // button promises. Write the tab's own record directly. Only in this branch: doing
+        // both would clobber variables a live trigger wrote since we read the tab.
+        const loc = workspacesStore._locateTab(tabId);
+        if (!loc) return;
+        const vars = { ...(loc.tab.trigger_variables ?? {}), [SPENT_KEEP_VAR]: stamp };
+        try {
+          await commands.setTabTriggerVariables(loc.workspaceId, loc.paneId, tabId, vars);
+          loc.tab.trigger_variables = vars;
+        } catch (e) {
+          logError(`overlord: keep marker failed for ${tabId.slice(0, 8)}: ${e}`);
+          return;
+        }
+      }
       bumpLive();
     },
 
@@ -1684,13 +1761,16 @@ function createOverlordStore() {
 
     get triageRun() { return triageRun; },
 
-    /** What "run all" would do right now, for the button's own label. Counting it here
-     *  keeps the promise and the execution reading from one list. */
+    /** What "run all" would do right now, for the button's own label. The count and the
+     *  run read the SAME list, so the label can't promise work the run then skips. */
     get triageActionable(): { rebinds: number; proposals: number; total: number } {
       void liveVersion;
-      let rebinds = 0;
-      for (const e of liveness.values()) if (e.kind === 'unbound') rebinds++;
-      return { rebinds, proposals: proposals.length, total: rebinds + proposals.length };
+      const j = triageJobs();
+      return {
+        rebinds: j.rebinds.length,
+        proposals: j.proposalIds.length,
+        total: j.rebinds.length + j.proposalIds.length,
+      };
     },
 
     cancelTriageRun() { triageCancelled = true; },
@@ -1720,12 +1800,20 @@ function createOverlordStore() {
       const gapMs = Math.max(0, opts?.gapMs ?? TRIAGE_GAP_MS);
 
       type Job = { kind: 'rebind'; tabId: string } | { kind: 'proposal'; id: string };
-      const jobs: Job[] = [];
-      for (const [tabId, e] of [...liveness]) {
-        if (e.kind === 'unbound') jobs.push({ kind: 'rebind', tabId });
-      }
-      for (const p of [...proposals]) jobs.push({ kind: 'proposal', id: p.id });
+      const { rebinds, proposalIds, superseded } = triageJobs();
+      const jobs: Job[] = [
+        ...rebinds.map((tabId): Job => ({ kind: 'rebind', tabId })),
+        ...proposalIds.map((id): Job => ({ kind: 'proposal', id })),
+      ];
       if (!jobs.length) return { sent: 0, skipped: 0 };
+
+      // Drop the proposals the re-bind replaces, rather than leaving stale cards on the
+      // deck offering a remedy this run is about to deliver a better way.
+      if (superseded.length) {
+        const drop = new Set(superseded);
+        proposals = proposals.filter((p) => !drop.has(p.id));
+        logInfo(`overlord: run-all — ${superseded.length} agent_unready proposal(s) superseded by re-bind`);
+      }
 
       triageCancelled = false;
       let sent = 0, skipped = 0;
