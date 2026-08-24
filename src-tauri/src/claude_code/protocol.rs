@@ -724,7 +724,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "driveTab",
-            "description": "Overlord agent only: inject a directive into another tab in this window, typed with the human's full authority (the target cannot tell it from the human). kind 'process' = free-text directive; 'slash' = a slash command like /compact. The same mechanical guards as automated rules apply — a structured refusal comes back if the target has no live agent REPL, is busy, or already has an outstanding directive. Every call lands verbatim in the ledger.",
+            "description": "Overlord agent only: inject a directive into another tab in this window, typed with the human's full authority (the target cannot tell it from the human). kind 'process' = free-text directive; 'slash' = a slash command like /compact. The same mechanical guards as automated rules apply — a structured refusal comes back if the target has no live agent REPL, is busy, or already has an outstanding directive. Refusal reasons: no_live_repl, agent_busy, outstanding_directive, runtime_mismatch, and awaiting_permission — that last one means the tab is stopped at a permission prompt, which retrying will NOT clear and which you cannot answer; put the decision to the human with AskUserQuestion instead. Every call lands verbatim in the ledger.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

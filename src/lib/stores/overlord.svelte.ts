@@ -2255,7 +2255,11 @@ function createOverlordStore() {
 
     /** Drive a tab on the Overlord agent's behalf (S4 driveTab): same guards, same
      *  ledger, structured refusal. */
-    async driveTab(tabId: string, kind: 'process' | 'slash', text: string): Promise<{ sent: boolean; reason?: string }> {
+    async driveTab(
+      tabId: string,
+      kind: 'process' | 'slash',
+      text: string,
+    ): Promise<{ sent: boolean; reason?: string; detail?: string }> {
       const step: OverlordStep = { kind, text };
       if (kind === 'slash') {
         const rt = workspacesStore.getTabRuntime(tabId);
@@ -2277,7 +2281,20 @@ function createOverlordStore() {
       const st = mappedState(tabId);
       if (st !== 'idle') {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
-        return { sent: false, reason: 'agent_busy' };
+        // "busy" is wrong for a tab stopped at a permission prompt, and wrong in the way
+        // that matters: busy invites a retry, and retrying never clears a gate that is
+        // waiting on a person. Name the actual state so the supervisor stops guessing.
+        return st === 'permission'
+          ? {
+              sent: false,
+              reason: 'awaiting_permission',
+              detail:
+                'That tab is stopped at a permission prompt. Retrying will not clear it — ' +
+                'and you cannot answer it, which is what the prompt exists to prevent. ' +
+                'Put the decision to the human with AskUserQuestion; the tab resumes when ' +
+                'they answer, and its reply reaches you then.',
+            }
+          : { sent: false, reason: 'agent_busy' };
       }
       const inst = terminalsStore.get(tabId);
       if (!inst) return { sent: false, reason: 'no_live_repl' };
