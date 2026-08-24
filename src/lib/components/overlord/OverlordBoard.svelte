@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { workspacesStore, navigateToTab, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
-  import { overlordStore } from '$lib/stores/overlord.svelte';
+  import { overlordStore, type SpentTab } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import type { Workspace, Tab } from '$lib/tauri/types';
   import { isInFlight, type TaskRow } from '$lib/tasks/model';
@@ -126,17 +126,28 @@
     | { sev: number; id: string; type: 'proposal'; p: (typeof overlordStore.proposals)[number] }
     | { sev: number; id: string; type: 'escalation'; e: (typeof overlordStore.escalations)[number] }
     | { sev: number; id: string; type: 'permission' | 'pressure' | 'unready'; u: FleetUnit }
-    | { sev: number; id: string; type: 'stale'; t: TaskRow };
+    | { sev: number; id: string; type: 'stale'; t: TaskRow }
+    | { sev: number; id: string; type: 'spent'; s: SpentTab };
+
+  const spent = $derived(overlordStore.spentTabs);
 
   const signals = $derived.by<Signal[]>(() => {
     const out: Signal[] = [];
+    // A finished session that has also gone dormant must NOT also be offered a re-bind:
+    // its agent exited having done everything asked of it, so the useful move is to pack
+    // it away, not to wake it up.
+    const spentIds = new Set(spent.map((s) => s.tabId));
     for (const e of overlordStore.escalations) out.push({ sev: 0, id: e.id, type: 'escalation', e });
     for (const p of overlordStore.proposals) out.push({ sev: 1, id: p.id, type: 'proposal', p });
     for (const u of fleet) {
       if (u.state === 'permission') out.push({ sev: 2, id: `perm-${u.tab.id}`, type: 'permission', u });
       else if ((u.pct ?? 0) >= PRESSURE_PCT) out.push({ sev: 3, id: `ctx-${u.tab.id}`, type: 'pressure', u });
-      else if (u.state === 'dormant') out.push({ sev: 5, id: `dead-${u.tab.id}`, type: 'unready', u });
+      else if (u.state === 'dormant' && !spentIds.has(u.tab.id)) {
+        out.push({ sev: 5, id: `dead-${u.tab.id}`, type: 'unready', u });
+      }
     }
+    // Last: housekeeping, not a problem. Nothing here is going wrong.
+    for (const s of spent) out.push({ sev: 6, id: `spent-${s.tabId}`, type: 'spent', s });
     for (const t of overlordStore.tasks) {
       // Parked tasks are never stale. A backlog item is meant to sit untouched — raising
       // it here would turn the parking lot into a queue of things demanding attention.
@@ -228,6 +239,40 @@
     const at = runProgress?.resumeAt;
     return at ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : 0;
   });
+
+  // ── Archive / close ────────────────────────────────────────────────────────
+  let tabBusy = $state<string | null>(null);
+  /** Inline confirmation — `confirm()` does nothing in a Tauri webview, and closing a
+   *  session is the one action here with no way back. */
+  let closingTab = $state<string | null>(null);
+  let archivingAll = $state(false);
+
+  async function archiveTab(tabId: string) {
+    tabBusy = tabId;
+    try {
+      const ok = await overlordStore.archiveSpentTab(tabId);
+      if (!ok) recoverNote = "Couldn't archive that tab.";
+    } finally { tabBusy = null; }
+  }
+
+  async function closeTab(tabId: string) {
+    tabBusy = tabId;
+    try {
+      const ok = await overlordStore.closeSpentTab(tabId);
+      if (!ok) recoverNote = "Couldn't close that tab.";
+    } finally {
+      tabBusy = null;
+      closingTab = null;
+    }
+  }
+
+  async function archiveAll() {
+    archivingAll = true;
+    try {
+      const r = await overlordStore.archiveAllSpent();
+      recoverNote = `Archived ${r.archived} session${r.archived === 1 ? '' : 's'}${r.skipped ? `, skipped ${r.skipped}` : ''}.`;
+    } finally { archivingAll = false; }
+  }
 
   async function runAll() {
     const r = await overlordStore.runTriage();
@@ -391,6 +436,21 @@
         </div>
       {/if}
 
+      <!-- Separate from "run all" on purpose: that button talks to agents, this one takes
+           tabs out of the window. One control doing both would be a nasty surprise. -->
+      {#if spent.length > 1}
+        <div class="runbar ov-panel ov-in">
+          <div class="runbar-line">
+            <button class="ov-btn" onclick={archiveAll} disabled={archivingAll}>
+              {archivingAll ? 'Archiving…' : `Archive all ${spent.length}`}
+            </button>
+            <span class="runbar-what">
+              {spent.length} finished sessions · restorable later, nothing is closed for good
+            </span>
+          </div>
+        </div>
+      {/if}
+
       {#if recoverNote}
         <!-- A recovery that couldn't run has to say so. A button that silently does
              nothing is the exact failure this whole section was built to remove. -->
@@ -462,6 +522,7 @@
                    : s.sev === 1 ? 'var(--ov-live)'
                    : s.sev === 2 ? 'var(--ov-warn)'
                    : s.sev === 3 ? 'var(--ov-pressure)'
+                   : s.sev === 6 ? 'var(--ov-ok)'
                    : 'var(--ov-ink-dim)'}>
           <div class="signal-rail"></div>
           <div class="signal-body">
@@ -514,6 +575,47 @@
                 {#if s.u.ritual}Checkpoint running — step {s.u.ritual.step} of {s.u.ritual.steps}.
                 {:else}A checkpoint should run before it hits the wall.{/if}
               </p>
+
+            {:else if s.type === 'spent'}
+              <div class="signal-head">
+                <span class="ov-chip ov-chip-tone">finished</span>
+                <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.s.tabId)}>{s.s.name}</button>
+                <span class="ov-chip">{s.s.done} done</span>
+                {#if s.s.parked}<span class="ov-chip">{s.s.parked} parked</span>{/if}
+                <span class="signal-age ov-mono">{fmtAge(s.s.lastActivity)}</span>
+              </div>
+              {#if closingTab === s.s.tabId}
+                <p class="signal-text">
+                  Close <strong>{s.s.name}</strong> for good? The session ends and its
+                  transcript is not kept — there is no way back. Archive instead if there is
+                  any chance you'll need to look at this work again.
+                </p>
+                <div class="signal-actions">
+                  <button class="ov-btn ov-btn-danger" disabled={tabBusy === s.s.tabId}
+                          onclick={() => closeTab(s.s.tabId)}>
+                    {tabBusy === s.s.tabId ? 'Closing…' : 'Close for good'}
+                  </button>
+                  <button class="ov-btn" onclick={() => (closingTab = null)}>Cancel</button>
+                </div>
+              {:else}
+                <p class="signal-text">
+                  Every tracked task on this tab is done and it has been quiet since.
+                  <strong>Archive</strong> keeps the scrollback and the working directory, so
+                  the session can be restored if a bug turns up in what it built.
+                  {#if s.s.parked}
+                    Its {s.s.parked} parked task{s.s.parked === 1 ? '' : 's'} return{s.s.parked === 1 ? 's' : ''} to the project.
+                  {/if}
+                </p>
+                <div class="signal-actions">
+                  <button class="ov-btn ov-btn-primary" disabled={tabBusy === s.s.tabId}
+                          onclick={() => archiveTab(s.s.tabId)}>
+                    {tabBusy === s.s.tabId ? 'Archiving…' : 'Archive'}
+                  </button>
+                  <button class="ov-btn ov-btn-danger" onclick={() => (closingTab = s.s.tabId)}>Close</button>
+                  <button class="ov-btn" onclick={() => overlordStore.keepSpentTab(s.s.tabId)}
+                          title="Stop offering this session for a week">Keep</button>
+                </div>
+              {/if}
 
             {:else if s.type === 'stale'}
               <div class="signal-head">

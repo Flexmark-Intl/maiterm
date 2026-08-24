@@ -148,6 +148,16 @@ export interface PendingRuleChangeBatch {
 
 /** What one scan pass found. `silent` are running tabs with nothing on the task list —
  *  the candidates a census would ask, already filtered by the ask-cooldown. */
+/** An agent tab whose tracked work is finished and which has gone quiet — a candidate for
+ *  archiving (recoverable) or closing (not). */
+export interface SpentTab {
+  tabId: string;
+  name: string;
+  done: number;
+  parked: number;
+  lastActivity?: number;
+}
+
 /** Live progress of a triage "run all" pass, for the deck's progress bar. */
 export interface TriageRunProgress {
   total: number;
@@ -1005,6 +1015,15 @@ function createOverlordStore() {
   const TRACK_ASK_VAR = 'overlordTrackAskAt';
   const TRACK_ASK_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
+  /** "Keep this session" is a decision, so it persists like one — same trigger-variable
+   *  mechanism as the track-ask marker, and it holds for a week rather than a tick. */
+  const SPENT_KEEP_VAR = 'overlordKeepTabAt';
+  const SPENT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+  /** How long a finished tab must have been quiet before it is offered for archiving.
+   *  Finishing the last task is not the moment to suggest packing the session away — the
+   *  human is usually still reading the result. */
+  const SPENT_IDLE_MS = 30 * 60_000;
+
   /** What a silent tab is asked to do.
    *
    *  Deliberately NOT "tell me in one line what you're working on". A one-line answer is a
@@ -1538,6 +1557,127 @@ function createOverlordStore() {
       liveness.delete(tabId);
       bumpLive();
       return { sent: true, kind };
+    },
+
+    // ── Spent sessions: archive or close out ─────────────────────────────────
+
+    /**
+     * Agent tabs whose tracked work is finished and which have gone quiet.
+     *
+     * The deck's housekeeping queue: a session that did a big piece of work, completed it,
+     * and is now an idle terminal holding a PTY and a slot in the fleet. Requires *tracked*
+     * tasks — a tab with nothing on the board has told us nothing, and "no tasks" is not
+     * evidence of being finished — and at least one of them actually done, so a tab holding
+     * only parked work is never mistaken for a completed one.
+     *
+     * Never offered for a tab that is mid-turn, awaiting permission, or carrying an
+     * outstanding directive: those are live, whatever their task list says.
+     */
+    get spentTabs(): SpentTab[] {
+      void liveVersion;
+      const now = Date.now();
+      const out: SpentTab[] = [];
+      for (const { tab } of agentTabs()) {
+        if (!isBoardableTab(tab.id)) continue;
+        const st = mappedState(tab.id);
+        if (st === 'active' || st === 'permission') continue;
+        if (outstanding.has(tab.id) || rituals.has(tab.id)) continue;
+
+        const tasks = tasksForTab(tab.id);
+        if (!tasks.length) continue;
+        if (tasks.some((t) => isInFlight(t))) continue;
+        const done = tasks.filter((t) => t.status === 'done').length;
+        if (!done) continue;
+
+        // Newest evidence of life wins: a turn we recorded, or the last task touched. With
+        // neither (0), there is nothing suggesting recent activity, so it qualifies.
+        let lastActivity = facts.get(tab.id)?.last_turn_ts ?? 0;
+        for (const t of tasks) {
+          const ts = Date.parse(t.updated_at);
+          if (Number.isFinite(ts) && ts > lastActivity) lastActivity = ts;
+        }
+        if (lastActivity && now - lastActivity < SPENT_IDLE_MS) continue;
+
+        const keptAt = Number(getVariables(tab.id)?.get(SPENT_KEEP_VAR) ?? 0);
+        if (now - keptAt < SPENT_KEEP_MS) continue;
+
+        out.push({
+          tabId: tab.id,
+          name: tab.name,
+          done,
+          parked: tasks.filter((t) => isParked(t.status)).length,
+          lastActivity: lastActivity || undefined,
+        });
+      }
+      return out;
+    },
+
+    /**
+     * Archive a finished session — RECOVERABLE. Keeps the scrollback, cwd and ssh context
+     * so the tab can be restored when a bug surfaces in the work it did, which is the whole
+     * reason to prefer this over closing.
+     *
+     * Unfinished rows are released to the project first. An archived tab is out of the
+     * window, and work owned by a tab nobody can see is work nobody will do — the same
+     * reasoning `releaseTab` already applies when a tab closes. Done rows keep their tab id;
+     * that is history, and history should stay attributed.
+     */
+    async archiveSpentTab(tabId: string): Promise<boolean> {
+      if (!isBoardableTab(tabId)) return false;
+      tasksStore.releaseTab(tabId);
+      try {
+        await workspacesStore.archiveTabById(tabId);
+      } catch (e) {
+        logError(`overlord: archive failed for ${tabId.slice(0, 8)}: ${e}`);
+        return false;
+      }
+      liveness.delete(tabId);
+      bumpLive();
+      logInfo(`overlord: archived spent tab ${tabId.slice(0, 8)}`);
+      return true;
+    },
+
+    /**
+     * Close a finished session — IRREVERSIBLE. Kills the PTY, tears down bridges, keeps no
+     * archive entry.
+     *
+     * Deliberately has no bulk form and no rule: Overlord never does an irreversible thing
+     * on its own, which is the same line that keeps `stopped` agents out of bulk recovery
+     * and task deletion out of the MCP surface. One tab, one explicit click, behind a
+     * confirmation in the UI.
+     */
+    async closeSpentTab(tabId: string): Promise<boolean> {
+      if (!isBoardableTab(tabId)) return false;
+      try {
+        await workspacesStore.closeTabById(tabId);
+      } catch (e) {
+        logError(`overlord: close failed for ${tabId.slice(0, 8)}: ${e}`);
+        return false;
+      }
+      liveness.delete(tabId);
+      bumpLive();
+      logInfo(`overlord: closed spent tab ${tabId.slice(0, 8)}`);
+      return true;
+    },
+
+    /** "I'm keeping this one." Persisted, so the deck stops offering it for a week rather
+     *  than re-asking on the next tick. */
+    async keepSpentTab(tabId: string) {
+      await setVariable(tabId, SPENT_KEEP_VAR, String(Date.now()));
+      bumpLive();
+    },
+
+    /** Bulk archive — the recoverable action only. Snapshotted first, since archiving
+     *  mutates the list this reads from. */
+    async archiveAllSpent(): Promise<{ archived: number; skipped: number }> {
+      const list = [...this.spentTabs];
+      let archived = 0, skipped = 0;
+      for (const s of list) {
+        if (await this.archiveSpentTab(s.tabId)) archived++;
+        else skipped++;
+        await sleep(200);
+      }
+      return { archived, skipped };
     },
 
     // ── Triage: run everything actionable ────────────────────────────────────

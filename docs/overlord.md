@@ -606,6 +606,52 @@ workspace — all existing pane/split/PTY machinery applies unchanged.
 - The board view is the workspace's primary surface, indexed by **workstream** —
   see "Board view: one job at a time" below.
 
+### Closing out finished sessions
+
+A supervised fleet accumulates sessions that did a big piece of work, finished it,
+and are now idle terminals holding a PTY and a slot. The deck raises those as a
+`spent` signal (severity 6 — housekeeping, tinted `--ov-ok`, because nothing is
+going wrong) offering three answers:
+
+| Action | Reversible | Bulk | Rule |
+|---|---|---|---|
+| **Archive** | yes — scrollback, cwd and ssh context preserved, restorable | yes | no |
+| **Close** | **no** — PTY killed, bridges torn down, no archive entry | **no** | no |
+| **Keep** | n/a — suppresses the offer for a week | — | — |
+
+Archive is the expected answer, and the reason the distinction exists: a session
+responsible for complex work that is now complete may still be needed when a bug
+surfaces in what it built. Close is for sessions with nothing worth recovering.
+
+**Close is never automatic and has no bulk form.** Same line that keeps `stopped`
+agents out of bulk recovery and task deletion out of the MCP surface: Overlord
+does not do irreversible things on its own. The UI confirms inline — `confirm()`
+is inert in a Tauri webview.
+
+Neither is wired as a rule *action*. Rule steps are text typed into a tab
+(`slash` / `process`); "archive this tab" is a different kind of verb and would
+need a new step kind, editor UI and migration. Deliberately deferred.
+
+**What qualifies as spent** (`overlordStore.spentTabs`):
+- a boardable agent tab — never the Overlord agent's own;
+- not `active`, not `permission`, no outstanding directive, no ritual in flight;
+- has **tracked** tasks (a tab with nothing on the board has told us nothing —
+  "no tasks" is not evidence of being finished), none in flight, ≥1 actually
+  done (so a tab holding only parked work never counts);
+- quiet for `SPENT_IDLE_MS` (30min) since the later of its last recorded turn and
+  its last task edit. Finishing the last task is not the moment to suggest
+  packing the session away — the human is usually still reading the result;
+- not marked Keep within `SPENT_KEEP_MS` (7d), persisted as a trigger variable.
+
+A spent tab that has also gone dormant suppresses its own `unready` signal: its
+agent exited having done everything asked of it, so waking it up is not the
+useful move.
+
+Archiving releases unfinished rows to the project (`tasksStore.releaseTab`) —
+work owned by a tab nobody can see is work nobody will do. Done rows keep their
+tab id, and `tabDisplayName` now resolves archived tabs so those chips keep
+reading as the session's name rather than a truncated id.
+
 ### Triage: run all
 
 One button clears the deck of everything Overlord already decided on — added

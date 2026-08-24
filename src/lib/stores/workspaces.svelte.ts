@@ -2474,6 +2474,13 @@ export function tabDisplayName(tabId: string): string {
       if (tab) return tab.name;
     }
   }
+  // Archived too: a finished session keeps its done tasks, and a board chip reading
+  // "a3f19c2b" instead of the session's name loses exactly the attribution archiving
+  // was meant to preserve.
+  for (const ws of workspacesStore.workspaces) {
+    const archived = ws.archived_tabs.find(t => t.id === tabId);
+    if (archived) return archived.archived_name || archived.name;
+  }
   return tabId.slice(0, 8);
 }
 
