@@ -1352,9 +1352,32 @@ function createOverlordStore() {
         w.sentAt = Math.min(now, w.sentAt + TICK_MS);
         continue;
       }
+      // Left the gate — so a LATER gate on the same directive is a new event that must be
+      // reported again. One directive routinely trips several ("run the tests" → approve
+      // npm, then approve git commit); latching the flag for the directive's lifetime meant
+      // only the first was ever escalated, and since the branch above also freezes the
+      // give-up clock, the tab sat at gate two forever with Overlord never told and doctrine
+      // telling it not to poll.
+      w.permissionNotified = false;
 
       if (now - w.sentAt > DRIVE_WATCH_MS) {
         driveWatch.delete(tabId);
+        // Never expire silently. The doctrine promises "you WILL get the answer back", so a
+        // watch that gives up owes the supervisor a word — otherwise it waits forever on a
+        // reply that is never coming. The common cause is a transcript this machine cannot
+        // read (an SSH tab's JSONL lives on the remote host and is only shadowed locally
+        // when maiLink is running), which is invisible from here.
+        escalate(
+          tabId,
+          null,
+          'drive_reply',
+          `No reply could be read from ${tabDisplayName(tabId)} for your directive ` +
+            `${JSON.stringify(w.text.slice(0, 120))}. Its transcript may not be readable from ` +
+            `this machine (an SSH tab's transcript lives on the remote host). Do not keep ` +
+            `waiting — ask the tab directly with driveTab, and tell it to answer you with ` +
+            `replyToOverlord.`,
+        );
+        logInfo(`overlord: drive watch expired unread for ${tabId.slice(0, 8)}`);
         continue;
       }
       const ts = facts.get(tabId)?.last_turn_ts;
@@ -1362,13 +1385,19 @@ function createOverlordStore() {
       if (st === 'active') continue;
 
       let reply: string | null = null;
+      let readFailed = false;
       try {
         reply = await commands.getAgentReplySince(tabId, w.baseline);
       } catch (e) {
+        readFailed = true;
         logError(`overlord: reply read failed for ${tabId.slice(0, 8)}: ${e}`);
       }
+      // KEEP the watch on an empty or failed read and try again next tick. A turn can be
+      // recorded before the agent's prose lands (the pasted directive is itself a user turn,
+      // so `last_turn_ts` moves on delivery), and deleting here on the first unproductive
+      // read permanently ended the return leg for a reply that arrived seconds later.
+      if (readFailed || !reply?.trim()) continue;
       driveWatch.delete(tabId);
-      if (!reply?.trim()) continue;
 
       // The answer is proof the directive completed. Clearing here matters beyond
       // tidiness: a driveTab directive otherwise holds the tab's outstanding slot for a
@@ -1376,9 +1405,13 @@ function createOverlordStore() {
       // only_if_no_outstanding and every further driveTab at that tab.
       clearOutstanding(tabId);
 
+      // Truncate from the FRONT, keeping the tail. An agent narrates as it works and states
+      // its conclusion last, so cutting the end throws away the answer and hands the
+      // supervisor the preamble — with no way to fetch the rest, since driving the tab again
+      // starts a new turn.
       const clipped =
         reply.length > DRIVE_REPLY_MAX
-          ? `${reply.slice(0, DRIVE_REPLY_MAX)}\n\n[…truncated — drive the tab again if you need the rest]`
+          ? `[…earlier narration truncated…]\n\n${reply.slice(-DRIVE_REPLY_MAX)}`
           : reply;
       escalate(
         tabId,
@@ -1492,6 +1525,13 @@ function createOverlordStore() {
     get tasks(): TaskRow[] { return allTasks(); },
     get proposals() { return proposals; },
     get escalations() { return escalations; },
+    /** Escalations addressed to the HUMAN. Anything that counts or badges "waiting on you"
+     *  must read this, not `escalations` — an agent-only row lit the sidebar's urgent badge
+     *  with a tooltip saying an item was waiting, while the deck deliberately showed nothing
+     *  and offered no way to clear it. */
+    get humanEscalations() {
+      return escalations.filter((e) => !AGENT_ONLY_ESCALATIONS.has(e.kind));
+    },
     get recentLedger() { return recentLedger; },
     /** tabId of any in-flight ritual's target, for board display. */
     get activeRituals() { void liveVersion; return [...rituals.keys()]; },
@@ -1788,11 +1828,21 @@ function createOverlordStore() {
      *  complained and nothing could act, which is advice wearing a supervisor's badge.
      *  Null when no rule is enabled, which the deck says out loud. */
     get checkpointThreshold(): number | null {
+      // The LOWEST enabled threshold — the level at which the first rule can fire, which is
+      // what `checkpointRuleFor` picks too. Returning the first rule in list order meant a
+      // second rule added at a lower threshold fired a checkpoint on a tab the deck was
+      // showing no pressure card for: the same deck-says-one-thing, engine-does-another
+      // gap this whole change closed, just inverted.
+      //
+      // Workspace scope is deliberately ignored: this is one window-wide number for the
+      // deck's severity ramp, and a scoped rule still narrows what actually fires.
+      let lowest: number | null = null;
       for (const r of preferencesStore.overlordRules) {
         if (!r.enabled || r.when.event !== 'context_pct' || !r.sequence.length) continue;
-        return (r.when as { at_or_above: number }).at_or_above;
+        const at = (r.when as { at_or_above: number }).at_or_above;
+        if (lowest === null || at < lowest) lowest = at;
       }
-      return null;
+      return lowest;
     },
 
     /** Why a tab under context pressure is or isn't being checkpointed right now. The deck
@@ -2358,7 +2408,12 @@ function createOverlordStore() {
       // with no envelope, so an agent that simply answers in its terminal — the normal
       // case — would otherwise never reach the supervisor that asked.
       driveWatch.set(tabId, {
-        baseline: facts.get(tabId)?.last_turn_ts ?? 0,
+        // Falling back to 0 meant "everything in the tail": a tab with no facts yet (driven
+        // before the first tick, or whose transcript appears later) would harvest the whole
+        // recent transcript and present it as the answer. `Date.now()` is the right floor for
+        // a local tab, whose transcript clock is this machine's; for a remote tab there is no
+        // readable transcript either way, and the expiry escalation covers it.
+        baseline: facts.get(tabId)?.last_turn_ts ?? Date.now(),
         sentAt: Date.now(),
         text,
       });

@@ -641,8 +641,28 @@ tool call, drops the watch, and guarantees the real reply is never seen. So:
 - The give-up clock is **paused** while blocked — a prompt can sit for hours and the
   directive is not stale, it is waiting on a human. Capped at `now`, so the worst case on
   resume is a fresh full window rather than instant expiry.
-- A **`permission_stuck`** escalation is raised once (never per tick — re-alarming would
-  bury the supervisor in its own noise), telling Overlord to go and answer it.
+- A **`permission_stuck`** escalation is raised once **per gate**, not once per directive
+  (never per tick — re-alarming would bury the supervisor in its own noise). The flag
+  resets the moment the tab leaves `permission`: one directive routinely trips several
+  gates ("run the tests" → approve npm, then approve git commit), and latching it for the
+  directive's lifetime left the tab stopped at gate two with Overlord never told and
+  doctrine telling it not to poll.
+
+**A watch never expires silently.** The doctrine promises "you WILL get the answer back",
+so giving up owes the supervisor a word. The common cause is a transcript this machine
+cannot read: `last_turn_ts` comes from the local JSONL, and an **SSH tab's transcript
+lives on the remote host**, shadowed locally only while maiLink is running (off by
+default) — so for those tabs the harvest can never fire at all. On expiry Overlord is told
+to stop waiting and ask the tab directly. `overlord_tab_facts` documents that an absent
+`last_turn_ts` means *unknown*, never *no turns*.
+
+**Truncation keeps the tail, not the head.** An agent narrates as it works and states its
+conclusion last; cutting the end threw away the answer and handed the supervisor the
+preamble, with no way to fetch the rest since driving the tab again starts a new turn.
+
+**An empty or failed read keeps the watch.** The pasted directive is itself a user turn, so
+`last_turn_ts` moves on *delivery* — deleting on the first unproductive read permanently
+ended the return leg for a reply that arrived seconds later.
 - Once answered, the tab finishes and the reply harvests normally.
 
 ### Overlord answers prompts (decided 2026-08-24)

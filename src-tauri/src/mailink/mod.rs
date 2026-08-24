@@ -897,6 +897,13 @@ async fn post_respond(
     if !is_designated(&s.app, &tab_id) {
         return Err(StatusCode::NOT_FOUND);
     }
+    // Order matters and is the pre-extraction order: "no prompt open" wins over "no PTY".
+    // The phone routinely taps a cached permission card whose tab has since lost its agent
+    // (suspended workspace, exited session) — that must stay a graceful 200 `stale` body,
+    // not a 409 the app has no branch for.
+    if current_prompt(&s.app, &tab_id).is_none() {
+        return Ok(Json(json!({ "ok": false, "reason": "stale" })));
+    }
     // The tab must still have a PTY — kept here so the phone's HTTP contract still answers
     // 409 for that case rather than the shared function's `{ok:false}`.
     pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
@@ -3315,11 +3322,6 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     Some(m)
 }
 
-/// Per-tab agent facts for the Overlord engine (docs/overlord.md §5 detection table) — the
-/// cheap, cached signals the frontend rules engine polls: context gauge, last-real-turn
-/// timestamp, runtime, session id. Everything comes from the (mtime,len)-gated tail-facts
-/// cache in `transcript.rs`, so steady-state cost per tab is one stat. snake_case keys —
-/// this is a maiTerm frontend surface, not the mailink phone protocol.
 /// Everything the tab's agent has SAID since `since_ms`, joined oldest-first.
 ///
 /// This is the tail Overlord reads to harvest an answer to a directive it typed. Overlord
@@ -3354,6 +3356,15 @@ pub(crate) fn agent_reply_since(app: &AppState, tab_id: &str, since_ms: i64) -> 
     Some(parts.join("\n\n"))
 }
 
+/// Per-tab agent facts for the Overlord engine (docs/overlord.md §5 detection table) — the
+/// cheap, cached signals the frontend rules engine polls: context gauge, last-real-turn
+/// timestamp, runtime, session id. Everything comes from the (mtime,len)-gated tail-facts
+/// cache in `transcript.rs`, so steady-state cost per tab is one stat. snake_case keys —
+/// this is a maiTerm frontend surface, not the mailink phone protocol.
+///
+/// NOTE `last_turn_ts` is absent for a tab whose transcript this machine cannot read — an
+/// SSH tab's JSONL lives on the remote host and is only shadowed locally while maiLink is
+/// running. Callers must treat its absence as "unknown", never as "no turns".
 pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let mut v = json!({

@@ -462,10 +462,14 @@
 
   // Overlord accessor-row state: how many things want a human, whether anything is
   // being typed right now, and how loud the badge should be.
+  // `humanEscalations`, not `escalations`: agent-addressed rows (a tab's reply to a directive,
+  // a permission gate routed to the Overlord agent) are filtered off the deck, so counting
+  // them here lit "1 item waiting on you" over a board with nothing on it and no way to
+  // clear the badge — it only cleared when the AGENT next pulled its queue.
   const overlordAttention = $derived(
-    overlordStore.proposals.length + overlordStore.escalations.filter(e => !e.read).length
+    overlordStore.proposals.length + overlordStore.humanEscalations.filter(e => !e.read).length
   );
-  const overlordUrgent = $derived(overlordStore.escalations.some(e => !e.read));
+  const overlordUrgent = $derived(overlordStore.humanEscalations.some(e => !e.read));
   const overlordBusy = $derived(overlordStore.ritualProgress.length > 0);
 
   async function handleOverlordClick() {
