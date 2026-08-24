@@ -63,8 +63,16 @@
   const clock = setInterval(() => { now = Date.now(); }, 20_000);
 
   // ── Constants ───────────────────────────────────────────────────────────────
-  const PRESSURE_PCT = 50;
+  /** Only used when NO context_pct rule is enabled — then nothing can act at any level,
+   *  and the deck says so rather than pretending a checkpoint is coming. */
+  const PRESSURE_FALLBACK_PCT = 60;
   const STALE_DAYS = 3;
+
+  /** Raise pressure at the level where a checkpoint will actually fire, not at a constant
+   *  of our own. The old hardcoded 50 sat five points below the default rule's 55, so
+   *  every tab in that band got a card saying "a checkpoint should run" while no rule
+   *  could possibly run one. */
+  const PRESSURE_PCT = $derived(overlordStore.checkpointThreshold ?? PRESSURE_FALLBACK_PCT);
 
   type View = 'deck' | 'fleet' | 'board' | 'ledger';
   let view = $state<View>('deck');
@@ -243,6 +251,27 @@
     const at = runProgress?.resumeAt;
     return at ? Math.max(0, Math.ceil((at - Date.now()) / 1000)) : 0;
   });
+
+  // ── Checkpoint ─────────────────────────────────────────────────────────────
+  let checkpointing = $state<string | null>(null);
+
+  async function checkpoint(tabId: string) {
+    checkpointing = tabId;
+    try {
+      const r = await overlordStore.checkpointTab(tabId);
+      recoverNote = r.started
+        ? null
+        : r.reason === 'no_live_repl'
+          ? "That tab has no live agent, so there's nothing to checkpoint."
+          : r.reason === 'outstanding'
+            ? 'That tab is still working on an earlier directive.'
+            : r.reason === 'already_running'
+              ? 'A ritual is already running on that tab.'
+              : `Couldn't start a checkpoint (${r.reason}).`;
+    } finally {
+      checkpointing = null;
+    }
+  }
 
   // ── Archive / close ────────────────────────────────────────────────────────
   let tabBusy = $state<string | null>(null);
@@ -565,20 +594,54 @@
                 <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.u.tab.id)}>{s.u.tab.name}</button>
                 <span class="ov-chip">{s.u.ws.name}</span>
               </div>
-              <p class="signal-text">Waiting on your approval — the agent is stopped until you answer.</p>
+              <p class="signal-text">
+                Waiting on your approval — the agent is stopped until you answer. This is the
+                one signal Overlord cannot clear for you: answering a permission prompt on
+                your behalf is exactly what that prompt exists to prevent.
+              </p>
+              <div class="signal-actions">
+                <button class="ov-btn ov-btn-primary" onclick={() => navigateToTab(s.u.tab.id)}>Open tab</button>
+              </div>
 
             {:else if s.type === 'pressure'}
+              {@const cp = overlordStore.checkpointState(s.u.tab.id)}
               <div class="signal-head">
                 <span class="ov-chip ov-chip-tone">{s.u.pct}% context</span>
                 <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.u.tab.id)}>{s.u.tab.name}</button>
                 <span class="ov-chip">{s.u.ws.name}</span>
                 <span class="signal-age ov-mono">{fmtAge(s.u.lastTurn)}</span>
               </div>
+              <!-- Says what is HAPPENING, not what ought to. "A checkpoint should run"
+                   is not an answer when running it is Overlord's entire job. -->
               <p class="signal-text">
                 Approaching compaction.
-                {#if s.u.ritual}Checkpoint running — step {s.u.ritual.step} of {s.u.ritual.steps}.
-                {:else}A checkpoint should run before it hits the wall.{/if}
+                {#if cp.kind === 'running'}
+                  Checkpoint running — step {cp.step} of {cp.steps}.
+                {:else if cp.kind === 'proposed'}
+                  A checkpoint is waiting for your approval in the queue above.
+                {:else if cp.kind === 'no_rule'}
+                  No checkpoint rule is enabled for this tab, so nothing will run on its own.
+                {:else if cp.kind === 'cooling'}
+                  A checkpoint ran recently, so the rule holds off for another {cp.minutes}m.
+                {:else if cp.kind === 'busy'}
+                  The agent is mid-turn — the checkpoint runs as soon as it finishes.
+                {:else}
+                  The checkpoint runs on the next tick.
+                {/if}
               </p>
+              {#if cp.kind !== 'running' && cp.kind !== 'proposed'}
+                <div class="signal-actions">
+                  {#if cp.kind === 'no_rule'}
+                    <span class="signal-note">Enable one in Preferences → Overlord.</span>
+                  {:else}
+                    <button class="ov-btn ov-btn-primary" disabled={checkpointing === s.u.tab.id}
+                            onclick={() => checkpoint(s.u.tab.id)}
+                            title="Run the checkpoint now, ignoring the rule's cooldown. If the agent is mid-turn it waits for the turn to end rather than typing over it.">
+                      {checkpointing === s.u.tab.id ? 'Starting…' : 'Checkpoint now'}
+                    </button>
+                  {/if}
+                </div>
+              {/if}
 
             {:else if s.type === 'spent'}
               <div class="signal-head">

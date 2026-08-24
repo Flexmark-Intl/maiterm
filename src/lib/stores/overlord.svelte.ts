@@ -148,6 +148,16 @@ export interface PendingRuleChangeBatch {
 
 /** What one scan pass found. `silent` are running tabs with nothing on the task list —
  *  the candidates a census would ask, already filtered by the ask-cooldown. */
+/** Why a tab under context pressure is or isn't being checkpointed — the deck's copy AND
+ *  which button it offers, so the two can't drift apart. */
+export type CheckpointState =
+  | { kind: 'running'; step: number; steps: number }
+  | { kind: 'proposed' }
+  | { kind: 'no_rule' }
+  | { kind: 'cooling'; minutes: number }
+  | { kind: 'busy' }
+  | { kind: 'ready' };
+
 /** An agent tab whose tracked work is finished and which has gone quiet — a candidate for
  *  archiving (recoverable) or closing (not). */
 export interface SpentTab {
@@ -1226,6 +1236,20 @@ function createOverlordStore() {
     return { rebinds, proposalIds, superseded };
   }
 
+  /** The enabled `context_pct` rule that would checkpoint this tab — lowest threshold
+   *  first, since that is the one that fires. */
+  function checkpointRuleFor(tabId: string): OverlordRule | null {
+    const ws = workspaceForTab(tabId);
+    let best: OverlordRule | null = null;
+    for (const r of preferencesStore.overlordRules) {
+      if (!r.enabled || r.when.event !== 'context_pct' || !r.sequence.length) continue;
+      if (r.workspaces.length && (!ws || !r.workspaces.includes(ws.id))) continue;
+      const at = r.when.at_or_above;
+      if (!best || at < (best.when as { at_or_above: number }).at_or_above) best = r;
+    }
+    return best;
+  }
+
   function unreadyKind(tabId: string): UnreadyKind | null {
     void liveVersion; // see probeLiveness — `liveness` is a plain Map
     return liveness.get(tabId)?.kind ?? null;
@@ -1604,6 +1628,60 @@ function createOverlordStore() {
       liveness.delete(tabId);
       bumpLive();
       return { sent: true, kind };
+    },
+
+    // ── Context pressure: checkpoint ─────────────────────────────────────────
+
+    /** The context level at which something will ACTUALLY happen: the lowest enabled
+     *  `context_pct` threshold. The deck reads this instead of its own constant — a
+     *  hardcoded 50 against a rule firing at 55 gave a five-point band where the deck
+     *  complained and nothing could act, which is advice wearing a supervisor's badge.
+     *  Null when no rule is enabled, which the deck says out loud. */
+    get checkpointThreshold(): number | null {
+      for (const r of preferencesStore.overlordRules) {
+        if (!r.enabled || r.when.event !== 'context_pct' || !r.sequence.length) continue;
+        return (r.when as { at_or_above: number }).at_or_above;
+      }
+      return null;
+    },
+
+    /** Why a tab under context pressure is or isn't being checkpointed right now. The deck
+     *  renders this verbatim: "a checkpoint should run" is not an answer when the whole
+     *  point is that Overlord runs it. */
+    checkpointState(tabId: string): CheckpointState {
+      void liveVersion;
+      const run = rituals.get(tabId);
+      if (run) return { kind: 'running', step: run.stepIndex + 1, steps: run.stepCount };
+      const rule = checkpointRuleFor(tabId);
+      if (!rule) return { kind: 'no_rule' };
+      if (proposals.some((p) => p.tabId === tabId && p.ruleId === rule.id)) return { kind: 'proposed' };
+      const last = lastFiredAt.get(`${rule.id}|${tabId}`) ?? 0;
+      const left = rule.cooldown * 1000 - (Date.now() - last);
+      if (left > 0) return { kind: 'cooling', minutes: Math.max(1, Math.ceil(left / 60_000)) };
+      const st = mappedState(tabId);
+      if (st && st !== 'idle') return { kind: 'busy' };
+      return { kind: 'ready' };
+    },
+
+    /**
+     * Run the checkpoint on this tab now.
+     *
+     * Bypasses the rate limiters — `cooldown` and `max_per_hour` exist to stop the ENGINE
+     * nagging, and a human clicking the button is the override they are guarding against
+     * being unable to make. The mechanical guards are NOT bypassed: `runSequence` still
+     * re-checks the live REPL at every step and `waitInjectable` still holds for the
+     * agent-state and quiet window, so clicking while the agent is mid-turn queues the
+     * checkpoint rather than typing over its output.
+     */
+    async checkpointTab(tabId: string): Promise<{ started: boolean; reason?: string }> {
+      const rule = checkpointRuleFor(tabId);
+      if (!rule) return { started: false, reason: 'no_rule' };
+      if (rituals.has(tabId)) return { started: false, reason: 'already_running' };
+      if (outstanding.has(tabId)) return { started: false, reason: 'outstanding' };
+      if (!(await hasLiveRepl(tabId))) return { started: false, reason: 'no_live_repl' };
+      void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'human');
+      logInfo(`overlord: manual checkpoint on ${tabId.slice(0, 8)} via "${rule.name}"`);
+      return { started: true };
     },
 
     // ── Spent sessions: archive or close out ─────────────────────────────────

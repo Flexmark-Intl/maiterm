@@ -606,6 +606,58 @@ workspace — all existing pane/split/PTY machinery applies unchanged.
 - The board view is the workspace's primary surface, indexed by **workstream** —
   see "Board view: one job at a time" below.
 
+### Every triage card carries its own remedy
+
+The deck's standing rule, learned twice the hard way (the `unready` cards that printed
+"run /maiterm init" and the `pressure` cards that printed "a checkpoint should run"):
+
+> **A triage card that only describes a problem is a bug.** Overlord exists so the
+> human doesn't walk to the tab and do it by hand. Every card either acts, or says
+> precisely why it can't and what would change that.
+
+| Signal | Remedy |
+|---|---|
+| escalation | Clear |
+| proposal | Send it / Not now |
+| permission | Open tab — *see below* |
+| pressure | **Checkpoint now** |
+| stale | Mark done / Park / Drop |
+| unready | Re-bind (`unbound`) / Restart agent (`stopped`) |
+| spent | Archive / Close / Keep |
+
+`permission` is the sole card Overlord cannot clear: answering a permission prompt on
+the human's behalf is exactly what that prompt exists to prevent. It says so, and
+offers the only correct action — jump there.
+
+### Context pressure is managed, not announced
+
+The `pressure` card had the same shortcoming twice over:
+
+1. **The threshold was a lie.** The deck hardcoded `PRESSURE_PCT = 50` while the
+   default `checkpoint_at_context_pressure` rule fires at 55, so every tab between
+   50–55% got a card saying a checkpoint should run while no rule could run one. The
+   deck now reads `overlordStore.checkpointThreshold` — the lowest enabled
+   `context_pct` rule — so it raises pressure exactly where something will act. With
+   no such rule enabled it falls back to 60% and says outright that nothing will run.
+2. **There was no button.** Now `checkpointState(tabId)` drives both the copy and the
+   control, so they cannot drift:
+
+| State | Card says | Offers |
+|---|---|---|
+| `running` | step N of M | — (in progress) |
+| `proposed` | waiting for approval in the queue above | — (approve it there) |
+| `cooling` | rule holds off for another N min | Checkpoint now |
+| `busy` | runs as soon as the turn finishes | Checkpoint now |
+| `ready` | runs on the next tick | Checkpoint now |
+| `no_rule` | nothing will run on its own | pointer to Preferences |
+
+`checkpointTab()` bypasses the **rate limiters** (`cooldown`, `max_per_hour`) — those
+exist to stop the *engine* nagging, and a human clicking the button is the override
+they would otherwise make impossible. It does **not** bypass the mechanical guards:
+`runSequence` re-checks the live REPL at every step and `waitInjectable` still holds
+for the agent-state and quiet window, so clicking mid-turn queues the checkpoint
+rather than typing over the agent's output.
+
 ### Closing out finished sessions
 
 A supervised fleet accumulates sessions that did a big piece of work, finished it,
