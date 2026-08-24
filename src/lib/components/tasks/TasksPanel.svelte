@@ -16,7 +16,7 @@
    *  version of the board and buried the one list the tab actually needs. */
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { effectiveStatus, isParked, TASK_STATUSES } from '$lib/tasks/model';
+  import { effectiveStatus, isInFlight, isParked, TASK_STATUSES } from '$lib/tasks/model';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -37,6 +37,7 @@
   let confirmingDelete = $state<string | null>(null);
   let showDone = $state(false);
   let showParked = $state(false);
+  let showUnclaimed = $state(false);
 
   /** The whole workspace list — needed ONLY as the dependency universe for
    *  `effectiveStatus`, since a prerequisite can live on another tab. Never rendered. */
@@ -51,9 +52,19 @@
   const doneCount = $derived(mine.filter((t) => t.status === 'done').length);
   const parkedCount = $derived(mine.filter((t) => isParked(t.status)).length);
 
-  /** How much of the project this panel is deliberately not showing. One line, not a list —
-   *  enough to say "the board has more", never enough to become a second board. */
-  const elsewhere = $derived(all.length - mine.length);
+  /** Work nobody owns: released when a tab closed (`releaseTab`), or created unassigned.
+   *
+   *  This IS the per-tab panel's business — it is the pile you can pick up here, not
+   *  another tab's work. Surfacing it is also the only way to reach it: nothing else in the
+   *  app writes `Task.tab_id`, so without a claim control released rows are unreadable,
+   *  uneditable and undeletable from every surface, forever. */
+  const unclaimed = $derived(all.filter((t) => !t.tab_id && isInFlight(t)));
+
+  /** Work in flight on OTHER tabs. One line, not a list — enough to say the board has more,
+   *  never enough to become a second board. Counts only in-flight and only genuinely
+   *  assigned rows: a raw `all - mine` grew monotonically with every task the project ever
+   *  finished, so it shouted loudest exactly when nothing was happening. */
+  const elsewhere = $derived(all.filter((t) => t.tab_id && t.tab_id !== tabId && isInFlight(t)).length);
 
   /** This tab's work, grouped by job. One tab routinely runs two unrelated jobs, which is
    *  the whole reason workstreams exist — without grouping they blur into one list. */
@@ -61,6 +72,7 @@
     key: string;
     name: string | null;
     list: Task[];
+    unclaimed?: boolean;
   }
 
   const groups = $derived.by<Group[]>(() => {
@@ -72,15 +84,20 @@
       if (!byStream.has(k)) byStream.set(k, []);
       byStream.get(k)!.push(t);
     }
-    return [...byStream.keys()]
+    const out: Group[] = [...byStream.keys()]
       // Loose tasks last; named jobs alphabetical.
       .sort((a, b) => (!a ? 1 : !b ? -1 : (nameOf(a) ?? '').localeCompare(nameOf(b) ?? '')))
       .map((k) => ({ key: k, name: k ? nameOf(k) : null, list: visible(byStream.get(k)!) }))
       .filter((g) => g.list.length);
+    if (showUnclaimed && unclaimed.length) {
+      out.push({ key: '__unclaimed', name: null, list: unclaimed, unclaimed: true });
+    }
+    return out;
   });
 
-  /** Headings only earn their space when there is more than one job in view. */
-  const showGroupHeadings = $derived(groups.length > 1);
+  /** Headings only earn their space when there is more than one job in view — but the
+   *  unclaimed pile always needs its label, or it reads as this tab's own work. */
+  const showGroupHeadings = $derived(groups.length > 1 || groups.some((g) => g.unclaimed));
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
     backlog: 'Parked',
@@ -100,7 +117,11 @@
   function addTask() {
     const title = draft.trim();
     if (!title) return;
-    const streams = new Set(mine.filter((t) => t.status !== 'done').map((t) => t.workstream_id ?? ''));
+    // `isInFlight`, not `status !== 'done'`: backlog is the parking lot and is exempt from
+    // every other in-flight question in the codebase. Counting it here meant a tab whose
+    // only rows were parked (and therefore hidden) silently filed a new bug into a shelved
+    // workstream, with no heading shown to reveal it.
+    const streams = new Set(mine.filter(isInFlight).map((t) => t.workstream_id ?? ''));
     const only = streams.size === 1 ? [...streams][0] : '';
     tasksStore.add(workspaceId, {
       title,
@@ -181,6 +202,13 @@
     detailFor = null;
   }
 
+  /** Take ownership of unclaimed work, or hand this tab's work back to the project. The
+   *  only `Task.tab_id` writers in the UI — the board reassigns workstream and status, never
+   *  the assignee. */
+  function setAssignee(t: Task, mineNow: boolean) {
+    tasksStore.update(workspaceId, t.id, { tab_id: mineNow ? tabId : null });
+  }
+
   function remove(id: string) {
     tasksStore.remove(workspaceId, id);
     confirmingDelete = null;
@@ -230,6 +258,11 @@
   <div class="panel-header">
     <span class="title">Tasks</span>
     <span class="spacer"></span>
+    {#if unclaimed.length > 0}
+      <button class="done-toggle" class:on={showUnclaimed} onclick={() => (showUnclaimed = !showUnclaimed)}>
+        {unclaimed.length} unclaimed
+      </button>
+    {/if}
     {#if parkedCount > 0}
       <button class="done-toggle" class:on={showParked} onclick={() => (showParked = !showParked)}>
         {parkedCount} parked
@@ -258,17 +291,23 @@
   </div>
 
   <div class="lists">
-    {#if mine.length === 0}
+    {#if groups.length === 0}
       <p class="empty">
-        Nothing tracked on this tab yet. Add a task above — the agent here reads and updates
-        the same list.
+        {#if mine.length}
+          Nothing in flight on this tab — the counts above hold the rest.
+        {:else}
+          Nothing tracked on this tab yet. Add a task above — the agent here reads and
+          updates the same list.
+        {/if}
       </p>
     {/if}
 
     {#each groups as group (group.key)}
       {#if showGroupHeadings}
         <h4 class="group">
-          {#if group.name}{group.name}{:else}<span class="group-loose">Ungrouped</span>{/if}
+          {#if group.unclaimed}<span class="group-loose">Unclaimed — nobody is on these</span>
+          {:else if group.name}{group.name}
+          {:else}<span class="group-loose">Ungrouped</span>{/if}
         </h4>
       {/if}
       <ul class="task-list">
@@ -309,6 +348,13 @@
                       {t.origin === 'imported' ? '⇥' : '◆'}
                     </span>
                   {/if}
+                  <button
+                    class="mini"
+                    title={group.unclaimed ? 'Claim for this tab' : 'Hand back — leave for whoever picks it up'}
+                    onclick={() => setAssignee(t, !!group.unclaimed)}
+                  >
+                    {group.unclaimed ? '↧' : '↥'}
+                  </button>
                   {#if confirmingDelete === t.id}
                     <button class="mini danger" title="Confirm delete" onclick={() => remove(t.id)}>✓</button>
                     <button class="mini" title="Cancel" onclick={() => (confirmingDelete = null)}>✕</button>
@@ -349,7 +395,7 @@
       <!-- A pointer, never a list. The moment this shows other tabs' work it stops being a
            per-tab panel and starts being a cramped second board. -->
       <p class="elsewhere">
-        {elsewhere} more task{elsewhere === 1 ? '' : 's'} elsewhere in this project — see the board.
+        {elsewhere} task{elsewhere === 1 ? '' : 's'} in flight on other tabs{#if preferencesStore.overlordEnabled} — see the board{/if}.
       </p>
     {/if}
   </div>

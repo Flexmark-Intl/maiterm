@@ -289,12 +289,22 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 
 Content: this tab's tasks grouped by workstream (headings only when there is more than
 one job in view), inline add, click-to-edit title/detail, status cycling, delete, a
-blocked-by indicator, and `N parked` / `N done` collapses. One closing line reports how
-many tasks exist elsewhere in the project, as a pointer to the board — never a list.
+blocked-by indicator, and `N parked` / `N done` / `N unclaimed` collapses. One closing
+line reports how many tasks are **in flight on other tabs** — a pointer to the board,
+never a list, and never a raw row count (that grew with every task the project ever
+finished, so it shouted loudest when nothing was happening).
+
+**`N unclaimed` is not a scope violation, it is the only way to reach that work.** The
+panel is the sole writer of `Task.tab_id` in the whole frontend — the board reassigns
+workstream and status, and `updateTasks` over MCP has no assignee field. So without a
+claim control, a row released by `releaseTab` when its tab closed would be unreadable,
+uneditable and undeletable from every surface, forever, while still inflating counts.
+Unclaimed work is also genuinely this panel's business: it is the pile you can pick up
+*here*, not another tab's work. Collapsed by default; ↧ claims, ↥ hands back.
 
 Removed, and why: it also listed **the rest of the project**, offered a **workstream
-picker** on every add, a **per-row workstream dropdown**, and an **assign/unassign**
-control. All four are *organizing* work, and organizing has a proper home now — the board
+picker** on every add, and a **per-row workstream dropdown**. All three are *organizing*
+work, and organizing has a proper home now — the board
 is indexed by workstream (`docs/overlord.md`), where a drag moves a task between jobs and
 the whole window is legible at once. Reproducing that in a 280px dock made the panel a
 worse board and buried the one list the tab actually needs.
