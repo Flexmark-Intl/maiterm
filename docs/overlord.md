@@ -746,8 +746,43 @@ The deck's standing rule, learned twice the hard way (the `unready` cards that p
 | permission | Open tab — *see below* |
 | pressure | **Checkpoint now** |
 | stale | Mark done / Park / Drop |
-| unready | Re-bind (`unbound`) / Restart agent (`stopped`) |
+| unready | Re-bind (`unbound`) / Restart agent (`stopped`) — raised only for tabs whose pane is mounted, since nothing can probe or type into the others |
 | spent | Archive / Close / Keep |
+
+#### The declared-but-unproduced sweep (2026-08-24)
+
+Three separate bugs had the same shape — a condition, kind or threshold declared
+somewhere and produced nowhere, so the UI degraded to advice — so every declared
+condition, step kind, gate, escalation kind, ledger outcome, board signal and
+MCP argument was traced to a live producer. What it found, all now fixed:
+
+| Was | Why it couldn't work |
+|---|---|
+| `blocked` escalation | `replyToOverlord` filed every report as `agent_report` |
+| `directive_unacked` escalation | nothing raised it, while `listEscalations` promised the agent it would see them |
+| `replyToOverlord.directive_id` | declared in the schema, read nowhere — and unknowable to the answering agent, since the injection carries no envelope |
+| agent-proposed `permission_pending` / `directive_unacked` rules | `AGENT_RULE_GUARDS` repaired only `agent_unready`, so both arrived dead — and `update` never re-coupled guards at all |
+| `commit` / `turn_end` rules | the edge was consumed on the tick the guards rejected it (see below) |
+| `overlordStore.reportFromAgent` | exported, never called |
+| `unready` card on unmounted tabs | no TerminalPane → no probe → permanent card with no button |
+| `permission_pending` rule injection | typed prose at a keystroke menu, which `driveTab` already refused |
+| agent-only escalations | no disposal but the agent's own pull; they piled up once the agent tab was gone |
+| `supersedes` | honoured by the engine, settable only by the agent |
+| runtime coverage | `conditionSource` claimed "every runtime" for signals blind to Gemini |
+
+**Edges are latched, not sampled.** An edge is a moment; every guard is about a
+window (idle, PTY quiet 3s, no ritual, no outstanding directive). The two rarely
+coincide on one 5s tick, and the edge was recomputed from a single-tick state
+delta and dropped. A `commit` fact appears when the git `tool_use` block is
+emitted — *mid-turn*, when the agent is by definition not idle — so
+`review_after_commit`, a **shipped default**, could effectively never fire. Any
+turn ending inside the quiet window was lost too, and `break` after one fire per
+tab ate that tick's edge for every other rule. Edges now sit in `pendingEdges`
+and are re-offered until a rule spends one or they age out (5 min).
+
+**The general rule this leaves behind:** before adding a condition, kind or
+threshold, name its producer and its consumer. If either is missing, it is
+decoration — and decoration in a supervisor reads as a promise.
 
 `permission` is the sole card Overlord cannot clear: answering a permission prompt on
 the human's behalf is exactly what that prompt exists to prevent. It says so, and
@@ -773,7 +808,16 @@ The `pressure` card had the same shortcoming twice over:
 | `cooling` | rule holds off for another N min | Checkpoint now |
 | `busy` | runs as soon as the turn finishes | Checkpoint now |
 | `ready` | runs on the next tick | Checkpoint now |
+| `below_rule` | this tab's rule doesn't fire until N% | Checkpoint now |
 | `no_rule` | nothing will run on its own | pointer to Preferences |
+
+`below_rule` is the 50-vs-55 dead band inverted, and it survived the first fix.
+`checkpointThreshold` is one window-wide number that **ignores workspace scope on
+purpose**; `checkpointRuleFor` respects it. So a workspace-scoped rule at 40%
+anywhere in the window raises a card for a tab in a *different* workspace at 42%,
+whose own rule needs 55%. The card was right to appear — the human may well want
+to checkpoint early, and the button always worked — but it said "runs on the next
+tick", which was false. It now names the rule's own threshold.
 
 `checkpointTab()` bypasses the **rate limiters** (`cooldown`, `max_per_hour`) — those
 exist to stop the *engine* nagging, and a human clicking the button is the override
