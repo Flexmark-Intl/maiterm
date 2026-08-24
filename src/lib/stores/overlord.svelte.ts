@@ -112,7 +112,12 @@ export interface OverlordEscalation {
     | 'agent_report'
     /** A tab answered a directive Overlord typed. For the AGENT, not the human — the deck
      *  filters these out, since a normal answer is not a problem needing triage. */
-    | 'drive_reply';
+    | 'drive_reply'
+    /** The human handed a board task to the agent to carry ("Send" on the card). */
+    | 'task_handoff'
+    /** The human deleted a task and the owning tab could not be told directly — the agent
+     *  relays it, so the tab stops believing in work that is off the board. */
+    | 'task_dropped';
   detail: string;
   /** Consumed by listEscalations (S4); stays visible on the board until dismissed. */
   read: boolean;
@@ -224,8 +229,9 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
 /** Bump when the doctrine's CONTRACT changes, not when its wording is tidied. The marker
  *  is persisted, so an already-primed agent is never re-primed at the same version — and
  *  an agent running last version's doctrine believes last version's rules. v2 added the
- *  promise that driven tabs' replies come back on their own. */
-const DOCTRINE_VERSION = '4';
+ *  promise that driven tabs' replies come back on their own. v5 added task handoffs
+ *  (task_handoff / task_dropped), which the agent must recognise to act on. */
+const DOCTRINE_VERSION = '5';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -233,6 +239,8 @@ const DOCTRINE_VERSION = '4';
 const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
   'drive_reply',
   'permission_stuck',
+  'task_handoff',
+  'task_dropped',
 ]);
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
@@ -391,6 +399,11 @@ function createOverlordStore() {
    */
   type UnreadyKind = 'unbound' | 'stopped';
   const liveness = new Map<string, { kind: UnreadyKind; at: number }>();
+
+  /** Board tasks the human handed to the agent ("Send" on a card) → when. In memory only,
+   *  like `escalations` itself: the handoff IS the escalation, and once the agent has
+   *  consumed it the mark is only a receipt for the human. */
+  const handedOff = new Map<string, number>(); // taskId → ms epoch
 
   const rituals = new Map<string, RitualRun>(); // tabId → active ritual
   let ticker: ReturnType<typeof setInterval> | null = null;
@@ -702,6 +715,7 @@ function createOverlordStore() {
       `  - You WILL get the answer back: when a tab you drove finishes its turn, its reply is queued for you and you are rung the same way as an escalation. So it is fine to ask a tab a question and wait — you do not need to ask it to report back, and you should not poll it.\n` +
       `  - If that tab stops at a prompt instead, you are told. Call getTabPrompt to see it, then ANSWER IT with answerTabPrompt — unblocking your own fleet is your job, and a tab left sitting at a prompt is the failure you exist to prevent. Pass back the prompt_id you were given.\n` +
       `  - ESCALATE INSTEAD OF ANSWERING when the decision is consequential: anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion, and you answer the tab once they tell you. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, it is the escalating side.\n` +
+      `  - Your human can also hand you a board task directly ("Send" on a card): it arrives as a task_handoff escalation naming the task and the tab that owns it. Carry it — drive that tab, drive a better one, or do it yourself — and keep its status current with updateTasks so the board follows along. A task_dropped escalation is the reverse: the human deleted a task and the tab carrying it could not be told, so tell it yourself when it is reachable.\n` +
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
@@ -1646,9 +1660,99 @@ function createOverlordStore() {
       const hit = tasksStore.findAnywhere(id);
       if (hit) tasksStore.setStatus(hit.workspaceId, id, status);
     },
-    deleteTask(id: string) {
+    /** Drop a task off the board AND tell whoever was carrying it.
+     *
+     *  Deleting used to be silent, which made the board lie to the agent: the row vanished
+     *  here while the agent still believed in the work, and the next time it re-sent its
+     *  list (re-prime, resume, compaction) `findDuplicate` saw nothing and put the task
+     *  straight back. The human's decision has to reach the tab or it doesn't stick.
+     *
+     *  Direct when the tab can take it — a one-line notice, not a directive: it asks for
+     *  nothing back, so it must not occupy the tab's outstanding slot and block every
+     *  `only_if_no_outstanding` rule behind it. When the tab can't be typed into (no live
+     *  REPL, mid-repaint, not mounted), the Overlord agent is told instead and relays it
+     *  when the tab comes back — the same act-or-escalate shape as every other card.
+     *
+     *  NOT a tombstone: an agent that ignores the notice can still re-add the row. Making
+     *  that impossible needs a persisted drop list the dedup consults, which is a schema
+     *  change; this closes the "nobody ever told it" hole, which was the actual bug. */
+    async deleteTask(id: string): Promise<{ removed: boolean; told: 'tab' | 'agent' | 'nobody' }> {
       const hit = tasksStore.findAnywhere(id);
-      if (hit) tasksStore.remove(hit.workspaceId, id);
+      if (!hit) return { removed: false, told: 'nobody' };
+      const { workspaceId, task } = hit;
+      const tabId = task.tab_id;
+      tasksStore.remove(workspaceId, id);
+      handedOff.delete(id);
+      bumpLive();
+      // Nobody was carrying it — an unassigned row is the board's alone to forget. Nor is
+      // there anything to say about work already finished or parked: the agent isn't going
+      // to re-add what it has closed out, and clearing out done rows is routine tidying
+      // that would otherwise type a line into a tab for every card swept.
+      if (!tabId || !isInFlight(task)) return { removed: true, told: 'nobody' };
+
+      const text =
+        `Board update: I removed the task "${task.title}" from the board — it is no longer ` +
+        `something I want done. Drop it from your own list too, and don't re-add it.`;
+      const step: OverlordStep = { kind: 'process', text };
+      const inst = terminalsStore.get(tabId);
+      const quiet = Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) >= 1500;
+      if (inst && quiet && (await hasLiveRepl(tabId))) {
+        try {
+          await bracketedPasteSubmit(inst.ptyId, text);
+          ledger(tabId, null, 'human', 0, step, 'sent');
+          return { removed: true, told: 'tab' };
+        } catch (e) {
+          logError(`overlord: drop notice failed for ${tabId.slice(0, 8)}: ${e}`);
+        }
+      }
+      ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+      escalate(
+        tabId,
+        null,
+        'task_dropped',
+        `The human deleted the task "${task.title}" from the board. ${tabDisplayName(tabId)} was ` +
+          `carrying it and could not be told directly. Tell it when it is reachable: the task is ` +
+          `off the board, it should drop it from its own list and not re-add it.`,
+      );
+      return { removed: true, told: 'agent' };
+    },
+
+    /** Hand a board task to the Overlord agent to carry (the card's "Send").
+     *
+     *  A handoff is queued as an agent-only escalation rather than typed at the owning tab:
+     *  the agent decides what the task needs — drive the tab that owns it, drive a different
+     *  one, ask the human, or do it itself — and it already has the doorbell + `listEscalations`
+     *  pull for exactly this. Re-sending is allowed (a nudge is sometimes the point); the
+     *  receipt just says when it last went. */
+    sendTaskToOverlord(id: string): boolean {
+      const hit = tasksStore.findAnywhere(id);
+      if (!hit) return false;
+      const { task } = hit;
+      const stream = tasksStore.workstream(hit.workspaceId, task.workstream_id)?.name;
+      const where = task.tab_id
+        ? `It is assigned to ${tabDisplayName(task.tab_id)} (tab ${task.tab_id}).`
+        : 'It is not assigned to any tab — pick one, or carry it yourself.';
+      escalate(
+        task.tab_id ?? '',
+        null,
+        'task_handoff',
+        `The human handed you a board task to carry: "${task.title}"` +
+          (stream ? ` (workstream: ${stream})` : '') +
+          `, currently in ${task.status}. ${where}` +
+          (task.detail ? `\n\nWhat it says: ${task.detail}` : '') +
+          `\n\nTake it from here: move it forward yourself, drive the tab that owns it, or ` +
+          `escalate to the human if it needs a decision. Update its status as it moves ` +
+          `(task id ${task.id}).`,
+      );
+      handedOff.set(id, Date.now());
+      bumpLive();
+      return true;
+    },
+
+    /** When a task was last handed to the agent, for the card's receipt. */
+    taskHandoffAt(id: string): number | null {
+      void liveVersion;
+      return handedOff.get(id) ?? null;
     },
 
     get agentReports() { return agentReports; },

@@ -914,6 +914,55 @@ in kanban clothing. Reshaped 2026-08-23 (`OverlordBoardView.svelte`):
   lives in a pane that can be narrow inside a wide window, which a media query
   cannot see.
 
+#### The card (reworked 2026-08-24)
+
+The owning tab **headlines** the card as one clipped line of plain text, not a
+chip button in the footer. Long tab names wrapped the footer and pushed the
+controls around, and the point of the board is not having to walk to the tab —
+its name is context, not a destination. Reaching it is a labelled **View**
+button instead.
+
+The footer is a three-part row: `‹` and `›` hug the edges they move toward, and
+the two acts that take a task *off* this board sit centred between them, so
+neither is hit while reaching for the other. Delete moved up to the card's top
+right, out of the stepping path entirely.
+
+- **View** — jump to the owning tab (disabled when unassigned).
+- **Send** — hand the task to the Overlord agent. It queues a `task_handoff`
+  escalation naming the task, its lane, its workstream and its tab, and rings
+  the agent's doorbell like any other item. The agent decides what it needs:
+  drive that tab, drive a better one, carry it itself, or escalate. Re-sending
+  is allowed — a nudge is sometimes the point — and the button becomes a
+  receipt saying when it last went.
+
+#### Deleting a task has to reach whoever was carrying it
+
+Deleting used to be silent, which made the board lie to the agent: the row
+vanished here while the agent still believed in the work, and the next time it
+re-sent its list (re-prime, resume, compaction) `findDuplicate` found nothing
+and put the task straight back. The human's decision has to land in the tab or
+it doesn't stick.
+
+`overlordStore.deleteTask` therefore acts, in the same act-or-escalate shape as
+every other card:
+
+1. In-flight task on a tab that can be typed into → a one-line notice, direct.
+   It is **not** a directive: it asks for nothing back, so it must not occupy
+   the tab's outstanding slot and block every `only_if_no_outstanding` rule
+   behind it.
+2. Tab not reachable (no live REPL, mid-repaint, unmounted) → a `task_dropped`
+   escalation, so the agent relays it when the tab comes back.
+3. Unassigned, or already done/parked → nobody to tell. Sweeping finished rows
+   is routine tidying and must not type a line per card.
+
+This is **not** a tombstone: an agent that ignores the notice can still re-add
+the row. Making that mechanically impossible needs a persisted drop list that
+`findDuplicate` consults — a schema change. What shipped closes the "nobody ever
+told it" hole, which was the actual bug.
+
+Both new kinds are agent-only (hidden from the deck, deleted on delivery) and
+both are named in the doctrine, so `DOCTRINE_VERSION` went to **5**.
+
 ### Task model — minimum viable
 
 `id`, `title`, `workspace_id`, `tab_id` (assignee, nullable = backlog), `state`

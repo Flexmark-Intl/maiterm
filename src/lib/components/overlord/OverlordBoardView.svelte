@@ -292,6 +292,16 @@
     if (next !== t.status) tasksStore.setStatus(t.workspace_id, t.id, next);
   }
 
+  /** Delete a card THROUGH the engine, not `tasksStore.remove`.
+   *
+   *  A task the human deletes has to reach whoever was carrying it, or the tab keeps
+   *  believing in the work and puts the row back the next time it re-sends its list. The
+   *  engine tells the tab directly when it can, and hands it to the Overlord agent to
+   *  relay when it can't (`deleteTask`). */
+  function dropTask(t: TaskRow) {
+    void overlordStore.deleteTask(t.id);
+  }
+
   /** Start a named job, seeded with its first task — a workstream with no tasks is dropped
    *  on persist, so the two have to be created together. */
   let creating = $state(false);
@@ -572,6 +582,7 @@
 
             <div class="lane-body">
               {#each shown as t (t.id)}
+                {@const sentAt = overlordStore.taskHandoffAt(t.id)}
                 <!-- The accent marks "an agent put this here", covering both a task created
                      over MCP ('agent') and one imported from a runtime's own list
                      ('imported'). Testing for 'agent' alone would miss every importer row. -->
@@ -584,6 +595,18 @@
                   ondragstart={(e) => onDragStart(e, t.id)}
                   ondragend={endDrag}
                 >
+                  <!-- Whose tab this is headlines the card as plain text, one line, clipped.
+                       It was a chip button, which wrapped on long tab names and pushed the
+                       controls around — and the whole point of the board is not having to
+                       walk to the tab, so its name is context, not a destination. -->
+                  <div class="card-head">
+                    <span class="card-tab" title={t.tab_id ? tabDisplayName(t.tab_id) : 'Not assigned to a tab'}>
+                      {t.tab_id ? tabDisplayName(t.tab_id) : 'unassigned'}
+                    </span>
+                    <span class="ov-mono card-age">{fmtAge(t.updated_at)}</span>
+                    <button class="tick tick-del" title="Delete" onclick={() => dropTask(t)}>×</button>
+                  </div>
+
                   <button
                     class="card-title"
                     title={t.detail ? 'Click to read the description' : 'No description'}
@@ -597,28 +620,39 @@
                     <p class="card-detail">{t.detail || 'No description was recorded for this task.'}</p>
                   {/if}
 
+                  {#if (isEverything && streamOf(t)) || depBlocked.has(t.id)}
+                    <div class="card-meta">
+                      {#if isEverything && streamOf(t)}
+                        <button class="ov-chip card-stream" onclick={() => (selected = `${t.workspace_id}|${t.workstream_id ?? ''}`)}>
+                          {streamOf(t)}
+                        </button>
+                      {/if}
+                      {#if depBlocked.has(t.id)}
+                        <span class="ov-chip card-dep" title="Waiting on an unfinished prerequisite. It moves on its own once that task is done.">waiting</span>
+                      {/if}
+                    </div>
+                  {/if}
+
+                  <!-- Steppers pin to the edges they move toward; the two acts that leave the
+                       board sit centred between them. -->
                   <div class="card-foot">
-                    {#if isEverything && streamOf(t)}
-                      <button class="ov-chip card-stream" onclick={() => (selected = `${t.workspace_id}|${t.workstream_id ?? ''}`)}>
-                        {streamOf(t)}
+                    <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Back'}
+                            disabled={depBlocked.has(t.id) || t.status === 'backlog'}
+                            onclick={() => moveTask(t, -1)}>‹</button>
+                    <span class="card-acts">
+                      <button class="act" title="View Tab" disabled={!t.tab_id}
+                              onclick={() => navigateToTab(t.tab_id!)}>View</button>
+                      <button class="act act-send" class:sent={sentAt !== null}
+                              title={sentAt === null
+                                ? 'Send to Overlord'
+                                : `Sent to Overlord ${fmtAge(new Date(sentAt).toISOString())} — click to send again`}
+                              onclick={() => overlordStore.sendTaskToOverlord(t.id)}>
+                        {sentAt === null ? 'Send' : 'Sent'}
                       </button>
-                    {/if}
-                    {#if t.tab_id}
-                      <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(t.tab_id!)}>{tabDisplayName(t.tab_id)}</button>
-                    {/if}
-                    <span class="ov-mono card-age">{fmtAge(t.updated_at)}</span>
-                    {#if depBlocked.has(t.id)}
-                      <span class="ov-chip card-dep" title="Waiting on an unfinished prerequisite. It moves on its own once that task is done.">waiting</span>
-                    {/if}
-                    <span class="card-ctl">
-                      <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Back'}
-                              disabled={depBlocked.has(t.id) || t.status === 'backlog'}
-                              onclick={() => moveTask(t, -1)}>‹</button>
-                      <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Forward'}
-                              disabled={depBlocked.has(t.id) || t.status === 'done'}
-                              onclick={() => moveTask(t, 1)}>›</button>
-                      <button class="tick tick-del" title="Delete" onclick={() => tasksStore.remove(t.workspace_id, t.id)}>×</button>
                     </span>
+                    <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Forward'}
+                            disabled={depBlocked.has(t.id) || t.status === 'done'}
+                            onclick={() => moveTask(t, 1)}>›</button>
                   </div>
                 </div>
               {/each}
@@ -929,6 +963,27 @@
   .card.from-agent { border-left-color: var(--ov-live); }
   .card.from-overlord { border-left-color: var(--ov-note); }
 
+  /* Headline: who owns it, how old, and the one control that removes it. */
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+  }
+  .card-tab {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--ov-face);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--ov-ink-mid);
+  }
+
   .card-title {
     background: none;
     border: none;
@@ -963,12 +1018,50 @@
     word-break: break-word;
   }
 
-  .card-foot {
+  .card-meta {
     display: flex;
     align-items: center;
     gap: 5px;
     margin-top: 6px;
     flex-wrap: wrap;
+  }
+
+  /* Steppers hug the edges they move toward; the acts that take the task off this board
+     sit centred between them, so neither can be hit by accident reaching for the other. */
+  .card-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 5px;
+    margin-top: 6px;
+  }
+  .card-acts { display: flex; gap: 4px; min-width: 0; }
+  .act {
+    font-family: var(--ov-face);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    height: 18px;
+    padding: 0 8px;
+    border-radius: 2px;
+    border: 1px solid var(--ov-hair);
+    background: transparent;
+    color: var(--ov-ink-mid);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  }
+  .act:hover {
+    color: var(--ov-ink);
+    border-color: color-mix(in srgb, var(--ov-live) 60%, transparent);
+    background: color-mix(in srgb, var(--ov-live) 10%, transparent);
+  }
+  .act:disabled { opacity: 0.3; cursor: default; }
+  .act:disabled:hover { color: var(--ov-ink-mid); border-color: var(--ov-hair); background: transparent; }
+  .act-send.sent {
+    border-color: color-mix(in srgb, var(--ov-note) 45%, transparent);
+    color: color-mix(in srgb, var(--ov-note) 85%, var(--fg));
   }
   .card-stream {
     cursor: pointer;
@@ -979,14 +1072,12 @@
     line-height: 17px;
   }
   .card-stream:hover { color: var(--ov-ink); border-color: var(--ov-hair-strong); }
-  .card-age { font-size: 0.7rem; color: var(--ov-ink-dim); margin-left: auto; }
+  .card-age { font-size: 0.7rem; color: var(--ov-ink-dim); flex-shrink: 0; }
   /* The lane this card sits in is derived, not chosen — say so, since its steppers are off. */
   .card-dep {
     border-color: color-mix(in srgb, var(--ov-critical) 35%, transparent);
     color: color-mix(in srgb, var(--ov-critical) 80%, var(--fg));
   }
-  .card-ctl { display: flex; gap: 1px; }
-
   .tick {
     color: var(--ov-ink-dim);
     font-size: 0.95rem;
