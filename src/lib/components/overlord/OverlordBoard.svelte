@@ -645,6 +645,9 @@
                   A checkpoint ran recently, so the rule holds off for another {cp.minutes}m.
                 {:else if cp.kind === 'busy'}
                   The agent is mid-turn — the checkpoint runs as soon as it finishes.
+                {:else if cp.kind === 'below_rule'}
+                  This tab's own rule doesn't fire until {cp.at}% — nothing runs on its own
+                  before then. Checkpoint now if you'd rather not wait.
                 {:else}
                   The checkpoint runs on the next tick.
                 {/if}

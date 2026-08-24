@@ -178,6 +178,12 @@ export type CheckpointState =
   | { kind: 'no_rule' }
   | { kind: 'cooling'; minutes: number }
   | { kind: 'busy' }
+  /** A card is showing, but this tab's own applicable rule fires higher up. The deck's
+   *  threshold is one window-wide number (the lowest enabled `context_pct`, scope
+   *  ignored); `checkpointRuleFor` respects workspace scope. So a workspace-scoped rule at
+   *  40% anywhere in the window raised a card for a tab in a DIFFERENT workspace at 42%
+   *  and told it a checkpoint was coming — while the rule that governs it needs 55%. */
+  | { kind: 'below_rule'; at: number }
   | { kind: 'ready' };
 
 /** An agent tab whose tracked work is finished and which has gone quiet — a candidate for
@@ -904,6 +910,31 @@ function createOverlordStore() {
         if (humanTypedSince(tabId, run.lastInjectionAt)) {
           // Human typed into this tab since our last injection — their tab, their turn (§7).
           ledger(tabId, rule.id, origin, i, step, 'aborted');
+          return;
+        }
+        // Stopped at a permission prompt. `driveTab` refuses this exact state — "there is
+        // nothing to type a directive into" — and it is right: a permission prompt is a
+        // keystroke menu, so pasted prose is swallowed or corrupts the selection. Rules
+        // reached the opposite verdict only because a `permission_pending` rule must list
+        // `permission` in agent_state to fire at all, and waitInjectable then accepted it.
+        //
+        // One injection tool, one verdict (§2). The engine can't answer a prompt — that
+        // needs a runtime-specific keystroke and a judgement about consequence — so it
+        // hands the tab to the agent, which has getTabPrompt/answerTabPrompt for exactly
+        // this. That is also what makes `permission_pending` rules useful rather than
+        // merely fireable: the rule becomes "if a permission sits this long, wake the
+        // supervisor", which is the thing the human actually wanted.
+        if (mappedState(tabId) === 'permission') {
+          ledger(tabId, rule.id, origin, i, step, 'blocked_guard');
+          escalate(
+            tabId,
+            rule.id,
+            'permission_stuck',
+            `"${rule.name}" fired on ${tabDisplayName(tabId)}, which is stopped at a prompt — ` +
+              `nothing can be typed there. Call getTabPrompt on that tab, then answerTabPrompt ` +
+              `(escalate to the human first if the decision is consequential). The rule wanted ` +
+              `to say: ${JSON.stringify(step.text.slice(0, 160))}.`,
+          );
           return;
         }
         const inst = terminalsStore.get(tabId);
@@ -2121,6 +2152,11 @@ function createOverlordStore() {
       const rule = checkpointRuleFor(tabId);
       if (!rule) return { kind: 'no_rule' };
       if (proposals.some((p) => p.tabId === tabId && p.ruleId === rule.id)) return { kind: 'proposed' };
+      // The card's threshold and this tab's rule are not the same number (see `below_rule`).
+      // Say the rule's, or the card promises a checkpoint that is not coming.
+      const at = (rule.when as { at_or_above?: number }).at_or_above;
+      const pct = facts.get(tabId)?.context_pct;
+      if (at !== undefined && pct !== undefined && pct < at) return { kind: 'below_rule', at };
       const last = lastFiredAt.get(`${rule.id}|${tabId}`) ?? 0;
       const left = rule.cooldown * 1000 - (Date.now() - last);
       if (left > 0) return { kind: 'cooling', minutes: Math.max(1, Math.ceil(left / 60_000)) };
