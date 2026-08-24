@@ -776,9 +776,21 @@ coincide on one 5s tick, and the edge was recomputed from a single-tick state
 delta and dropped. A `commit` fact appears when the git `tool_use` block is
 emitted — *mid-turn*, when the agent is by definition not idle — so
 `review_after_commit`, a **shipped default**, could effectively never fire. Any
-turn ending inside the quiet window was lost too, and `break` after one fire per
-tab ate that tick's edge for every other rule. Edges now sit in `pendingEdges`
-and are re-offered until a rule spends one or they age out (5 min).
+turn ending inside the quiet window was lost too. Edges now sit in `pendingEdges`
+and are re-offered until a rule spends one, the human overtakes it, or it ages
+out (5 min).
+
+**A latched edge is not a licence to act later regardless.** Holding one for
+minutes reopens a hole §7 closes for rituals: `waitInjectable` compares keystrokes
+only against the *running* ritual's baseline, so typing from before the rule fired
+is invisible to it. A commit latched at T could otherwise fire "review that commit"
+at T+90s into a conversation where the human had already said *revert it, wrong
+branch*. So `latchEdges` drops any edge the human has typed over — the same
+judgement §7 makes between ritual steps, applied to the window before the first one.
+
+`consumeEdge` still spends the edge for the event the winning rule matched, so a
+second rule on the same event and tab is still passed over by the one-fire-per-tab
+`break`. That is unchanged and deliberate: directives serialize per tab anyway.
 
 **The general rule this leaves behind:** before adding a condition, kind or
 threshold, name its producer and its consumer. If either is missing, it is
@@ -982,6 +994,13 @@ right, out of the stepping path entirely.
   is allowed — a nudge is sometimes the point — and the button becomes a
   receipt saying when it last went.
 
+  Disabled when the window has no agent tab. A handoff is agent-only, so it
+  never appears on the deck, and `sweepUndeliverableEscalations` throws
+  undelivered ones away after 30 minutes — accepting one with nobody to collect
+  it would leave a "Sent" receipt as the only trace of a hand-off that was
+  quietly destroyed. If a handoff IS swept (the agent tab was closed after the
+  fact), the receipt is withdrawn with it.
+
 #### Deleting a task has to reach whoever was carrying it
 
 Deleting used to be silent, which made the board lie to the agent: the row
@@ -993,10 +1012,14 @@ it doesn't stick.
 `overlordStore.deleteTask` therefore acts, in the same act-or-escalate shape as
 every other card:
 
-1. In-flight task on a tab that can be typed into → a one-line notice, direct.
-   It is **not** a directive: it asks for nothing back, so it must not occupy
-   the tab's outstanding slot and block every `only_if_no_outstanding` rule
-   behind it.
+1. In-flight task on a tab that is **idle** → a one-line notice, direct. It is
+   **not** a directive: it asks for nothing back, so it must not occupy the
+   tab's outstanding slot and block every `only_if_no_outstanding` rule behind
+   it. Idle is checked, not just liveness: `hasLiveRepl` is true for `active`
+   and for `permission`, and a permission prompt is the keystroke menu every
+   other injection path refuses. Notices serialize per tab, since
+   `bracketedPasteSubmit` is write → settle → CR and two quick deletes on the
+   same tab would otherwise merge into one prompt.
 2. Tab not reachable (no live REPL, mid-repaint, unmounted) → a `task_dropped`
    escalation, so the agent relays it when the tab comes back.
 3. Unassigned, or already done/parked → nobody to tell. Sweeping finished rows

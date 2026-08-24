@@ -128,6 +128,9 @@ export interface OverlordEscalation {
      *  relays it, so the tab stops believing in work that is off the board. */
     | 'task_dropped';
   detail: string;
+  /** The board task this is about (`task_handoff`), so the card's "Sent" receipt can be
+   *  withdrawn if the handoff is ever swept undelivered. */
+  taskId?: string;
   /** Consumed by listEscalations (S4); stays visible on the board until dismissed. */
   read: boolean;
 }
@@ -386,11 +389,15 @@ function createOverlordStore() {
    *     `review_after_commit` — a DEFAULT rule — could effectively never fire.
    *   - a `turn_end` inside the quiet window (any turn ending in the 3s before a tick)
    *     was lost permanently.
-   *   - `break` after one rule fire per tab ate that tick's edge for every other rule.
    *
-   * Latching fixes all three: the edge is re-offered on every tick until a rule consumes
-   * it or it ages past EDGE_LATCH_MS. The rule still runs no earlier than its guards
-   * allow — it just no longer misses its one chance.
+   * Latching fixes both: the edge is re-offered on every tick until a rule consumes it,
+   * the human overtakes it, or it ages past EDGE_LATCH_MS. The rule still runs no earlier
+   * than its guards allow — it just no longer misses its one chance.
+   *
+   * What latching does NOT change: `consumeEdge` spends the edge for the event the winning
+   * rule matched, so a SECOND rule on the same event and tab is still starved by the
+   * one-fire-per-tab `break`. That is deliberate — directives serialize per tab anyway —
+   * and unchanged from before.
    */
   const pendingEdges = new Map<string, { turnEnded?: number; committed?: number }>();
   /** How long a latched edge stays offerable. Long enough to outlast a working turn and
@@ -663,6 +670,16 @@ function createOverlordStore() {
     return 'timeout';
   }
 
+  /** One board notice at a time per tab (see `deleteTask`). Rejections are swallowed on
+   *  the stored tail so one failed notice can't poison the next. */
+  const noticeChain = new Map<string, Promise<unknown>>();
+  function serializeNotice(tabId: string, fn: () => Promise<boolean>): Promise<boolean> {
+    const prev = noticeChain.get(tabId) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    noticeChain.set(tabId, next.catch(() => {}));
+    return next;
+  }
+
   /** Record this tick's edges and report which are still offerable (§ `pendingEdges`). */
   function latchEdges(
     tabId: string,
@@ -673,8 +690,21 @@ function createOverlordStore() {
     const e = pendingEdges.get(tabId) ?? {};
     if (turnEnded) e.turnEnded = now;
     if (committed) e.committed = now;
-    if (e.turnEnded !== undefined && now - e.turnEnded >= EDGE_LATCH_MS) delete e.turnEnded;
-    if (e.committed !== undefined && now - e.committed >= EDGE_LATCH_MS) delete e.committed;
+    // Expire, and drop anything the human has overtaken.
+    //
+    // Holding an edge for minutes reopens a hole §7 closes for rituals: `waitInjectable`
+    // only compares keystrokes against the RUNNING ritual's baseline, so typing that
+    // happened before the rule fired is invisible to it. A latched commit could therefore
+    // fire "review that commit" into a conversation where the human had already said
+    // "revert it, wrong branch". Keystrokes after an edge was stamped mean the human has
+    // taken the tab somewhere else, and the edge is stale — which is the same judgement
+    // §7 makes between ritual steps, applied to the window before the first one.
+    if (e.turnEnded !== undefined && (now - e.turnEnded >= EDGE_LATCH_MS || humanTypedSince(tabId, e.turnEnded))) {
+      delete e.turnEnded;
+    }
+    if (e.committed !== undefined && (now - e.committed >= EDGE_LATCH_MS || humanTypedSince(tabId, e.committed))) {
+      delete e.committed;
+    }
     if (e.turnEnded === undefined && e.committed === undefined) {
       pendingEdges.delete(tabId);
       return { turnEnded: false, committed: false };
@@ -699,6 +729,7 @@ function createOverlordStore() {
     ruleId: string | null,
     kind: OverlordEscalation['kind'],
     detail: string,
+    taskId?: string,
   ) {
     escalations = [
       ...escalations,
@@ -710,6 +741,7 @@ function createOverlordStore() {
         ruleId,
         kind,
         detail,
+        taskId,
         read: false,
       },
     ];
@@ -745,12 +777,21 @@ function createOverlordStore() {
     const ids = new Set(dead.map((e) => e.id));
     escalations = escalations.filter((e) => !ids.has(e.id));
     for (const id of ids) unNudged.delete(id);
+    // Withdraw the card's "Sent" receipt for any handoff being thrown away — a receipt
+    // that outlives the thing it is a receipt for is worse than no receipt at all.
+    let withdrew = false;
+    for (const e of dead) {
+      if (e.taskId && handedOff.delete(e.taskId)) withdrew = true;
+    }
+    if (withdrew) bumpLive();
     logInfo(`overlord: dropped ${ids.size} undeliverable agent escalation(s) — no agent tab in this window`);
   }
 
   /** One-line doorbell into the Overlord agent's PTY (§9.1) — content stays behind
-   *  the listEscalations pull, keeping the agent's transcript lean. No live agent →
-   *  the queue simply waits (the engine runs regardless; §2 agent lifecycle). */
+   *  the listEscalations pull, keeping the agent's transcript lean. An agent that is merely
+   *  busy or unmounted → the queue waits (the engine runs regardless; §2 agent lifecycle).
+   *  NO agent tab at all → agent-only items are swept after 30 min rather than waiting
+   *  forever, so nothing may be accepted here on the promise that it will be delivered. */
   async function wakeOverlordAgent() {
     if (unNudged.size === 0) return;
     // The human may have cleared the queue while the agent was busy — an escalation
@@ -1856,15 +1897,37 @@ function createOverlordStore() {
         `something I want done. Drop it from your own list too, and don't re-add it.`;
       const step: OverlordStep = { kind: 'process', text };
       const inst = terminalsStore.get(tabId);
-      const quiet = Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) >= 1500;
-      if (inst && quiet && (await hasLiveRepl(tabId))) {
+      // Idle only, and re-checked AFTER the liveness round trip.
+      //
+      // `hasLiveRepl` says a process is alive; it says nothing about whether the tab can
+      // take typed text. It returns true for `active` (the notice lands mid-turn, which
+      // every rule-driven injection waits to avoid) and for `permission` — the one state
+      // driveTab, runSequence and answerPrompt all refuse, because a permission prompt is
+      // a keystroke menu where pasted prose is swallowed or corrupts the selection. This
+      // shipped alongside the change that unified that verdict and was left outside it.
+      //
+      // Serialized per tab, because `bracketedPasteSubmit` is write → settle → CR: two
+      // deletes on cards owned by the same tab, clicked inside that window, would merge
+      // into one prompt and leave a stray carriage return behind. The checks run INSIDE
+      // the chain so the second notice re-tests a tab the first one just typed into.
+      const sent = await serializeNotice(tabId, async () => {
+        if (!inst) return false;
+        if (mappedState(tabId) !== 'idle') return false;
+        if (!(await hasLiveRepl(tabId))) return false;
+        // State can move during the liveness round trip.
+        if (mappedState(tabId) !== 'idle') return false;
+        if (Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) < 1500) return false;
         try {
           await bracketedPasteSubmit(inst.ptyId, text);
-          ledger(tabId, null, 'human', 0, step, 'sent');
-          return { removed: true, told: 'tab' };
+          return true;
         } catch (e) {
           logError(`overlord: drop notice failed for ${tabId.slice(0, 8)}: ${e}`);
+          return false;
         }
+      });
+      if (sent) {
+        ledger(tabId, null, 'human', 0, step, 'sent');
+        return { removed: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
       escalate(
@@ -1884,8 +1947,15 @@ function createOverlordStore() {
      *  the agent decides what the task needs — drive the tab that owns it, drive a different
      *  one, ask the human, or do it itself — and it already has the doorbell + `listEscalations`
      *  pull for exactly this. Re-sending is allowed (a nudge is sometimes the point); the
-     *  receipt just says when it last went. */
+     *  receipt just says when it last went.
+     *
+     *  Refused outright when this window has no agent tab. The queue does not simply wait
+     *  any more — `sweepUndeliverableEscalations` throws undeliverable handoffs away after
+     *  30 minutes — and a handoff is hidden from the deck, so accepting one here would have
+     *  shown a "Sent" receipt for a hand-off that was silently destroyed later with no
+     *  surface anywhere that could have told the human. */
     sendTaskToOverlord(id: string): boolean {
+      if (!hasOverlordAgentTab()) return false;
       const hit = tasksStore.findAnywhere(id);
       if (!hit) return false;
       const { task } = hit;
@@ -1904,6 +1974,7 @@ function createOverlordStore() {
           `\n\nTake it from here: move it forward yourself, drive the tab that owns it, or ` +
           `escalate to the human if it needs a decision. Update its status as it moves ` +
           `(task id ${task.id}).`,
+        task.id,
       );
       handedOff.set(id, Date.now());
       bumpLive();
@@ -1914,6 +1985,13 @@ function createOverlordStore() {
     taskHandoffAt(id: string): number | null {
       void liveVersion;
       return handedOff.get(id) ?? null;
+    },
+
+    /** Is there an Overlord agent tab in this window to hand work to? The card's Send
+     *  button reads this so it can say why it is disabled instead of accepting a handoff
+     *  nothing will ever collect. */
+    get hasAgentTab(): boolean {
+      return hasOverlordAgentTab();
     },
 
     get agentReports() { return agentReports; },

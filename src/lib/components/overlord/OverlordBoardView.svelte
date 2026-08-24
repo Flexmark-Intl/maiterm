@@ -44,6 +44,9 @@
    *  filed there is invisible to this board forever (see `createStream`). */
   const boardWorkspaces = $derived(workspacesStore.workspaces.filter((w) => !w.overlord));
 
+  /** Whether "Send" has anywhere to send to — see the button's own note. */
+  const hasAgent = $derived(overlordStore.hasAgentTab);
+
   /** Tasks bucketed by workspace — the one grouping both the index and the dependency
    *  scan below read, so a fleet-sized board walks the list once rather than per lane. */
   const grouped = $derived.by<Map<string, TaskRow[]>>(() => {
@@ -642,10 +645,17 @@
                     <span class="card-acts">
                       <button class="act" title="View Tab" disabled={!t.tab_id}
                               onclick={() => navigateToTab(t.tab_id!)}>View</button>
+                      <!-- Disabled with no agent tab, rather than accepting a handoff
+                           nothing will collect: a handoff is hidden from the deck and is
+                           swept undelivered after 30 minutes, so a "Sent" receipt would
+                           have been the only trace, and a false one. -->
                       <button class="act act-send" class:sent={sentAt !== null}
-                              title={sentAt === null
-                                ? 'Send to Overlord'
-                                : `Sent to Overlord ${fmtAge(new Date(sentAt).toISOString())} — click to send again`}
+                              disabled={!hasAgent}
+                              title={!hasAgent
+                                ? 'No Overlord agent tab in this window — start one in the Overlord workspace to hand work to it'
+                                : sentAt === null
+                                  ? 'Send to Overlord'
+                                  : `Sent to Overlord ${fmtAge(new Date(sentAt).toISOString())} — click to send again`}
                               onclick={() => overlordStore.sendTaskToOverlord(t.id)}>
                         {sentAt === null ? 'Send' : 'Sent'}
                       </button>
