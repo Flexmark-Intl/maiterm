@@ -45,14 +45,22 @@
   // ── Conversation graph geometry ─────────────────────────────────────────────
   // Node labels are word-wrapped via <foreignObject>; LBL_* size the label box and GH leaves
   // vertical room above the top node / below the bottom node so 2-line labels don't clip.
+  // Past LABEL_LIMIT nodes the labels can't fit around the ring without colliding, so we drop
+  // them entirely and let the per-node <title> tooltip carry the name instead.
   const GW = 260, GH = 240;
   const LBL_W = 104, LBL_H = 26, LBL_GAP = 12;
+  const LABEL_LIMIT = 6;
+  const dense = $derived(board.length > LABEL_LIMIT);
   const graph = $derived.by(() => {
     void agentMeshStore.version; void tick;
     if (!ws || !isMesh) return { nodes: [], edges: [] };
     const members: MeshMember[] = board.map((b) => ({ tabId: b.tabId, role: b.role, cwd: b.cwd, purpose: b.purpose, live: b.live }));
     const active = new Set(board.filter((b) => b.claudeState === 'active').map((b) => b.tabId));
-    return computeGraph(members, topics, agentMeshStore.getEdges(), active, Date.now(), { cx: GW / 2, cy: GH / 2, radius: Math.min(78, 30 + members.length * 8) }, pausedIds);
+    // With labels gone the ring can use the space they were reserving.
+    const radius = members.length > LABEL_LIMIT
+      ? Math.min(100, 34 + members.length * 7)
+      : Math.min(78, 30 + members.length * 8);
+    return computeGraph(members, topics, agentMeshStore.getEdges(), active, Date.now(), { cx: GW / 2, cy: GH / 2, radius }, pausedIds);
   });
 
   function reasonLabel(r: string): string {
@@ -136,6 +144,12 @@
           <button class="primary" disabled={busy} onclick={enableMesh}>Enable Mesh</button>
         </div>
       {:else}
+        <div class="cockpit-actions">
+          <button class="mini" onclick={toggleStage}>{stageActive ? 'Exit stage view' : 'Stage view'}</button>
+          <button class="mini ghost" onclick={recheck}>Re-check</button>
+          <button class="mini ghost danger" disabled={busy} onclick={disableMesh}>Disable Mesh</button>
+        </div>
+
         {#if paused.length > 0}
           <div class="paused-banner">
             {#each paused as p (p.id)}
@@ -176,14 +190,20 @@
               {#each graph.nodes as n (n.tabId)}
                 {@const below = n.y >= GH / 2}
                 <g class="node" class:active={n.active} class:offline={!n.live} onclick={() => openTab(n.tabId)} onkeydown={(e) => { if (e.key === 'Enter') openTab(n.tabId); }} role="button" tabindex="-1">
+                  <title>{n.role}</title>
                   <circle cx={n.x} cy={n.y} r="9" />
                   {#if n.active}<circle class="halo" cx={n.x} cy={n.y} r="9" />{/if}
-                  <foreignObject x={n.x - LBL_W / 2} y={below ? n.y + LBL_GAP : n.y - LBL_GAP - LBL_H} width={LBL_W} height={LBL_H}>
-                    <div xmlns="http://www.w3.org/1999/xhtml" class="node-label" class:below class:above={!below}><span>{n.role}</span></div>
-                  </foreignObject>
+                  {#if !dense}
+                    <foreignObject x={n.x - LBL_W / 2} y={below ? n.y + LBL_GAP : n.y - LBL_GAP - LBL_H} width={LBL_W} height={LBL_H}>
+                      <div xmlns="http://www.w3.org/1999/xhtml" class="node-label" class:below class:above={!below}><span>{n.role}</span></div>
+                    </foreignObject>
+                  {/if}
                 </g>
               {/each}
             </svg>
+            {#if dense}
+              <p class="graph-hint">Names hidden — hover a node to see it, click to open its tab.</p>
+            {/if}
           {/if}
         </section>
 
@@ -240,11 +260,6 @@
           {/each}
         </section>
 
-        <footer class="cockpit-footer">
-          <button class="mini" onclick={toggleStage}>{stageActive ? 'Exit stage view' : 'Stage view'}</button>
-          <button class="mini ghost" onclick={recheck}>Re-check</button>
-          <button class="mini ghost danger" disabled={busy} onclick={disableMesh}>Disable Mesh</button>
-        </footer>
       {/if}
     </aside>
   </div>
@@ -324,6 +339,7 @@
 
   .graph-section { padding: 8px 12px 4px; }
   .graph { width: 100%; height: auto; display: block; }
+  .graph-hint { margin: 2px 0 0; font-size: 10px; color: var(--fg-dim); text-align: center; }
   .edge { opacity: 0.5; transition: opacity 0.3s; }
   .edge.recent { opacity: 0.95; }
   .edge.paused { opacity: 0.35; }
@@ -386,7 +402,12 @@
   }
   .needs-you:hover { background: color-mix(in srgb, var(--yellow) 28%, transparent); }
 
-  .cockpit-footer { margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--bg-light); }
+  .cockpit-actions {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--bg-light);
+  }
+  .cockpit-actions .danger { margin-left: auto; }
 
   .mini {
     background: var(--accent); color: var(--bg-dark);
