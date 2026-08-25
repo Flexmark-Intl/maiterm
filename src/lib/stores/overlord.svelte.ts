@@ -1621,8 +1621,9 @@ function createOverlordStore() {
         // Never expire silently. The doctrine promises "you WILL get the answer back", so a
         // watch that gives up owes the supervisor a word — otherwise it waits forever on a
         // reply that is never coming. The common cause is a transcript this machine cannot
-        // read (an SSH tab's JSONL lives on the remote host and is only shadowed locally
-        // when maiLink is running), which is invisible from here.
+        // read: an SSH tab's JSONL lives on the remote host, and the mirror shadows it only
+        // for Claude, and only while that tab's bridge tunnel is up (docs/overlord.md §4.1).
+        // Either gap is invisible from here.
         escalate(
           tabId,
           null,
