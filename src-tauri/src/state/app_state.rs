@@ -170,6 +170,10 @@ pub struct AppState {
     pub agent_sessions: RwLock<HashMap<String, AgentSessionInfo>>,
     // Pending session IDs from SessionStart HTTP hooks awaiting initSession to assign a tab
     pub pending_agent_sessions: RwLock<Vec<(String, Option<String>, Instant)>>, // (session_id, cwd, timestamp)
+    // Session IDs seen bound to more than one tab (a duplicate/reload clone resuming the same
+    // session, or a stale $MAITERM_TAB_ID). For these, and only these, a SessionEnd that cannot
+    // name its own tab must not clear the mapping — it may belong to the OTHER claimant.
+    pub contested_agent_sessions: RwLock<HashMap<String, Instant>>, // session_id → last rebind
     // maiLink: outstanding one-time pairing codes → expiry instant (docs/mailink-protocol.md §3.2)
     pub mailink_pairing_codes: RwLock<HashMap<String, Instant>>,
     // maiLink: the live listener's (fingerprint, port), set when the bridge starts so the
@@ -222,6 +226,7 @@ impl AppState {
             memory_samples: RwLock::new(Vec::new()),
             agent_sessions: RwLock::new(HashMap::new()),
             pending_agent_sessions: RwLock::new(Vec::new()),
+            contested_agent_sessions: RwLock::new(HashMap::new()),
             mailink_pairing_codes: RwLock::new(HashMap::new()),
             mailink_info: RwLock::new(None),
             mailink_shutdown: RwLock::new(None),

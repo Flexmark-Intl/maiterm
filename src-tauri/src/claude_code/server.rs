@@ -2743,6 +2743,15 @@ async fn hooks_handler(
                     if prev != tab_id {
                         log::warn!("Claude hook: session {} rebinding tab {} → {} (duplicate/fork, or a stale $MAITERM_TAB_ID)",
                             session_id, prev, tab_id);
+                        // Two tabs have now claimed this session, so a SessionEnd that cannot
+                        // name its own tab is ambiguous and must not clear the mapping — see
+                        // the SessionEnd arm. Recorded here because the rebind necessarily
+                        // happens before either agent ends, which makes the guard
+                        // order-independent.
+                        let mut contested = srv.state.contested_agent_sessions.write();
+                        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(24 * 3600);
+                        contested.retain(|_, ts| *ts > cutoff);
+                        contested.insert(session_id.clone(), std::time::Instant::now());
                     }
                 }
                 sessions.insert(
@@ -2865,9 +2874,50 @@ async fn hooks_handler(
         }
 
         HookPhase::SessionEnd => {
+            // Whose end is this? Normally the answer is "the only agent that ever had this
+            // session id" and the mapping is simply cleared. But a tab reload duplicates the
+            // tab and plain-resumes the SAME session id, so for a while two agents own it: the
+            // clone (which registered at ITS SessionStart) and the original, whose agent may
+            // outlive the tab entirely — a detached tmux session on a bridged host keeps
+            // running and exits minutes later. Clearing the mapping then does not just drop a
+            // dot: Stop and Notification resolve their tab THROUGH this map, and Claude's http
+            // hooks carry no tab id, so every later event for the live clone is discarded and
+            // the tab goes dark for the rest of the session with nothing to heal it.
+            //
+            // So for a session we have SEEN claimed by two tabs, only an end that can name its
+            // own tab (our SessionEnd command hook, which runs in the ending agent's shell and
+            // posts ?tab_id=) may clear it, and only when that tab is the one currently mapped.
+            // Uncontested sessions — every ordinary one — are unaffected.
+            let contested = srv.state.contested_agent_sessions.read().contains_key(&session_id);
+            let ending_tab = tab_id_from_param.clone();
             let tab_id = {
                 let mut sessions = srv.state.agent_sessions.write();
-                sessions.remove(&session_id).map(|s| s.tab_id)
+                let owner = sessions.get(&session_id).map(|s| s.tab_id.clone());
+                let may_clear = match (contested, &ending_tab, &owner) {
+                    (false, _, _) => true,
+                    // Contested and the ending agent named its tab: clear only its OWN mapping.
+                    (true, Some(ending), Some(mapped)) => ending == mapped,
+                    // Contested with nothing to identify the caller — leave it. A stale entry
+                    // costs a dot that the next SessionStart corrects; a wrong removal costs
+                    // the live tab every event for the rest of its session.
+                    (true, _, _) => false,
+                };
+                if may_clear {
+                    sessions.remove(&session_id).map(|s| s.tab_id)
+                } else {
+                    log::info!("Claude hook: session {} ended, but it is claimed by more than one tab{} — leaving the mapping to the live claimant",
+                        &session_id[..session_id.len().min(8)],
+                        match (&ending_tab, &owner) {
+                            (Some(e), Some(m)) => format!(" (ended in {}, mapped to {})", &e[..e.len().min(8)], &m[..m.len().min(8)]),
+                            _ => String::new(),
+                        });
+                    // Emit for the tab that ENDED, never the one still mapped — the frontend
+                    // teardown clears that tab's state, which is precisely what must not
+                    // happen to the live claimant. `None` here is fine: every listener
+                    // returns early on a null tab.
+                    let _ = owner;
+                    ending_tab.clone()
+                }
             }
             .or(tab_id_from_param);
 

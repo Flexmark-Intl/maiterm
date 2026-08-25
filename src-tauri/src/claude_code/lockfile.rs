@@ -328,6 +328,25 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
         mcp_key = mcp_key,
     );
 
+    // SessionEnd command hook: the mirror of the SessionStart one, and for the same reason —
+    // only a hook running in the tab's own shell can say WHICH tab ended. Without it a
+    // SessionEnd is anonymous, and for a session claimed by two tabs (a reload clone
+    // plain-resuming the original's session id) an anonymous end cannot be told from the live
+    // one, so the server has to leave the mapping alone. This makes the common case decidable.
+    // No echo: stdout at session end is not injected anywhere.
+    let session_end_cmd = format!(
+        "{{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
+         [ -n \"$MAITERM_TAB_ID\" ] && {{ \
+         MAITERM_IN=$(cat); \
+         curl -s -o /dev/null --connect-timeout 2 --max-time 4 \
+         -H \"x-claude-code-ide-authorization: {auth}\" -H 'content-type: application/json' \
+         --data-binary \"$MAITERM_IN\" \
+         \"http://127.0.0.1:{port}/hooks?tab_id=$MAITERM_TAB_ID\" 2>/dev/null; \
+         }} || true",
+        port = port,
+        auth = auth,
+    );
+
     let http_hook = |url: &str| -> serde_json::Value {
         serde_json::json!([{
             "matcher": "",
@@ -364,7 +383,10 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
                 }]
             }
         ],
-        "SessionEnd": http_hook(&hooks_url),
+        "SessionEnd": serde_json::json!([
+            { "matcher": "", "hooks": [{ "type": "command", "command": session_end_cmd, "timeout": 5 }] },
+            { "matcher": "", "hooks": [{ "type": "http", "url": &hooks_url, "headers": { "x-claude-code-ide-authorization": auth } }] }
+        ]),
         "Notification": http_hook(&hooks_url),
         "Stop": http_hook(&hooks_url),
         "UserPromptSubmit": http_hook(&hooks_url),
@@ -385,13 +407,23 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
 /// SessionStart context — a failed initSession followed by a recovery dance.
 const MAITERM_CMD_HOOK_MARKER: &str = "initSession tool with this tabId";
 
+/// Second signature for our command hooks. The SessionEnd one echoes nothing — nothing
+/// consumes stdout at session end — so it carries no phrase to match on, and it has no `url`
+/// field either (it is a command hook). Without a signature the merge could not recognise it
+/// as ours, and every 30s re-assert would append another copy: the duplicate-hook failure that
+/// produced phantom tab ids before. Both of our command hooks POST exactly this query, and
+/// nothing else in a settings.json does.
+const MAITERM_CMD_HOOK_POST_MARKER: &str = "/hooks?tab_id=$MAITERM_TAB_ID";
+
 /// True when `entry` is a maiTerm SessionStart command hook — from ANY instance
 /// or vintage (ours, a dev/prod sibling's, a peer tunnel's, pre-rename AITERM_).
 fn is_maiterm_command_hook(entry: &serde_json::Value) -> bool {
     if let Some(hooks) = entry.get("hooks").and_then(|v| v.as_array()) {
         for hook in hooks {
             if let Some(cmd) = hook.get("command").and_then(|v| v.as_str()) {
-                if cmd.contains(MAITERM_CMD_HOOK_MARKER) {
+                if cmd.contains(MAITERM_CMD_HOOK_MARKER)
+                    || cmd.contains(MAITERM_CMD_HOOK_POST_MARKER)
+                {
                     return true;
                 }
             }
@@ -1105,6 +1137,63 @@ mod session_start_hook_tests {
             cmd,
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    fn session_end_command(port: u16, auth: &str) -> String {
+        build_our_hooks(port, auth)["SessionEnd"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("SessionEnd command hook is a string")
+            .to_string()
+    }
+
+    #[test]
+    fn session_end_command_is_valid_shell_and_names_its_tab() {
+        let cmd = session_end_command(51234, "AUTHTOK");
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .expect("sh is available");
+        assert!(
+            out.status.success(),
+            "hook command is not valid shell:\n{}\n--- stderr ---\n{}",
+            cmd,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Naming the ending tab is the whole point: without it a SessionEnd for a session two
+        // tabs claim cannot be told from the live one's.
+        assert!(cmd.contains("tab_id=$MAITERM_TAB_ID"), "posts the tab id:\n{}", cmd);
+        assert!(!cmd.contains("prime=1"), "no priming at session end:\n{}", cmd);
+        assert!(cmd.contains("--max-time"), "bounds the request:\n{}", cmd);
+        // The http twin must still be registered — it is the only SessionEnd on hosts where
+        // the command hook cannot run.
+        let http = &build_our_hooks(51234, "AUTHTOK")["SessionEnd"][1]["hooks"][0];
+        assert_eq!(http["type"].as_str(), Some("http"), "http SessionEnd hook is still registered");
+        // It must be recognisable as OURS, or the merge cannot remove the previous copy and
+        // every 30s re-assert appends another one.
+        let entry = &build_our_hooks(51234, "AUTHTOK")["SessionEnd"][0];
+        assert!(is_maiterm_command_hook(entry), "SessionEnd command hook is matched by the sweep:\n{}", cmd);
+        assert_eq!(extract_hook_port(entry), Some(51234), "and is port-scoped to this instance");
+    }
+
+    // Every byte of both hook commands crosses an ssh boundary and is decoded by the remote's
+    // python3 under whatever locale ssh gives it. Python only coerces C/POSIX to UTF-8 from
+    // 3.7 (PEP 538/540), so one non-ASCII character silently kills the hooks merge on an
+    // older remote — the setup script still exits 0, and the bridge reports success with no
+    // hooks installed at all.
+    #[test]
+    fn hook_commands_are_pure_ascii() {
+        for (name, cmd) in [
+            ("SessionStart", session_start_command(51234, "AUTHTOK")),
+            ("SessionEnd", session_end_command(51234, "AUTHTOK")),
+        ] {
+            assert!(
+                cmd.is_ascii(),
+                "{name} hook command has non-ASCII bytes: {:?}",
+                cmd.chars().filter(|c| !c.is_ascii()).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

@@ -239,6 +239,21 @@ function buildSetupScript(
     "maiTerm already knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the maiterm initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; " +
     "} || true";
 
+  // SessionEnd command hook: mirrors lockfile.rs build_our_hooks. Only a hook in the tab's own
+  // shell can say WHICH tab ended, which is what lets the server clear the right mapping when a
+  // reload clone shares the original's session id. No echo — stdout is not injected at session end.
+  // NOTE: keep this pure ASCII (it is decoded by the remote python3 under the ssh locale).
+  const sessionEndCmd =
+    "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
+    "{ [ \"$MAITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$MAITERM_PORT\" ]; } && " +
+    "[ -n \"$MAITERM_TAB_ID\" ] && { " +
+    "MAITERM_IN=$(cat); " +
+    "curl -s -o /dev/null --connect-timeout 2 --max-time 4 " +
+    "-H \"x-claude-code-ide-authorization: " + authToken + "\" -H 'content-type: application/json' " +
+    "--data-binary \"$MAITERM_IN\" " +
+    "\"" + hooksUrl + "?tab_id=$MAITERM_TAB_ID\" 2>/dev/null; " +
+    "} || true";
+
   const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
 
   const hooksData = JSON.stringify({
@@ -249,7 +264,10 @@ function buildSetupScript(
         { matcher: "", hooks: [{ type: "command", command: sessionStartCmd, timeout: 5 }] },
         httpHook,
       ],
-      SessionEnd: [httpHook],
+      SessionEnd: [
+        { matcher: "", hooks: [{ type: "command", command: sessionEndCmd, timeout: 5 }] },
+        httpHook,
+      ],
       Notification: [httpHook],
       Stop: [httpHook],
       UserPromptSubmit: [httpHook],
