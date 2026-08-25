@@ -383,7 +383,9 @@ human types). Rules:
   `None` when 2+ tabs have live sessions and not exactly one is unbound — reachable, because
   every tab registers a session at SessionStart while `bound` only counts connections that have
   called a maiterm tool. An agent with a stale env whose named tab has never used a maiterm tool
-  can still bind that tab on a reconnect. Such binds log at WARN as *uncorroborated*.
+  can still bind that tab on a reconnect. Such binds are the NORM in a fleet, not an anomaly — with many agents live, `recover_affinity`
+  can never single anyone out — so they log at INFO. WARN is reserved for the shape a stolen
+  identity actually takes: the header naming a tab another live connection is already bound to.
 - **Why precedence is not academic:** a stale-but-live `$MAITERM_TAB_ID` (a tmux pane
   inheriting a sibling tab's env — the case `~/.aiterm` sole-tab gating exists for) names a
   real tab, so the existence check does not catch it. Connection ids are ephemeral and an

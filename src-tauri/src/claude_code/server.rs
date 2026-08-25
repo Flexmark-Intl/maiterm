@@ -2353,6 +2353,17 @@ async fn process_message(
                         ct.values().map(|a| a.tab_id.as_str()).collect();
                     let recovered = recover_affinity(&active_tabs, &bound);
 
+                    // Is some OTHER live connection already bound to the tab this request
+                    // claims? That is the shape a stolen identity actually takes (two
+                    // connections being one tab), and it is the only reason to raise a voice
+                    // below. "Nothing corroborated it" is NOT that reason: in a fleet several
+                    // agents are always live, so `recover_affinity` can never single anyone out
+                    // and EVERY ordinary bind is uncorroborated. The first deployed build
+                    // logged those at WARN and hit 100% of binds against 109 active agents,
+                    // burying the real case in noise from the normal one. Computed here, while
+                    // `bound` still borrows the connection map.
+                    let contested_tab = declared_tab.is_some_and(|d| bound.contains(d));
+
                     let active_count = active_tabs.len();
                     drop(ct);
                     drop(sessions);
@@ -2370,6 +2381,7 @@ async fn process_message(
                         ok
                     });
                     let disagreed = matches!((&recovered, &declared), (Some(r), Some(d)) if r != d);
+
 
                     if let Some(bound_to) = resolve_unbound_affinity(recovered, declared.map(String::from)) {
                         let tab_id = bound_to.tab_id.clone();
@@ -2396,12 +2408,12 @@ async fn process_message(
                             log::warn!("{} header disagrees with the live session for {}: header said a different tab, binding {} from the session as INFERRED; peer-routing tools stay locked until initSession",
                                 TAB_ID_HEADER, &connection_id[..connection_id.len().min(11)],
                                 &tab_id[..tab_id.len().min(8)]);
-                        } else if actual.stated && active_count > 1 {
-                            // Nothing corroborated the header: several agents are live and
-                            // counting could not name this caller. Right in the ordinary case,
-                            // but this is the one binding a stale-but-live $MAITERM_TAB_ID can
-                            // still win, so say so at WARN rather than filing it under routine.
-                            log::warn!("Bound connection {} → tab {} from the {} header ALONE ({} active agents, none identifiable) — uncorroborated",
+                        } else if actual.stated && contested_tab {
+                            // Another live connection is already acting as this tab. Usually a
+                            // reconnect whose old connection has not been reaped yet — but it
+                            // is also exactly how a stale-but-live $MAITERM_TAB_ID looks, so
+                            // this one is worth a voice.
+                            log::warn!("Bound connection {} → tab {} from the {} header, but another live connection is already bound to that tab ({} active agents) — verify this is a reconnect, not a stale $MAITERM_TAB_ID",
                                 &connection_id[..connection_id.len().min(11)],
                                 &tab_id[..tab_id.len().min(8)], TAB_ID_HEADER, active_count);
                         } else if actual.stated {
