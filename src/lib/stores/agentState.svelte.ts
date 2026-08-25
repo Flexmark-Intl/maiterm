@@ -79,6 +79,15 @@ function createAgentStateStore() {
   // tabId → timeout handle for stale tool detection
   const staleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /** Mark a tab's idle result as read. Shared by the public markRead() and the
+   *  session-start handler, which must not leave a fresh start looking like an unseen result. */
+  function markReadInternal(tabId: string) {
+    const s = sessions.get(tabId);
+    if (!s || s.state !== 'idle' || s.read) return;
+    sessions = new Map(sessions);
+    sessions.set(tabId, { ...s, read: true });
+  }
+
   function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string, runtime: AgentRuntime = 'claude') {
     const current = sessions.get(tabId);
     if (current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
@@ -245,10 +254,7 @@ function createAgentStateStore() {
     /** Mark a finished (idle) Claude result as read — called when the user
      *  views the tab. No-op unless the tab is currently idle and still unread. */
     markRead(tabId: string) {
-      const s = sessions.get(tabId);
-      if (!s || s.state !== 'idle' || s.read) return;
-      sessions = new Map(sessions);
-      sessions.set(tabId, { ...s, read: true });
+      markReadInternal(tabId);
     },
 
     async init() {
@@ -256,14 +262,26 @@ function createAgentStateStore() {
         const { session_id, tab_id, source } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
-        setState(tab_id, session_id, 'active', undefined, undefined, runtime);
+        // A session that has just STARTED is up and waiting for input — idle, not active.
+        // This used to be unreachable on a restore (the hook could not name its tab, so the
+        // handler returned above) and only fired via initSession, which happens mid-turn, so
+        // 'active' was right. Now the SessionStart hook names its tab, so every restored tab
+        // hit this: a window full of blue pulsing "Claude is working" dots for agents sitting
+        // at an empty prompt. Compaction is the exception — it fires DURING a turn, so the
+        // agent really is working, and the next tool event would only have to undo it.
+        const started: AgentState = source === 'compact' ? 'active' : 'idle';
+        setState(tab_id, session_id, started, undefined, undefined, runtime);
+        // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
+        // seen signal that fills the tab dot and drives the workspace all-done indicator.
+        // Coming up at startup is not a result the human missed.
+        if (started === 'idle') markReadInternal(tab_id);
         // Tag the tab's runtime live so getTabRuntime (bridge adapter, resume) is right
         // even when the agent never calls initSession (e.g. Codex via the hook path).
         workspacesStore.setTabRuntimeLocal(tab_id, runtime);
         if (source === 'compact') {
           dispatch(getDescriptor(runtime).displayName, 'Compaction complete', 'info', { tabId: tab_id });
         }
-        logInfo(`Claude state: session ${session_id.slice(0, 8)} started (${source ?? 'unknown'}) → tab ${tab_id.slice(0, 8)} = active`);
+        logInfo(`Claude state: session ${session_id.slice(0, 8)} started (${source ?? 'unknown'}) → tab ${tab_id.slice(0, 8)} = ${started}`);
       });
       unlisteners.push(u1);
 
