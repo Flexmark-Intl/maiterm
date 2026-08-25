@@ -7,6 +7,7 @@
   import { getAgentLiveness, writeTerminal } from '$lib/tauri/commands';
   import { replayAutoResume } from '$lib/stores/triggers.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
 
   interface Props {
@@ -325,18 +326,25 @@
                 </div>
               {:else}
                 <span class="role">{r.role}</span>
-                {#if r.generic}<span class="nudge" title="A generic name is a poor address — rename for clarity">generic name</span>{/if}
+                {#if r.generic}
+                  <Tooltip text="A generic name is a poor address — rename for clarity">
+                    <span class="nudge">generic name</span>
+                  </Tooltip>
+                {/if}
               {/if}
-              <span class="status-tag {r.status}"
-                    title={rebindFailed[r.tabId]
-                      ? 'Init was sent and no session came back, so the agent is gone rather than unregistered. On an SSH tab that only shows up once it has been tried — the ssh session stays alive after the remote agent exits.'
-                      : undefined}>{statusLabel(r.status)}</span>
+              <Tooltip text={rebindFailed[r.tabId]
+                ? 'Init was sent and no session came back, so the agent is gone rather than unregistered. On an SSH tab that only shows up once it has been tried — the ssh session stays alive after the remote agent exits.'
+                : ''}>
+                <span class="status-tag {r.status}">{statusLabel(r.status)}</span>
+              </Tooltip>
             </div>
             <div class="action">
               {#if w === 'waiting'}
                 <span class="waiting">waiting…</span>
               {:else if w === 'timeout'}
-                <span class="timeout" title="Didn't come online — check the tab">no response</span>
+                <Tooltip text="Didn't come online — check the tab">
+                  <span class="timeout">no response</span>
+                </Tooltip>
                 {#if r.status === 'not-registered' || r.status === 'needs-init'}
                   <button class="mini" onclick={() => sendInit(r)} disabled={!r.ptyId}>Retry</button>
                 {/if}
@@ -346,13 +354,17 @@
                 {#if r.hasResume}
                   <button class="mini" onclick={() => resumeDropped(r)} disabled={!r.ptyId}>Resume</button>
                 {:else}
-                  <span class="warn-inline" title="No auto-resume command — restart the agent in its tab">restart in tab</span>
+                  <Tooltip text="No auto-resume command — restart the agent in its tab">
+                    <span class="warn-inline">restart in tab</span>
+                  </Tooltip>
                 {/if}
               {:else if r.status === 'suspended'}
                 <button class="mini" onclick={() => wake(r)}>Wake</button>
               {/if}
               {#if r.status === 'suspended' && !r.hasResume}
-                <span class="warn-inline" title="No auto-resume configured — this wakes as a bare shell, not the agent">no resume</span>
+                <Tooltip text="No auto-resume configured — this wakes as a bare shell, not the agent">
+                  <span class="warn-inline">no resume</span>
+                </Tooltip>
               {/if}
             </div>
           </div>

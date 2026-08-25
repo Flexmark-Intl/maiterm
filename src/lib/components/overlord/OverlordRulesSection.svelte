@@ -4,6 +4,7 @@
   import { DEFAULT_OVERLORD_RULES, seedDefaultOverlordRules } from '$lib/overlord/defaults';
   import * as commands from '$lib/tauri/commands';
   import Icon from '$lib/components/Icon.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import {
     conditionChip, conditionSource, describeCondition, describeGate,
     fmtSeconds, guardsForCondition, ruleWarnings, scopeLabel, sequenceSummary,
@@ -349,8 +350,12 @@
         </span>
 
         {#if rule.default_id}
-          <button class="ov-btn rule-reset" disabled={!rule.user_modified}
-                  onclick={() => restoreDefault(rule)} title="Restore this default's original wording">Reset</button>
+          <Tooltip text={rule.user_modified
+            ? "Restore this default's original wording"
+            : 'Unchanged from the default — nothing to restore'}>
+            <button class="ov-btn rule-reset" disabled={!rule.user_modified}
+                    onclick={() => restoreDefault(rule)}>Reset</button>
+          </Tooltip>
         {/if}
 
         {#if confirmDeleteId === rule.id}
@@ -360,7 +365,9 @@
             <button class="ov-btn" onclick={() => (confirmDeleteId = null)}>No</button>
           </span>
         {:else}
-          <button class="icon-btn" onclick={() => deleteRule(rule)} title="Delete rule"><Icon name="trash" /></button>
+          <Tooltip text="Delete rule">
+            <button class="icon-btn" onclick={() => deleteRule(rule)}><Icon name="trash" /></button>
+          </Tooltip>
         {/if}
       </div>
 
@@ -433,7 +440,9 @@
                         </span>
                       {/if}
                       {#if rule.sequence.length > 1}
-                        <button class="icon-btn step-del" onclick={() => removeStep(rule, idx)} title="Remove step"><Icon name="trash" /></button>
+                        <Tooltip text="Remove step">
+                          <button class="icon-btn step-del" onclick={() => removeStep(rule, idx)}><Icon name="trash" /></button>
+                        </Tooltip>
                       {/if}
                     </div>
 
@@ -714,6 +723,7 @@
   .sep { opacity: 0.45; margin: 0 3px; }
 
   .rule-chips { display: flex; gap: 5px; flex-shrink: 0; }
+  .rule-head :global(.tooltip-wrapper) { flex-shrink: 0; }
   .rule-reset { flex-shrink: 0; }
   .confirm { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
@@ -827,6 +837,8 @@
   }
   .rt.on { color: var(--ov-live); border-color: color-mix(in srgb, var(--ov-live) 50%, transparent); }
 
+  /* Placement moves to the tooltip wrapper, which is the flex item once it wraps. */
+  .step-body .row :global(.tooltip-wrapper) { margin-left: auto; }
   .step-del { margin-left: auto; }
   .gate-row { margin-top: 6px; }
   .add-step { margin-left: 31px; }

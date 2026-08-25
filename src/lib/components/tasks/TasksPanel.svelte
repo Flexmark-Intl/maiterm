@@ -21,6 +21,7 @@
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
 
   interface Props {
     tabId: string;
@@ -320,13 +321,14 @@
             {@const eff = effectiveStatus(t, all)}
             <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)}>
               <div class="task-main">
-                <button
-                  class="status s-{eff}"
-                  title="{STATUS_LABEL[eff]} — click to advance, shift-click to go back"
-                  onclick={(e) => cycleStatus(t, e.shiftKey)}
-                >
-                  {STATUS_LABEL[eff]}
-                </button>
+                <Tooltip text="{STATUS_LABEL[eff]} — click to advance, shift-click to go back">
+                  <button
+                    class="status s-{eff}"
+                    onclick={(e) => cycleStatus(t, e.shiftKey)}
+                  >
+                    {STATUS_LABEL[eff]}
+                  </button>
+                </Tooltip>
 
                 {#if editingId === t.id}
                   <!-- svelte-ignore a11y_autofocus -->
@@ -349,24 +351,33 @@
 
                 <span class="row-ctl">
                   {#if t.origin !== 'human'}
-                    <span class="origin" title="Recorded by {t.origin === 'imported' ? 'an import from the agent\'s own list' : t.origin}">
-                      {t.origin === 'imported' ? '⇥' : '◆'}
-                    </span>
+                    <Tooltip text="Recorded by {t.origin === 'imported' ? "an import from the agent's own list" : t.origin}">
+                      <span class="origin">
+                        {t.origin === 'imported' ? '⇥' : '◆'}
+                      </span>
+                    </Tooltip>
                   {/if}
-                  <button
-                    class="mini"
-                    title={group.unclaimed ? 'Claim for this tab' : 'Hand back — leave for whoever picks it up'}
-                    onclick={() => setAssignee(t, !!group.unclaimed)}
-                  >
-                    {group.unclaimed ? '↧' : '↥'}
-                  </button>
-                  {#if confirmingDelete === t.id}
-                    <button class="mini danger" title="Confirm delete" onclick={() => remove(t.id)}>✓</button>
-                    <button class="mini" title="Cancel" onclick={() => (confirmingDelete = null)}>✕</button>
-                  {:else}
-                    <button class="mini" title="Delete" onclick={() => (confirmingDelete = t.id)}>
-                      <Icon name="trash" size={11} />
+                  <Tooltip text={group.unclaimed ? 'Claim for this tab' : 'Hand back — leave for whoever picks it up'}>
+                    <button
+                      class="mini"
+                      onclick={() => setAssignee(t, !!group.unclaimed)}
+                    >
+                      {group.unclaimed ? '↧' : '↥'}
                     </button>
+                  </Tooltip>
+                  {#if confirmingDelete === t.id}
+                    <Tooltip text="Confirm delete">
+                      <button class="mini danger" onclick={() => remove(t.id)}>✓</button>
+                    </Tooltip>
+                    <Tooltip text="Cancel">
+                      <button class="mini" onclick={() => (confirmingDelete = null)}>✕</button>
+                    </Tooltip>
+                  {:else}
+                    <Tooltip text="Delete">
+                      <button class="mini" onclick={() => (confirmingDelete = t.id)}>
+                        <Icon name="trash" size={11} />
+                      </button>
+                    </Tooltip>
                   {/if}
                 </span>
               </div>
@@ -549,6 +560,10 @@
     display: flex;
     gap: 6px;
   }
+  /* The status pill is wrapped for its tooltip, and the wrapper is what the row lays
+     out — without this the pill gets squeezed by a long title instead of the title
+     wrapping. */
+  .task-main > :global(.tooltip-wrapper) { flex-shrink: 0; }
 
   .status {
     background: none;

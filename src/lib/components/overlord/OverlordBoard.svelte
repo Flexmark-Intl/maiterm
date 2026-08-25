@@ -8,6 +8,7 @@
   import { isInFlight, type TaskRow } from '$lib/tasks/model';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { escalationLabel, fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import OverlordBoardView from './OverlordBoardView.svelte';
   import '$lib/overlord/deck.css';
 
@@ -397,26 +398,30 @@
       </nav>
 
       {#if unboundCount > 1}
-        <button class="ov-btn scan-btn" onclick={recoverAll} disabled={recoveringAll}
-                title="Send /maiterm init to every tab whose agent is running but unbound. Nothing is sent to tabs that aren't running an agent.">
-          {recoveringAll ? 'Re-binding…' : `Re-bind ${unboundCount}`}
-        </button>
+        <Tooltip text="Send /maiterm init to every tab whose agent is running but unbound. Nothing is sent to tabs that aren't running an agent.">
+          <button class="ov-btn scan-btn" onclick={recoverAll} disabled={recoveringAll}>
+            {recoveringAll ? 'Re-binding…' : `Re-bind ${unboundCount}`}
+          </button>
+        </Tooltip>
       {/if}
-      <button class="ov-btn scan-btn" onclick={runScan} disabled={overlordStore.scanning}
-              title="Read every running agent tab and populate the board from it. Safe to repeat — nothing is typed into any tab.">
-        {overlordStore.scanning ? 'Scanning…' : 'Scan tabs'}
-      </button>
+      <Tooltip text="Read every running agent tab and populate the board from it. Safe to repeat — nothing is typed into any tab.">
+        <button class="ov-btn scan-btn" onclick={runScan} disabled={overlordStore.scanning}>
+          {overlordStore.scanning ? 'Scanning…' : 'Scan tabs'}
+        </button>
+      </Tooltip>
 
-      <div class="mode-toggle" title="Rules land as proposals you approve, instead of typing into tabs on their own">
-        <span class="ov-label">Propose first</span>
-        <button
-          class="toggle"
-          class:active={preferencesStore.overlordProposeMode}
-          onclick={() => preferencesStore.setOverlordProposeMode(!preferencesStore.overlordProposeMode)}
-          aria-pressed={preferencesStore.overlordProposeMode}
-          aria-label="Toggle propose mode"
-        ><span class="toggle-knob"></span></button>
-      </div>
+      <Tooltip text="Rules land as proposals you approve, instead of typing into tabs on their own">
+        <div class="mode-toggle">
+          <span class="ov-label">Propose first</span>
+          <button
+            class="toggle"
+            class:active={preferencesStore.overlordProposeMode}
+            onclick={() => preferencesStore.setOverlordProposeMode(!preferencesStore.overlordProposeMode)}
+            aria-pressed={preferencesStore.overlordProposeMode}
+            aria-label="Toggle propose mode"
+          ><span class="toggle-knob"></span></button>
+        </div>
+      </Tooltip>
     </div>
 
     {#if inFlight > 0}<div class="sweep"><span></span></div>{/if}
@@ -699,11 +704,12 @@
                   {#if cp.kind === 'no_rule'}
                     <span class="signal-note">Enable one in Preferences → Overlord.</span>
                   {:else}
-                    <button class="ov-btn ov-btn-primary" disabled={checkpointing === s.u.tab.id}
-                            onclick={() => checkpoint(s.u.tab.id)}
-                            title="Run the checkpoint now, ignoring the rule's cooldown. If the agent is mid-turn it waits for the turn to end rather than typing over it.">
-                      {checkpointing === s.u.tab.id ? 'Starting…' : 'Checkpoint now'}
-                    </button>
+                    <Tooltip text="Run the checkpoint now, ignoring the rule's cooldown. If the agent is mid-turn it waits for the turn to end rather than typing over it.">
+                      <button class="ov-btn ov-btn-primary" disabled={checkpointing === s.u.tab.id}
+                              onclick={() => checkpoint(s.u.tab.id)}>
+                        {checkpointing === s.u.tab.id ? 'Starting…' : 'Checkpoint now'}
+                      </button>
+                    </Tooltip>
                   {/if}
                 </div>
               {/if}
@@ -744,8 +750,9 @@
                     {tabBusy === s.s.tabId ? 'Archiving…' : 'Archive'}
                   </button>
                   <button class="ov-btn ov-btn-danger" onclick={() => (closingTab = s.s.tabId)}>Close</button>
-                  <button class="ov-btn" onclick={() => overlordStore.keepSpentTab(s.s.tabId)}
-                          title="Stop offering this session for a week">Keep</button>
+                  <Tooltip text="Stop offering this session for a week">
+                    <button class="ov-btn" onclick={() => overlordStore.keepSpentTab(s.s.tabId)}>Keep</button>
+                  </Tooltip>
                 </div>
               {/if}
 
@@ -911,7 +918,10 @@
             <span class="ov-mono entry-time">{new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             <span class="ov-label entry-outcome">{outcomeLabel(e.outcome)}</span>
             <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(e.tab_id)}>{tabDisplayName(e.tab_id)}</button>
-            <span class="ov-mono entry-text" title={e.text}>{e.text}</span>
+            <!-- The row clips the directive; the bubble is the only way to read the rest. -->
+            <Tooltip text={e.text} block>
+              <span class="ov-mono entry-text">{e.text}</span>
+            </Tooltip>
           </div>
         {/each}
       </div>
@@ -1011,6 +1021,10 @@
   }
 
   .scan-btn { flex-shrink: 0; }
+
+  /* A tooltip's wrapper becomes the flex item, so `flex-shrink: 0` has to live on the
+     wrapper or the buttons it holds start wrapping their labels as the bar fills up. */
+  .command-row :global(.tooltip-wrapper) { flex-shrink: 0; }
 
   .mode-toggle { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
@@ -1346,6 +1360,8 @@
   }
   .entry-time { color: var(--ov-ink-dim); flex-shrink: 0; }
   .entry-outcome { color: var(--tone); min-width: 88px; flex-shrink: 0; }
+  /* Sits inside the tooltip wrapper, which is the flex item the row actually measures. */
+  .entry :global(.tooltip-wrapper.block) { flex: 1; }
   .entry-text {
     color: var(--ov-ink-dim);
     overflow: hidden;

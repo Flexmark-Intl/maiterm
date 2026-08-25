@@ -5,6 +5,7 @@
   import { effectiveStatus, hasUnmetDeps, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
   import type { TaskStatus } from '$lib/tauri/types';
   import { fmtAge } from '$lib/overlord/format';
+  import Tooltip from '$lib/components/Tooltip.svelte';
 
   /**
    * The board, indexed by WORKSTREAM (docs/tasks.md §4).
@@ -396,6 +397,19 @@
   function streamOf(t: TaskRow): string | null {
     return tasksStore.workstream(t.workspace_id, t.workstream_id)?.name ?? null;
   }
+
+  /** Everything the row can't fit, on one bubble — the name is clipped, and the staleness
+   *  flag is a bare count that means nothing without its unit. */
+  function rowTip(e: StreamEntry): string {
+    const lead = e.name ? `${e.name} · ${e.wsName}` : `Unfiled tasks in ${e.wsName}`;
+    return e.stale ? `${lead}\n${e.stale} untouched for days` : lead;
+  }
+
+  /** The meter is 3px tall — per-segment hovering is a fiction, so the whole bar carries
+   *  the breakdown instead of six unhittable strips each carrying one number. */
+  function meterTip(e: StreamEntry): string {
+    return spread(e).map((s) => `${s.n} ${laneLabel(s.lane)}`).join(' · ');
+  }
 </script>
 
 <!-- The query container must be an ANCESTOR: an element never matches its own
@@ -439,29 +453,34 @@
             <span class="rail-ws-rule"></span>
           </div>
         {/if}
+        <!-- The staleness flag's own tooltip is folded into the row's, because two nested
+             wrappers both fire on enter and neither hides the other — mouseenter doesn't
+             bubble, so the outer bubble is already up when the inner one appears. One
+             trigger per element; the bubble renders newlines. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <button
-          class="row"
-          class:on={selected === e.key}
-          class:dimmed={e.suspended}
-          class:drop={dragRow === e.key && draggingWs === e.wsId}
-          class:deny={dragRow === e.key && draggingWs !== null && draggingWs !== e.wsId}
-          onclick={() => (selected = e.key)}
-          ondragover={(ev) => { ev.preventDefault(); dragRow = e.key; }}
-          ondragleave={() => { if (dragRow === e.key) dragRow = null; }}
-          ondrop={(ev) => dropOnStream(ev, e)}
-          title={e.name ? `${e.name} · ${e.wsName}` : `Unfiled tasks in ${e.wsName}`}
-        >
-          <span class="ov-dot" style:--tone={pipTone(e)}></span>
-          <span class="row-name" class:loose={!e.name}>{e.name ?? 'Unfiled'}</span>
-          {#if e.stale}<span class="row-flag" title="{e.stale} untouched for days">{e.stale}◆</span>{/if}
-          <span class="ov-mono row-count">{e.open || '—'}</span>
-          <div class="spread">
-            {#each spread(e) as s (s.lane)}
-              <span style:flex={s.n} style:background={laneTone(s.lane)}></span>
-            {/each}
-          </div>
-        </button>
+        <Tooltip text={rowTip(e)} block>
+          <button
+            class="row"
+            class:on={selected === e.key}
+            class:dimmed={e.suspended}
+            class:drop={dragRow === e.key && draggingWs === e.wsId}
+            class:deny={dragRow === e.key && draggingWs !== null && draggingWs !== e.wsId}
+            onclick={() => (selected = e.key)}
+            ondragover={(ev) => { ev.preventDefault(); dragRow = e.key; }}
+            ondragleave={() => { if (dragRow === e.key) dragRow = null; }}
+            ondrop={(ev) => dropOnStream(ev, e)}
+          >
+            <span class="ov-dot" style:--tone={pipTone(e)}></span>
+            <span class="row-name" class:loose={!e.name}>{e.name ?? 'Unfiled'}</span>
+            {#if e.stale}<span class="row-flag">{e.stale}◆</span>{/if}
+            <span class="ov-mono row-count">{e.open || '—'}</span>
+            <div class="spread">
+              {#each spread(e) as s (s.lane)}
+                <span style:flex={s.n} style:background={laneTone(s.lane)}></span>
+              {/each}
+            </div>
+          </button>
+        </Tooltip>
       {/each}
 
       {#if index.length && !rail.length}
@@ -532,14 +551,15 @@
               }}
             />
           {:else}
-            <button
-              class="ov-label-lead stage-name"
-              class:renameable={!isEverything && !!current.streamId}
-              onclick={startRename}
-              title={current.streamId ? 'Click to rename this workstream' : ''}
-            >
-              {isEverything ? 'Everything' : (current.name ?? 'Unfiled')}
-            </button>
+            <Tooltip text={current.streamId ? 'Click to rename this workstream' : ''}>
+              <button
+                class="ov-label-lead stage-name"
+                class:renameable={!isEverything && !!current.streamId}
+                onclick={startRename}
+              >
+                {isEverything ? 'Everything' : (current.name ?? 'Unfiled')}
+              </button>
+            </Tooltip>
           {/if}
           {#if !isEverything}
             <span class="ov-chip">{current.wsName}</span>
@@ -557,11 +577,13 @@
         </div>
       </header>
 
-      <div class="meter" aria-hidden="true">
-        {#each spread(current) as s (s.lane)}
-          <span style:flex={s.n} style:background={laneTone(s.lane)} title="{s.n} {laneLabel(s.lane)}"></span>
-        {/each}
-      </div>
+      <Tooltip text={meterTip(current)} block>
+        <div class="meter" aria-hidden="true">
+          {#each spread(current) as s (s.lane)}
+            <span style:flex={s.n} style:background={laneTone(s.lane)}></span>
+          {/each}
+        </div>
+      </Tooltip>
 
       <div class="lanes">
         {#each LANES as lane, li (lane)}
@@ -603,21 +625,26 @@
                        controls around — and the whole point of the board is not having to
                        walk to the tab, so its name is context, not a destination. -->
                   <div class="card-head">
-                    <span class="card-tab" title={t.tab_id ? tabDisplayName(t.tab_id) : 'Not assigned to a tab'}>
-                      {t.tab_id ? tabDisplayName(t.tab_id) : 'unassigned'}
-                    </span>
+                    <Tooltip text={t.tab_id ? tabDisplayName(t.tab_id) : 'Not assigned to a tab'} block>
+                      <span class="card-tab">
+                        {t.tab_id ? tabDisplayName(t.tab_id) : 'unassigned'}
+                      </span>
+                    </Tooltip>
                     <span class="ov-mono card-age">{fmtAge(t.updated_at)}</span>
-                    <button class="tick tick-del" title="Delete" onclick={() => dropTask(t)}>×</button>
+                    <Tooltip text="Delete">
+                      <button class="tick tick-del" onclick={() => dropTask(t)}>×</button>
+                    </Tooltip>
                   </div>
 
-                  <button
-                    class="card-title"
-                    title={t.detail ? 'Click to read the description' : 'No description'}
-                    onclick={() => (openCard = openCard === t.id ? null : t.id)}
-                  >
-                    {t.title}
-                    {#if t.detail}<span class="has-detail" class:open={openCard === t.id}>▾</span>{/if}
-                  </button>
+                  <Tooltip text={t.detail ? 'Click to read the description' : 'No description'} block>
+                    <button
+                      class="card-title"
+                      onclick={() => (openCard = openCard === t.id ? null : t.id)}
+                    >
+                      {t.title}
+                      {#if t.detail}<span class="has-detail" class:open={openCard === t.id}>▾</span>{/if}
+                    </button>
+                  </Tooltip>
 
                   {#if openCard === t.id}
                     <p class="card-detail">{t.detail || 'No description was recorded for this task.'}</p>
@@ -631,7 +658,9 @@
                         </button>
                       {/if}
                       {#if depBlocked.has(t.id)}
-                        <span class="ov-chip card-dep" title="Waiting on an unfinished prerequisite. It moves on its own once that task is done.">waiting</span>
+                        <Tooltip text="Waiting on an unfinished prerequisite. It moves on its own once that task is done.">
+                          <span class="ov-chip card-dep">waiting</span>
+                        </Tooltip>
                       {/if}
                     </div>
                   {/if}
@@ -639,30 +668,37 @@
                   <!-- Steppers pin to the edges they move toward; the two acts that leave the
                        board sit centred between them. -->
                   <div class="card-foot">
-                    <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Back'}
-                            disabled={depBlocked.has(t.id) || t.status === 'backlog'}
-                            onclick={() => moveTask(t, -1)}>‹</button>
+                    <Tooltip text={depBlocked.has(t.id) ? PINNED_WHY : 'Back'}>
+                      <button class="tick"
+                              disabled={depBlocked.has(t.id) || t.status === 'backlog'}
+                              onclick={() => moveTask(t, -1)}>‹</button>
+                    </Tooltip>
                     <span class="card-acts">
-                      <button class="act" title="View Tab" disabled={!t.tab_id}
-                              onclick={() => navigateToTab(t.tab_id!)}>View</button>
+                      <Tooltip text={t.tab_id ? 'View Tab' : 'Not assigned to a tab'}>
+                        <button class="act" disabled={!t.tab_id}
+                                onclick={() => navigateToTab(t.tab_id!)}>View</button>
+                      </Tooltip>
                       <!-- Disabled with no agent tab, rather than accepting a handoff
                            nothing will collect: a handoff is hidden from the deck and is
                            swept undelivered after 30 minutes, so a "Sent" receipt would
                            have been the only trace, and a false one. -->
-                      <button class="act act-send" class:sent={sentAt !== null}
-                              disabled={!hasAgent}
-                              title={!hasAgent
+                      <Tooltip text={!hasAgent
                                 ? 'No Overlord agent tab in this window — start one in the Overlord workspace to hand work to it'
                                 : sentAt === null
                                   ? 'Send to Overlord'
-                                  : `Sent to Overlord ${fmtAge(new Date(sentAt).toISOString())} — click to send again`}
-                              onclick={() => overlordStore.sendTaskToOverlord(t.id)}>
-                        {sentAt === null ? 'Send' : 'Sent'}
-                      </button>
+                                  : `Sent to Overlord ${fmtAge(new Date(sentAt).toISOString())} — click to send again`}>
+                        <button class="act act-send" class:sent={sentAt !== null}
+                                disabled={!hasAgent}
+                                onclick={() => overlordStore.sendTaskToOverlord(t.id)}>
+                          {sentAt === null ? 'Send' : 'Sent'}
+                        </button>
+                      </Tooltip>
                     </span>
-                    <button class="tick" title={depBlocked.has(t.id) ? PINNED_WHY : 'Forward'}
-                            disabled={depBlocked.has(t.id) || t.status === 'done'}
-                            onclick={() => moveTask(t, 1)}>›</button>
+                    <Tooltip text={depBlocked.has(t.id) ? PINNED_WHY : 'Forward'}>
+                      <button class="tick"
+                              disabled={depBlocked.has(t.id) || t.status === 'done'}
+                              onclick={() => moveTask(t, 1)}>›</button>
+                    </Tooltip>
                   </div>
                 </div>
               {/each}
@@ -876,8 +912,13 @@
   .tally { display: flex; align-items: baseline; gap: 5px; }
   .tally b { font-size: 1rem; font-weight: 500; color: var(--ov-ink); }
 
+  /* Anything given a tooltip hands its layout to the wrapper — it, not the trigger, is
+     the flex item the stage measures. */
+  .stage > :global(.tooltip-wrapper) { flex-shrink: 0; }
+
   .meter {
     display: flex;
+    flex: 1;
     gap: 1px;
     height: 3px;
     border-radius: 2px;
@@ -1134,6 +1175,8 @@
       margin-right: 0;
     }
     .rail-ws { display: none; }
+    /* Rows are wrapped for their tooltip, so the strip's sizing belongs on the wrapper. */
+    .rail-list :global(.tooltip-wrapper) { width: auto; flex-shrink: 0; }
     .row {
       grid-template-columns: auto auto auto;
       grid-template-rows: auto auto;
