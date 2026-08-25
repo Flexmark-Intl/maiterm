@@ -201,6 +201,69 @@ fn extract_auth(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+/// Header on every MCP request carrying the caller's tab id, expanded by the agent
+/// runtime from `$MAITERM_TAB_ID` in that tab's own PTY environment (we register it as
+/// `"x-maiterm-tab": "${MAITERM_TAB_ID}"` in `~/.claude.json`).
+///
+/// This is the ONLY identity an MCP request has that the model didn't type. Before it,
+/// the tab id could only reach us by way of the agent reading its SessionStart context
+/// and calling `initSession` — which is why a maiTerm restart left every resumed tab
+/// uninitialized: the process is new, the connection is new, and a resumed agent takes
+/// no turn until its human types, so nothing could announce itself.
+const TAB_ID_HEADER: &str = "x-maiterm-tab";
+
+/// The tab id a request declares for itself, or `None` if it declares nothing usable.
+///
+/// Runtimes that don't expand `${...}` — and shells with no `$MAITERM_TAB_ID` at all
+/// (tmux/su on a bridged host) — send the placeholder through VERBATIM rather than
+/// dropping the server, so the literal must be rejected here or we'd bind connections
+/// to a tab named `${MAITERM_TAB_ID}`.
+fn declared_tab_id(headers: &HeaderMap) -> Option<String> {
+    let v = headers.get(TAB_ID_HEADER)?.to_str().ok()?.trim();
+    if v.is_empty() || v.contains('$') || v.contains('{') {
+        return None;
+    }
+    Some(v.to_string())
+}
+
+/// Seed a connection's tab affinity from `TAB_ID_HEADER`, so tool calls target the right
+/// tab from the first request without the agent calling `initSession`.
+///
+/// SEED, not override: an existing affinity always wins. `initSession` stays the way an
+/// agent CORRECTS a wrong identity — the documented recovery for a stale `$MAITERM_TAB_ID`
+/// is getActiveTab → initSession, and re-binding from the (still stale) header on the very
+/// next request would undo that recovery every time.
+///
+/// `stated: true` is correct here: this isn't the count-based inference `recover_affinity`
+/// does, it's the same environment variable `initSession` reads, arriving by a path the
+/// model can't get wrong. A tab id that outlived its tab fails the existence check below
+/// and binds nothing, leaving today's behavior untouched.
+fn bind_declared_tab(srv: &ServerState, connection_id: &str, headers: &HeaderMap) {
+    if srv.connection_tabs.read().contains_key(connection_id) {
+        return;
+    }
+    let Some(tab_id) = declared_tab_id(headers) else { return };
+    if find_window_for_tab(&srv.state, &tab_id).is_none() {
+        log::debug!(
+            "Ignoring {} header for {}: tab {} is not in this instance (stale $MAITERM_TAB_ID?)",
+            TAB_ID_HEADER,
+            &connection_id[..connection_id.len().min(11)],
+            &tab_id[..tab_id.len().min(8)]
+        );
+        return;
+    }
+    log::info!(
+        "Bound connection {} → tab {} from {} header (no initSession needed)",
+        &connection_id[..connection_id.len().min(11)],
+        &tab_id[..tab_id.len().min(8)],
+        TAB_ID_HEADER
+    );
+    srv.connection_tabs.write().insert(
+        connection_id.to_string(),
+        TabAffinity { tab_id, stated: true },
+    );
+}
+
 /// Result of the synchronous server preparation step. Holds the bound TCP
 /// listener (std form — converted to tokio inside `serve_server`) along with
 /// the port and auth token that were already written into `~/.claude.json`.
@@ -1639,6 +1702,11 @@ async fn streamable_http_handler(
         .unwrap_or(false);
     let (connection_id, assigned_sid) = derive_streamable_connection_id(incoming_sid, is_initialize);
 
+    // Adopt the tab the request declares for itself, before the message is dispatched —
+    // this is what makes `initSession` unnecessary for tab targeting. Sessionless requests
+    // mint a fresh connection id each time, so this must run per request, not per session.
+    bind_declared_tab(&srv, &connection_id, &headers);
+
     // Process the JSON-RPC message and get the response
     let response_json = process_message(&body, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &connection_id).await;
 
@@ -1804,6 +1872,8 @@ async fn sse_message_handler(
     };
 
     let connection_id = format!("sse-{}", params.session_id);
+    // Same seeding as streamable HTTP — the SSE transport is what bridged SSH tabs use.
+    bind_declared_tab(&srv, &connection_id, &headers);
     handle_message(&body, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &connection_id, &tx).await;
     StatusCode::OK.into_response()
 }
@@ -3092,6 +3162,32 @@ mod tests {
         let mut h4 = HeaderMap::new();
         h4.insert("x-claude-code-ide-authorization", "".parse().unwrap());
         assert_eq!(extract_auth(&h4), None, "empty header value -> None");
+    }
+
+    // The header carries an env-expanded tab id. A runtime that doesn't expand `${...}`,
+    // and a shell with no $MAITERM_TAB_ID, both send the placeholder through verbatim
+    // (verified: the server is NOT dropped in that case) — so the literal must never be
+    // mistaken for a tab id, or every such connection binds to the same phantom tab.
+    #[test]
+    fn declared_tab_id_rejects_unexpanded_placeholders() {
+        use axum::http::HeaderMap;
+        use super::{declared_tab_id, TAB_ID_HEADER};
+        let mut h = HeaderMap::new();
+        assert_eq!(declared_tab_id(&h), None, "absent header -> None");
+        h.insert(TAB_ID_HEADER, "${MAITERM_TAB_ID}".parse().unwrap());
+        assert_eq!(declared_tab_id(&h), None, "unexpanded placeholder is not a tab id");
+        h.insert(TAB_ID_HEADER, "$MAITERM_TAB_ID".parse().unwrap());
+        assert_eq!(declared_tab_id(&h), None, "bare-$ shell form is not a tab id either");
+        h.insert(TAB_ID_HEADER, "".parse().unwrap());
+        assert_eq!(declared_tab_id(&h), None, "empty -> None, not Some(\"\")");
+        h.insert(TAB_ID_HEADER, "  ".parse().unwrap());
+        assert_eq!(declared_tab_id(&h), None, "whitespace-only -> None");
+        h.insert(TAB_ID_HEADER, " 46af41c5-b48e-4786-afcd-850c80e6122b ".parse().unwrap());
+        assert_eq!(
+            declared_tab_id(&h).as_deref(),
+            Some("46af41c5-b48e-4786-afcd-850c80e6122b"),
+            "a real id is accepted and trimmed"
+        );
     }
 
     #[test]

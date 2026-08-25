@@ -348,12 +348,37 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
 - `Notification` (HTTP): Receives Claude Code notification events.
 - `Stop` (HTTP): Receives stop events.
 
-**Connection tab affinity (`initSession`):**
-- Claude calls `initSession({ tabId, sessionId })` as its first MCP tool call
+**Connection tab affinity:**
 - Server stores connection_id → tab_id mapping in `ServerState.connection_tabs`
 - All subsequent tool calls on that connection auto-inject `tabId` if missing
 - Prevents wrong-tab targeting when user switches tabs while Claude is working
 - Connection affinity cleaned up on disconnect (WS close, SSE drop)
+- Two ways in: the `x-maiterm-tab` header (below) and `initSession({ tabId, sessionId })`
+
+**The tab id rides the transport (`x-maiterm-tab`).** Our `~/.claude.json` entry registers
+`"x-maiterm-tab": "${MAITERM_TAB_ID}"`, which Claude Code expands from the agent process's
+own environment and sends on **every** MCP request; Codex's equivalent is
+`env_http_headers = { "x-maiterm-tab" = "MAITERM_TAB_ID" }` (a header name → env var NAME
+map). `bind_declared_tab` adopts it in `streamable_http_handler`/`sse_message_handler`
+before the message is dispatched, so tool calls target the right tab from the first request
+with no `initSession`. Why this matters: an MCP request otherwise carries **no identity of
+its own**, so the tab id could only reach us via the model reading its SessionStart context
+and typing it into a tool call — which is why a maiTerm restart left every resumed tab
+uninitialized (new process, new connection, and a resumed agent takes no turn until its
+human types). Rules:
+- **Seed, not override** — an existing affinity always wins, so `initSession` remains how an
+  agent *corrects* a wrong identity (the documented stale-`$MAITERM_TAB_ID` recovery is
+  getActiveTab → initSession; re-binding from the still-stale header would undo it).
+- **`stated: true`** — this is the same env var `initSession` reads, arriving by a path the
+  model can't get wrong, not the count-based guess `recover_affinity` makes.
+- **Unexpanded placeholders are rejected** (`declared_tab_id`). A runtime that doesn't expand
+  `${...}`, and an env-less shell (tmux/su on a bridged host), both send the literal through
+  — verified they do *not* drop the server — so it must never be read as a tab id.
+- **SSH remotes get the unexpanded form too.** `~/.claude.json` holds ONE `mcpServers.maiterm`
+  per remote account, shared by every tab bridged to that host; a baked-in id would hand one
+  tab's identity to its siblings, so each remote agent expands its own.
+- `initSession` still carries what a header can't: the session→tab link in `agent_sessions`,
+  the `<runtime>SessionId` + auto-resume wiring, and the Overlord/tasks priming text.
 
 **Streamable-HTTP connection identity (the load-bearing part for local agents):** local
 Claude connects over `type: http` (`POST /mcp`), which has no persistent socket — so

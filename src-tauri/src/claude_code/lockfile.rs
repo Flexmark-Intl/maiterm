@@ -153,12 +153,20 @@ pub fn delete_lockfile(port: u16, auth: &str) {
 }
 
 /// The expected `mcpServers.<key>` value pointing at our live server.
+///
+/// `x-maiterm-tab` is expanded by the agent runtime from the tab's own PTY environment,
+/// so every MCP request arrives already naming its tab and the server can bind affinity
+/// without waiting for the agent to call `initSession` (see `server::TAB_ID_HEADER`). A
+/// runtime that doesn't expand `${...}`, or a shell with the var unset, sends the literal
+/// placeholder — verified NOT to drop the server — which the reader rejects, leaving the
+/// pre-header behavior intact.
 fn expected_mcp_entry(port: u16, auth: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "http",
         "url": format!("http://127.0.0.1:{}/mcp", port),
         "headers": {
-            "x-claude-code-ide-authorization": auth
+            "x-claude-code-ide-authorization": auth,
+            "x-maiterm-tab": "${MAITERM_TAB_ID}"
         }
     })
 }

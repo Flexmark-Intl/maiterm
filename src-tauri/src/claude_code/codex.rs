@@ -238,6 +238,15 @@ fn put_codex_mcp_entry(doc: &mut DocumentMut, name: &str, port: u16, auth: &str)
     let mut headers = toml_edit::InlineTable::new();
     headers.insert("x-maiterm-authorization", toml_edit::Value::from(auth));
     entry["http_headers"] = toml_edit::value(headers);
+    // Codex's equivalent of Claude's `${VAR}` header expansion: `env_http_headers` maps a
+    // header name to an ENV VAR NAME that Codex resolves from the agent's environment. It
+    // gives the server the caller's tab on every request, so tool calls target the right
+    // tab without waiting for the agent to call initSession (see `server::TAB_ID_HEADER`).
+    // Verified safe when the var is unset — the server stays enabled, it just sends nothing
+    // for us to read, which is the pre-header behavior.
+    let mut env_headers = toml_edit::InlineTable::new();
+    env_headers.insert("x-maiterm-tab", toml_edit::Value::from("MAITERM_TAB_ID"));
+    entry["env_http_headers"] = toml_edit::value(env_headers);
     // Drop any stale bearer_token from a previous (rejected) format.
     entry.remove("bearer_token");
 }
@@ -654,6 +663,15 @@ mod tests {
         assert!(rendered.contains("http_headers"), "http_headers present:\n{}", rendered);
         assert!(rendered.contains("x-maiterm-authorization"), "auth header present:\n{}", rendered);
         assert!(rendered.contains("AUTHXYZ"), "token present:\n{}", rendered);
+        // Tab identity rides the transport: env_http_headers maps the header to an env var
+        // NAME (not a value), so each agent resolves its own tab and one shared config entry
+        // stays correct for every tab on the host.
+        assert_eq!(
+            doc["mcp_servers"][name]["env_http_headers"]["x-maiterm-tab"].as_str(),
+            Some("MAITERM_TAB_ID"),
+            "tab header maps to the env var name:\n{}",
+            rendered
+        );
         assert!(!rendered.contains("bearer_token"), "no bearer_token in our entry:\n{}", rendered);
     }
 

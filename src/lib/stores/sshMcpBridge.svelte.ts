@@ -189,11 +189,20 @@ function buildSetupScript(
   // Escape single quotes for shell
   const escapedLockContent = lockContent.replace(/'/g, "'\\''");
 
-  // MCP entry for ~/.claude.json registration
+  // MCP entry for ~/.claude.json registration.
+  // x-maiterm-tab is deliberately the UNEXPANDED `${MAITERM_TAB_ID}`, not this tab's id:
+  // ~/.claude.json holds ONE `mcpServers.maiterm` entry per remote account, shared by every
+  // tab bridged to that host, so a baked-in id would hand one tab's identity to its siblings.
+  // The remote agent expands it from its own shell env (exported per tab on connect), which
+  // makes the shared entry correct for all of them; an env-less shell (tmux/su) sends the
+  // literal through and the server ignores it, exactly as before.
   const mcpEntry = JSON.stringify({
     type: 'sse',
     url: `http://127.0.0.1:${remotePort}/sse`,
-    headers: { 'x-claude-code-ide-authorization': authToken },
+    headers: {
+      'x-claude-code-ide-authorization': authToken,
+      'x-maiterm-tab': '${MAITERM_TAB_ID}',
+    },
   });
   // Escape for single-quoted shell string
   const escapedMcpEntry = mcpEntry.replace(/'/g, "'\\''");
