@@ -24,7 +24,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 | Tool | Description |
 |------|-------------|
-| initSession | **REQUIRED first call.** Registers tab ID + session ID → enables auto-inject of tabId on all subsequent calls. Safe to run in parallel with non-maiterm opening tool calls (file reads, grep) to save a round-trip — but never batched with other maiterm calls, which would race the registration |
+| initSession | **Repair, not a startup step** — the `x-maiterm-tab` header and the SessionStart hook already register tab + session (see Connection tab affinity). Call it to re-bind after a stale `$MAITERM_TAB_ID`, an inferred-identity refusal, or `/maiterm init`. Never batch it with other maiterm calls, which would race the registration |
 | getOpenEditors | List open editor tabs (path, language, dirty state) |
 | getWorkspaceFolders | Workspace root paths |
 | getDiagnostics | App version, tab/PTY counts, WebGL status, FPS, memory/CPU, performance metrics |
