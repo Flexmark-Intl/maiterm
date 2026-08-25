@@ -445,7 +445,7 @@ export async function replayAutoResume(tabId: string) {
   try {
     if (sshCmd) {
       // SSH replay: build full ssh command, then append auto-resume command if any
-      const ssh = buildSshCommand(sshCmd, remoteCwd);
+      const ssh = buildSshCommand(sshCmd, remoteCwd, tabId);
       let payload = ssh + '\n';
       if (cmd) {
         payload += interpolateVariables(tabId, cmd, true) + '\n';

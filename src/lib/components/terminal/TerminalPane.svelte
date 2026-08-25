@@ -84,6 +84,14 @@
   // --- SSH drop detection / recovery ---
   // Set (via getPtyInfo) while an interactive ssh session is the foreground job.
   let sshForeground: { cmd: string; host: string | null } | null = null;
+  /**
+   * Have we seen this PTY's foreground be something OTHER than ssh? Only after that does a
+   * subsequent ssh detection mean "the user just connected, the remote end is a shell at a
+   * prompt" — which is the only state in which it is safe to type the maiTerm env export into
+   * the live session. On mount/restore the very first probe already returns ssh, so this stays
+   * false and we never type into a session that has been running (and may now be an agent).
+   */
+  let sawNonSshForeground = false;
   // Last title set while ssh was confirmed foreground — the remote (Claude) title
   // we preserve on the tab when the connection drops.
   let lastRemoteTitle: string | null = null;
@@ -630,6 +638,13 @@
             && !cmd.includes('git@')
             && !cmd.includes('BatchMode=yes')
             && isInteractiveSshSession(cmd);
+          // A foreground that is NOT interactive ssh means a local shell (or a command) owns
+          // this PTY — the precondition for treating the NEXT ssh as one we watched start.
+          if (cmd && !isInteractiveSsh) {
+            sawNonSshForeground = true;
+          }
+          // Fresh only on the transition into ssh, and only if we saw the other side of it.
+          const freshSsh = !!isInteractiveSsh && !sshForeground && sawNonSshForeground;
           if (isInteractiveSsh) {
             // Track the live ssh session + its remote title so we can preserve
             // the title and replay the connection if it drops unexpectedly.
@@ -662,11 +677,13 @@
           if (hostChanged) {
             logInfo(`SSH MCP bridge: tab ${tabId} moved to a different host — re-bridging`);
             disableBridge(tabId)
-              .then(() => enableBridge(tabId, cmd as string, ptyId))
+              // Hopping hosts within one tab is a connection we just watched happen.
+              .then(() => enableBridge(tabId, cmd as string, ptyId, true))
               .catch(() => {});
           } else if (isInteractiveSsh && bridgeStatus !== 'connected' && bridgeStatus !== 'pending') {
-            enableBridge(tabId, cmd, ptyId).catch(() => {});
+            enableBridge(tabId, cmd, ptyId, freshSsh).catch(() => {});
           } else if (!cmd && hasBridge(tabId)) {
+            sshForeground = null;
             disableBridge(tabId).catch(() => {});
           }
         }).catch(() => {});
@@ -821,7 +838,7 @@
         // Send SSH command first — small delay for local shell to initialize
         setTimeout(async () => {
           try {
-            const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd);
+            const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd, tabId);
             const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
             await writeTerminal(ptyId, bytes);
           } catch (e) {
@@ -1585,7 +1602,7 @@
     lastDropAt = 0;
 
     try {
-      const cmd = buildSshCommand(sshCommand, remoteCwd);
+      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId);
       await writeTerminal(ptyId, Array.from(new TextEncoder().encode(cmd + '\n')));
     } catch (e) {
       logError(`reconnectSsh: failed to write ssh command: ${e}`);

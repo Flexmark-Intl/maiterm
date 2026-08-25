@@ -490,6 +490,17 @@ Remote Claude Code → discovers ~/.claude/ide/{port}.lock → connects through 
 
 **Remote setup:** Lockfile, `~/.claude.json`, hooks (`~/.claude/settings.json`), skill (`~/.claude/skills/maiterm/SKILL.md` + `bin/` statusline helper scripts, fetched via `get_maiterm_skill_scripts`), and `~/.aiterm` env file are written via a separate background SSH connection (`ssh_run_setup`), **not** through the user's interactive PTY. This prevents command injection into running programs (e.g. Claude Code). The setup script uses shell variables for JSON data to avoid nested quoting issues, and pipes JSON to python3/jq via stdin. After setup, `MAITERM_TAB_ID` and `MAITERM_PORT` env vars are injected into the remote shell via PTY write (leading space suppresses shell history).
 
+**Env-var injection into the live PTY is a last resort.** A maiTerm-initiated session carries
+`export MAITERM_TAB_ID=` in its ssh command (`buildSshCommand`), so nothing is typed at all. The
+PTY write survives only for an ssh the USER typed, and only when the pane OBSERVED the session
+start — a non-ssh foreground, then ssh (`sawNonSshForeground` → `enableBridge(..., freshSsh)`).
+Re-bridging a long-lived session never types into it. The reason is that the live-agent guard is
+negative evidence and is blindest exactly when it matters: a tab whose agent has gone quiet is a
+tab whose session mapping is missing, so the guard sees nothing and the export is typed into the
+agent's chat — where the trailing newline sends it. Observed in the wild: an injection at
+11:28:45 followed by that tab's `initSession` at 11:29:03, i.e. the user pressing Enter on
+`/maiterm init` is what triggered the injection that polluted their message.
+
 **`~/.aiterm` env file:** Written during bridge setup with `export MAITERM_TAB_ID=... MAITERM_PORT=...`. Sourced as a fallback by the SessionStart hook (and the Codex `agent-hook.sh` shim) when `$MAITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. **Sole-tab gated:** the file is per-ACCOUNT, but all tabs on one host share ONE reverse tunnel/port, so an env-less agent on a shared account can't be disambiguated — a stale file would hand it whichever tab connected most recently, corrupting session/tab identity (the wrong tab gets the session registered + `claudeSessionId` + auto-resume repointed). So `buildSetupScript` writes it only when this maiTerm is the *sole* bridged tab on that host (`isSharedHost(hostKey, tabId)` false); on shared hosts it runs `rm -f ~/.aiterm` (also scrubbing stale pre-fix files) and env-less agents fail closed to a visible "needs init" rather than silently mis-registering.
 
 **Context menu items (SSH tabs with active bridge):**

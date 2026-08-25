@@ -394,20 +394,25 @@ const bridgeEpoch = new Map<string, number>();
  * text inside the agent's TUI instead of its shell. Joining makes "bridge is up (and
  * injected)" a real precondition for everything sequenced after it.
  *
- * @param ptyId — if provided, injects env vars into the remote shell via PTY write.
- *   Leading space prevents the command from appearing in shell history.
+ * @param ptyId — if provided, the PTY the tab owns.
+ * @param freshSsh — the caller OBSERVED this ssh session start (a non-ssh foreground, then
+ *   ssh), so the remote end is a shell sitting at a prompt. Only then may env vars be typed
+ *   into the live PTY. Without it we could be writing into whatever has taken the remote shell
+ *   over since — which, on an agent tab, means the export appears in the agent's chat and the
+ *   trailing newline sends it. maiTerm-initiated sessions pass `false`: buildSshCommand already
+ *   baked the tab id into their remote command, so there is nothing to type.
  */
-export function enableBridge(tabId: string, sshArgs: string, ptyId?: string): Promise<boolean> {
+export function enableBridge(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false): Promise<boolean> {
   const inflight = inFlightBridges.get(tabId);
   if (inflight) return inflight;
-  const attempt = enableBridgeInner(tabId, sshArgs, ptyId).finally(() => {
+  const attempt = enableBridgeInner(tabId, sshArgs, ptyId, freshSsh).finally(() => {
     inFlightBridges.delete(tabId);
   });
   inFlightBridges.set(tabId, attempt);
   return attempt;
 }
 
-async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string): Promise<boolean> {
+async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false): Promise<boolean> {
   // Independent per-runtime gates: the tunnel + env injection are runtime-agnostic and
   // run for either; the remote setup writes Claude artifacts only when claudeOn and
   // Codex artifacts only when codexOn (so a Claude-only or Codex-only host both work).
@@ -479,6 +484,14 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string)
       // the shell. Re-injecting on every failed-setup retry would spam the user's
       // interactive session with `export MAITERM_TAB_ID=…` lines, once per prompt.
       logInfo("SSH MCP bridge: env vars already injected for tab " + tabId + " — skipping re-injection");
+    } else if (ptyId && !freshSsh) {
+      // Not a shell we watched connect, so we cannot know what owns the remote end now. The
+      // live-agent check below is negative evidence, and it is blindest exactly when it
+      // matters: re-bridging a tab whose agent has gone quiet is the moment its session
+      // mapping is missing, so the guard sees nothing and the export lands in the chat. The
+      // tab id still reaches the remote through the baked ssh command (maiTerm-initiated
+      // sessions), ~/.aiterm (sole-tab hosts), or the manual "Inject maiTerm Env Vars" action.
+      logInfo("SSH MCP bridge: skipping env-var injection — ssh session for tab " + tabId + " was not observed starting, so the remote shell may not be at a prompt");
     } else if (ptyId) {
       try {
         if (!(await isRemoteShellForeground(ptyId))) {

@@ -155,8 +155,25 @@ OSC 133 (FinalTerm protocol) detects command start/finish for tab indicators. Co
 
 When source has active SSH, `buildSshCommand()` constructs:
 ```
-ssh -t user@host 'cd ~/path && exec $SHELL -l'
+ssh -t user@host 'export MAITERM_TAB_ID=<tab>; cd ~/path && exec $SHELL -l'
 ```
+
+**Why the export is baked in.** It is how a maiTerm-initiated remote session gets a PER-TAB
+identity on a host where several tabs share one account — the case the SSH bridge is most used
+for. The alternatives cannot serve it: `~/.aiterm` is per-ACCOUNT and is deliberately deleted on
+shared hosts (it would hand an agent a sibling's tab id), and typing the export into the live
+PTY lands in the agent's chat whenever the remote shell is already running one. Baking it into a
+command we are already sending cannot be mistyped into anything.
+
+`MAITERM_PORT` is deliberately NOT baked: the reverse tunnel does not exist yet when this command
+is built, and nothing needs it — the remote hook gate passes when it is unset and the MCP
+`x-maiterm-tab` header reads only the tab id.
+
+**`cleanSshCommand()` must strip the export form FIRST.** It recovers the bare `user@host` for
+storage; if it does not recognise the export, the plain pattern matches from ` cd …` onward and
+leaves a dangling `'export MAITERM_TAB_ID=…;`, which is stored and baked into the next build —
+accumulating on every clone/restore. `sshCommand.test.ts` covers the round-trip and its
+idempotence.
 
 ### Remote CWD Detection
 

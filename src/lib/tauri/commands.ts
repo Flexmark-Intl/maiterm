@@ -20,9 +20,14 @@ export interface PtyInfo {
  */
 export function cleanSshCommand(cmd: string): string {
   if (!cmd.match(/^ssh\s/)) return cmd;
-  // Remove our injected remote command (unquoted form from ps output)
-  let cleaned = cmd.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
-  // Also handle the single-quoted form
+  // Remove our injected remote command. The MAITERM_TAB_ID forms MUST be stripped first:
+  // the plain patterns below would match from ` cd …` onwards and leave a dangling
+  // `'export MAITERM_TAB_ID=…;` behind, which then accumulates on every clone/restore
+  // round-trip — the same flag-accumulation this function exists to prevent.
+  let cleaned = cmd.replace(/\s+'export\s+MAITERM_TAB_ID=\S+?;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l'\s*$/, '');
+  cleaned = cleaned.replace(/\s+export\s+MAITERM_TAB_ID=\S+?;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l\s*$/, '');
+  // Pre-export forms (stored commands from earlier builds, and ps output for them).
+  cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
   cleaned = cleaned.replace(/\s+'cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l'\s*$/, '');
   // Remove only flags that buildSshCommand re-injects
   cleaned = cleaned.replace(/\s+-t(?=\s|$)/g, '');
@@ -65,16 +70,35 @@ export function shellEscapePath(path: string): string {
  * Stored SSH values are bare "user@host" (possibly with flags).
  * Reconstructs full "ssh -t -o ControlMaster=no user@host" and
  * appends 'cd <path> && exec $SHELL -l' if remoteCwd is given.
+ *
+ * `tabId` bakes `export MAITERM_TAB_ID=<tab>` into that remote command, which is how a
+ * maiTerm-initiated session gets a PER-TAB identity on a host where several tabs share one
+ * account. The alternative — `~/.aiterm` — is per-ACCOUNT and is deliberately deleted on
+ * shared hosts precisely because it would hand an agent a sibling's tab id; and the other
+ * alternative, typing the export into the live PTY, lands in the agent's chat when the remote
+ * shell is already running one. Baking it into the command we are already sending costs
+ * nothing and cannot be mistyped into anything.
+ *
+ * MAITERM_PORT is deliberately NOT baked: the reverse tunnel does not exist yet when this
+ * command is built, and nothing needs it — the remote hook gate passes when it is unset, and
+ * the MCP header reads only the tab id.
  */
-export function buildSshCommand(sshCmd: string | null, remoteCwd: string | null): string {
+export function buildSshCommand(sshCmd: string | null, remoteCwd: string | null, tabId?: string | null): string {
   if (!sshCmd) return '';
   const fullCmd = sshCmd.match(/^ssh\s/) ? sshCmd : `ssh ${sshCmd}`;
+  // Tab ids are UUIDs; anything else is not ours to interpolate into a shell command.
+  const exportPrefix = tabId && /^[A-Za-z0-9-]+$/.test(tabId)
+    ? `export MAITERM_TAB_ID=${tabId}; `
+    : '';
+  const rest = fullCmd.replace(/^ssh\s+/, '');
   if (!remoteCwd) {
-    return fullCmd.replace(/^ssh\s+/, 'ssh -o ControlMaster=no ');
+    if (!exportPrefix) {
+      return fullCmd.replace(/^ssh\s+/, 'ssh -o ControlMaster=no ');
+    }
+    return `ssh -t -o ControlMaster=no ${rest} '${exportPrefix}exec $SHELL -l'`;
   }
   const cdPath = shellEscapePath(remoteCwd);
-  const rest = fullCmd.replace(/^ssh\s+/, '');
-  return `ssh -t -o ControlMaster=no ${rest} 'cd ${cdPath} && exec $SHELL -l'`;
+  return `ssh -t -o ControlMaster=no ${rest} '${exportPrefix}cd ${cdPath} && exec $SHELL -l'`;
 }
 
 export function normalizeSshInput(input: string): string {
