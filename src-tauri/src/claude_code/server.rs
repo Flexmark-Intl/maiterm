@@ -2275,6 +2275,11 @@ async fn process_message(
                             "runtime": runtime.as_key(),
                             "tab_id": &tab_id,
                             "session_id": &init_session_id,
+                            // The agent called a tool, so this proves it is up, on THIS
+                            // instance, and tool-capable — what the Agent Bridge fork
+                            // handshake waits for. The hook-sourced twin proves only that
+                            // a process started. See `source` in the hooks_handler emit.
+                            "source": "tool",
                         }));
                     }
 
@@ -2809,6 +2814,11 @@ async fn hooks_handler(
                     "runtime": runtime_key,
                     "tab_id": &tab_id,
                     "session_id": &session_id,
+                    // A hook fired, which proves a process started and nothing more. Consumers
+                    // that only wire state (session-id variable, auto-resume, mesh readiness)
+                    // want it; the Agent Bridge fork handshake must NOT accept it in place of
+                    // the fork's own initSession.
+                    "source": "hook",
                 }));
             }
         }

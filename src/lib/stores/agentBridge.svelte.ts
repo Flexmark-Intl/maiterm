@@ -558,7 +558,7 @@ function createAgentBridgeStore() {
       //   1. A fresh fork completing its handshake (primeFork forced the init).
       //   2. An already-bridged tab re-initializing after a resume (or a rehydrated
       //      bridge coming back online) — re-bind it.
-      const u1 = await listen<{ tab_id: string | null; session_id: string }>('agent-init-session', (e) => {
+      const u1 = await listen<{ tab_id: string | null; session_id: string; source?: string }>('agent-init-session', (e) => {
         const { tab_id, session_id } = e.payload;
         if (!tab_id) return;
 
@@ -567,6 +567,13 @@ function createAgentBridgeStore() {
         // opener to the caller.
         const po = pendingOpeners.get(tab_id);
         if (po) {
+          // ...but only when the AGENT proved it, not when a hook did. The SessionStart
+          // hook now emits this event too (it carries the tab, so it can wire the session
+          // variable and auto-resume without a tool call) — and it fires while the fork's
+          // Claude is still booting. Accepting it here would hand the caller an opener for
+          // an agent that cannot yet read it, AND clear pendingOpeners, which makes
+          // primeFork return before it injects the re-init directive at all.
+          if (e.payload.source === 'hook') return;
           pendingOpeners.delete(tab_id);
           const callerBridge = bridges.get(po.callerTabId);
           if (callerBridge) { callerBridge.partnerSessionId = session_id; void persistBridge(po.callerTabId); }

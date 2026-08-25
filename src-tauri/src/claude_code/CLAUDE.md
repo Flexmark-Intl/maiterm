@@ -407,6 +407,12 @@ which the hook echoes into the agent's SessionStart context.
 - **Both SessionStarts arrive** (ours with a tab, Claude's without) in either order, so the
   no-tab branch skips buffering a session already bound, and the tab branch drops the buffered
   twin — otherwise a solved session sits in the pool every other tab's init draws from.
+- **`agent-init-session` now has two emitters, and they are not equivalent** — the payload
+  carries `source: "tool" | "hook"`. State wiring (session-id variable, auto-resume, mesh
+  readiness) takes either. The Agent Bridge fork handshake takes only `"tool"`: it needs proof
+  the fork is up, on this instance, AND tool-capable, which a hook cannot give. Accepting the
+  hook there would deliver the caller's opener to a still-booting agent and clear
+  `pendingOpeners`, so `primeFork` would return before injecting the re-init directive.
 - With both halves in place `initSession` is a **repair tool**, not a startup step: it is how an
   agent re-binds after a stale `$MAITERM_TAB_ID`, an inferred-identity refusal, or `/maiterm
   init`. The MCP `instructions` (protocol.rs) say exactly that, so agents stop spending an
