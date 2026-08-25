@@ -2252,6 +2252,20 @@ function createWorkspacesStore() {
         await commands.setTabPinned(workspaceId, paneId, newTab.id, true);
       }
 
+      // Carry chat monitoring. This is a RELOAD — the new tab replaces the original — so it
+      // has to inherit what the original was responsible for. `comms_monitor` is keyed by tab
+      // id and duplicateTab does not copy it (correctly: a genuine DUPLICATE must not also
+      // pick up the channel's summons, or two agents answer every thread). Without this the
+      // reload silently stops the tab being a chat handler: its tools still work, so pasting
+      // a permalink binds a thread as always, and nothing anywhere reports that @mentions no
+      // longer reach it. Observed in the wild — a reloaded Chat Handler sat with
+      // `channels: []` while its siblings kept theirs.
+      if (sourceTab.comms_monitor?.channels?.length) {
+        await this.setTabCommsMonitor(
+          workspaceId, paneId, newTab.id, sourceTab.comms_monitor.channels,
+        );
+      }
+
       // Move new tab into the old tab's position and delete the old one
       const currentIds = freshPane.tabs.map(t => t.id);
       const reordered = currentIds.filter(id => id !== newTab.id);
