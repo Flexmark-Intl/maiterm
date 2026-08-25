@@ -363,6 +363,12 @@ pub fn run() {
                 });
             }
 
+            // Shadowed SSH transcripts outlive whichever feature wrote them, so pruning is
+            // the app's job, not maiLink's. It used to run inside `mailink::start`, which
+            // meant an Overlord-only user — who now populates the same directory — kept
+            // every shadow file forever.
+            mailink::mirror::prune_stale_shadows();
+
             // maiLink mobile-companion LAN bridge (docs/mailink-protocol.md): a separate,
             // opt-in TLS listener — only started when the user has enabled it. Kept distinct
             // from the localhost-only Claude-Code server above.

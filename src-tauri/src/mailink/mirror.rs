@@ -21,8 +21,16 @@
 //!   sidecar state). Each fetch also gets the remote size (`wc -c`) in the same round trip;
 //!   remote-shorter-than-shadow means the file was replaced → shadow resets and refetches.
 //!
-//! Scope: Claude runtime only (Codex/Gemini keep the snapshot), gated on the maiLink
-//! listener running — no phone bridge, no ssh traffic.
+//! Two consumers, not one. maiLink reads shadows to render a phone chat; **Overlord** reads
+//! them for its per-tab facts (context gauge, last-turn recency, commit/todo edges) through
+//! the same `locate_jsonl` fallback. So the gate is "does anything want this" — see
+//! [`shadow_is_wanted`] — not "is the phone bridge up". Overlord needs no equivalent of the
+//! phone's slow tick: every fact it reads changes at a turn boundary, which is exactly when
+//! a hook fires, and a poll-driven refresh would scale with the fleet instead of with
+//! activity.
+//!
+//! Scope: Claude runtime only (Codex/Gemini keep the snapshot). Neither feature enabled —
+//! no ssh traffic.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,12 +58,29 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Whether anything on this machine consumes shadowed transcripts right now.
+///
+/// The mirror used to be maiLink's alone, so this was `mailink_info.is_some()`. That made
+/// Overlord blind to every SSH tab for a reason nothing in Overlord could see: its facts all
+/// resolve through `locate_jsonl`, which already searches the shadow dir, so the shadow file
+/// simply never existed unless a phone bridge happened to be switched on.
+///
+/// It stays a gate rather than becoming unconditional — mirroring is ssh traffic against the
+/// user's hosts, and neither feature being on means nobody would read the result.
+fn shadow_is_wanted(app: &Arc<AppState>) -> bool {
+    if app.mailink_info.read().is_some() {
+        return true;
+    }
+    app.app_data.read().preferences.overlord_enabled
+}
+
 /// Fetch the remote transcript delta for one session, coalesced: one ssh in flight per
-/// session, events landing mid-fetch fold into a single follow-up pass. No-ops unless the
-/// maiLink listener is running AND the tab rides a live SSH bridge tunnel (local tabs and
-/// bridge-down tabs fall through to the existing snapshot path untouched).
+/// session, events landing mid-fetch fold into a single follow-up pass. No-ops unless
+/// something wants shadowed transcripts (see [`shadow_is_wanted`]) AND the tab rides a live
+/// SSH bridge tunnel (local tabs and bridge-down tabs fall through to the existing snapshot
+/// path untouched).
 pub fn schedule_fetch(app: &Arc<AppState>, tab_id: &str, session_id: &str, transcript_path: &str) {
-    if app.mailink_info.read().is_none() {
+    if !shadow_is_wanted(app) {
         return;
     }
     // The tab's tunnel gives the ssh destination; its absence is the "not an SSH tab" gate.

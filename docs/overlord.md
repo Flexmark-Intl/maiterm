@@ -213,6 +213,41 @@ Verified in the current tree — Overlord is mostly an aggregation layer.
 | Agent liveness / state | `active` / `idle` / `permission` / dormant | `agentState.svelte.ts`, `get_agent_liveness` |
 | Rule lifecycle (seed / hide / restore / auto-update unmodified) | `DEFAULT_TRIGGERS`, `seedDefaultTriggers`, `hidden_default_triggers`, `user_modified` | `src/lib/triggers/defaults.ts` |
 | Window scoping | Each window's `workspacesStore.workspaces` *is* its universe | `notificationDispatch.ts:104` |
+| Facts for tabs whose session is on another host | SSH transcript mirror — remote JSONL + task board shadowed locally | `src-tauri/src/mailink/mirror.rs` |
+
+### 4.1 SSH tabs: where the facts come from
+
+Everything in §5's detection table resolves a session id to a JSONL **on this machine**.
+An SSH tab's session writes on the remote host, so without help Overlord sees no context
+gauge, no last-turn recency, and no commit or todo edges for the largest tabs in a fleet.
+
+The mirror closes that. `hooks_handler` gets `transcript_path` verbatim on every Claude hook
+— a hook event *is* the "something appended" signal — and fetches the byte delta over the
+bridge tunnel's ControlMaster socket into `<data_dir>/<slug>/remote-transcripts/<sid>.jsonl`.
+`locate_jsonl` searches that directory alongside `~/.claude/projects`, so every fact lights
+up unmodified. The same fetch brings back the remote task board, which is why an SSH tab
+gets its **complete** list rather than whatever fit in the transcript tail's window.
+
+It was built for maiLink and gated on the phone bridge being up, which is why Overlord was
+blind here: the shadow file simply never existed unless a phone happened to be connected.
+The gate is now "does anything want shadows" — maiLink running **or** Overlord enabled.
+
+Overlord deliberately does **not** drive refreshes from its own 5s facts poll. maiLink's
+slow tick exists for mid-turn streaming to one open chat; Overlord watches the whole window,
+and every fact it reads changes at a turn boundary, which is exactly when a hook fires.
+Poll-driven refresh would cost one ssh round trip per SSH tab per tick — scaling with fleet
+size instead of with activity — to chase data a hook already announced.
+
+Three things this does not fix, and Overlord must keep reading as *unknown* rather than as
+*nothing happening*:
+
+- **Claude only.** The mirror is Claude-scoped; Codex and Gemini SSH tabs have no facts.
+- **Needs a live bridge tunnel.** No tunnel entry for the tab ⇒ no mirror. Overlaps with the
+  `rebindFailed` class in §11 — a tab whose bridge never came up is invisible twice over.
+- **"Finished everything" is not detectable remotely.** The local store distinguishes a swept
+  task directory (`Some(empty)` — completed all of it) from one that never existed (`None`).
+  The remote dump is the task files' bytes concatenated, so both arrive as nothing; the
+  shadow path is two-state and falls through to the tail rather than claim a completion.
 
 ---
 

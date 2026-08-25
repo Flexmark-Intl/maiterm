@@ -593,6 +593,10 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
 ///                         "start keeping a list" at the exact moment it finished one.
 ///   * `None`            — no directory: this session never tracked anything.
 ///
+/// An SSH session's store lives on the remote host, so there is no local directory — the
+/// mirror shadows the remote board and [`shadow_task_store`] reads it. That path is
+/// two-state, not tri-state; see its own note.
+///
 /// Change detection is a cheap (count, total-bytes, newest-mtime) signature over the
 /// directory — no file contents are read while nothing has moved.
 pub fn claude_task_store(session_id: &str) -> Option<Value> {
@@ -602,7 +606,7 @@ pub fn claude_task_store(session_id: &str) -> Option<Value> {
 
     let dir = dirs::home_dir()?.join(".claude").join("tasks").join(session_id);
     if !dir.is_dir() {
-        return None;
+        return shadow_task_store(session_id);
     }
 
     // Signature pass: stat only, and skip the bookkeeping files (.lock/.highwatermark).
@@ -646,10 +650,28 @@ pub fn claude_task_store(session_id: &str) -> Option<Value> {
             .unwrap_or(u64::MAX)
     });
 
+    let raw: Vec<Value> = files
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .collect();
+
+    // Directory present but no task files → every task was completed and swept.
+    let value = Some(Value::Array(normalize_task_board(&raw)));
+    if let Ok(mut c) = cache.lock() {
+        c.insert(dir, (sig, value.clone()));
+    }
+    value
+}
+
+/// Claude Code's task-file shape → the board shape Overlord and the task panel consume.
+///
+/// One normalizer for both the local store and the SSH shadow. They used to be separate
+/// readers of the same file format, which is how an SSH tab ended up on transcript-tail
+/// todos while a complete board sat mirrored on disk beside it.
+fn normalize_task_board(raw: &[Value]) -> Vec<Value> {
     let mut items: Vec<Value> = Vec::new();
-    for path in &files {
-        let Ok(raw) = std::fs::read_to_string(path) else { continue };
-        let Ok(t) = serde_json::from_str::<Value>(&raw) else { continue };
+    for t in raw {
         let status = t.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
         if status == "deleted" {
             continue;
@@ -666,11 +688,55 @@ pub fn claude_task_store(session_id: &str) -> Option<Value> {
             "blocked": blocked,
         }));
     }
+    items
+}
 
-    // Directory present but no task files → every task was completed and swept.
-    let value = Some(Value::Array(items));
+/// The task board of a session whose store lives on the far side of an SSH hop, read from
+/// the shadow the transcript mirror writes (`tasks::shadow_path`, already sorted by numeric
+/// id remotely).
+///
+/// TWO-state, deliberately, where the local store is tri-state: the mirror deletes the
+/// shadow when the remote board is empty, and it could not do otherwise — the remote dump is
+/// the task files' bytes concatenated, so a swept directory and a directory that never
+/// existed both arrive as nothing. `Some(empty)` would therefore be a claim the wire cannot
+/// support. Absent means "can't say" and falls through to the transcript tail, exactly as
+/// before this path existed; what it adds is the COMPLETE board whenever there is one,
+/// instead of only the part that fit in the tail's window.
+fn shadow_task_store(session_id: &str) -> Option<Value> {
+    static SHADOW_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, ((u64, u64), Option<Value>)>>,
+    > = std::sync::OnceLock::new();
+
+    let path = super::tasks::shadow_path(session_id)?;
+    let md = std::fs::metadata(&path).ok()?;
+    let sig = (
+        md.len(),
+        md.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    );
+
+    let cache = SHADOW_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock() {
+        if let Some((cached_sig, value)) = c.get(&path) {
+            if *cached_sig == sig {
+                return value.clone();
+            }
+        }
+    }
+
+    let value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+        .map(|raw| Value::Array(normalize_task_board(&raw)))
+        // An empty board here is the mirror mid-write or a corrupt shadow, not a finished
+        // session — say nothing rather than report a session that completed everything.
+        .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+
     if let Ok(mut c) = cache.lock() {
-        c.insert(dir, (sig, value.clone()));
+        c.insert(path, (sig, value.clone()));
     }
     value
 }
@@ -1802,6 +1868,37 @@ mod tests {
         assert_eq!(arr[1]["blocked"], true, "blockedBy on an open task means blocked");
         assert_eq!(swept.as_ref().and_then(|v| v.as_array()).map(|a| a.len()), Some(0), "finished = present but empty");
         assert!(untracked.is_none(), "never tracked = absent");
+    }
+
+    #[test]
+    fn task_store_falls_back_to_the_ssh_board_shadow() {
+        // An SSH session has no local task dir — its store is on the remote host, and the
+        // transcript mirror shadows it. Without this fallback the tab drops to whatever
+        // todos fit in the transcript tail while a complete board sits on disk beside it.
+        let sid = "shadow-board-test-4000-8000-aiterm";
+        let Some(path) = super::super::tasks::shadow_path(sid) else { return };
+        if path.parent().map(|p| std::fs::create_dir_all(p).is_err()).unwrap_or(true) { return }
+        std::fs::write(
+            &path,
+            r#"[{"id":"1","subject":"remote one","status":"in_progress","activeForm":"Doing one","blockedBy":[]},
+                {"id":"2","subject":"remote two","status":"pending","activeForm":"Doing two","blockedBy":["1"]},
+                {"id":"3","subject":"dropped","status":"deleted","blockedBy":[]}]"#,
+        )
+        .unwrap();
+        let mirrored = claude_task_store(sid);
+
+        // The mirror REMOVES the shadow for an empty remote board, so an empty array can
+        // only be a mid-write or corrupt file — never a claim that the session finished.
+        std::fs::write(&path, "[]").unwrap();
+        let empty = claude_task_store(sid);
+        let _ = std::fs::remove_file(&path);
+
+        let arr = mirrored.as_ref().and_then(|v| v.as_array()).cloned().expect("shadow read");
+        assert_eq!(arr.len(), 2, "the shared normalizer skips deleted tasks here too");
+        assert_eq!(arr[0]["content"], "remote one");
+        assert_eq!(arr[0]["status"], "in_progress");
+        assert_eq!(arr[1]["blocked"], true, "blockedBy survives the round trip");
+        assert!(empty.is_none(), "an empty shadow is 'can't say', not 'finished'");
     }
 
     #[test]

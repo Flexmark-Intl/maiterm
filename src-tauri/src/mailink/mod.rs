@@ -230,7 +230,6 @@ pub fn start(app_state: &Arc<AppState>, app_handle: tauri::AppHandle) -> Result<
         return Ok(()); // already running
     }
     let cfg = prepare(app_state).ok_or("maiLink bridge failed to initialize (see logs)")?;
-    mirror::prune_stale_shadows();
     let st = Arc::clone(app_state);
     tauri::async_runtime::spawn(async move {
         serve(st, cfg, app_handle).await;
@@ -3385,9 +3384,11 @@ pub(crate) fn agent_reply_since(app: &AppState, tab_id: &str, since_ms: i64) -> 
 /// cache in `transcript.rs`, so steady-state cost per tab is one stat. snake_case keys —
 /// this is a maiTerm frontend surface, not the mailink phone protocol.
 ///
-/// NOTE `last_turn_ts` is absent for a tab whose transcript this machine cannot read — an
-/// SSH tab's JSONL lives on the remote host and is only shadowed locally while maiLink is
-/// running. Callers must treat its absence as "unknown", never as "no turns".
+/// NOTE `last_turn_ts` is absent for a tab whose transcript this machine cannot read.
+/// Callers must treat its absence as "unknown", never as "no turns". For an SSH tab the
+/// JSONL lives on the remote host, and the mirror shadows it whenever Overlord or maiLink is
+/// enabled — but only for Claude, and only while the tab's bridge tunnel is up. A Codex or
+/// Gemini SSH tab, or one whose bridge is down, still has no facts at all.
 pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> {
     let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let mut v = json!({
@@ -3423,9 +3424,9 @@ pub(crate) fn overlord_tab_facts(app: &AppState, tab_id: &str) -> Option<Value> 
             v["last_compact_ts"] = json!(ts);
         }
         // Task lists, best source first. Claude Code's own store is authoritative and
-        // COMPLETE; the transcript tail only ever saw whatever fit in its window, and is
-        // what SSH tabs run on (a remote session's store lives on the remote host while
-        // its transcript is mirrored here).
+        // COMPLETE; the transcript tail only ever saw whatever fit in its window. An SSH
+        // session's store lives on the remote host, so `claude_task_store` reads the
+        // mirror's shadow of it — the tail is the floor for those tabs now, not the norm.
         //
         // `tracked` is the fact the tail cannot supply: whether this session has a task
         // list AT ALL. Claude Code deletes the task files once every task is completed, so
