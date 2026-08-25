@@ -1916,8 +1916,16 @@ async fn sse_message_handler(
 /// connection ids are ephemeral (an SSE-over-SSH stream re-mints one every few seconds), so a
 /// header that pre-empted recovery would revert the agent's own correction on the next flap —
 /// and revert it to `stated: true`, unlocking the peer-addressing tools that the correction
-/// exists to keep locked. Never worse than the pre-header behavior by construction: wherever
-/// recovery decided before, it still decides.
+/// exists to keep locked. Wherever recovery decides, it still decides — so a correction it can
+/// see is safe.
+///
+/// The residual gap is the `(None, Some(d))` arm, and it is worth knowing precisely: recovery
+/// returns `None` when 2+ tabs have live sessions and not exactly one is unbound, which is
+/// reachable because every tab now registers a session at SessionStart while `bound` only
+/// counts connections that have actually called a maiterm tool. An agent whose env is stale
+/// AND whose named tab has never used a maiterm tool can therefore still bind that tab on a
+/// reconnect. Narrower than the bug this replaced (which needed neither condition), but not
+/// nothing — so an uncorroborated bind is logged as such rather than claimed to be safe.
 fn resolve_unbound_affinity(
     recovered: Option<String>,
     declared: Option<String>,
@@ -2388,6 +2396,14 @@ async fn process_message(
                             log::warn!("{} header disagrees with the live session for {}: header said a different tab, binding {} from the session as INFERRED; peer-routing tools stay locked until initSession",
                                 TAB_ID_HEADER, &connection_id[..connection_id.len().min(11)],
                                 &tab_id[..tab_id.len().min(8)]);
+                        } else if actual.stated && active_count > 1 {
+                            // Nothing corroborated the header: several agents are live and
+                            // counting could not name this caller. Right in the ordinary case,
+                            // but this is the one binding a stale-but-live $MAITERM_TAB_ID can
+                            // still win, so say so at WARN rather than filing it under routine.
+                            log::warn!("Bound connection {} → tab {} from the {} header ALONE ({} active agents, none identifiable) — uncorroborated",
+                                &connection_id[..connection_id.len().min(11)],
+                                &tab_id[..tab_id.len().min(8)], TAB_ID_HEADER, active_count);
                         } else if actual.stated {
                             log::info!("Bound connection {} → tab {} from the {} header (no initSession needed, {} active agent(s))",
                                 &connection_id[..connection_id.len().min(11)],
@@ -2717,6 +2733,18 @@ async fn hooks_handler(
             if !session_id.is_empty() && !tab_id.is_empty() {
                 use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
                 let mut sessions = srv.state.agent_sessions.write();
+                // Same rebind fingerprint initSession logs, and it matters MORE here: this
+                // path needs no agent turn, so a shell whose $MAITERM_TAB_ID names a sibling
+                // tab (tmux inheriting a pane's env) repoints that tab's session — and its
+                // persisted auto-resume, via agent-init-session — with nobody in the loop.
+                // Legitimate on a duplicated tab; the fingerprint of env cross-pollution
+                // otherwise, and the only trace either leaves.
+                if let Some(prev) = sessions.get(&session_id).map(|s| s.tab_id.clone()) {
+                    if prev != tab_id {
+                        log::warn!("Claude hook: session {} rebinding tab {} → {} (duplicate/fork, or a stale $MAITERM_TAB_ID)",
+                            session_id, prev, tab_id);
+                    }
+                }
                 sessions.insert(
                     session_id.clone(),
                     AgentSessionInfo {
@@ -2745,19 +2773,32 @@ async fn hooks_handler(
                 pending.retain(|(sid, _, _)| *sid != session_id);
                 log::info!("Claude hook: session {} started for tab {}", session_id, tab_id);
             } else if !session_id.is_empty() {
-                // The other half of that race: the twin already told us this session's tab,
-                // so there is nothing to assign. Buffering anyway would republish a solved
-                // session into the pool every tab's init draws from.
-                let known = srv.state.agent_sessions.read().contains_key(&session_id);
-                if known {
-                    log::debug!("Claude hook: session {} already bound to a tab, not buffering",
-                        &session_id[..session_id.len().min(8)]);
+                let mut pending = srv.state.pending_agent_sessions.write();
+                // Clean entries older than 30s
+                let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
+                pending.retain(|(_, _, ts)| *ts > cutoff);
+
+                // Both checks happen HERE, under the pending write lock, because both races
+                // are live: two SessionStarts now arrive per Claude session (ours carrying
+                // ?tab_id=, Claude's http hook carrying none) and the runtime dispatches them
+                // together.
+                //   - `bound`: the twin already resolved this session's tab, so there is
+                //     nothing to assign. Read before the lock, it could go stale between the
+                //     check and the push.
+                //   - `already_pending`: when the tab id is REJECTED (a $MAITERM_TAB_ID that
+                //     outlived its tab), both POSTs land here and would push the same session
+                //     twice. claim_pending_index is built on "exactly ONE live entry" — two
+                //     identical entries make an initSession with no sessionId claim nothing
+                //     (no <runtime>SessionId, no auto-resume), and if the tab's persisted
+                //     resume sid matches, one is claimed and the twin is left for a SIBLING
+                //     tab's init to take, binding this agent's session to that tab.
+                let bound = srv.state.agent_sessions.read().contains_key(&session_id);
+                let already_pending = pending.iter().any(|(sid, _, _)| *sid == session_id);
+                if bound || already_pending {
+                    log::debug!("Claude hook: session {} already {}, not buffering",
+                        &session_id[..session_id.len().min(8)],
+                        if bound { "bound to a tab" } else { "in the pending pool" });
                 } else {
-                    // No tab_id yet — buffer for initSession to pick up
-                    let mut pending = srv.state.pending_agent_sessions.write();
-                    // Clean entries older than 30s
-                    let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
-                    pending.retain(|(_, _, ts)| *ts > cutoff);
                     pending.push((session_id.clone(), cwd.clone(), std::time::Instant::now()));
                     log::info!("Claude hook: session {} started (pending tab assignment)", session_id);
                 }

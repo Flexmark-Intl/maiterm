@@ -321,7 +321,7 @@ fn build_our_hooks(port: u16, auth: &str) -> serde_json::Value {
          --data-binary \"$MAITERM_IN\" \
          \"http://127.0.0.1:{port}/hooks?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); \
          echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. \
-maiTerm already knows this tab and session — you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the {mcp_key} initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; \
+maiTerm already knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the {mcp_key} initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; \
          }} || true",
         port = port,
         auth = auth,

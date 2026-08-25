@@ -374,8 +374,12 @@ human types). Rules:
   shell that launched the agent. So the session wins the *tab* whenever it has an opinion, and
   the header only upgrades *trust* when the two agree: agree → `stated: true`; disagree →
   session's tab, `stated: false` (peer tools stay locked, WARN logged); no session → header,
-  `stated: true`; neither → no binding. Never worse than the pre-header behavior by
-  construction — wherever recovery decided before, it still decides.
+  `stated: true`; neither → no binding. Wherever recovery decides, it still decides, so a
+  correction it can see is safe. **The residual gap is the no-session arm:** recovery returns
+  `None` when 2+ tabs have live sessions and not exactly one is unbound — reachable, because
+  every tab registers a session at SessionStart while `bound` only counts connections that have
+  called a maiterm tool. An agent with a stale env whose named tab has never used a maiterm tool
+  can still bind that tab on a reconnect. Such binds log at WARN as *uncorroborated*.
 - **Why precedence is not academic:** a stale-but-live `$MAITERM_TAB_ID` (a tmux pane
   inheriting a sibling tab's env — the case `~/.aiterm` sole-tab gating exists for) names a
   real tab, so the existence check does not catch it. Connection ids are ephemeral and an

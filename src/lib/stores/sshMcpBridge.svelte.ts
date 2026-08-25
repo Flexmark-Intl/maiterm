@@ -236,7 +236,7 @@ function buildSetupScript(
     "--data-binary \"$MAITERM_IN\" " +
     "\"" + hooksUrl + "?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); " +
     "echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. " +
-    "maiTerm already knows this tab and session — you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the maiterm initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; " +
+    "maiTerm already knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the maiterm initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; " +
     "} || true";
 
   const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
