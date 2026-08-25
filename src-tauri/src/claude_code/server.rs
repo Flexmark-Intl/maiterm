@@ -226,44 +226,6 @@ fn declared_tab_id(headers: &HeaderMap) -> Option<String> {
     Some(v.to_string())
 }
 
-/// Seed a connection's tab affinity from `TAB_ID_HEADER`, so tool calls target the right
-/// tab from the first request without the agent calling `initSession`.
-///
-/// SEED, not override: an existing affinity always wins. `initSession` stays the way an
-/// agent CORRECTS a wrong identity — the documented recovery for a stale `$MAITERM_TAB_ID`
-/// is getActiveTab → initSession, and re-binding from the (still stale) header on the very
-/// next request would undo that recovery every time.
-///
-/// `stated: true` is correct here: this isn't the count-based inference `recover_affinity`
-/// does, it's the same environment variable `initSession` reads, arriving by a path the
-/// model can't get wrong. A tab id that outlived its tab fails the existence check below
-/// and binds nothing, leaving today's behavior untouched.
-fn bind_declared_tab(srv: &ServerState, connection_id: &str, headers: &HeaderMap) {
-    if srv.connection_tabs.read().contains_key(connection_id) {
-        return;
-    }
-    let Some(tab_id) = declared_tab_id(headers) else { return };
-    if find_window_for_tab(&srv.state, &tab_id).is_none() {
-        log::debug!(
-            "Ignoring {} header for {}: tab {} is not in this instance (stale $MAITERM_TAB_ID?)",
-            TAB_ID_HEADER,
-            &connection_id[..connection_id.len().min(11)],
-            &tab_id[..tab_id.len().min(8)]
-        );
-        return;
-    }
-    log::info!(
-        "Bound connection {} → tab {} from {} header (no initSession needed)",
-        &connection_id[..connection_id.len().min(11)],
-        &tab_id[..tab_id.len().min(8)],
-        TAB_ID_HEADER
-    );
-    srv.connection_tabs.write().insert(
-        connection_id.to_string(),
-        TabAffinity { tab_id, stated: true },
-    );
-}
-
 /// Result of the synchronous server preparation step. Holds the bound TCP
 /// listener (std form — converted to tokio inside `serve_server`) along with
 /// the port and auth token that were already written into `~/.claude.json`.
@@ -1661,10 +1623,13 @@ async fn ws_upgrade_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_ws_connection(socket, srv))
+    // The header (if any) is on the upgrade request — carry it into the connection, since
+    // the individual WS frames have no headers of their own.
+    let declared = declared_tab_id(&headers);
+    ws.on_upgrade(move |socket| handle_ws_connection(socket, srv, declared))
 }
 
-async fn handle_ws_connection(socket: WebSocket, srv: ServerState) {
+async fn handle_ws_connection(socket: WebSocket, srv: ServerState, ws_declared_tab: Option<String>) {
     let ws_connection_id = format!("ws-{}", uuid::Uuid::new_v4());
     log::debug!("Claude Code WS client connected ({})", &ws_connection_id[..11]);
     connection_inc(&srv);
@@ -1682,7 +1647,7 @@ async fn handle_ws_connection(socket: WebSocket, srv: ServerState) {
             msg = ws_read.next() => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
-                        handle_message(&text, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &ws_connection_id, &response_tx).await;
+                        handle_message(&text, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &ws_connection_id, ws_declared_tab.as_deref(), &response_tx).await;
                     }
                     Some(Ok(WsMessage::Ping(data))) => {
                         let _ = ws_write.send(WsMessage::Pong(data)).await;
@@ -1753,13 +1718,8 @@ async fn streamable_http_handler(
         .unwrap_or(false);
     let (connection_id, assigned_sid) = derive_streamable_connection_id(incoming_sid, is_initialize);
 
-    // Adopt the tab the request declares for itself, before the message is dispatched —
-    // this is what makes `initSession` unnecessary for tab targeting. Sessionless requests
-    // mint a fresh connection id each time, so this must run per request, not per session.
-    bind_declared_tab(&srv, &connection_id, &headers);
-
     // Process the JSON-RPC message and get the response
-    let response_json = process_message(&body, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &connection_id).await;
+    let response_json = process_message(&body, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &connection_id, declared_tab_id(&headers).as_deref()).await;
 
     match response_json {
         Some(json) => {
@@ -1923,9 +1883,7 @@ async fn sse_message_handler(
     };
 
     let connection_id = format!("sse-{}", params.session_id);
-    // Same seeding as streamable HTTP — the SSE transport is what bridged SSH tabs use.
-    bind_declared_tab(&srv, &connection_id, &headers);
-    handle_message(&body, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &connection_id, &tx).await;
+    handle_message(&body, &srv.app_handle, &srv.state, &srv.connection_tabs, &srv.connection_runtimes, &connection_id, declared_tab_id(&headers).as_deref(), &tx).await;
     StatusCode::OK.into_response()
 }
 
@@ -1942,6 +1900,44 @@ async fn sse_message_handler(
 ///
 /// The runtime FILTERING happens before this is called — `active_same_runtime_tabs`
 /// already excludes other runtimes' sessions.
+/// What a connection with no affinity should bind to, given what the SESSIONS say
+/// (`recovered`, from `recover_affinity`) and what the REQUEST says (`declared`, from
+/// `TAB_ID_HEADER`) — and how far that binding may be trusted.
+///
+/// The two sources fail in opposite ways, which is what decides the precedence:
+/// - `recovered` reasons about counts, not identity, so it is a guess — but it reads
+///   `agent_sessions`, which is where an `initSession` CORRECTION is durable.
+/// - `declared` names one tab exactly, but it is only as good as `$MAITERM_TAB_ID` in the
+///   shell that started the agent — which can be stale while still naming a live tab (a
+///   tmux pane inheriting a sibling tab's env is the documented case).
+///
+/// So the session wins the tab whenever it has an opinion, and the header only upgrades
+/// TRUST when the two agree. Getting this backwards is a live regression, not a hypothetical:
+/// connection ids are ephemeral (an SSE-over-SSH stream re-mints one every few seconds), so a
+/// header that pre-empted recovery would revert the agent's own correction on the next flap —
+/// and revert it to `stated: true`, unlocking the peer-addressing tools that the correction
+/// exists to keep locked. Never worse than the pre-header behavior by construction: wherever
+/// recovery decided before, it still decides.
+fn resolve_unbound_affinity(
+    recovered: Option<String>,
+    declared: Option<String>,
+) -> Option<TabAffinity> {
+    match (recovered, declared) {
+        // Both sources agree — the strongest evidence available, and the ordinary case.
+        (Some(r), Some(d)) if r == d => Some(TabAffinity { tab_id: r, stated: true }),
+        // They disagree: the agent told us who it is and the environment is stale. Take the
+        // session's answer, but as INFERRED — this connection has not stated anything we can
+        // trust, so it may act on the tab and never speak as it.
+        (Some(r), Some(_)) => Some(TabAffinity { tab_id: r, stated: false }),
+        (Some(r), None) => Some(TabAffinity { tab_id: r, stated: false }),
+        // Nothing to contradict it, and nothing else to go on — a fresh session, or several
+        // live agents where counting cannot name the caller. This is the case the header
+        // exists for: it is per-process, not a guess.
+        (None, Some(d)) => Some(TabAffinity { tab_id: d, stated: true }),
+        (None, None) => None,
+    }
+}
+
 fn recover_affinity(
     active_same_runtime_tabs: &[String],
     bound_tabs: &std::collections::HashSet<&str>,
@@ -2020,6 +2016,9 @@ async fn process_message(
     connection_tabs: &ConnectionTabMap,
     connection_runtimes: &ConnectionRuntimeMap,
     connection_id: &str,
+    // The tab this request names for itself (`TAB_ID_HEADER`), if any. Not trusted over a
+    // live session's answer — see `resolve_unbound_affinity`.
+    declared_tab: Option<&str>,
 ) -> Option<String> {
     let req: JsonRpcRequest = match serde_json::from_str(text) {
         Ok(r) => r,
@@ -2345,26 +2344,55 @@ async fn process_message(
                     drop(ct);
                     drop(sessions);
 
-                    if let Some(tab_id) = recovered {
-                        connection_tabs.write().insert(
-                            connection_id.to_string(),
-                            // Inferred, not stated — see TabAffinity.
-                            TabAffinity { tab_id: tab_id.clone(), stated: false },
-                        );
+                    // What the REQUEST claims (see TAB_ID_HEADER), kept only if it names a tab
+                    // this instance actually has — a `$MAITERM_TAB_ID` that outlived its tab is
+                    // the common stale case, and binding it would act on nothing.
+                    let declared = declared_tab.filter(|t| {
+                        let ok = find_window_for_tab(state, t).is_some();
+                        if !ok {
+                            log::info!("Ignoring {} header for {}: tab {} is not in this instance (stale $MAITERM_TAB_ID?)",
+                                TAB_ID_HEADER, &connection_id[..connection_id.len().min(11)],
+                                &t[..t.len().min(8)]);
+                        }
+                        ok
+                    });
+                    let disagreed = matches!((&recovered, &declared), (Some(r), Some(d)) if r != d);
+
+                    if let Some(bound_to) = resolve_unbound_affinity(recovered, declared.map(String::from)) {
+                        let tab_id = bound_to.tab_id.clone();
+                        // or_insert, not insert: a concurrent initSession on this same
+                        // connection (the client may have several requests in flight) must not
+                        // have its explicit binding silently replaced by this derived one.
+                        let actual = connection_tabs
+                            .write()
+                            .entry(connection_id.to_string())
+                            .or_insert(bound_to)
+                            .clone();
                         // Update the session's connection_id to the new connection
                         let mut sessions = state.agent_sessions.write();
                         for info in sessions.values_mut() {
-                            if info.tab_id == tab_id {
+                            if info.tab_id == actual.tab_id {
                                 info.connection_id = Some(connection_id.to_string());
                             }
                         }
+                        drop(sessions);
                         // INFO, not debug: production runs at INFO, so every one of these
                         // decisions used to be invisible in exactly the logs you reach for when an
                         // agent turns out to have been acting as a different tab.
-                        log::info!("Inferred connection affinity for {} → tab {} (sole unbound of {} active agent(s)); peer-routing tools stay locked until initSession",
-                            &connection_id[..connection_id.len().min(11)],
-                            &tab_id[..tab_id.len().min(8)], active_count);
-                        affinity = Some(TabAffinity { tab_id, stated: false });
+                        if disagreed {
+                            log::warn!("{} header disagrees with the live session for {}: header said a different tab, binding {} from the session as INFERRED; peer-routing tools stay locked until initSession",
+                                TAB_ID_HEADER, &connection_id[..connection_id.len().min(11)],
+                                &tab_id[..tab_id.len().min(8)]);
+                        } else if actual.stated {
+                            log::info!("Bound connection {} → tab {} from the {} header (no initSession needed, {} active agent(s))",
+                                &connection_id[..connection_id.len().min(11)],
+                                &tab_id[..tab_id.len().min(8)], TAB_ID_HEADER, active_count);
+                        } else {
+                            log::info!("Inferred connection affinity for {} → tab {} (sole unbound of {} active agent(s)); peer-routing tools stay locked until initSession",
+                                &connection_id[..connection_id.len().min(11)],
+                                &tab_id[..tab_id.len().min(8)], active_count);
+                        }
+                        affinity = Some(actual);
                     } else if active_count > 1 {
                         log::info!("Affinity recovery declined for {}: {} active agents, ambiguous — requiring initSession",
                             &connection_id[..connection_id.len().min(11)], active_count);
@@ -3076,9 +3104,10 @@ async fn handle_message(
     connection_tabs: &ConnectionTabMap,
     connection_runtimes: &ConnectionRuntimeMap,
     connection_id: &str,
+    declared_tab: Option<&str>,
     response_tx: &mpsc::UnboundedSender<String>,
 ) {
-    if let Some(json) = process_message(text, app_handle, state, connection_tabs, connection_runtimes, connection_id).await {
+    if let Some(json) = process_message(text, app_handle, state, connection_tabs, connection_runtimes, connection_id, declared_tab).await {
         let _ = response_tx.send(json);
     }
 }
@@ -3212,6 +3241,43 @@ mod tests {
         let mut h4 = HeaderMap::new();
         h4.insert("x-claude-code-ide-authorization", "".parse().unwrap());
         assert_eq!(extract_auth(&h4), None, "empty header value -> None");
+    }
+
+    // The precedence between the two identity sources, which is the safety-critical part of
+    // the header path. A stale-but-live $MAITERM_TAB_ID (a tmux pane inheriting a sibling
+    // tab's env) names a real tab, so nothing else catches it — only losing to the session
+    // does. Connection ids are ephemeral, so getting this backwards would revert an agent's
+    // own initSession correction on the next SSE flap, and revert it to `stated: true`.
+    #[test]
+    fn a_live_session_outranks_the_header_and_locks_the_binding() {
+        use super::resolve_unbound_affinity;
+        let r = |a: Option<&str>, b: Option<&str>| {
+            resolve_unbound_affinity(a.map(String::from), b.map(String::from))
+        };
+
+        // Agree — the ordinary case, and the only one that earns full trust.
+        let both = r(Some("tab-a"), Some("tab-a")).expect("binds");
+        assert_eq!((both.tab_id.as_str(), both.stated), ("tab-a", true));
+
+        // Disagree — the agent corrected itself, the environment is stale. The SESSION's tab
+        // wins, and `stated: false` keeps sendToBridgedAgent/postCommsReply/driveTab refused.
+        let split = r(Some("tab-b"), Some("tab-a")).expect("binds");
+        assert_eq!(
+            (split.tab_id.as_str(), split.stated),
+            ("tab-b", false),
+            "the header must never override a live session, nor unlock peer tools"
+        );
+
+        // No header — unchanged from before the header existed.
+        let legacy = r(Some("tab-b"), None).expect("binds");
+        assert_eq!((legacy.tab_id.as_str(), legacy.stated), ("tab-b", false));
+
+        // Nothing to contradict it: a fresh session, or several live agents that counting
+        // cannot tell apart. This is what the header is for.
+        let header_only = r(None, Some("tab-a")).expect("binds");
+        assert_eq!((header_only.tab_id.as_str(), header_only.stated), ("tab-a", true));
+
+        assert!(r(None, None).is_none(), "nothing to go on -> no binding");
     }
 
     // The header carries an env-expanded tab id. A runtime that doesn't expand `${...}`,

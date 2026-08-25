@@ -359,18 +359,31 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
 `"x-maiterm-tab": "${MAITERM_TAB_ID}"`, which Claude Code expands from the agent process's
 own environment and sends on **every** MCP request; Codex's equivalent is
 `env_http_headers = { "x-maiterm-tab" = "MAITERM_TAB_ID" }` (a header name → env var NAME
-map). `bind_declared_tab` adopts it in `streamable_http_handler`/`sse_message_handler`
-before the message is dispatched, so tool calls target the right tab from the first request
-with no `initSession`. Why this matters: an MCP request otherwise carries **no identity of
+map). Verified expanded for both `type: http` and `type: sse` (the SSH bridge's transport),
+and on the SSE GET *and* its POSTs. Each transport reads it with `declared_tab_id` and hands
+it to `process_message`, which resolves identity in ONE place, so tool calls target the right
+tab from the first request with no `initSession`. Why this matters: an MCP request otherwise carries **no identity of
 its own**, so the tab id could only reach us via the model reading its SessionStart context
 and typing it into a tool call — which is why a maiTerm restart left every resumed tab
 uninitialized (new process, new connection, and a resumed agent takes no turn until its
 human types). Rules:
-- **Seed, not override** — an existing affinity always wins, so `initSession` remains how an
-  agent *corrects* a wrong identity (the documented stale-`$MAITERM_TAB_ID` recovery is
-  getActiveTab → initSession; re-binding from the still-stale header would undo it).
-- **`stated: true`** — this is the same env var `initSession` reads, arriving by a path the
-  model can't get wrong, not the count-based guess `recover_affinity` makes.
+- **The session outranks the header** (`resolve_unbound_affinity`, and the only part of this
+  worth memorising). The two sources fail in opposite ways: `recover_affinity` reasons about
+  counts so it's a guess, but it reads `agent_sessions`, where an `initSession` correction is
+  durable; the header names one tab exactly, but is only as good as `$MAITERM_TAB_ID` in the
+  shell that launched the agent. So the session wins the *tab* whenever it has an opinion, and
+  the header only upgrades *trust* when the two agree: agree → `stated: true`; disagree →
+  session's tab, `stated: false` (peer tools stay locked, WARN logged); no session → header,
+  `stated: true`; neither → no binding. Never worse than the pre-header behavior by
+  construction — wherever recovery decided before, it still decides.
+- **Why precedence is not academic:** a stale-but-live `$MAITERM_TAB_ID` (a tmux pane
+  inheriting a sibling tab's env — the case `~/.aiterm` sole-tab gating exists for) names a
+  real tab, so the existence check does not catch it. Connection ids are ephemeral and an
+  SSE-over-SSH stream re-mints one every few seconds, so a header that pre-empted recovery
+  would revert the agent's own correction on the next flap, and revert it to `stated: true` —
+  unlocking exactly the tools the correction exists to keep locked. It binds with the entry
+  API for the same reason: a concurrent `initSession` on the same connection must not be
+  silently replaced.
 - **Unexpanded placeholders are rejected** (`declared_tab_id`). A runtime that doesn't expand
   `${...}`, and an env-less shell (tmux/su on a bridged host), both send the literal through
   — verified they do *not* drop the server — so it must never be read as a tab id.
