@@ -442,6 +442,12 @@ function createOverlordStore() {
     /** Raised the permission escalation once — the prompt sits until a human answers, and
      *  re-escalating every tick would bury the supervisor in its own alarm. */
     permissionNotified?: boolean;
+    /** How many times a reply read was actually ATTEMPTED, and how many of those threw.
+     *  Without these the expiry escalation cannot tell "this machine never had a transcript
+     *  to read" from "it read fine and the agent said nothing" — and it used to name the
+     *  first as the cause every time, whichever had happened. */
+    reads: number;
+    readErrors: number;
   }
   const driveWatch = new Map<string, DriveWatch>();
   /** Give up harvesting after the same window driveTab's own directive cleanup uses. */
@@ -1620,21 +1626,41 @@ function createOverlordStore() {
         driveWatch.delete(tabId);
         // Never expire silently. The doctrine promises "you WILL get the answer back", so a
         // watch that gives up owes the supervisor a word — otherwise it waits forever on a
-        // reply that is never coming. The common cause is a transcript this machine cannot
-        // read: an SSH tab's JSONL lives on the remote host, and the mirror shadows it only
-        // for Claude, and only while that tab's bridge tunnel is up (docs/overlord.md §4.1).
-        // Either gap is invisible from here.
+        // reply that is never coming.
+        //
+        // It owes an OBSERVATION, not a theory. This used to assert one cause every time —
+        // "its transcript may not be readable from this machine (an SSH tab's transcript
+        // lives on the remote host)" — whichever of the three had actually happened. That
+        // guess was read as a finding: it reached the supervisor as the explanation, was
+        // relayed to the human as fact, and became the stated rationale for a rule change,
+        // all without anything ever checking whether that tab's transcript was readable.
+        // Everything needed to tell the cases apart is right here.
+        const ts = facts.get(tabId)?.last_turn_ts;
+        const why = !ts
+          ? `This machine has no readable transcript for that tab, so no reply of any kind ` +
+            `can be read from it. On an SSH tab the transcript lives on the remote host and ` +
+            `is mirrored here only for Claude, and only while that tab's bridge is up.`
+          : w.reads === 0
+            ? `Its transcript is readable here, and it has recorded no turn since the ` +
+              `directive was typed — so the directive may never have landed in its input, ` +
+              `or nothing is running in that tab.`
+            : w.readErrors === w.reads
+              ? `Its transcript moved, but every attempt to read the reply failed.`
+              : `Its transcript moved and was read ${w.reads} time${w.reads === 1 ? '' : 's'}, ` +
+                `but no reply text came back — it may have answered with tool calls only, or ` +
+                `be narrating in a form the reader skips.`;
         escalate(
           tabId,
           null,
           'drive_reply',
           `No reply could be read from ${tabDisplayName(tabId)} for your directive ` +
-            `${JSON.stringify(w.text.slice(0, 120))}. Its transcript may not be readable from ` +
-            `this machine (an SSH tab's transcript lives on the remote host). Do not keep ` +
-            `waiting — ask the tab directly with driveTab, and tell it to answer you with ` +
-            `replyToOverlord.`,
+            `${JSON.stringify(w.text.slice(0, 120))}. ${why} Do not keep waiting — ask the ` +
+            `tab directly with driveTab, and tell it to answer you with replyToOverlord.`,
         );
-        logInfo(`overlord: drive watch expired unread for ${tabId.slice(0, 8)}`);
+        logInfo(
+          `overlord: drive watch expired unread for ${tabId.slice(0, 8)} ` +
+            `(last_turn_ts=${ts ?? 'none'} reads=${w.reads} errors=${w.readErrors})`,
+        );
         continue;
       }
       const ts = facts.get(tabId)?.last_turn_ts;
@@ -1643,10 +1669,12 @@ function createOverlordStore() {
 
       let reply: string | null = null;
       let readFailed = false;
+      w.reads++;
       try {
         reply = await commands.getAgentReplySince(tabId, w.baseline);
       } catch (e) {
         readFailed = true;
+        w.readErrors++;
         logError(`overlord: reply read failed for ${tabId.slice(0, 8)}: ${e}`);
       }
       // KEEP the watch on an empty or failed read and try again next tick. A turn can be
@@ -2922,6 +2950,8 @@ function createOverlordStore() {
         baseline: facts.get(tabId)?.last_turn_ts ?? Date.now(),
         sentAt: Date.now(),
         text,
+        reads: 0,
+        readErrors: 0,
       });
       // Fire-and-forget from the engine's perspective; the ack/turn-end clears it.
       setTimeout(() => {
