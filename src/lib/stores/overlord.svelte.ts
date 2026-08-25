@@ -307,13 +307,46 @@ function matchRule(rules: OverlordRule[], key: string | undefined): OverlordRule
   return rules.find((r) => r.id === key || r.default_id === key);
 }
 
-/** Apply one approved change. Enforces the field tiers mechanically: guards are never
- *  taken from the agent (created rules get AGENT_RULE_GUARDS; update patches have any
- *  guards stripped), and applied edits set user_modified so seeding won't overwrite. */
-function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): OverlordRule[] {
+/**
+ * Why a change cannot be applied, or null if it can.
+ *
+ * This exists because the answer used to be discarded. `applyRuleChange` returned the list
+ * UNCHANGED on every one of these, and the caller counted that as success — so a `create`
+ * missing `when` or `sequence` was ledgered "rule change approved", reported approved to the
+ * agent, shown as approved to the human, and produced no rule. Nothing anywhere said no.
+ *
+ * Checked at PROPOSE time as well as apply time, so an agent gets a correctable error
+ * instead of a false success, and the human is never asked to approve something unbuildable.
+ */
+function changeProblem(c: OverlordRuleChange, rules: OverlordRule[]): string | null {
+  if (c.op === 'create') {
+    if (!c.rule) return 'op "create" needs a `rule` object.';
+    const missing: string[] = [];
+    if (!c.rule.name) missing.push('name');
+    if (!c.rule.when?.event) missing.push('when.event');
+    if (!c.rule.sequence?.length) missing.push('sequence (at least one step)');
+    if (missing.length) return `op "create" is missing: ${missing.join(', ')}.`;
+    const bad = c.rule.sequence!.findIndex((s) => !s?.text || (s.kind !== 'process' && s.kind !== 'slash'));
+    return bad === -1 ? null : `op "create": sequence[${bad}] needs a "kind" of "process" or "slash" and a non-empty "text".`;
+  }
+  if (!c.rule_id) return `op "${c.op}" needs rule_id (a rule id or a default_id).`;
+  if (c.op === 'update' && !c.patch) return 'op "update" needs a `patch` object.';
+  // Checked against the ruleset as it stands. A change naming a rule that isn't there was
+  // the other silent no-op: matchRule found nothing and the list came back untouched.
+  return matchRule(rules, c.rule_id)
+    ? null
+    : `op "${c.op}": no rule matches rule_id ${JSON.stringify(c.rule_id)}.`;
+}
+
+/** Apply one approved change, or null if it could not be applied. Enforces the field tiers
+ *  mechanically: guards are never taken from the agent (created rules get AGENT_RULE_GUARDS;
+ *  update patches have any guards stripped), and applied edits set user_modified so seeding
+ *  won't overwrite. Returning null rather than the unchanged list is what lets the caller
+ *  tell "applied" from "silently did nothing" — see `changeProblem`. */
+function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): OverlordRule[] | null {
   switch (c.op) {
     case 'create': {
-      if (!c.rule?.name || !c.rule.when || !c.rule.sequence?.length) return rules;
+      if (!c.rule?.name || !c.rule.when || !c.rule.sequence?.length) return null;
       const rule: OverlordRule = {
         id: crypto.randomUUID(),
         name: c.rule.name,
@@ -338,7 +371,7 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
     }
     case 'update': {
       const target = matchRule(rules, c.rule_id);
-      if (!target || !c.patch) return rules;
+      if (!target || !c.patch) return null;
       const { guards: _guards, id: _id, default_id: _did, ...patch } = c.patch;
       // Guards never come from the agent — but changing the CONDITION can contradict the
       // guards already on the rule, which would leave an existing, working rule dead after
@@ -348,18 +381,18 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
     }
     case 'rescope': {
       const target = matchRule(rules, c.rule_id);
-      if (!target) return rules;
+      if (!target) return null;
       return rules.map((r) => (r.id === target.id ? { ...r, workspaces: c.workspaces ?? [], user_modified: true } : r));
     }
     case 'enable':
     case 'disable': {
       const target = matchRule(rules, c.rule_id);
-      if (!target) return rules;
+      if (!target) return null;
       return rules.map((r) => (r.id === target.id ? { ...r, enabled: c.op === 'enable' } : r));
     }
     case 'delete': {
       const target = matchRule(rules, c.rule_id);
-      if (!target) return rules;
+      if (!target) return null;
       return rules.filter((r) => r.id !== target.id);
     }
   }
@@ -379,7 +412,9 @@ function createOverlordStore() {
   let triageRun = $state<TriageRunProgress | null>(null);
   let triageCancelled = false;
   // Resolver for the MCP proposeRuleChanges round trip (the modal answers it).
-  let ruleChangeResolver: ((res: { approved: string[]; rejected: string[]; pending?: boolean }) => void) | null = null;
+  let ruleChangeResolver:
+    | ((res: { approved: string[]; rejected: string[]; failed?: string[]; pending?: boolean }) => void)
+    | null = null;
   // Rituals and outstanding directives live in plain Maps (engine-internal, mutated from
   // async loops). This counter is the reactivity bridge for the board — same bump()
   // pattern as agentMesh. Every mutation of those maps calls bumpLive().
@@ -2774,6 +2809,23 @@ function createOverlordStore() {
         return { error: 'A rule-change batch is already awaiting the human. Wait for it to resolve.' };
       }
       if (!changes?.length) return { error: 'No changes given.' };
+      // Validate before the human ever sees it. The MCP schema takes `rule` as a bare
+      // object, so a create with no `when` or no `sequence` arrives well-formed, renders
+      // fine in the approval prompt, and then applies to nothing. Refuse the batch with the
+      // specific field named — the agent can fix that; it cannot fix a false "approved".
+      const problems = changes
+        .map((c, i) => {
+          const p = changeProblem(c, $state.snapshot(preferencesStore.overlordRules) as OverlordRule[]);
+          return p ? `changes[${i}]: ${p}` : null;
+        })
+        .filter((p): p is string => p !== null);
+      if (problems.length) {
+        return {
+          error:
+            `${problems.length} change${problems.length === 1 ? '' : 's'} cannot be applied, so the batch was not shown to the human. ` +
+            `Fix and re-propose — this is not a rejection.\n${problems.join('\n')}`,
+        };
+      }
       const repitched = changes.filter((c) => rejectedChangeKeys.has(changeKey(c)));
       if (repitched.length === changes.length) {
         return { error: 'Every change in this batch was already rejected by the human. Do not re-propose.' };
@@ -2786,7 +2838,12 @@ function createOverlordStore() {
       };
       pendingRuleChanges = batch;
       dispatch('Overlord', 'Overlord proposes rule changes — review in the approval prompt.', 'info');
-      const decision = await new Promise<{ approved: string[]; rejected: string[]; pending?: boolean }>((resolve) => {
+      const decision = await new Promise<{
+        approved: string[];
+        rejected: string[];
+        failed?: string[];
+        pending?: boolean;
+      }>((resolve) => {
         ruleChangeResolver = resolve;
         // Answer inside the MCP response window; the modal stays up past this.
         setTimeout(() => {
@@ -2802,7 +2859,13 @@ function createOverlordStore() {
           note: 'The human has not decided yet. The approval prompt stays open; check the ruleset later. Do not re-propose.',
         };
       }
-      return { approved: decision.approved, rejected: decision.rejected };
+      return {
+        approved: decision.approved,
+        rejected: decision.rejected,
+        // Only present when something the human said yes to could not be built. Absent is
+        // the normal case; a non-empty list means the ruleset does NOT contain it.
+        ...(decision.failed?.length ? { failed: decision.failed } : {}),
+      };
     },
 
     /** The approval modal's answer: apply the selected change indexes, reject the rest. */
@@ -2812,6 +2875,7 @@ function createOverlordStore() {
       pendingRuleChanges = null;
       const approved: string[] = [];
       const rejected: string[] = [];
+      const failed: string[] = [];
       let rules = ($state.snapshot(preferencesStore.overlordRules) as OverlordRule[]);
       batch.changes.forEach((change, i) => {
         const label = describeChange(change);
@@ -2820,23 +2884,43 @@ function createOverlordStore() {
           rejected.push(label);
           return;
         }
+        // Look the target up BEFORE applying — a delete removes it from the list — but act
+        // on it only once the change has actually landed.
+        const target = change.op === 'delete' ? matchRule(rules, change.rule_id) : undefined;
+        const next = applyRuleChange(rules, change);
+        if (!next) {
+          // The human said yes to something that cannot be built. Saying "approved" here is
+          // how "SSH tabs must report explicitly" came to be ledgered as approved, reported
+          // approved to the agent, and never exist. Propose-time validation should stop this
+          // reaching the modal at all; this is the backstop for a ruleset that moved in
+          // between (the target rule deleted while the prompt was open).
+          const why = changeProblem(change, rules) ?? 'it no longer applies to the current ruleset';
+          failed.push(`${label} — ${why}`);
+          ledger(batch.tabId, null, 'overlord_judgment', 0,
+            { kind: 'process', text: `rule change approved but NOT applied: ${label} — ${why}` }, 'aborted');
+          return;
+        }
+        rules = next;
         // Deleting a seeded default must also hide its default_id, or the next
         // startup re-seeds it right back.
-        if (change.op === 'delete') {
-          const target = matchRule(rules, change.rule_id);
-          if (target?.default_id && !preferencesStore.hiddenDefaultOverlordRules.includes(target.default_id)) {
-            void preferencesStore.setHiddenDefaultOverlordRules([
-              ...preferencesStore.hiddenDefaultOverlordRules,
-              target.default_id,
-            ]);
-          }
+        if (target?.default_id && !preferencesStore.hiddenDefaultOverlordRules.includes(target.default_id)) {
+          void preferencesStore.setHiddenDefaultOverlordRules([
+            ...preferencesStore.hiddenDefaultOverlordRules,
+            target.default_id,
+          ]);
         }
-        rules = applyRuleChange(rules, change);
         approved.push(label);
         ledger(batch.tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `rule change approved: ${label}` }, 'sent');
       });
       if (approved.length) void preferencesStore.setOverlordRules(rules);
-      ruleChangeResolver?.({ approved, rejected });
+      if (failed.length) {
+        dispatch(
+          'Overlord',
+          `${failed.length} approved rule change${failed.length === 1 ? '' : 's'} could not be applied — see the ledger.`,
+          'error',
+        );
+      }
+      ruleChangeResolver?.({ approved, rejected, failed });
       ruleChangeResolver = null;
     },
 

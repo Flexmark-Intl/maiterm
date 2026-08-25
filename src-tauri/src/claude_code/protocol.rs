@@ -786,7 +786,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                             "type": "object",
                             "properties": {
                                 "op": { "type": "string", "enum": ["create", "update", "rescope", "enable", "disable", "delete"] },
-                                "rule": { "type": "object", "description": "op create: the full rule (id may be omitted)" },
+                                "rule": overlord_rule_schema(),
                                 "rule_id": { "type": "string", "description": "ops other than create: target rule id or default_id" },
                                 "patch": { "type": "object", "description": "op update: partial rule fields (guards are ignored)" },
                                 "workspaces": { "type": "array", "items": { "type": "string" }, "description": "op rescope: new workspace scope ([] = global)" }
@@ -801,6 +801,60 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
     ]).as_array().unwrap().clone());
 
     serde_json::json!({ "tools": tools })
+}
+
+/// Schema for `proposeRuleChanges`' `rule` field (op `create`).
+///
+/// Spelled out because a bare `{"type":"object"}` let a create with no `when` and no
+/// `sequence` validate here, render fine in the human's approval prompt, and then apply to
+/// nothing — approved, ledgered, and absent from the ruleset. The engine validates these
+/// same fields again before the prompt opens; this is what tells the agent the shape in the
+/// first place.
+///
+/// Its own function rather than inline: nesting it in the tools `json!` blew the macro's
+/// recursion limit.
+fn overlord_rule_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "op create: the full rule (id and guards are set by maiTerm; guards sent here are ignored)",
+        "required": ["name", "when", "sequence"],
+        "properties": {
+            "name": { "type": "string", "description": "Short rule name shown in Preferences" },
+            "description": { "type": "string" },
+            "enabled": { "type": "boolean", "description": "Default true" },
+            "cooldown": { "type": "number", "description": "Seconds, per tab. Default 1800" },
+            "workspaces": { "type": "array", "items": { "type": "string" }, "description": "[] or omitted = global" },
+            "when": {
+                "type": "object",
+                "description": "The condition. Each event takes its own extra field: context_pct→at_or_above, tab_idle→minutes, task_stale→days, permission_pending→minutes, directive_unacked→minutes; turn_end, commit, agent_unready and no_todo_list take none.",
+                "required": ["event"],
+                "properties": {
+                    "event": { "type": "string", "enum": ["context_pct", "turn_end", "commit", "tab_idle", "task_stale", "agent_unready", "no_todo_list", "permission_pending", "directive_unacked"] },
+                    "at_or_above": { "type": "number" },
+                    "minutes": { "type": "number" },
+                    "days": { "type": "number" }
+                }
+            },
+            "sequence": {
+                "type": "array",
+                "description": "One step = a directive; more than one = a gated ritual",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["kind", "text"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["process", "slash"] },
+                        "text": { "type": "string", "description": "The directive, typed verbatim into the tab" },
+                        "runtimes": { "type": "array", "items": { "type": "string", "enum": ["claude", "codex", "gemini"] }, "description": "slash steps only; omit = all" },
+                        "await": { "type": "object", "description": "Gate to wait for after injection; omit = fire-and-forget" },
+                        "timeout_seconds": { "type": "number" },
+                        "on_timeout": { "type": "string", "enum": ["abort", "continue", "notify_human", "escalate_to_overlord"] }
+                    }
+                }
+            },
+            "supersedes": { "type": "array", "items": { "type": "string" }, "description": "Rule ids / default_ids this replaces in scope" }
+        }
+    })
 }
 
 pub fn initialize_response(client_protocol_version: Option<&str>) -> Value {
