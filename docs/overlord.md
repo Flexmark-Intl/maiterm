@@ -219,7 +219,10 @@ Verified in the current tree — Overlord is mostly an aggregation layer.
 
 `require_live_repl` guards against a directive landing in **bash**. That needs a live agent
 *process*. Routing a reply back needs a *registered* session — `claudeState` is fed only by
-hooks, and a hook cannot name its tab until `initSession` binds the connection.
+hooks, and (when this was written) a hook could not name its tab until `initSession` bound the
+connection. That second half no longer holds: the SessionStart command hook now POSTs
+`?tab_id=$MAITERM_TAB_ID` itself, so a tab registers when its agent STARTS rather than when it
+first calls a tool. `unbound` should therefore become rare — see the watch item below.
 
 Those are different facts and were one boolean. A tab resumed from a previous session has a
 running agent and no registration, so the merged test said `no_live_repl` — a phrase that
@@ -237,6 +240,18 @@ the guard that reported it: the only way to reach an unregistered tab is to type
 - `unknown` (the tick's batched probe never classified the tab — its pane isn't mounted)
   refuses with `not_classified`, not with "dead".
 - `stopped` keeps `no_live_repl`, which is now true when it is said.
+
+**Watch item (undeployed as of 2026-08-25): `ready` is now reachable earlier than it used to
+be.** Registration used to *imply* the agent had taken a turn, because only `initSession` could
+create it. Now the SessionStart hook does, at process start — so `ready` (registered AND
+running) can be true while Claude is still replaying a resumed transcript and not yet reading
+input, and a `driveTab` directive injected then may go unread. It fails silently, which is the
+failure mode this guard exists to prevent, so it is worth watching for on the first deploy:
+a directive acked by nobody, with the tab's own next turn showing no sign of it. The fix, if it
+bites, is one extra condition — require the tab to have been `idle` at least once (a completed
+turn), which is what `agentDelivery` already models for mesh and bridge. Deliberately not done
+up front: the bytes land in the tty input buffer and raw mode preserves pending input, so it may
+never actually bite.
 
 Cost note: the unregistered branch reads the tick's batched classification rather than
 firing its own probe. `get_agent_liveness` TTL-caches the process sweep but *not* the

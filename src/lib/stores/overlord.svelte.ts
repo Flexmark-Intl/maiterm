@@ -675,7 +675,17 @@ function createOverlordStore() {
     return kind === 'unbound' ? 'unbound' : kind === 'stopped' ? 'stopped' : 'unknown';
   }
 
-  /** The require_live_repl hard precondition (§3): registered AND running. */
+  /**
+   * The require_live_repl hard precondition (§3): registered AND running.
+   *
+   * WATCH ITEM (docs/overlord.md §4.0): "registered" used to imply the agent had taken a
+   * turn, because only initSession could create the session mapping. The SessionStart hook
+   * now creates it at PROCESS START, so this can be true while Claude is still replaying a
+   * resumed transcript and not yet reading input — a directive injected then may go unread,
+   * silently, which is the failure this guard exists to prevent. If that turns out to bite,
+   * add one condition: the tab has been `idle` at least once (a completed turn), the same
+   * fact agentDelivery already models for mesh and bridge.
+   */
   async function hasLiveRepl(tabId: string): Promise<boolean> {
     return (await replState(tabId)) === 'ready';
   }
