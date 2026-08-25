@@ -292,17 +292,39 @@ fn hook_url_marker(port: u16) -> String {
 fn build_our_hooks(port: u16, auth: &str) -> serde_json::Value {
     let hooks_url = hook_url_marker(port);
 
-    // SessionStart command hook: reads session_id from stdin JSON, echoes tab ID + session ID
-    // into Claude's context so Claude passes both to initSession.
-    // Gate on $MAITERM_PORT matching our port to prevent dev/prod cross-talk.
+    // SessionStart command hook. It is the only hook that runs INSIDE the tab's shell, so it
+    // is the only one that can see `$MAITERM_TAB_ID` — which is why it, not the http hook,
+    // forwards the event to us with the tab attached (`?tab_id=`). That POST is what links
+    // session → tab without the agent calling initSession: a resumed agent takes no turn
+    // until its human types, so anything that waits on a tool call waits forever.
+    //
+    // It captures stdin ONCE (`cat` is not re-readable), re-uses it for both the session-id
+    // extraction and the POST body, and echoes only on stdout — stdout becomes the agent's
+    // SessionStart context, so curl is silenced and its reply (the standing instructions the
+    // server tailors to this tab) is captured instead.
+    //
+    // `--max-time` is not optional: on a bridged host this URL is a reverse tunnel, and a
+    // zombie tunnel port accepts the connect and then never answers, which would hang the
+    // hook until its 5s timeout on every single session start.
+    //
+    // Gate on $MAITERM_PORT matching our port to prevent dev/prod cross-talk. When
+    // $MAITERM_TAB_ID is absent (tmux/su shells) the whole block is skipped and the http
+    // hook's pending-pool path still runs, exactly as before.
     let mcp_key = mcp_server_key();
     let session_start_cmd = format!(
         "{{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
-         [ -n \"$MAITERM_TAB_ID\" ] && \
-         MAITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && \
+         [ -n \"$MAITERM_TAB_ID\" ] && {{ \
+         MAITERM_IN=$(cat); \
+         MAITERM_SID=$(printf '%s' \"$MAITERM_IN\" | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1); \
+         MAITERM_PRIME=$(curl -s --connect-timeout 2 --max-time 4 \
+         -H \"x-claude-code-ide-authorization: {auth}\" -H 'content-type: application/json' \
+         --data-binary \"$MAITERM_IN\" \
+         \"http://127.0.0.1:{port}/hooks?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); \
          echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. \
-You MUST immediately call the {mcp_key} initSession tool with this tabId and sessionId before responding to the user. You can run it in parallel with your other opening tool calls to save a round-trip, but not alongside other maiterm calls. This is required for correct tab targeting.' || true",
+maiTerm already knows this tab and session — you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the {mcp_key} initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; \
+         }} || true",
         port = port,
+        auth = auth,
         mcp_key = mcp_key,
     );
 
@@ -1051,6 +1073,63 @@ fn cleanup_stale_hooks(stale_ports: &[(u16, String)]) -> Result<(), String> {
 
     log::info!("Cleaned {} stale hook entries from ~/.claude/settings.json", removed_count);
     Ok(())
+}
+
+#[cfg(test)]
+mod session_start_hook_tests {
+    use super::*;
+
+    fn session_start_command(port: u16, auth: &str) -> String {
+        build_our_hooks(port, auth)["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("SessionStart command hook is a string")
+            .to_string()
+    }
+
+    /// The command is a dense one-liner mixing single quotes, double quotes, `$(...)`,
+    /// a `{ ...; }` group and a `&&`/`||` chain — every past break here has been a quoting
+    /// slip, and a broken hook fails silently at session start (the agent just never gets
+    /// its context). Parse it with the real shell rather than trusting the format string.
+    #[test]
+    fn session_start_command_is_valid_shell() {
+        let cmd = session_start_command(51234, "AUTHTOK");
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .expect("sh is available");
+        assert!(
+            out.status.success(),
+            "hook command is not valid shell:\n{}\n--- stderr ---\n{}",
+            cmd,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn session_start_command_forwards_the_event_with_its_tab() {
+        let cmd = session_start_command(51234, "AUTHTOK");
+        // The POST is what links session → tab without waiting on an initSession call.
+        assert!(cmd.contains("tab_id=$MAITERM_TAB_ID"), "posts the tab id:\n{}", cmd);
+        assert!(cmd.contains("prime=1"), "asks for the standing instructions:\n{}", cmd);
+        assert!(cmd.contains("/hooks?"), "posts to the hooks endpoint:\n{}", cmd);
+        assert!(cmd.contains("AUTHTOK"), "authenticates:\n{}", cmd);
+        // A bridged host's hooks URL is a reverse tunnel; a zombie port accepts the connect
+        // and never answers, so an unbounded curl would hang every session start.
+        assert!(cmd.contains("--max-time"), "bounds the request:\n{}", cmd);
+        // stdin can only be read once — it feeds both the session-id parse and the body.
+        assert!(cmd.contains("MAITERM_IN=$(cat)"), "captures stdin once:\n{}", cmd);
+        // Sweep/dedup matches our own hook on this exact phrase; losing it means every
+        // re-install appends another copy instead of replacing ours.
+        assert!(
+            cmd.contains(MAITERM_CMD_HOOK_MARKER),
+            "keeps the sweep marker '{}':\n{}",
+            MAITERM_CMD_HOOK_MARKER,
+            cmd
+        );
+        assert!(is_maiterm_command_hook(&build_our_hooks(51234, "AUTHTOK")["SessionStart"][0]));
+    }
 }
 
 #[cfg(test)]

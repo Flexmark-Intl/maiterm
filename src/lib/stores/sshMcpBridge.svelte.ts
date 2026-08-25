@@ -219,13 +219,25 @@ function buildSetupScript(
   // (needed when Claude runs inside tmux where env vars weren't inherited). That file
   // only exists on sole-tab hosts — on shared hosts it's removed to avoid handing this
   // env-less agent a sibling tab's identity, so those agents fail closed to "needs init".
+  // Mirrors the local hook in lockfile.rs build_our_hooks — keep the two in step.
+  // It captures stdin ONCE and POSTs it back through the tunnel with ?tab_id=, which is what
+  // links session → tab without the agent calling initSession (a resumed agent takes no turn
+  // until its human types). --max-time is mandatory here above all: this URL IS a reverse
+  // tunnel, and a zombie tunnel port accepts the connect then never answers.
+  // NOTE: no apostrophes inside the single-quoted echo string — one would close the quote.
   const sessionStartCmd =
     "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
     "{ [ \"$MAITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$MAITERM_PORT\" ]; } && " +
-    "[ -n \"$MAITERM_TAB_ID\" ] && " +
-    "MAITERM_SID=$(cat | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1) && " +
+    "[ -n \"$MAITERM_TAB_ID\" ] && { " +
+    "MAITERM_IN=$(cat); " +
+    "MAITERM_SID=$(printf '%s' \"$MAITERM_IN\" | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1); " +
+    "MAITERM_PRIME=$(curl -s --connect-timeout 2 --max-time 4 " +
+    "-H \"x-claude-code-ide-authorization: " + authToken + "\" -H 'content-type: application/json' " +
+    "--data-binary \"$MAITERM_IN\" " +
+    "\"" + hooksUrl + "?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); " +
     "echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. " +
-    "You MUST immediately call the maiterm initSession tool with this tabId and sessionId before responding to the user. You can run it in parallel with your other opening tool calls to save a round-trip, but not alongside other maiterm calls. This is required for correct tab targeting.' || true";
+    "maiTerm already knows this tab and session — you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the maiterm initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; " +
+    "} || true";
 
   const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
 

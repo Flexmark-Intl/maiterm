@@ -494,6 +494,57 @@ fn persisted_resume_session_id(
     None
 }
 
+/// The standing instructions an agent needs at session start, for the tab it is running in.
+///
+/// Two callers, one text: `initSession`'s response, and the SessionStart hook's `prime=1`
+/// reply (which the command hook echoes into the agent's context). The hook path is what
+/// reaches an agent that never calls `initSession` — including a resumed one, which takes no
+/// turn at all until its human types. Empty when the tab needs neither.
+fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
+    let mut out = String::new();
+
+    // Overlord standing instruction (docs/overlord.md §8): only when the feature is on AND
+    // this tab's window actually has an Overlord workspace.
+    let overlord_present = {
+        let app_data = state.app_data.read();
+        app_data.preferences.overlord_enabled
+            && app_data.windows.iter().any(|w| {
+                w.workspaces.iter().any(|ws| ws.overlord)
+                    && w.workspaces.iter().any(|ws| {
+                        ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id))
+                    })
+            })
+    };
+    if overlord_present {
+        out.push_str(
+            "\n\nThis window has an Overlord coordinating work across tabs. Call replyToOverlord \
+             with kind:'ready' now. When you finish something you were asked to do, ack it. \
+             If you're blocked on a human decision, escalate with needs_human.",
+        );
+    }
+
+    // maiTerm task priming (docs/tasks.md §5) — on EVERY agent tab, not just supervised ones,
+    // so task state is consistent whether or not anyone is watching. The migration clause
+    // matters because this also fires on resume/fork/compact: that is precisely when an agent
+    // is mid-project holding a live list, and without it the work already in flight stays
+    // invisible until the agent's next multi-step task. Re-sending is safe — createTasks
+    // dedups on normalized title within the tab.
+    if state.app_data.read().preferences.tasks_enabled {
+        out.push_str(
+            "\n\nTrack multi-step work with the maiTerm task tools (createTasks/updateTasks) \
+             rather than your runtime's own todo list, so your human and this window's board \
+             can see it. Keep statuses current as you go. If you are working on more than one \
+             distinct thing, give each its own `workstream` name on createTasks so the jobs \
+             stay separate. If you ALREADY have a task or todo list for this project, migrate \
+             it now: one createTasks call with the outstanding items, carrying their current \
+             status across and skipping anything already finished. Then work from the maiTerm \
+             list.",
+        );
+    }
+
+    out
+}
+
 /// Pure selection rule for the empty-sessionId path of `initSession` (unit-tested): which
 /// pending SessionStart entry, if any, may THIS tab claim? The pool is shared across all tabs
 /// (Claude http hooks carry no tab_id, so SessionStart can only buffer here), so claiming must
@@ -2228,48 +2279,11 @@ async fn process_message(
                         }));
                     }
 
-                    // Overlord standing instruction (docs/overlord.md §8): only when the
-                    // feature is on AND this tab's window actually has an Overlord workspace.
-                    let overlord_present = {
-                        let app_data = state.app_data.read();
-                        app_data.preferences.overlord_enabled
-                            && app_data.windows.iter().any(|w| {
-                                w.workspaces.iter().any(|ws| ws.overlord)
-                                    && w.workspaces.iter().any(|ws| {
-                                        ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id))
-                                    })
-                            })
-                    };
                     let mut init_text = format!(
                         "Session initialized. All subsequent tool calls on this connection will target tab {}. You no longer need to pass tabId.",
                         tab_id
                     );
-                    if overlord_present {
-                        init_text.push_str(
-                            "\n\nThis window has an Overlord coordinating work across tabs. Call replyToOverlord \
-                             with kind:'ready' now. When you finish something you were asked to do, ack it. \
-                             If you're blocked on a human decision, escalate with needs_human.",
-                        );
-                    }
-                    // maiTerm task priming (docs/tasks.md §5) — on EVERY agent tab, not just
-                    // supervised ones, so task state is consistent whether or not anyone is
-                    // watching. The migration clause matters because initSession also fires on
-                    // resume/fork/compact: that is precisely when an agent is mid-project
-                    // holding a live list, and without it the work already in flight stays
-                    // invisible until the agent's next multi-step task. Re-sending is safe —
-                    // createTasks dedups on normalized title within the tab.
-                    if state.app_data.read().preferences.tasks_enabled {
-                        init_text.push_str(
-                            "\n\nTrack multi-step work with the maiTerm task tools (createTasks/updateTasks) \
-                             rather than your runtime's own todo list, so your human and this window's board \
-                             can see it. Keep statuses current as you go. If you are working on more than one \
-                             distinct thing, give each its own `workstream` name on createTasks so the jobs \
-                             stay separate. If you ALREADY have a task or todo list for this project, migrate \
-                             it now: one createTasks call with the outstanding items, carrying their current \
-                             status across and skipping anything already finished. Then work from the maiTerm \
-                             list.",
-                        );
-                    }
+                    init_text.push_str(&session_priming_text(state, &tab_id));
                     let resp = JsonRpcResponse::success(
                         id,
                         serde_json::json!({
@@ -2653,6 +2667,14 @@ async fn hooks_handler(
         }
     });
 
+    // Kept aside for the `prime=1` reply at the end — the match arms below consume
+    // `tab_id_from_param`. Only cloned when a reply is actually asked for.
+    let prime_tab = if params.contains_key("prime") {
+        tab_id_from_param.clone()
+    } else {
+        None
+    };
+
     match normalize_hook_event(runtime, hook_event_name, &event) {
         HookPhase::SessionStart => {
             let tab_id = tab_id_from_param.clone().unwrap_or_default();
@@ -2678,15 +2700,34 @@ async fn hooks_handler(
                         connection_id: None,
                     },
                 );
+                // SessionStart arrives TWICE for a Claude tab that has both hooks: once from
+                // the command hook's curl (this branch — it carries ?tab_id=) and once from
+                // Claude's own http hook (no tab id). Order isn't guaranteed, so drop any
+                // buffered twin now that the tab is known — exactly as initSession does —
+                // or a SIBLING tab's init could claim it and bind that agent to this tab.
+                // Release `sessions` first: nothing else in the server holds these two locks
+                // at once, and this is not the place to introduce the first nesting order.
+                drop(sessions);
+                let mut pending = srv.state.pending_agent_sessions.write();
+                pending.retain(|(sid, _, _)| *sid != session_id);
                 log::info!("Claude hook: session {} started for tab {}", session_id, tab_id);
             } else if !session_id.is_empty() {
-                // No tab_id yet — buffer for initSession to pick up
-                let mut pending = srv.state.pending_agent_sessions.write();
-                // Clean entries older than 30s
-                let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
-                pending.retain(|(_, _, ts)| *ts > cutoff);
-                pending.push((session_id.clone(), cwd.clone(), std::time::Instant::now()));
-                log::info!("Claude hook: session {} started (pending tab assignment)", session_id);
+                // The other half of that race: the twin already told us this session's tab,
+                // so there is nothing to assign. Buffering anyway would republish a solved
+                // session into the pool every tab's init draws from.
+                let known = srv.state.agent_sessions.read().contains_key(&session_id);
+                if known {
+                    log::debug!("Claude hook: session {} already bound to a tab, not buffering",
+                        &session_id[..session_id.len().min(8)]);
+                } else {
+                    // No tab_id yet — buffer for initSession to pick up
+                    let mut pending = srv.state.pending_agent_sessions.write();
+                    // Clean entries older than 30s
+                    let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(30);
+                    pending.retain(|(_, _, ts)| *ts > cutoff);
+                    pending.push((session_id.clone(), cwd.clone(), std::time::Instant::now()));
+                    log::info!("Claude hook: session {} started (pending tab assignment)", session_id);
+                }
             }
 
             // Persist the tab's runtime for NON-Claude runtimes from the hook path.
@@ -2728,15 +2769,14 @@ async fn hooks_handler(
                 "source": source,
             }));
 
-            // Non-Claude runtimes (Codex) don't pass sessionId to initSession — nothing
-            // tells their agent the id — so the SessionStart hook (which carries both the
-            // resumable session id and the tab) is where we surface the init-session
-            // event that wires <runtime>SessionId + auto-resume on the frontend. Claude
-            // still gets its init-session from the initSession tool (explicit sessionId).
-            if runtime != crate::state::AgentRuntime::Claude
-                && !session_id.is_empty()
-                && !tab_id.is_empty()
-            {
+            // The SessionStart hook carries both the resumable session id and (since the
+            // command hook forwards ?tab_id=) the tab, so it can wire <runtime>SessionId +
+            // auto-resume on the frontend by itself. This used to be gated to non-Claude
+            // runtimes because only they lacked an initSession that knew the session id;
+            // Claude needs it too, since that wiring otherwise waits on a tool call the
+            // agent cannot make until its human types — the whole reason a restart left
+            // resumed tabs unwired. The frontend handler is idempotent.
+            if !session_id.is_empty() && !tab_id.is_empty() {
                 emit_dual(&srv.app_handle, "agent-init-session", "claude-init-session", serde_json::json!({
                     "runtime": runtime_key,
                     "tab_id": &tab_id,
@@ -3012,6 +3052,16 @@ async fn hooks_handler(
                 crate::mailink::mirror::schedule_fetch(&srv.state, &tab_id, &session_id, tp);
             }
         }
+    }
+
+    // `prime=1` is set ONLY by our own SessionStart command hook's curl — never by the
+    // agent's http hooks, whose URL carries no query string. That distinction is
+    // load-bearing: the runtime parses an http hook's RESPONSE BODY as hook output, so a
+    // body must never reach it, while our curl captures this one and echoes it into the
+    // agent's context. It's how the standing instructions reach an agent that never calls
+    // initSession — including a resumed one, which takes no turn until its human types.
+    if let Some(tab) = prime_tab.as_deref() {
+        return session_priming_text(&srv.state, tab).into_response();
     }
 
     StatusCode::OK.into_response()

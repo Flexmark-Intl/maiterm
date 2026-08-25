@@ -342,8 +342,8 @@ when the tab is in a mesh workspace, else the 1:1 `agentBridgeStore`.
 Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up on app exit and stale lockfile sweep.
 
 **Hooks registered:**
-- `SessionStart` (command): Echoes tab ID into Claude's context. Gated on `$MAITERM_PORT` matching server port (prevents dev/prod cross-talk). Output appears collapsed in TUI ("Ran 1 start hook") but injected into model context as system-reminder.
-- `SessionStart` (HTTP): POST to `/hooks` with `{session_id, cwd, source, model}`. Registers session→tab mapping in `AppState.agent_sessions`.
+- `SessionStart` (command): the only hook that runs **inside the tab's shell**, so the only one that can see `$MAITERM_TAB_ID`. It captures stdin once, POSTs the event to `/hooks?tab_id=$MAITERM_TAB_ID&prime=1`, and echoes the tab id, the session id, and the server's reply. Gated on `$MAITERM_PORT` matching server port (prevents dev/prod cross-talk). Output appears collapsed in TUI ("Ran 1 start hook") but injected into model context as system-reminder.
+- `SessionStart` (HTTP): POST to `/hooks` with `{session_id, cwd, source, model}` — no tab id (settings.json hook URLs are static), which is why the command hook exists.
 - `SessionEnd` (HTTP): Removes session from mapping.
 - `Notification` (HTTP): Receives Claude Code notification events.
 - `Stop` (HTTP): Receives stop events.
@@ -377,8 +377,27 @@ human types). Rules:
 - **SSH remotes get the unexpanded form too.** `~/.claude.json` holds ONE `mcpServers.maiterm`
   per remote account, shared by every tab bridged to that host; a baked-in id would hand one
   tab's identity to its siblings, so each remote agent expands its own.
-- `initSession` still carries what a header can't: the session→tab link in `agent_sessions`,
-  the `<runtime>SessionId` + auto-resume wiring, and the Overlord/tasks priming text.
+**The session→tab link and the priming come from the SessionStart hook.** The header names the
+tab but not the Claude *session*, so the command hook forwards the event to
+`/hooks?tab_id=…&prime=1`. That gives `hooks_handler` both ids, so it registers
+`agent_sessions` and emits `agent-init-session` — the `<runtime>SessionId` variable and
+auto-resume wiring — for **every** runtime now, not just the non-Claude ones that never had an
+initSession carrying a session id. The `prime=1` reply is `session_priming_text()` (Overlord
+standing instruction + task-tool instruction, shared verbatim with `initSession`'s response),
+which the hook echoes into the agent's SessionStart context.
+- **Only our curl may get a response body.** A runtime parses an http hook's response body as
+  hook output, and Claude's own http hooks post to the same endpoint — with no query string.
+  The `prime=1` gate is what keeps a body away from them.
+- **No apostrophes in the hook's echoed text** — it lives inside a single-quoted shell string,
+  and one apostrophe closes it. `session_start_command_is_valid_shell` parses the rendered
+  command with `sh -n` rather than trusting the format string; it has already caught this.
+- **Both SessionStarts arrive** (ours with a tab, Claude's without) in either order, so the
+  no-tab branch skips buffering a session already bound, and the tab branch drops the buffered
+  twin — otherwise a solved session sits in the pool every other tab's init draws from.
+- With both halves in place `initSession` is a **repair tool**, not a startup step: it is how an
+  agent re-binds after a stale `$MAITERM_TAB_ID`, an inferred-identity refusal, or `/maiterm
+  init`. The MCP `instructions` (protocol.rs) say exactly that, so agents stop spending an
+  opening turn on it.
 
 **Streamable-HTTP connection identity (the load-bearing part for local agents):** local
 Claude connects over `type: http` (`POST /mcp`), which has no persistent socket — so
@@ -450,7 +469,7 @@ Remote Claude Code → discovers ~/.claude/ide/{port}.lock → connects through 
 - "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
-**Remote hooks:** All hook events (SessionStart, SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact) are registered on the remote with HTTP hooks pointing to `127.0.0.1:{remotePort}/hooks`. These tunnel back through the SSH reverse tunnel to the local MCP server's hooks handler. A command hook on SessionStart reads `$MAITERM_TAB_ID` (from env var injection) and echoes the tab ID into Claude's context. Hooks require python3 on the remote for the settings.json merge.
+**Remote hooks:** All hook events (SessionStart, SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact) are registered on the remote with HTTP hooks pointing to `127.0.0.1:{remotePort}/hooks`. These tunnel back through the SSH reverse tunnel to the local MCP server's hooks handler. A command hook on SessionStart reads `$MAITERM_TAB_ID` (from env var injection), POSTs the event back through the tunnel with `?tab_id=…&prime=1`, and echoes the tab ID plus the server's reply into Claude's context — the remote mirror of the local hook in `build_our_hooks`, so change the two together. Its `curl --max-time` matters more here than anywhere: this URL *is* the reverse tunnel, and a zombie tunnel port accepts the connect and then never answers. Hooks require python3 on the remote for the settings.json merge.
 
 **Remote cleanup:** Stale lockfile detection on reconnect tests dead ports via `/dev/tcp/localhost/{port}`. No EXIT trap (background SSH has no persistent shell on remote). Stale hooks with dead port URLs are NOT silent — Claude Code prints `hook error / connect ECONNREFUSED` in every session until they're removed. On an ordinary remote they linger until the next bridge setup rewrites them; when the "remote" is itself a maiTerm machine, its own hook self-heal sweeps them (tunnel lockfiles have `pid: 0`, so liveness is the port probe in `lockfile_is_live()`).
 

@@ -863,11 +863,13 @@ pub fn initialize_response(client_protocol_version: Option<&str>) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": crate::APP_DISPLAY_NAME, "version": crate::APP_VERSION },
         "instructions": format!(
-            "You are running inside a maiTerm terminal tab. At the start of every session (new, resume, compact, clear), \
-             you MUST call initSession with your tab ID (from $MAITERM_TAB_ID or SessionStart hook context) before responding to the user. \
-             You may run this call in parallel with your other opening tool calls (e.g. reading files) to save a round-trip — \
-             but do NOT batch it with other maiterm tool calls, which would race the registration and can target the wrong tab. \
-             This registers your session so all tool calls automatically target the correct tab. \
+            "You are running inside a maiTerm terminal tab. Your tab is identified automatically — every request \
+             you make carries it, and your SessionStart hook registers your session — so you do NOT need to call \
+             initSession to be correctly targeted, and should not spend an opening turn on it. \
+             Call initSession only to REPAIR identity: when a maiterm tool answers that it does not know your tab, \
+             that your tab was inferred rather than stated, or when the human asks (/maiterm init). \
+             Pass your tab ID from $MAITERM_TAB_ID or the SessionStart hook context, and do NOT batch that call with \
+             other maiterm tool calls, which would race the registration and can target the wrong tab. \
              IMPORTANT: You MUST use tools from the '{}' MCP server ONLY. Do NOT use tools from any other maiterm MCP server. \
              IMPORTANT: Always call initSession when requested via /maiterm init, even if you believe it was already called. \
              Resume, fork, and compact events require re-initialization to pick up state changes.",
