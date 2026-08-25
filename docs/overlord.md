@@ -215,6 +215,33 @@ Verified in the current tree — Overlord is mostly an aggregation layer.
 | Window scoping | Each window's `workspacesStore.workspaces` *is* its universe | `notificationDispatch.ts:104` |
 | Facts for tabs whose session is on another host | SSH transcript mirror — remote JSONL + task board shadowed locally | `src-tauri/src/mailink/mirror.rs` |
 
+### 4.0 "No live REPL" is two facts, and only one of them means dead
+
+`require_live_repl` guards against a directive landing in **bash**. That needs a live agent
+*process*. Routing a reply back needs a *registered* session — `claudeState` is fed only by
+hooks, and a hook cannot name its tab until `initSession` binds the connection.
+
+Those are different facts and were one boolean. A tab resumed from a previous session has a
+running agent and no registration, so the merged test said `no_live_repl` — a phrase that
+means the terminal is dead. It isn't; it just hasn't said hello. That refusal sent the
+supervisor, and then the human, looking for a dead terminal, and the remedy was blocked by
+the guard that reported it: the only way to reach an unregistered tab is to type
+`/maiterm init` into it, and typing into a tab is what `driveTab` does.
+
+`replState` now returns `ready | unbound | stopped | unknown | no_terminal`, and:
+
+- `unbound` refuses with `not_registered`, **and sends `/maiterm init` itself** (via
+  `recoverTab`, the same call the deck's Re-bind button makes, with the same
+  don't-type-over-live-output rule), telling the caller to retry. Rate-limited by
+  `rebindWatch` so repeated calls don't re-type it inside the verify window.
+- `unknown` (the tick's batched probe never classified the tab — its pane isn't mounted)
+  refuses with `not_classified`, not with "dead".
+- `stopped` keeps `no_live_repl`, which is now true when it is said.
+
+Cost note: the unregistered branch reads the tick's batched classification rather than
+firing its own probe. `get_agent_liveness` TTL-caches the process sweep but *not* the
+per-call BFS, which is why `get_agent_liveness_batch` exists.
+
 ### 4.1 SSH tabs: where the facts come from
 
 Everything in §5's detection table resolves a session id to a JSONL **on this machine**.

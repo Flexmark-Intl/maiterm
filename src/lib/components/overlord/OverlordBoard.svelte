@@ -291,8 +291,12 @@
       const r = await overlordStore.checkpointTab(tabId);
       recoverNote = r.started
         ? null
-        : r.reason === 'no_live_repl'
-          ? "That tab has no live agent, so there's nothing to checkpoint."
+        : r.reason === 'tab_unbound'
+          ? "That tab's agent is running but hasn't run /maiterm init, so nothing can be sent to it yet — re-bind it first."
+          : r.reason === 'tab_stopped'
+            ? "Nothing is running in that tab, so there's nothing to checkpoint."
+            : r.reason === 'tab_unknown' || r.reason === 'tab_no_terminal'
+              ? "That tab isn't loaded in this window, so it can't be checked or driven. Open its workspace and try again."
           : r.reason === 'outstanding'
             ? 'That tab is still working on an earlier directive.'
             : r.reason === 'already_running'

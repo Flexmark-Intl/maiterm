@@ -640,18 +640,44 @@ function createOverlordStore() {
     return true;
   }
 
-  /** The require_live_repl hard precondition (§3): a live agent session AND a live
-   *  agent/ssh process in the tty — an absent agent means the directive lands in bash. */
-  async function hasLiveRepl(tabId: string): Promise<boolean> {
-    if (!claudeStateStore.getState(tabId)) return false;
+  /**
+   * Why `require_live_repl` is or isn't satisfied — not just whether.
+   *
+   * The two halves are different facts and were being collapsed into one boolean:
+   *   * a live agent PROCESS in the tty — without it a directive lands in bash;
+   *   * a REGISTERED session — `claudeState` is fed only by hooks, and a hook cannot name
+   *     its tab until `initSession` binds the connection.
+   *
+   * A tab resumed from a previous session has the first and not the second, and the merged
+   * boolean reported that as "no live REPL" — a phrase that means the terminal is dead. It
+   * sent the supervisor, and then the human, hunting for a dead terminal that was never
+   * dead. `unbound` is a different problem with a different, one-line remedy.
+   */
+  type ReplState = 'ready' | 'unbound' | 'stopped' | 'unknown' | 'no_terminal';
+
+  async function replState(tabId: string): Promise<ReplState> {
     const inst = terminalsStore.get(tabId);
-    if (!inst) return false;
-    try {
-      const live = await commands.getAgentLiveness(inst.ptyId);
-      return live.agent_running || live.ssh_foreground;
-    } catch {
-      return false;
+    if (!inst) return 'no_terminal';
+    if (claudeStateStore.getState(tabId)) {
+      // Registered — but still confirm something is running, or the directive lands in bash.
+      try {
+        const live = await commands.getAgentLiveness(inst.ptyId);
+        return live.agent_running || live.ssh_foreground ? 'ready' : 'stopped';
+      } catch {
+        return 'stopped';
+      }
     }
+    // Unregistered. This tick's BATCHED probe already classified it, so read that rather
+    // than firing a per-call process sweep — `get_agent_liveness` TTL-caches the sweep but
+    // not the per-call BFS, which is why the batch exists. `null` means the tab could not
+    // be classified at all (its pane isn't mounted), which is not the same as dead.
+    const kind = unreadyKind(tabId);
+    return kind === 'unbound' ? 'unbound' : kind === 'stopped' ? 'stopped' : 'unknown';
+  }
+
+  /** The require_live_repl hard precondition (§3): registered AND running. */
+  async function hasLiveRepl(tabId: string): Promise<boolean> {
+    return (await replState(tabId)) === 'ready';
   }
 
   function humanTypedSince(tabId: string, sinceMs: number): boolean {
@@ -2403,7 +2429,10 @@ function createOverlordStore() {
       if (!rule) return { started: false, reason: 'no_rule' };
       if (rituals.has(tabId)) return { started: false, reason: 'already_running' };
       if (outstanding.has(tabId)) return { started: false, reason: 'outstanding' };
-      if (!(await hasLiveRepl(tabId))) return { started: false, reason: 'no_live_repl' };
+      // Same distinction the deck and driveTab make: an unbound tab is not a dead one, and
+      // "no_live_repl" on a running agent reads as "that terminal is gone".
+      const repl = await replState(tabId);
+      if (repl !== 'ready') return { started: false, reason: `tab_${repl}` };
       void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'human');
       logInfo(`overlord: manual checkpoint on ${tabId.slice(0, 8)} via "${rule.name}"`);
       return { started: true };
@@ -2983,9 +3012,47 @@ function createOverlordStore() {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
         return { sent: false, reason: 'outstanding_directive' };
       }
-      if (!(await hasLiveRepl(tabId))) {
+      const repl = await replState(tabId);
+      if (repl !== 'ready') {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_no_repl');
-        return { sent: false, reason: 'no_live_repl' };
+        if (repl === 'unbound') {
+          // An agent IS running there; it just hasn't told maiTerm which tab it is, so
+          // nothing can be routed to or from it. Saying "no live REPL" here is what sent
+          // everyone looking for a dead terminal.
+          //
+          // And then say it with the block already clearing: `recoverTab` types the one
+          // line that fixes it, exactly as the deck's Re-bind button does, and refuses to
+          // type over live output. Describing this and leaving it is the failure mode this
+          // subsystem keeps repeating — the remedy is one call away and the supervisor has
+          // no other way to reach an unregistered tab, because driveTab is that way.
+          const recent = rebindWatch.get(tabId);
+          const fresh = recent !== undefined && Date.now() - recent < REBIND_VERIFY_MS;
+          const r = fresh ? { sent: false, reason: 'already_sent' } : await this.recoverTab(tabId);
+          return {
+            sent: false,
+            reason: 'not_registered',
+            detail:
+              `An agent is running in that tab, but it has not run /maiterm init since it ` +
+              `started, so maiTerm cannot route to it — the tab is not dead. ` +
+              (r.sent || fresh
+                ? `/maiterm init has been sent for you; retry this directive in a few seconds. ` +
+                  `If it still refuses, the agent is gone rather than unbound and the tab needs restarting.`
+                : `Sending /maiterm init failed (${r.reason}) — use the Re-bind action on the ` +
+                  `triage deck, or ask the human to run it in the tab.`),
+          };
+        }
+        return {
+          sent: false,
+          reason: repl === 'unknown' ? 'not_classified' : 'no_live_repl',
+          detail:
+            repl === 'no_terminal'
+              ? 'That tab has no terminal in this window.'
+              : repl === 'unknown'
+                ? 'That tab could not be classified — its pane is not mounted, which happens ' +
+                  'in a suspended or never-opened workspace. Open that workspace and retry.'
+                : 'Nothing is running in that tab — the agent exited. It needs restarting ' +
+                  'before it can be driven.',
+        };
       }
       const st = mappedState(tabId);
       if (st !== 'idle') {
