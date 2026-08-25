@@ -361,8 +361,10 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
 `"x-maiterm-tab": "${MAITERM_TAB_ID}"`, which Claude Code expands from the agent process's
 own environment and sends on **every** MCP request; Codex's equivalent is
 `env_http_headers = { "x-maiterm-tab" = "MAITERM_TAB_ID" }` (a header name → env var NAME
-map). Verified expanded for both `type: http` and `type: sse` (the SSH bridge's transport),
-and on the SSE GET *and* its POSTs. Each transport reads it with `declared_tab_id` and hands
+map). Verified on the wire: Claude expands it for both `type: http` and `type: sse` (the SSH
+bridge's transport), on the SSE GET *and* its POSTs; Codex sends it too (codex-cli 0.149.0, on
+initialize/notifications/tools-list). With the var unset both send the literal placeholder or
+nothing and neither drops the server. Each transport reads it with `declared_tab_id` and hands
 it to `process_message`, which resolves identity in ONE place, so tool calls target the right
 tab from the first request with no `initSession`. Why this matters: an MCP request otherwise carries **no identity of
 its own**, so the tab id could only reach us via the model reading its SessionStart context

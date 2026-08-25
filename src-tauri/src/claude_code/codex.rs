@@ -242,8 +242,10 @@ fn put_codex_mcp_entry(doc: &mut DocumentMut, name: &str, port: u16, auth: &str)
     // header name to an ENV VAR NAME that Codex resolves from the agent's environment. It
     // gives the server the caller's tab on every request, so tool calls target the right
     // tab without waiting for the agent to call initSession (see `server::TAB_ID_HEADER`).
-    // Verified safe when the var is unset — the server stays enabled, it just sends nothing
-    // for us to read, which is the pre-header behavior.
+    // Verified against codex-cli 0.149.0: the header is sent on initialize,
+    // notifications/initialized and tools/list, carrying the env var's value. Verified safe
+    // when the var is unset too — the server stays enabled, it just sends nothing for us to
+    // read, which is the pre-header behavior.
     let mut env_headers = toml_edit::InlineTable::new();
     env_headers.insert("x-maiterm-tab", toml_edit::Value::from("MAITERM_TAB_ID"));
     entry["env_http_headers"] = toml_edit::value(env_headers);
