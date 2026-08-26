@@ -1952,6 +1952,111 @@ pub fn set_tab_comms_monitor(
     save_state(&data_clone)
 }
 
+/// The hand-over itself, kept pure so the inversion can be tested.
+///
+/// `..src` carries the WHOLE persisted record; the fields named here are the entire
+/// exception list, and each is named because the REPLACEMENT's own value is the correct
+/// one — never because nobody thought of the field.
+fn carry_tab_record(src: crate::state::Tab, replacement: &crate::state::Tab) -> crate::state::Tab {
+    crate::state::Tab {
+        // Identity: the replacement IS a different tab, that is the whole premise of reload.
+        id: replacement.id.clone(),
+        // Its own freshly spawned PTY — the original's is being killed.
+        pty_id: replacement.pty_id.clone(),
+        // duplicateTab already wrote the LIVE buffer captured off the terminal; `src`'s copy
+        // is whatever was persisted at the last save, i.e. staler.
+        scrollback: replacement.scrollback.clone(),
+        // Lifecycle marks that describe a tab which is NOT live. The replacement is live by
+        // construction, so inheriting these would make it read as archived or suspended.
+        archived_name: None,
+        archived_at: None,
+        suspended_at: None,
+        wake_on_resume: false,
+        // Transient UI flag, cleared on activation — not state a tab is responsible for.
+        import_highlight: false,
+        ..src
+    }
+}
+
+/// Hand a reload's replacement tab everything the original was responsible for.
+///
+/// Reload is `duplicateTab` + `deleteTab(original)`, so the replacement gets a NEW tab id
+/// and starts life as a blank tab that merely looks like the old one. What survived used
+/// to be a hand-maintained ALLOWLIST in `reloadTab` — extended once per production
+/// incident (`pinned` b452a22, `comms_monitor` 060cb38) while `Tab` grew to ~35 persisted
+/// fields. Every field added to `Tab` was a silent regression by default: `runtime`,
+/// `mailink_native`/`mailink_excluded`, `mesh_purpose` and `comms_bindings` were all
+/// dropped by a reload, each failing in its own quiet way.
+///
+/// So the list is INVERTED here. `..src` carries the whole persisted record, and the only
+/// fields that do NOT survive are the handful named explicitly below — each because the
+/// REPLACEMENT's own value is the correct one, never because nobody thought of it. A new
+/// field on `Tab` is carried automatically, which is the property that matters.
+///
+/// This is deliberately NOT `duplicateTab`'s behaviour. A duplicate and a reload need
+/// OPPOSITE handling for anything that represents a claim on the outside world: a genuine
+/// duplicate must not also inherit the channel's summons or a bound thread (two agents
+/// would answer every message), while a reload MUST inherit them or the tab silently
+/// stops being what it was. Those claims are MOVED — cleared on the original inside this
+/// same write lock — so the comms watcher, which rescans tabs every 5s, can never observe
+/// both tabs holding the same thread or channel.
+#[tauri::command]
+pub fn carry_tab_state_on_reload(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    pane_id: String,
+    from_tab_id: String,
+    to_tab_id: String,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    let workspace = win
+        .workspaces
+        .iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    let pane = workspace
+        .panes
+        .iter_mut()
+        .find(|p| p.id == pane_id)
+        .ok_or("Pane not found")?;
+
+    // Snapshot the original, and refuse before mutating anything if either side is missing.
+    let src = pane
+        .tabs
+        .iter()
+        .find(|t| t.id == from_tab_id)
+        .cloned()
+        .ok_or("Source tab not found")?;
+    if !pane.tabs.iter().any(|t| t.id == to_tab_id) {
+        return Err("Replacement tab not found".to_string());
+    }
+
+    // Release the original's outward-facing claims first. Both tabs exist until the caller
+    // deletes the original, and a claim held twice is worse than a claim held nowhere: the
+    // comms watcher would pick the same summon up twice or inject a thread reply into two
+    // sessions. One write lock covers the release and the hand-over, so no reader sees the
+    // overlap.
+    if let Some(orig) = pane.tabs.iter_mut().find(|t| t.id == from_tab_id) {
+        orig.comms_bindings.clear();
+        orig.comms_binding = None;
+        orig.comms_monitor = None;
+    }
+
+    let tab = pane
+        .tabs
+        .iter_mut()
+        .find(|t| t.id == to_tab_id)
+        .ok_or("Replacement tab not found")?;
+    *tab = carry_tab_record(src, tab);
+
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
 /// Replace a mesh workspace's topic registry wholesale. The frontend `agentMesh` store is
 /// authoritative for topics (it mints ids + timestamps in JS and dedups by normalized
 /// label), so persistence is a coarse replace rather than granular CRUD — right-sized for
@@ -2876,4 +2981,155 @@ pub fn read_app_logs(lines: Option<usize>, level: Option<String>, search: Option
         "lines": result,
         "truncated": truncated,
     }))
+}
+
+#[cfg(test)]
+mod reload_carry_tests {
+    use super::carry_tab_record;
+    use crate::state::workspace::TabType;
+    use crate::state::{CommsBinding, CommsMonitor, CommsMonitorChannel, Tab};
+    use std::collections::HashMap;
+
+    /// Every field of `Tab` given a value distinguishable from a fresh tab's.
+    ///
+    /// Written as a FULL struct literal on purpose: adding a field to `Tab` breaks this
+    /// test's compile, which is the moment to decide whether a reload should carry it.
+    /// That decision used to be made by silence — the field simply did not appear in
+    /// reloadTab's allowlist and was dropped, once per production incident.
+    fn fully_populated(id: &str) -> Tab {
+        let mut vars = HashMap::new();
+        vars.insert("sessionId".to_string(), "sess-1".to_string());
+        Tab {
+            id: id.to_string(),
+            name: "Chat Handler".to_string(),
+            pty_id: Some("pty-old".to_string()),
+            scrollback: Some("stale buffer".to_string()),
+            custom_name: true,
+            pinned: true,
+            import_highlight: true,
+            restore_cwd: Some("/src".to_string()),
+            restore_ssh_command: Some("ews@nova".to_string()),
+            restore_remote_cwd: Some("/home/ews".to_string()),
+            auto_resume_cwd: Some("/src".to_string()),
+            auto_resume_ssh_command: Some("ews@nova".to_string()),
+            auto_resume_remote_cwd: Some("/home/ews/app".to_string()),
+            auto_resume_command: Some("claude".to_string()),
+            auto_resume_remembered_command: Some("claude --resume".to_string()),
+            auto_resume_pinned: true,
+            // The one a reload used to re-arm behind the user's back: duplicateTab's
+            // setTabAutoResumeContext force-enables, and nothing put the `false` back.
+            auto_resume_enabled: false,
+            notes: Some("notes".to_string()),
+            notes_mode: Some("render".to_string()),
+            notes_open: true,
+            tasks_open: true,
+            composer_open: Some(true),
+            composer_draft: Some("half-typed".to_string()),
+            mesh_purpose: Some("owns the chat channel".to_string()),
+            trigger_variables: vars,
+            comms_binding: None, // legacy, deserialize-only — drained into comms_bindings
+            comms_bindings: vec![CommsBinding {
+                provider: "mattermost".to_string(),
+                server_url: "https://mm.example.com".to_string(),
+                channel_id: "chan".to_string(),
+                root_id: "root".to_string(),
+                permalink: "https://mm.example.com/t/pl/root".to_string(),
+                last_seen_create_at: 1700,
+                bound_at: 1600,
+                deliver_all_replies: true,
+            }],
+            comms_monitor: Some(CommsMonitor {
+                channels: vec![CommsMonitorChannel {
+                    id: "chan".to_string(),
+                    name: "EWS Support DEV".to_string(),
+                    team_name: "fmp".to_string(),
+                    last_seen_create_at: 1650,
+                }],
+            }),
+            last_cwd: Some("/home/ews/app".to_string()),
+            archived_name: Some("archived".to_string()),
+            archived_at: Some("2026-08-01T00:00:00Z".to_string()),
+            suspended_at: Some("2026-08-02T00:00:00Z".to_string()),
+            wake_on_resume: true,
+            tab_type: TabType::Terminal,
+            editor_file: None,
+            diff_context: None,
+            agent_bridge: None,
+            runtime: Some(crate::state::AgentRuntime::Claude),
+            mailink_native: true,
+            mailink_excluded: true,
+        }
+    }
+
+    fn replacement() -> Tab {
+        let mut t = Tab::new("Terminal 2".to_string());
+        t.id = "new-tab".to_string();
+        t.pty_id = Some("pty-new".to_string());
+        t.scrollback = Some("live buffer".to_string());
+        t
+    }
+
+    #[test]
+    fn reload_keeps_only_the_replacement_own_identity_pty_and_buffer() {
+        let new_tab = replacement();
+        let out = carry_tab_record(fully_populated("old-tab"), &new_tab);
+
+        assert_eq!(out.id, "new-tab", "the replacement keeps its own id");
+        assert_eq!(out.pty_id.as_deref(), Some("pty-new"), "and its own live PTY");
+        assert_eq!(
+            out.scrollback.as_deref(),
+            Some("live buffer"),
+            "and the buffer duplicateTab just captured, not the stale persisted one"
+        );
+    }
+
+    #[test]
+    fn reload_carries_the_whole_rest_of_the_record() {
+        let src = fully_populated("old-tab");
+        let new_tab = replacement();
+        let out = carry_tab_record(src.clone(), &new_tab);
+
+        // Compare as serialized values so EVERY carried field is checked, including any
+        // added later — no field-by-field list to forget to extend.
+        let mut expected = src.clone();
+        expected.id = new_tab.id.clone();
+        expected.pty_id = new_tab.pty_id.clone();
+        expected.scrollback = new_tab.scrollback.clone();
+        expected.archived_name = None;
+        expected.archived_at = None;
+        expected.suspended_at = None;
+        expected.wake_on_resume = false;
+        expected.import_highlight = false;
+
+        assert_eq!(
+            serde_json::to_value(&out).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_fields_a_reload_used_to_drop_now_survive() {
+        // Each of these was its own silent production failure: a reloaded tab that was no
+        // longer a chat handler, no longer visible to Overlord/mesh/maiLink, no longer
+        // holding the thread it was working, or quietly re-armed for auto-resume.
+        let out = carry_tab_record(fully_populated("old-tab"), &replacement());
+        assert_eq!(out.comms_monitor.unwrap().channels.len(), 1);
+        assert_eq!(out.comms_bindings.len(), 1);
+        assert!(out.runtime.is_some());
+        assert!(out.mailink_native && out.mailink_excluded);
+        assert_eq!(out.mesh_purpose.as_deref(), Some("owns the chat channel"));
+        assert_eq!(out.trigger_variables.get("sessionId").map(|s| s.as_str()), Some("sess-1"));
+        assert!(out.pinned && out.custom_name);
+        assert_eq!(out.name, "Chat Handler");
+        assert!(!out.auto_resume_enabled, "a deliberate disable must not be re-armed");
+    }
+
+    #[test]
+    fn a_live_replacement_never_inherits_archived_or_suspended_marks() {
+        let out = carry_tab_record(fully_populated("old-tab"), &replacement());
+        assert!(out.archived_name.is_none() && out.archived_at.is_none());
+        assert!(out.suspended_at.is_none());
+        assert!(!out.wake_on_resume);
+        assert!(!out.import_highlight);
+    }
 }

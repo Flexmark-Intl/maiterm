@@ -703,6 +703,24 @@ export async function setTabCommsMonitor(
   return invoke('set_tab_comms_monitor', { workspaceId, paneId, tabId, channels });
 }
 
+/**
+ * Hand a reload's replacement tab everything the original was responsible for.
+ *
+ * Carries the WHOLE persisted tab record except the replacement's own identity, PTY and
+ * freshly-captured scrollback — an inverted list, so a field added to `Tab` survives a
+ * reload by default instead of being silently dropped until someone remembers it. The
+ * outward-facing claims (bound threads, chat monitoring) are MOVED, released on the
+ * original in the same write so the comms watcher never sees both tabs holding them.
+ */
+export async function carryTabStateOnReload(
+  workspaceId: string,
+  paneId: string,
+  fromTabId: string,
+  toTabId: string
+): Promise<void> {
+  return invoke('carry_tab_state_on_reload', { workspaceId, paneId, fromTabId, toTabId });
+}
+
 export async function setWorkspaceMailinkNative(workspaceId: string, enabled: boolean): Promise<void> {
   return invoke('set_workspace_mailink_native', { workspaceId, enabled });
 }

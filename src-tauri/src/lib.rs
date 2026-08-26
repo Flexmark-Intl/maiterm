@@ -590,6 +590,7 @@ pub fn run() {
             commands::comms::comms_test_connection,
             commands::comms::comms_list_bot_channels,
             commands::workspace::set_tab_comms_monitor,
+            commands::workspace::carry_tab_state_on_reload,
             commands::window::get_window_data,
             commands::window::create_window,
             commands::window::duplicate_window,

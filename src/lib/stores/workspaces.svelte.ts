@@ -2205,10 +2205,9 @@ function createWorkspacesStore() {
       // Diff tabs: nothing to reload (content is ephemeral from Claude)
       if (sourceTab.tab_type === 'diff') return;
 
-      // Terminal tabs: duplicate + delete for full PTY restart
-      // Remember exact name and position before duplication
-      const tabName = sourceTab.name;
-      const isCustom = sourceTab.custom_name;
+      // Terminal tabs: duplicate + delete for full PTY restart.
+      // Remember the position before duplication; the name (and the rest of the record)
+      // comes back via carry_tab_state_on_reload below.
       const sourceIndex = pane.tabs.findIndex(t => t.id === tabId);
 
       // Deep duplicate: clones scrollback, CWD, SSH, notes, history, auto-resume, variables
@@ -2241,30 +2240,22 @@ function createWorkspacesStore() {
         terminalsStore.setSplitContext(newTab.id, ctx);
       }
 
-      // Restore exact name (duplicateTab may have appended " (2)" for custom names)
-      if (isCustom) {
-        await commands.renameTab(workspaceId, paneId, newTab.id, tabName, true);
-      }
-
-      // Carry pin state over — the new tab replaces the original, and it takes the
-      // original's storage slot below, so it keeps its position in the pin cluster.
-      if (sourceTab.pinned) {
-        await commands.setTabPinned(workspaceId, paneId, newTab.id, true);
-      }
-
-      // Carry chat monitoring. This is a RELOAD — the new tab replaces the original — so it
-      // has to inherit what the original was responsible for. `comms_monitor` is keyed by tab
-      // id and duplicateTab does not copy it (correctly: a genuine DUPLICATE must not also
-      // pick up the channel's summons, or two agents answer every thread). Without this the
-      // reload silently stops the tab being a chat handler: its tools still work, so pasting
-      // a permalink binds a thread as always, and nothing anywhere reports that @mentions no
-      // longer reach it. Observed in the wild — a reloaded Chat Handler sat with
-      // `channels: []` while its siblings kept theirs.
-      if (sourceTab.comms_monitor?.channels?.length) {
-        await this.setTabCommsMonitor(
-          workspaceId, paneId, newTab.id, sourceTab.comms_monitor.channels,
-        );
-      }
+      // Hand the replacement everything the original was responsible for: name, pin state,
+      // notes, auto-resume, trigger variables (the session id lives here), runtime, maiLink
+      // designation, mesh purpose, bound comms threads and chat monitoring — the whole
+      // persisted record bar the replacement's own id, PTY and freshly-captured scrollback.
+      //
+      // This used to be a hand-maintained ALLOWLIST right here, extended once per production
+      // incident, so every field added to `Tab` was dropped by a reload until someone noticed.
+      // Inverting it is the fix: `carry_tab_state_on_reload` copies by default and names its
+      // exceptions, and it does the whole hand-over under ONE write lock — which is also what
+      // makes it safe to move the outward-facing claims (bound threads, monitored channels)
+      // rather than copy them, so the comms watcher can never catch both tabs holding one.
+      //
+      // Note this deliberately overrides duplicateTab's preference-gated copying: `clone_notes`
+      // / `clone_variables` govern a genuine DUPLICATE, but a reload is a REPLACEMENT and must
+      // come back as what it was regardless of how the user likes duplicates to behave.
+      await commands.carryTabStateOnReload(workspaceId, paneId, tabId, newTab.id);
 
       // Move new tab into the old tab's position and delete the old one
       const currentIds = freshPane.tabs.map(t => t.id);
