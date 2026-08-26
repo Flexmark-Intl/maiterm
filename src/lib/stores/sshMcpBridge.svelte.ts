@@ -189,18 +189,30 @@ function buildSetupScript(
   // Escape single quotes for shell
   const escapedLockContent = lockContent.replace(/'/g, "'\\''");
 
-  // MCP entry for ~/.claude.json registration.
-  // x-maiterm-tab is deliberately the UNEXPANDED `${MAITERM_TAB_ID}`, not this tab's id:
-  // ~/.claude.json holds ONE `mcpServers.maiterm` entry per remote account, shared by every
-  // tab bridged to that host, so a baked-in id would hand one tab's identity to its siblings.
-  // The remote agent expands it from its own shell env (exported per tab on connect), which
-  // makes the shared entry correct for all of them; an env-less shell (tmux/su) sends the
-  // literal through and the server ignores it, exactly as before.
+  // MCP entry for ~/.claude.json registration. EVERY VALUE IS UNEXPANDED ON PURPOSE.
+  //
+  // ~/.claude.json holds ONE `mcpServers.maiterm` entry per remote ACCOUNT, shared by every
+  // tab bridged to that host — and, since nothing arbitrates it, by every maiTerm on every
+  // machine that bridges to that account. Any concrete value here belongs to whoever wrote
+  // last: a baked tab id hands one tab's identity to its siblings, and a baked port and token
+  // point the whole account at one instance's tunnel, so when that tunnel goes, so does
+  // everyone's MCP.
+  //
+  // Written as placeholders instead, the entry is the same bytes from every instance and
+  // overwriting it is a no-op. Each agent resolves it from its own shell environment, which
+  // is per-tab and cannot be clobbered by anyone. Verified on a live remote: the `url`
+  // expands as well as the headers, the connection uses the expanded port (not just the
+  // display), and a wrong `${MAITERM_AUTH}` is rejected — so both are really in play.
+  //
+  // The cost is that an env-less shell (tmux, su, an ssh the user typed themselves) sends the
+  // literal placeholder and cannot connect at all, where before it reached whichever maiTerm
+  // wrote last. That is a downgrade only in appearance: on a contended account the port it
+  // used to reach was frequently a dead one belonging to another machine.
   const mcpEntry = JSON.stringify({
     type: 'sse',
-    url: `http://127.0.0.1:${remotePort}/sse`,
+    url: 'http://127.0.0.1:${MAITERM_PORT}/sse',
     headers: {
-      'x-claude-code-ide-authorization': authToken,
+      'x-claude-code-ide-authorization': '${MAITERM_AUTH}',
       'x-maiterm-tab': '${MAITERM_TAB_ID}',
     },
   });
