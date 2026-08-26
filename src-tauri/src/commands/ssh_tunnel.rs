@@ -169,14 +169,14 @@ fn remote_port_book() -> &'static parking_lot::Mutex<RemotePortBook> {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         if !(REMOTE_PORT_BASE..REMOTE_PORT_BASE + REMOTE_PORT_SPAN).contains(&book.instance_port) {
-            // First run on this install (or a file from before this existed). Draw from the
-            // clock rather than pulling in a PRNG — the only property needed is that two
-            // machines are unlikely to pick the same number, and a collision is handled anyway.
-            let jitter = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
-            book.instance_port = REMOTE_PORT_BASE + (jitter % REMOTE_PORT_SPAN as u32) as u16;
+            // First run on this install (or a file from before this existed). A real PRNG, not
+            // the clock: `subsec_nanos()` looks like a fine source of jitter and is not one —
+            // macOS's realtime clock is microsecond-granular, so it is always a multiple of
+            // 1000 and `% 1000` is always ZERO. Every install would draw the base port, which
+            // turns the collision path from a rare fallback into the guaranteed case for every
+            // pair of instances — including dev and prod on one Mac.
+            use rand::Rng;
+            book.instance_port = REMOTE_PORT_BASE + rand::thread_rng().gen_range(0..REMOTE_PORT_SPAN);
             log::info!("SSH tunnel: this install will ask for remote port {}", book.instance_port);
             save_remote_port_book(&book);
         }
@@ -233,15 +233,21 @@ pub fn preferred_remote_port(host_key: &str) -> u16 {
         .unwrap_or(&book.instance_port)
 }
 
-/// Remember where we actually landed. `None` means the port was chosen by the remote
-/// (the `-R 0:` fallback): forget any override so the next start goes back to asking for
-/// the instance port rather than chasing a one-off ephemeral number.
-fn record_remote_port(host_key: &str, port: Option<u16>) {
+/// Remember where we actually landed, INCLUDING a port the remote chose for us. The
+/// temptation is to forget that one, on the grounds that an ephemeral number is a one-off
+/// not worth chasing — but the book is what `get_remote_bridge_env` predicts from, and
+/// forgetting leaves it predicting `instance_port` while the tunnel is somewhere else
+/// entirely. On a contended account `instance_port` is not merely wrong, it is another live
+/// maiTerm, so every tab on that host would bake a stranger's port and quietly talk to them.
+/// Recording it also tends to stabilise: the port was free last time, so asking for it again
+/// usually works, and `next_port_candidate` pulls the walk back into our range if it does not.
+fn record_remote_port(host_key: &str, port: u16) {
     let key = port_book_key(host_key);
     let mut book = remote_port_book().lock();
-    let changed = match port {
-        Some(p) if p != book.instance_port => book.hosts.insert(key, p) != Some(p),
-        _ => book.hosts.remove(&key).is_some(),
+    let changed = if port == book.instance_port {
+        book.hosts.remove(&key).is_some()
+    } else {
+        book.hosts.insert(key, port) != Some(port)
     };
     if changed {
         save_remote_port_book(&book);
@@ -400,7 +406,7 @@ pub async fn start_ssh_tunnel(
     }
     candidates.push(None);
 
-    let mut established: Option<(tokio::process::Child, u16, Option<u16>)> = None;
+    let mut established: Option<(tokio::process::Child, u16)> = None;
     for listen in candidates {
         let cmd_args = build_tunnel_args(&host_key, &ssh_args, local_port, listen);
         log::info!("Starting SSH tunnel: ssh {}", cmd_args.join(" "));
@@ -419,7 +425,7 @@ pub async fn start_ssh_tunnel(
         let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
         match await_forward_result(stdout, stderr, listen).await? {
             ForwardOutcome::Ready(port) => {
-                established = Some((child, port, listen));
+                established = Some((child, port));
                 break;
             }
             ForwardOutcome::PortTaken => {
@@ -434,12 +440,10 @@ pub async fn start_ssh_tunnel(
         }
     }
 
-    let (mut child, remote_port, requested) =
+    let (mut child, remote_port) =
         established.ok_or_else(|| "SSH tunnel: no remote port could be bound".to_string())?;
     let pid = child.id().ok_or("Failed to get SSH tunnel PID")?;
-    // `requested` and not `remote_port`: a port the REMOTE picked is one-off, and
-    // remembering it would send the next start chasing an ephemeral number.
-    record_remote_port(&host_key, requested);
+    record_remote_port(&host_key, remote_port);
 
     log::info!("SSH tunnel established: {} → remote port {}", host_key, remote_port);
 
@@ -582,16 +586,29 @@ pub struct RemoteBridgeEnv {
 
 /// The bridge values for a host, answerable BEFORE its tunnel exists — which is the whole
 /// point: they are baked into the tab's ssh command, and that command is built while the
-/// remote is still a login prompt. The port is a prediction (right unless a collision moved
-/// us since), so treat a mismatch as recoverable, not as corruption.
+/// remote is still a login prompt.
+///
+/// A LIVE tunnel to that host outranks the book, because it is not a prediction: it is where
+/// this maiTerm is actually listening. That matters most in the case the book is worst at —
+/// a host where collisions pushed us onto a port we did not choose. Tunnels are per-host and
+/// shared by every tab on it, so one lookup answers for all of them. Matched on the
+/// normalised key, since the tunnel was opened under the ssh command the bridge OBSERVED and
+/// this is called with the one the tab has STORED.
 #[tauri::command]
 pub fn get_remote_bridge_env(
     state: tauri::State<'_, Arc<AppState>>,
     host_key: String,
 ) -> Option<RemoteBridgeEnv> {
     let auth = state.mcp_auth.read().clone()?;
+    let key = port_book_key(&host_key);
+    let live = state
+        .ssh_tunnels
+        .read()
+        .values()
+        .find(|t| port_book_key(&t.host_key) == key)
+        .map(|t| t.remote_port);
     Some(RemoteBridgeEnv {
-        port: preferred_remote_port(&host_key),
+        port: live.unwrap_or_else(|| preferred_remote_port(&host_key)),
         auth,
     })
 }
@@ -956,6 +973,23 @@ mod tests {
             classify_forward_line(line, None),
             Some(ForwardOutcome::Ready(45015))
         ));
+    }
+
+    /// The draw must actually vary. `subsec_nanos()` was the first source used here and is a
+    /// trap: macOS's realtime clock is microsecond-granular, so it is always a multiple of
+    /// 1000 and `% REMOTE_PORT_SPAN` was always ZERO — every install asked for the base port,
+    /// making a collision certain between any two instances instead of unlikely.
+    #[test]
+    fn the_instance_port_is_not_the_same_on_every_install() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let drawn: std::collections::HashSet<u16> = (0..500)
+            .map(|_| REMOTE_PORT_BASE + rng.gen_range(0..REMOTE_PORT_SPAN))
+            .collect();
+        assert!(drawn.len() > 100, "draw barely varies: {} distinct in 500", drawn.len());
+        assert!(drawn
+            .iter()
+            .all(|p| (REMOTE_PORT_BASE..REMOTE_PORT_BASE + REMOTE_PORT_SPAN).contains(p)));
     }
 
     /// Candidates must stay inside the range the preferred port was drawn from — walking
