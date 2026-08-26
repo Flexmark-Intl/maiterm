@@ -2013,6 +2013,25 @@ fn refuse_on_inferred_identity(
         && PEER_ADDRESSING_TOOLS.contains(&tool_name)
 }
 
+/// What state a session is in the instant its SessionStart hook fires (unit-tested; the handler
+/// wires it into the `agent_sessions` row maiLink reads).
+///
+/// A process that has just come up is waiting for input, not working. `Active` was correct while
+/// this event could only name its tab through `initSession`, which happens mid-turn — on a restore
+/// the hook carried no tab id and the handler returned before touching state. Now the SessionStart
+/// command hook names its tab, so this fires for every tab at process start, and an unconditional
+/// `Active` reported a whole restored window as busy. Compaction is the exception: it fires DURING
+/// a turn, so the agent really is working, and anything else would be undone by the next tool
+/// event. Mirrors the desktop verdict in `agentState.svelte.ts` — change the two together.
+fn session_start_state(source: &str) -> crate::state::app_state::AgentSessionState {
+    use crate::state::app_state::AgentSessionState;
+    if source == "compact" {
+        AgentSessionState::Active
+    } else {
+        AgentSessionState::WaitingInput
+    }
+}
+
 /// Process one JSON-RPC message and return the response as a raw JSON string.
 /// Returns `None` for notifications (no id) that don't require a response.
 /// `connection_id` identifies the transport connection (SSE session, WS, or streamable-http)
@@ -2741,6 +2760,9 @@ async fn hooks_handler(
             let tab_id = tab_id_from_param.clone().unwrap_or_default();
             let cwd = event.get("cwd").and_then(|v| v.as_str()).map(String::from);
             let model = event.get("model").and_then(|v| v.as_str()).map(String::from);
+            // Read up here because the session row below needs it: `source` is what separates a
+            // process that just came up from a compaction that fires mid-turn.
+            let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
 
             if !session_id.is_empty() && !tab_id.is_empty() {
                 use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
@@ -2766,13 +2788,18 @@ async fn hooks_handler(
                         contested.insert(session_id.clone(), std::time::Instant::now());
                     }
                 }
+                // A restart left maiLink reporting "Working" for a whole window of agents
+                // sitting at an empty prompt. The desktop tab dot had the identical bug from
+                // the identical cause and was fixed in 8340e90 — but that fix landed in the
+                // Svelte mirror only, and maiLink reads THIS row. See session_start_state.
+                let started = session_start_state(source);
                 sessions.insert(
                     session_id.clone(),
                     AgentSessionInfo {
                         runtime,
                         tab_id: tab_id.clone(),
                         cwd: cwd.clone(),
-                        state: AgentSessionState::Active,
+                        state: started,
                         tool_name: None,
                         tool_detail: None,
                         pending_question: None,
@@ -2792,7 +2819,10 @@ async fn hooks_handler(
                 drop(sessions);
                 let mut pending = srv.state.pending_agent_sessions.write();
                 pending.retain(|(sid, _, _)| *sid != session_id);
-                log::info!("Claude hook: session {} started for tab {}", session_id, tab_id);
+                log::info!("Claude hook: session {} started for tab {} ({}, {})",
+                    session_id, tab_id,
+                    if source.is_empty() { "unknown" } else { source },
+                    if matches!(started, AgentSessionState::Active) { "active" } else { "idle" });
             } else if !session_id.is_empty() {
                 let mut pending = srv.state.pending_agent_sessions.write();
                 // Clean entries older than 30s
@@ -2855,7 +2885,6 @@ async fn hooks_handler(
                 }
             }
 
-            let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
             emit_dual(&srv.app_handle, "agent-hook-session-start", "claude-hook-session-start", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,
@@ -3229,6 +3258,7 @@ async fn handle_message(
 mod tests {
     use super::derive_streamable_connection_id;
     use super::{recover_affinity, refuse_on_inferred_identity, PEER_ADDRESSING_TOOLS};
+    use super::session_start_state;
     use super::{normalize_hook_event, HookPhase};
     use crate::state::AgentRuntime;
     use std::collections::HashSet;
@@ -3462,6 +3492,23 @@ mod tests {
         // Both unbound → ambiguous → None.
         let none_bound: HashSet<&str> = HashSet::new();
         assert_eq!(recover_affinity(&active, &none_bound), None);
+    }
+
+    #[test]
+    fn a_session_that_just_started_is_waiting_not_working() {
+        use crate::state::app_state::AgentSessionState;
+        // Every source that means "the process just came up". These are the ones that fire for
+        // a whole window at once on a maiTerm restart, which is what made every maiLink chat
+        // read "Working" while its agent sat at an empty prompt.
+        for source in ["startup", "resume", "clear", ""] {
+            assert!(
+                matches!(session_start_state(source), AgentSessionState::WaitingInput),
+                "source {source:?} means the agent is up and waiting, not mid-turn"
+            );
+        }
+        // Compaction is the one source that fires DURING a turn — the agent really is working,
+        // and calling it idle would only be undone by the next tool event.
+        assert!(matches!(session_start_state("compact"), AgentSessionState::Active));
     }
 
     #[test]
