@@ -373,11 +373,18 @@ map). Codex sends it too (codex-cli 0.149.0, on initialize/notifications/tools-l
 | http **hook** `headers` | **no** — resolves to an EMPTY string | *silent and destructive*: an env-driven auth header becomes `""` and every hook 401s with nothing in the config to explain it |
 
 Both `type: http` and `type: sse` expand (the SSH bridge uses sse), on the SSE GET *and* its
-POSTs. The hook rows are why the remote hooks file **cannot** be made instance-independent, and
-why `?tab_id=` cannot be put on the http hooks to retire `pending_agent_sessions` — only a
-*command* hook can read the environment, which is what the SessionStart/SessionEnd ones do.
-(Testing note: http hooks DO fire under `claude -p`; an earlier "they never fire" reading was
-maiTerm's own 30s reassert sweeping the probe hook, whose port had no lockfile.) Each transport reads it with `declared_tab_id` and hands
+POSTs. Verified again when the remote entry was converted: `claude mcp list` reports **Connected**
+through the expanded port and refuses a wrong `${MAITERM_AUTH}`, so the connection really uses the
+substitution. Beware the display — `mcp list` prints the raw `${MAITERM_PORT}` template even while
+connected, which reads like non-expansion and is not.
+
+The hook rows do NOT mean hooks are stuck with a baked port: only that an *http* hook is. A
+**command** hook runs in the tab's shell and reads the environment directly, needing no expansion
+at all — which is how the remote hooks file became instance-independent and how `?tab_id=` now
+rides on every remote event, not just SessionStart. `pending_agent_sessions` still exists for the
+LOCAL side, whose hooks are still http. (Testing note: http hooks DO fire under `claude -p`; an
+earlier "they never fire" reading was maiTerm's own 30s reassert sweeping the probe hook, whose
+port had no lockfile.) Each transport reads it with `declared_tab_id` and hands
 it to `process_message`, which resolves identity in ONE place, so tool calls target the right
 tab from the first request with no `initSession`. Why this matters: an MCP request otherwise carries **no identity of
 its own**, so the tab id could only reach us via the model reading its SessionStart context
@@ -532,11 +539,12 @@ listening.** Confirm by comparing `authToken` between `~/.claude/ide/*.lock` on 
 each instance mints its own 32-char token, so a different token is a different maiTerm. Mind the
 timezone when correlating mtimes. Immediate remedy: reload a tab on that host to re-assert.
 
-**The fix in progress: make every instance write IDENTICAL bytes, rather than isolating them.**
-A file that names no port cannot be clobbered — overwriting it is a no-op. Both halves can get
-there, contrary to an earlier reading of the expansion table: the MCP entry via `${MAITERM_PORT}`
-in the url (the url expands, not just headers), and the hooks by becoming *command* hooks, which
-read the shell environment directly and so never needed expansion at all.
+**The fix: every instance writes IDENTICAL bytes, rather than being isolated from each other.**
+A file that names no port cannot be clobbered — overwriting it is a no-op. Both halves got there,
+contrary to an earlier reading of the expansion table: the MCP entry via `${MAITERM_PORT}` in the
+url (the url expands, not just headers), and the hooks by becoming *command* hooks, which read the
+shell environment directly and so never needed expansion at all. What remains per-port on the
+remote is only what is genuinely per-port: `~/.claude/ide/<port>.lock`, and `~/.aiterm`.
 
 What unlocked it was the tunnel port. It used to be chosen by the remote sshd (`-R 0:`), so it did
 not exist when a tab's ssh command was built and could only be delivered by baking it into the
@@ -547,8 +555,14 @@ stable across restarts (the config stops being rewritten every launch) and knowa
 connects, so `buildSshCommand` exports it — along with `MAITERM_AUTH` — next to `MAITERM_TAB_ID`.
 
 The accepted cost is that an env-less remote shell (tmux, `su`, the user's own `ssh`) gets the
-literal `${MAITERM_PORT}` and therefore no MCP and no hooks, where today it gets whatever port was
-written last — frequently a dead one from another machine. Silently-wrong becomes visibly-absent.
+literal `${MAITERM_PORT}` and therefore no MCP and no hooks, where it used to reach whatever port
+was written last — frequently a dead one belonging to another machine. Silently-wrong becomes
+visibly-absent: `claude mcp list` names the missing variables. `source ~/.aiterm` remains the
+manual fix, and it now carries all three values, so it restores hooks *and* MCP for that shell.
+
+Still baked, and still contended, on a remote that also runs Codex: `render_codex_remote_artifacts`
+writes a `config.toml` naming the port. Codex's `env_http_headers` maps a header to an env var
+NAME, so the header half is already instance-independent; whether its `url` can be too is untested.
 
 The fallback if this does not hold up is per-instance `CLAUDE_CONFIG_DIR`, which isolates instead
 of converging. It relocates the ENTIRE root including `projects/`, `sessions/` and
@@ -556,7 +570,7 @@ of converging. It relocates the ENTIRE root including `projects/`, `sessions/` a
 remote session is stranded, and the user's own `settings.json` stops applying to maiTerm-launched
 agents.
 
-**`~/.aiterm` env file:** Written during bridge setup with `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` (mode 600 — it carries the token now). Sourced as a fallback by the SessionStart hook (and the Codex `agent-hook.sh` shim) when `$MAITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. **Sole-tab gated:** the file is per-ACCOUNT, but all tabs on one host share ONE reverse tunnel/port, so an env-less agent on a shared account can't be disambiguated — a stale file would hand it whichever tab connected most recently, corrupting session/tab identity (the wrong tab gets the session registered + `claudeSessionId` + auto-resume repointed). So `buildSetupScript` writes it only when this maiTerm is the *sole* bridged tab on that host (`isSharedHost(hostKey, tabId)` false); on shared hosts it runs `rm -f ~/.aiterm` (also scrubbing stale pre-fix files) and env-less agents fail closed to a visible "needs init" rather than silently mis-registering.
+**`~/.aiterm` env file:** Written during bridge setup with `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` (mode 600 — it carries the token now). Sourced as a fallback by the SessionStart hook (and the Codex `agent-hook.sh` shim) when `$MAITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. **Sole-tab gated:** the file is per-ACCOUNT, but all tabs on one host share ONE reverse tunnel/port, so an env-less agent on a shared account can't be disambiguated — a stale file would hand it whichever tab connected most recently, corrupting session/tab identity (the wrong tab gets the session registered + `claudeSessionId` + auto-resume repointed). So `buildSetupScript` writes it only when this maiTerm is the *sole* bridged tab on that host (`isSharedHost(hostKey, tabId)` false); on shared hosts it runs `rm -f ~/.aiterm` (also scrubbing stale pre-fix files) and env-less agents fail closed to a visible "needs init" rather than silently mis-registering. **The gate is per-instance blind:** `isSharedHost` only knows THIS maiTerm's bridges, so a peer instance's tabs on the same account are invisible to it and both will happily write the file. The setup script already enumerates remote lockfiles and could tell.
 
 **Context menu items (SSH tabs with active bridge):**
 - "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
