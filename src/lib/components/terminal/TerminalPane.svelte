@@ -803,6 +803,14 @@
       : null;
     const ctx = splitCtx ?? autoResumeCtx ?? restoreCtx;
 
+    // Nothing above this point has spawned a process, and several of the steps that got
+    // us here awaited — so the pane can have been destroyed meanwhile (its tab closed, or
+    // its `{#if}` branch swapped out from under it). Spawning now would leak a shell with
+    // no pane, no tab UI and nothing left to kill it: `onDestroy` already ran, and its
+    // `killTerminal` no-opped against a PTY that did not exist yet. Three fds a piece, and
+    // fd exhaustion is a failure this app has shipped before.
+    if (destroyed) return;
+
     // Spawn PTY (or skip if reattaching to an existing one)
     if (!reattaching) {
       try {
