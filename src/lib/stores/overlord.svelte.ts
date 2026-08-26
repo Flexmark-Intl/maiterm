@@ -888,6 +888,81 @@ function createOverlordStore() {
     logInfo(`overlord: dropped ${ids.size} undeliverable agent escalation(s) — no agent tab in this window`);
   }
 
+  /**
+   * Forget every tab this window no longer has.
+   *
+   * Nothing watched for a tab going away. The fleet-derived signals — pressure, permission,
+   * unready — self-clear because they are DERIVED from the workspace tree, so they simply
+   * stop being produced. Proposals and escalations are QUEUES, and had nobody to clear
+   * them: closing a tab left its card sitting on triage, most visibly a "Re-bind a running
+   * agent" proposal whose Send button pointed at a PTY that no longer exists.
+   *
+   * Also drops the tab's engine bookkeeping, which only ever grew — a long-lived window
+   * that opens and closes tabs leaked an entry per tab across a dozen maps.
+   */
+  function sweepClosedTabs() {
+    const live = new Set<string>();
+    for (const ws of workspacesStore.workspaces) {
+      for (const pane of ws.panes) for (const tab of pane.tabs) live.add(tab.id);
+    }
+    // An empty tree means the window is still loading, not that every tab was closed.
+    // Sweeping on it would throw away the whole queue at startup.
+    if (!live.size) return;
+
+    const deadProposals = proposals.filter((p) => !live.has(p.tabId));
+    const deadEscalations = escalations.filter((e) => !live.has(e.tabId));
+    const deadTabs = new Set<string>([
+      ...deadProposals.map((p) => p.tabId),
+      ...deadEscalations.map((e) => e.tabId),
+      ...[...outstanding.keys(), ...liveness.keys(), ...driveWatch.keys(), ...rituals.keys()],
+    ].filter((id) => !live.has(id)));
+    if (!deadProposals.length && !deadEscalations.length && !deadTabs.size) return;
+
+    if (deadProposals.length) proposals = proposals.filter((p) => live.has(p.tabId));
+    if (deadEscalations.length) {
+      escalations = escalations.filter((e) => live.has(e.tabId));
+      for (const e of deadEscalations) {
+        unNudged.delete(e.id);
+        // Same reason as the sweep above: a "Sent" receipt must not outlive its errand.
+        if (e.taskId) handedOff.delete(e.taskId);
+      }
+    }
+
+    for (const id of deadTabs) {
+      // Abort rather than delete — the ritual's own loop owns its map entry and clears it
+      // in its finally, and yanking it from under a running loop is how you get one that
+      // keeps injecting into a tab nobody is watching.
+      const run = rituals.get(id);
+      if (run) run.aborted = true;
+      prevAgentState.delete(id);
+      prevCommitTs.delete(id);
+      pendingEdges.delete(id);
+      permissionSince.delete(id);
+      outstanding.delete(id);
+      liveness.delete(id);
+      rebindWatch.delete(id);
+      rebindFailed.delete(id);
+      // A watch on a closed tab expires into "no reply could be read", which is true and
+      // useless: the human closed it. Drop it without the escalation.
+      driveWatch.delete(id);
+      noticeChain.delete(id);
+      primedAgents.delete(id);
+      if (agentReports.has(id)) {
+        agentReports.delete(id);
+        agentReports = new Map(agentReports);
+      }
+      // These two are keyed `${ruleId}|${tabId}`, so they need the scan.
+      for (const k of [...lastFiredAt.keys()]) if (k.endsWith(`|${id}`)) lastFiredAt.delete(k);
+      for (const k of [...fireLog.keys()]) if (k.endsWith(`|${id}`)) fireLog.delete(k);
+    }
+
+    bumpLive();
+    logInfo(
+      `overlord: swept ${deadTabs.size} closed tab(s) — dropped ${deadProposals.length} ` +
+        `proposal(s), ${deadEscalations.length} escalation(s)`,
+    );
+  }
+
   /** One-line doorbell into the Overlord agent's PTY (§9.1) — content stays behind
    *  the listEscalations pull, keeping the agent's transcript lean. An agent that is merely
    *  busy or unmounted → the queue waits (the engine runs regardless; §2 agent lifecycle).
@@ -1898,6 +1973,7 @@ function createOverlordStore() {
       // Escalations that arrived while the agent was busy still owe it a doorbell.
       if (unNudged.size) void wakeOverlordAgent();
       sweepUndeliverableEscalations(now);
+      sweepClosedTabs();
       sweepDoneTasks(now);
     } finally {
       ticking = false;

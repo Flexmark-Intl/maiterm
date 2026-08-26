@@ -215,6 +215,26 @@ Verified in the current tree — Overlord is mostly an aggregation layer.
 | Window scoping | Each window's `workspacesStore.workspaces` *is* its universe | `notificationDispatch.ts:104` |
 | Facts for tabs whose session is on another host | SSH transcript mirror — remote JSONL + task board shadowed locally | `src-tauri/src/mailink/mirror.rs` |
 
+### 3.1 Derived signals self-clear; queued ones need a sweep
+
+The triage deck mixes two kinds of card and they have opposite lifetimes.
+
+**Derived** — pressure, permission, unready, spent — are computed from the workspace tree
+every tick. Close the tab and they stop being produced, with no cleanup anywhere.
+
+**Queued** — proposals and escalations — are arrays the engine appends to. Nothing removed
+them when their tab went away, so closing a tab left its card on the deck, most visibly a
+`Re-bind a running agent` proposal offering to Send into a PTY that no longer exists.
+
+`sweepClosedTabs` (per tick) drops both queues for tabs the window no longer has, and with
+them the tab's engine bookkeeping — a dozen maps that only ever grew. Three rules it must
+keep: never sweep on an empty workspace tree (that means "still loading", not "all closed");
+abort a running ritual via `run.aborted` rather than deleting its map entry, which the
+ritual's own `finally` owns; and drop a `driveWatch` on a closed tab silently, since expiring
+it would escalate "no reply could be read" about a tab the human deliberately closed.
+
+Anything added to a queue keyed by tab id belongs in this sweep.
+
 ### 4.0 "No live REPL" is two facts, and only one of them means dead
 
 `require_live_repl` guards against a directive landing in **bash**. That needs a live agent
