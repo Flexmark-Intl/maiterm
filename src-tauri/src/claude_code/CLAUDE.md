@@ -532,17 +532,34 @@ listening.** Confirm by comparing `authToken` between `~/.claude/ide/*.lock` on 
 each instance mints its own 32-char token, so a different token is a different maiTerm. Mind the
 timezone when correlating mtimes. Immediate remedy: reload a tab on that host to re-assert.
 
-Fixing it properly is an open design question (board: "Remote per-account config is clobbered by
-any maiTerm that bridges"). The MCP half can be made instance-independent via `${MAITERM_PORT}`
-in the url; the hooks half cannot (see the expansion table above), so the candidates are
-per-instance `CLAUDE_CONFIG_DIR` — which relocates the ENTIRE root including `projects/`,
-`sessions/` and `.credentials.json`, so transcripts and credentials must be symlinked back or
-every existing remote session is stranded — or converting the http hooks to command hooks.
+**The fix in progress: make every instance write IDENTICAL bytes, rather than isolating them.**
+A file that names no port cannot be clobbered — overwriting it is a no-op. Both halves can get
+there, contrary to an earlier reading of the expansion table: the MCP entry via `${MAITERM_PORT}`
+in the url (the url expands, not just headers), and the hooks by becoming *command* hooks, which
+read the shell environment directly and so never needed expansion at all.
 
-**`~/.aiterm` env file:** Written during bridge setup with `export MAITERM_TAB_ID=... MAITERM_PORT=...`. Sourced as a fallback by the SessionStart hook (and the Codex `agent-hook.sh` shim) when `$MAITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. **Sole-tab gated:** the file is per-ACCOUNT, but all tabs on one host share ONE reverse tunnel/port, so an env-less agent on a shared account can't be disambiguated — a stale file would hand it whichever tab connected most recently, corrupting session/tab identity (the wrong tab gets the session registered + `claudeSessionId` + auto-resume repointed). So `buildSetupScript` writes it only when this maiTerm is the *sole* bridged tab on that host (`isSharedHost(hostKey, tabId)` false); on shared hosts it runs `rm -f ~/.aiterm` (also scrubbing stale pre-fix files) and env-less agents fail closed to a visible "needs init" rather than silently mis-registering.
+What unlocked it was the tunnel port. It used to be chosen by the remote sshd (`-R 0:`), so it did
+not exist when a tab's ssh command was built and could only be delivered by baking it into the
+shared config. maiTerm now asks for its own port (`ssh_tunnel.rs`), drawn once per install below
+the Linux ephemeral floor, walking to the next candidate when taken and finally back to `-R 0:` so
+port choice can never be why a tunnel fails. That makes the port a property of the INSTALL:
+stable across restarts (the config stops being rewritten every launch) and knowable before a tab
+connects, so `buildSshCommand` exports it — along with `MAITERM_AUTH` — next to `MAITERM_TAB_ID`.
+
+The accepted cost is that an env-less remote shell (tmux, `su`, the user's own `ssh`) gets the
+literal `${MAITERM_PORT}` and therefore no MCP and no hooks, where today it gets whatever port was
+written last — frequently a dead one from another machine. Silently-wrong becomes visibly-absent.
+
+The fallback if this does not hold up is per-instance `CLAUDE_CONFIG_DIR`, which isolates instead
+of converging. It relocates the ENTIRE root including `projects/`, `sessions/` and
+`.credentials.json`, so transcripts and credentials must be symlinked back or every existing
+remote session is stranded, and the user's own `settings.json` stops applying to maiTerm-launched
+agents.
+
+**`~/.aiterm` env file:** Written during bridge setup with `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` (mode 600 — it carries the token now). Sourced as a fallback by the SessionStart hook (and the Codex `agent-hook.sh` shim) when `$MAITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. **Sole-tab gated:** the file is per-ACCOUNT, but all tabs on one host share ONE reverse tunnel/port, so an env-less agent on a shared account can't be disambiguated — a stale file would hand it whichever tab connected most recently, corrupting session/tab identity (the wrong tab gets the session registered + `claudeSessionId` + auto-resume repointed). So `buildSetupScript` writes it only when this maiTerm is the *sole* bridged tab on that host (`isSharedHost(hostKey, tabId)` false); on shared hosts it runs `rm -f ~/.aiterm` (also scrubbing stale pre-fix files) and env-less agents fail closed to a visible "needs init" rather than silently mis-registering.
 
 **Context menu items (SSH tabs with active bridge):**
-- "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
+- "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
 **Remote hooks:** All hook events (SessionStart, SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact) are registered on the remote with HTTP hooks pointing to `127.0.0.1:{remotePort}/hooks`. These tunnel back through the SSH reverse tunnel to the local MCP server's hooks handler. A command hook on SessionStart reads `$MAITERM_TAB_ID` (from env var injection), POSTs the event back through the tunnel with `?tab_id=…&prime=1`, and echoes the tab ID plus the server's reply into Claude's context — the remote mirror of the local hook in `build_our_hooks`, so change the two together. Its `curl --max-time` matters more here than anywhere: this URL *is* the reverse tunnel, and a zombie tunnel port accepts the connect and then never answers. Hooks require python3 on the remote for the settings.json merge.

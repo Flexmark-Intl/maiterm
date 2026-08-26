@@ -2,7 +2,7 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
-import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, shellEscapePath, countSessionIdClaimants } from '$lib/tauri/commands';
+import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, getRemoteBridgeEnv, shellEscapePath, countSessionIdClaimants } from '$lib/tauri/commands';
 import { stripAnsi } from '$lib/utils/ansi';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
@@ -462,7 +462,7 @@ export async function replayAutoResume(tabId: string) {
   try {
     if (sshCmd) {
       // SSH replay: build full ssh command, then append auto-resume command if any
-      const ssh = buildSshCommand(sshCmd, remoteCwd, tabId);
+      const ssh = buildSshCommand(sshCmd, remoteCwd, tabId, await getRemoteBridgeEnv(sshCmd));
       let payload = ssh + '\n';
       if (cmd) {
         payload += interpolateVariables(tabId, cmd, true) + '\n';

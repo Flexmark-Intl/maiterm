@@ -194,21 +194,54 @@ fn save_remote_port_book(book: &RemotePortBook) {
     }
 }
 
+/// SSH short flags that take a following argument (`man ssh`), so the host token can be
+/// found without mistaking a flag's value for it.
+const SSH_FLAGS_WITH_ARG: &[&str] = &[
+    "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m", "-O", "-o", "-p", "-Q",
+    "-R", "-S", "-W", "-w",
+];
+
+/// The key this host is remembered under: the `user@host` token alone, not the whole arg
+/// string. The two paths that need to agree see different strings for the same host — the
+/// bridge keys off the ssh command it OBSERVED in the foreground, while a tab's replay keys
+/// off the one it has STORED, and those differ by flags (`-x -C ews@nova` vs `ews@nova`).
+/// Keyed on the raw string, a host that had to move off the instance port would be looked up
+/// under one spelling and recorded under the other, so the ssh command would predict the
+/// wrong port on that host forever.
+fn port_book_key(host_key: &str) -> String {
+    let mut tokens = host_key.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        if token.starts_with('-') {
+            // `-p 2222` consumes its value; `-p2222` and `-oKey=Val` carry it inline.
+            if token.len() == 2 && SSH_FLAGS_WITH_ARG.contains(&token) {
+                tokens.next();
+            }
+            continue;
+        }
+        return token.to_string();
+    }
+    host_key.trim().to_string()
+}
+
 /// The remote port this maiTerm will ask for on `host_key`. Answerable without a tunnel:
 /// that is what lets the ssh command carry it before the tunnel exists.
 pub fn preferred_remote_port(host_key: &str) -> u16 {
     let book = remote_port_book().lock();
-    *book.hosts.get(host_key).unwrap_or(&book.instance_port)
+    *book
+        .hosts
+        .get(&port_book_key(host_key))
+        .unwrap_or(&book.instance_port)
 }
 
 /// Remember where we actually landed. `None` means the port was chosen by the remote
 /// (the `-R 0:` fallback): forget any override so the next start goes back to asking for
 /// the instance port rather than chasing a one-off ephemeral number.
 fn record_remote_port(host_key: &str, port: Option<u16>) {
+    let key = port_book_key(host_key);
     let mut book = remote_port_book().lock();
     let changed = match port {
-        Some(p) if p != book.instance_port => book.hosts.insert(host_key.to_string(), p) != Some(p),
-        _ => book.hosts.remove(host_key).is_some(),
+        Some(p) if p != book.instance_port => book.hosts.insert(key, p) != Some(p),
+        _ => book.hosts.remove(&key).is_some(),
     };
     if changed {
         save_remote_port_book(&book);
@@ -538,6 +571,29 @@ pub fn get_mcp_port(state: tauri::State<'_, Arc<AppState>>) -> Option<u16> {
 #[tauri::command]
 pub fn get_mcp_auth(state: tauri::State<'_, Arc<AppState>>) -> Option<String> {
     state.mcp_auth.read().clone()
+}
+
+/// What a tab's ssh command exports so the remote agent can reach THIS maiTerm.
+#[derive(serde::Serialize)]
+pub struct RemoteBridgeEnv {
+    pub port: u16,
+    pub auth: String,
+}
+
+/// The bridge values for a host, answerable BEFORE its tunnel exists — which is the whole
+/// point: they are baked into the tab's ssh command, and that command is built while the
+/// remote is still a login prompt. The port is a prediction (right unless a collision moved
+/// us since), so treat a mismatch as recoverable, not as corruption.
+#[tauri::command]
+pub fn get_remote_bridge_env(
+    state: tauri::State<'_, Arc<AppState>>,
+    host_key: String,
+) -> Option<RemoteBridgeEnv> {
+    let auth = state.mcp_auth.read().clone()?;
+    Some(RemoteBridgeEnv {
+        port: preferred_remote_port(&host_key),
+        auth,
+    })
 }
 
 /// The `/maiterm statusline` helper scripts, served from the same bundled

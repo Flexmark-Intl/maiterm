@@ -9,7 +9,7 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
@@ -846,7 +846,8 @@
         // Send SSH command first — small delay for local shell to initialize
         setTimeout(async () => {
           try {
-            const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd, tabId);
+            const cmd = buildSshCommand(
+              ctx.sshCommand, ctx.remoteCwd, tabId, await getRemoteBridgeEnv(ctx.sshCommand!));
             const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
             await writeTerminal(ptyId, bytes);
           } catch (e) {
@@ -1610,7 +1611,7 @@
     lastDropAt = 0;
 
     try {
-      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId);
+      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, await getRemoteBridgeEnv(sshCommand));
       await writeTerminal(ptyId, Array.from(new TextEncoder().encode(cmd + '\n')));
     } catch (e) {
       logError(`reconnectSsh: failed to write ssh command: ${e}`);
@@ -1895,8 +1896,10 @@
               // "after tmux attach" is precisely what this action is for. Writing under
               // tmux works — it forwards the keystrokes to the inner pane's shell.
               const bridge = getBridgeInfo(tabId);
-              if (bridge?.remotePort) {
-                const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort + "\n";
+              const auth = await getMcpAuth();
+              if (bridge?.remotePort && auth) {
+                const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort
+                  + " MAITERM_AUTH=" + auth + "\n";
                 const bytes = Array.from(new TextEncoder().encode(envCmd));
                 await writeTerminal(ptyId, bytes);
               }

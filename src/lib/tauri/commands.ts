@@ -24,8 +24,11 @@ export function cleanSshCommand(cmd: string): string {
   // the plain patterns below would match from ` cd …` onwards and leave a dangling
   // `'export MAITERM_TAB_ID=…;` behind, which then accumulates on every clone/restore
   // round-trip — the same flag-accumulation this function exists to prevent.
-  let cleaned = cmd.replace(/\s+'export\s+MAITERM_TAB_ID=\S+?;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l'\s*$/, '');
-  cleaned = cleaned.replace(/\s+export\s+MAITERM_TAB_ID=\S+?;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l\s*$/, '');
+  // Match to the `;` rather than to the first whitespace: the export carries several
+  // variables now (MAITERM_PORT, MAITERM_AUTH), so a `\S+?` stops at the first space and
+  // recognises nothing.
+  let cleaned = cmd.replace(/\s+'export\s+MAITERM_TAB_ID=[^';]*;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l'\s*$/, '');
+  cleaned = cleaned.replace(/\s+export\s+MAITERM_TAB_ID=[^';]*;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l\s*$/, '');
   // Pre-export forms (stored commands from earlier builds, and ps output for them).
   cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
   cleaned = cleaned.replace(/\s+'cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l'\s*$/, '');
@@ -79,17 +82,31 @@ export function shellEscapePath(path: string): string {
  * shell is already running one. Baking it into the command we are already sending costs
  * nothing and cannot be mistyped into anything.
  *
- * MAITERM_PORT is deliberately NOT baked: the reverse tunnel does not exist yet when this
- * command is built, and nothing needs it — the remote hook gate passes when it is unset, and
- * the MCP header reads only the tab id.
+ * `bridge` adds `MAITERM_PORT` and `MAITERM_AUTH` — which maiTerm this tab's agent should
+ * talk to, and with what. They ride here rather than being written into the remote's
+ * per-account config because that config is shared by every maiTerm bridging to the account:
+ * whoever writes last owns it, and the others' tabs go dead. In the environment the value is
+ * per-tab and nobody can overwrite it. The port is a PREDICTION (see get_remote_bridge_env) —
+ * this maiTerm's usual port on that host, which is wrong only if a collision has moved it
+ * since, and self-corrects on the bridge's own env injection.
  */
-export function buildSshCommand(sshCmd: string | null, remoteCwd: string | null, tabId?: string | null): string {
+export function buildSshCommand(
+  sshCmd: string | null,
+  remoteCwd: string | null,
+  tabId?: string | null,
+  bridge?: { port: number; auth: string } | null,
+): string {
   if (!sshCmd) return '';
   const fullCmd = sshCmd.match(/^ssh\s/) ? sshCmd : `ssh ${sshCmd}`;
   // Tab ids are UUIDs; anything else is not ours to interpolate into a shell command.
-  const exportPrefix = tabId && /^[A-Za-z0-9-]+$/.test(tabId)
-    ? `export MAITERM_TAB_ID=${tabId}; `
-    : '';
+  const exports: string[] = [];
+  if (tabId && /^[A-Za-z0-9-]+$/.test(tabId)) exports.push(`MAITERM_TAB_ID=${tabId}`);
+  // Same rule for the token: it reaches a remote shell, so anything that isn't plainly
+  // safe to paste into one is dropped rather than quoted around.
+  if (bridge && bridge.port > 0 && /^[A-Za-z0-9._-]+$/.test(bridge.auth)) {
+    exports.push(`MAITERM_PORT=${bridge.port}`, `MAITERM_AUTH=${bridge.auth}`);
+  }
+  const exportPrefix = exports.length ? `export ${exports.join(' ')}; ` : '';
   const rest = fullCmd.replace(/^ssh\s+/, '');
   if (!remoteCwd) {
     if (!exportPrefix) {
@@ -1093,6 +1110,15 @@ export async function getMcpPort(): Promise<number | null> {
 
 export async function getMcpAuth(): Promise<string | null> {
   return invoke('get_mcp_auth');
+}
+
+/**
+ * The bridge values to export in a tab's ssh command, for the host that command targets.
+ * Answerable before the tunnel exists — see buildSshCommand. Null while the MCP server
+ * is still coming up, in which case the command is built without them, exactly as before.
+ */
+export async function getRemoteBridgeEnv(hostKey: string): Promise<{ port: number; auth: string } | null> {
+  return invoke('get_remote_bridge_env', { hostKey });
 }
 
 export async function sshRunSetup(sshArgs: string, setupScript: string): Promise<void> {

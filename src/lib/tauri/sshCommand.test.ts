@@ -29,6 +29,18 @@ describe('buildSshCommand', () => {
     expect(cmd).not.toContain('rm -rf');
     expect(cmd).toBe('ssh -o ControlMaster=no ews@nova');
   });
+
+  it('carries which maiTerm to talk to, so the shared remote config need not name it', () => {
+    const cmd = buildSshCommand('ews@nova', '/srv/app', TAB, { port: 28123, auth: 'tok-123' });
+    expect(cmd).toContain(`export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123;`);
+  });
+
+  it('drops a bridge it cannot safely paste into a remote shell', () => {
+    const cmd = buildSshCommand('ews@nova', null, TAB, { port: 28123, auth: "t'; rm -rf /; echo '" });
+    expect(cmd).not.toContain('rm -rf');
+    expect(cmd).not.toContain('MAITERM_PORT');
+    expect(cmd).toContain(`export MAITERM_TAB_ID=${TAB};`);
+  });
 });
 
 describe('cleanSshCommand round-trip', () => {
@@ -61,5 +73,17 @@ describe('cleanSshCommand round-trip', () => {
   it('strips the unquoted export form that ps reports', () => {
     expect(cleanSshCommand(`ssh -t ews@nova export MAITERM_TAB_ID=${TAB}; cd /srv/app && exec $SHELL -l`))
       .toBe('ews@nova');
+  });
+
+  // The export carries several variables now. A pattern that stops at the first space
+  // recognises none of them, and the dangling remainder accumulates on every round-trip.
+  it('strips the multi-variable export, quoted and unquoted', () => {
+    const bridge = { port: 28123, auth: 'tok-123' };
+    for (const cwd of ['/srv/app', null]) {
+      expect(cleanSshCommand(buildSshCommand('-x -C ews@nova', cwd, TAB, bridge))).toBe('-x -C ews@nova');
+    }
+    expect(cleanSshCommand(
+      `ssh -t ews@nova export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123; cd /srv/app && exec $SHELL -l`,
+    )).toBe('ews@nova');
   });
 });

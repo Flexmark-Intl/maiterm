@@ -165,9 +165,15 @@ shared hosts (it would hand an agent a sibling's tab id), and typing the export 
 PTY lands in the agent's chat whenever the remote shell is already running one. Baking it into a
 command we are already sending cannot be mistyped into anything.
 
-`MAITERM_PORT` is deliberately NOT baked: the reverse tunnel does not exist yet when this command
-is built, and nothing needs it — the remote hook gate passes when it is unset and the MCP
-`x-maiterm-tab` header reads only the tab id.
+`MAITERM_PORT` and `MAITERM_AUTH` ride along too — *which* maiTerm this tab's agent should talk
+to, and with what. They used not to: the tunnel port was chosen by the remote sshd, so it did not
+exist when this command was built, which is why it had to be written into the remote's per-ACCOUNT
+config instead. That config is shared by every maiTerm bridging to the account, so whoever wrote
+last owned it and the others' tabs went dead. maiTerm now picks its own remote port
+(`ssh_tunnel.rs`), which makes the port a property of the *install* — knowable here, and per-tab
+in the environment where nothing can overwrite it. The baked port is a PREDICTION (this install's
+usual port on that host); it is wrong only if a collision has moved us since, and the bridge's own
+env injection corrects the shell when that happens.
 
 **`cleanSshCommand()` must strip the export form FIRST.** It recovers the bare `user@host` for
 storage; if it does not recognise the export, the plain pattern matches from ` cd …` onward and

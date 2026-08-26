@@ -348,9 +348,11 @@ function buildSetupScript(
     // env-less agent (session/tab identity cross-pollution), so write it only when this
     // tab is the sole bridge to the host; on shared hosts remove it (also scrubs stale
     // pre-fix files) and let those agents fail closed to a visible "needs init".
+    // 0600: it now carries the auth token as well as the identity, and the account may be
+    // shared with other humans on the box.
     sharedHost
       ? 'rm -f ~/.aiterm'
-      : `printf 'export MAITERM_TAB_ID=${tabId}\\nexport MAITERM_PORT=${remotePort}\\n' > ~/.aiterm`,
+      : `printf 'export MAITERM_TAB_ID=${tabId}\\nexport MAITERM_PORT=${remotePort}\\nexport MAITERM_AUTH=${authToken}\\n' > ~/.aiterm && chmod 600 ~/.aiterm`,
     // Install /maiterm skill on the remote (drop any legacy /aiterm one)
     'rm -rf ~/.claude/skills/aiterm',
     'mkdir -p ~/.claude/skills/maiterm',
@@ -463,7 +465,8 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     // %maitermTabId, %maitermPort for individual values, %maitermExport for the full export command.
     setVariable(tabId, 'maitermTabId', tabId);
     setVariable(tabId, 'maitermPort', String(tunnelInfo.remote_port));
-    setVariable(tabId, 'maitermExport', `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port}`);
+    setVariable(tabId, 'maitermExport',
+      `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port} MAITERM_AUTH=${authToken}`);
 
     // Inject MAITERM_TAB_ID and MAITERM_PORT into the remote shell FIRST — before
     // building or kicking off the remote setup below. The injection only needs
@@ -512,7 +515,8 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           // don't inherit the spawn env.
           logInfo("SSH MCP bridge: skipping env-var injection — an agent session owns tab " + tabId);
         } else {
-          const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port + "\n";
+          const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
+            + " MAITERM_AUTH=" + authToken + "\n";
           const bytes = Array.from(new TextEncoder().encode(envCmd));
           await commands.writeTerminal(ptyId, bytes);
           injectedEnvPort.set(tabId, tunnelInfo.remote_port);
