@@ -235,6 +235,30 @@ it would escalate "no reply could be read" about a tab the human deliberately cl
 
 Anything added to a queue keyed by tab id belongs in this sweep.
 
+### 3.2 A proposal is a snapshot, so it has to be re-read
+
+A proposal records what was true when the rule matched, then waits for a human. Nothing
+re-read it, so it aged into a lie: a compaction staged at 23:31 for a tab genuinely over
+55% was still on the board at 09:58 — after that tab compacted at 01:38 and dropped to 8% —
+offering to compact it again. Approving it would have thrown away a tab's whole working
+context to save nothing, and `run all` fires the entire queue without anyone reading cards
+one by one.
+
+`proposalStillHolds` is checked three times: on the tick (so the card *disappears* rather
+than being refused later), at `approveProposal`, and in `runTriage`. It returns false when
+the rule was deleted or disabled while the proposal waited, and then splits by condition:
+
+- **Level conditions** (`context_pct`, `tab_idle`, `task_stale`, `agent_unready`,
+  `no_todo_list`, `permission_pending`, `directive_unacked`) describe a state, so they are
+  simply re-evaluated with `conditionFires`.
+- **Edge conditions** (`turn_end`, `commit`) describe a moment that has already passed —
+  re-checking them would void every edge proposal the instant it was queued. They get an age
+  backstop (`PROPOSAL_STALE_MS`, 4h), and `commit` additionally dies when a NEWER commit
+  lands, because the directive names *the* last commit and now names the wrong one.
+
+The general rule: **anything queued for later approval must be re-read against the present
+before it acts, and a card that has stopped being true must stop being shown.**
+
 ### 4.0 "No live REPL" is two facts, and only one of them means dead
 
 `require_live_repl` guards against a directive landing in **bash**. That needs a live agent

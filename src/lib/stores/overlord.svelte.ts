@@ -1,6 +1,7 @@
 import * as commands from '$lib/tauri/commands';
 import type { OverlordTabFacts } from '$lib/tauri/commands';
 import type {
+  OverlordCondition,
   OverlordGuards,
   OverlordLedgerEntry,
   OverlordLedgerOutcome,
@@ -1208,6 +1209,71 @@ function createOverlordStore() {
 
   // ── Condition evaluation (§5) ───────────────────────────────────────────────
 
+  /**
+   * Conditions describing a STATE, so they still mean something when re-read later.
+   *
+   * `turn_end` and `commit` describe a moment that has already passed. Re-checking those
+   * would invalidate every edge proposal the instant it was queued — they get the age
+   * backstop below instead.
+   */
+  const RECHECKABLE_EVENTS = new Set<OverlordCondition['event']>([
+    'context_pct', 'tab_idle', 'task_stale', 'agent_unready',
+    'no_todo_list', 'permission_pending', 'directive_unacked',
+  ]);
+
+  /** How long an edge proposal stays offerable. Long enough to survive a lunch break;
+   *  short enough that a queue left overnight doesn't fire on yesterday's commit, by which
+   *  time "review that commit" names something the agent has long since moved past. */
+  const PROPOSAL_STALE_MS = 4 * 3_600_000;
+
+  /**
+   * Whether a queued proposal still describes reality.
+   *
+   * A proposal is a SNAPSHOT: it records what was true when the rule matched, and then sits
+   * on the board until a human decides. Nothing re-read it. A compaction staged at 23:31,
+   * when the tab was genuinely over 55%, was still on the board at 09:58 — after the tab had
+   * compacted at 01:38 and dropped to 8% — offering to compact it again. Approving it would
+   * have thrown away a tab's entire working context to save nothing.
+   *
+   * Checked on the tick so the card DISAPPEARS when it stops being true, and again at fire
+   * time so the gap between rendering a card and clicking it can't be exploited.
+   */
+  function proposalStillHolds(p: OverlordProposal, now: number): boolean {
+    const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
+    // Rule deleted or switched off while the proposal waited.
+    if (!rule || !rule.enabled) return false;
+    if (!RECHECKABLE_EVENTS.has(rule.when.event)) {
+      if (now - p.createdAt > PROPOSAL_STALE_MS) return false;
+      // A `commit` proposal names THE last commit. Once another one lands it names the
+      // wrong one, and the directive ("review that commit") points at history.
+      if (rule.when.event === 'commit') {
+        const last = facts.get(p.tabId)?.last_commit_ts;
+        if (last !== undefined && last > p.createdAt) return false;
+      }
+      return true;
+    }
+    const tab = workspaceForTab(p.tabId)
+      ?.panes.flatMap((pane) => pane.tabs)
+      .find((t) => t.id === p.tabId);
+    if (!tab) return false;
+    return conditionFires($state.snapshot(rule) as OverlordRule, tab, now, false, false);
+  }
+
+  /** Drop proposals that have stopped being true. Runs on the tick, so the board shows what
+   *  is the case now rather than what was the case when the sweep ran. */
+  function sweepStaleProposals(now: number) {
+    const dead = proposals.filter((p) => !proposalStillHolds(p, now));
+    if (!dead.length) return;
+    const ids = new Set(dead.map((p) => p.id));
+    proposals = proposals.filter((p) => !ids.has(p.id));
+    for (const p of dead) {
+      logInfo(
+        `overlord: dropped stale proposal "${p.ruleName}" for ${p.tabName} ` +
+          `(queued ${Math.round((now - p.createdAt) / 60_000)}m ago — no longer applies)`,
+      );
+    }
+  }
+
   function conditionFires(rule: OverlordRule, tab: Tab, now: number, turnEnded: boolean, committed: boolean): boolean {
     const w = rule.when;
     const f = facts.get(tab.id);
@@ -1974,6 +2040,7 @@ function createOverlordStore() {
       if (unNudged.size) void wakeOverlordAgent();
       sweepUndeliverableEscalations(now);
       sweepClosedTabs();
+      sweepStaleProposals(now);
       sweepDoneTasks(now);
     } finally {
       ticking = false;
@@ -2043,13 +2110,23 @@ function createOverlordStore() {
     },
 
     // ── Propose-mode (§3) ────────────────────────────────────────────────────
-    approveProposal(id: string) {
+    /** Returns false when the proposal was no longer true and so did NOT run — the card is
+     *  removed either way, since a proposal that has stopped applying is not pending. */
+    approveProposal(id: string): boolean {
       const p = proposals.find((x) => x.id === id);
-      if (!p) return;
+      if (!p) return false;
       proposals = proposals.filter((x) => x.id !== id);
       const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
-      if (!rule) return;
+      if (!rule) return false;
+      // Re-check at fire time, not just on the tick that rendered the card. The human can
+      // click a card the moment it stops being true, and the whole point is that a
+      // proposal is a snapshot — approving one must never act on a stale one.
+      if (!proposalStillHolds(p, Date.now())) {
+        logInfo(`overlord: refused stale proposal "${p.ruleName}" for ${p.tabName} at approval`);
+        return false;
+      }
       void runSequence($state.snapshot(rule) as OverlordRule, p.tabId, 'rule');
+      return true;
     },
     dismissProposal(id: string) {
       proposals = proposals.filter((x) => x.id !== id);
@@ -2760,10 +2837,12 @@ function createOverlordStore() {
               if (ok) { awaitingRebind.add(job.tabId); rebindSent++; }
             } else {
               // Re-read: the human may have dismissed it, or the rule may have been edited
-              // away, since the snapshot.
+              // away, since the snapshot. And re-CHECK: run all is exactly where a stale
+              // proposal does the most damage, since it fires a whole queue at once without
+              // anyone reading the cards one by one.
               const p = proposals.find((x) => x.id === job.id);
               const rule = p && preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
-              if (p && rule && !rituals.has(p.tabId)) {
+              if (p && rule && !rituals.has(p.tabId) && proposalStillHolds(p, Date.now())) {
                 proposals = proposals.filter((x) => x.id !== p.id);
                 void runSequence($state.snapshot(rule) as OverlordRule, p.tabId, 'rule');
                 ok = true;
