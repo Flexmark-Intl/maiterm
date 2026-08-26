@@ -220,87 +220,105 @@ function buildSetupScript(
   const escapedMcpEntry = mcpEntry.replace(/'/g, "'\\''");
 
   // ── Hooks registration ──
-  // Build hooks data for ~/.claude/settings.json on the remote.
-  // HTTP hooks tunnel back through the reverse SSH tunnel to our local MCP server.
-  const hooksUrl = "http://127.0.0.1:" + remotePort + "/hooks";
+  // Build hooks data for ~/.claude/settings.json on the remote. Like the MCP entry above,
+  // this file is a per-ACCOUNT singleton, so every hook here is a COMMAND hook reading
+  // $MAITERM_PORT / $MAITERM_AUTH / $MAITERM_TAB_ID rather than an http hook naming a port.
+  //
+  // Command hooks are the only kind that can: an http hook's url and headers do NOT expand
+  // ${VAR} (a header resolves to an empty string — silent and destructive), which is why the
+  // hooks half of this file looked unfixable. A command hook runs in the tab's own shell and
+  // simply reads the environment, so the file becomes the same bytes from every instance.
+  //
+  // Two things fall out. `?tab_id=` is now on EVERY event, not just SessionStart — an http
+  // hook could never carry it — so events no longer have to be matched to a tab through the
+  // pending pool. And there are no http hooks left to allow, so `allowedHttpHookUrls` (which
+  // was itself contended, being a single list each instance rewrote) disappears.
+  //
+  // Kept in the foreground rather than backgrounded with `&`: the server returns nothing for
+  // these events, so a reply is not what we are waiting for, but ORDER matters — tab state is
+  // derived from the sequence (UserPromptSubmit → PreToolUse → PostToolUse → Stop), and
+  // detached curls can finish out of order. The cost over an http hook is a fork, against a
+  // POST both kinds have to make anyway.
+  const hookPost =
+    "curl -s -o /dev/null --connect-timeout 2 --max-time 4 " +
+    "-H \"x-claude-code-ide-authorization: $MAITERM_AUTH\" -H 'content-type: application/json' ";
+  const hooksUrlExpr = "\"http://127.0.0.1:$MAITERM_PORT/hooks?tab_id=$MAITERM_TAB_ID\"";
 
-  // SessionStart command hook: reads $MAITERM_TAB_ID (injected into PTY after bridge setup),
-  // extracts session_id from hook stdin, echoes both into Claude's context.
-  // Uses double-quoted JS string to avoid template literal ${} interpolation of bash vars.
-  // SessionStart hook: reads $MAITERM_TAB_ID from env, falls back to ~/.aiterm file
-  // (needed when Claude runs inside tmux where env vars weren't inherited). That file
-  // only exists on sole-tab hosts — on shared hosts it's removed to avoid handing this
-  // env-less agent a sibling tab's identity, so those agents fail closed to "needs init".
-  // Mirrors the local hook in lockfile.rs build_our_hooks — keep the two in step.
-  // It captures stdin ONCE and POSTs it back through the tunnel with ?tab_id=, which is what
-  // links session → tab without the agent calling initSession (a resumed agent takes no turn
-  // until its human types). --max-time is mandatory here above all: this URL IS a reverse
-  // tunnel, and a zombie tunnel port accepts the connect then never answers.
-  // NOTE: no apostrophes inside the single-quoted echo string — one would close the quote.
-  const sessionStartCmd =
+  // Every hook starts the same way: recover the identity from ~/.aiterm when the shell has
+  // none (tmux/su), then fall through silently unless we know BOTH which maiTerm to reach and
+  // which tab is asking. Without the port there is nowhere to send it; without the tab id the
+  // event cannot be attributed, and a misattributed event is worse than a missing one.
+  const hookGate =
     "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
-    "{ [ \"$MAITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$MAITERM_PORT\" ]; } && " +
-    "[ -n \"$MAITERM_TAB_ID\" ] && { " +
+    "[ -n \"$MAITERM_PORT\" ] && [ -n \"$MAITERM_TAB_ID\" ] && { ";
+
+  // The generic event hook: forward stdin verbatim, ignore the reply.
+  // `--data-binary @-` streams the payload straight through — nothing here needs to read it.
+  const eventCmd = hookGate + hookPost + "--data-binary @- " + hooksUrlExpr + " 2>/dev/null; } || true";
+
+  // SessionStart is the one event whose REPLY matters, so it cannot use the generic hook: it
+  // asks for `&prime=1` and echoes what comes back, which is how the standing instructions the
+  // server tailors to this tab reach the model. Everything else gets StatusCode::OK and an
+  // empty body.
+  //
+  // It captures stdin ONCE (`cat` is not re-readable) and re-uses it for both the session-id
+  // extraction and the POST. Mirrors the local hook in lockfile.rs build_our_hooks — keep the
+  // two in step. --max-time is mandatory here above all: this URL IS a reverse tunnel, and a
+  // zombie tunnel port accepts the connect then never answers.
+  // NOTE: no apostrophes inside the single-quoted echo string — one would close the quote.
+  // Uses double-quoted JS strings so `${}` is not read as template interpolation.
+  const sessionStartCmd =
+    hookGate +
     "MAITERM_IN=$(cat); " +
     "MAITERM_SID=$(printf '%s' \"$MAITERM_IN\" | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1); " +
     "MAITERM_PRIME=$(curl -s --connect-timeout 2 --max-time 4 " +
-    "-H \"x-claude-code-ide-authorization: " + authToken + "\" -H 'content-type: application/json' " +
+    "-H \"x-claude-code-ide-authorization: $MAITERM_AUTH\" -H 'content-type: application/json' " +
     "--data-binary \"$MAITERM_IN\" " +
-    "\"" + hooksUrl + "?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); " +
+    "\"http://127.0.0.1:$MAITERM_PORT/hooks?tab_id=$MAITERM_TAB_ID&prime=1\" 2>/dev/null); " +
     "echo 'Your maiTerm tab ID is '$MAITERM_TAB_ID'. Your session ID is '$MAITERM_SID'. " +
     "maiTerm already knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool answers that it does not know your tab, call the maiterm initSession tool with this tabId and sessionId to re-bind.'\"$MAITERM_PRIME\"; " +
     "} || true";
 
-  // SessionEnd command hook: mirrors lockfile.rs build_our_hooks. Only a hook in the tab's own
-  // shell can say WHICH tab ended, which is what lets the server clear the right mapping when a
-  // reload clone shares the original's session id. No echo — stdout is not injected at session end.
-  // NOTE: keep this pure ASCII (it is decoded by the remote python3 under the ssh locale).
-  const sessionEndCmd =
-    "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
-    "{ [ \"$MAITERM_PORT\" = \"" + remotePort + "\" ] || [ -z \"$MAITERM_PORT\" ]; } && " +
-    "[ -n \"$MAITERM_TAB_ID\" ] && { " +
-    "MAITERM_IN=$(cat); " +
-    "curl -s -o /dev/null --connect-timeout 2 --max-time 4 " +
-    "-H \"x-claude-code-ide-authorization: " + authToken + "\" -H 'content-type: application/json' " +
-    "--data-binary \"$MAITERM_IN\" " +
-    "\"" + hooksUrl + "?tab_id=$MAITERM_TAB_ID\" 2>/dev/null; " +
-    "} || true";
-
-  const httpHook = { matcher: "", hooks: [{ type: "http", url: hooksUrl, headers: { "x-claude-code-ide-authorization": authToken } }] };
+  // SessionEnd needs no special case any more. It used to be the only other hook that ran in
+  // the tab's shell, because only such a hook can say WHICH tab ended — the thing that lets the
+  // server clear the right mapping when a reload clone shares the original's session id. Now
+  // every event carries its tab, so the generic hook says it for all of them.
+  // NOTE: keep all of these pure ASCII (they are decoded by the remote python3 under the ssh locale).
+  const commandHook = (command: string) => ({ matcher: "", hooks: [{ type: "command", command, timeout: 5 }] });
+  const eventHook = commandHook(eventCmd);
 
   const hooksData = JSON.stringify({
-    url: hooksUrl,
-    port: remotePort,
     hooks: {
-      SessionStart: [
-        { matcher: "", hooks: [{ type: "command", command: sessionStartCmd, timeout: 5 }] },
-        httpHook,
-      ],
-      SessionEnd: [
-        { matcher: "", hooks: [{ type: "command", command: sessionEndCmd, timeout: 5 }] },
-        httpHook,
-      ],
-      Notification: [httpHook],
-      Stop: [httpHook],
-      UserPromptSubmit: [httpHook],
-      PreToolUse: [httpHook],
-      PostToolUse: [httpHook],
-      PreCompact: [httpHook],
+      SessionStart: [commandHook(sessionStartCmd)],
+      SessionEnd: [eventHook],
+      Notification: [eventHook],
+      Stop: [eventHook],
+      UserPromptSubmit: [eventHook],
+      PreToolUse: [eventHook],
+      PostToolUse: [eventHook],
+      PreCompact: [eventHook],
     },
   });
   const escapedHooksData = hooksData.replace(/'/g, "'\\''");
 
   // Python script to merge hooks into ~/.claude/settings.json.
   // Removes ALL maiTerm-related hook entries (stale or current), then adds only ours.
-  // Stale hooks from dead tunnels (kept alive by ControlMaster) cause errors otherwise.
-  // Also cleans up stale allowedHttpHookUrls from dead ports.
+  //
+  // That sweep used to be how one instance destroyed another's config rather than merely
+  // overwriting it. It is safe now for the reason the rest of this file is: what we add back
+  // is byte-identical to what any other maiTerm would add, so removing theirs and writing ours
+  // leaves the file exactly as it was. It still earns its keep against hooks from OLD builds,
+  // which named a port and are now dead weight.
+  //
+  // allowedHttpHookUrls is stripped and not rewritten: with no http hooks left there is
+  // nothing to allow, and the list was itself a contended singleton — one array that every
+  // instance rewrote with its own port. Drop the key when it empties rather than leaving [].
   // No single quotes in the python code (shell wraps it in single quotes).
   const pythonHooks =
     'import json,sys,os,re\n' +
     'h=json.load(sys.stdin)\n' +
     'p=os.path.expanduser("~/.claude/settings.json")\n' +
     's=json.load(open(p)) if os.path.exists(p) else {}\n' +
-    'url=h["url"]\n' +
     'def is_aiterm(e):\n' +
     ' for hk in e.get("hooks",[]):\n' +
     '  u=hk.get("url","")\n' +
@@ -312,8 +330,10 @@ function buildSetupScript(
     ' existing.extend(entries)\n' +
     ' s.setdefault("hooks",{})[ev]=existing\n' +
     'a=[u for u in s.get("allowedHttpHookUrls",[]) if not re.search(r"127\\.0\\.0\\.1:\\d+/hooks",u)]\n' +
-    'a.append(url)\n' +
-    's["allowedHttpHookUrls"]=a\n' +
+    'if a:\n' +
+    ' s["allowedHttpHookUrls"]=a\n' +
+    'else:\n' +
+    ' s.pop("allowedHttpHookUrls",None)\n' +
     'open(p,"w").write(json.dumps(s,indent=2))';
 
   // Build script with newline separators (semicolons after `do`/`then`/`else` are syntax errors).
