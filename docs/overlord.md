@@ -320,9 +320,27 @@ decides whether to spend that tab's whole context compacting it again. The bound
 states the post-compaction size at the instant it happens, and the model id still comes from
 the older assistant line (the boundary doesn't carry one, and the percentage needs it).
 
-Placeholder `usage` records — `input_tokens` of 0 or 1 with no cache fields — are skipped.
-The floor is 2, not a "plausible session size": a higher bar would work on live data but
-would be invented rather than observed, and would silently discard a genuine small reading.
+Placeholder `usage` records are skipped whole — **including their `model` field**. Claude
+Code writes an assistant record with all-zero usage and `"model":"<synthetic>"` for
+`API Error: …` and `No response requested.`, and it stays the newest usage-bearing line
+until the session takes another turn (measured across this corpus: 280 such records, median
+dwell 48s, some permanent where the session ended on the error). `context_limit_for` doesn't
+recognise `<synthetic>`, so letting it answer the model question swaps a 1M window for 200k:
+153,715 tokens reads as **77% instead of 15%**, clearing the default 55% checkpoint — and an
+API error leaves the agent idle with a quiet PTY and a live REPL, so every guard passes. The
+gauge meant to prevent a needless compaction would have caused one.
+
+The floor itself is 2, not a "plausible session size": a higher bar would work on live data
+but would be invented rather than observed, and would silently discard a genuine small
+reading.
+
+**Known limitation, bounded.** When the boundary supplies the tokens but no assistant line
+survives in the 256 KB tail to supply a model, the reading is returned with `model_id: None`
+and the caller guesses a 200k window — 7 of 481 real compactions in this corpus. That
+overstates a 1M-window tab (2% reads as 12%) and drops the model label from the phone gauge.
+It cannot trip the checkpoint rule: `postTokens` maxes at 39,697 across 414 compactions, so
+even against a 200k guess it never reaches 55%. Still strictly better than the pre-boundary
+behaviour, which reported the pre-compaction number.
 
 **No PostCompact hook is needed for this.** The transcript already carries the authoritative
 number, `SessionStart` already fires on compaction so the tab re-resolves to the new session

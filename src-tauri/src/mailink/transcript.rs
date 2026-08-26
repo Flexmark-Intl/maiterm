@@ -893,15 +893,30 @@ fn claude_meta_from_tail(tail: &str) -> Option<SessionMeta> {
             if tokens >= MIN_PLAUSIBLE_CONTEXT_TOKENS {
                 context_tokens = Some(tokens);
             } else {
-                // A placeholder line tells us nothing — but it is still an assistant record,
-                // so let it answer the model/effort questions below.
+                // A sub-floor record answers NOTHING, model included. I briefly let it fall
+                // through to the model question below, on the reasoning that a placeholder
+                // is still an assistant record — which is backwards. Claude Code writes
+                // these for `API Error: …` and `No response requested.`, and stamps them
+                // `"model":"<synthetic>"`: the one record whose model field is not a model.
                 //
-                // (Falls through deliberately: `continue` here would discard a perfectly
-                // good model id on the way past.)
+                // `context_limit_for` doesn't recognise `<synthetic>`, so it fell back to a
+                // 200k window. A tab at 153,715 tokens of a 1M window went from 15% to 77%,
+                // which clears the default checkpoint rule's 55% — and an API error leaves
+                // the agent idle with a quiet PTY and a live REPL, so every guard passes.
+                // The reading that was supposed to stop a needless compaction caused one.
+                continue;
             }
         }
         if model_id.is_none() {
-            model_id = msg.get("model").and_then(|m| m.as_str()).map(String::from);
+            // Never from a synthetic record. Sub-floor lines already `continue` above, so
+            // this only bites if Claude Code ever stamps `<synthetic>` on a line carrying
+            // real usage — but the invariant is the point: that string is not a model, and
+            // treating it as one silently rewrites the context window.
+            model_id = msg
+                .get("model")
+                .and_then(|m| m.as_str())
+                .filter(|m| *m != "<synthetic>")
+                .map(String::from);
             // `effort` is a top-level field on the SAME assistant line (sibling of `message`),
             // so it costs no extra read. Absent on older transcripts / effort-less models.
             effort = v.get("effort").and_then(|e| e.as_str()).map(String::from);
@@ -2458,6 +2473,31 @@ mod tests {
         );
         let meta3 = claude_meta_from_tail(&placeholder_then_real).expect("falls back past the placeholder");
         assert_eq!(meta3.context_tokens, 30_001);
+    }
+
+    #[test]
+    fn a_synthetic_api_error_record_never_supplies_the_model() {
+        // Verbatim shape from a real transcript: Claude Code writes an assistant record with
+        // all-zero usage and `"model":"<synthetic>"` for `API Error: …` and
+        // `No response requested.` It is the newest usage-bearing line until the session
+        // takes another turn, which after an API error can be a long time or forever.
+        //
+        // `context_limit_for` doesn't know `<synthetic>`, so letting it answer the model
+        // question swaps a 1M window for 200k: 153,715 tokens reads as 77% instead of 15%,
+        // clearing the default checkpoint rule's 55% and compacting a tab at 15%.
+        let real = r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-4-8","usage":{"input_tokens":4,"cache_read_input_tokens":153711,"cache_creation_input_tokens":0}}}"#;
+        let synthetic = r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"content":"API Error: 529 Overloaded."}"#;
+
+        let meta = claude_meta_from_tail(&format!("{real}\n{synthetic}\n")).expect("real turn is found");
+        assert_eq!(meta.context_tokens, 153_715);
+        assert_eq!(meta.model_id.as_deref(), Some("claude-opus-4-8"), "the synthetic record must not win the model");
+        assert_eq!(meta.effort.as_deref(), Some("high"), "effort rides the same line as the model");
+
+        // And it must not win even if it ever carried real usage — the string is not a model.
+        let synthetic_with_usage = r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":9000}}}"#;
+        let meta2 = claude_meta_from_tail(synthetic_with_usage).expect("tokens still count");
+        assert_eq!(meta2.context_tokens, 9000);
+        assert_eq!(meta2.model_id, None, "no model beats a wrong one — the caller then guesses");
     }
 
     #[test]
