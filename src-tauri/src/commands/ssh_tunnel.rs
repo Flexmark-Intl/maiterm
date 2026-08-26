@@ -117,6 +117,172 @@ async fn cm_master_alive(host_key: &str, ssh_args: &str) -> bool {
     }
 }
 
+// ── Which remote port this maiTerm listens on ────────────────────────────────────────
+//
+// The tunnel's remote port is what identifies this maiTerm to a remote agent, and it used
+// to be chosen by the remote sshd (`-R 0:`). That is the root of the shared-config problem:
+// an sshd-chosen port does not exist yet when a tab's ssh command is built, so it cannot
+// ride into the remote shell's environment, so it has to be baked into the per-ACCOUNT
+// files instead (`~/.claude.json`, `~/.claude/settings.json`) — where the next maiTerm to
+// bridge overwrites it and takes the first one's tabs down with it.
+//
+// Choosing it ourselves makes the port a property of THIS INSTALL rather than of one
+// connection: stable across restarts (the remote config stops being rewritten every launch)
+// and knowable before a tab connects (so it can be exported next to MAITERM_TAB_ID).
+//
+// The preferred port is drawn once per install from a range below the Linux ephemeral floor
+// (32768), so the remote kernel's own outbound allocations cannot land on it. Dev and prod
+// draw separately — `app_data_slug()` already splits their data dirs — because they are two
+// writers of the same remote files today.
+//
+// A collision is still possible: a peer maiTerm that drew the same number, or our own zombie
+// listener held open by a dead ControlMaster (which this codebase has seen). So a taken port
+// falls through to the next candidate and, once those are exhausted, back to `-R 0:` — today's
+// behaviour, kept as the floor. Port choice must never be the reason a tunnel fails to come up.
+const REMOTE_PORT_BASE: u16 = 28000;
+const REMOTE_PORT_SPAN: u16 = 1000;
+const REMOTE_PORT_ATTEMPTS: usize = 4;
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct RemotePortBook {
+    /// The port this install asks for on every host.
+    instance_port: u16,
+    /// Hosts where a collision pushed us off `instance_port`.
+    #[serde(default)]
+    hosts: std::collections::HashMap<String, u16>,
+}
+
+fn remote_port_book_path() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|p| {
+        p.join(crate::state::persistence::app_data_slug())
+            .join("aiterm-remote-ports.json")
+    })
+}
+
+/// The in-process copy. Loaded once, written through on every change — the file only
+/// matters across restarts, which is the whole point of it.
+fn remote_port_book() -> &'static parking_lot::Mutex<RemotePortBook> {
+    static BOOK: std::sync::OnceLock<parking_lot::Mutex<RemotePortBook>> = std::sync::OnceLock::new();
+    BOOK.get_or_init(|| {
+        let mut book: RemotePortBook = remote_port_book_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if !(REMOTE_PORT_BASE..REMOTE_PORT_BASE + REMOTE_PORT_SPAN).contains(&book.instance_port) {
+            // First run on this install (or a file from before this existed). Draw from the
+            // clock rather than pulling in a PRNG — the only property needed is that two
+            // machines are unlikely to pick the same number, and a collision is handled anyway.
+            let jitter = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            book.instance_port = REMOTE_PORT_BASE + (jitter % REMOTE_PORT_SPAN as u32) as u16;
+            log::info!("SSH tunnel: this install will ask for remote port {}", book.instance_port);
+            save_remote_port_book(&book);
+        }
+        parking_lot::Mutex::new(book)
+    })
+}
+
+fn save_remote_port_book(book: &RemotePortBook) {
+    let Some(path) = remote_port_book_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(book) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// The remote port this maiTerm will ask for on `host_key`. Answerable without a tunnel:
+/// that is what lets the ssh command carry it before the tunnel exists.
+pub fn preferred_remote_port(host_key: &str) -> u16 {
+    let book = remote_port_book().lock();
+    *book.hosts.get(host_key).unwrap_or(&book.instance_port)
+}
+
+/// Remember where we actually landed. `None` means the port was chosen by the remote
+/// (the `-R 0:` fallback): forget any override so the next start goes back to asking for
+/// the instance port rather than chasing a one-off ephemeral number.
+fn record_remote_port(host_key: &str, port: Option<u16>) {
+    let mut book = remote_port_book().lock();
+    let changed = match port {
+        Some(p) if p != book.instance_port => book.hosts.insert(host_key.to_string(), p) != Some(p),
+        _ => book.hosts.remove(host_key).is_some(),
+    };
+    if changed {
+        save_remote_port_book(&book);
+    }
+}
+
+fn next_port_candidate(prev: u16) -> u16 {
+    let offset = prev.wrapping_sub(REMOTE_PORT_BASE).wrapping_add(1) % REMOTE_PORT_SPAN;
+    REMOTE_PORT_BASE + offset
+}
+
+/// The `ssh` arguments for a reverse tunnel to `host_key`. `listen` is the remote port to
+/// bind; `None` lets the remote sshd choose one (`-R 0:`).
+fn build_tunnel_args(host_key: &str, ssh_args: &str, local_port: u16, listen: Option<u16>) -> Vec<String> {
+    let mut cmd_args: Vec<String> = Vec::new();
+    cmd_args.push("-N".to_string());
+    // -v is required: when SSH multiplexes through an existing ControlMaster,
+    // the mux client prints nothing without it. With -v, the forwarding result
+    // appears on stderr alongside debug lines (which we filter out).
+    cmd_args.push("-v".to_string());
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ExitOnForwardFailure=yes".to_string());
+    // Fail fast + reap wedged tunnels: bound the initial connect and detect a dead
+    // peer within ~30s (else a hung remote lingers "alive" for the user's global
+    // ServerAliveInterval, often minutes), so the monitor task below removes the stale
+    // tunnel and the frontend can re-establish. Explicit -o wins over ~/.ssh/config.
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ConnectTimeout=15".to_string());
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ServerAliveInterval=10".to_string());
+    cmd_args.push("-o".to_string());
+    cmd_args.push("ServerAliveCountMax=3".to_string());
+    // Never touch the user's shared ControlMaster socket. With `ControlMaster auto`
+    // (common in ~/.ssh/config), this long-lived `-N` tunnel would otherwise CREATE
+    // and own `~/.ssh/master-<user>@<host>.socket`, forcing the user's own plain
+    // `ssh <host>` to multiplex over OUR tunnel. When our connection then saturates or
+    // degrades, their manual ssh breaks with "mux_client_request_session: Session open
+    // refused by peer". Instead the tunnel is master of a socket in OUR OWN namespace
+    // (~/.maiterm/cm*, see cm_socket_path): the user's ssh never resolves that path, so
+    // the poisoning failure mode is impossible, while short-lived maiTerm clients
+    // (transcript-mirror fetches, scp) get free mux'd commands over the already-
+    // authenticated tunnel. The socket lives and dies with the tunnel process — no
+    // ControlPersist, so no daemonized master escapes our pid tracking.
+    #[cfg(unix)]
+    if let Some(sock) = prepare_cm_socket(host_key) {
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlMaster=yes".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push(format!("ControlPath={}", sock.display()));
+    } else {
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlMaster=no".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlPath=none".to_string());
+    }
+    // Windows OpenSSH has no ControlMaster support — plain independent connection.
+    #[cfg(not(unix))]
+    {
+        let _ = host_key;
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlMaster=no".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlPath=none".to_string());
+    }
+    cmd_args.push("-R".to_string());
+    cmd_args.push(format!("{}:127.0.0.1:{}", listen.unwrap_or(0), local_port));
+
+    // Add the user's SSH args
+    for arg in ssh_args.split_whitespace() {
+        cmd_args.push(arg.to_string());
+    }
+    cmd_args
+}
+
 #[derive(serde::Serialize)]
 pub struct SshTunnelInfo {
     pub tunnel_id: String,
@@ -189,83 +355,58 @@ pub async fn start_ssh_tunnel(
             .unwrap_or_default()
     };
 
-    // Build SSH command args
-    // ssh_args is already cleaned (e.g. "user@host" or "-p 2222 user@host")
-    let mut cmd_args: Vec<String> = Vec::new();
-    cmd_args.push("-N".to_string());
-    // -v is required: when SSH multiplexes through an existing ControlMaster,
-    // the mux client prints nothing without it. With -v, "Allocated port ..."
-    // appears on stderr alongside debug lines (which we filter out).
-    cmd_args.push("-v".to_string());
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ExitOnForwardFailure=yes".to_string());
-    // Fail fast + reap wedged tunnels: bound the initial connect and detect a dead
-    // peer within ~30s (else a hung remote lingers "alive" for the user's global
-    // ServerAliveInterval, often minutes), so the monitor task below removes the stale
-    // tunnel and the frontend can re-establish. Explicit -o wins over ~/.ssh/config.
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ConnectTimeout=15".to_string());
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ServerAliveInterval=10".to_string());
-    cmd_args.push("-o".to_string());
-    cmd_args.push("ServerAliveCountMax=3".to_string());
-    // Never touch the user's shared ControlMaster socket. With `ControlMaster auto`
-    // (common in ~/.ssh/config), this long-lived `-N` tunnel would otherwise CREATE
-    // and own `~/.ssh/master-<user>@<host>.socket`, forcing the user's own plain
-    // `ssh <host>` to multiplex over OUR tunnel. When our connection then saturates or
-    // degrades, their manual ssh breaks with "mux_client_request_session: Session open
-    // refused by peer". Instead the tunnel is master of a socket in OUR OWN namespace
-    // (~/.maiterm/cm*, see cm_socket_path): the user's ssh never resolves that path, so
-    // the poisoning failure mode is impossible, while short-lived maiTerm clients
-    // (transcript-mirror fetches, scp) get free mux'd commands over the already-
-    // authenticated tunnel. The socket lives and dies with the tunnel process — no
-    // ControlPersist, so no daemonized master escapes our pid tracking.
-    #[cfg(unix)]
-    if let Some(sock) = prepare_cm_socket(&host_key) {
-        cmd_args.push("-o".to_string());
-        cmd_args.push("ControlMaster=yes".to_string());
-        cmd_args.push("-o".to_string());
-        cmd_args.push(format!("ControlPath={}", sock.display()));
-    } else {
-        cmd_args.push("-o".to_string());
-        cmd_args.push("ControlMaster=no".to_string());
-        cmd_args.push("-o".to_string());
-        cmd_args.push("ControlPath=none".to_string());
+    // Ask for this install's own remote port, walking to the next candidate if something
+    // already holds it, and finally letting the remote choose (`-R 0:`) so a run of
+    // collisions degrades to the old behaviour instead of leaving the tab unbridged.
+    // ssh_args is already cleaned (e.g. "user@host" or "-p 2222 user@host").
+    let mut candidates: Vec<Option<u16>> = Vec::with_capacity(REMOTE_PORT_ATTEMPTS + 1);
+    let mut candidate = preferred_remote_port(&host_key);
+    for _ in 0..REMOTE_PORT_ATTEMPTS {
+        candidates.push(Some(candidate));
+        candidate = next_port_candidate(candidate);
     }
-    // Windows OpenSSH has no ControlMaster support — plain independent connection.
-    #[cfg(not(unix))]
-    {
-        cmd_args.push("-o".to_string());
-        cmd_args.push("ControlMaster=no".to_string());
-        cmd_args.push("-o".to_string());
-        cmd_args.push("ControlPath=none".to_string());
-    }
-    cmd_args.push("-R".to_string());
-    cmd_args.push(format!("0:127.0.0.1:{}", local_port));
+    candidates.push(None);
 
-    // Add the user's SSH args
-    for arg in ssh_args.split_whitespace() {
-        cmd_args.push(arg.to_string());
+    let mut established: Option<(tokio::process::Child, u16, Option<u16>)> = None;
+    for listen in candidates {
+        let cmd_args = build_tunnel_args(&host_key, &ssh_args, local_port, listen);
+        log::info!("Starting SSH tunnel: ssh {}", cmd_args.join(" "));
+
+        let mut child = tokio::process::Command::new("ssh")
+            .args(&cmd_args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn SSH tunnel: {}", e))?;
+
+        // Read both stdout and stderr for the forwarding result. Direct connections
+        // report on stderr, but ControlMaster-multiplexed ones use stdout instead.
+        let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+        let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+        match await_forward_result(stdout, stderr, listen).await? {
+            ForwardOutcome::Ready(port) => {
+                established = Some((child, port, listen));
+                break;
+            }
+            ForwardOutcome::PortTaken => {
+                // ExitOnForwardFailure has already ended it; kill() is the reap.
+                let _ = child.kill().await;
+                log::info!(
+                    "SSH tunnel: remote port {} is taken on {} — trying the next candidate",
+                    listen.unwrap_or(0),
+                    host_key
+                );
+            }
+        }
     }
 
-    log::info!("Starting SSH tunnel: ssh {}", cmd_args.join(" "));
-
-    let mut child = tokio::process::Command::new("ssh")
-        .args(&cmd_args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn SSH tunnel: {}", e))?;
-
+    let (mut child, remote_port, requested) =
+        established.ok_or_else(|| "SSH tunnel: no remote port could be bound".to_string())?;
     let pid = child.id().ok_or("Failed to get SSH tunnel PID")?;
-
-    // Read both stdout and stderr to find the allocated port.
-    // Direct connections print to stderr, but ControlMaster-multiplexed
-    // connections print "Allocated port ..." to stdout instead.
-    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
-    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
-    let remote_port = parse_allocated_port(stdout, stderr).await?;
+    // `requested` and not `remote_port`: a port the REMOTE picked is one-off, and
+    // remembering it would send the next start chasing an ephemeral number.
+    record_remote_port(&host_key, requested);
 
     log::info!("SSH tunnel established: {} → remote port {}", host_key, remote_port);
 
@@ -586,24 +727,58 @@ pub async fn ssh_run_setup(
     Ok(())
 }
 
-/// Parse "Allocated port NNNNN for remote forward" from SSH output.
-/// Reads both stdout and stderr concurrently — direct connections print to
-/// stderr, but ControlMaster-multiplexed connections print to stdout.
-/// Times out after 15 seconds.
-async fn parse_allocated_port(
+enum ForwardOutcome {
+    /// The remote is listening on this port.
+    Ready(u16),
+    /// Something else already holds the port we asked for.
+    PortTaken,
+}
+
+/// Classify one line of `ssh -v` output. `requested` is the port we asked to bind, or
+/// `None` when we left the choice to the remote.
+fn classify_forward_line(line: &str, requested: Option<u16>) -> Option<ForwardOutcome> {
+    // The remote chose for us (`-R 0:`): "Allocated port NNNNN for remote forward to ...".
+    if let Some(port) = line
+        .strip_prefix("Allocated port ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.parse::<u16>().ok())
+    {
+        return Some(ForwardOutcome::Ready(port));
+    }
+    // We named the port, so nothing is allocated back to us. Observed against OpenSSH on
+    // a real host, a taken port produces BOTH of these, the debug line first:
+    //   debug1: remote forward failure for: listen 28123, connect 127.0.0.1:11420
+    //   Error: remote port forwarding failed for listen port 28123
+    // and a free one produces:
+    //   debug1: remote forward success for: listen 28123, connect 127.0.0.1:11420
+    // The "Error:"/"Warning:" prefix varies by version, so match on the phrase alone.
+    if let Some(port) = requested {
+        if line.contains("remote forward success for: listen") {
+            return Some(ForwardOutcome::Ready(port));
+        }
+        if line.contains("remote port forwarding failed")
+            || line.contains("remote forward failure for: listen")
+        {
+            return Some(ForwardOutcome::PortTaken);
+        }
+    }
+    None
+}
+
+/// Wait for the reverse forwarding to be reported. Reads both stdout and stderr
+/// concurrently — direct connections report on stderr, but ControlMaster-multiplexed
+/// connections use stdout. Times out after 15 seconds.
+async fn await_forward_result(
     stdout: tokio::process::ChildStdout,
     stderr: tokio::process::ChildStderr,
-) -> Result<u16, String> {
+    requested: Option<u16>,
+) -> Result<ForwardOutcome, String> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();
 
-    fn try_parse_port(line: &str) -> Option<u16> {
-        line.strip_prefix("Allocated port ")
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|s| s.parse::<u16>().ok())
-    }
+    let try_parse_port = |line: &str| classify_forward_line(line, requested);
 
     let timeout = tokio::time::Duration::from_secs(15);
     match tokio::time::timeout(timeout, async {
@@ -618,8 +793,8 @@ async fn parse_allocated_port(
                     match result {
                         Ok(Some(line)) => {
                             log::debug!("SSH tunnel stdout: {}", line);
-                            if let Some(port) = try_parse_port(&line) {
-                                return Ok(port);
+                            if let Some(outcome) = try_parse_port(&line) {
+                                return Ok(outcome);
                             }
                         }
                         Ok(None) => { stdout_done = true; }
@@ -630,8 +805,8 @@ async fn parse_allocated_port(
                     match result {
                         Ok(Some(line)) => {
                             log::debug!("SSH tunnel stderr: {}", line);
-                            if let Some(port) = try_parse_port(&line) {
-                                return Ok(port);
+                            if let Some(outcome) = try_parse_port(&line) {
+                                return Ok(outcome);
                             }
                         }
                         Ok(None) => { stderr_done = true; }
@@ -683,6 +858,62 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    /// Naming the port changes what ssh says on success: there is no "Allocated port"
+    /// line to read, because nothing was allocated back to us. Reading the wrong line
+    /// would hang every tunnel until the 15s timeout.
+    #[test]
+    fn a_named_port_is_confirmed_by_the_forward_success_line() {
+        let line = "debug1: remote forward success for: listen 28123, connect 127.0.0.1:11420";
+        assert!(matches!(
+            classify_forward_line(line, Some(28123)),
+            Some(ForwardOutcome::Ready(28123))
+        ));
+        // Same line means nothing when we did not name a port — the dynamic path is
+        // still waiting for its allocation.
+        assert!(classify_forward_line(line, None).is_none());
+    }
+
+    /// Both lines a real collision produces (captured against a live host), plus the
+    /// older "Warning:" phrasing. Missing the verdict costs 15s of timeout per candidate.
+    #[test]
+    fn a_taken_port_is_a_retry_not_a_failure() {
+        for line in [
+            "debug1: remote forward failure for: listen 28123, connect 127.0.0.1:11420",
+            "Error: remote port forwarding failed for listen port 28123",
+            "Warning: remote port forwarding failed for listen port 28123",
+        ] {
+            assert!(
+                matches!(
+                    classify_forward_line(line, Some(28123)),
+                    Some(ForwardOutcome::PortTaken)
+                ),
+                "not read as a collision: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_remote_chosen_port_is_still_read_from_the_allocation_line() {
+        let line = "Allocated port 45015 for remote forward to 127.0.0.1:11420";
+        assert!(matches!(
+            classify_forward_line(line, None),
+            Some(ForwardOutcome::Ready(45015))
+        ));
+    }
+
+    /// Candidates must stay inside the range the preferred port was drawn from — walking
+    /// off the end would put us in the remote's ephemeral range, where the kernel's own
+    /// outbound connections can take the port out from under us.
+    #[test]
+    fn candidates_wrap_inside_the_range() {
+        let last = REMOTE_PORT_BASE + REMOTE_PORT_SPAN - 1;
+        assert_eq!(next_port_candidate(last), REMOTE_PORT_BASE);
+        assert_eq!(next_port_candidate(REMOTE_PORT_BASE), REMOTE_PORT_BASE + 1);
+        // A port from outside the range (an older file, a hand-edit) still lands inside it.
+        let stray = next_port_candidate(45015);
+        assert!((REMOTE_PORT_BASE..REMOTE_PORT_BASE + REMOTE_PORT_SPAN).contains(&stray));
+    }
 
     /// Pipe `input` to `program -c <stdin-reader>` and return whether it exited 0.
     fn pipe_ok(program: &str, args: &[&str], input: &str) -> (bool, String) {
