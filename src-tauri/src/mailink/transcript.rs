@@ -825,31 +825,93 @@ pub fn overlord_facts_for(rt: AgentRuntime, session_id: &str) -> Option<Overlord
     })
 }
 
+/// Smallest token count treated as a real reading.
+///
+/// Claude Code writes placeholder `usage` values on some assistant records: `input_tokens`
+/// of 0 or 1 with no cache fields. Zero was already skipped; one was not, and a one-token
+/// context reads as an empty tab. That is the dangerous direction for Overlord — a full
+/// session that looks empty never gets its checkpoint, and nothing reports a missed one.
+///
+/// Deliberately 2, not a "plausible session" floor. A real reading is thousands of tokens,
+/// so a higher bar would also work on live data and would be a number invented rather than
+/// observed — and it would silently discard any genuine small reading, which is the same
+/// class of quiet failure this is meant to prevent. Exclude what is known to be a
+/// placeholder; nothing more.
+const MIN_PLAUSIBLE_CONTEXT_TOKENS: u64 = 2;
+
 /// Parse a Claude JSONL tail (newest lines last) into model id + context tokens + effort, scanning
-/// upward for the latest assistant turn that carries a usable `message.usage`. Split out so it can
-/// be unit-tested without a real `~/.claude` transcript (mirrors `codex_meta_from_tail`).
+/// upward for the newest usable reading. Split out so it can be unit-tested without a real
+/// `~/.claude` transcript (mirrors `codex_meta_from_tail`).
+///
+/// TWO sources, newest wins, which the reverse scan gives for free:
+///
+/// * an assistant turn's `message.usage` — the normal case; and
+/// * `compact_boundary.compactMetadata.postTokens`, which Claude Code writes at the instant
+///   a compaction lands.
+///
+/// The boundary matters because it is the only reading available in the window between a
+/// compaction and the session's next assistant turn. Before this, the newest `usage` line in
+/// that window was the one from BEFORE the compaction, so a tab that had just been compacted
+/// down to a few percent still read as nearly full — which is exactly when Overlord decides
+/// whether to spend a tab's whole context compacting it again.
+///
+/// Note this is a transcript fact, not a status-line one. maiTerm never receives Claude's
+/// status line at all, so there is nothing here to reconcile with it and no dependency on
+/// the user having configured one.
 fn claude_meta_from_tail(tail: &str) -> Option<SessionMeta> {
+    let mut context_tokens: Option<u64> = None;
+    let mut model_id: Option<String> = None;
+    let mut effort: Option<String> = None;
+
     for line in tail.lines().rev() {
+        if context_tokens.is_none() && line.contains("\"compact_boundary\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") {
+                    // Authoritative: this IS the post-compaction context size, stated by the
+                    // thing that did the compacting. Keep scanning for the model, which the
+                    // boundary record does not carry and the percentage needs.
+                    context_tokens = v
+                        .get("compactMetadata")
+                        .and_then(|m| m.get("postTokens"))
+                        .and_then(|t| t.as_u64())
+                        .filter(|&t| t > 0);
+                    continue;
+                }
+            }
+        }
         if !line.contains("\"usage\"") {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let Some(msg) = v.get("message") else { continue };
         let Some(usage) = msg.get("usage") else { continue };
-        let tokens = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
-            .iter()
-            .map(|k| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0))
-            .sum::<u64>();
-        if tokens == 0 {
-            continue;
+        if context_tokens.is_none() {
+            let tokens = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
+                .iter()
+                .map(|k| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0))
+                .sum::<u64>();
+            if tokens >= MIN_PLAUSIBLE_CONTEXT_TOKENS {
+                context_tokens = Some(tokens);
+            } else {
+                // A placeholder line tells us nothing — but it is still an assistant record,
+                // so let it answer the model/effort questions below.
+                //
+                // (Falls through deliberately: `continue` here would discard a perfectly
+                // good model id on the way past.)
+            }
         }
-        let model_id = msg.get("model").and_then(|m| m.as_str()).map(String::from);
-        // `effort` is a top-level field on the SAME assistant line (sibling of `message`), so it
-        // costs no extra read. Absent on older transcripts / effort-less models → None.
-        let effort = v.get("effort").and_then(|e| e.as_str()).map(String::from);
-        return Some(SessionMeta { model_id, context_tokens: tokens, context_window: None, effort });
+        if model_id.is_none() {
+            model_id = msg.get("model").and_then(|m| m.as_str()).map(String::from);
+            // `effort` is a top-level field on the SAME assistant line (sibling of `message`),
+            // so it costs no extra read. Absent on older transcripts / effort-less models.
+            effort = v.get("effort").and_then(|e| e.as_str()).map(String::from);
+        }
+        if context_tokens.is_some() && model_id.is_some() {
+            break;
+        }
     }
-    None
+
+    Some(SessionMeta { model_id, context_tokens: context_tokens?, context_window: None, effort })
 }
 
 /// The maiTerm tab id that most recently HOSTED a Claude session, read from the transcript
@@ -2358,6 +2420,44 @@ mod tests {
             &mut none,
         );
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn claude_meta_prefers_the_compaction_boundary_and_skips_placeholder_usage() {
+        let assistant = |tokens: u64| {
+            format!(
+                r#"{{"type":"assistant","effort":"high","message":{{"model":"claude-opus-5","usage":{{"input_tokens":1,"cache_read_input_tokens":{tokens},"cache_creation_input_tokens":0}}}}}}"#
+            )
+        };
+        let boundary = r#"{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":148146,"postTokens":14372}}"#;
+
+        // Between a compaction and the next assistant turn, the newest `usage` line is the
+        // one from BEFORE the compaction. The boundary is the only current reading there.
+        let just_compacted = format!("{}\n{}\n", assistant(148_000), boundary);
+        let meta = claude_meta_from_tail(&just_compacted).expect("boundary is a reading");
+        assert_eq!(meta.context_tokens, 14372, "postTokens wins over the pre-compaction usage");
+        assert_eq!(meta.model_id.as_deref(), Some("claude-opus-5"), "model still comes from the older turn");
+
+        // Once the session takes a turn, that turn is newer than the boundary and wins.
+        let after_a_turn = format!("{}\n{}\n{}\n", assistant(148_000), boundary, assistant(20_000));
+        let meta2 = claude_meta_from_tail(&after_a_turn).expect("usage parses");
+        assert_eq!(meta2.context_tokens, 20_001);
+        assert_eq!(meta2.effort.as_deref(), Some("high"));
+
+        // A placeholder record (input_tokens 1, no cache) is not a measurement — but it must
+        // still be allowed to answer the model question rather than being skipped whole.
+        let placeholder = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":1}}}"#, "\n",
+        );
+        assert!(claude_meta_from_tail(placeholder).is_none(), "1 token is not a context reading");
+
+        let placeholder_then_real = format!(
+            "{}\n{}\n",
+            assistant(30_000),
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":0}}}"#,
+        );
+        let meta3 = claude_meta_from_tail(&placeholder_then_real).expect("falls back past the placeholder");
+        assert_eq!(meta3.context_tokens, 30_001);
     }
 
     #[test]

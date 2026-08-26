@@ -301,6 +301,34 @@ Cost note: the unregistered branch reads the tick's batched classification rathe
 firing its own probe. `get_agent_liveness` TTL-caches the process sweep but *not* the
 per-call BFS, which is why `get_agent_liveness_batch` exists.
 
+### 4.05 The context gauge reads the transcript, never a status line
+
+`context_pct` comes from `claude_meta_from_tail` walking the JSONL tail. maiTerm never
+receives Claude's status line at all, so there is nothing to reconcile with it and no
+dependency on the user having configured one — advice framed as "status line normally,
+transcript on compaction" doesn't apply here; the transcript is the only source.
+
+Two readings, newest wins, which the reverse scan gives for free:
+
+- an assistant turn's `message.usage` (`input_tokens + cache_read + cache_creation`);
+- `compact_boundary.compactMetadata.postTokens`.
+
+The boundary is not a nicety. Between a compaction and the session's next assistant turn,
+the newest `usage` line is the one from *before* the compaction — so a tab just compacted
+down to a few percent still read as nearly full, which is precisely when the checkpoint rule
+decides whether to spend that tab's whole context compacting it again. The boundary record
+states the post-compaction size at the instant it happens, and the model id still comes from
+the older assistant line (the boundary doesn't carry one, and the percentage needs it).
+
+Placeholder `usage` records — `input_tokens` of 0 or 1 with no cache fields — are skipped.
+The floor is 2, not a "plausible session size": a higher bar would work on live data but
+would be invented rather than observed, and would silently discard a genuine small reading.
+
+**No PostCompact hook is needed for this.** The transcript already carries the authoritative
+number, `SessionStart` already fires on compaction so the tab re-resolves to the new session
+id, and the facts poll re-reads the tail every 5s. A hook would only shave latency off a
+reading that is already correct.
+
 ### 4.1 SSH tabs: where the facts come from
 
 Everything in §5's detection table resolves a session id to a JSONL **on this machine**.
