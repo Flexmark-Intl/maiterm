@@ -2205,6 +2205,14 @@ function createWorkspacesStore() {
       // Diff tabs: nothing to reload (content is ephemeral from Claude)
       if (sourceTab.tab_type === 'diff') return;
 
+      // Board tabs: same — the Overlord board renders live from the store, it has no PTY
+      // and nothing to restart. It reached the duplicate path only because the early
+      // returns above listed two of the three non-terminal types; the result was a board
+      // tab silently turning into a blank terminal. Now that `tab_type` is carried, it
+      // would instead land on a tab whose TerminalPane has already begun mounting and
+      // destroy it mid-init — leaking the PTY that init goes on to spawn.
+      if (sourceTab.tab_type === 'board') return;
+
       // Terminal tabs: duplicate + delete for full PTY restart.
       // Remember the position before duplication; the name (and the rest of the record)
       // comes back via carry_tab_state_on_reload below.
