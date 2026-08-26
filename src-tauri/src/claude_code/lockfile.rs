@@ -1277,7 +1277,13 @@ mod command_hook_sweep_tests {
                             echo 'call the aiterm initSession tool with this tabId and sessionId'"
             }]
         });
+        // Assert the extraction itself: with an empty instance list every
+        // marker hook is sweepable, so the sweep verdict alone would still
+        // pass if extract_port_from_aiterm_var regressed to None.
+        assert_eq!(extract_hook_port(&legacy), Some(59184));
         assert!(command_hook_is_ours_to_sweep(&legacy, 56819, &[]));
+        // And the extracted port really does drive the scoping.
+        assert!(!command_hook_is_ours_to_sweep(&legacy, 56819, &[59184]));
     }
 
     #[test]
