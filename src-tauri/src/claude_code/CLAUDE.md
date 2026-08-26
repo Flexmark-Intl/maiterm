@@ -361,10 +361,23 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
 `"x-maiterm-tab": "${MAITERM_TAB_ID}"`, which Claude Code expands from the agent process's
 own environment and sends on **every** MCP request; Codex's equivalent is
 `env_http_headers = { "x-maiterm-tab" = "MAITERM_TAB_ID" }` (a header name → env var NAME
-map). Verified on the wire: Claude expands it for both `type: http` and `type: sse` (the SSH
-bridge's transport), on the SSE GET *and* its POSTs; Codex sends it too (codex-cli 0.149.0, on
-initialize/notifications/tools-list). With the var unset both send the literal placeholder or
-nothing and neither drops the server. Each transport reads it with `declared_tab_id` and hands
+map). Codex sends it too (codex-cli 0.149.0, on initialize/notifications/tools-list).
+
+**Where `${VAR}` expansion works — verified on the wire, do not re-derive it:**
+
+| Where | Expands? | On failure |
+|---|---|---|
+| MCP entry `headers` | **yes** (from the agent's process env) | var unset → sends the literal `${…}`, server NOT dropped |
+| MCP entry `url` | **yes** — so a shared entry can name no port at all (`http://127.0.0.1:${MAITERM_PORT}/mcp`) | as above |
+| http **hook** `url` | **no** — passes through literal | request goes to a nonsense URL |
+| http **hook** `headers` | **no** — resolves to an EMPTY string | *silent and destructive*: an env-driven auth header becomes `""` and every hook 401s with nothing in the config to explain it |
+
+Both `type: http` and `type: sse` expand (the SSH bridge uses sse), on the SSE GET *and* its
+POSTs. The hook rows are why the remote hooks file **cannot** be made instance-independent, and
+why `?tab_id=` cannot be put on the http hooks to retire `pending_agent_sessions` — only a
+*command* hook can read the environment, which is what the SessionStart/SessionEnd ones do.
+(Testing note: http hooks DO fire under `claude -p`; an earlier "they never fire" reading was
+maiTerm's own 30s reassert sweeping the probe hook, whose port had no lockfile.) Each transport reads it with `declared_tab_id` and hands
 it to `process_message`, which resolves identity in ONE place, so tool calls target the right
 tab from the first request with no `initSession`. Why this matters: an MCP request otherwise carries **no identity of
 its own**, so the tab id could only reach us via the model reading its SessionStart context
@@ -465,6 +478,8 @@ key; mint a per-request id instead so distinct agents can't merge.
 
 **Stale hook cleanup:** On startup, `write_hook_settings()` sweeps hooks whose port has no live lockfile. `cleanup_stale_lockfiles()` also removes hooks for dead servers by auth token. Port extraction handles both URL format (`127.0.0.1:NNNNN`) and the command-hook env-var format (`MAITERM_PORT = "NNNNN"`, whose marker substring also matches legacy `AITERM_PORT` hooks).
 
+**SessionStart command-hook dedup + sweep (`is_maiterm_command_hook` / `command_hook_is_ours_to_sweep`):** the command hook carries no URL, so the URL-matching dedup above can't see it — every re-assert appended another identical copy, unbounded. It's identified instead by a stable content signature (`"initSession tool with this tabId"`, present in every vintage incl. pre-rename `AITERM_` and the SSH remote-setup variant), swept before re-adding our single copy, and `hooks_are_current()` counts "not exactly one" as drift so the self-heal actually cleans duplicates. **The scoping rule is load-bearing: a marker-matching hook is ours to sweep UNLESS its gate port is owned by a live `pid > 0` lockfile** — i.e. a concurrently-running dev/prod sibling. `~/.claude/settings.json` is shared between the two flavors (which run simultaneously by design, each hook gated on its own `$MAITERM_PORT`); an instance-agnostic sweep makes their 30s self-heals fight forever, each removing the other's hook, and the instance whose hook is currently missing boots sessions with **no tab id** — the phantom-id failure this machinery exists to prevent. Tunnel-gated hooks (pid-0 lockfile, or none) stay always-sweepable on purpose: a TCP probe can't tell an active peer tunnel from a zombie listener, which is exactly how a stale pre-rename hook survived every liveness sweep while its dead port still accepted connections. Accepted trade-off: an *active* peer-tunnel command hook gets swept too and is rewritten on the peer's next bridge connect. `hooks_are_current()` must apply the identical predicate — count only what the write path would sweep, or the self-heal loops on a state the write can't change.
+
 **Hook self-heal:** the 30s reassert loop (`reassert_if_drifted`) covers BOTH `~/.claude.json` (`ensure_mcp_settings`) and the hooks in `~/.claude/settings.json` (`ensure_hook_settings`, gated on `claude_hooks` pref). Both files are co-owned: the `claude` CLI rewrites them, and an SSH-bridge setup script that lands in a local shell clobbers them with remote-tunnel ports (dead locally → ECONNREFUSED on every hook). `build_our_hooks()` is the single definition shared by install and drift check. Drift also includes **stale foreign maiTerm entries** (hook or allowlist ports with no live lockfile) — since the sweep lives in `write_hook_settings()`, which only runs on drift, `hooks_are_current()` must return false when a dead foreign port is present, or every session dials it forever (ECONNREFUSED on every hook event). The canonical source of such entries: **this machine was the ssh target of a peer maiTerm's bridge** — the peer's remote setup legitimately writes hooks for its reverse-tunnel port plus a `pid: 0` lockfile here; when the tunnel dies those hooks go dead. Lockfile liveness must go through `lockfile_is_live()`: pid > 0 → process check; pid 0 (tunnel lockfile — the listener is sshd, not a process we can see) → TCP probe of the port. Never call `is_process_alive(0)`: `kill(0, 0)` signals our own process group and always succeeds, which made tunnel lockfiles immortal.
 
 **Auto-open notes panel:** `claudeCode.svelte.ts` auto-opens notes panel when MCP tools write tab notes or workspace notes, switching scope as appropriate.
@@ -502,6 +517,27 @@ tab whose session mapping is missing, so the guard sees nothing and the export i
 agent's chat — where the trailing newline sends it. Observed in the wild: an injection at
 11:28:45 followed by that tab's `initSession` at 11:29:03, i.e. the user pressing Enter on
 `/maiterm init` is what triggered the injection that polluted their message.
+
+**The remote config is a per-ACCOUNT singleton, and nothing arbitrates it.** `~/.claude.json`
+and `~/.claude/settings.json` on the remote hold ONE maiterm entry and ONE hooks URL, each
+naming a specific reverse-tunnel port. `buildSetupScript` writes them unconditionally on every
+bridge — no liveness check, no ownership check — so the last writer wins, ACROSS INSTANCES AND
+MACHINES. A peer maiTerm (or your own dev build: the remote key is hardcoded `maiterm`, not the
+dev key) points every agent on that account at its tunnel, and when that tunnel goes the whole
+account loses hooks and MCP.
+
+Diagnostic signature, distinguishing it from ordinary port churn: **ECONNREFUSED on a port that
+appears in NO local log, while this instance's tunnel process is alive and its server is
+listening.** Confirm by comparing `authToken` between `~/.claude/ide/*.lock` on the remote —
+each instance mints its own 32-char token, so a different token is a different maiTerm. Mind the
+timezone when correlating mtimes. Immediate remedy: reload a tab on that host to re-assert.
+
+Fixing it properly is an open design question (board: "Remote per-account config is clobbered by
+any maiTerm that bridges"). The MCP half can be made instance-independent via `${MAITERM_PORT}`
+in the url; the hooks half cannot (see the expansion table above), so the candidates are
+per-instance `CLAUDE_CONFIG_DIR` — which relocates the ENTIRE root including `projects/`,
+`sessions/` and `.credentials.json`, so transcripts and credentials must be symlinked back or
+every existing remote session is stranded — or converting the http hooks to command hooks.
 
 **`~/.aiterm` env file:** Written during bridge setup with `export MAITERM_TAB_ID=... MAITERM_PORT=...`. Sourced as a fallback by the SessionStart hook (and the Codex `agent-hook.sh` shim) when `$MAITERM_TAB_ID` is empty (e.g. inside tmux where env vars weren't inherited). Users can manually `source ~/.aiterm` in any shell. **Sole-tab gated:** the file is per-ACCOUNT, but all tabs on one host share ONE reverse tunnel/port, so an env-less agent on a shared account can't be disambiguated — a stale file would hand it whichever tab connected most recently, corrupting session/tab identity (the wrong tab gets the session registered + `claudeSessionId` + auto-resume repointed). So `buildSetupScript` writes it only when this maiTerm is the *sole* bridged tab on that host (`isSharedHost(hostKey, tabId)` false); on shared hosts it runs `rm -f ~/.aiterm` (also scrubbing stale pre-fix files) and env-less agents fail closed to a visible "needs init" rather than silently mis-registering.
 
