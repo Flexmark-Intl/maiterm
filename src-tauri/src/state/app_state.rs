@@ -109,6 +109,20 @@ pub struct AgentSessionInfo {
     pub pending_question_at: Option<i64>,
     /// Model used in this session (set by SessionStart)
     pub model: Option<String>,
+    /// Whether a turn has ENDED on this session row — set by the Stop hook, never cleared.
+    ///
+    /// Exists because `state` cannot answer "is there a result here for a human to read". Both
+    /// `WaitingInput` and `Stopped` map to the wire's `"idle"`, and since a starting session
+    /// registers as `WaitingInput`, plain `"idle"` also means "a process is alive and sitting at
+    /// an empty prompt" — the steady state of every tab after a maiTerm restart. maiLink's
+    /// `unread` keys on this instead, so a restored roster isn't uniformly unread.
+    ///
+    /// A timestamp comparison (last transcript turn vs. session start) would answer the same
+    /// question inferentially; this answers it directly, needs no transcript read on the unread
+    /// path, and doesn't drift when an SSH tab's mirrored JSONL lags behind its hooks. It also
+    /// survives Claude's `idle_prompt` Notification, which rewrites the state back to
+    /// `WaitingInput` ~60s after a turn ends and would otherwise un-read a real result.
+    pub finished_a_turn: bool,
     /// Absolute path of the session's transcript JSONL *on the host where the agent runs* — a
     /// REMOTE path for SSH tabs. Every Claude hook payload carries it verbatim (even through the
     /// SSH reverse tunnel); captured/refreshed by hooks_handler so the SSH transcript mirror

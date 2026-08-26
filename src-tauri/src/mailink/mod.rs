@@ -2595,7 +2595,7 @@ async fn drive_question_answers(
 /// shown; the runtime picks the keystroke dialect for the answer injection.
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
     let states = session_states(app);
-    let (st, rt, tool) = states.get(tab_id)?;
+    let (st, rt, tool, _) = states.get(tab_id)?;
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
     if tool.as_deref() == Some("AskUserQuestion") {
@@ -2909,17 +2909,23 @@ fn is_designated(app: &AppState, tab_id: &str) -> bool {
     designated_tabs(app).iter().any(|t| t.tab_id == tab_id)
 }
 
-/// tab_id → (state, runtime, current tool), choosing the most attention-worthy session if a
-/// tab somehow has more than one tracked session.
-fn session_states(app: &AppState) -> HashMap<String, (AgentSessionState, AgentRuntime, Option<String>)> {
+/// tab_id → (state, runtime, current tool, has this session ever finished a turn), choosing the
+/// most attention-worthy session if a tab somehow has more than one tracked session.
+///
+/// The last field is what `unread` keys on. `state` can't answer it: `"idle"` covers both
+/// "finished, go read it" and "alive at an empty prompt", and the second is the resting state of
+/// every tab after a restart. See `AgentSessionInfo::finished_a_turn`.
+type SessionState = (AgentSessionState, AgentRuntime, Option<String>, bool);
+
+fn session_states(app: &AppState) -> HashMap<String, SessionState> {
     let sessions = app.agent_sessions.read();
-    let mut map: HashMap<String, (AgentSessionState, AgentRuntime, Option<String>)> = HashMap::new();
+    let mut map: HashMap<String, SessionState> = HashMap::new();
     for sess in sessions.values() {
-        let candidate = (sess.state, sess.runtime, sess.tool_name.clone());
+        let candidate = (sess.state, sess.runtime, sess.tool_name.clone(), sess.finished_a_turn);
         map.entry(sess.tab_id.clone())
             .and_modify(|cur| {
                 if rank(sess.state) > rank(cur.0) {
-                    *cur = (sess.state, sess.runtime, sess.tool_name.clone());
+                    *cur = (sess.state, sess.runtime, sess.tool_name.clone(), sess.finished_a_turn);
                 }
             })
             .or_insert(candidate);
@@ -3545,15 +3551,16 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
     designated_tabs(app)
         .into_iter()
         .map(|t| {
-            let (state, runtime, tool, registered) = match states.get(&t.tab_id) {
-                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone(), true),
+            let (state, runtime, tool, registered, _finished) = match states.get(&t.tab_id) {
+                Some((st, rt, tool, fin)) => (map_state(*st), runtime_key(*rt), tool.clone(), true, *fin),
                 None => {
                     let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
                         "active"
                     } else {
                         "dormant"
                     };
-                    (st, runtime_key(t.runtime), None, false)
+                    // An unregistered tab has no session that could have finished anything.
+                    (st, runtime_key(t.runtime), None, false, false)
                 }
             };
             // Same prompt-kind rule as build_chats: an open AskUserQuestion outranks permission.
@@ -3597,15 +3604,16 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let chats: Vec<Value> = tabs
         .into_iter()
         .map(|t| {
-            let (state, runtime, tool, registered) = match states.get(&t.tab_id) {
-                Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone(), true),
+            let (state, runtime, tool, registered, finished) = match states.get(&t.tab_id) {
+                Some((st, rt, tool, fin)) => (map_state(*st), runtime_key(*rt), tool.clone(), true, *fin),
                 None => {
                     let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
                         "active"
                     } else {
                         "dormant"
                     };
-                    (st, runtime_key(t.runtime), None, false)
+                    // An unregistered tab has no session that could have finished anything.
+                    (st, runtime_key(t.runtime), None, false, false)
                 }
             };
             let ask_open = tool.as_deref() == Some("AskUserQuestion");
@@ -3634,7 +3642,12 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "prompt": prompt_kind,
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
-                "unread": ask_open || state == "permission" || state == "idle",
+                // NOT plain `state == "idle"`. Since a starting session registers as idle, that
+                // word also means "alive at an empty prompt" — the resting state of every tab
+                // after a maiTerm restart — which made every chat permanently unread and the
+                // phone's Focus filter identical to All. `finished` is the direct answer to the
+                // question `unread` is actually asking: has a turn ENDED here.
+                "unread": ask_open || state == "permission" || (state == "idle" && finished),
                 // `state` alone can't express "a live agent that never registered": the fallback
                 // has to pick a word, and both are wrong — it isn't dormant (there's a live agent)
                 // and it isn't working (it's sitting at a prompt). Reporting it as active also hid
@@ -3689,15 +3702,16 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let ph = std::time::Instant::now();
     let last_activity = last_activity_ts(app, tab_id, scrollback_ts, now);
     let ms_activity = ph.elapsed().as_millis(); // locate_jsonl + last-turn tail read
-    let (state, runtime, tool, registered) = match states.get(tab_id) {
-        Some((st, rt, tool)) => (map_state(*st), runtime_key(*rt), tool.clone(), true),
+    let (state, runtime, tool, registered, finished) = match states.get(tab_id) {
+        Some((st, rt, tool, fin)) => (map_state(*st), runtime_key(*rt), tool.clone(), true, *fin),
         None => {
             let st = if tab_looks_live_despite_no_session(app, tab_id, now) {
                 "active"
             } else {
                 "dormant"
             };
-            (st, runtime_key(meta.runtime), None, false)
+            // An unregistered tab has no session that could have finished anything.
+            (st, runtime_key(meta.runtime), None, false, false)
         }
     };
 
@@ -3717,11 +3731,11 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "mesh": meta.mesh,
         "runtime": runtime,
         "state": state,
-        // Same rule as build_chats: an open AskUserQuestion is unread even if a build leaves
-        // the session state at "active".
+        // Same rule as build_chats, both halves: an open AskUserQuestion is unread even if a
+        // build leaves the session state at "active", and a bare "idle" is not a result.
         "unread": tool.as_deref() == Some("AskUserQuestion")
             || state == "permission"
-            || state == "idle",
+            || (state == "idle" && finished),
         "registered": registered,
         "lastActivityTs": last_activity,
         "transcript": transcript,
@@ -4325,6 +4339,67 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_agent_is_not_unread_until_it_finishes_something() {
+        use crate::state::app_state::AgentSessionInfo;
+        use crate::state::workspace::{WindowData, Workspace};
+        let app = AppState::new();
+        let (fresh_tab, done_tab) = {
+            let mut data = app.app_data.write();
+            data.preferences.mailink_expose_all = true;
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("ENAGIC".into());
+            ws.panes[0].tabs.push(crate::state::workspace::Tab::new("agent-2".into()));
+            for t in &mut ws.panes[0].tabs {
+                t.runtime = Some(AgentRuntime::Claude);
+            }
+            let ids = (ws.panes[0].tabs[0].id.clone(), ws.panes[0].tabs[1].id.clone());
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            ids
+        };
+        let mk = |tab: &str, state: AgentSessionState, finished: bool| AgentSessionInfo {
+            runtime: AgentRuntime::Claude,
+            tab_id: tab.to_string(),
+            cwd: None,
+            state,
+            tool_name: None,
+            tool_detail: None,
+            pending_question: None,
+            pending_question_at: None,
+            model: None,
+            transcript_path: None,
+            finished_a_turn: finished,
+            connection_id: None,
+        };
+        {
+            let mut s = app.agent_sessions.write();
+            // What a maiTerm restart produces: the SessionStart hook registers the agent, and
+            // nothing has happened since.
+            s.insert("s1".into(), mk(&fresh_tab, AgentSessionState::WaitingInput, false));
+            // A real finished turn. Note it is ALSO reported as state "idle" — which is exactly
+            // why `state` alone could not tell these two apart, and why every chat became a
+            // permanent member of the phone's Focus list.
+            s.insert("s2".into(), mk(&done_tab, AgentSessionState::Stopped, true));
+        }
+        let chats = build_chats(&app);
+        let unread = |tab: &str| {
+            chats
+                .iter()
+                .find(|c| c["tabId"] == json!(tab))
+                .expect("tab listed")["unread"]
+                .as_bool()
+                .expect("unread present")
+        };
+        assert_eq!(unread(&done_tab), true, "a finished turn is a result to read");
+        assert_eq!(unread(&fresh_tab), false, "coming up is not a result");
+        // Both still report the same wire state — the fix is NOT a state change.
+        for t in [&fresh_tab, &done_tab] {
+            let c = chats.iter().find(|c| c["tabId"] == json!(t)).unwrap();
+            assert_eq!(c["state"], json!("idle"));
+        }
+    }
+
+    #[test]
     fn interrupt_settles_only_the_targeted_tabs_running_sessions() {
         use crate::state::app_state::AgentSessionInfo;
         let app = AppState::new();
@@ -4339,6 +4414,7 @@ mod tests {
             pending_question_at: Some(123),
             model: None,
             transcript_path: None,
+            finished_a_turn: false,
             connection_id: None,
         };
         {

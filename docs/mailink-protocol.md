@@ -424,6 +424,17 @@ interface Chat {
                             // turns but whose session registration was lost (e.g. a mesh/SSH resume
                             // where the hook/init handshake missed) reports 'active' via a
                             // self-correcting liveness fallback — never a stuck 'dormant' over live output.
+                            //
+                            // **`idle` does NOT mean "a turn finished".** It also means "a process is
+                            // alive and sitting at an empty prompt", which is the resting state of
+                            // every tab after a desktop restart — an agent registers as idle the
+                            // moment it comes up, before anyone has typed anything. Do not build
+                            // "has a result", "needs you", or "worth surfacing" on bare `idle`; use
+                            // `unread` (which the desktop derives from a turn actually ending) or
+                            // `prompt`. Three desktop-side predicates got this wrong in a row — the
+                            // push doorbell, the WS `attention` frame, and `unread` itself — each
+                            // announcing a finished turn for every tab that had merely come back up.
+
   registered: boolean;      // false ⇒ this tab has NO tracked agent session, so `state` was
                             //   inferred from a liveness fallback (live PTY + a recent transcript
                             //   turn ⇒ "active", else "dormant") rather than observed. A live
@@ -431,7 +442,10 @@ interface Chat {
                             //   `state` has no word for it — so don't read too much into the word;
                             //   offer a re-initialize action instead. Always true when a session
                             //   is tracked.
-  unread: boolean;          // idle/attention not yet seen on a device
+  unread: boolean;          // this chat holds something a human has not read: an open prompt, or
+                            //   a turn that ENDED here. Deliberately NOT "state is idle" — see the
+                            //   note under `state` below. Still not per-device: nothing clears it
+                            //   until the agent works again.
   lastActivityTs: number;
   preview: string;          // last line(s) of distilled context
 }

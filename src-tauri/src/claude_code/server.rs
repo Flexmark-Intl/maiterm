@@ -2198,6 +2198,9 @@ async fn process_message(
                                     pending_question: existing.as_ref().and_then(|e| e.pending_question.clone()),
                                     pending_question_at: existing.as_ref().and_then(|e| e.pending_question_at),
                                     transcript_path: existing.as_ref().and_then(|e| e.transcript_path.clone()),
+                                    // Preserved: /maiterm init on a session that already
+                                    // finished a turn must not un-read that result.
+                                    finished_a_turn: existing.as_ref().is_some_and(|e| e.finished_a_turn),
                                     model: existing.and_then(|e| e.model),
                                     connection_id: Some(connection_id.to_string()),
                                 },
@@ -2249,6 +2252,7 @@ async fn process_message(
                                     pending_question_at: None,
                                     transcript_path: None,
                                     model: None,
+                                    finished_a_turn: false,
                                     connection_id: Some(connection_id.to_string()),
                                 },
                             );
@@ -2793,6 +2797,9 @@ async fn hooks_handler(
                 // the identical cause and was fixed in 8340e90 — but that fix landed in the
                 // Svelte mirror only, and maiLink reads THIS row. See session_start_state.
                 let started = session_start_state(source);
+                // A compaction fires on a LIVE row mid-turn, so a result this session already
+                // produced must survive it — this insert replaces the row wholesale.
+                let had_result = sessions.get(&session_id).is_some_and(|s| s.finished_a_turn);
                 sessions.insert(
                     session_id.clone(),
                     AgentSessionInfo {
@@ -2806,6 +2813,7 @@ async fn hooks_handler(
                         pending_question_at: None,
                         transcript_path: transcript_path.clone(),
                         model: model.clone(),
+                        finished_a_turn: had_result,
                         connection_id: None,
                     },
                 );
@@ -3037,6 +3045,11 @@ async fn hooks_handler(
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.state = AgentSessionState::Stopped;
+                    // The one place this is ever set: a turn ending here is what makes the tab
+                    // hold something a human hasn't read. Never cleared — a later idle_prompt
+                    // Notification rewrites `state` back to WaitingInput ~60s from now, and the
+                    // result is no less unread for that.
+                    session.finished_a_turn = true;
                     session.tool_name = None;
                     session.tool_detail = None;
                     session.pending_question = None;
