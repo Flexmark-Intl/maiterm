@@ -1930,7 +1930,18 @@ pub fn set_tab_comms_monitor(
                     .as_ref()
                     .and_then(|m| m.channels.iter().find(|c| c.id == ch.id))
                     .map(|c| c.last_seen_create_at);
-                ch.last_seen_create_at = kept.unwrap_or(now);
+                // A caller that supplies a cursor MEANS it. The picker always sends 0 (start
+                // watching from now), so a non-zero value can only come from code carrying a
+                // monitor across — reloadTab handing a replacement tab what the original was
+                // responsible for. Resolving that to `now` because the NEW tab id has no
+                // `prev` would discard exactly what the reload was meant to collect: the
+                // monitor deliberately holds its cursor at any summon it could not take, so
+                // the messages waiting for a revived handler are the ones at risk.
+                ch.last_seen_create_at = if ch.last_seen_create_at > 0 {
+                    ch.last_seen_create_at
+                } else {
+                    kept.unwrap_or(now)
+                };
             }
             tab.comms_monitor = Some(crate::state::CommsMonitor { channels: chans });
         }
