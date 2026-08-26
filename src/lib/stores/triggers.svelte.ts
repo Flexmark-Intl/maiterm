@@ -7,6 +7,7 @@ import { stripAnsi } from '$lib/utils/ansi';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
+import { mergeAutoResumeContext } from '$lib/stores/autoResumeContext';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
 import { isForkCommand, sessionIdVar, forkFlag } from '$lib/agents/resume';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
@@ -393,9 +394,25 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
       }
     }
 
+    // Absence of evidence is not evidence of absence. `remoteCwd` is unknown until the remote
+    // shell reports OSC 7 (or a prompt cwd), and this runs on agent-init-session — which now
+    // fires when the AGENT STARTS, i.e. often before the remote end has said where it is. The
+    // old code wrote that null straight over a saved path, and the damage compounds: with no
+    // remote cwd the next ssh replay has no `cd`, so the session lands in the remote HOME, and
+    // home is then observed and recorded as the tab's cwd. Observed live — four tabs on one
+    // host reduced to `/home/ews` while the one PINNED tab kept its real project path.
+    const merged = mergeAutoResumeContext(
+      { cwd: localCwd, remoteCwd },
+      { cwd: tab?.auto_resume_cwd ?? null, remoteCwd: tab?.auto_resume_remote_cwd ?? null },
+    );
+    if (!tab) {
+      // Not in the store (mid-restore refresh): we cannot know what we would be overwriting.
+      logInfo(`enable_auto_resume: tab ${tabId.slice(0, 8)} not in the store yet — not rewriting its context`);
+      return;
+    }
     await workspacesStore.setTabAutoResumeContext(
       instance.workspaceId, instance.paneId, tabId,
-      localCwd, sshCmd, remoteCwd, cmd,
+      merged.cwd, sshCmd, merged.remoteCwd, cmd,
     );
   } catch (e) {
     logError(`enable_auto_resume failed for tab ${tabId}: ${e}`);
