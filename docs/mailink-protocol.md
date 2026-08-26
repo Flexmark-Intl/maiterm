@@ -380,6 +380,15 @@ Presence: while ≥1 device holds a live WS for a tab, that tab is "covered" and
 is **suppressed** (no redundant push). On WS close, coverage drops and future attention
 events doorbell again.
 
+**A registration edge is not a finished turn.** Both announcers — the push doorbell and the WS
+`attention` frame — ring only when a tab crosses INTO attention *and* already had a tracked
+session (`registered`) when it was last observed. A first sighting baselines silently, and so does
+a tab's session row first appearing. This matters at desktop startup: session tracking is
+in-memory, so every tab launches `dormant` + `registered:false`, and moments later each agent's
+SessionStart registers it as idle — an attention transition on every resumed tab at once, while
+nothing can be covered because the desktop was down. Clients need no logic for this; it is stated
+so nobody re-derives the naive edge.
+
 **Clients MUST answer WebSocket Pings.** The desktop pings every 20s and closes the socket after
 one unanswered ping. This is load-bearing rather than hygiene: coverage suppresses the doorbell, so
 a socket that is dead-but-ESTABLISHED — an iOS app suspended in the background, a phone that walked

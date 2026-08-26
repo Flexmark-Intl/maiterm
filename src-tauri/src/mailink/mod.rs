@@ -134,6 +134,31 @@ fn is_attn(key: &str) -> bool {
     state == "permission" || state == "idle" || prompt == "question"
 }
 
+/// Whether a tab just crossed INTO attention in a way worth announcing — the shared edge rule for
+/// both announcers, the push doorbell and the WS `attention` frame (unit-tested).
+///
+/// Two things must hold, and the second is the one that cost a push storm. The edge must be an
+/// OBSERVED transition into attention, so a first sighting baselines silently. And the tab must
+/// already have had a tracked session when we last saw it: a session row APPEARING is a
+/// registration edge, not a turn ending.
+///
+/// A restart walks every tab across that second edge at once. `agent_sessions` is in-memory, so at
+/// launch every tab reports `dormant` + `registered:false`; seconds later each agent's SessionStart
+/// hook inserts a row, which maps to "idle", which `is_attn` counts as attention. Nothing finished
+/// — the roster was merely coming up — but the desktop had been down, so nothing was `covered` and
+/// every resumed tab rang "Agent finished".
+///
+/// Nothing real is suppressed. A genuine finish happens on a tab whose row already existed (the
+/// agent had to be running to finish anything), and a compaction writes Active onto an existing
+/// row, so it is not a registration edge either. The one case this does swallow is a row dropped
+/// and recreated mid-work — which arrives as "the process just came up" and should stay silent.
+///
+/// Sibling guard: `tab_looks_live_despite_no_session` reports "active" rather than "idle" for the
+/// UNregistered case for exactly this reason. This is that same rule for the registered path.
+fn rings_attention(prev_key: Option<&str>, prev_registered: bool, key: &str) -> bool {
+    prev_key.is_some_and(|p| prev_registered && !is_attn(p)) && is_attn(key)
+}
+
 /// `~/Library/Application Support/<slug>/mailink/` (or the OS equivalent).
 fn mailink_dir() -> Option<PathBuf> {
     dirs::data_dir()
@@ -1799,6 +1824,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     // Registration flips when an agent finally re-registers (or a restart drops
                     // its session entry) — the phone must re-render the re-initialize control.
                     let reg = c["registered"].as_bool().unwrap_or(true);
+                    // Captured before the insert: the attention edge below needs to know whether
+                    // this tab had a tracked session LAST tick, not this one.
+                    let prev_reg = registered.get(&tab).copied().unwrap_or(false);
                     let reg_changed = prev.is_some() && registered.get(&tab) != Some(&reg);
                     if reg_changed {
                         roster_changed = true;
@@ -1815,11 +1843,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         if socket.send(Message::Text(enriched_chat_state_event(&s.app, c).to_string().into())).await.is_err() {
                             return;
                         }
-                        // Attention only on an OBSERVED transition into an attention state. A tab
-                        // that merely APPEARS in the roster already idle (exposure toggled on, a
-                        // restore) must not announce "finished" — prev must exist and not already
-                        // have been attention-worthy.
-                        if prev.as_deref().is_some_and(|p| !is_attn(p)) && is_attn(&key) {
+                        // Same edge rule the push doorbell uses — see `rings_attention`. A tab
+                        // that merely APPEARS in the roster already idle, or whose session row is
+                        // being created for the first time, must not announce "finished".
+                        if rings_attention(prev.as_deref(), prev_reg, &key) {
                             let ev = attention_event(&s.app, &tab, &st, c["title"].as_str().unwrap_or_default());
                             if socket.send(Message::Text(ev.to_string().into())).await.is_err() {
                                 return;
@@ -3888,10 +3915,11 @@ const DEFAULT_MAILINK_RELAY_URL: &str = "https://updates.maiterm.dev/push";
 /// §6. No-op while no such device exists.
 async fn doorbell_loop(app: Arc<AppState>) {
     let client = reqwest::Client::new();
-    // tab_id → last observed attn_key. Rings only on an OBSERVED transition into attention:
-    // the first sighting of a tab (loop start, roster add) just baselines, so an
-    // already-idle tab that gets exposed doesn't push a phantom "finished".
-    let mut last: HashMap<String, String> = HashMap::new();
+    // tab_id → (last observed attn_key, whether it had a tracked session then). Both halves are
+    // load-bearing — see `rings_attention`: the first sighting of a tab baselines silently, and so
+    // does the tab's session row first appearing, which is a registration edge rather than a
+    // finished turn.
+    let mut last: HashMap<String, (String, bool)> = HashMap::new();
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2000));
     loop {
         ticker.tick().await;
@@ -3935,15 +3963,19 @@ async fn doorbell_loop(app: Arc<AppState>) {
                 c["prompt"].as_str(),
             );
             let title = c["title"].as_str().unwrap_or_default().to_string();
+            let reg = c["registered"].as_bool().unwrap_or(true);
             current.insert(tab.clone());
-            let prev = last.insert(tab.clone(), key.clone());
+            let prev = last.insert(tab.clone(), (key.clone(), reg));
 
-            // Fire only on an observed transition into attention, while uncovered. First
-            // sighting (prev None) baselines silently — see `last` above.
+            // Fire only on an announceable edge, while uncovered — see `rings_attention`.
             if covered {
                 continue;
             }
-            if prev.as_deref().is_some_and(|p| !is_attn(p)) && is_attn(&key) {
+            let (prev_key, prev_reg) = match &prev {
+                Some((k, r)) => (Some(k.as_str()), *r),
+                None => (None, false),
+            };
+            if rings_attention(prev_key, prev_reg, &key) {
                 // Distinguish an open AskUserQuestion (state coincides with "permission") from a
                 // real approval prompt so the push line/route matches what the card will show.
                 let kind = match current_prompt(&app, &tab) {
@@ -4198,6 +4230,35 @@ mod tests {
         // so the gauge self-corrects instead of pegging at 100% forever.
         assert_eq!(context_limit_for("claude-something-new", 200_000), 200_000);
         assert_eq!(context_limit_for("claude-something-new", 200_001), 1_000_000);
+    }
+
+    #[test]
+    fn a_tab_coming_up_after_a_restart_must_not_ring_finished() {
+        let dormant = attn_key("dormant", None);
+        let active = attn_key("active", None);
+        let idle = attn_key("idle", None);
+
+        // THE REPORTED STORM. `agent_sessions` is in-memory, so at launch every tab baselines
+        // dormant + unregistered; seconds later its SessionStart hook inserts a row that maps to
+        // "idle". That is a textbook transition into attention, and the desktop having been down
+        // means nothing is `covered` — so every resumed tab rang "Agent finished" at once.
+        assert!(!rings_attention(Some(&dormant), false, &idle));
+        // Same edge from the live-agent fallback's "active" — also a registration edge.
+        assert!(!rings_attention(Some(&active), false, &idle));
+
+        // What must still ring: a real turn ending on a tab whose session row already existed.
+        assert!(rings_attention(Some(&active), true, &idle));
+        // ...and a prompt opening on one.
+        assert!(rings_attention(Some(&active), true, &attn_key("permission", Some("permission"))));
+        assert!(rings_attention(Some(&active), true, &attn_key("active", Some("question"))));
+
+        // Unchanged guards: a first sighting baselines silently whatever its registration...
+        assert!(!rings_attention(None, true, &idle));
+        // ...and a tab that was ALREADY wanting a human doesn't re-ring.
+        assert!(!rings_attention(Some(&idle), true, &idle));
+        assert!(!rings_attention(Some(&idle), true, &attn_key("permission", Some("permission"))));
+        // Leaving attention is not an edge into it.
+        assert!(!rings_attention(Some(&idle), true, &active));
     }
 
     #[test]
