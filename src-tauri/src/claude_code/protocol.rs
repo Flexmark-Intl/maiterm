@@ -560,7 +560,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "readCommsThread",
-            "description": "Re-fetch the full current Mattermost thread this tab is bound to, as a transcript. Use this to catch up on ambient discussion — only messages that @mention the bot are auto-injected into your session, so the rest of the thread is read-on-demand. Image attachments are staged to temp files whose paths appear in the transcript — view them with the Read tool.",
+            "description": "Re-fetch the FULL current Mattermost thread this tab is bound to, as a transcript. Two uses, both routine — this call is cheap, prefer it over guessing: (1) catch up on ambient discussion, since only messages that @mention the bot are auto-injected into your session and the rest of the thread is read-on-demand; (2) RECOVER a thread you can no longer see. A summon for a thread you already worked delivers only the NEW messages, on the basis that the earlier ones were already given to this session — but a compaction or a /clear can have taken them from your context since. If you cannot see the history a pickup refers to, call this instead of asking the humans to repeat themselves. Attachments of any type are staged to temp files whose paths appear in the transcript, each with a note on how to open it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

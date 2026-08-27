@@ -305,6 +305,11 @@ pub struct Tab {
     /// (the watcher rescans tabs each tick; summons hold until the session is live).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comms_monitor: Option<CommsMonitor>,
+    /// Threads this tab has worked and released — see `CommsThreadReceipt`. Bounded and
+    /// aged out by `prune_comms_receipts`; a receipt is a memory, never a claim, so
+    /// duplicating a tab must not copy it (a duplicate's agent has seen none of it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comms_thread_receipts: Vec<CommsThreadReceipt>,
     /// Last known working directory (absolute path, updated live from OSC 7 / prompt patterns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_cwd: Option<String>,
@@ -1384,6 +1389,33 @@ pub struct CommsMonitorChannel {
     pub last_seen_create_at: i64,
 }
 
+/// What a tab remembers about a thread it has already worked and released.
+///
+/// Releasing a finished thread is the normal ending (the agent must not camp on one of
+/// its slots waiting for a human), and an `@mention` summons it straight back. Without a
+/// receipt every one of those returns looks like first contact, so the pickup re-sends the
+/// entire transcript AND re-downloads every attachment in it — for a thread the agent read
+/// twenty minutes ago and may still have in context.
+///
+/// The receipt is what lets a re-summon deliver only what is NEW. It is per-tab on
+/// purpose: if another tab is summoned to the same thread, that tab has never seen it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommsThreadReceipt {
+    pub root_id: String,
+    pub channel_id: String,
+    /// The cursor that was actually delivered into the session — everything at or before
+    /// this the agent has been shown.
+    pub last_seen_create_at: i64,
+    /// The agent session that did the work. A DIFFERENT session (restart, resume, a fresh
+    /// agent in the same tab) never saw any of it, so the receipt does not apply and the
+    /// full transcript is sent. This is what makes trimming safe rather than a gamble —
+    /// though it cannot see a compaction or a /clear, which keep the same session id, so
+    /// the trimmed payload always tells the agent how to pull the thread back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub released_at: i64,
+}
+
 /// A tab's binding to an external chat thread (/maiterm resolve). The comms watcher
 /// polls the thread and injects new human replies into the tab's agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1577,6 +1609,7 @@ impl Tab {
             comms_binding: None,
             comms_bindings: Vec::new(),
             comms_monitor: None,
+            comms_thread_receipts: Vec::new(),
         }
     }
 
@@ -1622,6 +1655,7 @@ impl Tab {
             comms_binding: None,
             comms_bindings: Vec::new(),
             comms_monitor: None,
+            comms_thread_receipts: Vec::new(),
         }
     }
 
@@ -1667,6 +1701,7 @@ impl Tab {
             comms_binding: None,
             comms_bindings: Vec::new(),
             comms_monitor: None,
+            comms_thread_receipts: Vec::new(),
         }
     }
 }

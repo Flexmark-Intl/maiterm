@@ -10,7 +10,7 @@ pub mod mattermost;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::state::{AppState, CommsBinding};
+use crate::state::{AppState, CommsBinding, CommsThreadReceipt};
 use mattermost::{MattermostClient, User};
 
 #[derive(Debug)]
@@ -1136,7 +1136,16 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
 /// Max simultaneous thread bindings a monitor tab will accept from summons; further
 /// summons queue in-channel (cursor hold) until one closes. Also enforced by
 /// startCommsThread so an agent can't open its way past the cap.
-pub(crate) const MAX_TAB_BINDINGS: usize = 3;
+///
+/// This was 3 while a finished thread was held until a human confirmed the fix, which
+/// could take hours — the cap existed to stop one tab quietly sitting on every slot. Now
+/// that posting the resolution releases the thread (and a receipt makes coming back
+/// cheap), the backlog it guarded against is gone and the number can be generous.
+///
+/// It is not zero, though. Each binding is a thread fetch every tick, and more to the
+/// point the cap is the only backpressure that tells a channel "this tab is full": without
+/// it one agent silently accepts a dozen concurrent jobs and does all of them badly.
+pub(crate) const MAX_TAB_BINDINGS: usize = 6;
 
 /// In-thread notice posted once when a summon must queue. Excluded from the
 /// "bot already answered" check (summon_already_answered) — a queued summon is
@@ -1176,6 +1185,70 @@ fn bindings_count_for_tab(app: &AppState, tab_id: &str) -> usize {
         .find(|t| t.id == tab_id)
         .map(|t| t.comms_bindings.len())
         .unwrap_or(0)
+}
+
+/// How many released-thread receipts a tab keeps, and how long one stays useful.
+/// Both are generous: a receipt is two ids and two integers, and its only job is to stop
+/// a re-summon re-sending a thread the agent still has.
+pub(crate) const MAX_THREAD_RECEIPTS: usize = 20;
+pub(crate) const RECEIPT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Keep a tab's receipts bounded: drop the aged-out, then the oldest beyond the cap.
+pub(crate) fn prune_receipts(receipts: &mut Vec<CommsThreadReceipt>, now: i64) {
+    receipts.retain(|r| now.saturating_sub(r.released_at) < RECEIPT_TTL_MS);
+    if receipts.len() > MAX_THREAD_RECEIPTS {
+        receipts.sort_by_key(|r| std::cmp::Reverse(r.released_at));
+        receipts.truncate(MAX_THREAD_RECEIPTS);
+    }
+}
+
+/// Record that a tab has finished with a thread. Called on every release path (a
+/// `resolve: true` reply and an explicit unbind) so the next summon for this root can
+/// deliver only what is new instead of the whole transcript again.
+pub(crate) fn note_released_thread(
+    tab: &mut crate::state::Tab,
+    binding: &CommsBinding,
+    session_id: Option<String>,
+) {
+    let now = now_ms();
+    tab.comms_thread_receipts.retain(|r| r.root_id != binding.root_id);
+    tab.comms_thread_receipts.push(CommsThreadReceipt {
+        root_id: binding.root_id.clone(),
+        channel_id: binding.channel_id.clone(),
+        last_seen_create_at: binding.last_seen_create_at,
+        session_id,
+        released_at: now,
+    });
+    prune_receipts(&mut tab.comms_thread_receipts, now);
+}
+
+/// The agent session id currently registered for a tab, if any.
+pub(crate) fn session_id_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
+    app.agent_sessions
+        .read()
+        .iter()
+        .find(|(_, s)| s.tab_id == tab_id)
+        .map(|(sid, _)| sid.clone())
+}
+
+/// A usable receipt for `root_id` on `tab_id`: one written by the SAME agent session that
+/// is running now. A different session — a restart, a resume, a fresh agent in the same
+/// tab — never saw any of the thread, so its receipt does not apply and the caller must
+/// send the whole transcript.
+fn usable_receipt(app: &AppState, tab_id: &str, root_id: &str) -> Option<CommsThreadReceipt> {
+    let current = session_id_for_tab(app, tab_id)?;
+    let data = app.app_data.read();
+    let tab = data
+        .windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|t| t.id == tab_id)?;
+    tab.comms_thread_receipts
+        .iter()
+        .find(|r| r.root_id == root_id && r.session_id.as_deref() == Some(current.as_str()))
+        .cloned()
 }
 
 /// Is this thread root bound to ANY tab?
@@ -1229,9 +1302,33 @@ async fn summon_pickup(
     bot_username: &str,
 ) -> Result<(), String> {
     let staging = staging_target_for_tab(app, tab_id);
-    let thread_refs: Vec<&mattermost::Post> = thread.iter().collect();
-    let attachment_notes = stage_attachments(client, &staging, &thread_refs).await;
-    let transcript = build_transcript(client, thread, root_id, &attachment_notes).await;
+
+    // Has THIS tab's current agent already been shown this thread? Releasing a finished
+    // thread is the normal ending and an @mention brings the agent straight back, so a
+    // re-summon is the common case — and re-sending the whole transcript (plus
+    // re-downloading and re-staging every attachment in it) for a thread the agent read
+    // twenty minutes ago is pure waste. `usable_receipt` only answers yes for the same
+    // agent session; anything else never saw it.
+    let receipt = usable_receipt(app, tab_id, root_id);
+    let fresh: Vec<&mattermost::Post> = match &receipt {
+        Some(r) => thread
+            .iter()
+            .filter(|p| p.create_at > r.last_seen_create_at)
+            .collect(),
+        None => Vec::new(),
+    };
+    // A receipt with nothing new behind it means the cursor and the thread disagree; send
+    // everything rather than injecting a pickup with no content in it.
+    let resuming = receipt.is_some() && !fresh.is_empty();
+    let posts: Vec<&mattermost::Post> = if resuming {
+        fresh
+    } else {
+        thread.iter().collect()
+    };
+    let attachment_notes = stage_attachments(client, &staging, &posts).await;
+    let owned: Vec<mattermost::Post> = posts.iter().map(|p| (*p).clone()).collect();
+    let transcript = build_transcript(client, &owned, root_id, &attachment_notes).await;
+    let already_seen = thread.len().saturating_sub(owned.len());
     let last_seen = thread
         .iter()
         .map(|p| p.create_at)
@@ -1275,6 +1372,26 @@ async fn summon_pickup(
         };
         (instructions, approvers)
     };
+    // What the agent is actually given, and how to get the rest. The recall line is not
+    // decoration: the receipt proves the session was SHOWN the history, not that it still
+    // has it — a compaction or a /clear leaves the same session id behind. So every pickup
+    // says how to pull the thread back, and the trimmed one says it emphatically.
+    let thread_section = if resuming {
+        format!(
+            "\nYou have worked this thread before and released it. Its earlier {already_seen} \
+             message(s) were already delivered into THIS session, so only what is NEW is below. \
+             If you no longer have that history — you were compacted, cleared, or simply cannot \
+             see it — call readCommsThread with root_id \"{root_id}\" and you get the whole thread \
+             back. One cheap call, and it exists for exactly this: never guess at the earlier \
+             context, and never make the humans repeat what they already wrote.\nNew message(s):\n{transcript}"
+        )
+    } else {
+        format!(
+            "\nThe full thread is below. If you later lose it — a compaction, a /clear — \
+             readCommsThread with root_id \"{root_id}\" returns it in full at any time.\n\
+             Summon message and thread so far:\n{transcript}"
+        )
+    };
     let payload = format!(
         "[Mattermost pickup — {who} (@{uname}) [{tag}] summoned you (@{bot_username}) in channel \"{}\". \
          This tab is now bound to that thread (root_id {root_id}, {permalink}). Work it per the \
@@ -1290,8 +1407,8 @@ async fn summon_pickup(
          ALWAYS pass root_id \"{root_id}\" on postCommsReply/readCommsThread calls for this \
          thread. When the work is done and posted, RELEASE this thread (postCommsReply with \
          resolve: true) instead of holding the slot waiting for a human to confirm — this \
-         channel is monitored, so an @{bot_username} reply here summons you straight back with \
-         the full thread.{approvers}{instructions}\nSummon message and thread so far:\n{transcript}]",
+         channel is monitored, so an @{bot_username} reply here summons you straight back. \
+         {approvers}{instructions}{thread_section}]",
         ch.name
     );
     crate::mailink::inject_text(app, pty_id, &payload, true).await?;
@@ -1477,6 +1594,77 @@ mod tests {
         assert_eq!(kind_noun(AttachmentKind::Office, "pptx"), "PowerPoint deck");
         assert_eq!(kind_noun(AttachmentKind::Pdf, "pdf"), "PDF");
         assert_eq!(kind_noun(AttachmentKind::Text, "md"), "file");
+    }
+
+    fn receipt(root: &str, released_at: i64) -> CommsThreadReceipt {
+        CommsThreadReceipt {
+            root_id: root.to_string(),
+            channel_id: "chan".to_string(),
+            last_seen_create_at: released_at,
+            session_id: Some("sess".to_string()),
+            released_at,
+        }
+    }
+
+    #[test]
+    fn receipts_age_out_and_stay_bounded() {
+        let now = 10 * RECEIPT_TTL_MS;
+        let mut rs = vec![
+            receipt("fresh", now - 1000),
+            receipt("stale", now - RECEIPT_TTL_MS - 1),
+        ];
+        prune_receipts(&mut rs, now);
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0].root_id, "fresh");
+
+        // Over the cap, the OLDEST go — a thread released long ago is the one whose
+        // history the agent is least likely to still be holding.
+        let mut many: Vec<CommsThreadReceipt> = (0..MAX_THREAD_RECEIPTS as i64 + 5)
+            .map(|i| receipt(&format!("r{i}"), now - i))
+            .collect();
+        prune_receipts(&mut many, now);
+        assert_eq!(many.len(), MAX_THREAD_RECEIPTS);
+        assert_eq!(many[0].root_id, "r0", "newest kept");
+        assert!(!many.iter().any(|r| r.root_id == "r24"), "oldest dropped");
+    }
+
+    #[test]
+    fn releasing_a_thread_records_where_the_session_got_to() {
+        let mut tab = crate::state::Tab::new("Chat Handler".to_string());
+        let binding = CommsBinding {
+            provider: "mattermost".to_string(),
+            server_url: "https://mm.example.com".to_string(),
+            channel_id: "chan".to_string(),
+            root_id: "root".to_string(),
+            permalink: "https://mm.example.com/t/pl/root".to_string(),
+            last_seen_create_at: 4242,
+            bound_at: 1,
+            deliver_all_replies: false,
+        };
+        note_released_thread(&mut tab, &binding, Some("sess-1".to_string()));
+        assert_eq!(tab.comms_thread_receipts.len(), 1);
+        let r = &tab.comms_thread_receipts[0];
+        assert_eq!(r.root_id, "root");
+        assert_eq!(r.last_seen_create_at, 4242, "the cursor is the whole point");
+        assert_eq!(r.session_id.as_deref(), Some("sess-1"));
+
+        // Working the same thread again and releasing it again REPLACES the receipt
+        // rather than stacking one per round trip.
+        let mut later = binding.clone();
+        later.last_seen_create_at = 9999;
+        note_released_thread(&mut tab, &later, Some("sess-1".to_string()));
+        assert_eq!(tab.comms_thread_receipts.len(), 1);
+        assert_eq!(tab.comms_thread_receipts[0].last_seen_create_at, 9999);
+    }
+
+    #[test]
+    fn a_receipt_only_applies_to_the_session_that_earned_it() {
+        // The rule `usable_receipt` enforces: a receipt proves a session was SHOWN the
+        // thread. A different session — restart, resume, a fresh agent in the same tab —
+        // saw none of it, so the summon must carry the whole transcript.
+        let r = receipt("root", 1000);
+        assert!(r.session_id.as_deref() == Some("sess"));
+        assert_ne!(r.session_id.as_deref(), Some("other-session"));
     }
 
     #[test]

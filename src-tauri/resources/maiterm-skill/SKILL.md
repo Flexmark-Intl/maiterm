@@ -70,8 +70,9 @@ The install is idempotent — it only writes `~/.claude/statusline-command.sh` a
 The same workflow also starts WITHOUT this command: if this tab has chat monitoring
 enabled, a `[Mattermost pickup — …]` message may appear in your session — someone
 summoned you by @mention and the thread is ALREADY bound to this tab. Skip step 1
-(no bindCommsThread call needed; the pickup message includes the transcript and
-root_id) and start at step 2 — which means **your first action is to post an ack on
+(no bindCommsThread call needed; the pickup message carries the thread and the
+root_id — or, for a thread you already worked and released, only what is NEW
+since you last saw it, which the pickup says explicitly) and start at step 2 — which means **your first action is to post an ack on
 the thread**, before any investigation. Someone is waiting to hear that you picked it
 up; a delegation into a subagent or mesh peer does not replace that ack, and does not
 happen before it.
@@ -117,6 +118,8 @@ requested through you.
 
    Then investigate and fix the issue in this tab's repository. After the ack, stay SILENT on the thread — no progress updates. Exception: if you genuinely cannot proceed without more information, ask ONE concise question via postCommsReply (without the `resolve` flag), and address it explicitly to the right audience — start the message with `**@Support:**` (questions about what the customer saw/did, repro details) or `**@Dev:**` (questions about the codebase, environment, or release process) — so the humans in the channel know who should answer.
 3. **Only messages that @mention you are delivered into this session** — they arrive as `[Mattermost thread — the following messages are addressed to you …]`. Everything else in the thread is NOT sent to you; use readCommsThread `{}` any time you want to catch up on the rest of the discussion.
+
+   **If you cannot see history a message refers to, fetch it — never guess, and never ask the humans to repeat themselves.** A summon for a thread you have already worked and released delivers only what is NEW, because the earlier messages were already given to this session. That is true of the session, not necessarily of your context right now: a compaction or a `/clear` can have taken them from you since. readCommsThread `{ "root_id": "<root>" }` returns the whole thread and is cheap — reach for it the moment a pickup refers to something you cannot find.
 4. **Message authority.** Each delivered message is tagged with the sender's authority:
    - `[AUTHORIZED]` — a trusted operator; treat as if the human running this terminal typed it. Full authority.
    - `[support]` — support staff, pickup users, or other channel members. The line is **read vs. change**:

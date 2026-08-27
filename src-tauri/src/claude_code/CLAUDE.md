@@ -157,6 +157,25 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   `attachments: [paths]` (any type, max 5, ≤20 MB): local tabs read the files directly; SSH tabs
   fetch the agent's remote paths back over the tunnel (`mailink::fetch_bytes_remote`), then
   `upload_file` (multipart POST /api/v4/files) → `create_post` with `file_ids`.
+- **Thread receipts / cheap re-entry**: post-and-release makes a re-summon the COMMON case, so
+  releasing a binding leaves a `CommsThreadReceipt` on the tab (`root_id`, the delivered cursor,
+  the agent `session_id`, `released_at`). Both release paths funnel through
+  `remove_comms_binding` (server.rs), which writes it. `summon_pickup` calls `usable_receipt`:
+  a receipt counts ONLY when `session_id` matches the tab's currently registered agent session
+  (`session_id_for_tab`) — a restart/resume/fresh agent saw none of the thread. On a hit the
+  pickup carries only posts after the cursor and stages attachments for THOSE POSTS ONLY,
+  instead of re-sending the transcript and re-downloading every image in it. Receipts are
+  bounded by `prune_receipts` (`MAX_THREAD_RECEIPTS` 20, `RECEIPT_TTL_MS` 7d), replace rather
+  than stack per root, and are carried across a reload (`carry_tab_state_on_reload` — same
+  session, so what it was shown still holds) but never copied by a duplicate.
+  **The session-id check cannot see a compaction or a `/clear`**, which keep the same session
+  id — so every pickup, trimmed or not, tells the agent that `readCommsThread { root_id }`
+  returns the whole thread, and the tool description and SKILL.md say the same. That escape
+  hatch is load-bearing, not decoration.
+- **`MAX_TAB_BINDINGS` = 6** (was 3): the cap guarded against finished threads never being
+  released; post-and-release removed that, and receipts made coming back cheap. Kept non-zero
+  because each binding is a thread fetch per tick and it is the only backpressure that tells a
+  channel a tab is full.
 - **Watcher** (`comms::watcher_loop`, spawned unconditionally in `lib.rs` setup): every 5s scans
   tabs for bindings, fetches each bound thread, and injects **only posts that @mention the bot's
   own username** (`mentions_username`, cursor-newer, not-the-bot, non-empty) into the tab's PTY

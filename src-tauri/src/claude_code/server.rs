@@ -922,7 +922,17 @@ fn upsert_comms_binding(
 }
 
 /// Remove one binding (by root_id) from a tab and persist. Some(true) = removed.
+///
+/// Releasing leaves a RECEIPT behind: which thread, how far into it the session was
+/// shown, and which session that was. Both release paths (a `resolve: true` reply and an
+/// explicit unbind) come through here, so the next summon for this root can deliver only
+/// what is new instead of re-sending the whole transcript and re-staging every attachment
+/// in it. Post-and-release is the normal ending, so that return trip is the common case.
 fn remove_comms_binding(state: &Arc<AppState>, tab_id: &str, root_id: &str) -> Option<bool> {
+    // Read the session id BEFORE taking the app_data write lock — agent_sessions is a
+    // separate lock and taking them in a consistent order everywhere avoids inventing a
+    // deadlock for the sake of one string.
+    let session_id = crate::comms::session_id_for_tab(state, tab_id);
     let (data_clone, removed) = {
         let mut app_data = state.app_data.write();
         let tab = app_data
@@ -932,9 +942,17 @@ fn remove_comms_binding(state: &Arc<AppState>, tab_id: &str, root_id: &str) -> O
             .flat_map(|ws| &mut ws.panes)
             .flat_map(|p| &mut p.tabs)
             .find(|t| t.id == tab_id)?;
+        let released = tab
+            .comms_bindings
+            .iter()
+            .find(|b| b.root_id == root_id)
+            .cloned();
         let before = tab.comms_bindings.len();
         tab.comms_bindings.retain(|b| b.root_id != root_id);
         let removed = tab.comms_bindings.len() < before;
+        if let Some(binding) = released {
+            crate::comms::note_released_thread(tab, &binding, session_id);
+        }
         (app_data.clone(), removed)
     };
     if removed {

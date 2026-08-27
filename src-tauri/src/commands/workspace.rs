@@ -3038,6 +3038,15 @@ mod reload_carry_tests {
                 bound_at: 1600,
                 deliver_all_replies: true,
             }],
+            // A reload MUST carry these: the replacement runs the same agent session, so
+            // what that session has already been shown is still true of it.
+            comms_thread_receipts: vec![crate::state::CommsThreadReceipt {
+                root_id: "root".to_string(),
+                channel_id: "chan".to_string(),
+                last_seen_create_at: 1700,
+                session_id: Some("sess-1".to_string()),
+                released_at: 1690,
+            }],
             comms_monitor: Some(CommsMonitor {
                 channels: vec![CommsMonitorChannel {
                     id: "chan".to_string(),
@@ -3115,6 +3124,11 @@ mod reload_carry_tests {
         let out = carry_tab_record(fully_populated("old-tab"), &replacement());
         assert_eq!(out.comms_monitor.unwrap().channels.len(), 1);
         assert_eq!(out.comms_bindings.len(), 1);
+        assert_eq!(
+            out.comms_thread_receipts.len(),
+            1,
+            "a reload keeps the same agent session, so what it has been shown still holds"
+        );
         assert!(out.runtime.is_some());
         assert!(out.mailink_native && out.mailink_excluded);
         assert_eq!(out.mesh_purpose.as_deref(), Some("owns the chat channel"));

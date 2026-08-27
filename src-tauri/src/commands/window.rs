@@ -487,6 +487,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 comms_binding: None,
                 comms_bindings: Vec::new(),
                 comms_monitor: None,
+                // A receipt records what THIS tab's agent has already been shown; a new
+                // window's tabs run fresh sessions that have seen none of it.
+                comms_thread_receipts: Vec::new(),
             }
         }).collect();
 
