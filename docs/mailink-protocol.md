@@ -330,7 +330,30 @@ Bidirectional, opened while the app is foreground. Server→client events:
 ```jsonc
 { "type": "chat_state", "tabId": "...", "state": "active|idle|permission",
   "runtime": "claude", "tool": "Bash", "detail": "rm -rf ./dist",
-  "registered": true, "ts": 0 }
+  "registered": true, "prompt": null, "ts": 0 }
+                                                     // FIELD-PRESENCE CONTRACT, and the general form of the merge rule
+                                                     // spelled out for `registered` below. A `chat_state` frame is MERGED
+                                                     // over a row built by GET /chats — two producers, one row — so an
+                                                     // omitted field is indistinguishable from a field the frame is
+                                                     // claiming is empty. Therefore: **every field above is always present
+                                                     // on every frame, carrying an explicit `null` where there is nothing.**
+                                                     // `meta` is the single exception: it is omitted when the desktop
+                                                     // cannot resolve it (non-Claude tab, transcript momentarily
+                                                     // unreadable), which means "unknown", so merge it only when present
+                                                     // and never let a transient miss blank a live gauge.
+                                                     //
+                                                     // Clients: apply present fields, ignore absent ones. That single rule
+                                                     // covers `registered` and every field added later, and is what an
+                                                     // older desktop (which omits newer fields entirely) needs too.
+                                                     // `prompt` mirrors the field on Chat. It is present because this frame
+                                                     // FIRES on prompt changes — the emit key is state+prompt — so a frame
+                                                     // that carried only `state` announced that something moved while
+                                                     // withholding what. Answering an AskUserQuestion is exactly that case
+                                                     // (prompt question → null, `state` stays "active"): it raises no
+                                                     // `attention` event, since those fire only INTO attention, and no
+                                                     // `chats_changed`, since the roster diff does not watch prompt. Bind
+                                                     // the "needs you" pin to this rather than to the value the last GET
+                                                     // left behind, or an answered ask stays pinned.
                                                      // `registered` mirrors the field on Chat/ThreadDetail. It is the ONLY
                                                      // live signal an already-open thread gets about registration, so bind
                                                      // the "running but not registered" banner to it rather than to the

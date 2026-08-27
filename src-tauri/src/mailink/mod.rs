@@ -1911,6 +1911,21 @@ fn state_frame_needed(prev: Option<&str>, key: &str, reg_changed: bool) -> bool 
     prev != Some(key) || reg_changed
 }
 
+/// A `chat_state` frame.
+///
+/// **Every field here is ALWAYS present, `meta` excepted.** That is a contract, not an accident:
+/// the client MERGES these frames over rows built by `build_chats`, so it cannot distinguish a
+/// field this producer omitted from a field this producer is claiming is empty. Omitting one
+/// therefore either strands a stale value (the answered-ask pin, see `prompt` below) or clobbers
+/// a good one (absent `registered` read as `true` would have hidden the re-initialize banner on
+/// exactly the desktops that still needed it). Send a real `null`, never nothing.
+///
+/// `meta` is the single deliberate exception: `build_meta` returns None for a non-Claude tab or a
+/// transcript it cannot resolve right now, and that is "unknown", not "no telemetry" — a
+/// transient miss must not blank a live context gauge. Clients merge it only when present.
+///
+/// So: adding a field to `build_chats` that the phone RENDERS means adding it here too, or the
+/// live path silently disagrees with the REST path. Two producers, one row.
 fn chat_state_event(c: &Value) -> Value {
     // Carry the chat's REAL per-tab last-activity (build_chats computed it) as both `ts` and
     // `lastActivityTs`. The initial WS snapshot replays one chat_state per existing chat, so
@@ -1927,6 +1942,14 @@ fn chat_state_event(c: &Value) -> Value {
         // is the only live signal an open thread gets, so the phone binds the banner to it and
         // the affordance disappears the moment the init it asked for actually lands.
         "registered": c.get("registered").cloned().unwrap_or_else(|| json!(true)),
+        // Explicitly present, and explicitly `null` when there is no open prompt. This frame
+        // FIRES on a prompt change — `attn_key` is state+prompt — so omitting the prompt half
+        // told the phone "something moved" while withholding what moved. Answering an ask
+        // (prompt question → null, state stays "active") emits exactly this frame, raises no
+        // `attention` event (that only fires INTO attention) and no `chats_changed` (the roster
+        // diff doesn't watch prompt), so nothing made the phone re-GET: the row kept its stale
+        // prompt and the answered ask stayed pinned at the top of the inbox.
+        "prompt": c.get("prompt").cloned().unwrap_or(Value::Null),
         "ts": ts.clone(),
         "lastActivityTs": ts,
     });
@@ -4658,6 +4681,43 @@ mod tests {
         // The ordinary trigger is untouched.
         assert!(state_frame_needed(Some("active"), "idle_done", false));
         assert!(state_frame_needed(None, "active", false), "a tab we've never seen");
+    }
+
+    #[test]
+    fn a_state_frame_never_omits_what_the_phone_merges() {
+        // The frame is merged over a row the REST build produced, so a field it leaves out is
+        // indistinguishable from a field it is claiming is empty. Every field but `meta` must
+        // therefore be present on every frame, carrying a real null where there is nothing.
+        let ev = chat_state_event(&json!({
+            "tabId": "t1", "state": "active", "runtime": "claude",
+            "registered": true, "prompt": Value::Null,
+        }));
+        for f in ["type", "tabId", "state", "runtime", "registered", "prompt", "ts", "lastActivityTs"] {
+            assert!(ev.get(f).is_some(), "`{f}` must be present on every chat_state frame");
+        }
+        // `meta` is the one deliberate omission: absent means "unknown", so a transient failure
+        // to resolve a transcript can't blank a live context gauge.
+        assert!(ev.get("meta").is_none());
+    }
+
+    #[test]
+    fn answering_an_ask_tells_the_phone_the_prompt_is_gone() {
+        // This frame is what an answered AskUserQuestion produces: attn_key moves from
+        // "active|question" to "active|", so a frame fires — but no `attention` event (those
+        // only fire INTO attention) and no `chats_changed` (the roster diff doesn't watch
+        // prompt). If the frame withholds `prompt`, nothing ever tells the phone the ask is
+        // over and it stays pinned on a stale value.
+        let ev = chat_state_event(&json!({
+            "tabId": "t1", "state": "active", "runtime": "claude", "registered": true,
+            "prompt": Value::Null,
+        }));
+        assert_eq!(ev["prompt"], Value::Null, "an explicit null, not an omission");
+        // And the opening edge still carries the kind, so the pin can be raised from the frame.
+        let ev = chat_state_event(&json!({
+            "tabId": "t1", "state": "active", "runtime": "claude", "registered": true,
+            "prompt": "question",
+        }));
+        assert_eq!(ev["prompt"], json!("question"));
     }
 
     #[test]
