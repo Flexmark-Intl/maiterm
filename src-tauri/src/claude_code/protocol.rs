@@ -572,7 +572,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "postCommsReply",
-            "description": "Post a reply (Mattermost markdown) to a thread this tab is bound to. Set resolve: true when YOUR work on the thread is done — it posts the message and releases that thread's binding, freeing one of this tab's 3 slots. Post-and-release is the normal ending: do NOT hold a finished thread waiting for a human to confirm, since an @mention on the thread summons you straight back with full context (unless the bind result said can_be_resummoned: false — then stay bound). The bot must be a member of the channel.",
+            "description": format!("Post a reply (Mattermost markdown) to a thread this tab is bound to. Set resolve: true when YOUR work on the thread is done — it posts the message and releases that thread's binding, freeing one of this tab's {} slots. Post-and-release is the normal ending: do NOT hold a finished thread waiting for a human to confirm, since an @mention on the thread summons you straight back — with whatever you have not already been shown, plus readCommsThread to pull the rest (unless the bind result said can_be_resummoned: false — then stay bound). The bot must be a member of the channel.", crate::comms::MAX_TAB_BINDINGS),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -587,7 +587,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "startCommsThread",
-            "description": "Open a NEW Mattermost thread in a channel this tab monitors — for raising something yourself (an incident you found, a heads-up, a question for the channel) rather than replying to an existing thread. Posts a root message and binds this tab to the new thread, so replies that @mention the bot come back to you like any other bound thread (pass bind: false to post without binding — then you won't see replies). Only channels the operator put on this tab's monitor list are allowed. Counts against the same 3-thread cap as summons.",
+            "description": format!("Open a NEW Mattermost thread in a channel this tab monitors — for raising something yourself (an incident you found, a heads-up, a question for the channel) rather than replying to an existing thread. Posts a root message and binds this tab to the new thread, so replies that @mention the bot come back to you like any other bound thread (pass bind: false to post without binding — then you won't see replies). Only channels the operator put on this tab's monitor list are allowed. Counts against the same {}-thread cap as summons.", crate::comms::MAX_TAB_BINDINGS),
             "inputSchema": {
                 "type": "object",
                 "properties": {

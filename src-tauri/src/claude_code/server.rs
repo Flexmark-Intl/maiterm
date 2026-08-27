@@ -906,8 +906,12 @@ fn upsert_comms_binding(
             // Refresh in place, but keep the delivered-cursor high-watermark — a
             // re-bind must not replay replies already injected into the session.
             let keep_cursor = existing.last_seen_create_at.max(binding.last_seen_create_at);
+            let keep_delivered = existing
+                .last_delivered_create_at
+                .max(binding.last_delivered_create_at);
             *existing = binding;
             existing.last_seen_create_at = keep_cursor;
+            existing.last_delivered_create_at = keep_delivered;
             true
         } else {
             tab.comms_bindings.push(binding);
@@ -932,7 +936,7 @@ fn remove_comms_binding(state: &Arc<AppState>, tab_id: &str, root_id: &str) -> O
     // Read the session id BEFORE taking the app_data write lock — agent_sessions is a
     // separate lock and taking them in a consistent order everywhere avoids inventing a
     // deadlock for the sake of one string.
-    let session_id = crate::comms::session_id_for_tab(state, tab_id);
+    let session_id = crate::comms::sole_session_for_tab(state, tab_id);
     let (data_clone, removed) = {
         let mut app_data = state.app_data.write();
         let tab = app_data
@@ -1245,6 +1249,9 @@ async fn handle_bind_comms_thread(
         root_id: root_id.clone(),
         permalink: url.clone(),
         last_seen_create_at: last_seen,
+        // This tool hands the agent the whole transcript in its result, so everything up
+        // to the tip really has been delivered.
+        last_delivered_create_at: last_seen,
         bound_at: now_ms,
         // A human's thread (resolve/permalink) — stay mention-gated.
         deliver_all_replies: false,
@@ -1548,6 +1555,8 @@ async fn handle_start_comms_thread(
         permalink: permalink.clone(),
         // Our own root post is already "seen" — never re-deliver it to ourselves.
         last_seen_create_at: posted.create_at,
+        // The agent wrote it, so it has it.
+        last_delivered_create_at: posted.create_at,
         bound_at: posted.create_at,
         // The agent asked the question, so every reply is an answer to it — humans
         // shouldn't have to @mention a bot they didn't summon.

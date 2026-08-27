@@ -3035,6 +3035,7 @@ mod reload_carry_tests {
                 root_id: "root".to_string(),
                 permalink: "https://mm.example.com/t/pl/root".to_string(),
                 last_seen_create_at: 1700,
+                last_delivered_create_at: 1650,
                 bound_at: 1600,
                 deliver_all_replies: true,
             }],
@@ -3043,7 +3044,7 @@ mod reload_carry_tests {
             comms_thread_receipts: vec![crate::state::CommsThreadReceipt {
                 root_id: "root".to_string(),
                 channel_id: "chan".to_string(),
-                last_seen_create_at: 1700,
+                delivered_through: 1650,
                 session_id: Some("sess-1".to_string()),
                 released_at: 1690,
             }],

@@ -771,8 +771,10 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 binding.deliver_all_replies,
             );
             if addressed.is_empty() {
-                // Nothing aimed at the bot this tick — just move the cursor forward.
-                advance_cursor(&app, &tab_id, &binding.root_id, new_cursor);
+                // Nothing aimed at the bot this tick — move the SCAN cursor only. These
+                // posts were never injected, so the delivered watermark must not move:
+                // a later re-summon still owes them to the agent.
+                advance_cursor(&app, &tab_id, &binding.root_id, new_cursor, None);
                 continue;
             }
 
@@ -889,7 +891,10 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
 
             match crate::mailink::inject_text(&app, &pty_id, &payload, true).await {
                 Ok(()) => {
-                    advance_cursor(&app, &tab_id, &binding.root_id, new_cursor);
+                    // Scan cursor to the tick's newest post; delivered watermark only to
+                    // the newest post actually in the payload.
+                    let delivered = addressed.iter().map(|p| p.create_at).max();
+                    advance_cursor(&app, &tab_id, &binding.root_id, new_cursor, delivered);
                     injected_tabs.insert(tab_id.clone());
                     // Delivered — a future undeliverable burst should notify again.
                     pending_notified.remove(&key);
@@ -1215,20 +1220,37 @@ pub(crate) fn note_released_thread(
     tab.comms_thread_receipts.push(CommsThreadReceipt {
         root_id: binding.root_id.clone(),
         channel_id: binding.channel_id.clone(),
-        last_seen_create_at: binding.last_seen_create_at,
+        delivered_through: binding.last_delivered_create_at,
         session_id,
         released_at: now,
     });
     prune_receipts(&mut tab.comms_thread_receipts, now);
 }
 
-/// The agent session id currently registered for a tab, if any.
-pub(crate) fn session_id_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
-    app.agent_sessions
-        .read()
-        .iter()
-        .find(|(_, s)| s.tab_id == tab_id)
-        .map(|(sid, _)| sid.clone())
+/// The agent session registered for a tab — but only when there is exactly ONE.
+///
+/// `agent_sessions` is keyed by session id, so a tab can carry several: a resume mints a
+/// new id, and a SessionEnd that never reached the server (a killed agent, a dead tunnel)
+/// leaves the old row behind until restart. Picking one with `find` would let HashMap
+/// iteration order decide whether a receipt matches — and getting that wrong in the
+/// permissive direction is the exact failure the session check exists to prevent: a brand
+/// new agent told that a thread it has never seen "was already delivered into THIS
+/// session".
+///
+/// So ambiguity resolves to None, which makes the receipt unusable and sends the full
+/// transcript — the behaviour from before receipts existed. Over-sending is the safe
+/// direction; under-sending loses messages.
+pub(crate) fn sole_session_for_tab(app: &AppState, tab_id: &str) -> Option<String> {
+    let sessions = app.agent_sessions.read();
+    let mut matching = sessions.iter().filter(|(_, s)| s.tab_id == tab_id);
+    let (sid, _) = matching.next()?;
+    if matching.next().is_some() {
+        log::debug!(
+            "[comms] tab {tab_id} has more than one registered agent session — not trimming"
+        );
+        return None;
+    }
+    Some(sid.clone())
 }
 
 /// A usable receipt for `root_id` on `tab_id`: one written by the SAME agent session that
@@ -1236,7 +1258,7 @@ pub(crate) fn session_id_for_tab(app: &AppState, tab_id: &str) -> Option<String>
 /// tab — never saw any of the thread, so its receipt does not apply and the caller must
 /// send the whole transcript.
 fn usable_receipt(app: &AppState, tab_id: &str, root_id: &str) -> Option<CommsThreadReceipt> {
-    let current = session_id_for_tab(app, tab_id)?;
+    let current = sole_session_for_tab(app, tab_id)?;
     let data = app.app_data.read();
     let tab = data
         .windows
@@ -1313,7 +1335,7 @@ async fn summon_pickup(
     let fresh: Vec<&mattermost::Post> = match &receipt {
         Some(r) => thread
             .iter()
-            .filter(|p| p.create_at > r.last_seen_create_at)
+            .filter(|p| p.create_at > r.delivered_through)
             .collect(),
         None => Vec::new(),
     };
@@ -1420,6 +1442,9 @@ async fn summon_pickup(
         root_id: root_id.to_string(),
         permalink,
         last_seen_create_at: last_seen.max(summon_post.create_at),
+        // The pickup payload above carried everything from the receipt watermark (or the
+        // start of the thread) up to the tip, so that is what this session has now seen.
+        last_delivered_create_at: last_seen.max(summon_post.create_at),
         bound_at: now_ms(),
         // Summoned = a human's thread; stay mention-gated.
         deliver_all_replies: false,
@@ -1448,8 +1473,25 @@ async fn summon_pickup(
     Ok(())
 }
 
-/// Advance a binding's last-seen cursor and persist (only when it actually moved).
-fn advance_cursor(app: &AppState, tab_id: &str, root_id: &str, new_cursor: i64) {
+/// Advance a binding's cursors and persist (only when one actually moved).
+///
+/// TWO cursors, and the difference matters. `last_seen_create_at` is the SCAN cursor: it
+/// jumps past everything the tick looked at, including ambient chatter that was never
+/// aimed at the bot and so was never injected — that is what stops the watcher re-reading
+/// the same posts forever. `last_delivered_create_at` moves only for posts actually
+/// injected into the session.
+///
+/// A thread receipt has to record the second one. Using the scan cursor would have a
+/// re-summon skip every ambient message the agent was never shown while telling it those
+/// messages "were already delivered into THIS session" — a false claim that also disarms
+/// the readCommsThread escape hatch, since the agent is told nothing is missing.
+fn advance_cursor(
+    app: &AppState,
+    tab_id: &str,
+    root_id: &str,
+    new_cursor: i64,
+    delivered: Option<i64>,
+) {
     let data_clone = {
         let mut data = app.app_data.write();
         let mut changed = false;
@@ -1465,6 +1507,12 @@ fn advance_cursor(app: &AppState, tab_id: &str, root_id: &str, new_cursor: i64) 
                 if b.last_seen_create_at < new_cursor {
                     b.last_seen_create_at = new_cursor;
                     changed = true;
+                }
+                if let Some(d) = delivered {
+                    if b.last_delivered_create_at < d {
+                        b.last_delivered_create_at = d;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -1600,7 +1648,7 @@ mod tests {
         CommsThreadReceipt {
             root_id: root.to_string(),
             channel_id: "chan".to_string(),
-            last_seen_create_at: released_at,
+            delivered_through: released_at,
             session_id: Some("sess".to_string()),
             released_at,
         }
@@ -1637,7 +1685,8 @@ mod tests {
             channel_id: "chan".to_string(),
             root_id: "root".to_string(),
             permalink: "https://mm.example.com/t/pl/root".to_string(),
-            last_seen_create_at: 4242,
+            last_seen_create_at: 5000,
+            last_delivered_create_at: 4242,
             bound_at: 1,
             deliver_all_replies: false,
         };
@@ -1645,16 +1694,19 @@ mod tests {
         assert_eq!(tab.comms_thread_receipts.len(), 1);
         let r = &tab.comms_thread_receipts[0];
         assert_eq!(r.root_id, "root");
-        assert_eq!(r.last_seen_create_at, 4242, "the cursor is the whole point");
+        assert_eq!(
+            r.delivered_through, 4242,
+            "the receipt records what was DELIVERED (4242), never the scan cursor (5000) —              the gap is ambient posts the watcher skipped and the agent never saw"
+        );
         assert_eq!(r.session_id.as_deref(), Some("sess-1"));
 
         // Working the same thread again and releasing it again REPLACES the receipt
         // rather than stacking one per round trip.
         let mut later = binding.clone();
-        later.last_seen_create_at = 9999;
+        later.last_delivered_create_at = 9999;
         note_released_thread(&mut tab, &later, Some("sess-1".to_string()));
         assert_eq!(tab.comms_thread_receipts.len(), 1);
-        assert_eq!(tab.comms_thread_receipts[0].last_seen_create_at, 9999);
+        assert_eq!(tab.comms_thread_receipts[0].delivered_through, 9999);
     }
 
     #[test]

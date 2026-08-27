@@ -158,11 +158,22 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   fetch the agent's remote paths back over the tunnel (`mailink::fetch_bytes_remote`), then
   `upload_file` (multipart POST /api/v4/files) → `create_post` with `file_ids`.
 - **Thread receipts / cheap re-entry**: post-and-release makes a re-summon the COMMON case, so
-  releasing a binding leaves a `CommsThreadReceipt` on the tab (`root_id`, the delivered cursor,
-  the agent `session_id`, `released_at`). Both release paths funnel through
+  releasing a binding leaves a `CommsThreadReceipt` on the tab (`root_id`, `delivered_through`,
+  the agent `session_id`, `released_at`).
+  **A binding carries TWO cursors and the receipt must use the second one.**
+  `last_seen_create_at` is the SCAN cursor — the watcher jumps it past everything a tick looked
+  at, including ambient posts not addressed to the bot, so they are not re-read forever.
+  `last_delivered_create_at` moves only for posts actually injected (`advance_cursor`'s
+  `delivered` argument is `None` on the ambient-skip path). Trimming against the scan cursor
+  would drop every ambient message the agent was never shown WHILE telling it they had been
+  delivered — a false claim that also disarms the readCommsThread hatch, since the agent is
+  told nothing is missing. Both release paths funnel through
   `remove_comms_binding` (server.rs), which writes it. `summon_pickup` calls `usable_receipt`:
   a receipt counts ONLY when `session_id` matches the tab's currently registered agent session
-  (`session_id_for_tab`) — a restart/resume/fresh agent saw none of the thread. On a hit the
+  (`sole_session_for_tab`) — a restart/resume/fresh agent saw none of the thread. That lookup
+  returns None when a tab has MORE THAN ONE session row (a resume mints a new id; a SessionEnd
+  that never arrived leaves the old one), because `agent_sessions` is a HashMap and letting
+  iteration order decide would fail in the permissive direction. Ambiguity ⇒ full transcript. On a hit the
   pickup carries only posts after the cursor and stages attachments for THOSE POSTS ONLY,
   instead of re-sending the transcript and re-downloading every image in it. Receipts are
   bounded by `prune_receipts` (`MAX_THREAD_RECEIPTS` 20, `RECEIPT_TTL_MS` 7d), replace rather

@@ -1403,9 +1403,11 @@ pub struct CommsMonitorChannel {
 pub struct CommsThreadReceipt {
     pub root_id: String,
     pub channel_id: String,
-    /// The cursor that was actually delivered into the session — everything at or before
-    /// this the agent has been shown.
-    pub last_seen_create_at: i64,
+    /// Newest post actually injected into the session — `CommsBinding::last_delivered_
+    /// create_at` at the moment of release. NOT the scan cursor: that one runs ahead, past
+    /// ambient posts the agent was never shown, and trimming against it would drop them
+    /// silently while telling the agent they had been delivered.
+    pub delivered_through: i64,
     /// The agent session that did the work. A DIFFERENT session (restart, resume, a fresh
     /// agent in the same tab) never saw any of it, so the receipt does not apply and the
     /// full transcript is sent. This is what makes trimming safe rather than a gamble —
@@ -1432,6 +1434,12 @@ pub struct CommsBinding {
     /// Newest provider create_at (ms) already delivered to the session; the watcher
     /// only forwards posts newer than this.
     pub last_seen_create_at: i64,
+    /// Newest post actually INJECTED into the agent's session. Lags `last_seen_create_at`,
+    /// which is a scan cursor and jumps past ambient posts the watcher deliberately does
+    /// not deliver. This is the one a thread receipt records: it is the only honest answer
+    /// to "what has this session actually been shown?".
+    #[serde(default)]
+    pub last_delivered_create_at: i64,
     pub bound_at: i64,
     /// Deliver EVERY human reply on this thread, not just @mentions of the bot. Set on
     /// threads the agent itself opened (startCommsThread): it asked the question, so the
