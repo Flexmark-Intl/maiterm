@@ -345,6 +345,14 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // Clients: apply present fields, ignore absent ones. That single rule
                                                      // covers `registered` and every field added later, and is what an
                                                      // older desktop (which omits newer fields entirely) needs too.
+                                                     // `ts` is NOT when this event happened — it is the tab's real
+                                                     // `lastActivityTs`, and both fields carry the same value. So it does
+                                                     // NOT advance on every frame: a prompt opening or closing moves no
+                                                     // transcript turn, so a frame announcing one repeats the previous
+                                                     // `ts`. Never use it to decide whether a frame is newer than what you
+                                                     // hold — `ev.ts <= row.lastActivityTs` discards exactly the frames
+                                                     // that report a prompt change. Frames arrive in order on one socket;
+                                                     // apply them.
                                                      // `prompt` mirrors the field on Chat. It is present because this frame
                                                      // FIRES on prompt changes — the emit key is state+prompt — so a frame
                                                      // that carried only `state` announced that something moved while
