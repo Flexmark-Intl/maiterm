@@ -741,12 +741,114 @@ pub fn reconcile_tab_liveness(data: &mut AppData, db: &super::scrollback_db::Scr
     if normalized > 0 {
         log::info!("Tab-liveness: normalized {} limbo tab(s) to suspended", normalized);
     }
+
+    backfill_agent_runtimes(data);
+}
+
+/// Every boot, idempotent: tag a terminal tab as an agent tab when its own persisted record
+/// proves an agent has run in it, and nothing has said so.
+///
+/// `Tab.runtime` had exactly one writer for Claude — `initSession` — because the SessionStart
+/// hook deliberately skipped it ("None defaults to claude"). That default holds on the frontend
+/// and NOT in maiLink, where `designated_tabs` reads `runtime.is_some()` as "this is an agent
+/// tab": a null runtime hides the tab from the phone completely. It stayed invisible only while
+/// `/maiterm init` was still required of every agent; once the tab id started riding the wire,
+/// nothing made an agent call init, and the writes stopped happening.
+///
+/// The hook now writes it for every runtime, which fixes this going forward and heals any tab
+/// whose agent starts again. It cannot heal a DORMANT tab — no agent, so no SessionStart, ever —
+/// and on the machine this was found on that was ~85% of the affected tabs. Their evidence is
+/// already persisted: a `<runtime>SessionId` trigger variable is written only by a real
+/// registration. Read it back rather than stranding them.
+///
+/// Conservative on purpose: it only ever fills a `None`, never corrects a runtime already set,
+/// and a tab with no session variable is left alone (a plain shell tab must not become an agent
+/// tab). Idempotent — the second boot finds nothing to do.
+fn backfill_agent_runtimes(data: &mut AppData) {
+    use crate::state::AgentRuntime;
+    const RUNTIMES: [AgentRuntime; 3] =
+        [AgentRuntime::Claude, AgentRuntime::Codex, AgentRuntime::Gemini];
+
+    let mut tagged = 0usize;
+    for win in &mut data.windows {
+        for ws in &mut win.workspaces {
+            for pane in &mut ws.panes {
+                for tab in &mut pane.tabs {
+                    if !matches!(tab.tab_type, TabType::Terminal) || tab.runtime.is_some() {
+                        continue;
+                    }
+                    let found = RUNTIMES.into_iter().find(|rt| {
+                        let var = crate::state::agent_runtime::descriptor(*rt).session_id_var;
+                        tab.trigger_variables.get(var).is_some_and(|v| !v.trim().is_empty())
+                    });
+                    if let Some(rt) = found {
+                        tab.runtime = Some(rt);
+                        tagged += 1;
+                    }
+                }
+            }
+        }
+    }
+    if tagged > 0 {
+        log::info!(
+            "Agent-runtime backfill: tagged {} tab(s) from a persisted session id — they were \
+             invisible to maiLink",
+            tagged
+        );
+    }
 }
 
 #[cfg(test)]
 mod migration_tests {
     use super::*;
     use crate::state::workspace::Workspace;
+
+    #[test]
+    fn a_tab_that_has_run_an_agent_is_tagged_as_one() {
+        use crate::state::workspace::Tab;
+        use crate::state::AgentRuntime;
+        let mut ws = Workspace::new("EWS Mesh".to_string());
+        ws.panes[0].tabs.clear(); // drop the auto-created Terminal tab so indices are the cases
+        let mut mk = |name: &str, var: Option<(&str, &str)>, rt: Option<AgentRuntime>| {
+            let mut t = Tab::new(name.to_string());
+            t.runtime = rt;
+            if let Some((k, v)) = var {
+                t.trigger_variables.insert(k.to_string(), v.to_string());
+            }
+            ws.panes[0].tabs.push(t);
+        };
+        // The reported shape: Claude has unmistakably run here, but nothing ever wrote runtime
+        // because this agent never happened to call initSession.
+        mk("Backoffice Social Campaigns", Some(("claudeSessionId", "b5e41230")), None);
+        mk("codex tab", Some(("codexSessionId", "c-1")), None);
+        // A plain shell tab must NOT become an agent tab.
+        mk("just a shell", None, None);
+        // An empty variable is not evidence.
+        mk("empty var", Some(("claudeSessionId", "  ")), None);
+        // An already-tagged tab is never re-decided, even if a stale sibling var disagrees.
+        mk("already codex", Some(("claudeSessionId", "x")), Some(AgentRuntime::Codex));
+
+        let mut win = WindowData::new("main".to_string());
+        win.workspaces.push(ws);
+        let mut data = AppData::default();
+        data.windows.push(win);
+
+        backfill_agent_runtimes(&mut data);
+        let tabs = &data.windows[0].workspaces[0].panes[0].tabs;
+        assert_eq!(tabs[0].runtime, Some(AgentRuntime::Claude));
+        assert_eq!(tabs[1].runtime, Some(AgentRuntime::Codex));
+        assert_eq!(tabs[2].runtime, None, "a shell tab stays a shell tab");
+        assert_eq!(tabs[3].runtime, None, "an empty session id proves nothing");
+        assert_eq!(tabs[4].runtime, Some(AgentRuntime::Codex), "never re-decided");
+
+        // Idempotent: a second boot changes nothing.
+        let before = data.clone();
+        backfill_agent_runtimes(&mut data);
+        let after = &data.windows[0].workspaces[0].panes[0].tabs;
+        for (i, t) in before.windows[0].workspaces[0].panes[0].tabs.iter().enumerate() {
+            assert_eq!(t.runtime, after[i].runtime);
+        }
+    }
 
     fn window_with_legacy(workspace_id: &str, rows: serde_json::Value) -> AppData {
         let mut ws = Workspace::new("Project".to_string());

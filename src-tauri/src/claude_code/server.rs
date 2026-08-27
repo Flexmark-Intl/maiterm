@@ -2890,10 +2890,17 @@ async fn hooks_handler(
                 }
             }
 
-            // Persist the tab's runtime for NON-Claude runtimes from the hook path.
-            // Codex doesn't always call initSession (where Tab.runtime is otherwise set),
-            // so tag it here too; Claude tabs are left untouched (None → defaults claude).
-            if runtime != crate::state::AgentRuntime::Claude && !tab_id.is_empty() {
+            // Persist the tab's runtime for EVERY runtime from the hook path.
+            //
+            // This used to skip Claude, on the reasoning that `None` already defaults to claude.
+            // That is true of `getTabRuntime` on the frontend, where it was written — and false
+            // of maiLink, whose `designated_tabs` reads `runtime.is_some()` as "this is an agent
+            // tab" and so hides a null-runtime tab from the phone entirely. While every agent ran
+            // `/maiterm init` eventually, initSession (the only other writer) covered for it. Now
+            // that nothing requires init, a Claude tab that never happens to call it would stay
+            // invisible forever. The hook fires for every tab at process start and carries its
+            // tab id, so the Codex-only scoping is a leftover from when it could not do this.
+            if !tab_id.is_empty() {
                 let mut app_data = srv.state.app_data.write();
                 let mut changed = false;
                 'find_tab: for win in &mut app_data.windows {
