@@ -1317,12 +1317,22 @@ function createWorkspacesStore() {
 
       // Skip note migration — archived tabs preserve their notes and restore them intact
 
-      await commands.archiveTab(workspaceId, paneId, tabId, displayName, scrollback, cwd, sshCommand, remoteCwd);
+      // Patch the mirror BEFORE the invoke, with nothing awaited in between. This store
+      // persists whole lists, and Tauri runs these sync commands in the order the webview
+      // sent them — so a `commit()` issued after this point carries the post-move list and
+      // lands after archive_tab, which is correct. Patching AFTER the await left the mirror
+      // stale for the whole flight of archive_tab: a commit sent in that window wrote the
+      // pre-move list straight back, leaving the rows in `Workspace.tasks` AND on the
+      // archived record, which restore then turns into two rows with one id.
+      const movedTasks = tasksStore.applyTabArchive(workspaceId, tabId);
+      try {
+        await commands.archiveTab(workspaceId, paneId, tabId, displayName, scrollback, cwd, sshCommand, remoteCwd);
+      } catch (e) {
+        // The mirror now says something Rust never did. Take the backend's word for it.
+        await tasksStore.rehydrate();
+        throw e;
+      }
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId));
-      // archive_tab moved this tab's rows onto the archived tab record. Patch the mirror in
-      // the SAME synchronous step — a rehydrate, even awaited, leaves it stale for a whole
-      // IPC round trip, and this store persists whole lists (see applyTabArchive).
-      tasksStore.applyTabArchive(workspaceId, tabId);
 
       // Build the archived tab object for local state
       const archivedTab: Tab = {
@@ -1334,6 +1344,11 @@ function createWorkspacesStore() {
         restore_ssh_command: sshCommand,
         restore_remote_cwd: remoteCwd,
         archived_at: new Date().toISOString(),
+        // The rows Rust just parked on this record. Spreading the LIVE tab gave the local
+        // copy no `archived_tasks` — a live tab never has any — so `parkedTaskIds` stayed
+        // empty and every dependency on a row archived this session read as met until the
+        // next app start re-read the archive from disk. The fix that was inert.
+        archived_tasks: movedTasks,
       };
 
       // Update local state

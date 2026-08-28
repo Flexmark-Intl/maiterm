@@ -187,6 +187,27 @@ throws), and on the restore side drops them from both places with no copy anywhe
 stored one is cloned with the field already empty — so `applyTabArchive`/`applyTabRestore` can
 update the mirror in the same synchronous step, without persisting.
 
+On the archive side the patch goes **before** the invoke, not after. Tauri runs these sync
+commands in the order the webview sent them, so a `commit()` issued after the patch carries
+the post-move list and still lands after `archive_tab` — correct either way. Patching after
+the await instead left the mirror stale for the whole flight of `archive_tab`, which is a real
+window: a 5s Overlord tick and any agent's MCP task call are both writers. A failed archive
+rehydrates, since the mirror then claims something Rust never did.
+
+**Two things the local copy has to carry.** `archiveTab` builds its local archived-tab record
+by spreading the LIVE tab, which never has `archived_tasks` — so `parkedTaskIds` stayed empty
+for anything archived in the current session, and the parked-dependency fix did nothing until
+the next app start re-read the archive from disk. `applyTabArchive` returns the rows it
+removed, and they go onto that record. And it mirrors the cross-workspace release too: rows
+left in a workspace the tab was dragged out of get `tab_id` cleared locally as well, or the
+next whole-list write to that workspace re-attributes them.
+
+**Every consumer of the parked set has to use it.** `effectiveStatus` decides the lane;
+`hasUnmetDeps` also feeds the board's `depBlocked`, which disables the ‹ › steppers. When only
+the first was given the parked set they disagreed: the card rendered in Blocked with its
+steppers live, and four clicks walked the *stored* status to `done`, where `effectiveStatus`
+short-circuits — a card jumping to Done for work that never started.
+
 ### The six lanes, and what `backlog` actually means
 
 ```

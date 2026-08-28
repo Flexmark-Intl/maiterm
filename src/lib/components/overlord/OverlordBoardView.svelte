@@ -64,8 +64,13 @@
    *  Those cards can't be stepped by hand — see the ‹ › controls. */
   const depBlocked = $derived.by<Set<string>>(() => {
     const out = new Set<string>();
+    // Same parked set the lane assignment uses. Disagreeing with it re-enabled the ‹ ›
+    // steppers on a card the board was showing as Blocked: four clicks walked the STORED
+    // status to `done`, `effectiveStatus` short-circuits on done, and the card jumped to
+    // Done — work marked finished that never started, with its prerequisite still parked.
+    const parked = workspacesStore.parkedTaskIds;
     for (const list of grouped.values()) {
-      for (const t of list) if (hasUnmetDeps(t, list)) out.add(t.id);
+      for (const t of list) if (hasUnmetDeps(t, list, parked)) out.add(t.id);
     }
     return out;
   });

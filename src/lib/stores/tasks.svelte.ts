@@ -286,11 +286,25 @@ function createTasksStore() {
      * throws on), or, on the restore side, dropping the returned rows from both places at
      * once with no copy left anywhere.
      */
-    applyTabArchive(workspaceId: string, tabId: string) {
-      const list = byWorkspace.get(workspaceId);
-      if (!list) return;
-      byWorkspace.set(workspaceId, list.filter((t) => t.tab_id !== tabId));
+    applyTabArchive(workspaceId: string, tabId: string): Task[] {
+      const moved = (byWorkspace.get(workspaceId) ?? []).filter((t) => t.tab_id === tabId);
+      for (const [wsId, list] of [...byWorkspace]) {
+        if (wsId === workspaceId) {
+          byWorkspace.set(wsId, list.filter((t) => t.tab_id !== tabId));
+          continue;
+        }
+        // Rows this tab left behind in a workspace it was dragged out of are RELEASED by
+        // `archive_tab`, not moved — mirror that here too, or the next whole-list write to
+        // that workspace re-attributes them to a tab it no longer has, where the panel shows
+        // them as neither `mine` nor `unclaimed` and `findDuplicate` will not reclaim them.
+        if (!list.some((t) => t.tab_id === tabId && t.status !== 'done')) continue;
+        byWorkspace.set(
+          wsId,
+          list.map((t) => (t.tab_id === tabId && t.status !== 'done' ? { ...t, tab_id: null } : t)),
+        );
+      }
       byWorkspace = new Map(byWorkspace);
+      return moved;
     },
 
     /** The other half: rows that came back with a restored tab. */
