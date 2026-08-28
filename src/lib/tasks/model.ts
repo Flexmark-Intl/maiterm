@@ -59,21 +59,30 @@ export function isFinished(status: TaskStatus): boolean {
   return status === 'done';
 }
 
-/** Does this task have an unmet dependency? A `blocked_by` id that no longer resolves is
- *  treated as met — a deleted prerequisite must not wedge its dependents forever. */
-export function hasUnmetDeps(task: Task, all: Task[]): boolean {
+/** Does this task have an unmet dependency?
+ *
+ *  A `blocked_by` id that no longer resolves is treated as met — a deleted prerequisite must
+ *  not wedge its dependents forever.
+ *
+ *  `parked` is the exception that proves it: ids that still exist but are off the list,
+ *  because their tab was archived. Those are NOT deleted, so treating them as met silently
+ *  unblocked every dependent — a task waiting on "migrate schema" jumped into To-do, and
+ *  `listTasks` reported it to agents as ready work, the moment the tab holding the migration
+ *  was archived. Unresolvable-and-unknown means gone; unresolvable-but-parked means waiting. */
+export function hasUnmetDeps(task: Task, all: Task[], parked?: ReadonlySet<string>): boolean {
   if (!task.blocked_by?.length) return false;
   return task.blocked_by.some((id) => {
     const dep = all.find((t) => t.id === id);
-    return !!dep && dep.status !== 'done';
+    if (dep) return dep.status !== 'done';
+    return parked?.has(id) ?? false;
   });
 }
 
 /** Status as the UI should render it: an unfinished task with unmet dependencies shows as
  *  blocked regardless of its stored status, so a dependency chain is visible without
  *  anyone having to restate it. The stored value is left alone — this is a view concern. */
-export function effectiveStatus(task: Task, all: Task[]): TaskStatus {
-  if (task.status !== 'done' && hasUnmetDeps(task, all)) return 'blocked';
+export function effectiveStatus(task: Task, all: Task[], parked?: ReadonlySet<string>): TaskStatus {
+  if (task.status !== 'done' && hasUnmetDeps(task, all, parked)) return 'blocked';
   return task.status;
 }
 

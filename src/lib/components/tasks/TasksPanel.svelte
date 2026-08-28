@@ -17,6 +17,7 @@
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { effectiveStatus, isInFlight, isParked, TASK_STATUSES } from '$lib/tasks/model';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
@@ -142,7 +143,7 @@
    *  look frozen: three clicks would silently walk the stored status through the whole
    *  vocabulary while the label stayed "BLOCKED", then jump to "DONE" on the fourth. */
   function cycleStatus(t: Task, back: boolean) {
-    const shown = effectiveStatus(t, all);
+    const shown = effectiveStatus(t, all, workspacesStore.parkedTaskIds);
     const i = TASK_STATUSES.indexOf(shown);
     const next = TASK_STATUSES[(i + (back ? -1 : 1) + TASK_STATUSES.length) % TASK_STATUSES.length];
     tasksStore.setStatus(workspaceId, t.id, next);
@@ -318,7 +319,7 @@
       {/if}
       <ul class="task-list">
           {#each group.list as t (t.id)}
-            {@const eff = effectiveStatus(t, all)}
+            {@const eff = effectiveStatus(t, all, workspacesStore.parkedTaskIds)}
             <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)}>
               <div class="task-main">
                 <Tooltip text="{STATUS_LABEL[eff]} — click to advance, shift-click to go back">

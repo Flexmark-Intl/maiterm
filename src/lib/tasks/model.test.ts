@@ -234,6 +234,18 @@ describe('dependencies', () => {
     expect(hasUnmetDeps(t, [t])).toBe(false);
   });
 
+  it('keeps blocking on a prerequisite parked by archiving its tab', () => {
+    // Off `Workspace.tasks` but not deleted: archiving the tab that owned the migration
+    // must not advertise the backfill waiting on it as ready work.
+    const t = task({ id: 't1', status: 'todo', blocked_by: ['parked'] });
+    expect(hasUnmetDeps(t, [t])).toBe(false); // unknown id: gone, so it must not wedge
+    expect(hasUnmetDeps(t, [t], new Set(['parked']))).toBe(true);
+    expect(effectiveStatus(t, [t], new Set(['parked']))).toBe('blocked');
+    // Restoring the tab puts the row back in the list, where its real status decides.
+    const dep = task({ id: 'parked', status: 'done' });
+    expect(effectiveStatus(t, [dep, t], new Set(['parked']))).toBe('todo');
+  });
+
   it('never overrides done — a finished task is finished', () => {
     const dep = task({ id: 'd1', status: 'active' });
     const t = task({ id: 't1', status: 'done', blocked_by: ['d1'] });

@@ -274,6 +274,34 @@ function createTasksStore() {
      *  workspaces leaves tasks behind in the old one, so its rows legitimately span two
      *  lists and stopping early would strand half of them on an id that no longer exists —
      *  unreachable by the panel, by the importer, and by the dedup. */
+    /**
+     * Mirror a move Rust has ALREADY made and persisted (tab archive / restore).
+     *
+     * Local only — deliberately no `persist()`. This store writes WHOLE lists, so persisting
+     * here would race the very move it is reflecting. And it must run SYNCHRONOUSLY after the
+     * command resolves: an awaited `rehydrate()` leaves the mirror stale for a whole IPC
+     * round trip, and any writer touching that workspace in the gap computes its whole-list
+     * write from the pre-move copy — putting the rows back on the board while the archived
+     * tab also holds them (restore then duplicates the ids, which Svelte's keyed `each`
+     * throws on), or, on the restore side, dropping the returned rows from both places at
+     * once with no copy left anywhere.
+     */
+    applyTabArchive(workspaceId: string, tabId: string) {
+      const list = byWorkspace.get(workspaceId);
+      if (!list) return;
+      byWorkspace.set(workspaceId, list.filter((t) => t.tab_id !== tabId));
+      byWorkspace = new Map(byWorkspace);
+    },
+
+    /** The other half: rows that came back with a restored tab. */
+    applyTabRestore(workspaceId: string, rows: Task[]) {
+      if (!rows.length) return;
+      const list = byWorkspace.get(workspaceId) ?? [];
+      const known = new Set(list.map((t) => t.id));
+      byWorkspace.set(workspaceId, [...list, ...rows.filter((t) => !known.has(t.id))]);
+      byWorkspace = new Map(byWorkspace);
+    },
+
     releaseTab(tabId: string) {
       // Snapshot the entries: commit() reassigns the Map underneath the iteration.
       for (const [workspaceId, list] of [...byWorkspace]) {

@@ -2191,6 +2191,23 @@ pub fn archive_tab(
         tab.archived_tasks = mine;
 
         workspace.archived_tabs.push(tab);
+
+        // A tab dragged between workspaces leaves rows behind, so its rows can legitimately
+        // span two lists — and only the archiving workspace's are moved above. The rest are
+        // RELEASED (tab_id cleared), which is what the old archive path did for all of them:
+        // leaving them attributed to a tab that is no longer in that workspace makes them
+        // neither `mine` nor `unclaimed` in its panel, so nothing can ever reach them again.
+        for ws in win.workspaces.iter_mut() {
+            if ws.id == workspace_id {
+                continue;
+            }
+            for t in ws.tasks.iter_mut() {
+                if t.tab_id.as_deref() == Some(tab_id.as_str()) && t.status != "done" {
+                    t.tab_id = None;
+                }
+            }
+        }
+
         app_data.clone()
     };
     save_state(&data_clone)
@@ -2232,7 +2249,12 @@ pub fn restore_archived_tab(
         pane.active_tab_id = Some(tab.id.clone());
 
         // The tab is back, so its work is back, still attributed to it.
-        workspace.tasks.extend(returning_tasks);
+        workspace.tasks.extend(returning_tasks.clone());
+        // Handed to the frontend on the RETURNED tab only — the one stored in the pane was
+        // cloned above with this field already empty. The caller needs the rows to update its
+        // task mirror in the same synchronous step, without an IPC round trip it could lose a
+        // concurrent write into.
+        tab.archived_tasks = returning_tasks;
 
         (app_data.clone(), tab)
     };

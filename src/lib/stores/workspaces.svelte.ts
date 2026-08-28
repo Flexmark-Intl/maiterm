@@ -9,6 +9,9 @@ import { activityStore } from '$lib/stores/activity.svelte';
 import { getCompiledPatterns } from '$lib/utils/promptPattern';
 import { error as logError } from '@tauri-apps/plugin-log';
 import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
+// Static, not dynamic: archive/restore must patch the task mirror in the same synchronous
+// step the command returns in. tasks.svelte does not import this module, so no cycle.
+import { tasksStore } from '$lib/stores/tasks.svelte';
 import { getVariables } from '$lib/stores/triggers.svelte';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
@@ -182,6 +185,23 @@ function createWorkspacesStore() {
     get windowId() { return windowId; },
     get windowLabel() { return windowLabel; },
     get workspaces() { return workspaces; },
+
+    /** Ids of task rows PARKED on archived tabs — off `Workspace.tasks`, but not deleted.
+     *
+     *  `hasUnmetDeps` treats an unresolvable `blocked_by` id as met, which is right for a
+     *  deleted prerequisite and wrong for an archived one: without this, archiving the tab
+     *  that owned "migrate schema" silently moved everything waiting on it into To-do and
+     *  advertised it to agents as ready work. Lives here because this store owns
+     *  `archived_tabs`; the task store must not import it (this module imports that one). */
+    get parkedTaskIds(): ReadonlySet<string> {
+      const out = new Set<string>();
+      for (const ws of workspaces) {
+        for (const tab of ws.archived_tabs ?? []) {
+          for (const t of tab.archived_tasks ?? []) out.add(t.id);
+        }
+      }
+      return out;
+    },
     get activeWorkspaceId() { return activeWorkspaceId; },
     get activeWorkspace() { return activeWorkspace; },
     get activePane() { return activePane; },
@@ -1299,12 +1319,10 @@ function createWorkspacesStore() {
 
       await commands.archiveTab(workspaceId, paneId, tabId, displayName, scrollback, cwd, sshCommand, remoteCwd);
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId));
-      // archive_tab moved this tab's task rows onto the archived tab record, so the store's
-      // in-memory mirror is now stale. Reload rather than patch: the mirror persists whole
-      // lists, so a stale copy would write the moved rows straight back onto the board —
-      // leaving them in BOTH places, and restore would then duplicate them. AWAITED for the
-      // same reason: any task edit landing in the gap persists the stale list.
-      await import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
+      // archive_tab moved this tab's rows onto the archived tab record. Patch the mirror in
+      // the SAME synchronous step — a rehydrate, even awaited, leaves it stale for a whole
+      // IPC round trip, and this store persists whole lists (see applyTabArchive).
+      tasksStore.applyTabArchive(workspaceId, tabId);
 
       // Build the archived tab object for local state
       const archivedTab: Tab = {
@@ -1351,9 +1369,10 @@ function createWorkspacesStore() {
       if (!pane) return;
 
       const tab = await commands.restoreArchivedTab(workspaceId, pane.id, tabId);
-      // Its task rows came back with it — same reason as the archive side, awaited for the
-      // same reason too.
-      await import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
+      // Its rows came back with it, carried on the returned tab so this can be synchronous
+      // for the same reason as the archive side.
+      tasksStore.applyTabRestore(workspaceId, tab.archived_tasks ?? []);
+      tab.archived_tasks = undefined; // transport only; a live tab never carries these
 
       // Migrate old auto-resume command if needed (archived tabs skip the startup migration)
       const OLD_PATTERNS = [

@@ -1357,7 +1357,7 @@ function createClaudeCodeStore() {
       title: t.title,
       ...(workstream ? { workstream } : {}),
       ...(t.detail ? { detail: t.detail } : {}),
-      status: effectiveStatus(t, all),
+      status: effectiveStatus(t, all, workspacesStore.parkedTaskIds),
       assignee: t.tab_id === selfTabId ? 'you' : (t.tab_id ?? 'unassigned'),
       ...(t.blocked_by?.length ? { blocked_by: t.blocked_by } : {}),
       origin: t.origin,

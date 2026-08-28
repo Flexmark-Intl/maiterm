@@ -130,7 +130,7 @@
           };
           buckets.set(bucketKey, e);
         }
-        const lane = effectiveStatus(t, all);
+        const lane = effectiveStatus(t, all, workspacesStore.parkedTaskIds);
         e.lanes[lane].push(t);
         e.total++;
         if (t.status === 'done') {
@@ -257,7 +257,7 @@
     // rewrote its stored status to 'blocked', so it never returned to Active when the
     // prerequisite finished: stuck in Blocked with nothing blocking it.
     const all = overlordStore.tasks.filter((x) => x.workspace_id === t.workspace_id);
-    if (effectiveStatus(t, all) !== lane) tasksStore.setStatus(t.workspace_id, t.id, lane);
+    if (effectiveStatus(t, all, workspacesStore.parkedTaskIds) !== lane) tasksStore.setStatus(t.workspace_id, t.id, lane);
   }
 
   function dropOnStream(e: DragEvent, entry: StreamEntry) {

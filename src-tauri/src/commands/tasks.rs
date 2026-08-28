@@ -48,7 +48,6 @@ pub fn set_workspace_tasks(
     // Drop workstreams nothing points at any more. They exist only to group tasks, so an
     // empty one is a label with no referent — and leaving them would let an agent's
     // throwaway names accumulate on the board forever.
-    workstreams.retain(|w| tasks.iter().any(|t| t.workstream_id.as_deref() == Some(w.id.as_str())));
     let data_clone = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
@@ -57,6 +56,21 @@ pub fn set_workspace_tasks(
             .iter_mut()
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
+        // A workstream is kept while ANY task still points at it — including the rows parked
+        // on archived tabs, which are out of `tasks` but not gone. Without that, archiving
+        // the tab that owned a workstream's only rows left the label with no referent, and
+        // the very next task write in that workspace deleted it for good; restoring the tab
+        // then brought its rows back into "Ungrouped", with the board's rename silently
+        // refusing to fix it because the workstream id no longer existed.
+        workstreams.retain(|w| {
+            let id = w.id.as_str();
+            tasks.iter().any(|t| t.workstream_id.as_deref() == Some(id))
+                || workspace.archived_tabs.iter().any(|tab| {
+                    tab.archived_tasks
+                        .iter()
+                        .any(|t| t.workstream_id.as_deref() == Some(id))
+                })
+        });
         workspace.tasks = tasks;
         workspace.workstreams = workstreams;
         app_data.clone()

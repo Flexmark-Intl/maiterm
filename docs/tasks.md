@@ -159,6 +159,34 @@ whole lists, so a stale copy would put the moved rows straight back.
 Deleting an archived tab destroys its rows along with it — that is what makes it the
 irreversible one.
 
+Three things follow from "off the list but not gone", each of which was wrong first:
+
+- **A workstream is kept while any task points at it, including a parked one.**
+  `set_workspace_tasks` garbage-collects workstreams with no referent, so moving a tab's rows
+  off the list left a workstream whose only members were that tab's — and the next task write
+  in that workspace deleted the label permanently. Restore then dropped the rows into
+  "Ungrouped", and the board's rename silently refused to fix it, because `renameWorkstream`
+  no-ops on an id that no longer exists.
+- **A parked prerequisite still blocks.** `hasUnmetDeps` treats an unresolvable `blocked_by`
+  id as met, which is right for a *deleted* prerequisite and wrong for a parked one: archiving
+  the tab holding "migrate schema" moved everything waiting on it into To-do and reported it
+  to agents as ready work. It now takes a `parked` set (`workspacesStore.parkedTaskIds`);
+  unresolvable-and-unknown means gone, unresolvable-but-parked means waiting.
+- **Rows the tab left in another workspace are released, not moved.** A tab dragged between
+  workspaces leaves rows behind, and `archive_tab` only partitions the workspace it is
+  archiving from. The rest have their `tab_id` cleared — as the old archive path did for all
+  of them — because a row attributed to a tab that is not in that workspace is neither `mine`
+  nor `unclaimed` in its panel, and nothing can reach it again.
+
+**The mirror is patched synchronously, not rehydrated.** The frontend store persists WHOLE
+lists, so it must not be stale for a single await: any writer in the gap computes its write
+from the pre-move copy, which on the archive side puts the rows back on the board while the
+archived tab also holds them (restore then duplicates the ids, and Svelte's keyed `each`
+throws), and on the restore side drops them from both places with no copy anywhere.
+`restore_archived_tab` therefore returns the rows on the returned tab — transport only, the
+stored one is cloned with the field already empty — so `applyTabArchive`/`applyTabRestore` can
+update the mirror in the same synchronous step, without persisting.
+
 ### The six lanes, and what `backlog` actually means
 
 ```
