@@ -2979,8 +2979,16 @@ fn live_fallback_decision(has_live_pty: bool, last_turn_ts: Option<u64>, now: u6
 /// advancing reverts to "dormant". Cheap: an in-memory PTY-map lookup + a bounded transcript tail
 /// read (the same read `last_activity_ts` already does per tab) — no process scan.
 fn tab_looks_live_despite_no_session(app: &AppState, tab_id: &str, now: u64) -> bool {
+    // Order matters, and it is not style. Rust evaluates both arguments before the call, so
+    // passing the transcript read positionally paid for it on every dormant tab — the ones where
+    // the PTY check has already decided the answer is false. That was ~206 pointless transcript
+    // lookups per tick once every agent tab became designated. Check the cheap in-memory half
+    // first and return.
+    if pty_for_tab(app, tab_id).is_none() {
+        return false;
+    }
     live_fallback_decision(
-        pty_for_tab(app, tab_id).is_some(),
+        true,
         resolved_session_for_tab(app, tab_id).and_then(|(rt, sid)| transcript::last_turn_ts_for(rt, &sid)),
         now,
     )
@@ -3036,27 +3044,28 @@ fn live_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntime, S
 /// the app shows stale/duplicated detail.
 fn persisted_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntime, String)> {
     let data = app.app_data.read();
-    let mut found: Option<(AgentRuntime, String)> = None;
-    for win in &data.windows {
-        for ws in &win.workspaces {
-            for pane in &ws.panes {
-                for tab in &pane.tabs {
-                    if tab.id == tab_id {
-                        // None → Claude (matches designated_tabs' default): tabs persisted by
-                        // app versions predating Tab.runtime can still carry claudeSessionId.
-                        let rt = tab.runtime.unwrap_or_default();
-                        let var = crate::state::agent_runtime::descriptor(rt).session_id_var;
-                        found = tab
-                            .trigger_variables
-                            .get(var)
-                            .cloned()
-                            .filter(|s| !s.is_empty())
-                            .map(|sid| (rt, sid));
-                    }
-                }
-            }
-        }
-    }
+    // Tab ids are app-unique, so the first match is the only match — stop there. This is called
+    // 2–3× per designated tab per tick by three loops; walking all ~490 tabs to the end each
+    // time was hundreds of thousands of pointless comparisons a second once every agent tab
+    // became designated.
+    let found: Option<(AgentRuntime, String)> = data
+        .windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|tab| tab.id == tab_id)
+        .and_then(|tab| {
+            // None → Claude (matches designated_tabs' default): tabs persisted by app versions
+            // predating Tab.runtime can still carry claudeSessionId.
+            let rt = tab.runtime.unwrap_or_default();
+            let var = crate::state::agent_runtime::descriptor(rt).session_id_var;
+            tab.trigger_variables
+                .get(var)
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .map(|sid| (rt, sid))
+        });
     let (rt, sid) = found?;
     // Contested-sid resolution: tab duplication copies the session-id var ON PURPOSE (reload =
     // duplicate + close original; fork = duplicate + branch), so two tabs claiming one sid is a
@@ -4557,6 +4566,10 @@ mod tests {
             )}
         });
         std::fs::write(&path, format!("{line}\n")).expect("write shadow transcript");
+        // Phase 1's lookups failed and locate_jsonl remembers that for LOCATE_MISS_TTL. Writing
+        // the shadow file by hand is standing in for the SSH mirror's fetch, which is the only
+        // real producer of a transcript that did not exist a moment ago — so do what it does.
+        transcript::forget_locate_miss(sid);
         let resolved_a = persisted_session_for_tab(&app, &dup_a);
         let resolved_b = persisted_session_for_tab(&app, &dup_b);
         let _ = std::fs::remove_file(&path); // clean up before asserting

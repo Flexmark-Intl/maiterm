@@ -1096,6 +1096,43 @@ fn read_tail_bytes(path: &std::path::Path, max: u64) -> Option<(Vec<u8>, u64)> {
 static CLAUDE_PATHS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PathBuf>>> =
     std::sync::OnceLock::new();
 
+/// How long a FAILED lookup is remembered. Short on purpose: the cost of being wrong is that a
+/// transcript which appears within the window goes unnoticed for up to this long — a resumed
+/// agent reusing a session id whose file we just failed to find — and the message streamer runs
+/// at 400ms, so anything much larger would be a visible stall. Long enough to collapse the
+/// ~2.5 lookups/second/tab the tickers generate into one.
+const LOCATE_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Session ids we recently failed to find, and when. See `locate_jsonl`.
+static CLAUDE_MISSES: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, std::time::Instant>>,
+> = std::sync::OnceLock::new();
+
+/// Drop a remembered miss, so the next lookup goes back to disk.
+///
+/// Call this from anywhere that MAKES a transcript exist that did not before. There is exactly
+/// one such producer — the SSH transcript mirror, which fetches a remote JSONL into the shadow
+/// dir — and without this its first fetch for a tab we had just failed to resolve would go
+/// unnoticed for the TTL. That is the whole reason the TTL is short; this is why it can afford
+/// to be, rather than having to be zero.
+pub(super) fn forget_locate_miss(session_id: &str) {
+    if let Some(m) = CLAUDE_MISSES.get() {
+        if let Ok(mut m) = m.lock() {
+            m.remove(session_id);
+        }
+    }
+}
+
+/// Resolve a Claude session id to its transcript, caching BOTH outcomes.
+///
+/// Caching only successes was survivable while the tabs maiLink polls were few and nearly all
+/// resolvable. It stopped being survivable when `Tab.runtime` started being written for every
+/// agent tab: the designated set went 150 → 386 here, and the tabs whose persisted session id has
+/// no file on disk — dormant tabs whose transcript was rotated or deleted — went 19 → 175. A miss
+/// costs a `read_dir` of `~/.claude/projects` plus a stat per project dir, and three loops
+/// (doorbell 2s, roster 1.5s, messages 400ms) were paying it per tab per tick, forever, whether
+/// or not a phone was connected. The unresolvable population is the steady state, not a transient:
+/// those ids will never resolve, so re-scanning for them is pure waste.
 fn locate_jsonl(session_id: &str) -> Option<PathBuf> {
     let cache = CLAUDE_PATHS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Some(p) = cache.lock().ok()?.get(session_id) {
@@ -1103,9 +1140,23 @@ fn locate_jsonl(session_id: &str) -> Option<PathBuf> {
             return Some(p.clone());
         }
     }
-    let found = locate_jsonl_uncached(session_id)?;
+    let misses = CLAUDE_MISSES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(m) = misses.lock() {
+        if m.get(session_id).is_some_and(|t| t.elapsed() < LOCATE_MISS_TTL) {
+            return None;
+        }
+    }
+    let Some(found) = locate_jsonl_uncached(session_id) else {
+        if let Ok(mut m) = misses.lock() {
+            m.insert(session_id.to_string(), std::time::Instant::now());
+        }
+        return None;
+    };
     if let Ok(mut c) = cache.lock() {
         c.insert(session_id.to_string(), found.clone());
+    }
+    if let Ok(mut m) = misses.lock() {
+        m.remove(session_id);
     }
     Some(found)
 }
@@ -1911,6 +1962,37 @@ mod tests {
         let _ = std::fs::remove_file(&path); // clean up before asserting
         assert_eq!(found, Some(path));
         assert!(locate_jsonl(sid).is_none(), "gone once the shadow file is removed");
+    }
+
+    #[test]
+    fn a_failed_lookup_is_remembered_until_someone_says_otherwise() {
+        // Why a negative cache exists: a miss costs a read_dir of ~/.claude/projects plus a stat
+        // per project dir, and three poll loops pay it per tab per tick, forever. Once every
+        // agent tab became designated, the tabs whose persisted session id has no file on disk
+        // went 19 → 175 here, and those ids will never resolve — re-scanning is pure waste.
+        let sid = "missfixture-0000-4000-8000-aiterm-miss";
+        let dir = super::super::mirror::shadow_dir().expect("data dir resolvable");
+        std::fs::create_dir_all(&dir).expect("create shadow dir");
+        let path = dir.join(format!("{sid}.jsonl"));
+        let _ = std::fs::remove_file(&path);
+        forget_locate_miss(sid); // isolate from any earlier test in this process
+
+        assert!(locate_jsonl(sid).is_none(), "nothing on disk");
+
+        // And the cost of that: a transcript appearing inside the TTL is not noticed. This is
+        // the deliberate trade, so it is asserted rather than left to be discovered.
+        std::fs::write(&path, "{}\n").expect("write shadow file");
+        let while_cached = locate_jsonl(sid);
+
+        // The one real producer of a transcript that did not exist a moment ago — the SSH mirror
+        // — clears the memory, and the next lookup goes back to disk.
+        forget_locate_miss(sid);
+        let after_forget = locate_jsonl(sid);
+        let _ = std::fs::remove_file(&path); // clean up before asserting
+        forget_locate_miss(sid);
+
+        assert_eq!(while_cached, None, "the remembered miss is what makes this cheap");
+        assert_eq!(after_forget, Some(path), "and forgetting it is what keeps it correct");
     }
 
     #[test]

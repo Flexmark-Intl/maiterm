@@ -252,6 +252,9 @@ async fn fetch_once(host_key: &str, ssh_args: &str, session_id: &str, transcript
         .and_then(|mut f| f.write_all(delta));
     match appended {
         Ok(()) => {
+            // This is the one place a transcript can come into existence after we looked for it
+            // and failed, so it owns clearing that memory — see `forget_locate_miss`.
+            super::transcript::forget_locate_miss(session_id);
             log::debug!(
                 "transcript mirror: +{} bytes for {} (shadow now {})",
                 delta.len(), session_id_short(session_id), offset + delta.len() as u64
