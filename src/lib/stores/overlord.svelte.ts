@@ -865,7 +865,52 @@ function createOverlordStore() {
    * (§3.1): the `permission` CARD is derived and self-clears, this handoff is a queue and
    * had nobody to clear it.
    */
-  const permissionHandoff = new Map<string, { escalationId: string; ruleId: string | null }>();
+  const permissionHandoff = new Map<string, { escalationIds: string[]; ruleId: string | null }>();
+
+  /**
+   * A LIST per tab, not one entry. One open gate can be escalated more than once — a
+   * `permission_pending` rule re-fires on the same still-open prompt every cooldown, because
+   * `permissionSince` stays set for as long as it sits — and remembering only the newest left
+   * the earlier asks queued, to be delivered later about a gate that had long since opened.
+   * Withdrawing one of N is not withdrawing.
+   */
+  function recordPermissionHandoff(tabId: string, escalationId: string, ruleId: string | null) {
+    const existing = permissionHandoff.get(tabId);
+    if (existing) existing.escalationIds.push(escalationId);
+    else permissionHandoff.set(tabId, { escalationIds: [escalationId], ruleId });
+  }
+
+  /** Forget one id, dropping the tab's entry once nothing is left to withdraw. */
+  function forgetPermissionHandoff(tabId: string, escalationId: string) {
+    const h = permissionHandoff.get(tabId);
+    if (!h) return;
+    h.escalationIds = h.escalationIds.filter((id) => id !== escalationId);
+    if (!h.escalationIds.length) permissionHandoff.delete(tabId);
+  }
+
+  /**
+   * Retract every ask still sitting in the queue for this tab and forget it. Returns how many
+   * had ALREADY been pulled by the agent — the ones a correction is owed for — or null if
+   * this tab had no handoff at all.
+   *
+   * Dropping the map entry alone is not enough: the un-pulled asks would still be delivered,
+   * about a gate that is no longer there.
+   */
+  function withdrawPermissionHandoff(tabId: string): { delivered: number; ruleId: string | null } | null {
+    const h = permissionHandoff.get(tabId);
+    if (!h) return null;
+    permissionHandoff.delete(tabId);
+    const queued = new Set(h.escalationIds.filter((id) => escalations.some((e) => e.id === id)));
+    if (queued.size) {
+      escalations = escalations.filter((e) => !queued.has(e.id));
+      for (const id of queued) unNudged.delete(id);
+      logInfo(
+        `overlord: withdrew ${queued.size} undelivered permission handoff(s) for ` +
+          `${tabDisplayName(tabId)} — the gate cleared before the agent read them`,
+      );
+    }
+    return { delivered: h.escalationIds.length - queued.size, ruleId: h.ruleId };
+  }
 
   /** Does this window still have an Overlord agent tab that could ever pull the queue? */
   function hasOverlordAgentTab(): boolean {
@@ -901,7 +946,7 @@ function createOverlordStore() {
     for (const e of dead) {
       if (e.taskId && handedOff.delete(e.taskId)) withdrew = true;
       // Thrown away undelivered, so there is nothing to stand down from later.
-      if (permissionHandoff.get(e.tabId)?.escalationId === e.id) permissionHandoff.delete(e.tabId);
+      forgetPermissionHandoff(e.tabId, e.id);
     }
     if (withdrew) bumpLive();
     logInfo(`overlord: dropped ${ids.size} undeliverable agent escalation(s) — no agent tab in this window`);
@@ -930,10 +975,19 @@ function createOverlordStore() {
 
     const deadProposals = proposals.filter((p) => !live.has(p.tabId));
     const deadEscalations = escalations.filter((e) => !live.has(e.tabId));
+    // Seeded from every per-tab map, not just the four with visible symptoms. A tab can sit
+    // in one of these and NO other: the ritual path records a permission handoff and returns
+    // before `setOutstanding`, and its `rituals` entry is dropped in the same `finally` — so
+    // closing that tab left a handoff whose tab was gone, which `sweepResolvedPermissionHandoffs`
+    // then read as a prompt somebody answered.
     const deadTabs = new Set<string>([
       ...deadProposals.map((p) => p.tabId),
       ...deadEscalations.map((e) => e.tabId),
-      ...[...outstanding.keys(), ...liveness.keys(), ...driveWatch.keys(), ...rituals.keys()],
+      ...[
+        ...outstanding.keys(), ...liveness.keys(), ...driveWatch.keys(), ...rituals.keys(),
+        ...permissionHandoff.keys(), ...permissionSince.keys(), ...prevAgentState.keys(),
+        ...pendingEdges.keys(),
+      ],
     ].filter((id) => !live.has(id)));
     if (!deadProposals.length && !deadEscalations.length && !deadTabs.size) return;
 
@@ -994,32 +1048,26 @@ function createOverlordStore() {
    * that will never come, because the human answered the tab instead.
    */
   function sweepResolvedPermissionHandoffs() {
-    for (const [tabId, h] of [...permissionHandoff]) {
+    for (const tabId of [...permissionHandoff.keys()]) {
       const st = mappedState(tabId);
       if (st === 'permission') continue;
-      permissionHandoff.delete(tabId);
-      if (escalations.some((e) => e.id === h.escalationId)) {
-        escalations = escalations.filter((e) => e.id !== h.escalationId);
-        unNudged.delete(h.escalationId);
-        logInfo(
-          `overlord: withdrew an undelivered permission handoff for ${tabDisplayName(tabId)} ` +
-            `— the gate cleared before the agent read it`,
-        );
-        continue;
-      }
+      const w = withdrawPermissionHandoff(tabId);
+      // Nothing reached the agent, so it never learns it was asked.
+      if (!w || !w.delivered) continue;
       // Say WHICH way it cleared. A prompt also stops being a prompt when the agent behind it
       // exits, and "it was answered, the tab is moving again" would be a confident account of
       // something nobody checked — the exact habit this subsystem keeps having to unlearn.
       const answered = st === 'idle' || st === 'active';
       escalate(
         tabId,
-        h.ruleId,
+        w.ruleId,
         'permission_stuck',
         answered
           ? `Stand down on ${tabDisplayName(tabId)} — the prompt you were told about was ` +
-              `answered and that tab is working again, so nothing is needed from you. Usually ` +
-              `this means the human answered it in the tab. If you put the question to them, ` +
-              `it is moot: drop it rather than waiting on an answer that is not coming.`
+              `answered and that tab is working again, so nothing is needed from you. You did ` +
+              `not answer it through maiTerm, so it was answered in the tab. If you put the ` +
+              `question to a human, it is moot: drop it rather than waiting on an answer that ` +
+              `is not coming.`
           : `Stand down on ${tabDisplayName(tabId)} — it is no longer at that prompt, but it ` +
               `has no live agent state either, so the gate went away with the agent rather ` +
               `than being answered. Nothing there will act on a directive until it is ` +
@@ -1221,7 +1269,7 @@ function createOverlordStore() {
               `(escalate to the human first if the decision is consequential). The rule wanted ` +
               `to say: ${JSON.stringify(step.text.slice(0, 160))}.`,
           );
-          permissionHandoff.set(tabId, { escalationId, ruleId: rule.id });
+          recordPermissionHandoff(tabId, escalationId, rule.id);
           return;
         }
         const inst = terminalsStore.get(tabId);
@@ -1890,7 +1938,7 @@ function createOverlordStore() {
               `If the human answers the prompt in the tab before you get to it, you will be ` +
               `told to stand down — so do not treat this as a question you must resolve.`,
           );
-          permissionHandoff.set(tabId, { escalationId, ruleId: null });
+          recordPermissionHandoff(tabId, escalationId, null);
         }
         // Pause the give-up clock. A prompt can sit for hours, and the directive is not
         // stale — it is waiting on a human. Capped at `now`, so the worst case after a long
@@ -3228,6 +3276,15 @@ function createOverlordStore() {
       }
       ledger(tabId, null, 'overlord_judgment', 0, step, res.ok ? 'sent' : 'blocked_guard');
       logInfo(`overlord: answered ${tabId.slice(0, 8)} prompt — ${JSON.stringify(shown)} (${res.ok ? 'ok' : res.reason})`);
+      // The agent just did the thing the handoff asked it to do, so there is nothing left to
+      // stand it down from. Without this the doctrine's own success path ends in a false
+      // correction — the tab leaves `permission`, and the sweep, which can only see that the
+      // queue is empty and the tab is running, tells the agent the human must have answered
+      // it. Answering is the only resolution the engine can attribute; every other way out
+      // of a prompt is somebody else's doing, which is what the stand-down may then assert.
+      // Withdraw rather than forget: asks still queued would otherwise be delivered later,
+      // about a gate this agent itself closed.
+      if (res.ok) withdrawPermissionHandoff(tabId);
       return res;
     },
 

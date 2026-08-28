@@ -245,13 +245,29 @@ the doorbell and sent the agent chasing an open gate. Delivered, it left the sup
 blocked on an answer nobody was going to give, because the human had already answered
 somewhere else — Overlord hanging on a problem that no longer existed.
 
-`permissionHandoff` records the escalation id per tab, and `sweepResolvedPermissionHandoffs`
-withdraws it the moment the tab leaves `permission`: deleted outright if the agent never read
-it, and otherwise replaced with an explicit stand-down, since an agent already acting on it
-is owed the correction. The stand-down names *which* way the gate cleared — `idle`/`active`
-means answered, no state at all means the agent exited and took the prompt with it, and those
-call for opposite next moves. It runs **after** `sweepClosedTabs`, so a tab the human closed
-is never reported as a prompt that got answered.
+`permissionHandoff` records the escalation ids per tab, and `sweepResolvedPermissionHandoffs`
+withdraws them the moment the tab leaves `permission`: every ask still in the queue is pulled,
+and a stand-down goes out only if at least one had already been read, since an agent acting on
+it is owed the correction and an agent that never saw it is owed nothing. Four things it has
+to get right, three of which it got wrong first:
+
+- **A list per tab, not one id.** A `permission_pending` rule re-fires on the same still-open
+  prompt every cooldown (`permissionSince` stays set while it sits), so one gate can queue
+  several asks. Remembering only the newest withdrew one of N and delivered the rest later.
+- **`answerPrompt` withdraws too.** The agent answering the prompt is the doctrine's success
+  path, and it also takes the tab out of `permission` — so the sweep would have followed the
+  agent's own fix with "that was answered, and not by you". Answering through maiTerm is the
+  one resolution the engine can attribute; the stand-down may therefore say the tab was
+  answered elsewhere, because it now knows it wasn't answered here.
+- **Say WHICH way it cleared.** `idle`/`active` means answered; no state at all means the
+  agent exited and took the prompt with it. Those call for opposite next moves.
+- **Ordering, plus `sweepClosedTabs` seeding.** It runs after `sweepClosedTabs` so a tab the
+  human closed is never reported as a prompt that got answered — but that only works if the
+  closed-tab sweep can *see* the tab. `deadTabs` was seeded from four maps, and the ritual
+  raise site records a handoff and returns before `setOutstanding`, dropping its `rituals`
+  entry in the same `finally`; the tab was then in `permissionHandoff` and nothing else, so
+  the sweep returned early and the handoff outlived it. `deadTabs` is now seeded from every
+  per-tab map, which is what its docstring always claimed.
 
 ### 3.2 A proposal is a snapshot, so it has to be re-read
 
