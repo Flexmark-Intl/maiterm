@@ -46,6 +46,11 @@ const TICK_MS = 5_000;
 const INJECTABLE_WAIT_CAP_MS = 5 * 60_000;
 /** A commit older than this at first observation never fires the commit event. */
 const COMMIT_FRESH_MS = 15 * 60_000;
+/** Quiet a terminal must have been before the agent may put it away. `stopped` means no AGENT
+ *  process, which is also what a shell part-way through a build looks like — so recency of
+ *  output and keystrokes is the discriminator, and the irreversible verb asks for more of it. */
+const ARCHIVE_QUIET_MS = 60_000;
+const CLOSE_QUIET_MS = 5 * 60_000;
 /** no_todo_list only nags sessions with real work in them. */
 const NO_TODO_MIN_CONTEXT_TOKENS = 30_000;
 const NO_TODO_RECENT_TURN_MS = 30 * 60_000;
@@ -2067,12 +2072,52 @@ function createOverlordStore() {
    * positively classified `stopped` has actually exited; `null` means not yet classified, and
    * the answer there is to wait, not to guess.
    */
-  function retireGuard(tabId: string): { reason: string; detail: string } | null {
+  function retireGuard(
+    tabId: string,
+    /** Seconds of quiet required first. 0 for the deck's `spentTabs`, which applies its own
+     *  far stricter 30-minute idle test; non-zero for the agent's tools, which do not. */
+    quietMs = 0,
+    /** May a tab with no live terminal be retired? The deck says no — it only OFFERS what it
+     *  can see is finished, and a parked tab cannot be probed. The agent's tools say yes: a
+     *  suspended tab has no process to kill, which makes it the SAFEST thing to put away, and
+     *  refusing it (`not_classified`, "resume its workspace and retry") sent the agent off to
+     *  respawn a session purely so it could wait for it to idle and then kill it again. */
+    allowParked = false,
+  ): { reason: string; detail: string } | null {
     if (!isBoardableTab(tabId)) {
       return {
         reason: 'not_boardable',
         detail: 'That tab is not in a supervised workspace in this window (or it is the Overlord agent\'s own tab).',
       };
+    }
+    if (outstanding.has(tabId) || rituals.has(tabId)) {
+      return { reason: 'outstanding_directive', detail: 'That tab still owes an answer to a directive. Let it land first.' };
+    }
+    const inst = terminalsStore.get(tabId);
+    if (!inst && !terminalsStore.isSpawning(tabId)) {
+      // Nothing is running: no PTY to kill, no agent to end. Every check below exists to
+      // protect a live process, so they have nothing to say about this tab.
+      if (allowParked) return null;
+      return {
+        reason: 'not_classified',
+        detail: 'That tab has no live terminal, so nothing could probe it. Resume it (resumeTab) if you need to see what it was doing.',
+      };
+    }
+    // Output still arriving, or the human still typing. `stopped` means no AGENT process —
+    // which is also exactly what a shell running a build looks like, and closeTab has no
+    // undo. The deck never needed this because it demands 30 minutes of quiet first.
+    if (quietMs > 0) {
+      const now = Date.now();
+      const busySince = Math.max(
+        terminalsStore.getLastOutputAt(tabId) ?? 0,
+        terminalsStore.getLastUserInputAt(tabId) ?? 0,
+      );
+      if (busySince && now - busySince < quietMs) {
+        return {
+          reason: 'tab_in_use',
+          detail: `That terminal produced output or took a keystroke ${Math.round((now - busySince) / 1000)}s ago — something is running in it, or somebody is using it. A tab with no agent is not necessarily an idle one. Wait until it has been quiet for ${Math.round(quietMs / 1000)}s.`,
+        };
+      }
     }
     const st = mappedState(tabId);
     if (st === 'active') {
@@ -2095,12 +2140,9 @@ function createOverlordStore() {
       if (kind !== 'stopped') {
         return {
           reason: 'not_classified',
-          detail: 'That tab has not been classified — usually its pane is not mounted, so nothing could probe it. Open or resume its workspace and retry.',
+          detail: 'That tab has a live terminal that has not been classified yet — the liveness probe has not reached it. Retry in a few seconds rather than guessing.',
         };
       }
-    }
-    if (outstanding.has(tabId) || rituals.has(tabId)) {
-      return { reason: 'outstanding_directive', detail: 'That tab still owes an answer to a directive. Let it land first.' };
     }
     return null;
   }
@@ -2676,9 +2718,17 @@ function createOverlordStore() {
      * how it became indistinguishable from a tab in a workspace nobody has opened.
      */
     tabPtyState(tabId: string): 'live' | 'suspended' | 'none' {
+      // `pty_id` is NOT "has a live PTY" — in the frontend mirror it means "has had one".
+      // `suspendWorkspace` clears it in Rust and only writes `suspended = true` back to the
+      // mirror, and a cancelled session restore leaves it set on purpose. Reading it as live
+      // reported every tab in an auto-suspended workspace as a running session.
+      //
+      // The app's own test is the one to use (`+page.svelte`: had a PTY, has no live
+      // instance ⇒ suspended), and a live terminal instance is what "live" has to mean here
+      // anyway, since that instance is the thing anything types into.
+      if (terminalsStore.get(tabId) || terminalsStore.isSpawning(tabId)) return 'live';
       const tab = workspacesStore._locateTab(tabId)?.tab;
-      if (tab?.pty_id) return 'live';
-      return tab?.suspended_at ? 'suspended' : 'none';
+      return tab?.pty_id || tab?.suspended_at ? 'suspended' : 'none';
     },
 
     /**
@@ -2692,9 +2742,9 @@ function createOverlordStore() {
     async resumeTabById(tabId: string): Promise<{ ok: boolean; reason?: string; detail?: string }> {
       const loc = workspacesStore._locateTab(tabId);
       if (!loc) return { ok: false, reason: 'not_found', detail: 'No tab with that id in this window.' };
-      if (loc.tab.pty_id) {
-        return { ok: false, reason: 'already_live', detail: 'That tab already has a live terminal — nothing to resume.' };
-      }
+      // Workspace first. Testing `pty_id` first made `workspace_suspended` unreachable in the
+      // exact case it was written for: suspendWorkspace leaves a stale `pty_id` in the mirror,
+      // so every tab in a parked workspace answered "already live — nothing to resume".
       const ws = workspaceForTab(tabId);
       if (ws?.suspended) {
         return {
@@ -2702,6 +2752,9 @@ function createOverlordStore() {
           reason: 'workspace_suspended',
           detail: `That tab is in the suspended workspace "${ws.name}". Resuming the workspace brings back every tab that was live in it — call resumeWorkspace instead of waking this one.`,
         };
+      }
+      if (terminalsStore.get(tabId) || terminalsStore.isSpawning(tabId)) {
+        return { ok: false, reason: 'already_live', detail: 'That tab already has a live terminal — nothing to resume.' };
       }
       try {
         await navigateToTab(tabId);
@@ -2727,11 +2780,23 @@ function createOverlordStore() {
      *  Deliberately does NOT go through driveTab, whose guards require a live REPL and an
      *  idle agent — both false here by definition. It keeps the quiescence rule (never
      *  type over a repaint) and ledgers verbatim like every other injection. */
-    async recoverTab(tabId: string): Promise<{ sent: boolean; kind?: UnreadyKind; reason?: string }> {
-      const kind = unreadyKind(tabId);
-      if (!kind) return { sent: false, reason: 'not_unready' };
+    async recoverTab(tabId: string): Promise<{ sent: boolean; kind?: UnreadyKind; reason?: string; detail?: string }> {
+      // Terminal first. A tab with no mounted pane has no liveness entry either — the probe
+      // only considers tabs it can reach — so asking `unreadyKind` first answered
+      // `not_unready`, which reads as "nothing wrong with that tab" for a tab nothing can
+      // reach. The description promised the opposite; now it is true.
       const inst = terminalsStore.get(tabId);
-      if (!inst) return { sent: false, reason: 'no_terminal' };
+      if (!inst) {
+        return {
+          sent: false,
+          reason: 'no_terminal',
+          detail: terminalsStore.isSpawning(tabId)
+            ? 'That tab is still starting up. Retry in a few seconds.'
+            : 'Nothing can be typed into that tab: it has no live terminal. If it is suspended, resumeTab wakes it; if its workspace is suspended, resumeWorkspace does.',
+        };
+      }
+      const kind = unreadyKind(tabId);
+      if (!kind) return { sent: false, reason: 'not_unready', detail: 'That tab is not classified as unready — its agent is running and bound, so there is nothing to recover.' };
 
       let text: string;
       if (kind === 'unbound') {
@@ -2963,7 +3028,9 @@ function createOverlordStore() {
      * least as auditable as a directive typed on their behalf.
      */
     async retireTab(tabId: string, mode: 'archive' | 'close'): Promise<{ ok: boolean; reason?: string; detail?: string }> {
-      const refusal = retireGuard(tabId);
+      // Quiet windows scaled to reversibility: an archive can be undone by restoring it, a
+      // close cannot be undone at all, so it asks for five minutes rather than one.
+      const refusal = retireGuard(tabId, mode === 'close' ? CLOSE_QUIET_MS : ARCHIVE_QUIET_MS, true);
       const step: OverlordStep = { kind: 'process', text: `[${mode}] ${tabDisplayName(tabId)}` };
       if (refusal) {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');

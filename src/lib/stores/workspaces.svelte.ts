@@ -1282,6 +1282,17 @@ function createWorkspacesStore() {
           const osc7RemoteCwd = (osc7Cwd && !isOsc7Stale) ? osc7Cwd : null;
           remoteCwd = osc7RemoteCwd ?? promptCwd ?? null;
         }
+
+        // Nothing to read from a tab whose terminal is already gone — `_gatherTabContext`
+        // returns nulls for all three — and archive_tab assigns them unconditionally, so
+        // archiving a SUSPENDED tab used to overwrite the cwd and ssh command that suspending
+        // it had just saved. Restoring it then gave you a local shell in the default
+        // directory, which is precisely what the restore context exists to prevent.
+        if (!terminalsStore.get(tabId)) {
+          cwd = tab.restore_cwd ?? null;
+          sshCommand = tab.restore_ssh_command ?? null;
+          remoteCwd = tab.restore_remote_cwd ?? null;
+        }
       }
 
       // Skip note migration — archived tabs preserve their notes and restore them intact

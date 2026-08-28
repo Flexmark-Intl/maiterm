@@ -1120,12 +1120,32 @@ to use.* That is a judgement, which is what the agent is for. What the engine
 still enforces is `retireGuard` — never take away a tab that is **working**.
 
 `retireGuard` is the safety half of `spentTabs`, factored out so the two cannot
-drift: boardable, not `active`, not `permission`, no outstanding directive or
-ritual, and — the one that bites — never `unbound`, because no agent state does
-not mean no agent. An unbound tab's process is alive and merely unregistered, and
-archiving or closing destroys the TerminalPane, which kills the PTY. Only a tab
-positively classified `stopped` has exited; `null` means unclassified, where the
-answer is to wait rather than guess.
+drift: boardable, no outstanding directive or ritual, not `active`, not
+`permission`, and — the one that bites — never `unbound`, because no agent state
+does not mean no agent. An unbound tab's process is alive and merely
+unregistered, and archiving or closing destroys the TerminalPane, which kills the
+PTY. Only a tab positively classified `stopped` has exited.
+
+Two things it took a review to get right:
+
+- **A parked tab is the safest one to put away, and the guard was refusing it.**
+  A suspended tab has no terminal, so the liveness probe never classifies it and
+  `not_classified` fired — telling the agent to "resume its workspace and retry"
+  for a workspace that was already open. Following that advice meant respawning a
+  session, waiting for it to idle, and killing it again. Every check in the guard
+  exists to protect a live process, so with no live terminal there is nothing to
+  say: the agent's tools pass (`allowParked`), while the deck still declines,
+  because the deck only OFFERS what it can see is finished.
+- **`stopped` means no AGENT, not an idle terminal.** It is defined as "no
+  claude/codex/gemini process in the PTY tree", which is exactly what a shell
+  six minutes into `docker build` looks like — and `closeTab` has no undo. The
+  guard now requires quiet first, measured on output and keystroke recency and
+  scaled to reversibility: 60s for archive, 5 minutes for close. The deck never
+  needed this because it demands 30 minutes of quiet before it will even offer.
+
+The residual risk is named rather than papered over: a build can be silent
+between steps, so quiet is evidence, not proof. That is part of why archive is
+the default and close is the exception.
 
 The *other* half of `spentTabs` — tracked tasks with one done, quiet 30 minutes,
 not marked Keep — deliberately does **not** gate the tools. That half decides
@@ -1155,7 +1175,7 @@ window full of these is normal, not a fleet full of dead sessions.
 | | Where the tab lives | PTY | Way back |
 |---|---|---|---|
 | **Suspended tab** (`tab.pty: 'suspended'`) | in its pane, workspace may be fully active | killed | `resumeTab` |
-| **Suspended workspace** (`workspace.suspended`) | still in its panes | killed | `resumeWorkspace` — respawns exactly the tabs that were live |
+| **Suspended workspace** (`workspace.suspended`) | still in its panes, all reporting `pty: 'suspended'` | killed | `resumeWorkspace` — respawns exactly the tabs that were live |
 | **Archived tab** (`workspace.archivedTabs[]`) | lifted out of the pane tree | none | `restoreArchivedTab` |
 | **Not loaded** (`tab.loaded: false`) | in its pane | **may be alive** | open or resume its workspace |
 
@@ -1168,6 +1188,17 @@ one enum covering them would have to lie about the others:
 - `loaded` — whether a TerminalPane is mounted, i.e. whether anything can reach
   it. An `idle` agent with `loaded: false` is healthy and completely undrivable;
   a background workspace's tabs are exactly that.
+
+**`pty` is not read from `tab.pty_id`.** In the frontend mirror that field means
+"has had a PTY", not "has one now": `suspendWorkspace` clears it in Rust and
+writes only `suspended = true` back to the mirror, and a cancelled session
+restore leaves it set deliberately. Reading it as live reported every tab in an
+auto-suspended workspace — which happens on a timer, with no user action — as a
+running session, and made `resumeTab` answer `already_live` for the exact case
+its `workspace_suspended` refusal was written for. `tabPtyState` uses the app's
+own test instead (`+page.svelte`: had a PTY, has no live instance ⇒ suspended),
+and a live `terminalsStore` instance is what "live" has to mean here anyway,
+since that instance is the thing anything types into.
 
 Resuming a tab is mount-driven — the PTY respawns when its TerminalPane mounts —
 so `resumeTab` navigates to the tab and lifts the pane's resume gate, which is
@@ -1218,6 +1249,16 @@ inside the week the button promises.
 A spent tab that has also gone dormant suppresses its own `unready` signal: its
 agent exited having done everything asked of it, so waking it up is not the
 useful move.
+
+**Archiving a tab whose terminal is already gone must not erase its restore
+context.** `_gatherTabContext` reads cwd and ssh from the live terminal instance
+and returns nulls when there is none, and Rust's `archive_tab` assigns all three
+unconditionally — so archiving a *suspended* tab overwrote the cwd and ssh
+command that suspending it had just saved. Restoring it weeks later gave you a
+local shell in the default directory, which is the one thing the restore context
+exists to prevent. With no live terminal, the tab's own saved `restore_*` fields
+are carried through instead. This also covers maiLink's Archive action, which
+goes through the same `archiveTabById` with no guard in front of it.
 
 Archiving releases unfinished rows to the project (`tasksStore.releaseTab`) **after** the
 archive succeeds, never before: releasing first meant a failed archive left the tab in

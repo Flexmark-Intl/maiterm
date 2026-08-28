@@ -768,7 +768,7 @@ function createClaudeCodeStore() {
                     pty: overlordStore.tabPtyState(tab.id),
                     state: overlordStore.tabAgentState(tab.id),
                     loaded: overlordStore.tabLoaded(tab.id),
-                    ...(tab.suspended_at && !tab.pty_id ? { suspendedAt: tab.suspended_at } : {}),
+                    ...(tab.suspended_at && !overlordStore.tabLoaded(tab.id) ? { suspendedAt: tab.suspended_at } : {}),
                   }
                 : {}),
               ...(claude?.toolName ? { claudeTool: claude.toolName } : {}),
