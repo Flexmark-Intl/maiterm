@@ -832,11 +832,12 @@ function createOverlordStore() {
     kind: OverlordEscalation['kind'],
     detail: string,
     taskId?: string,
-  ) {
+  ): string {
+    const id = crypto.randomUUID();
     escalations = [
       ...escalations,
       {
-        id: crypto.randomUUID(),
+        id,
         ts: Date.now(),
         tabId,
         workspaceId: workspaceForTab(tabId)?.id ?? '',
@@ -847,9 +848,24 @@ function createOverlordStore() {
         read: false,
       },
     ];
-    unNudged.add(escalations[escalations.length - 1].id);
+    unNudged.add(id);
     void wakeOverlordAgent();
+    return id;
   }
+
+  /**
+   * Tabs the agent has been told are stuck at a prompt, so the ask can be WITHDRAWN when the
+   * gate clears.
+   *
+   * A permission prompt is the one thing Overlord may not answer, so it hands the tab to the
+   * agent and waits. But the human usually just answers it in the tab — and nothing told
+   * anyone. An undelivered handoff still rang the doorbell and sent the agent chasing a gate
+   * that was already open; a delivered one left it working, or holding a question it had put
+   * to the human, on a problem that no longer exists. Both are the queue-vs-derived split
+   * (§3.1): the `permission` CARD is derived and self-clears, this handoff is a queue and
+   * had nobody to clear it.
+   */
+  const permissionHandoff = new Map<string, { escalationId: string; ruleId: string | null }>();
 
   /** Does this window still have an Overlord agent tab that could ever pull the queue? */
   function hasOverlordAgentTab(): boolean {
@@ -884,6 +900,8 @@ function createOverlordStore() {
     let withdrew = false;
     for (const e of dead) {
       if (e.taskId && handedOff.delete(e.taskId)) withdrew = true;
+      // Thrown away undelivered, so there is nothing to stand down from later.
+      if (permissionHandoff.get(e.tabId)?.escalationId === e.id) permissionHandoff.delete(e.tabId);
     }
     if (withdrew) bumpLive();
     logInfo(`overlord: dropped ${ids.size} undeliverable agent escalation(s) — no agent tab in this window`);
@@ -939,6 +957,8 @@ function createOverlordStore() {
       prevCommitTs.delete(id);
       pendingEdges.delete(id);
       permissionSince.delete(id);
+      // The tab is gone, so "stand down, it was answered" would be a lie about why.
+      permissionHandoff.delete(id);
       outstanding.delete(id);
       liveness.delete(id);
       rebindWatch.delete(id);
@@ -962,6 +982,54 @@ function createOverlordStore() {
       `overlord: swept ${deadTabs.size} closed tab(s) — dropped ${deadProposals.length} ` +
         `proposal(s), ${deadEscalations.length} escalation(s)`,
     );
+  }
+
+  /**
+   * The gate cleared — usually because the human answered it in the tab, which is the normal
+   * way a permission prompt ends. Withdraw the ask.
+   *
+   * Undelivered: delete it, and the agent never learns it was asked. Delivered: it is acting
+   * on this right now, so it is owed a correction — including the case that prompted this,
+   * where it had already put the question to the human and is sitting blocked on an answer
+   * that will never come, because the human answered the tab instead.
+   */
+  function sweepResolvedPermissionHandoffs() {
+    for (const [tabId, h] of [...permissionHandoff]) {
+      const st = mappedState(tabId);
+      if (st === 'permission') continue;
+      permissionHandoff.delete(tabId);
+      if (escalations.some((e) => e.id === h.escalationId)) {
+        escalations = escalations.filter((e) => e.id !== h.escalationId);
+        unNudged.delete(h.escalationId);
+        logInfo(
+          `overlord: withdrew an undelivered permission handoff for ${tabDisplayName(tabId)} ` +
+            `— the gate cleared before the agent read it`,
+        );
+        continue;
+      }
+      // Say WHICH way it cleared. A prompt also stops being a prompt when the agent behind it
+      // exits, and "it was answered, the tab is moving again" would be a confident account of
+      // something nobody checked — the exact habit this subsystem keeps having to unlearn.
+      const answered = st === 'idle' || st === 'active';
+      escalate(
+        tabId,
+        h.ruleId,
+        'permission_stuck',
+        answered
+          ? `Stand down on ${tabDisplayName(tabId)} — the prompt you were told about was ` +
+              `answered and that tab is working again, so nothing is needed from you. Usually ` +
+              `this means the human answered it in the tab. If you put the question to them, ` +
+              `it is moot: drop it rather than waiting on an answer that is not coming.`
+          : `Stand down on ${tabDisplayName(tabId)} — it is no longer at that prompt, but it ` +
+              `has no live agent state either, so the gate went away with the agent rather ` +
+              `than being answered. Nothing there will act on a directive until it is ` +
+              `restarted. Drop any question you raised about it.`,
+      );
+      logInfo(
+        `overlord: permission handoff for ${tabDisplayName(tabId)} was already delivered — ` +
+          `told the agent to stand down (${answered ? 'answered' : `state=${st ?? 'none'}`})`,
+      );
+    }
   }
 
   /** One-line doorbell into the Overlord agent's PTY (§9.1) — content stays behind
@@ -1144,7 +1212,7 @@ function createOverlordStore() {
         // supervisor", which is the thing the human actually wanted.
         if (mappedState(tabId) === 'permission') {
           ledger(tabId, rule.id, origin, i, step, 'blocked_guard');
-          escalate(
+          const escalationId = escalate(
             tabId,
             rule.id,
             'permission_stuck',
@@ -1153,6 +1221,7 @@ function createOverlordStore() {
               `(escalate to the human first if the decision is consequential). The rule wanted ` +
               `to say: ${JSON.stringify(step.text.slice(0, 160))}.`,
           );
+          permissionHandoff.set(tabId, { escalationId, ruleId: rule.id });
           return;
         }
         const inst = terminalsStore.get(tabId);
@@ -1807,7 +1876,7 @@ function createOverlordStore() {
       if (st === 'permission') {
         if (!w.permissionNotified) {
           w.permissionNotified = true;
-          escalate(
+          const escalationId = escalate(
             tabId,
             null,
             'permission_stuck',
@@ -1817,8 +1886,11 @@ function createOverlordStore() {
               `unless the decision is consequential (destructive or irreversible, money, ` +
               `credentials, production, an external party, or a question about what the human ` +
               `WANTS rather than how to do what they already asked), in which case put it to ` +
-              `the human with AskUserQuestion first. Its reply reaches you once it finishes.`,
+              `the human with AskUserQuestion first. Its reply reaches you once it finishes. ` +
+              `If the human answers the prompt in the tab before you get to it, you will be ` +
+              `told to stand down — so do not treat this as a question you must resolve.`,
           );
+          permissionHandoff.set(tabId, { escalationId, ruleId: null });
         }
         // Pause the give-up clock. A prompt can sit for hours, and the directive is not
         // stale — it is waiting on a human. Capped at `now`, so the worst case after a long
@@ -2039,7 +2111,10 @@ function createOverlordStore() {
       // Escalations that arrived while the agent was busy still owe it a doorbell.
       if (unNudged.size) void wakeOverlordAgent();
       sweepUndeliverableEscalations(now);
+      // After sweepClosedTabs, which drops the handoffs whose tab is gone — a closed tab is
+      // not a prompt that got answered, and must not be reported as one.
       sweepClosedTabs();
+      sweepResolvedPermissionHandoffs();
       sweepStaleProposals(now);
       sweepDoneTasks(now);
     } finally {

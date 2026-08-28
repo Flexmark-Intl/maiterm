@@ -235,6 +235,24 @@ it would escalate "no reply could be read" about a tab the human deliberately cl
 
 Anything added to a queue keyed by tab id belongs in this sweep.
 
+**A tab going away is not the only way a queued item stops being true.** The
+`permission_stuck` handoff is the case that showed it. A tab stops at a prompt, the engine
+hands it to the agent (Overlord may not answer a prompt itself — §3), and the agent goes to
+work on it, often by putting the question to the human with `AskUserQuestion`. Then the human
+does the obvious thing and answers the prompt *in the tab*. The derived `permission` card
+vanished, because derived; the handoff did not, because queued. Undelivered, it still rang
+the doorbell and sent the agent chasing an open gate. Delivered, it left the supervisor
+blocked on an answer nobody was going to give, because the human had already answered
+somewhere else — Overlord hanging on a problem that no longer existed.
+
+`permissionHandoff` records the escalation id per tab, and `sweepResolvedPermissionHandoffs`
+withdraws it the moment the tab leaves `permission`: deleted outright if the agent never read
+it, and otherwise replaced with an explicit stand-down, since an agent already acting on it
+is owed the correction. The stand-down names *which* way the gate cleared — `idle`/`active`
+means answered, no state at all means the agent exited and took the prompt with it, and those
+call for opposite next moves. It runs **after** `sweepClosedTabs`, so a tab the human closed
+is never reported as a prompt that got answered.
+
 ### 3.2 A proposal is a snapshot, so it has to be re-read
 
 A proposal records what was true when the rule matched, then waits for a human. Nothing
