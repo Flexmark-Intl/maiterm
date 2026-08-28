@@ -1237,6 +1237,35 @@ server's cross-instance guard no longer answers "does not exist in this maiTerm
 instance — you may be calling the wrong MCP server" for a tab this instance is
 holding in its own archive.
 
+Two things that took a review to get right, both about reaching outside the pane
+tree:
+
+- **Scope the guard's exception to the tools that need it** (`ARCHIVED_TAB_TOOLS`).
+  Relaxing it globally quietly removed a correction: that same guard is what tells
+  a connection whose identity was *recovered* onto a since-archived tab that the
+  tab is gone, prompting a fresh `initSession`. Without it, the workspace-note
+  tools — which fall back to the ACTIVE workspace when a `tabId` resolves to no
+  pane — would write the agent's note into whichever workspace the human happened
+  to be looking at, the exact cross-workspace bleed that fallback's `tabId` branch
+  exists to prevent.
+- **Route to the window that holds the archive.** `resolve_target_window` only
+  searched pane trees, so an archived id fell through to `windows.first()`, whose
+  frontend has never heard of that tab (`get_window_data` scopes each window to
+  its own workspaces). In a two-window setup — which is the normal one, since
+  Overlord is *per window* — reading an archived tab's notes answered "Tab not
+  found": the same wrong answer, one layer further in. `find_window_for_archived_tab`
+  fixes it, and incidentally makes `restoreArchivedTab` work over MCP for the
+  first time; the guard had rejected every call to it since it was added.
+
+**Deleting an archived tab releases its task rows.** Archiving deliberately
+defers that — rows stay bound to the tab id while the tab is restorable — and
+deleting is where it stops being true. Nothing did it, so unfinished rows kept a
+`tab_id` no tab would ever have again: the task panel shows `mine` (this tab) and
+`unclaimed` (no tab), so they appeared in neither, and the claim control that is
+their only route back is offered only for unclaimed rows. `releaseTab` now runs
+inside `workspacesStore.deleteArchivedTab`, so the tab strip's own delete button
+is covered as well.
+
 All six new tools are Overlord-agent-only and are in `PEER_ADDRESSING_TOOLS`, so
 they refuse a deduced identity: the gate is *being* the Overlord agent, which
 makes a mis-deduced tab the one way a stranger could reach them, and `closeTab`

@@ -1427,6 +1427,16 @@ function createWorkspacesStore() {
         const idx = ws.archived_tabs.findIndex(t => t.id === tabId);
         if (idx >= 0) ws.archived_tabs.splice(idx, 1);
       }
+      // Archiving DEFERS this: rows stay bound to the tab id while the tab is restorable.
+      // Deleting is where that stops being true, and nothing did it — so unfinished rows kept
+      // a tab_id no tab will ever have again. The task panel shows `mine` (tab_id === this
+      // tab) and `unclaimed` (no tab_id), so those rows appeared in neither, and the claim
+      // control that is their only route back is offered only for unclaimed ones. They became
+      // unreadable, uneditable and undeletable from every surface, visible only as a number in
+      // an `elsewhere` count. Done here rather than at the call site so the tab strip's own
+      // delete button is covered too. Dynamic import, like `deleteTab`'s call — tasks.svelte
+      // imports this module.
+      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.releaseTab(tabId)).catch(() => {});
     },
 
     async reorderTabs(workspaceId: string, paneId: string, tabIds: string[]) {

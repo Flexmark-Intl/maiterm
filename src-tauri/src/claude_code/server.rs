@@ -427,18 +427,33 @@ fn find_window_for_tab(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     None
 }
 
-/// Does this instance hold this tab in a workspace's archive? Deliberately separate from
+/// Which window holds this tab in one of its workspaces' archives? Deliberately separate from
 /// `find_window_for_tab`, which answers "which window's pane tree holds it" and is what tab
 /// IDENTITY binding uses — an archived tab must never become a connection's identity, since
 /// nothing can run or be typed there.
-fn archived_tab_exists(state: &Arc<AppState>, tab_id: &str) -> bool {
+fn find_window_for_archived_tab(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     let app_data = state.app_data.read();
-    app_data.windows.iter().any(|win| {
-        win.workspaces
-            .iter()
-            .any(|ws| ws.archived_tabs.iter().any(|t| t.id == tab_id))
-    })
+    app_data
+        .windows
+        .iter()
+        .find(|win| {
+            win.workspaces
+                .iter()
+                .any(|ws| ws.archived_tabs.iter().any(|t| t.id == tab_id))
+        })
+        .map(|win| win.label.clone())
 }
+
+/// Tools that may legitimately name an ARCHIVED tab. The cross-instance guard admits an
+/// archived id for these and no others.
+///
+/// Scoped rather than global on purpose. That guard is also what CORRECTS a connection whose
+/// identity was recovered onto a tab that has since been archived: it answers "does not exist
+/// in this instance", the agent re-runs initSession, and the mistake heals. Admitting archived
+/// ids for every tool removed that correction, and the workspace-note tools fall back to the
+/// ACTIVE workspace when a tabId resolves to no pane — so the agent's note would land in
+/// whichever workspace the human happened to be looking at.
+const ARCHIVED_TAB_TOOLS: [&str; 3] = ["getTabNotes", "restoreArchivedTab", "deleteArchivedTab"];
 
 /// The tab's persisted resume session id — the `<runtime>SessionId` trigger variable that
 /// auto-resume interpolates into `claude --resume …` / `codex resume …`. Since a resume keeps
@@ -563,6 +578,14 @@ fn resolve_target_window(state: &Arc<AppState>, arguments: &Value) -> Option<Str
     if let Some(tab_id) = arguments.get("tabId").and_then(|v| v.as_str()) {
         drop(app_data); // release read lock for find_window_for_tab
         if let Some(label) = find_window_for_tab(state, tab_id) {
+            return Some(label);
+        }
+        // An ARCHIVED tab is still owned by a window, and only that window's frontend can
+        // answer for it — `get_window_data` gives each window its own workspaces. Routing to
+        // `windows.first()` sent the call to a window that has never heard of the tab, which
+        // answered "Tab not found" for one this instance is holding. That is the same wrong
+        // answer the archive-aware guard was added to stop, one layer further in.
+        if let Some(label) = find_window_for_archived_tab(state, tab_id) {
             return Some(label);
         }
         return state.app_data.read().windows.first().map(|w| w.label.clone());
@@ -2566,15 +2589,18 @@ async fn process_message(
                 // Guard: if a tabId is provided, verify it exists in THIS instance.
                 // Prevents cross-talk when both dev and prod are running.
                 //
-                // Archived tabs count as existing. They are this instance's tabs — just out of
-                // the pane tree — and reading one (its notes, say) is a legitimate thing to
-                // want, so answering "does not exist in this maiTerm instance, you may be
-                // calling the wrong MCP server" was both wrong and actively misleading. Only
-                // the cross-instance question is being asked here.
+                // Archived tabs count as existing, but only for the handful of tools that mean
+                // to name one (ARCHIVED_TAB_TOOLS). They are this instance's tabs — just out of
+                // the pane tree — so answering "does not exist in this maiTerm instance, you
+                // may be calling the wrong MCP server" when reading one's notes was both wrong
+                // and actively misleading. For every other tool the guard stays strict,
+                // because it doubles as the correction for an identity recovered onto a tab
+                // that has since been archived.
                 if let Some(tab_id) = arguments.get("tabId").and_then(|v| v.as_str()) {
                     if !tab_id.is_empty()
                         && find_window_for_tab(state, tab_id).is_none()
-                        && !archived_tab_exists(state, tab_id)
+                        && !(ARCHIVED_TAB_TOOLS.contains(&tool_name.as_str())
+                            && find_window_for_archived_tab(state, tab_id).is_some())
                     {
                         let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
                         let this_server = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
