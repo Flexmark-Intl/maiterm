@@ -505,11 +505,20 @@ fn claude_tail_facts(tail: &str) -> TailFacts {
 /// One reversed pass for the Overlord signals: the newest `git commit` Bash tool_use ts and
 /// the newest TodoWrite todos array. Cheap string prefilters keep the JSON parse rare; both
 /// searches stop at their first (i.e. latest) hit.
+///
+/// A tool_use block is the agent ASKING to run a command, not the command working. Taking it
+/// as proof of a commit made `last_commit_ts` advance on a rejected permission prompt, a
+/// pre-commit hook that said no, and `nothing to commit` — 32 of 278 `git commit` calls in the
+/// local corpus, which is `review_after_commit` telling a tab to review a commit that is not
+/// in the history. The tool_result is a line away and says which happened, so the fact is read
+/// from the outcome: `is_error` flags 29 of those 32 and none of the 244 real commits. Results
+/// come after their tool_use in the file, so the reverse scan always sees the verdict first.
 fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<u64>, Option<u64>) {
     let mut last_commit_ts: Option<u64> = None;
     let mut todos: Option<Value> = None;
     let mut todos_ts: Option<u64> = None;
     let mut last_compact_ts: Option<u64> = None;
+    let mut failed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in tail.lines().rev() {
         if last_commit_ts.is_some() && todos.is_some() && last_compact_ts.is_some() {
             break;
@@ -518,10 +527,30 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
         let want_commit = last_commit_ts.is_none() && line.contains("git commit");
         let want_compact = last_compact_ts.is_none()
             && (line.contains("\"isCompactSummary\":true") || line.contains("\"compact_boundary\""));
-        if !want_todo && !want_commit && !want_compact {
+        // Only failures need harvesting, and `"is_error":true` is rare enough to keep this
+        // as cheap as the other prefilters.
+        let want_error = last_commit_ts.is_none() && line.contains("\"is_error\":true");
+        if !want_todo && !want_commit && !want_compact && !want_error {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if want_error {
+            if let Some(blocks) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for b in blocks {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                        && b.get("is_error").and_then(|e| e.as_bool()) == Some(true)
+                    {
+                        if let Some(id) = b.get("tool_use_id").and_then(|i| i.as_str()) {
+                            failed_tools.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
         let ts = v
             .get("timestamp")
             .and_then(|t| t.as_str())
@@ -563,7 +592,11 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
                         .and_then(|i| i.get("command"))
                         .and_then(|c| c.as_str())
                         .unwrap_or("");
-                    if cmd.contains("git commit") {
+                    let failed = block
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .is_some_and(|id| failed_tools.contains(id));
+                    if cmd.contains("git commit") && !failed {
                         last_commit_ts = ts;
                     }
                 }
@@ -2109,6 +2142,35 @@ mod tests {
         // No signals → all None.
         let (c, t, _, _) = claude_overlord_from_tail(r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"text","text":"hi"}]}}"#);
         assert!(c.is_none() && t.is_none());
+    }
+
+    #[test]
+    fn a_git_commit_that_failed_is_not_a_commit() {
+        // The newest `git commit` errored (hook, denied prompt, nothing staged) and an older
+        // one succeeded. The fact must name the commit that is actually in the history —
+        // otherwise `review_after_commit` sends a tab to review something that never landed.
+        let tail = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_ok","name":"Bash","input":{"command":"git commit -m 'landed'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:20:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_ok","is_error":false,"content":"[main abc1234] landed"}]}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_bad","name":"Bash","input":{"command":"git commit -m 'rejected'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:25:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bad","is_error":true,"content":"Exit code 1\nnothing to commit, working tree clean"}]}}"#, "\n",
+        );
+        let (commit_ts, _, _, _) = claude_overlord_from_tail(tail);
+        assert_eq!(commit_ts, Some(1782595200000), "21:20 landed; 21:25 errored");
+
+        // A failure with no earlier success leaves the fact absent rather than guessing.
+        let only_failed = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_bad","name":"Bash","input":{"command":"git commit -m 'rejected'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:25:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bad","is_error":true,"content":"pre-commit hook declined"}]}}"#, "\n",
+        );
+        assert!(claude_overlord_from_tail(only_failed).0.is_none());
+
+        // An unrelated failing tool must not suppress a good commit.
+        let other_failed = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_ok","name":"Bash","input":{"command":"git commit -m 'landed'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:26:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_grep","is_error":true,"content":"No matches found"}]}}"#, "\n",
+        );
+        assert_eq!(claude_overlord_from_tail(other_failed).0, Some(1782595200000));
     }
 
     #[test]

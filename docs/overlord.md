@@ -449,6 +449,17 @@ export type OverlordCondition =
 2. poll `git log` per tab cwd — cheap, coarse, can't tell which agent
 3. OSC 133 + command text — breaks on SSH tabs
 
+(1) shipped, with one correction. A `tool_use` block is the agent *asking* to run a
+command; it says nothing about whether the command worked. Reading it as a commit made
+`last_commit_ts` advance on a denied permission prompt, a pre-commit hook that refused,
+and `nothing to commit` — **32 of the 278 `git commit` calls** in the local corpus, each
+one able to send a tab to review a commit that is not in the history. The verdict is one
+line further down the same file, so `claude_overlord_from_tail` reads it: a tool_result
+with `is_error` disqualifies its `tool_use`, which catches 29 of those 32 and none of the
+244 real commits. Results always follow their call, so the reverse scan sees the verdict
+before the claim. The general form is the one §9 keeps arriving at — **a request is not
+an outcome**; when the outcome is recorded nearby, read that instead.
+
 `turn_end` is defined as the tab's agentState transition `active` → `idle`
 (hook-driven for Claude/Codex), with the transcript-tail last-real-turn
 timestamp as the fallback for hook-less runtimes.
