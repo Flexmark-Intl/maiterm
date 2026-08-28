@@ -277,6 +277,14 @@ function createClaudeCodeStore() {
           else result = await overlordStore.recoverTab(a.tab_id);
           break;
         }
+        case 'deleteArchivedTab': {
+          const a = args as { tabId?: string; tab_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'deleteArchivedTab is available only to the Overlord agent tab.' };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else result = await overlordStore.deleteArchivedTabById(a.tab_id);
+          break;
+        }
         case 'resumeTab': {
           const a = args as { tabId?: string; tab_id: string };
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
@@ -695,6 +703,16 @@ function createClaudeCodeStore() {
     return null;
   }
 
+  /** Archived tabs live outside the pane tree, so `findTabLocation` cannot see them. Read-only
+   *  callers that legitimately want one use this instead. */
+  function findArchivedTab(tabId: string): { workspace: Workspace; tab: Tab } | null {
+    for (const ws of workspacesStore.workspaces) {
+      const tab = (ws.archived_tabs ?? []).find(t => t.id === tabId);
+      if (tab) return { workspace: ws, tab };
+    }
+    return null;
+  }
+
   function resolveWorkspace(workspaceId?: string): Workspace | null {
     if (workspaceId) return workspacesStore.workspaces.find(ws => ws.id === workspaceId) ?? null;
     return workspacesStore.activeWorkspace;
@@ -769,6 +787,16 @@ function createClaudeCodeStore() {
                     state: overlordStore.tabAgentState(tab.id),
                     loaded: overlordStore.tabLoaded(tab.id),
                     ...(tab.suspended_at && !overlordStore.tabLoaded(tab.id) ? { suspendedAt: tab.suspended_at } : {}),
+                    // How old a live tab is. Without it the only way to judge a dormant tab's
+                    // age was to grep months of maiTerm logs for its UUID — which bottoms out
+                    // at the log floor, so everything older read as the same date.
+                    ...(() => {
+                      const f = overlordStore.facts.get(tab.id);
+                      return {
+                        ...(f?.last_turn_ts ? { lastTurnAt: new Date(f.last_turn_ts).toISOString() } : {}),
+                        ...(f?.context_pct !== undefined ? { contextPct: Math.round(f.context_pct) } : {}),
+                      };
+                    })(),
                   }
                 : {}),
               ...(claude?.toolName ? { claudeTool: claude.toolName } : {}),
@@ -836,7 +864,27 @@ function createClaudeCodeStore() {
       return { error: 'tabId is required. Call initSession first so the MCP server can auto-inject your session tab.' };
     }
     const loc = findTabLocation(args.tabId);
-    if (!loc) return { error: `Tab not found: ${args.tabId}` };
+    // Archived tabs are readable. `hasNotes` was visible on them while the notes themselves
+    // were not, so the only way to find out what was in one was to restore it — which is a
+    // silly price for reading a note, and exactly backwards when the notes are how you decide
+    // whether it is worth restoring. READ only: the write paths keep using findTabLocation,
+    // since an archived tab has no pane to render an edit into.
+    if (!loc) {
+      const archived = findArchivedTab(args.tabId);
+      if (archived) {
+        return {
+          tabId: archived.tab.id,
+          displayName: archived.tab.archived_name ?? archived.tab.name,
+          notes: archived.tab.notes ?? null,
+          notesMode: archived.tab.notes_mode ?? null,
+          archived: true,
+          archivedAt: archived.tab.archived_at ?? null,
+          workspaceId: archived.workspace.id,
+          readOnly: 'This tab is archived — restoreArchivedTab first if you need to change its notes.',
+        };
+      }
+      return { error: `Tab not found: ${args.tabId}` };
+    }
     const tab = loc.tab;
 
     return {

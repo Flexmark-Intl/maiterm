@@ -1169,7 +1169,8 @@ function createOverlordStore() {
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports THREE independent facts: \`pty\` ('live' | 'suspended' | 'none' — the terminal underneath), \`state\` (what the agent is doing, meaningful only over a live pty), and \`loaded\` (whether anything can reach it at all). Read all three. An 'idle' agent with loaded:false is healthy and undrivable; a suspended tab is not a dead one.\n` +
       `  - Every state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · pty 'suspended' → resumeTab · a tab in a suspended WORKSPACE → resumeWorkspace · a tab in that workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
       `  - Four things that get confused, and are reported separately: a SUSPENDED TAB (pty:'suspended') sits in the pane tree of an ACTIVE workspace with its terminal killed — suspending every tab but the active one is routine, so most of these are perfectly ordinary; a SUSPENDED WORKSPACE parks all of its tabs at once; ARCHIVED tabs are lifted out of the pane tree entirely; loaded:false only means the pane is not mounted right now, and can be true of a tab whose agent is alive and working. Never describe one as another — say which one you mean.\n` +
-      `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered.\n` +
+      `  - Judging a tab's age: listWorkspaces gives \`lastTurnAt\` (its last real turn) and \`contextPct\` for live agent tabs, and \`suspendedAt\` for suspended ones. Archived tabs carry \`archivedAt\`, and getTabNotes reads an archived tab's notes without restoring it — read those before deciding what a session was for.\n` +
+      `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered. deleteArchivedTab prunes the archive itself when an archived session is no longer worth keeping.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
       `Standing doctrine (the active ruleset — improvise with these same thresholds and phrasings when asked to check on tabs by hand):\n` +
@@ -3039,6 +3040,38 @@ function createOverlordStore() {
       const ok = mode === 'archive' ? await this.archiveSpentTab(tabId) : await this.closeSpentTab(tabId);
       ledger(tabId, null, 'overlord_judgment', 0, step, ok ? 'sent' : 'aborted');
       if (!ok) return { ok: false, reason: 'failed', detail: `maiTerm could not ${mode} that tab; see the log.` };
+      return { ok: true };
+    },
+
+    /**
+     * Delete an ARCHIVED tab for good (S4 deleteArchivedTab) — the one disposition verb the
+     * archive had no way to reach.
+     *
+     * `closeTab` only works on tabs in the pane tree, so an archived session could be created
+     * and restored but never discarded, and an archive nobody can prune is a list that only
+     * grows. Irreversible, like `closeTab`, but with none of its danger: an archived tab holds
+     * no PTY and no process, so there is nothing running to destroy — only the record.
+     */
+    async deleteArchivedTabById(tabId: string): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+      const ws = workspacesStore.workspaces.find(
+        (w) => !w.overlord && (w.archived_tabs ?? []).some((t) => t.id === tabId),
+      );
+      if (!ws) {
+        return {
+          ok: false,
+          reason: 'not_archived',
+          detail: 'No archived tab with that id in this window. This deletes ARCHIVED tabs only — a tab still in a pane is closeTab\'s job.',
+        };
+      }
+      const name = (ws.archived_tabs ?? []).find((t) => t.id === tabId)?.archived_name ?? tabId.slice(0, 8);
+      try {
+        await workspacesStore.deleteArchivedTab(ws.id, tabId);
+      } catch (e) {
+        logError(`overlord: delete archived failed for ${tabId.slice(0, 8)}: ${e}`);
+        return { ok: false, reason: 'failed', detail: String(e) };
+      }
+      ledger(tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `[delete-archived] ${name}` }, 'sent');
+      logInfo(`overlord: deleted archived tab ${tabId.slice(0, 8)} from "${ws.name}"`);
       return { ok: true };
     },
 

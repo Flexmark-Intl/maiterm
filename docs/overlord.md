@@ -1216,10 +1216,28 @@ whole job is that nothing in the window stays stuck:
 | `unbound` / `stopped` | `recoverTab` — re-binds or restarts, chosen from the process state |
 | `pty: 'suspended'` | `resumeTab` |
 | in a suspended workspace | `resumeWorkspace` |
-| in `archivedTabs[]` | `restoreArchivedTab` |
+| in `archivedTabs[]` | `restoreArchivedTab`, or `deleteArchivedTab` to prune it |
 | finished | `archiveTab` / `closeTab` |
 
-All five new tools are Overlord-agent-only and are in `PEER_ADDRESSING_TOOLS`, so
+**Judging a tab's age needed data that wasn't there.** Deciding what to do with a
+dormant tab means knowing how old it is, and the only per-tab timestamp the API
+carried was `archivedAt` — on archived tabs. Asked to triage 314 dormant live
+tabs, the agent reconstructed dates by grepping eight months of maiTerm logs for
+tab UUIDs, which bottoms out at the log floor, so everything older than that read
+as the same date. `listWorkspaces` now carries `lastTurnAt` and `contextPct` from
+the facts the engine already polls every tick, and `suspendedAt` for suspended
+tabs. Nothing should ever have to read the logs for this.
+
+**Archived tabs are readable without restoring them.** `hasNotes: true` was
+visible on an archived tab while the notes themselves were not, so the only way
+to learn what a session had been for was to restore it — backwards, when the
+notes are how you decide whether restoring is worth it. `getTabNotes` resolves
+archived tabs (read-only; the write paths still require a pane), and the MCP
+server's cross-instance guard no longer answers "does not exist in this maiTerm
+instance — you may be calling the wrong MCP server" for a tab this instance is
+holding in its own archive.
+
+All six new tools are Overlord-agent-only and are in `PEER_ADDRESSING_TOOLS`, so
 they refuse a deduced identity: the gate is *being* the Overlord agent, which
 makes a mis-deduced tab the one way a stranger could reach them, and `closeTab`
 has no undo.

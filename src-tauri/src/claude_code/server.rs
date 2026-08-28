@@ -427,6 +427,19 @@ fn find_window_for_tab(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     None
 }
 
+/// Does this instance hold this tab in a workspace's archive? Deliberately separate from
+/// `find_window_for_tab`, which answers "which window's pane tree holds it" and is what tab
+/// IDENTITY binding uses — an archived tab must never become a connection's identity, since
+/// nothing can run or be typed there.
+fn archived_tab_exists(state: &Arc<AppState>, tab_id: &str) -> bool {
+    let app_data = state.app_data.read();
+    app_data.windows.iter().any(|win| {
+        win.workspaces
+            .iter()
+            .any(|ws| ws.archived_tabs.iter().any(|t| t.id == tab_id))
+    })
+}
+
 /// The tab's persisted resume session id — the `<runtime>SessionId` trigger variable that
 /// auto-resume interpolates into `claude --resume …` / `codex resume …`. Since a resume keeps
 /// the session id, this is what lets `initSession` match a resumed agent's buffered
@@ -1995,7 +2008,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 19] = [
+const PEER_ADDRESSING_TOOLS: [&str; 20] = [
     "sendToBridgedAgent",
     "getBridgedAgent",
     "listBridgedPeers",
@@ -2014,6 +2027,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 19] = [
     // — and closeTab has no undo.
     "archiveTab",
     "closeTab",
+    "deleteArchivedTab",
     "recoverTab",
     "resumeTab",
     "resumeWorkspace",
@@ -2551,8 +2565,17 @@ async fn process_message(
 
                 // Guard: if a tabId is provided, verify it exists in THIS instance.
                 // Prevents cross-talk when both dev and prod are running.
+                //
+                // Archived tabs count as existing. They are this instance's tabs — just out of
+                // the pane tree — and reading one (its notes, say) is a legitimate thing to
+                // want, so answering "does not exist in this maiTerm instance, you may be
+                // calling the wrong MCP server" was both wrong and actively misleading. Only
+                // the cross-instance question is being asked here.
                 if let Some(tab_id) = arguments.get("tabId").and_then(|v| v.as_str()) {
-                    if !tab_id.is_empty() && find_window_for_tab(state, tab_id).is_none() {
+                    if !tab_id.is_empty()
+                        && find_window_for_tab(state, tab_id).is_none()
+                        && !archived_tab_exists(state, tab_id)
+                    {
                         let other_server = if cfg!(debug_assertions) { "maiterm" } else { "maiterm-dev" };
                         let this_server = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
                         let err_msg = format!(

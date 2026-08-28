@@ -835,6 +835,18 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
             }
         },
         {
+            "name": "deleteArchivedTab",
+            "description": "Overlord agent only: permanently delete an ARCHIVED tab — the archive's own disposition verb. closeTab only reaches tabs still in a pane, so without this an archive could be added to and restored from but never pruned. Irreversible, but with none of closeTab's danger: an archived tab holds no PTY and no process, so only the record is destroyed. Read its notes with getTabNotes first if you want to know what it was. Refuses `not_archived` when the id is not in any workspace's archivedTabs[].",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "The archived tab id to delete" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
             "name": "resumeTab",
             "description": "Overlord agent only: wake ONE suspended tab — a tab reported with `pty: 'suspended'`, whose terminal was killed but which is still in its pane with a Resume prompt. This happens inside active workspaces (suspending every tab but the active one is routine), so it is NOT the same as an archived tab or a suspended workspace. Brings the tab into view and respawns its terminal, restoring cwd and ssh context; an agent with auto-resume set comes back with it. Refuses `already_live` (nothing to resume) and `workspace_suspended` — if the whole workspace is parked, use resumeWorkspace, which brings back every tab that was live in it rather than just this one.",
             "inputSchema": {
