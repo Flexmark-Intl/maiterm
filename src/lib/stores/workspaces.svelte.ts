@@ -1301,8 +1301,10 @@ function createWorkspacesStore() {
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId));
       // archive_tab moved this tab's task rows onto the archived tab record, so the store's
       // in-memory mirror is now stale. Reload rather than patch: the mirror persists whole
-      // lists, so a stale copy would write the moved rows straight back onto the board.
-      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
+      // lists, so a stale copy would write the moved rows straight back onto the board —
+      // leaving them in BOTH places, and restore would then duplicate them. AWAITED for the
+      // same reason: any task edit landing in the gap persists the stale list.
+      await import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
 
       // Build the archived tab object for local state
       const archivedTab: Tab = {
@@ -1349,8 +1351,9 @@ function createWorkspacesStore() {
       if (!pane) return;
 
       const tab = await commands.restoreArchivedTab(workspaceId, pane.id, tabId);
-      // Its task rows came back with it — same reason as the archive side.
-      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
+      // Its task rows came back with it — same reason as the archive side, awaited for the
+      // same reason too.
+      await import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
 
       // Migrate old auto-resume command if needed (archived tabs skip the startup migration)
       const OLD_PATTERNS = [
