@@ -1299,6 +1299,10 @@ function createWorkspacesStore() {
 
       await commands.archiveTab(workspaceId, paneId, tabId, displayName, scrollback, cwd, sshCommand, remoteCwd);
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId));
+      // archive_tab moved this tab's task rows onto the archived tab record, so the store's
+      // in-memory mirror is now stale. Reload rather than patch: the mirror persists whole
+      // lists, so a stale copy would write the moved rows straight back onto the board.
+      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
 
       // Build the archived tab object for local state
       const archivedTab: Tab = {
@@ -1345,6 +1349,8 @@ function createWorkspacesStore() {
       if (!pane) return;
 
       const tab = await commands.restoreArchivedTab(workspaceId, pane.id, tabId);
+      // Its task rows came back with it — same reason as the archive side.
+      import('$lib/stores/tasks.svelte').then(m => m.tasksStore.rehydrate()).catch(() => {});
 
       // Migrate old auto-resume command if needed (archived tabs skip the startup migration)
       const OLD_PATTERNS = [
@@ -1427,15 +1433,13 @@ function createWorkspacesStore() {
         const idx = ws.archived_tabs.findIndex(t => t.id === tabId);
         if (idx >= 0) ws.archived_tabs.splice(idx, 1);
       }
-      // Archiving DEFERS this: rows stay bound to the tab id while the tab is restorable.
-      // Deleting is where that stops being true, and nothing did it — so unfinished rows kept
-      // a tab_id no tab will ever have again. The task panel shows `mine` (tab_id === this
-      // tab) and `unclaimed` (no tab_id), so those rows appeared in neither, and the claim
-      // control that is their only route back is offered only for unclaimed ones. They became
-      // unreadable, uneditable and undeletable from every surface, visible only as a number in
-      // an `elsewhere` count. Done here rather than at the call site so the tab strip's own
-      // delete button is covered too. Dynamic import, like `deleteTab`'s call — tasks.svelte
-      // imports this module.
+      // A tab archived TODAY carries its rows on its own record, so they died with it above.
+      // This covers the ones archived before that changed, whose rows are still sitting in
+      // `Workspace.tasks` bound to a tab id that no longer exists anywhere: the panel offers
+      // `mine` (this tab) and `unclaimed` (no tab), so they would show in neither, and the
+      // claim control that is their only route back is offered only for unclaimed rows —
+      // unreadable and undeletable from every surface, visible only in an `elsewhere` count.
+      // Here rather than at the call site so the tab strip's delete button is covered too.
       import('$lib/stores/tasks.svelte').then(m => m.tasksStore.releaseTab(tabId)).catch(() => {});
     },
 

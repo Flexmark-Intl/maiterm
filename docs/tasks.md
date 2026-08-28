@@ -142,6 +142,23 @@ workspaces leaves tasks behind, so its rows legitimately span two lists.
 This is also the honest model: a task whose assignee is gone belongs to the project, not to
 a ghost.
 
+**Archiving is not a close, so it does not release.** A closed tab is gone; an archived one
+is coming back if anyone wants it, and it keeps its scrollback, cwd and ssh context for
+exactly that reason. Releasing its rows would have made the one reversible disposition
+irreversible for the work: `tab_id` cleared is not recoverable, so restoring the session
+returned a tab whose tasks were now indistinguishable from everyone else's unclaimed rows.
+
+So `archive_tab` MOVES the tab's rows out of `Workspace.tasks` onto the archived tab record
+(`Tab.archived_tasks`), and `restore_archived_tab` moves them back, still attributed. They
+are stored on the tab rather than flagged in place so that nothing which reads
+`Workspace.tasks` — board, panel, counts, staleness rules, the untracked check — needs to
+know they exist. A row that isn't in the list cannot be shown by something that forgot to
+filter it. Both paths call `tasksStore.rehydrate()` afterwards: the frontend mirror persists
+whole lists, so a stale copy would put the moved rows straight back.
+
+Deleting an archived tab destroys its rows along with it — that is what makes it the
+irreversible one.
+
 ### The six lanes, and what `backlog` actually means
 
 ```

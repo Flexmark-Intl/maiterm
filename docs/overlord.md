@@ -1307,13 +1307,30 @@ exists to prevent. With no live terminal, the tab's own saved `restore_*` fields
 are carried through instead. This also covers maiLink's Archive action, which
 goes through the same `archiveTabById` with no guard in front of it.
 
-Archiving releases unfinished rows to the project (`tasksStore.releaseTab`) **after** the
-archive succeeds, never before: releasing first meant a failed archive left the tab in
-place with its parked rows already persisted back to the project, silently, with nothing
-to undo it. The release itself is right — work owned by a tab nobody can see is work
-nobody will do — it just has to follow the archive. Done rows keep their
-tab id, and `tabDisplayName` now resolves archived tabs so those chips keep
-reading as the session's name rather than a truncated id.
+**A tab's task rows are archived with it, and come back on restore** (2026-08-28).
+Archiving used to *release* unfinished rows to the project — clearing their
+`tab_id` — on the reasoning that work owned by a tab nobody can see is work
+nobody will do. True, but it threw the attribution away permanently, so restoring
+a session returned a tab whose work had been scattered into the workspace's
+unclaimed pile with no way to tell which rows had been its. Archiving is supposed
+to be the reversible one.
+
+`archive_tab` now MOVES the rows onto the archived tab record
+(`Tab.archived_tasks`) and `restore_archived_tab` moves them back. Carrying them
+on the tab rather than flagging them in place is deliberate: rows that are not in
+`Workspace.tasks` cannot be shown by anything that reads it, so no board, panel or
+count had to learn a new rule — and "a surface that forgot to filter" is the
+defect this subsystem produces most reliably. Both sides then call
+`tasksStore.rehydrate()`, because the frontend mirror persists whole lists and a
+stale copy would write the moved rows straight back onto the board.
+
+Deleting an archived tab destroys its rows with the record, which is what
+"irreversible" should mean. `deleteArchivedTab` still calls `releaseTab` as well,
+for tabs archived before this change whose rows are stranded in `Workspace.tasks`
+under a tab id that no longer exists anywhere.
+
+`tabDisplayName` resolves archived tabs, so any chip still naming one reads as the
+session's name rather than a truncated id.
 
 ### Triage: run all
 

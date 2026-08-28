@@ -324,6 +324,14 @@ pub struct Tab {
     /// "age" of a suspended tab in the hidden-tabs menu.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<String>,
+    /// This tab's task rows while it is ARCHIVED, moved out of `Workspace.tasks` by
+    /// `archive_tab` and moved back by `restore_archived_tab`. Always empty on a live tab.
+    ///
+    /// Carrying them on the tab rather than flagging them in place is what keeps every
+    /// board, panel and count correct without any of them learning a new rule: rows that
+    /// are not in `Workspace.tasks` cannot be shown by anything that reads it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived_tasks: Vec<Task>,
     /// True when this tab was live at the moment its workspace was suspended.
     /// Resuming the workspace respawns exactly these tabs (mirrors app-restart
     /// session restore); cleared on resume or when the tab goes live again.
@@ -1604,6 +1612,7 @@ impl Tab {
             archived_name: None,
             archived_at: None,
             suspended_at: None,
+            archived_tasks: Vec::new(),
             wake_on_resume: false,
             tab_type: TabType::default(),
             editor_file: None,
@@ -1650,6 +1659,7 @@ impl Tab {
             archived_name: None,
             archived_at: None,
             suspended_at: None,
+            archived_tasks: Vec::new(),
             wake_on_resume: false,
             tab_type: TabType::Editor,
             editor_file: Some(file_info),
@@ -1696,6 +1706,7 @@ impl Tab {
             archived_name: None,
             archived_at: None,
             suspended_at: None,
+            archived_tasks: Vec::new(),
             wake_on_resume: false,
             tab_type: TabType::Diff,
             editor_file: None,

@@ -62,6 +62,9 @@ export interface Tab {
   archived_at: string | null;
   /** ISO 8601 timestamp of when the tab was last suspended; null/absent while live. */
   suspended_at?: string | null;
+  /** Task rows parked on this tab while it is ARCHIVED — moved out of `Workspace.tasks` by
+   *  archive and moved back by restore. Always absent on a live tab. */
+  archived_tasks?: Task[];
   /** True when this tab was live at the moment its workspace was suspended —
    *  resuming the workspace respawns exactly these tabs. */
   wake_on_resume?: boolean;

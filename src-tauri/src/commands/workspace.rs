@@ -2179,6 +2179,17 @@ pub fn archive_tab(
             };
         }
 
+        // The tab's task rows go WITH it. Leaving them on the board meant work attributed to
+        // a tab nobody can see — and releasing them (clearing tab_id) lost the attribution
+        // permanently, so restoring the tab brought back a session whose work had been
+        // scattered into the workspace's unclaimed pile. Moving them is reversible, which is
+        // the whole difference between archiving and closing.
+        let (mine, rest): (Vec<crate::state::Task>, Vec<crate::state::Task>) = std::mem::take(&mut workspace.tasks)
+            .into_iter()
+            .partition(|t| t.tab_id.as_deref() == Some(tab_id.as_str()));
+        workspace.tasks = rest;
+        tab.archived_tasks = mine;
+
         workspace.archived_tabs.push(tab);
         app_data.clone()
     };
@@ -2206,6 +2217,9 @@ pub fn restore_archived_tab(
         let mut tab = workspace.archived_tabs.remove(arch_index);
         tab.archived_name = None;
         tab.archived_at = None;
+        // Taken BEFORE the clone below, so neither the stored tab nor the returned one keeps
+        // a copy — the rows exist in exactly one place at every moment.
+        let returning_tasks = std::mem::take(&mut tab.archived_tasks);
 
         let pane = workspace.panes.iter_mut()
             .find(|p| p.id == pane_id)
@@ -2216,6 +2230,9 @@ pub fn restore_archived_tab(
             .unwrap_or(0);
         pane.tabs.insert(insert_index, tab.clone());
         pane.active_tab_id = Some(tab.id.clone());
+
+        // The tab is back, so its work is back, still attributed to it.
+        workspace.tasks.extend(returning_tasks);
 
         (app_data.clone(), tab)
     };

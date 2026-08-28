@@ -2983,10 +2983,11 @@ function createOverlordStore() {
         logError(`overlord: archive failed for ${tabId.slice(0, 8)}: ${e}`);
         return false;
       }
-      // AFTER the archive, never before: releasing first meant a failed archive left the
-      // tab in place with its parked rows already persisted back to the project, silently
-      // and with nothing to undo it. Nothing in the archive path depends on the release.
-      tasksStore.releaseTab(tabId);
+      // No release any more: `archive_tab` MOVES this tab's rows onto the archived record,
+      // and restoring brings them back still attributed to it. Releasing here would have
+      // fought that — clearing tab_id on rows Rust had already taken off the board, so the
+      // frontend mirror wrote them back unowned and restore returned a tab whose work had
+      // been scattered into the workspace's unclaimed pile.
       liveness.delete(tabId);
       bumpLive();
       logInfo(`overlord: archived spent tab ${tabId.slice(0, 8)}`);

@@ -443,6 +443,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 id: new_tab_id,
                 name: tab.name.clone(),
                 pty_id: None, // New window will spawn fresh PTYs
+                // A duplicated window's tabs are live, not archived — and the source tab's
+                // rows stay with the source tab.
+                archived_tasks: Vec::new(),
                 scrollback: ctx.and_then(|c| c.scrollback.clone()),
                 custom_name: tab.custom_name,
                 pinned: tab.pinned,
