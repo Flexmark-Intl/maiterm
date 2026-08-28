@@ -257,6 +257,34 @@ function createClaudeCodeStore() {
           else result = await overlordStore.answerPrompt(a.tab_id, a.prompt_id ?? null, a.choice ?? null, a.answers ?? null);
           break;
         }
+        case 'archiveTab':
+        case 'closeTab': {
+          const a = args as { tabId?: string; tab_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: `${tool} is available only to the Overlord agent tab.` };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          // Retiring your own tab takes the supervisor out of the window mid-call.
+          else if (a.tab_id === a.tabId) result = { ok: false, reason: 'cannot retire your own tab' };
+          else result = await overlordStore.retireTab(a.tab_id, tool === 'archiveTab' ? 'archive' : 'close');
+          break;
+        }
+        case 'recoverTab': {
+          const a = args as { tabId?: string; tab_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'recoverTab is available only to the Overlord agent tab.' };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else if (a.tab_id === a.tabId) result = { sent: false, reason: 'cannot recover your own tab' };
+          else result = await overlordStore.recoverTab(a.tab_id);
+          break;
+        }
+        case 'resumeWorkspace': {
+          const a = args as { tabId?: string; workspace_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'resumeWorkspace is available only to the Overlord agent tab.' };
+          else if (!a.workspace_id) result = { error: 'workspace_id is required.' };
+          else result = await overlordStore.resumeWorkspaceById(a.workspace_id);
+          break;
+        }
         case 'proposeRuleChanges': {
           const a = args as { tabId?: string; rationale: string; changes: import('$lib/stores/overlord.svelte').OverlordRuleChange[] };
           result = a.tabId
@@ -716,15 +744,34 @@ function createClaudeCodeStore() {
           isActive: pane.id === ws.active_pane_id,
           tabs: pane.tabs.map(tab => {
             const claude = claudeStateStore.getState(tab.id);
+            const isAgent = (tab.tab_type ?? 'terminal') === 'terminal' && !!tab.runtime;
             return {
               id: tab.id,
               displayName: tabDisplayName(tab),
               tabType: tab.tab_type ?? 'terminal',
               isActive: tab.id === pane.active_tab_id,
               hasNotes: !!tab.notes,
-              ...(claude ? { claudeState: claude.state, claudeTool: claude.toolName } : {}),
+              // `state` and `loaded` answer two different questions and are both needed to
+              // choose an action: what the agent is doing, and whether anything can reach it.
+              // A healthy `idle` agent in an unmounted pane is not drivable.
+              ...(isAgent
+                ? {
+                    runtime: tab.runtime,
+                    state: overlordStore.tabAgentState(tab.id),
+                    loaded: overlordStore.tabLoaded(tab.id),
+                  }
+                : {}),
+              ...(claude?.toolName ? { claudeTool: claude.toolName } : {}),
             };
           }),
+        })),
+        // Listed separately because that is what they ARE: lifted out of the pane tree, not
+        // parked inside it. Conflating these with a suspended workspace's tabs is the exact
+        // confusion this shape exists to prevent.
+        archivedTabs: (ws.archived_tabs ?? []).map(tab => ({
+          id: tab.id,
+          displayName: tab.archived_name ?? tab.name,
+          archivedAt: tab.archived_at ?? null,
         })),
       })),
     };

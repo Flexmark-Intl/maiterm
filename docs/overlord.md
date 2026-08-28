@@ -1101,24 +1101,82 @@ and are now idle terminals holding a PTY and a slot. The deck raises those as a
 `spent` signal (severity 6 — housekeeping, tinted `--ov-ok`, because nothing is
 going wrong) offering three answers:
 
-| Action | Reversible | Bulk | Rule |
-|---|---|---|---|
-| **Archive** | yes — scrollback, cwd and ssh context preserved, restorable | yes | no |
-| **Close** | **no** — PTY killed, bridges torn down, no archive entry | **no** | no |
-| **Keep** | n/a — suppresses the offer for a week | — | — |
+| Action | Reversible | Bulk | Agent tool | Rule |
+|---|---|---|---|---|
+| **Archive** | yes — scrollback, cwd and ssh context preserved, restorable | yes | `archiveTab` | no |
+| **Close** | **no** — PTY killed, bridges torn down, no archive entry | **no** | `closeTab` | no |
+| **Keep** | n/a — suppresses the offer for a week | — | — | — |
 
 Archive is the expected answer, and the reason the distinction exists: a session
 responsible for complex work that is now complete may still be needed when a bug
 surfaces in what it built. Close is for sessions with nothing worth recovering.
 
-**Close is never automatic and has no bulk form.** Same line that keeps `stopped`
-agents out of bulk recovery and task deletion out of the MCP surface: Overlord
-does not do irreversible things on its own. The UI confirms inline — `confirm()`
-is inert in a Tauri webview.
+**The agent may now do both (2026-08-28).** This reverses "Overlord does not do
+irreversible things on its own" for this one verb, at the human's explicit
+instruction, and their framing is the rule to apply: *archive when there's a
+chance we might be coming back to that session for bugs or additional work; close
+when the session is definitively over and/or a new session would be just as fine
+to use.* That is a judgement, which is what the agent is for. What the engine
+still enforces is `retireGuard` — never take away a tab that is **working**.
 
-Neither is wired as a rule *action*. Rule steps are text typed into a tab
+`retireGuard` is the safety half of `spentTabs`, factored out so the two cannot
+drift: boardable, not `active`, not `permission`, no outstanding directive or
+ritual, and — the one that bites — never `unbound`, because no agent state does
+not mean no agent. An unbound tab's process is alive and merely unregistered, and
+archiving or closing destroys the TerminalPane, which kills the PTY. Only a tab
+positively classified `stopped` has exited; `null` means unclassified, where the
+answer is to wait rather than guess.
+
+The *other* half of `spentTabs` — tracked tasks with one done, quiet 30 minutes,
+not marked Keep — deliberately does **not** gate the tools. That half decides
+what is worth putting on the human's deck unprompted; a session with nothing on
+the task board can be just as finished, and requiring it would have shipped a
+tool that refuses most of the cases it exists for.
+
+Still not wired as a rule *action*. Rule steps are text typed into a tab
 (`slash` / `process`); "archive this tab" is a different kind of verb and would
-need a new step kind, editor UI and migration. Deliberately deferred.
+need a new step kind, editor UI and migration. Deliberately deferred — and the
+line about irreversible things holds for anything *automatic*: a rule firing
+`closeTab` on a timer is not the same as an agent judging one session finished.
+
+Close still has no bulk form, and the deck still confirms inline (`confirm()` is
+inert in a Tauri webview).
+
+### Suspended, archived, and not loaded are three different things
+
+They were reported as one, and the agent could not tell them apart — partly
+because `listArchivedTabs` described its own results as "archived (suspended)
+tabs". The vocabulary now, in `listWorkspaces`:
+
+| | Where the tab lives | PTY | Way back |
+|---|---|---|---|
+| **Suspended workspace** (`workspace.suspended`) | still in its panes | killed | `resumeWorkspace` — respawns exactly the tabs that were live |
+| **Archived tab** (`workspace.archivedTabs[]`) | lifted out of the pane tree | none | `restoreArchivedTab` |
+| **Not loaded** (`tab.loaded: false`) | in its pane | may be alive | open or resume its workspace |
+
+`state` and `loaded` are reported separately because they answer different
+questions — what the AGENT is doing, and whether anything can reach it. One enum
+covering both would have to lie about one of them: an `idle` agent in an unmounted
+pane is perfectly healthy and completely undrivable. `state` is
+`active | idle | permission | unbound | stopped | unknown`, from the same
+`tabAgentState` the deck uses.
+
+Every state now has exactly one action, which is the point — the supervisor's
+whole job is that nothing in the window stays stuck:
+
+| State | Action |
+|---|---|
+| `idle` / `active` | `driveTab` |
+| `permission` | `getTabPrompt` + `answerTabPrompt` |
+| `unbound` / `stopped` | `recoverTab` — re-binds or restarts, chosen from the process state |
+| `loaded: false`, workspace suspended | `resumeWorkspace` |
+| in `archivedTabs[]` | `restoreArchivedTab` |
+| finished | `archiveTab` / `closeTab` |
+
+All four new tools are Overlord-agent-only and are in `PEER_ADDRESSING_TOOLS`, so
+they refuse a deduced identity: the gate is *being* the Overlord agent, which
+makes a mis-deduced tab the one way a stranger could reach them, and `closeTab`
+has no undo.
 
 **What qualifies as spent** (`overlordStore.spentTabs`):
 - a boardable agent tab — never the Overlord agent's own;

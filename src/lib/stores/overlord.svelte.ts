@@ -265,8 +265,10 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  is persisted, so an already-primed agent is never re-primed at the same version — and
  *  an agent running last version's doctrine believes last version's rules. v2 added the
  *  promise that driven tabs' replies come back on their own. v5 added task handoffs
- *  (task_handoff / task_dropped), which the agent must recognise to act on. */
-const DOCTRINE_VERSION = '5';
+ *  (task_handoff / task_dropped), which the agent must recognise to act on. v6 added the tab
+ *  lifecycle — archiveTab/closeTab/recoverTab/resumeWorkspace and the state vocabulary that
+ *  says which to use; an agent on v5 believes it cannot put a finished session away. */
+const DOCTRINE_VERSION = '6';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -1158,7 +1160,10 @@ function createOverlordStore() {
       `  - If that tab stops at a prompt instead, you are told. Call getTabPrompt to see it, then ANSWER IT with answerTabPrompt — unblocking your own fleet is your job, and a tab left sitting at a prompt is the failure you exist to prevent. Pass back the prompt_id you were given.\n` +
       `  - ESCALATE INSTEAD OF ANSWERING when the decision is consequential: anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion, and you answer the tab once they tell you. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, it is the escalating side.\n` +
       `  - Your human can also hand you a board task directly ("Send" on a card): it arrives as a task_handoff escalation naming the task and the tab that owns it. Carry it — drive that tab, drive a better one, or do it yourself — and keep its status current with updateTasks so the board follows along. A task_dropped escalation is the reverse: the human deleted a task and the tab carrying it could not be told, so tell it yourself when it is reachable.\n` +
-      `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger.\n` +
+      `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports a \`state\` and a \`loaded\` flag, and they answer DIFFERENT questions — \`state\` is what the agent is doing, \`loaded\` is whether anything can reach it. An 'idle' agent with loaded:false is healthy and undrivable.\n` +
+      `  - Every tab state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · loaded:false in a suspended workspace → resumeWorkspace · a tab in the workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
+      `  - Three things that get confused, and are reported separately: a SUSPENDED workspace still lists its tabs in its panes with their PTYs killed (resumeWorkspace brings them back); ARCHIVED tabs are individual sessions lifted out of the pane tree (restoreArchivedTab); loaded:false just means the pane is not mounted right now. Do not describe one as the other.\n` +
+      `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
       `Standing doctrine (the active ruleset — improvise with these same thresholds and phrasings when asked to check on tabs by hand):\n` +
@@ -2045,6 +2050,60 @@ function createOverlordStore() {
     return liveness.get(tabId)?.kind ?? null;
   }
 
+  /**
+   * Is it SAFE to take this tab out of the window? Returns the refusal, or null to proceed.
+   *
+   * The safety half of what `spentTabs` asks. The other half — tracked tasks, one of them
+   * done, quiet 30 minutes, not marked Keep — is about whether a tab looks FINISHED, which
+   * is what makes it worth putting on the deck unprompted. That half is deliberately not
+   * applied to `archiveTab`/`closeTab`: the agent is making a judgement the human asked it to
+   * make ("this session is definitively over"), and a tab with nothing on the task board can
+   * be just as over. What it may never do is take away a tab that is still working.
+   *
+   * `unbound` is the one that bites: no agent state does NOT mean no agent. An unbound tab's
+   * process is alive and merely unregistered, and archiving or closing destroys the
+   * TerminalPane, which kills the PTY — so it would silently kill a running agent. Only a tab
+   * positively classified `stopped` has actually exited; `null` means not yet classified, and
+   * the answer there is to wait, not to guess.
+   */
+  function retireGuard(tabId: string): { reason: string; detail: string } | null {
+    if (!isBoardableTab(tabId)) {
+      return {
+        reason: 'not_boardable',
+        detail: 'That tab is not in a supervised workspace in this window (or it is the Overlord agent\'s own tab).',
+      };
+    }
+    const st = mappedState(tabId);
+    if (st === 'active') {
+      return { reason: 'agent_busy', detail: 'That agent is mid-turn. Wait for it to finish and retry.' };
+    }
+    if (st === 'permission') {
+      return {
+        reason: 'awaiting_permission',
+        detail: 'That tab is stopped at a prompt. Answer it (getTabPrompt/answerTabPrompt) before deciding it is finished — the work it was doing is not over, it is waiting.',
+      };
+    }
+    if (!st) {
+      const kind = unreadyKind(tabId);
+      if (kind === 'unbound') {
+        return {
+          reason: 'agent_running_unbound',
+          detail: 'An agent IS running in that tab; it just has not run /maiterm init. Archiving or closing kills its PTY, so this would end a live session. Use recoverTab to re-bind it, then decide.',
+        };
+      }
+      if (kind !== 'stopped') {
+        return {
+          reason: 'not_classified',
+          detail: 'That tab has not been classified — usually its pane is not mounted, so nothing could probe it. Open or resume its workspace and retry.',
+        };
+      }
+    }
+    if (outstanding.has(tabId) || rituals.has(tabId)) {
+      return { reason: 'outstanding_directive', detail: 'That tab still owes an answer to a directive. Let it land first.' };
+    }
+    return null;
+  }
+
   function taskStateForAgent(st: AgentState | undefined): TaskStatus {
     return st === 'permission' ? 'blocked' : 'active';
   }
@@ -2588,6 +2647,22 @@ function createOverlordStore() {
       return !!terminalsStore.get(tabId);
     },
 
+    /**
+     * ONE vocabulary for what a tab's agent is doing, for every consumer that has to pick an
+     * action for it — the deck, the doctrine, and `listWorkspaces`.
+     *
+     * Deliberately NOT merged with `tabLoaded`. They are orthogonal facts and collapsing them
+     * is how the whole area got confusing: an agent can be running and bound (`idle`) in a
+     * workspace whose pane is not mounted, in which case it is perfectly healthy and still
+     * cannot be typed into. One enum answering both questions would have to lie about one.
+     */
+    tabAgentState(tabId: string): 'active' | 'idle' | 'permission' | 'unbound' | 'stopped' | 'unknown' {
+      const st = mappedState(tabId);
+      if (st) return st;
+      const kind = unreadyKind(tabId);
+      return kind === 'unbound' || kind === 'stopped' ? kind : 'unknown';
+    },
+
     /** Recover a tab that was an agent and isn't responding.
      *
      *  This is the point of a supervisor: the deck used to print "resume it or run
@@ -2743,18 +2818,7 @@ function createOverlordStore() {
       const now = Date.now();
       const out: SpentTab[] = [];
       for (const { tab } of agentTabs()) {
-        if (!isBoardableTab(tab.id)) continue;
-        const st = mappedState(tab.id);
-        if (st === 'active' || st === 'permission') continue;
-        if (!st) {
-          // No agent state is NOT the same as no agent. `unbound` means the process is
-          // alive and merely unbound from maiTerm — archiving or closing it destroys the
-          // TerminalPane, which kills the PTY, so treating it as finished would silently
-          // kill a running agent. `null` means not yet classified: wait, don't guess.
-          // Only a tab positively classified as `stopped` has actually exited.
-          if (unreadyKind(tab.id) !== 'stopped') continue;
-        }
-        if (outstanding.has(tab.id) || rituals.has(tab.id)) continue;
+        if (retireGuard(tab.id)) continue;
 
         const tasks = tasksForTab(tab.id);
         if (!tasks.length) continue;
@@ -2833,6 +2897,54 @@ function createOverlordStore() {
       bumpLive();
       logInfo(`overlord: closed spent tab ${tabId.slice(0, 8)}`);
       return true;
+    },
+
+    /**
+     * Take a tab out of the window on the agent's judgement (S4 archiveTab / closeTab).
+     *
+     * The human's rule, and the reason both verbs exist: **archive** when there is a chance
+     * of coming back to that session for bugs or follow-up work, **close** when it is
+     * definitively over or a fresh session would serve just as well. That is a judgement the
+     * agent is now trusted to make; what the engine still enforces is that it cannot take
+     * away a tab that is working (`retireGuard`).
+     *
+     * Ledgered either way. An irreversible action taken on the human's behalf has to be at
+     * least as auditable as a directive typed on their behalf.
+     */
+    async retireTab(tabId: string, mode: 'archive' | 'close'): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+      const refusal = retireGuard(tabId);
+      const step: OverlordStep = { kind: 'process', text: `[${mode}] ${tabDisplayName(tabId)}` };
+      if (refusal) {
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
+        return { ok: false, ...refusal };
+      }
+      const ok = mode === 'archive' ? await this.archiveSpentTab(tabId) : await this.closeSpentTab(tabId);
+      ledger(tabId, null, 'overlord_judgment', 0, step, ok ? 'sent' : 'aborted');
+      if (!ok) return { ok: false, reason: 'failed', detail: `maiTerm could not ${mode} that tab; see the log.` };
+      return { ok: true };
+    },
+
+    /**
+     * Bring a suspended workspace back (S4 resumeWorkspace) — the answer to `loaded: false`.
+     *
+     * A suspended workspace's tabs are still in its panes with their PTYs killed, so nothing
+     * can be typed into or probed there. Resuming respawns exactly the tabs that were live
+     * when it was suspended. Without this the agent could SEE those tabs and had no way to
+     * make any of them reachable.
+     */
+    async resumeWorkspaceById(workspaceId: string): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+      const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+      if (!ws) return { ok: false, reason: 'not_found', detail: 'No workspace with that id in this window.' };
+      if (ws.overlord) return { ok: false, reason: 'not_boardable', detail: 'That is the Overlord workspace.' };
+      if (!ws.suspended) return { ok: false, reason: 'not_suspended', detail: `"${ws.name}" is not suspended. If its tabs still read loaded:false, its panes simply are not mounted — switch to it.` };
+      try {
+        await workspacesStore.resumeWorkspace(workspaceId);
+      } catch (e) {
+        logError(`overlord: resume failed for workspace ${workspaceId.slice(0, 8)}: ${e}`);
+        return { ok: false, reason: 'failed', detail: String(e) };
+      }
+      logInfo(`overlord: resumed workspace "${ws.name}" on the agent's request`);
+      return { ok: true };
     },
 
     /** "I'm keeping this one." Persisted, so the deck stops offering it for a week rather

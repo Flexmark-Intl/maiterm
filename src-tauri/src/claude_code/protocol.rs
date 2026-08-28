@@ -186,7 +186,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "listWorkspaces",
-            "description": "List all workspaces with their panes and tabs. Returns windowId, windowLabel, workspace IDs, names, pane structure, tab IDs, interpolated display names, tab types, active states, and notes indicators. Use this to discover tabs for switchTab or notes operations. Each maiTerm window has its own set of workspaces; pass windowId to query a specific window.",
+            "description": "List all workspaces with their panes and tabs — the full picture of a window. Returns windowId, windowLabel, workspace IDs and names, pane structure, tab IDs, interpolated display names, tab types, active states and notes indicators. Each maiTerm window has its own set of workspaces; pass windowId to query a specific window.\n\nTHREE THINGS ARE OFTEN CONFUSED — they are separate and reported separately:\n- `workspace.suspended` — the workspace is parked. Its tabs are STILL LISTED in its panes, but their PTYs were killed; resuming the workspace respawns exactly the ones that were live. Fix with resumeWorkspace.\n- `workspace.archivedTabs[]` — tabs lifted OUT of the pane tree entirely. They are not in any pane, hold no PTY, and keep their scrollback, cwd and ssh context. Bring one back with restoreArchivedTab.\n- `tab.loaded: false` — the tab is in a pane, but its TerminalPane is not mounted (a suspended or never-opened workspace). NOTHING can be typed into it or probed until its workspace is opened or resumed, whatever its `state` says.\n\nEach agent tab also carries `runtime` and `state`: 'active' (mid-turn), 'idle' (bound and waiting), 'permission' (stopped at a prompt — getTabPrompt/answerTabPrompt), 'unbound' (agent process alive but has not run /maiterm init, so nothing can route to it — recoverTab), 'stopped' (no agent running; the tab is a shell — recoverTab restarts it), 'unknown' (not classified yet, usually because it is not loaded — do not guess). `state` describes the AGENT; `loaded` describes whether you can reach it. Both matter: an 'idle' agent in an unmounted pane is healthy and undrivable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -472,7 +472,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "listArchivedTabs",
-            "description": "List archived (suspended) tabs for a workspace. Returns tab IDs, display names, archived dates, and restore context (CWD, SSH command, auto-resume info). Use this to discover old sessions that can be restored. Use listWorkspaces first to find workspaces with archived tabs (archivedTabCount > 0).",
+            "description": "List a workspace's ARCHIVED tabs — sessions lifted out of the pane tree and put away, holding no PTY, restorable with restoreArchivedTab. Returns tab IDs, display names, archived dates and restore context (CWD, SSH command, auto-resume info). This is NOT the same as a suspended workspace, whose tabs are still listed in its panes with their PTYs killed and come back via resumeWorkspace. Use listWorkspaces to find workspaces with archivedTabCount > 0.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -796,6 +796,54 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                     }
                 },
                 "required": ["rationale", "changes"]
+            }
+        },
+        {
+            "name": "archiveTab",
+            "description": "Overlord agent only: archive a finished session — RECOVERABLE. The tab leaves the pane tree keeping its scrollback, cwd and ssh context, and comes back with restoreArchivedTab. Use this when there is any chance of returning to that session — a bug in what it built, or follow-up work on it. This is the DEFAULT choice for a finished session; prefer it to closeTab whenever you are unsure. Refuses, with `reason` and `detail`, anything still working: agent_busy (mid-turn), awaiting_permission (stopped at a prompt — that work is not over, it is waiting), agent_running_unbound (an agent IS alive there and archiving kills its PTY — recoverTab first), not_classified (pane not mounted; open or resume its workspace), outstanding_directive, not_boardable. Ledgered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id — the session to archive" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
+            "name": "closeTab",
+            "description": "Overlord agent only: close a session — IRREVERSIBLE. The PTY is killed, bridges are torn down, and NO archive entry is kept: the scrollback and context are gone. Use this only when the session is definitively over, or when starting a fresh session would serve just as well. If you would ever want to read that session again, use archiveTab instead — archiving costs nothing and is undoable, this is not. Same refusals as archiveTab (agent_busy, awaiting_permission, agent_running_unbound, not_classified, outstanding_directive, not_boardable), and the same rule behind them: never take away a tab that is still working. Ledgered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id — the session to close for good" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
+            "name": "recoverTab",
+            "description": "Overlord agent only: get an agent tab responding again. The remedy is chosen from the tab's process state, not guessed — 'unbound' (agent alive, never ran /maiterm init) gets /maiterm init typed into it, which restores routing; 'stopped' (nothing running) gets the runtime's resume command, relaunching the agent. Returns `kind` telling you which it did. Use it on any tab listWorkspaces reports as state 'unbound' or 'stopped'. Refuses when the tab's pane is not mounted (nothing to type into) — resume or open its workspace first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
+            "name": "resumeWorkspace",
+            "description": "Overlord agent only: bring a SUSPENDED workspace back, respawning exactly the tabs that were live when it was suspended. This is the answer to tabs reported with `loaded: false` in a workspace whose `suspended` is true — until it is resumed, nothing can be typed into or probed in any of them, whatever their `state` says. Not for archived tabs: those are individual sessions lifted out of the pane tree, and come back with restoreArchivedTab.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "workspace_id": { "type": "string", "description": "The suspended workspace to resume" }
+                },
+                "required": ["workspace_id"]
             }
         }
     ]).as_array().unwrap().clone());
