@@ -186,7 +186,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "listWorkspaces",
-            "description": "List all workspaces with their panes and tabs — the full picture of a window. Returns windowId, windowLabel, workspace IDs and names, pane structure, tab IDs, interpolated display names, tab types, active states and notes indicators. Each maiTerm window has its own set of workspaces; pass windowId to query a specific window.\n\nTHREE THINGS ARE OFTEN CONFUSED — they are separate and reported separately:\n- `workspace.suspended` — the workspace is parked. Its tabs are STILL LISTED in its panes, but their PTYs were killed; resuming the workspace respawns exactly the ones that were live. Fix with resumeWorkspace.\n- `workspace.archivedTabs[]` — tabs lifted OUT of the pane tree entirely. They are not in any pane, hold no PTY, and keep their scrollback, cwd and ssh context. Bring one back with restoreArchivedTab.\n- `tab.loaded: false` — the tab is in a pane, but its TerminalPane is not mounted (a suspended or never-opened workspace). NOTHING can be typed into it or probed until its workspace is opened or resumed, whatever its `state` says.\n\nEach agent tab also carries `runtime` and `state`: 'active' (mid-turn), 'idle' (bound and waiting), 'permission' (stopped at a prompt — getTabPrompt/answerTabPrompt), 'unbound' (agent process alive but has not run /maiterm init, so nothing can route to it — recoverTab), 'stopped' (no agent running; the tab is a shell — recoverTab restarts it), 'unknown' (not classified yet, usually because it is not loaded — do not guess). `state` describes the AGENT; `loaded` describes whether you can reach it. Both matter: an 'idle' agent in an unmounted pane is healthy and undrivable.",
+            "description": "List all workspaces with their panes and tabs — the full picture of a window. Returns windowId, windowLabel, workspace IDs and names, pane structure, tab IDs, interpolated display names, tab types, active states and notes indicators. Each maiTerm window has its own set of workspaces; pass windowId to query a specific window.\n\nFOUR THINGS ARE OFTEN CONFUSED — they are separate, reported separately, and have different remedies:\n- `tab.pty: 'suspended'` — a SUSPENDED TAB. Its PTY was killed and it sits in the pane tree with a Resume prompt, and this happens INSIDE a perfectly active workspace (suspending all but the active tab is routine). `suspendedAt` says since when. Wake it with resumeTab.\n- `workspace.suspended` — the whole workspace is parked. Its tabs are STILL LISTED in its panes with their PTYs killed; resuming respawns exactly the ones that were live. Use resumeWorkspace, not resumeTab.\n- `workspace.archivedTabs[]` — tabs lifted OUT of the pane tree entirely. Not in any pane, no PTY, scrollback and cwd/ssh context preserved. Bring one back with restoreArchivedTab.\n- `tab.loaded: false` — the tab is in a pane and may well have a LIVE PTY, but its TerminalPane is not mounted right now (a background, suspended or never-opened workspace). Nothing can be typed into it or probed until it is, whatever its `state` says.\n\nEach agent tab carries three independent facts. `pty`: 'live' | 'suspended' | 'none' (never started one). `state` — meaningful only over a live PTY: 'active' (mid-turn), 'idle' (bound and waiting), 'permission' (stopped at a prompt — getTabPrompt/answerTabPrompt), 'unbound' (agent process alive but has not run /maiterm init, so nothing routes to it — recoverTab), 'stopped' (no agent; the tab is a shell — recoverTab restarts it), 'unknown' (not classified, usually because it is not loaded — do not guess). `loaded`: whether anything can reach it at all. Read all three before deciding: an 'idle' agent with loaded:false is healthy and undrivable, and a suspended tab is not a dead one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -830,6 +830,18 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
                     "tab_id": { "type": "string", "description": "TARGET tab id" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
+            "name": "resumeTab",
+            "description": "Overlord agent only: wake ONE suspended tab — a tab reported with `pty: 'suspended'`, whose terminal was killed but which is still in its pane with a Resume prompt. This happens inside active workspaces (suspending every tab but the active one is routine), so it is NOT the same as an archived tab or a suspended workspace. Brings the tab into view and respawns its terminal, restoring cwd and ssh context; an agent with auto-resume set comes back with it. Refuses `already_live` (nothing to resume) and `workspace_suspended` — if the whole workspace is parked, use resumeWorkspace, which brings back every tab that was live in it rather than just this one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id — the suspended tab to wake" }
                 },
                 "required": ["tab_id"]
             }

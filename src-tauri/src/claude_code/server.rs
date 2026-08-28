@@ -1995,7 +1995,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 18] = [
+const PEER_ADDRESSING_TOOLS: [&str; 19] = [
     "sendToBridgedAgent",
     "getBridgedAgent",
     "listBridgedPeers",
@@ -2015,6 +2015,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 18] = [
     "archiveTab",
     "closeTab",
     "recoverTab",
+    "resumeTab",
     "resumeWorkspace",
     // Task tools resolve "this project" from the calling tab, so a deduced identity would
     // read or write a stranger's task list — the same failure the mesh incident produced,

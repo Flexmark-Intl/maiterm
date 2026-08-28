@@ -13,7 +13,8 @@ import type {
   Workspace,
 } from '$lib/tauri/types';
 import type { AgentState } from '$lib/agents/types';
-import { workspacesStore, tabDisplayName } from '$lib/stores/workspaces.svelte';
+import { workspacesStore, tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
+import { resumePane } from '$lib/stores/resumeGate.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -1160,9 +1161,9 @@ function createOverlordStore() {
       `  - If that tab stops at a prompt instead, you are told. Call getTabPrompt to see it, then ANSWER IT with answerTabPrompt — unblocking your own fleet is your job, and a tab left sitting at a prompt is the failure you exist to prevent. Pass back the prompt_id you were given.\n` +
       `  - ESCALATE INSTEAD OF ANSWERING when the decision is consequential: anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion, and you answer the tab once they tell you. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, it is the escalating side.\n` +
       `  - Your human can also hand you a board task directly ("Send" on a card): it arrives as a task_handoff escalation naming the task and the tab that owns it. Carry it — drive that tab, drive a better one, or do it yourself — and keep its status current with updateTasks so the board follows along. A task_dropped escalation is the reverse: the human deleted a task and the tab carrying it could not be told, so tell it yourself when it is reachable.\n` +
-      `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports a \`state\` and a \`loaded\` flag, and they answer DIFFERENT questions — \`state\` is what the agent is doing, \`loaded\` is whether anything can reach it. An 'idle' agent with loaded:false is healthy and undrivable.\n` +
-      `  - Every tab state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · loaded:false in a suspended workspace → resumeWorkspace · a tab in the workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
-      `  - Three things that get confused, and are reported separately: a SUSPENDED workspace still lists its tabs in its panes with their PTYs killed (resumeWorkspace brings them back); ARCHIVED tabs are individual sessions lifted out of the pane tree (restoreArchivedTab); loaded:false just means the pane is not mounted right now. Do not describe one as the other.\n` +
+      `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports THREE independent facts: \`pty\` ('live' | 'suspended' | 'none' — the terminal underneath), \`state\` (what the agent is doing, meaningful only over a live pty), and \`loaded\` (whether anything can reach it at all). Read all three. An 'idle' agent with loaded:false is healthy and undrivable; a suspended tab is not a dead one.\n` +
+      `  - Every state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · pty 'suspended' → resumeTab · a tab in a suspended WORKSPACE → resumeWorkspace · a tab in that workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
+      `  - Four things that get confused, and are reported separately: a SUSPENDED TAB (pty:'suspended') sits in the pane tree of an ACTIVE workspace with its terminal killed — suspending every tab but the active one is routine, so most of these are perfectly ordinary; a SUSPENDED WORKSPACE parks all of its tabs at once; ARCHIVED tabs are lifted out of the pane tree entirely; loaded:false only means the pane is not mounted right now, and can be true of a tab whose agent is alive and working. Never describe one as another — say which one you mean.\n` +
       `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
@@ -2661,6 +2662,56 @@ function createOverlordStore() {
       if (st) return st;
       const kind = unreadyKind(tabId);
       return kind === 'unbound' || kind === 'stopped' ? kind : 'unknown';
+    },
+
+    /**
+     * The terminal underneath the agent, which is a THIRD fact — not the agent's state and
+     * not whether its pane is mounted.
+     *
+     * A tab can be suspended on its own, inside a perfectly active workspace: `suspendTab`
+     * (and `suspendOtherTabs`, which does it to every tab but the active one) kills the PTY,
+     * clears `pty_id` and stamps `suspended_at`, leaving the tab in the pane tree with a
+     * Resume prompt. That is neither an archived tab nor a suspended workspace, and reporting
+     * it as `unknown`/not-loaded — which is all it could look like without this — is exactly
+     * how it became indistinguishable from a tab in a workspace nobody has opened.
+     */
+    tabPtyState(tabId: string): 'live' | 'suspended' | 'none' {
+      const tab = workspacesStore._locateTab(tabId)?.tab;
+      if (tab?.pty_id) return 'live';
+      return tab?.suspended_at ? 'suspended' : 'none';
+    },
+
+    /**
+     * Wake a single suspended tab (S4 resumeTab) — the answer to `pty: 'suspended'`.
+     *
+     * Resuming is mount-driven: the PTY respawns when the TerminalPane mounts, which is why
+     * this navigates to the tab and then lifts the pane's resume gate, exactly as the human's
+     * Resume click does. A tab in a SUSPENDED WORKSPACE is a different case with a different
+     * answer, and says so rather than half-working.
+     */
+    async resumeTabById(tabId: string): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+      const loc = workspacesStore._locateTab(tabId);
+      if (!loc) return { ok: false, reason: 'not_found', detail: 'No tab with that id in this window.' };
+      if (loc.tab.pty_id) {
+        return { ok: false, reason: 'already_live', detail: 'That tab already has a live terminal — nothing to resume.' };
+      }
+      const ws = workspaceForTab(tabId);
+      if (ws?.suspended) {
+        return {
+          ok: false,
+          reason: 'workspace_suspended',
+          detail: `That tab is in the suspended workspace "${ws.name}". Resuming the workspace brings back every tab that was live in it — call resumeWorkspace instead of waking this one.`,
+        };
+      }
+      try {
+        await navigateToTab(tabId);
+        resumePane(loc.paneId);
+      } catch (e) {
+        logError(`overlord: resume failed for tab ${tabId.slice(0, 8)}: ${e}`);
+        return { ok: false, reason: 'failed', detail: String(e) };
+      }
+      logInfo(`overlord: resumed suspended tab ${tabId.slice(0, 8)} on the agent's request`);
+      return { ok: true };
     },
 
     /** Recover a tab that was an agent and isn't responding.

@@ -1142,24 +1142,38 @@ line about irreversible things holds for anything *automatic*: a rule firing
 Close still has no bulk form, and the deck still confirms inline (`confirm()` is
 inert in a Tauri webview).
 
-### Suspended, archived, and not loaded are three different things
+### Suspended tab, suspended workspace, archived, not loaded — four things
 
 They were reported as one, and the agent could not tell them apart — partly
 because `listArchivedTabs` described its own results as "archived (suspended)
-tabs". The vocabulary now, in `listWorkspaces`:
+tabs". The one that is easiest to miss is the first row, because it happens
+inside perfectly ordinary workspaces: `suspendTab` / `suspendOtherTabs` kill a
+tab's PTY, clear `pty_id` and stamp `suspended_at`, leaving it in the pane tree
+behind a Resume prompt. Suspending every tab but the active one is routine, so a
+window full of these is normal, not a fleet full of dead sessions.
 
 | | Where the tab lives | PTY | Way back |
 |---|---|---|---|
+| **Suspended tab** (`tab.pty: 'suspended'`) | in its pane, workspace may be fully active | killed | `resumeTab` |
 | **Suspended workspace** (`workspace.suspended`) | still in its panes | killed | `resumeWorkspace` — respawns exactly the tabs that were live |
 | **Archived tab** (`workspace.archivedTabs[]`) | lifted out of the pane tree | none | `restoreArchivedTab` |
-| **Not loaded** (`tab.loaded: false`) | in its pane | may be alive | open or resume its workspace |
+| **Not loaded** (`tab.loaded: false`) | in its pane | **may be alive** | open or resume its workspace |
 
-`state` and `loaded` are reported separately because they answer different
-questions — what the AGENT is doing, and whether anything can reach it. One enum
-covering both would have to lie about one of them: an `idle` agent in an unmounted
-pane is perfectly healthy and completely undrivable. `state` is
-`active | idle | permission | unbound | stopped | unknown`, from the same
-`tabAgentState` the deck uses.
+Three independent facts per tab, because they answer different questions and any
+one enum covering them would have to lie about the others:
+
+- `pty` — `live | suspended | none`. The terminal underneath.
+- `state` — `active | idle | permission | unbound | stopped | unknown`, from the
+  same `tabAgentState` the deck uses. Only meaningful over a live PTY.
+- `loaded` — whether a TerminalPane is mounted, i.e. whether anything can reach
+  it. An `idle` agent with `loaded: false` is healthy and completely undrivable;
+  a background workspace's tabs are exactly that.
+
+Resuming a tab is mount-driven — the PTY respawns when its TerminalPane mounts —
+so `resumeTab` navigates to the tab and lifts the pane's resume gate, which is
+what the human's Resume click does. It refuses `workspace_suspended` rather than
+half-working: when the whole workspace is parked, `resumeWorkspace` brings back
+every tab that was live in it, and waking one by hand is not the same thing.
 
 Every state now has exactly one action, which is the point — the supervisor's
 whole job is that nothing in the window stays stuck:
@@ -1169,11 +1183,12 @@ whole job is that nothing in the window stays stuck:
 | `idle` / `active` | `driveTab` |
 | `permission` | `getTabPrompt` + `answerTabPrompt` |
 | `unbound` / `stopped` | `recoverTab` — re-binds or restarts, chosen from the process state |
-| `loaded: false`, workspace suspended | `resumeWorkspace` |
+| `pty: 'suspended'` | `resumeTab` |
+| in a suspended workspace | `resumeWorkspace` |
 | in `archivedTabs[]` | `restoreArchivedTab` |
 | finished | `archiveTab` / `closeTab` |
 
-All four new tools are Overlord-agent-only and are in `PEER_ADDRESSING_TOOLS`, so
+All five new tools are Overlord-agent-only and are in `PEER_ADDRESSING_TOOLS`, so
 they refuse a deduced identity: the gate is *being* the Overlord agent, which
 makes a mis-deduced tab the one way a stranger could reach them, and `closeTab`
 has no undo.

@@ -277,6 +277,14 @@ function createClaudeCodeStore() {
           else result = await overlordStore.recoverTab(a.tab_id);
           break;
         }
+        case 'resumeTab': {
+          const a = args as { tabId?: string; tab_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'resumeTab is available only to the Overlord agent tab.' };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else result = await overlordStore.resumeTabById(a.tab_id);
+          break;
+        }
         case 'resumeWorkspace': {
           const a = args as { tabId?: string; workspace_id: string };
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
@@ -757,8 +765,10 @@ function createClaudeCodeStore() {
               ...(isAgent
                 ? {
                     runtime: tab.runtime,
+                    pty: overlordStore.tabPtyState(tab.id),
                     state: overlordStore.tabAgentState(tab.id),
                     loaded: overlordStore.tabLoaded(tab.id),
+                    ...(tab.suspended_at && !tab.pty_id ? { suspendedAt: tab.suspended_at } : {}),
                   }
                 : {}),
               ...(claude?.toolName ? { claudeTool: claude.toolName } : {}),
