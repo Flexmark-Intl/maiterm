@@ -502,6 +502,80 @@ fn claude_tail_facts(tail: &str) -> TailFacts {
     }
 }
 
+/// What a `git commit` call actually did, as opposed to what it asked to do.
+#[derive(Debug, PartialEq)]
+enum CommitOutcome {
+    Landed,
+    Failed,
+    /// No result in the tail: still running, interrupted, or the session ended on it. Unknown
+    /// is not a commit — see `claude_overlord_from_tail`.
+    Pending,
+}
+
+/// git's own confirmation line for a commit it has just written: `[main 1a2b3c4] subject`,
+/// `[main (root-commit) 1a2b3c4]`, `[detached HEAD 1a2b3c4]`.
+///
+/// Needed because `is_error` is the exit status of the WHOLE shell command: in
+/// `git add … && git commit … && git push`, a rejected push reports an error over a commit
+/// that is in the history (2 of the 38 errored compound commits in the local corpus). Git
+/// naming a new sha is the positive evidence that separates those from a commit that never
+/// ran. `! [rejected] main -> main` does not match — it neither starts the line nor names a sha.
+fn names_a_new_commit(text: &str) -> bool {
+    text.lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix('[') else { return false };
+        let Some(inner) = rest.split(']').next() else { return false };
+        inner.contains(' ')
+            && inner
+                .rsplit(' ')
+                .next()
+                .is_some_and(|sha| sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()))
+    })
+}
+
+/// Find a Bash call's verdict by its tool_use id. A result always follows its call, so this
+/// searches the whole tail rather than the reverse scan's current position — and walks every
+/// occurrence of the id, because subagent `progress` frames carry it too and come first.
+fn commit_outcome(tail: &str, tool_use_id: &str) -> CommitOutcome {
+    let needle = format!("\"tool_use_id\":\"{tool_use_id}\"");
+    for (hit, _) in tail.match_indices(&needle) {
+        let start = tail[..hit].rfind('\n').map_or(0, |i| i + 1);
+        let end = tail[hit..].find('\n').map_or(tail.len(), |i| hit + i);
+        let Ok(v) = serde_json::from_str::<Value>(&tail[start..end]) else { continue };
+        let Some(blocks) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+        else {
+            continue;
+        };
+        for b in blocks {
+            if b.get("type").and_then(|t| t.as_str()) != Some("tool_result")
+                || b.get("tool_use_id").and_then(|i| i.as_str()) != Some(tool_use_id)
+            {
+                continue;
+            }
+            if b.get("is_error").and_then(|e| e.as_bool()) != Some(true) {
+                return CommitOutcome::Landed;
+            }
+            let text = match b.get("content") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Array(parts)) => parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => String::new(),
+            };
+            return if names_a_new_commit(&text) {
+                CommitOutcome::Landed
+            } else {
+                CommitOutcome::Failed
+            };
+        }
+    }
+    CommitOutcome::Pending
+}
+
 /// One reversed pass for the Overlord signals: the newest `git commit` Bash tool_use ts and
 /// the newest TodoWrite todos array. Cheap string prefilters keep the JSON parse rare; both
 /// searches stop at their first (i.e. latest) hit.
@@ -510,15 +584,16 @@ fn claude_tail_facts(tail: &str) -> TailFacts {
 /// as proof of a commit made `last_commit_ts` advance on a rejected permission prompt, a
 /// pre-commit hook that said no, and `nothing to commit` — 32 of 278 `git commit` calls in the
 /// local corpus, which is `review_after_commit` telling a tab to review a commit that is not
-/// in the history. The tool_result is a line away and says which happened, so the fact is read
-/// from the outcome: `is_error` flags 29 of those 32 and none of the 244 real commits. Results
-/// come after their tool_use in the file, so the reverse scan always sees the verdict first.
+/// in the history. So the fact is read from the outcome instead (`commit_outcome`), and a call
+/// still awaiting its result is NOT a fact: the gap between the two lines runs a median 1.6s
+/// but exceeds a whole 5s engine tick in 12% of failures, and an edge latched from a pending
+/// call survives the correction — the engine only withdraws a latched edge on age-out or a
+/// human keystroke, and a classifier denial or hook refusal involves neither.
 fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<u64>, Option<u64>) {
     let mut last_commit_ts: Option<u64> = None;
     let mut todos: Option<Value> = None;
     let mut todos_ts: Option<u64> = None;
     let mut last_compact_ts: Option<u64> = None;
-    let mut failed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in tail.lines().rev() {
         if last_commit_ts.is_some() && todos.is_some() && last_compact_ts.is_some() {
             break;
@@ -527,30 +602,10 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
         let want_commit = last_commit_ts.is_none() && line.contains("git commit");
         let want_compact = last_compact_ts.is_none()
             && (line.contains("\"isCompactSummary\":true") || line.contains("\"compact_boundary\""));
-        // Only failures need harvesting, and `"is_error":true` is rare enough to keep this
-        // as cheap as the other prefilters.
-        let want_error = last_commit_ts.is_none() && line.contains("\"is_error\":true");
-        if !want_todo && !want_commit && !want_compact && !want_error {
+        if !want_todo && !want_commit && !want_compact {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if want_error {
-            if let Some(blocks) = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
-            {
-                for b in blocks {
-                    if b.get("type").and_then(|t| t.as_str()) == Some("tool_result")
-                        && b.get("is_error").and_then(|e| e.as_bool()) == Some(true)
-                    {
-                        if let Some(id) = b.get("tool_use_id").and_then(|i| i.as_str()) {
-                            failed_tools.insert(id.to_string());
-                        }
-                    }
-                }
-            }
-        }
         let ts = v
             .get("timestamp")
             .and_then(|t| t.as_str())
@@ -592,11 +647,14 @@ fn claude_overlord_from_tail(tail: &str) -> (Option<u64>, Option<Value>, Option<
                         .and_then(|i| i.get("command"))
                         .and_then(|c| c.as_str())
                         .unwrap_or("");
-                    let failed = block
-                        .get("id")
-                        .and_then(|i| i.as_str())
-                        .is_some_and(|id| failed_tools.contains(id));
-                    if cmd.contains("git commit") && !failed {
+                    // Anything but Landed leaves `last_commit_ts` unset, so the scan keeps
+                    // walking back to an older commit that did land — which is the one the
+                    // history actually ends on.
+                    if cmd.contains("git commit")
+                        && block.get("id").and_then(|i| i.as_str()).is_some_and(|id| {
+                            matches!(commit_outcome(tail, id), CommitOutcome::Landed)
+                        })
+                    {
                         last_commit_ts = ts;
                     }
                 }
@@ -2126,11 +2184,13 @@ mod tests {
     #[test]
     fn overlord_tail_parses_newest_commit_and_todos() {
         let tail = concat!(
-            r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git commit -m 'old'"}}]}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_old","name":"Bash","input":{"command":"git commit -m 'old'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:20:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_old","content":"[main 1111111] old"}]}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-06-27T21:21:00.000Z","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"first","status":"pending"}]}}]}}"#, "\n",
             r#"{"type":"user","timestamp":"2026-06-27T21:22:00.000Z","message":{"content":"echo git commit in prose must not count"}}"#, "\n",
             r#"{"type":"assistant","timestamp":"2026-06-27T21:23:00.000Z","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"second","status":"completed"}]}}]}}"#, "\n",
-            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git add -A && git commit -m 'new'"}}]}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_new","name":"Bash","input":{"command":"git add -A && git commit -m 'new'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:25:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_new","content":"[main 2222222] new"}]}}"#, "\n",
             r#"{"type":"user","isCompactSummary":true,"timestamp":"2026-06-27T21:26:00.000Z","message":{"content":"summary"}}"#, "\n",
         );
         let (commit_ts, todos, todos_ts, compact_ts) = claude_overlord_from_tail(tail);
@@ -2168,9 +2228,55 @@ mod tests {
         // An unrelated failing tool must not suppress a good commit.
         let other_failed = concat!(
             r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_ok","name":"Bash","input":{"command":"git commit -m 'landed'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:20:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_ok","content":"[main abc1234] landed"}]}}"#, "\n",
             r#"{"type":"user","timestamp":"2026-06-27T21:26:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_grep","is_error":true,"content":"No matches found"}]}}"#, "\n",
         );
         assert_eq!(claude_overlord_from_tail(other_failed).0, Some(1782595200000));
+    }
+
+    #[test]
+    fn a_commit_still_awaiting_its_result_is_not_a_commit_yet() {
+        // The window between the tool_use line and its tool_result is where the old fact was
+        // most dangerous: the engine latches a `commit` edge from it and then never withdraws
+        // it (a classifier denial or a hook refusal involves no human keystroke), so the
+        // correction arrives after the directive has been typed. Until the verdict exists the
+        // scan walks past it to the last commit that demonstrably landed.
+        let pending_over_landed = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:20:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_ok","name":"Bash","input":{"command":"git commit -m 'landed'"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:20:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_ok","content":"[main abc1234] landed"}]}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_inflight","name":"Bash","input":{"command":"git commit -m 'in flight'"}}]}}"#, "\n",
+        );
+        assert_eq!(
+            claude_overlord_from_tail(pending_over_landed).0,
+            Some(1782595200000),
+            "21:20 landed; 21:25 has no verdict yet"
+        );
+
+        // A subagent progress frame carries the same tool_use_id and comes BEFORE the result,
+        // so the lookup must keep walking rather than stop at the first occurrence.
+        let progress_first = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_p","name":"Bash","input":{"command":"git commit -m 'x'"}}]}}"#, "\n",
+            r#"{"type":"progress","tool_use_id":"toolu_p","timestamp":"2026-06-27T21:25:02.000Z"}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:25:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_p","content":"[main deadbee] x"}]}}"#, "\n",
+        );
+        assert_eq!(claude_overlord_from_tail(progress_first).0, Some(1782595500000));
+    }
+
+    #[test]
+    fn a_commit_inside_a_failing_compound_command_still_counts() {
+        // `is_error` is the exit status of the whole shell command. `git commit && git push`
+        // with a rejected push errors over a commit that IS in the history — git naming the
+        // new sha is what separates that from a commit that never ran.
+        let pushed_and_rejected = concat!(
+            r#"{"type":"assistant","timestamp":"2026-06-27T21:25:00.000Z","message":{"content":[{"type":"tool_use","id":"toolu_c","name":"Bash","input":{"command":"git commit --amend -F msg && git push --force-with-lease"}}]}}"#, "\n",
+            r#"{"type":"user","timestamp":"2026-06-27T21:25:05.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_c","is_error":true,"content":"Exit code 1\n[main b6a1e08] Prefer local OpenAPI spec\n 2 files changed, 32 insertions(+)\n ! [rejected] main -> main (fetch first)"}]}}"#, "\n",
+        );
+        assert_eq!(claude_overlord_from_tail(pushed_and_rejected).0, Some(1782595500000));
+
+        // The rejection line alone is not a commit: it neither opens the line nor names a sha.
+        assert!(!names_a_new_commit(" ! [rejected]        main -> main (fetch first)"));
+        assert!(!names_a_new_commit("nothing to commit, working tree clean"));
+        assert!(names_a_new_commit("[main (root-commit) 1a2b3c4d] first"));
     }
 
     #[test]

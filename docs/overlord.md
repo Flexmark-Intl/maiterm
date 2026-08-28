@@ -454,11 +454,26 @@ command; it says nothing about whether the command worked. Reading it as a commi
 `last_commit_ts` advance on a denied permission prompt, a pre-commit hook that refused,
 and `nothing to commit` — **32 of the 278 `git commit` calls** in the local corpus, each
 one able to send a tab to review a commit that is not in the history. The verdict is one
-line further down the same file, so `claude_overlord_from_tail` reads it: a tool_result
-with `is_error` disqualifies its `tool_use`, which catches 29 of those 32 and none of the
-244 real commits. Results always follow their call, so the reverse scan sees the verdict
-before the claim. The general form is the one §9 keeps arriving at — **a request is not
-an outcome**; when the outcome is recorded nearby, read that instead.
+line further down the same file, so `commit_outcome` reads it. Three things that took two
+passes to get right:
+
+- **Unknown is not a commit.** A call whose result has not arrived yet is `Pending` and
+  produces no fact. The gap runs a median 1.6s but exceeds a whole 5s tick in 12% of
+  failures, and an edge latched inside that window is never withdrawn — `latchEdges` drops
+  an edge on age-out or a human keystroke, and a classifier denial or hook refusal is
+  neither. So the correction would land after the directive was typed. Roughly a third of
+  failed commits still fired the rule while the fact merely *stopped advancing*.
+- **`is_error` is the exit status of the whole shell command**, not of the commit. In
+  `git commit … && git push`, a rejected push errors over a commit that is in the history
+  (2 of the 38 errored compound commits locally). Git naming a new sha — `[main 1a2b3c4]` —
+  is the positive evidence that separates those; `git commit -q` prints nothing, so one of
+  those two stays a false negative and that is the accepted floor.
+- **Walk every occurrence of the id.** Subagent `progress` frames carry `tool_use_id` too
+  and appear before the real result.
+
+The general form is the one §9 keeps arriving at — **a request is not an outcome**; when
+the outcome is recorded nearby, read that, and treat "no verdict yet" as no fact rather
+than as the answer you were hoping for.
 
 `turn_end` is defined as the tab's agentState transition `active` → `idle`
 (hook-driven for Claude/Codex), with the transcript-tail last-real-turn
