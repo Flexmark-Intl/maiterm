@@ -1729,6 +1729,13 @@
     opacity: 0;
     width: 0;
     overflow: hidden;
+    /* The tab is capped (180px, or 50% when unclamped), so something has to give when
+       the strip opens. It must be the NAME — it ellipsizes. Left shrinkable, the strip
+       loses its share of the overflow proportionally (88px → ~60px on a clamped tab)
+       and, since the buttons can't shrink below 22px, `overflow: hidden` simply cuts
+       the rightmost one off: Close became invisible and unclickable, and the last
+       hoverable button under the cursor was Duplicate. */
+    flex-shrink: 0;
     transition: width 0.15s ease, opacity 0.15s ease, margin-left 0.15s ease;
   }
 
