@@ -33,6 +33,7 @@ use crate::state::app_state::AgentSessionState;
 use crate::state::workspace::TabType;
 use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
+pub(crate) mod assets;
 pub(crate) mod mirror;
 pub(crate) mod shells;
 pub(crate) mod tasks;
