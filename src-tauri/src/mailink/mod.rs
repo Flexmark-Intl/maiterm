@@ -1885,8 +1885,21 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // Same discipline for the background-shell roster.
     let mut shell_keys: HashMap<String, u64> = HashMap::new();
     // Asset batches already streamed, per tab, plus the manifest mtime that gates the whole pass.
+    // Seeded with everything already sent, right here at connect: the snapshot the phone is about
+    // to GET carries that history, and the streamer cannot baseline for itself (see
+    // `stream_new_assets`). Seeding at the same instant as the snapshot is what makes "already
+    // delivered" and "already shown" the same set.
     let mut asset_seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    let mut asset_mtime: Option<u64> = None;
+    let mut asset_mtime: Option<u64> = assets::index_mtime();
+    for t in designated_tabs(&s.app) {
+        let ids: std::collections::HashSet<String> = asset_turns(&t.tab_id)
+            .iter()
+            .filter_map(|turn| turn.get("msg_id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        if !ids.is_empty() {
+            asset_seen.insert(t.tab_id, ids);
+        }
+    }
 
     // initial snapshot: one chat_state per chat
     for c in build_chats(&s.app) {
@@ -2187,10 +2200,15 @@ async fn stream_new_assets(
             continue;
         }
         let entry = seen.entry(t.tab_id.clone()).or_default();
-        let baseline = entry.is_empty();
+        // NO first-observation baseline here, unlike the message streamer. That pass runs every
+        // tick, so a tab is always baselined on a tick before its first new turn. This one runs
+        // ONLY when the manifest changed — which is precisely the tick an asset was added — so
+        // baselining on an empty set would swallow the first file ever sent to a tab, every
+        // time. History is baselined once at connect instead (`asset_seen` is seeded there),
+        // which is the moment the phone's own GET carried it.
         for turn in &turns {
             let Some(id) = turn.get("msg_id").and_then(|v| v.as_str()) else { continue };
-            if !entry.insert(id.to_string()) || baseline {
+            if !entry.insert(id.to_string()) {
                 continue;
             }
             if socket
