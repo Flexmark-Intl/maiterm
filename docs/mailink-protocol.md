@@ -304,6 +304,8 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /pair` | Redeem QR code → token | `{code,device_name}` → `{device_id,token,server_name}` |
 | `POST /push-register` | Store push token + relay capability for doorbell | `{token,platform,env,cap}` → `{ok}` (`platform`: `"apns"`\|`"fcm"`; `cap` from §6 `/push-capability`) |
 | `GET  /chats` | List maiLink-native chats + state | → `Chat[]` (see §4.3) |
+| `GET  /assets` | Every file an agent sent, newest first, across all chats — the Files view | → `FileAsset[]` (max 200) |
+| `GET  /assets/{assetId}` | The bytes | → the file. `Accept-Ranges: bytes`; honours `Range` with `206` + `Content-Range`, `416` for a start past the end. `Content-Type` from the name, `Content-Disposition: attachment` with both `filename=` and `filename*=`. `404` when unknown OR evicted — but the descriptor's `available` already said so, so never discover it here |
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
 | `GET  /chats/{tabId}/context?lines=N` | Distilled plain-text context | → `{text, truncated}` |
 | `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"unreachable", reason, detail}` |
@@ -380,6 +382,11 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // manufacture a re-initialize prompt.
 { "type": "message", "tabId": "...", "role": "agent|user|system",
   "text": "...", "msg_id": "...", "ts": 0 }          // a new transcript turn
+                                                     // `kind: "asset"` turns also carry `assets: FileAsset[]` here — a file
+                                                     // an agent just sent, landing live in an open chat. Positional, not a
+                                                     // full-replace strip: it is a timeline entry and has a place in the
+                                                     // order. A client that doesn't know the kind renders `text`
+                                                     // ("Sent 2 files: report.pdf, clip.mov") rather than breaking.
                                                      // for a user echo, msg_id === the id POST /message returned
 { "type": "attention", "tabId": "...", "kind": "permission|idle_done|question",
   "summary": "Needs permission: Run rm -rf ./dist",
@@ -535,6 +542,31 @@ interface ChatDetail extends Chat {
 // `message{role:'user'}` WS echo for that turn (mints at accept-time, reused for both) —
 // lets the app reconcile an optimistic local bubble against the echo.
 interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string; ts: number; }
+
+// A file an agent sent to the phone (`sendFilesToPhone`). Appears twice: as a `kind:"asset"` turn
+// in its chat's transcript, and in GET /assets across all chats.
+interface FileAsset {
+  asset_id: string;         // uuid — unguessable on purpose; a leaked id is a leaked file
+  name: string;             // the original filename, what the phone saves it as
+  mime: string;             // from the extension only. Unknown ⇒ "application/octet-stream",
+                            //   which routes to the share sheet — the honest answer, never a
+                            //   wrong claim about what the file is
+  bytes: number;            // the real cost of a tap, and the ONLY cost signal a video row gets
+  ts: number;
+  tabId: string;
+  caption?: string;         // omitted when the agent gave none
+  available: boolean;       // false ⇒ the bytes were evicted; render a tombstone with no tap.
+                            //   ALWAYS present. Do not infer this from a failed fetch: a 404
+                            //   cannot distinguish an eviction from a broken server from an
+                            //   expired token, and a client forced to guess guesses wrong
+}
+// NO width, height, duration, or thumbnail endpoint, and none is coming. maiTerm has no image or
+// video decoder and should not acquire one. The phone plays a downloaded file from its own
+// container, where the media element is same-origin — so it reads duration/dimensions off
+// `loadedmetadata` and draws its own poster frame, for free, and caches both against `asset_id`.
+// A video row therefore renders from name + bytes + mime alone until first open, and improves
+// itself after. Caps: 1 GB per file (refused above, with the size, by the tool), 10 GB store,
+// oldest-first eviction.
 
 // One background shell. Reconstructed from the transcript (identity + observed outcomes) and then
 // SETTLED AGAINST THE OS PROCESS TABLE, because the transcript alone is badly stale: nothing is
