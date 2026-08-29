@@ -69,19 +69,54 @@ fn blob_path(asset_id: &str) -> Option<PathBuf> {
 /// the right amount of machinery.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn load_unlocked() -> Vec<AssetRecord> {
-    index_path()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+/// Bumped on every successful manifest write. The WS streamer polls THIS rather than the file's
+/// mtime: mtime has millisecond granularity, so two writes inside one millisecond compared equal
+/// and the second batch was never streamed. A counter cannot tie. Also saves a stat per tick.
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The manifest's current revision. Changes iff something was stored or evicted.
+pub fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Acquire)
 }
 
+fn load_unlocked() -> Vec<AssetRecord> {
+    let Some(path) = index_path() else { return Vec::new() };
+    let Ok(raw) = std::fs::read(&path) else { return Vec::new() }; // absent = empty store
+    match serde_json::from_slice(&raw) {
+        Ok(records) => records,
+        Err(e) => {
+            // NEVER silently default here. Returning an empty Vec would let the next `store` write
+            // a one-record manifest over the wreckage, erasing every asset row — and with them
+            // every `available:false` tombstone and every transcript turn, since those are BUILT
+            // from this file. Move it aside instead: loud, and recoverable by hand.
+            let aside = path.with_extension(format!("corrupt.{}.json", super::now_ms()));
+            let moved = std::fs::rename(&path, &aside).is_ok();
+            log::error!(
+                "[maiLink] asset manifest is unreadable ({e}) — {} asset records are unavailable. \
+                 The blobs are still on disk. {}",
+                raw.len(),
+                if moved { format!("Kept the bad file at {}", aside.display()) } else { "Could not move it aside.".into() }
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Write the manifest so a crash mid-write cannot destroy it.
+///
+/// `std::fs::write` truncates first, so an interruption anywhere in the span leaves a short or
+/// empty file — and this app tracks unclean shutdowns as a recurring event, not a hypothetical.
+/// Temp-then-rename makes the replacement atomic: a reader sees the old manifest or the new one.
 fn save_unlocked(records: &[AssetRecord]) -> Result<(), String> {
     let dir = assets_dir().ok_or("no data dir")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create assets dir: {e}"))?;
     let path = index_path().ok_or("no data dir")?;
+    let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec_pretty(records).map_err(|e| format!("serialize index: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write index: {e}"))
+    std::fs::write(&tmp, json).map_err(|e| format!("write index: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("replace index: {e}"))?;
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    Ok(())
 }
 
 /// Delete the oldest blobs until the store fits, then drop the oldest records past `MAX_RECORDS`.
@@ -127,46 +162,106 @@ fn evict(records: &mut Vec<AssetRecord>) {
     }
 }
 
-/// Copy `bytes` into the store and record it. Returns the stored record.
-pub fn store(
+/// One file on its way into the store: already read, not yet recorded.
+pub struct Incoming {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Copy a whole SEND into the store as ONE manifest write.
+///
+/// Batch-at-a-time is not an optimization, it is the correctness requirement. A batch renders as
+/// a single transcript turn under one `msg_id` (`asset_{batch_id}`), and the WS streamer's
+/// seen-set treats that id as final once emitted. Storing file-by-file published the turn after
+/// the first file, then mutated it under the same id — so on any send where two files straddle a
+/// tick (every multi-file send on an SSH tab, where each fetch spawns ssh) the phone showed file
+/// one and never heard about the rest, while the tool reported them all sent.
+///
+/// Per-file failures are returned alongside the successes rather than aborting: "send the files"
+/// is usually plural and one unreadable path must not discard the others.
+pub fn store_batch(
     tab_id: &str,
     batch_id: &str,
-    name: &str,
-    bytes: &[u8],
+    files: Vec<Incoming>,
     caption: Option<&str>,
-) -> Result<AssetRecord, String> {
-    let len = bytes.len() as u64;
-    if len > MAX_FILE_BYTES {
-        return Err(format!(
-            "{name} is {} — over the {} limit for a file sent to a phone",
-            human_bytes(len),
-            human_bytes(MAX_FILE_BYTES)
-        ));
-    }
-    let asset_id = uuid::Uuid::new_v4().to_string();
-    let dir = assets_dir().ok_or("no data dir")?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create assets dir: {e}"))?;
-    let path = blob_path(&asset_id).ok_or("no data dir")?;
-    std::fs::write(&path, bytes).map_err(|e| format!("write asset: {e}"))?;
+) -> (Vec<AssetRecord>, Vec<(String, String)>) {
+    let mut stored = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    let ts = super::now_ms();
+    let caption = caption.map(str::to_string).filter(|c| !c.trim().is_empty());
 
-    let record = AssetRecord {
-        asset_id,
-        batch_id: batch_id.to_string(),
-        name: name.to_string(),
-        mime: mime_for(name).to_string(),
-        bytes: len,
-        ts: super::now_ms(),
-        tab_id: tab_id.to_string(),
-        caption: caption.map(str::to_string).filter(|c| !c.trim().is_empty()),
-        available: true,
+    let dir = match assets_dir() {
+        Some(d) => d,
+        None => {
+            let e = "no data directory".to_string();
+            return (stored, files.into_iter().map(|f| (f.name, e.clone())).collect());
+        }
     };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        let e = format!("create assets dir: {e}");
+        return (stored, files.into_iter().map(|f| (f.name, e.clone())).collect());
+    }
 
-    let _guard = LOCK.lock().map_err(|_| "asset index lock poisoned")?;
-    let mut records = load_unlocked();
-    records.push(record.clone());
-    evict(&mut records);
-    save_unlocked(&records)?;
-    Ok(record)
+    for file in files {
+        let len = file.bytes.len() as u64;
+        if len > MAX_FILE_BYTES {
+            failed.push((
+                file.name.clone(),
+                format!(
+                    "{} — over the {} limit for a file sent to a phone",
+                    human_bytes(len),
+                    human_bytes(MAX_FILE_BYTES)
+                ),
+            ));
+            continue;
+        }
+        let asset_id = uuid::Uuid::new_v4().to_string();
+        let Some(path) = blob_path(&asset_id) else { continue };
+        if let Err(e) = std::fs::write(&path, &file.bytes) {
+            failed.push((file.name.clone(), format!("could not store it: {e}")));
+            continue;
+        }
+        stored.push(AssetRecord {
+            asset_id,
+            batch_id: batch_id.to_string(),
+            name: file.name.clone(),
+            mime: mime_for(&file.name).to_string(),
+            bytes: len,
+            ts,
+            tab_id: tab_id.to_string(),
+            caption: caption.clone(),
+            available: true,
+        });
+    }
+
+    if stored.is_empty() {
+        return (stored, failed);
+    }
+    match LOCK.lock() {
+        Ok(_guard) => {
+            let mut records = load_unlocked();
+            records.extend(stored.iter().cloned());
+            evict(&mut records);
+            if let Err(e) = save_unlocked(&records) {
+                // The blobs are written but unrecorded — say so per file rather than reporting a
+                // success the phone will never see.
+                log::error!("[maiLink] asset manifest write failed: {e}");
+                for r in &stored {
+                    let _ = blob_path(&r.asset_id).map(std::fs::remove_file);
+                    failed.push((r.name.clone(), format!("could not record it: {e}")));
+                }
+                stored.clear();
+            }
+        }
+        Err(_) => {
+            for r in &stored {
+                let _ = blob_path(&r.asset_id).map(std::fs::remove_file);
+                failed.push((r.name.clone(), "asset index lock poisoned".to_string()));
+            }
+            stored.clear();
+        }
+    }
+    (stored, failed)
 }
 
 /// Newest-first across every tab, bounded. The phone's Files view.
@@ -182,6 +277,10 @@ pub fn list(limit: usize) -> Vec<AssetRecord> {
 }
 
 /// Every asset sent to one tab, oldest first — the transcript renders these in place.
+///
+/// One tab, one parse. For anything that wants MANY tabs, use `by_tab`: calling this in a loop
+/// re-reads and re-parses the whole manifest per tab, which is the O(tabs × filesystem) shape that
+/// produced the chat-list storm.
 pub fn for_tab(tab_id: &str) -> Vec<AssetRecord> {
     let _guard = match LOCK.lock() {
         Ok(g) => g,
@@ -193,15 +292,19 @@ pub fn for_tab(tab_id: &str) -> Vec<AssetRecord> {
     records
 }
 
-/// Cheap change gate for the pollers: the manifest's mtime. One stat per tick instead of parsing
-/// the whole index for every designated tab, which is the shape that produced the chat-list storm.
-pub fn index_mtime() -> Option<u64> {
-    let meta = std::fs::metadata(index_path()?).ok()?;
-    let modified = meta.modified().ok()?;
-    modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_millis() as u64)
+/// Every asset, grouped by tab, oldest first within each — ONE read and ONE parse for the whole
+/// roster. The connect-time seed and the WS streamer both walk every designated tab, and at the
+/// 2000-record cap that is a ~500KB parse each if they ask per tab.
+pub fn by_tab() -> std::collections::HashMap<String, Vec<AssetRecord>> {
+    let mut out: std::collections::HashMap<String, Vec<AssetRecord>> =
+        std::collections::HashMap::new();
+    let Ok(_guard) = LOCK.lock() else { return out };
+    let mut records = load_unlocked();
+    records.sort_by_key(|r| r.ts);
+    for r in records {
+        out.entry(r.tab_id.clone()).or_default().push(r);
+    }
+    out
 }
 
 /// The record and the bytes' path, if the asset exists AND still has its blob.
@@ -329,6 +432,52 @@ mod tests {
         // the file to the phone's share sheet instead of a preview that would fail.
         assert_eq!(mime_for("Makefile"), "application/octet-stream");
         assert_eq!(mime_for("archive.sbjkt"), "application/octet-stream");
+    }
+
+    #[test]
+    fn a_whole_send_lands_in_one_manifest_write() {
+        // The defect this replaced: storing file-by-file bumped the revision per FILE, and the
+        // batch renders as ONE transcript turn under one msg_id. The streamer emitted that turn
+        // after file one and then skipped it as already-seen when files two and three arrived —
+        // so a multi-file send showed one file on the phone while the tool reported them all.
+        let before = revision();
+        let (stored, failed) = store_batch(
+            "tab-batch-test",
+            "batch-1",
+            vec![
+                Incoming { name: "a.txt".into(), bytes: b"one".to_vec() },
+                Incoming { name: "b.txt".into(), bytes: b"two".to_vec() },
+            ],
+            Some("two files"),
+        );
+        assert_eq!(stored.len(), 2);
+        assert!(failed.is_empty());
+        assert_eq!(
+            revision(),
+            before + 1,
+            "one send is one revision, however many files it carried"
+        );
+        // Same batch id and timestamp, so they group into a single turn.
+        assert_eq!(stored[0].batch_id, stored[1].batch_id);
+        assert_eq!(stored[0].ts, stored[1].ts);
+        assert_eq!(stored[0].caption.as_deref(), Some("two files"));
+
+        // Clean up: these are real files under the per-install dir.
+        for r in &stored {
+            if let Some(p) = blob_path(&r.asset_id) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+
+    #[test]
+    fn a_send_that_stores_nothing_wakes_nobody() {
+        // The revision is what the WS streamer polls. A call that stored nothing must not move
+        // it, or every connected phone re-walks the roster for a change that isn't there.
+        let before = revision();
+        let (stored, failed) = store_batch("tab-empty-test", "batch-3", Vec::new(), None);
+        assert!(stored.is_empty() && failed.is_empty());
+        assert_eq!(revision(), before, "no write, no revision");
     }
 
     #[test]

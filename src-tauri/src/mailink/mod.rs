@@ -445,7 +445,17 @@ async fn assets_list(
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
-    Ok(Json(json!(assets::list(ASSET_LIST_LIMIT))))
+    // Filtered to designated tabs. Without this, a file sent from a tab the human had explicitly
+    // kept out of maiLink still appeared in the Files view — tagged with a tabId the phone has no
+    // chat for. Exposure is a real gate, not a visibility toggle (§ the same rule every tab-scoped
+    // endpoint follows), and it has to hold on the cross-chat surface too.
+    let designated: std::collections::HashSet<String> =
+        designated_tabs(&s.app).into_iter().map(|t| t.tab_id).collect();
+    let visible: Vec<assets::AssetRecord> = assets::list(ASSET_LIST_LIMIT)
+        .into_iter()
+        .filter(|a| designated.contains(&a.tab_id))
+        .collect();
+    Ok(Json(json!(visible)))
 }
 
 /// What a `Range` header asks for, resolved against a known length (unit-tested).
@@ -1890,14 +1900,16 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // `stream_new_assets`). Seeding at the same instant as the snapshot is what makes "already
     // delivered" and "already shown" the same set.
     let mut asset_seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    let mut asset_mtime: Option<u64> = assets::index_mtime();
-    for t in designated_tabs(&s.app) {
-        let ids: std::collections::HashSet<String> = asset_turns(&t.tab_id)
-            .iter()
-            .filter_map(|turn| turn.get("msg_id").and_then(|v| v.as_str()).map(str::to_string))
-            .collect();
-        if !ids.is_empty() {
-            asset_seen.insert(t.tab_id, ids);
+    let mut asset_rev: u64 = assets::revision();
+    {
+        // ONE parse for the whole roster. Asking per tab re-read and re-parsed the entire manifest
+        // once per designated tab — ~386 of them here — which is the O(tabs x filesystem) shape
+        // that produced the chat-list storm.
+        let grouped = assets::by_tab();
+        for t in designated_tabs(&s.app) {
+            if let Some(records) = grouped.get(&t.tab_id) {
+                asset_seen.insert(t.tab_id, batch_ids(records));
+            }
         }
     }
 
@@ -1969,7 +1981,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys).await.is_err() {
                     return;
                 }
-                if stream_new_assets(&mut socket, &s.app, &mut asset_seen, &mut asset_mtime).await.is_err() {
+                if stream_new_assets(&mut socket, &s.app, &mut asset_seen, &mut asset_rev).await.is_err() {
                     return;
                 }
             }
@@ -2187,15 +2199,17 @@ async fn stream_new_assets(
     socket: &mut WebSocket,
     app: &AppState,
     seen: &mut HashMap<String, std::collections::HashSet<String>>,
-    last_mtime: &mut Option<u64>,
+    last_rev: &mut u64,
 ) -> Result<(), ()> {
-    let mtime = assets::index_mtime();
-    if mtime.is_none() || mtime == *last_mtime {
+    let rev = assets::revision();
+    if rev == *last_rev {
         return Ok(());
     }
-    *last_mtime = mtime;
+    *last_rev = rev;
+    let grouped = assets::by_tab();
     for t in designated_tabs(app) {
-        let turns = asset_turns(&t.tab_id);
+        let Some(records) = grouped.get(&t.tab_id) else { continue };
+        let turns = turns_from_records(records);
         if turns.is_empty() {
             continue;
         }
@@ -3167,7 +3181,7 @@ fn archived_chats(app: &AppState) -> Vec<Value> {
 /// via the exposure settings (designate-only mode, or `mailink_excluded` in expose-all mode)
 /// is genuinely unreachable, not merely hidden from discovery. Returns NOT_FOUND-worthy false
 /// for unknown or non-designated tab_ids alike.
-fn is_designated(app: &AppState, tab_id: &str) -> bool {
+pub(crate) fn is_designated(app: &AppState, tab_id: &str) -> bool {
     designated_tabs(app).iter().any(|t| t.tab_id == tab_id)
 }
 
@@ -3486,9 +3500,20 @@ fn map_ask_questions(tool_input: &Value) -> Option<Value> {
 /// `goal_status` and `terminal_snapshot` make. `text` is a real human sentence rather than a
 /// placeholder, because a client that doesn't know `kind: "asset"` falls through to rendering it,
 /// and "Sent 2 files: report.pdf, clip.mov" degrades usefully where an empty string would not.
+/// The `msg_id`s a tab's asset records render as — the streamer's dedup key.
+fn batch_ids(records: &[assets::AssetRecord]) -> std::collections::HashSet<String> {
+    records.iter().map(|r| format!("asset_{}", r.batch_id)).collect()
+}
+
 fn asset_turns(tab_id: &str) -> Vec<Value> {
+    turns_from_records(&assets::for_tab(tab_id))
+}
+
+/// Group already-loaded records into turns. Split from `asset_turns` so a caller walking the whole
+/// roster parses the manifest once (`assets::by_tab`) instead of once per tab.
+fn turns_from_records(records: &[assets::AssetRecord]) -> Vec<Value> {
     let mut by_batch: Vec<(String, Vec<assets::AssetRecord>)> = Vec::new();
-    for record in assets::for_tab(tab_id) {
+    for record in records.iter().cloned() {
         match by_batch.iter_mut().find(|(b, _)| *b == record.batch_id) {
             Some((_, group)) => group.push(record),
             None => by_batch.push((record.batch_id.clone(), vec![record])),

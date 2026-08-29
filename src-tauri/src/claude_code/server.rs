@@ -940,11 +940,24 @@ async fn handle_send_files_to_phone(arguments: &Value, state: &Arc<AppState>) ->
     let caption = arguments.get("caption").and_then(|v| v.as_str());
 
     // One batch id for the call, so the files of one send render as one turn in the chat.
+    // A tab the human has kept out of maiLink has no chat to deliver into, and no phone will
+    // ever show these. Refuse rather than succeed into nowhere: the agent relays this answer to
+    // a person, so a false "it's on your phone" is worse than a clear no.
+    if !crate::mailink::is_designated(state, &tab_id) {
+        return serde_json::json!({ "error":
+            "This tab is not available in maiLink, so there is no chat on the phone to send to. \
+             The human can enable it from the tab's context menu." });
+    }
+
     let batch_id = uuid::Uuid::new_v4().to_string();
     let staging = comms::staging_target_for_tab(state, &tab_id);
 
     let mut results = Vec::with_capacity(paths.len());
-    let (mut sent, mut failed) = (0usize, 0usize);
+    let mut incoming: Vec<assets::Incoming> = Vec::new();
+    let mut failures: Vec<(String, String)> = Vec::new();
+    // path -> the name it was read under, so per-path results can be matched back up.
+    let mut names: Vec<(String, String)> = Vec::new();
+
     for path in &paths {
         let name = std::path::Path::new(path)
             .file_name()
@@ -960,26 +973,78 @@ async fn handle_send_files_to_phone(arguments: &Value, state: &Arc<AppState>) ->
                     .to_string(),
             ),
             comms::StagingTarget::Local => {
-                std::fs::read(path).map_err(|e| format!("could not read it: {e}"))
+                // Check the file BEFORE reading it. The size limit used to be enforced inside the
+                // store, on bytes already resident — so a 40 GB disk image was a 40 GB allocation
+                // and a dead maiTerm (every PTY in every window) instead of the refusal the tool
+                // promises, and /dev/zero reported length 0 and read forever. Reading also blocks
+                // for seconds on a large file, so it goes to the blocking pool rather than
+                // stalling a tokio worker that is also serving the phone.
+                let p = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    let meta = std::fs::metadata(&p)
+                        .map_err(|e| format!("could not read it: {e}"))?;
+                    if !meta.is_file() {
+                        return Err(if meta.is_dir() {
+                            "that is a directory, not a file".to_string()
+                        } else {
+                            "that is not a regular file (a device, socket or pipe has no fixed \
+                             contents to send)".to_string()
+                        });
+                    }
+                    if meta.len() > assets::MAX_FILE_BYTES {
+                        return Err(format!(
+                            "{} — over the {} limit for a file sent to a phone",
+                            assets::human_bytes(meta.len()),
+                            assets::human_bytes(assets::MAX_FILE_BYTES)
+                        ));
+                    }
+                    std::fs::read(&p).map_err(|e| format!("could not read it: {e}"))
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("read task failed: {e}")))
             }
         };
-        match bytes.and_then(|b| assets::store(&tab_id, &batch_id, &name, &b, caption)) {
-            Ok(record) => {
-                sent += 1;
-                results.push(serde_json::json!({
-                    "path": path, "ok": true,
-                    "asset_id": record.asset_id,
-                    "name": record.name,
-                    "bytes": record.bytes,
-                    "size": assets::human_bytes(record.bytes),
-                }));
+        match bytes {
+            Ok(b) => {
+                names.push((path.clone(), name.clone()));
+                incoming.push(assets::Incoming { name, bytes: b });
             }
-            Err(e) => {
-                failed += 1;
-                results.push(serde_json::json!({ "path": path, "ok": false, "error": e }));
-            }
+            Err(e) => failures.push((path.clone(), e)),
         }
     }
+
+    // ONE manifest write for the whole send — see assets::store_batch. Storing file-by-file
+    // published the transcript turn after the first file and then mutated it under the same
+    // msg_id, so on a multi-file send the phone showed one file and never heard about the rest.
+    let (stored, store_failures) = assets::store_batch(&tab_id, &batch_id, incoming, caption);
+
+    let sent = stored.len();
+    for record in &stored {
+        let path = names
+            .iter()
+            .find(|(_, n)| *n == record.name)
+            .map(|(p, _)| p.clone())
+            .unwrap_or_else(|| record.name.clone());
+        results.push(serde_json::json!({
+            "path": path, "ok": true,
+            "asset_id": record.asset_id,
+            "name": record.name,
+            "bytes": record.bytes,
+            "size": assets::human_bytes(record.bytes),
+        }));
+    }
+    for (name, error) in store_failures {
+        let path = names
+            .iter()
+            .find(|(_, n)| *n == name)
+            .map(|(p, _)| p.clone())
+            .unwrap_or(name);
+        results.push(serde_json::json!({ "path": path, "ok": false, "error": error }));
+    }
+    for (path, error) in failures {
+        results.push(serde_json::json!({ "path": path, "ok": false, "error": error }));
+    }
+    let failed = results.len() - sent;
 
     log::info!(
         "[maiLink] sendFilesToPhone on tab {tab_id}: {sent} sent, {failed} failed (batch {batch_id})"
@@ -988,10 +1053,15 @@ async fn handle_send_files_to_phone(arguments: &Value, state: &Arc<AppState>) ->
         "sent": sent,
         "failed": failed,
         "results": results,
-        "note": if sent > 0 {
-            "On the phone these appear in this chat and in its Files list."
+        // Don't promise a phone that isn't there. The agent relays this to a human, and "it's on
+        // your phone" when nothing is paired sends them looking for something that cannot arrive.
+        "note": if sent == 0 {
+            "Nothing was sent.".to_string()
+        } else if state.app_data.read().preferences.mailink_devices.is_empty() {
+            "Stored, but no phone is paired with maiLink yet — they will appear once one is."
+                .to_string()
         } else {
-            "Nothing was sent."
+            "On the phone these appear in this chat and in its Files list.".to_string()
         },
     })
 }
