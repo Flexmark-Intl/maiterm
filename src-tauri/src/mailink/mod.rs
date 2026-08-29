@@ -316,6 +316,10 @@ const MAX_MESSAGE_BODY_BYTES: usize = 32 * 1024 * 1024;
 fn build_router(api: ApiState) -> Router {
     Router::new()
         .route("/mailink/v1/heartbeat", get(heartbeat))
+        // Files an agent sent, newest first across every tab — the phone's Files view. Static
+        // segment, and `{asset_id}` is a uuid, so neither can shadow the other.
+        .route("/mailink/v1/assets", get(assets_list))
+        .route("/mailink/v1/assets/{asset_id}", get(asset_bytes))
         .route("/mailink/v1/chats", get(chats_list))
         // Static segment — must be registered before `/chats/{tab_id}` so it isn't shadowed.
         .route("/mailink/v1/chats/archived", get(chats_archived))
@@ -425,6 +429,174 @@ async fn chats_list(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
     Ok(Json(json!(build_chats(&s.app))))
+}
+
+/// How many assets `GET /assets` returns. The phone's Files view is a browse surface, not an
+/// archive; the transcript is where an older file is found in context.
+const ASSET_LIST_LIMIT: usize = 200;
+
+/// Bytes per streamed chunk. Large enough that a LAN transfer isn't syscall-bound, small enough
+/// that a 1 GB asset never becomes 1 GB of maiTerm RSS.
+const ASSET_CHUNK_BYTES: u64 = 256 * 1024;
+
+/// GET /mailink/v1/assets — every file an agent has sent, newest first, across all tabs.
+async fn assets_list(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(json!(assets::list(ASSET_LIST_LIMIT))))
+}
+
+/// What a `Range` header asks for, resolved against a known length (unit-tested).
+#[derive(Debug, PartialEq)]
+enum RangeAsk {
+    /// No range, or a form we don't implement — answer 200 with the whole file, which is always
+    /// a legal response to a range request.
+    Whole,
+    /// Inclusive byte offsets, both within the file.
+    Part(u64, u64),
+    /// Syntactically a byte range, but off the end of the file — 416, never a silent full body.
+    /// Answering 200 here corrupts a resume: the client writes file-start bytes at its offset.
+    Unsatisfiable,
+}
+
+/// Parse a single `bytes=` range. Multi-range (`bytes=0-9,20-29`) is deliberately `Whole`: a
+/// multipart/byteranges body is a lot of machinery for something no client here sends, and a full
+/// body is a correct answer to any range request.
+fn parse_range(header: &str, len: u64) -> RangeAsk {
+    let Some(spec) = header.trim().strip_prefix("bytes=") else { return RangeAsk::Whole };
+    if spec.contains(',') {
+        return RangeAsk::Whole;
+    }
+    let Some((from, to)) = spec.split_once('-') else { return RangeAsk::Whole };
+    let (from, to) = (from.trim(), to.trim());
+    if len == 0 {
+        return RangeAsk::Unsatisfiable;
+    }
+    match (from.is_empty(), to.is_empty()) {
+        // `bytes=-N` — the LAST n bytes. n > len is not an error; it means the whole file.
+        (true, false) => match to.parse::<u64>() {
+            Ok(0) => RangeAsk::Unsatisfiable,
+            Ok(n) => RangeAsk::Part(len.saturating_sub(n), len - 1),
+            Err(_) => RangeAsk::Whole,
+        },
+        // `bytes=N-` — from n to the end.
+        (false, true) => match from.parse::<u64>() {
+            Ok(n) if n < len => RangeAsk::Part(n, len - 1),
+            Ok(_) => RangeAsk::Unsatisfiable,
+            Err(_) => RangeAsk::Whole,
+        },
+        // `bytes=N-M` — inclusive, clamped to the end (a client may ask past it).
+        (false, false) => match (from.parse::<u64>(), to.parse::<u64>()) {
+            (Ok(a), Ok(b)) if a < len && a <= b => RangeAsk::Part(a, b.min(len - 1)),
+            (Ok(_), Ok(_)) => RangeAsk::Unsatisfiable,
+            _ => RangeAsk::Whole,
+        },
+        (true, true) => RangeAsk::Whole,
+    }
+}
+
+/// `Content-Disposition` for a downloaded file. The plain `filename=` is ASCII-only and quoted;
+/// `filename*=` carries the real name for anything else, so a file called `résumé.pdf` saves under
+/// its own name rather than a mangled one.
+fn content_disposition(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || " ._-()[]".contains(c) { c } else { '_' })
+        .collect();
+    let encoded: String = name
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"._-~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    format!("attachment; filename=\"{safe}\"; filename*=UTF-8''{encoded}")
+}
+
+/// GET /mailink/v1/assets/{assetId} — the bytes.
+///
+/// Streamed in chunks rather than read into memory: the per-file cap is 1 GB, and a phone pulling
+/// one must not cost maiTerm the same. Honours `Range`, which matters less than first thought —
+/// the phone plays from a downloaded copy in its own container, not from this URL — but is what
+/// lets an interrupted 1 GB download resume instead of restarting.
+async fn asset_bytes(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+) -> Result<Response, StatusCode> {
+    authorize(&s, &headers)?;
+    // 404 covers both "no such asset" and "evicted": the phone should never be discovering
+    // availability here, because the descriptor already told it (`available`).
+    let (record, path) = assets::resolve(&asset_id).ok_or(StatusCode::NOT_FOUND)?;
+    let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(record.bytes);
+
+    let ask = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| parse_range(h, len))
+        .unwrap_or(RangeAsk::Whole);
+
+    let (status, start, end) = match ask {
+        RangeAsk::Whole => (StatusCode::OK, 0, len.saturating_sub(1)),
+        RangeAsk::Part(a, b) => (StatusCode::PARTIAL_CONTENT, a, b),
+        RangeAsk::Unsatisfiable => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{len}"))],
+            )
+                .into_response())
+        }
+    };
+
+    let mut file = tokio::fs::File::open(&path).await.map_err(|e| {
+        log::warn!("[maiLink] asset {asset_id} unreadable: {e}");
+        StatusCode::NOT_FOUND
+    })?;
+    if start > 0 {
+        use tokio::io::AsyncSeekExt;
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+    let count = end.saturating_sub(start).saturating_add(1).min(len);
+
+    let stream = futures_util::stream::try_unfold(
+        (file, count),
+        |(mut file, remaining)| async move {
+            use tokio::io::AsyncReadExt;
+            if remaining == 0 {
+                return Ok::<_, std::io::Error>(None);
+            }
+            let want = remaining.min(ASSET_CHUNK_BYTES) as usize;
+            let mut buf = vec![0u8; want];
+            let read = file.read(&mut buf).await?;
+            if read == 0 {
+                return Ok(None); // truncated under us — end cleanly rather than hang
+            }
+            buf.truncate(read);
+            Ok(Some((buf, (file, remaining - read as u64))))
+        },
+    );
+
+    let mut resp = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, record.mime.clone())
+        .header(header::CONTENT_LENGTH, count.to_string())
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_DISPOSITION, content_disposition(&record.name))
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if status == StatusCode::PARTIAL_CONTENT {
+        if let Ok(v) = format!("bytes {start}-{end}/{len}").parse() {
+            resp.headers_mut().insert(header::CONTENT_RANGE, v);
+        }
+    }
+    Ok(resp)
 }
 
 /// GET /mailink/v1/chats/{tabId} — one chat with a (v1: distilled-tail) transcript + any
@@ -4695,6 +4867,49 @@ mod tests {
         // The ordinary trigger is untouched.
         assert!(state_frame_needed(Some("active"), "idle_done", false));
         assert!(state_frame_needed(None, "active", false), "a tab we've never seen");
+    }
+
+    #[test]
+    fn a_byte_range_is_resolved_or_refused_but_never_guessed() {
+        use RangeAsk::*;
+        let len = 1000;
+        // The ordinary forms.
+        assert_eq!(parse_range("bytes=0-99", len), Part(0, 99));
+        assert_eq!(parse_range("bytes=500-", len), Part(500, 999), "resume from an offset");
+        assert_eq!(parse_range("bytes=-100", len), Part(900, 999), "the last N bytes");
+        assert_eq!(parse_range(" bytes=0-0 ", len), Part(0, 0), "one byte, whitespace tolerated");
+        // A client may ask past the end; that is a clamp, not an error.
+        assert_eq!(parse_range("bytes=900-99999", len), Part(900, 999));
+        assert_eq!(parse_range("bytes=-99999", len), Part(0, 999), "suffix longer than the file");
+
+        // THE ONE THAT MATTERS. A start past the end must be 416, never a silent 200 with the
+        // whole file: a resuming client writes those bytes at ITS offset, so answering from the
+        // beginning corrupts the download rather than failing it.
+        assert_eq!(parse_range("bytes=1000-", len), Unsatisfiable);
+        assert_eq!(parse_range("bytes=1200-1300", len), Unsatisfiable);
+        assert_eq!(parse_range("bytes=50-40", len), Unsatisfiable, "backwards");
+        assert_eq!(parse_range("bytes=-0", len), Unsatisfiable, "zero-length suffix");
+        assert_eq!(parse_range("bytes=0-0", 0), Unsatisfiable, "empty file");
+
+        // Anything we don't implement or can't parse falls back to the whole file, which is a
+        // legal answer to any range request.
+        assert_eq!(parse_range("bytes=0-9,20-29", len), Whole, "multi-range not implemented");
+        assert_eq!(parse_range("items=0-99", len), Whole, "not a byte range");
+        assert_eq!(parse_range("bytes=abc-def", len), Whole);
+        assert_eq!(parse_range("garbage", len), Whole);
+    }
+
+    #[test]
+    fn a_download_keeps_its_real_filename() {
+        let d = content_disposition("report.pdf");
+        assert!(d.contains("filename=\"report.pdf\""));
+        // Non-ASCII survives via filename*, and the plain form stays ASCII-safe rather than
+        // emitting raw bytes a header parser may reject.
+        let d = content_disposition("résumé.pdf");
+        assert!(d.contains("filename*=UTF-8''r%C3%A9sum%C3%A9.pdf"), "{d}");
+        assert!(d.contains("filename=\"r_sum_.pdf\""), "{d}");
+        // A quote in the name must not escape the quoted string.
+        assert!(!content_disposition("a\"b.txt").contains("\"a\"b.txt\""));
     }
 
     #[test]
