@@ -3099,6 +3099,24 @@ mod reload_carry_tests {
             archived_name: Some("archived".to_string()),
             archived_at: Some("2026-08-01T00:00:00Z".to_string()),
             suspended_at: Some("2026-08-02T00:00:00Z".to_string()),
+            // The tripwire above did its job: a reload DOES carry these. A reload is
+            // duplicate-then-close, so the surviving tab is the same tab to everyone who
+            // works in it, and dropping its archived work would delete task history that
+            // `restore_archived_tab` is the only way back to.
+            archived_tasks: vec![crate::state::workspace::Task {
+                id: "task-archived".to_string(),
+                title: "archived work".to_string(),
+                normalized_title: "archived work".to_string(),
+                detail: None,
+                status: "done".to_string(),
+                tab_id: Some(id.to_string()),
+                blocked_by: Vec::new(),
+                origin: "agent".to_string(),
+                created_at: "2026-08-01T00:00:00Z".to_string(),
+                updated_at: "2026-08-01T00:00:00Z".to_string(),
+                workstream_id: None,
+                topic_id: None,
+            }],
             wake_on_resume: true,
             tab_type: TabType::Terminal,
             editor_file: None,
