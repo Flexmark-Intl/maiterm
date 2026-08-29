@@ -157,7 +157,9 @@ Pane
 Tab
 ├── id, name, custom_name (bool — true if user explicitly renamed)
 ├── tab_type: 'terminal' | 'editor' | 'diff' | 'board'
-├── pty_id (terminal tabs — links to running PTY)
+├── pty_id (terminal tabs — see the pitfall below: NOT "has a live PTY")
+├── suspended_at (PTY killed by suspend; cleared when it goes live again)
+├── archived_tasks (task rows parked with the tab while ARCHIVED; empty on a live tab)
 ├── editor_file (editor tabs — EditorFileInfo)
 ├── diff_context (diff tabs — DiffContext)
 ├── scrollback (serialized terminal state)
@@ -304,4 +306,7 @@ Memory trend (`aiterm-memory-trend.json`) is reseeded into the in-memory ring bu
 - **Serde round-trip pitfall**: Rust `skip_serializing_if = "Option::is_none"` omits null fields → loaded JS objects have `undefined` instead of `null`. Use field-by-field comparison with `?? null` normalization, NOT `JSON.stringify`.
 - **Reload replaces a tab under a NEW id**: `reloadTab` = `duplicateTab` + `deleteTab(original)`. State transfer goes through `carry_tab_state_on_reload` (`commands/workspace.rs`), which copies the WHOLE `Tab` record and names its exceptions — never re-introduce an allowlist here, that is what made every new `Tab` field a silent regression. Anything a genuine *duplicate* must not inherit (bound comms threads, monitored channels) is MOVED — cleared on the original in the same write — so the comms watcher can't catch both tabs holding one claim. Non-`Tab` state keyed by tab id (agent bridge, mesh, tasks) has its own `remapTab` calls at the end of `reloadTab`.
 - **New workspace insert order**: New workspaces insert after the currently active workspace (not appended to end), persisted via `reorderWorkspaces`.
+- **`tab.pty_id` is NOT "has a live PTY"** — in the frontend mirror it means "has had one". `suspendWorkspace` clears it in Rust and writes only `suspended = true` back to the mirror; a cancelled session restore leaves it set deliberately. The app's own test for suspended is `!!tab.pty_id && !terminalsStore.get(tabId)` (`+page.svelte`). For "can anything reach this tab", ask `terminalsStore.get(tabId)`.
+- **Four tab states get confused, and they are separate**: a SUSPENDED TAB (PTY killed, still in the pane tree, inside a possibly-active workspace — `resumeTab`); a SUSPENDED WORKSPACE (all its tabs parked at once — `resumeWorkspace`); an ARCHIVED tab (lifted out of the pane tree into `archived_tabs` — `restoreArchivedTab`); and NOT LOADED (`TerminalPane` unmounted, PTY may be alive). `docs/overlord.md` has the table.
+- **`cargo check` does not compile tests.** Adding a field to a struct with exhaustive literals in `#[cfg(test)]` code passes `cargo check` and fails `cargo test`. Run `cargo check --tests` after a schema change.
 - **Width resizes mid-stream duplicate TUI scrollback**: Claude Code re-renders its retained transcript on every cols change; the old rendering stays in history → permanent duplicate blocks. `resize_pty` coalesces resizes (250ms trailing debounce while output is hot, no-ops skipped), and background tabs spawn at their saved size instead of 80×24 to avoid a width jump on first view. Never add code paths that fire gratuitous width changes at a streaming PTY.
