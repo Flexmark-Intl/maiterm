@@ -193,6 +193,17 @@ pub fn for_tab(tab_id: &str) -> Vec<AssetRecord> {
     records
 }
 
+/// Cheap change gate for the pollers: the manifest's mtime. One stat per tick instead of parsing
+/// the whole index for every designated tab, which is the shape that produced the chat-list storm.
+pub fn index_mtime() -> Option<u64> {
+    let meta = std::fs::metadata(index_path()?).ok()?;
+    let modified = meta.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+}
+
 /// The record and the bytes' path, if the asset exists AND still has its blob.
 pub fn resolve(asset_id: &str) -> Option<(AssetRecord, PathBuf)> {
     let _guard = LOCK.lock().ok()?;

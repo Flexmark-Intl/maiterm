@@ -1884,6 +1884,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     let mut task_keys: HashMap<String, u64> = HashMap::new();
     // Same discipline for the background-shell roster.
     let mut shell_keys: HashMap<String, u64> = HashMap::new();
+    // Asset batches already streamed, per tab, plus the manifest mtime that gates the whole pass.
+    let mut asset_seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut asset_mtime: Option<u64> = None;
 
     // initial snapshot: one chat_state per chat
     for c in build_chats(&s.app) {
@@ -1951,6 +1954,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
             }
             _ = msg_ticker.tick() => {
                 if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys).await.is_err() {
+                    return;
+                }
+                if stream_new_assets(&mut socket, &s.app, &mut asset_seen, &mut asset_mtime).await.is_err() {
                     return;
                 }
             }
@@ -2149,12 +2155,54 @@ fn message_event(tab_id: &str, turn: &Value) -> Value {
     // Typed turns (`peer_message`, …) must carry their tag on the LIVE path too: a streamed turn
     // that arrives untagged renders as a plain message and then silently changes shape when the
     // next GET returns the tagged version.
-    for key in ["kind", "peer"] {
+    for key in ["kind", "peer", "assets"] {
         if let Some(v) = turn.get(key) {
             ev[key] = v.clone();
         }
     }
     ev
+}
+
+/// Emit a `message` frame for any file batch the phone hasn't been sent yet.
+///
+/// Assets are synthesized turns, so they are invisible to the transcript-mtime path that streams
+/// everything else — they need their own diff. Gated on the manifest's mtime so the common case
+/// (nobody has sent a file) costs one stat per tick rather than a parse per designated tab; that
+/// per-tab shape is what made the chat-list storm. A tab's first observation baselines silently:
+/// the phone's GET already carried its history, and replaying it would duplicate every row.
+async fn stream_new_assets(
+    socket: &mut WebSocket,
+    app: &AppState,
+    seen: &mut HashMap<String, std::collections::HashSet<String>>,
+    last_mtime: &mut Option<u64>,
+) -> Result<(), ()> {
+    let mtime = assets::index_mtime();
+    if mtime.is_none() || mtime == *last_mtime {
+        return Ok(());
+    }
+    *last_mtime = mtime;
+    for t in designated_tabs(app) {
+        let turns = asset_turns(&t.tab_id);
+        if turns.is_empty() {
+            continue;
+        }
+        let entry = seen.entry(t.tab_id.clone()).or_default();
+        let baseline = entry.is_empty();
+        for turn in &turns {
+            let Some(id) = turn.get("msg_id").and_then(|v| v.as_str()) else { continue };
+            if !entry.insert(id.to_string()) || baseline {
+                continue;
+            }
+            if socket
+                .send(Message::Text(message_event(&t.tab_id, turn).to_string().into()))
+                .await
+                .is_err()
+            {
+                return Err(());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Stream newly-appended agent/tool turns for every designated tab as `message` frames. Never
@@ -3414,6 +3462,42 @@ fn map_ask_questions(tool_input: &Value) -> Option<Value> {
 /// (Claude JSONL / Codex rollout) when we can find it, otherwise a single-system-turn scrape of
 /// the tab's own live terminal (SSH tabs — whose transcripts live on the remote host — pruned
 /// local sessions, Gemini, plain shells).
+/// One synthesized transcript turn per `sendFilesToPhone` call, oldest first.
+///
+/// Synthesized, not injected: nothing is written into Claude's JSONL — the same move
+/// `goal_status` and `terminal_snapshot` make. `text` is a real human sentence rather than a
+/// placeholder, because a client that doesn't know `kind: "asset"` falls through to rendering it,
+/// and "Sent 2 files: report.pdf, clip.mov" degrades usefully where an empty string would not.
+fn asset_turns(tab_id: &str) -> Vec<Value> {
+    let mut by_batch: Vec<(String, Vec<assets::AssetRecord>)> = Vec::new();
+    for record in assets::for_tab(tab_id) {
+        match by_batch.iter_mut().find(|(b, _)| *b == record.batch_id) {
+            Some((_, group)) => group.push(record),
+            None => by_batch.push((record.batch_id.clone(), vec![record])),
+        }
+    }
+    by_batch
+        .into_iter()
+        .filter_map(|(batch_id, group)| {
+            let first = group.first()?;
+            let names: Vec<&str> = group.iter().map(|r| r.name.as_str()).collect();
+            let text = match (group.len(), first.caption.as_deref()) {
+                (_, Some(c)) => format!("{c} ({})", names.join(", ")),
+                (1, None) => format!("Sent {}", names[0]),
+                (n, None) => format!("Sent {n} files: {}", names.join(", ")),
+            };
+            Some(json!({
+                "msg_id": format!("asset_{batch_id}"),
+                "role": "system",
+                "kind": "asset",
+                "text": text,
+                "ts": first.ts,
+                "assets": group,
+            }))
+        })
+        .collect()
+}
+
 fn build_transcript(app: &AppState, tab_id: &str, now: u64) -> Vec<Value> {
     // Resolve via the LIVE session, or (post-relaunch, pre-initSession) the persisted resume
     // id — so a dormant/resuming agent still shows its real distilled conversation, keyed to
@@ -3924,7 +4008,14 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // lights up; falls back to the distilled terminal scrape for other runtimes / when no
     // transcript is found. See mailink/transcript.rs.
     let ph = std::time::Instant::now();
-    let transcript = build_transcript(app, tab_id, now);
+    let mut transcript = build_transcript(app, tab_id, now);
+    // Files an agent sent belong where it sent them, so merge by ts rather than appending. The
+    // live terminal_snapshot turn carries `now`, so it stays last on its own.
+    let sent = asset_turns(tab_id);
+    if !sent.is_empty() {
+        transcript.extend(sent);
+        transcript.sort_by_key(|t| t.get("ts").and_then(|v| v.as_u64()).unwrap_or(0));
+    }
     let ms_transcript = ph.elapsed().as_millis(); // 8 MiB tail read + distill
 
     let mut detail = json!({
