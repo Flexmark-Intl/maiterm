@@ -675,6 +675,7 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
     match tool_name {
         "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state, app_handle).await),
         "readCommsThread" => Some(handle_read_comms_thread(arguments, state).await),
+        "sendFilesToPhone" => Some(handle_send_files_to_phone(arguments, state).await),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
@@ -910,6 +911,91 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
 }
 
 /// The tabId argument (auto-injected by connection affinity after initSession).
+/// `sendFilesToPhone` — copy files into the maiLink asset store so the human's paired phone can
+/// preview or save them.
+///
+/// **Per-path results, never all-or-nothing.** "Send the files" is usually plural, and a typo in
+/// one path must not discard four good ones. The reply names each path with its outcome, so the
+/// agent can tell the human exactly what landed rather than reporting a batch failure.
+///
+/// SSH tabs are ordinary: the agent's paths are on the remote host, and `staging_target_for_tab`
+/// resolves that to a tunnel fetch — the same machinery comms already uses for attachments. The
+/// one real failure is a tab whose bridge tunnel is down, which says so per path.
+async fn handle_send_files_to_phone(arguments: &Value, state: &Arc<AppState>) -> Value {
+    use crate::comms;
+    use crate::mailink::assets;
+
+    let tab_id = match required_tab_id(arguments) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let paths: Vec<String> = arguments
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return serde_json::json!({ "error": "paths is required — give at least one absolute file path" });
+    }
+    let caption = arguments.get("caption").and_then(|v| v.as_str());
+
+    // One batch id for the call, so the files of one send render as one turn in the chat.
+    let batch_id = uuid::Uuid::new_v4().to_string();
+    let staging = comms::staging_target_for_tab(state, &tab_id);
+
+    let mut results = Vec::with_capacity(paths.len());
+    let (mut sent, mut failed) = (0usize, 0usize);
+    for path in &paths {
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+
+        let bytes = match &staging {
+            comms::StagingTarget::Remote { host_key, ssh_args } => {
+                crate::mailink::fetch_bytes_remote(host_key, ssh_args, path).await
+            }
+            comms::StagingTarget::Unavailable => Err(
+                "this SSH tab has no live maiTerm bridge tunnel, so its files cannot be reached"
+                    .to_string(),
+            ),
+            comms::StagingTarget::Local => {
+                std::fs::read(path).map_err(|e| format!("could not read it: {e}"))
+            }
+        };
+        match bytes.and_then(|b| assets::store(&tab_id, &batch_id, &name, &b, caption)) {
+            Ok(record) => {
+                sent += 1;
+                results.push(serde_json::json!({
+                    "path": path, "ok": true,
+                    "asset_id": record.asset_id,
+                    "name": record.name,
+                    "bytes": record.bytes,
+                    "size": assets::human_bytes(record.bytes),
+                }));
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({ "path": path, "ok": false, "error": e }));
+            }
+        }
+    }
+
+    log::info!(
+        "[maiLink] sendFilesToPhone on tab {tab_id}: {sent} sent, {failed} failed (batch {batch_id})"
+    );
+    serde_json::json!({
+        "sent": sent,
+        "failed": failed,
+        "results": results,
+        "note": if sent > 0 {
+            "On the phone these appear in this chat and in its Files list."
+        } else {
+            "Nothing was sent."
+        },
+    })
+}
+
 fn required_tab_id(arguments: &Value) -> Result<String, Value> {
     match arguments.get("tabId").and_then(|v| v.as_str()) {
         Some(t) if !t.is_empty() => Ok(t.to_string()),
@@ -2031,7 +2117,11 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 20] = [
+const PEER_ADDRESSING_TOOLS: [&str; 21] = [
+    // Files leave the machine for the human's phone and land in a named tab's chat. An
+    // inferred identity would put one agent's files in a stranger's conversation, which is
+    // the "speak as it" side of this line, not the "act on it" side.
+    "sendFilesToPhone",
     "sendToBridgedAgent",
     "getBridgedAgent",
     "listBridgedPeers",
