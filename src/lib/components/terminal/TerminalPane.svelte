@@ -9,8 +9,7 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
-  import { bakeBridgeEnv } from '$lib/utils/bridgeEnv';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
@@ -844,11 +843,16 @@
     // Skip all of this when reattaching to an existing PTY (e.g. tab moved between workspaces).
     if (!reattaching) {
       if (ctx?.sshCommand) {
+        // What the ssh command below baked as MAITERM_PORT. Handed to enableBridge so it can
+        // correct the shell if the tunnel lands elsewhere — safe here, and only here, because
+        // the poll below awaits the bridge before the agent is started.
+        let bakedPort: number | undefined;
         // Send SSH command first — small delay for local shell to initialize
         setTimeout(async () => {
           try {
-            const cmd = buildSshCommand(
-              ctx.sshCommand, ctx.remoteCwd, tabId, await bakeBridgeEnv(tabId, ctx.sshCommand!));
+            const bridgeEnv = await getRemoteBridgeEnv(ctx.sshCommand!);
+            bakedPort = bridgeEnv?.port;
+            const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd, tabId, bridgeEnv);
             const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
             await writeTerminal(ptyId, bytes);
           } catch (e) {
@@ -871,7 +875,7 @@
               if (i === maxAttempts - 1) return; // timed out
             }
             if (destroyed) return;
-            await enableBridge(tabId, ctx.sshCommand!, ptyId).catch(() => {});
+            await enableBridge(tabId, ctx.sshCommand!, ptyId, false, bakedPort).catch(() => {});
             if (destroyed) return;
             if ((autoResumeEnabled ?? true) && autoResumeCommand) {
               try {
@@ -1611,21 +1615,24 @@
     sshDisconnectStore.clear(tabId);
     lastDropAt = 0;
 
+    let bakedPort: number | undefined;
     try {
-      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, await bakeBridgeEnv(tabId, sshCommand));
+      const bridgeEnv = await getRemoteBridgeEnv(sshCommand);
+      bakedPort = bridgeEnv?.port;
+      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, bridgeEnv);
       await writeTerminal(ptyId, Array.from(new TextEncoder().encode(cmd + '\n')));
     } catch (e) {
       logError(`reconnectSsh: failed to write ssh command: ${e}`);
       return;
     }
-    await pollSshThenBridgeResume(sshCommand);
+    await pollSshThenBridgeResume(sshCommand, bakedPort);
   }
 
   /**
    * Wait for the ssh connection to come up, then enable the MCP bridge and fire
    * the auto-resume command. Shared by initial spawn and reconnect.
    */
-  async function pollSshThenBridgeResume(sshCommand: string) {
+  async function pollSshThenBridgeResume(sshCommand: string, bakedPort?: number) {
     const maxAttempts = 30; // 15s max
     for (let i = 0; i < maxAttempts; i++) {
       if (destroyed) return;
@@ -1637,7 +1644,7 @@
       if (i === maxAttempts - 1) return; // timed out
     }
     if (destroyed) return;
-    await enableBridge(tabId, sshCommand, ptyId).catch(() => {});
+    await enableBridge(tabId, sshCommand, ptyId, false, bakedPort).catch(() => {});
     if (destroyed) return;
     const resumeCmd = autoResumeCommand ?? autoResumeRememberedCommand ?? null;
     if (resumeCmd) {

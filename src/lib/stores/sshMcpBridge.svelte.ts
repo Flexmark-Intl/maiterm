@@ -16,7 +16,6 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable } from '$lib/stores/triggers.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { countedListen as listen } from '$lib/utils/listenCounter';
-import { bakedBridgePort, forgetBakedBridgePort } from '$lib/utils/bridgeEnv';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 export type BridgeStatus = 'connected' | 'pending' | 'failed';
@@ -53,7 +52,6 @@ function clearBridgeState(tabId: string): void {
   bridgeStates.delete(tabId);
   bridgeStates = new Map(bridgeStates);
   injectedEnvPort.delete(tabId);
-  forgetBakedBridgePort(tabId);
   logInfo(`SSH MCP bridge cleared for tab ${tabId} (tunnel down)`);
 }
 
@@ -438,17 +436,17 @@ const bridgeEpoch = new Map<string, number>();
  *   trailing newline sends it. maiTerm-initiated sessions pass `false`: buildSshCommand already
  *   baked the tab id into their remote command, so there is nothing to type.
  */
-export function enableBridge(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false): Promise<boolean> {
+export function enableBridge(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false, bakedPort?: number): Promise<boolean> {
   const inflight = inFlightBridges.get(tabId);
   if (inflight) return inflight;
-  const attempt = enableBridgeInner(tabId, sshArgs, ptyId, freshSsh).finally(() => {
+  const attempt = enableBridgeInner(tabId, sshArgs, ptyId, freshSsh, bakedPort).finally(() => {
     inFlightBridges.delete(tabId);
   });
   inFlightBridges.set(tabId, attempt);
   return attempt;
 }
 
-async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false): Promise<boolean> {
+async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string, freshSsh = false, bakedPort?: number): Promise<boolean> {
   // Independent per-runtime gates: the tunnel + env injection are runtime-agnostic and
   // run for either; the remote setup writes Claude artifacts only when claudeOn and
   // Codex artifacts only when codexOn (so a Claude-only or Codex-only host both work).
@@ -523,8 +521,16 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     // simply has no MCP and no hooks. So a stale bake overrides the "we baked it, there is
     // nothing to type" rule below — that rule was written when the tab id was the only thing
     // baked, and a tab id, unlike a port, is always right.
-    const baked = bakedBridgePort(tabId);
-    const bakedIsStale = baked !== undefined && baked !== tunnelInfo.remote_port;
+    //
+    // `bakedPort` is an ARGUMENT and not something looked up here, which is the safety
+    // property: only a caller still holding the remote shell may ask for a correction. The
+    // agent guard below cannot be relied on to catch the difference, because it is
+    // ANTI-correlated with staleness — a wrong port is exactly what stops this tab's hooks
+    // reaching us, so `agentStateStore` is empty precisely when an agent is running. Callers
+    // that hand the PTY to an agent in the same breath as the ssh command (the auto-resume
+    // replay in triggers.svelte.ts) therefore pass nothing, and the title-driven and manual
+    // re-bridges below cannot pass anything at all.
+    const bakedIsStale = bakedPort !== undefined && bakedPort !== tunnelInfo.remote_port;
     if (ptyId && injectedEnvPort.get(tabId) === tunnelInfo.remote_port) {
       // Already injected for this port — a prior attempt's export is still live in
       // the shell. Re-injecting on every failed-setup retry would spam the user's
@@ -540,7 +546,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       logInfo("SSH MCP bridge: skipping env-var injection — ssh session for tab " + tabId + " was not observed starting, so the remote shell may not be at a prompt");
     } else if (ptyId) {
       if (bakedIsStale) {
-        logInfo("SSH MCP bridge: tab " + tabId + " baked MAITERM_PORT=" + baked
+        logInfo("SSH MCP bridge: tab " + tabId + " baked MAITERM_PORT=" + bakedPort
           + " but the tunnel came up on " + tunnelInfo.remote_port + " — correcting the remote shell");
       }
       try {
