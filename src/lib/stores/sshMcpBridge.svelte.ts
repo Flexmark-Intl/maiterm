@@ -16,6 +16,7 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable } from '$lib/stores/triggers.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { countedListen as listen } from '$lib/utils/listenCounter';
+import { bakedBridgePort, forgetBakedBridgePort } from '$lib/utils/bridgeEnv';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 export type BridgeStatus = 'connected' | 'pending' | 'failed';
@@ -52,6 +53,7 @@ function clearBridgeState(tabId: string): void {
   bridgeStates.delete(tabId);
   bridgeStates = new Map(bridgeStates);
   injectedEnvPort.delete(tabId);
+  forgetBakedBridgePort(tabId);
   logInfo(`SSH MCP bridge cleared for tab ${tabId} (tunnel down)`);
 }
 
@@ -514,12 +516,21 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     // filter, etc.). Writing to a PTY whose foreground is no longer ssh dumps the
     // export into the local shell. The probe is foreground-only (no lsof) to keep
     // this last gate as thin as possible.
+    // A maiTerm-initiated session baked the port into its own ssh command, and that value is
+    // a GUESS — this maiTerm's usual port on the host, read before the tunnel existed. When
+    // the guess missed, the shell is pointed at a port serving nothing (or, worse, a sibling
+    // account's tunnel), and the failure is silent: the tab looks connected and its agent
+    // simply has no MCP and no hooks. So a stale bake overrides the "we baked it, there is
+    // nothing to type" rule below — that rule was written when the tab id was the only thing
+    // baked, and a tab id, unlike a port, is always right.
+    const baked = bakedBridgePort(tabId);
+    const bakedIsStale = baked !== undefined && baked !== tunnelInfo.remote_port;
     if (ptyId && injectedEnvPort.get(tabId) === tunnelInfo.remote_port) {
       // Already injected for this port — a prior attempt's export is still live in
       // the shell. Re-injecting on every failed-setup retry would spam the user's
       // interactive session with `export MAITERM_TAB_ID=…` lines, once per prompt.
       logInfo("SSH MCP bridge: env vars already injected for tab " + tabId + " — skipping re-injection");
-    } else if (ptyId && !freshSsh) {
+    } else if (ptyId && !freshSsh && !bakedIsStale) {
       // Not a shell we watched connect, so we cannot know what owns the remote end now. The
       // live-agent check below is negative evidence, and it is blindest exactly when it
       // matters: re-bridging a tab whose agent has gone quiet is the moment its session
@@ -528,6 +539,10 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       // sessions), ~/.aiterm (sole-tab hosts), or the manual "Inject maiTerm Env Vars" action.
       logInfo("SSH MCP bridge: skipping env-var injection — ssh session for tab " + tabId + " was not observed starting, so the remote shell may not be at a prompt");
     } else if (ptyId) {
+      if (bakedIsStale) {
+        logInfo("SSH MCP bridge: tab " + tabId + " baked MAITERM_PORT=" + baked
+          + " but the tunnel came up on " + tunnelInfo.remote_port + " — correcting the remote shell");
+      }
       try {
         if (!(await isRemoteShellForeground(ptyId))) {
           logInfo("SSH MCP bridge: skipping env-var injection — ssh no longer foreground for tab " + tabId);
@@ -545,7 +560,13 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           // catching tmux — where writing is fine, because tmux forwards keystrokes to
           // the inner shell, and where the export is most needed since tmux shells
           // don't inherit the spawn env.
-          logInfo("SSH MCP bridge: skipping env-var injection — an agent session owns tab " + tabId);
+          //
+          // When the bake was stale this is the one case the correction cannot reach: the
+          // agent has already read the wrong port out of its environment, and only a restart
+          // of that agent will pick up the right one. Say so, because the symptom at the
+          // other end is an MCP server that will not connect for the session's whole life.
+          logInfo("SSH MCP bridge: skipping env-var injection — an agent session owns tab " + tabId
+            + (bakedIsStale ? " (its MAITERM_PORT is stale; the agent must be restarted to pick up " + tunnelInfo.remote_port + ")" : ""));
         } else {
           const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
             + " MAITERM_AUTH=" + authToken + "\n";

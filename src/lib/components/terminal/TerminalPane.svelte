@@ -9,7 +9,8 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
+  import { bakeBridgeEnv } from '$lib/utils/bridgeEnv';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
@@ -847,7 +848,7 @@
         setTimeout(async () => {
           try {
             const cmd = buildSshCommand(
-              ctx.sshCommand, ctx.remoteCwd, tabId, await getRemoteBridgeEnv(ctx.sshCommand!));
+              ctx.sshCommand, ctx.remoteCwd, tabId, await bakeBridgeEnv(tabId, ctx.sshCommand!));
             const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
             await writeTerminal(ptyId, bytes);
           } catch (e) {
@@ -1611,7 +1612,7 @@
     lastDropAt = 0;
 
     try {
-      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, await getRemoteBridgeEnv(sshCommand));
+      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, await bakeBridgeEnv(tabId, sshCommand));
       await writeTerminal(ptyId, Array.from(new TextEncoder().encode(cmd + '\n')));
     } catch (e) {
       logError(`reconnectSsh: failed to write ssh command: ${e}`);
