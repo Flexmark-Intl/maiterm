@@ -535,6 +535,11 @@ function createOverlordStore() {
   /** How long a re-bind gets. An agent that is alive and merely unbound answers a slash
    *  command in a second or two; this is slack for a busy TUI, not for a resume. */
   const REBIND_VERIFY_MS = 45_000;
+  /** The one line that re-binds a running agent. Watching is keyed on THIS TEXT having been
+   *  typed, never on the rule that typed it: `agent_unready` is a selectable event with a
+   *  free-text sequence, so a rule whose step says anything else would otherwise be watched
+   *  for a binding it cannot produce. */
+  const REBIND_COMMAND = '/maiterm init';
 
   /** Board tasks the human handed to the agent ("Send" on a card) → when. In memory only,
    *  like `escalations` itself: the handoff IS the escalation, and once the agent has
@@ -1102,7 +1107,16 @@ function createOverlordStore() {
    *  busy or unmounted → the queue waits (the engine runs regardless; §2 agent lifecycle).
    *  NO agent tab at all → agent-only items are swept after 30 min rather than waiting
    *  forever, so nothing may be accepted here on the promise that it will be delivered. */
+  /** One doorbell at a time. Everything before the first `await` here is synchronous, so N
+   *  escalations raised in one synchronous loop — which is now the ordinary case, since a
+   *  restart leaves several tabs unbound and their re-bind watches expire in the same probe
+   *  pass — all read `idle` and an unread queue, then all reach `bracketedPasteSubmit` on the
+   *  SAME supervisor PTY. That helper writes the text, settles ~100ms, then writes the CR
+   *  separately, so the later pastes land inside that window: the supervisor's input box gets
+   *  the nudge concatenated N times, submitted by the first CR, followed by stray Enters. */
+  let waking = false;
   async function wakeOverlordAgent() {
+    if (waking) return;
     if (unNudged.size === 0) return;
     // The human may have cleared the queue while the agent was busy — an escalation
     // dismissed from the board must not still ring "0 escalations pending" later.
@@ -1112,28 +1126,33 @@ function createOverlordStore() {
     if (unNudged.size === 0) return;
     const ws = overlordWorkspace();
     if (!ws) return;
-    for (const pane of ws.panes) {
-      for (const tab of pane.tabs) {
-        if (!tab.runtime) continue;
-        if (mappedState(tab.id) !== 'idle') continue;
-        if (!(await hasLiveRepl(tab.id))) continue;
-        const inst = terminalsStore.get(tab.id);
-        if (!inst) return;
-        const unread = escalations.filter((e) => !e.read);
-        const n = unread.length;
-        // Word it for what's actually queued: calling a tab's answer an "escalation" makes
-        // the agent open it braced for a problem.
-        const what = unread.every((e) => e.kind === 'drive_reply')
-          ? `${n} repl${n === 1 ? 'y' : 'ies'} from tabs you drove`
-          : `${n} Overlord item${n === 1 ? '' : 's'} pending`;
-        try {
-          await bracketedPasteSubmit(inst.ptyId, `${what} — call listEscalations.`);
-          unNudged.clear();
-        } catch (e) {
-          logError(`overlord: wake nudge failed: ${e}`);
+    waking = true;
+    try {
+      for (const pane of ws.panes) {
+        for (const tab of pane.tabs) {
+          if (!tab.runtime) continue;
+          if (mappedState(tab.id) !== 'idle') continue;
+          if (!(await hasLiveRepl(tab.id))) continue;
+          const inst = terminalsStore.get(tab.id);
+          if (!inst) return;
+          const unread = escalations.filter((e) => !e.read);
+          const n = unread.length;
+          // Word it for what's actually queued: calling a tab's answer an "escalation" makes
+          // the agent open it braced for a problem.
+          const what = unread.every((e) => e.kind === 'drive_reply')
+            ? `${n} repl${n === 1 ? 'y' : 'ies'} from tabs you drove`
+            : `${n} Overlord item${n === 1 ? '' : 's'} pending`;
+          try {
+            await bracketedPasteSubmit(inst.ptyId, `${what} — call listEscalations.`);
+            unNudged.clear();
+          } catch (e) {
+            logError(`overlord: wake nudge failed: ${e}`);
+          }
+          return;
         }
-        return;
       }
+    } finally {
+      waking = false;
     }
   }
 
@@ -1316,12 +1335,6 @@ function createOverlordStore() {
           return;
         }
         run.lastInjectionAt = Date.now();
-        // A rule re-binding an unready tab gets the same verification as `recoverTab`'s.
-        // Both type the identical line at the identical tab for the identical reason, and
-        // only one of them was watching the outcome — so a rule-driven re-bind that never
-        // took ended at a silent `timed_out` (this rule's `on_timeout` is `continue`) and
-        // nothing, human or agent, was told. One injection, one verdict.
-        if (run.targetsUnready) rebindWatch.set(tabId, Date.now());
         const directive: OutstandingDirective = {
           id: crypto.randomUUID(),
           ruleId: rule.id,
@@ -1336,6 +1349,25 @@ function createOverlordStore() {
         bumpLive();
         ledger(tabId, rule.id, origin, i, step, 'sent');
         const res = await awaitGate(run, step, directive);
+        // A rule re-binding an unready tab gets the same verification `recoverTab` gets:
+        // both type the identical line at the identical tab for the identical reason, and
+        // only one of them was watching, so a rule-driven re-bind that never took ended at
+        // a silent `timed_out` (`reinit_unbound_agent`'s `on_timeout` is `continue`).
+        //
+        // Two things this must NOT do, both found in review. It is keyed on the text typed,
+        // not on `run.targetsUnready` — that flag is the rule's EVENT and says nothing about
+        // the step, so a custom agent_unready rule with any other prose would have been
+        // watched for a binding it could never produce, then declared failed. That verdict
+        // is not cosmetic: `rebindFailed` pins the tab to `stopped`, which is the one state
+        // that stops `reinit_unbound_agent` from ever firing there again and turns the card's
+        // only remaining action into a resume typed at a live agent.
+        //
+        // And it arms AFTER this step's gate rather than at injection, so the rule's own
+        // tolerance gets the first say. Armed at injection it set a 45s verdict against a
+        // step the rule gives 120s, and an init turn slow to reach its initSession call —
+        // rate-limit backoff, a remote agent still replaying its transcript — was declared
+        // failed while the ritual was still well inside its budget and about to succeed.
+        if (step.text === REBIND_COMMAND) rebindWatch.set(tabId, Date.now());
         if (outstanding.get(tabId)?.id === directive.id) clearOutstanding(tabId);
         if (res === 'aborted') {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
@@ -2849,7 +2881,7 @@ function createOverlordStore() {
 
       let text: string;
       if (kind === 'unbound') {
-        text = '/maiterm init';
+        text = REBIND_COMMAND;
       } else {
         const runtime = workspacesStore.getTabRuntime(tabId);
         if (!runtime) return { sent: false, reason: 'unknown_runtime' };

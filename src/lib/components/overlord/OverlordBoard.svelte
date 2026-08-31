@@ -658,7 +658,7 @@
           </div>
         {/if}
         <article class="signal ov-panel ov-in" style:--i={i}
-                 style:--tone={s.sev === 0 ? 'var(--ov-critical)'
+                 style:--tone={s.sev <= 0 ? 'var(--ov-critical)'
                    : s.sev === 1 ? 'var(--ov-live)'
                    : s.sev === 2 ? 'var(--ov-warn)'
                    : s.sev === 3 ? 'var(--ov-pressure)'

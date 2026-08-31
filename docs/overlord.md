@@ -849,11 +849,29 @@ Three changes close it: `recoverTab` returns `verified: false` and says so in it
 `detail`, so `sent: true` cannot be read as a result; the watch expiry raises a
 **`rebind_failed`** escalation naming the tab and the next remedy (call `recoverTab`
 again — it now reads `stopped`, so it resumes the agent rather than re-typing an init
-already shown not to work); and the **rule** path arms `rebindWatch` too, via
-`run.targetsUnready`. That last one matters for the same reason the rest of §2 does:
-`reinit_unbound_agent` types the identical line at the identical tab for the identical
-reason, and it was the one path not watching — its failures ended at a silent
-`timed_out`, since its `on_timeout` is `continue`. One injection, one verdict.
+already shown not to work); and the **rule** path arms `rebindWatch` too. That last one
+matters for the same reason the rest of §2 does: `reinit_unbound_agent` types the identical
+line at the identical tab for the identical reason, and it was the one path not watching —
+its failures ended at a silent `timed_out`, since its `on_timeout` is `continue`. One
+injection, one verdict.
+
+Two things the rule-path watch must not do, both caught in review before they shipped:
+
+- **Key it on the text typed, never on the rule.** The first cut armed on
+  `run.targetsUnready`, which is the rule's *event* and says nothing about the step.
+  `agent_unready` is a selectable event with a free-text sequence, so any rule saying
+  something other than `/maiterm init` would have been watched for a binding it could not
+  produce and then declared failed. That verdict is not cosmetic: `rebindFailed` pins the
+  tab to `stopped`, which is precisely the state that stops `reinit_unbound_agent` firing
+  there ever again, drops it out of *Run all* and *Re-bind all*, and leaves the card
+  offering **Restart agent** — a resume command typed at an agent that was alive the whole
+  time. A rule could permanently disable the remedy for the problem it was written to fix.
+- **Arm after the step's gate, not at injection.** `REBIND_VERIFY_MS` is 45s;
+  `reinit_unbound_agent` gives its step 120s. Two numbers governing one injection, and the
+  shorter one was rendering the verdict first — so an init turn slow to reach its
+  `initSession` call (rate-limit backoff, a remote agent still replaying its transcript)
+  was declared failed while the ritual was still inside its own budget and about to
+  succeed. The rule's tolerance gets the first say; the watch is the second.
 
 The escalation is agent-addressed (`AGENT_ONLY_ESCALATIONS`). The human is already
 served: the tab reclassifies to `stopped` in the same pass, so the deck raises its own
