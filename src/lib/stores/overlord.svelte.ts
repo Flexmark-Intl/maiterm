@@ -278,8 +278,11 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  promise that driven tabs' replies come back on their own. v5 added task handoffs
  *  (task_handoff / task_dropped), which the agent must recognise to act on. v6 added the tab
  *  lifecycle — archiveTab/closeTab/recoverTab/resumeWorkspace and the state vocabulary that
- *  says which to use; an agent on v5 believes it cannot put a finished session away. */
-const DOCTRINE_VERSION = '6';
+ *  says which to use; an agent on v5 believes it cannot put a finished session away. v7
+ *  reverses what the rendered ruleset MEANS: an agent on v6 reads it as a playbook to
+ *  improvise from and hand-drives sequences the engine is already running, which is the
+ *  whole reason v7 exists — so this is a contract change however much it looks like wording. */
+const DOCTRINE_VERSION = '7';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
