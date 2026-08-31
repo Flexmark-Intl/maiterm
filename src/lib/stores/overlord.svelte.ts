@@ -1173,7 +1173,17 @@ function createOverlordStore() {
       `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered. deleteArchivedTab prunes the archive itself when an archived session is no longer worth keeping.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
       `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
-      `Standing doctrine (the active ruleset — improvise with these same thresholds and phrasings when asked to check on tabs by hand):\n` +
+      // This heading used to read "improvise with these same thresholds and phrasings when
+      // asked to check on tabs by hand", which handed the agent a list of sequences with no
+      // hint that anything else runs them. It read as a playbook, so the agent executed one
+      // by hand — the engine fired the same rule mid-way through, and the human got every
+      // directive twice (2026-08-31, `checkpoint_at_context_pressure`). The ruleset is here
+      // as a description of what is ALREADY handled, not as instructions.
+      `Standing doctrine — THE ENGINE RUNS THESE RULES ITSELF, automatically, without you. ` +
+      `They are listed so you know what is already being taken care of and can speak about it in the same terms. ` +
+      `They are NOT a playbook for you to carry out. Never hand-drive a sequence a rule below already owns: ` +
+      `the engine will fire it too, and your human then gets every directive twice. ` +
+      `Borrow their thresholds and phrasing only when checking on something by hand that no rule covers:\n` +
       `${ruleLines || '  (no rules enabled yet)'}\n\n` +
       `Nothing to do right now? Check in with your human briefly, then stay silent until an escalation or instruction arrives.`
     );
@@ -3569,9 +3579,48 @@ function createOverlordStore() {
           return { sent: false, reason: 'runtime_mismatch' };
         }
       }
-      if (outstanding.has(tabId) || rituals.has(tabId)) {
+      // Name what holds the tab. This was the one refusal in this function with no `detail`,
+      // and a bare `outstanding_directive` reads as "busy, retry" — so the agent retried a
+      // step the engine was already part-way through sending, three times over ninety
+      // seconds, and the human saw every directive twice (2026-08-31). The refusal itself
+      // was correct; its silence about WHY is what turned one collision into three.
+      const run = rituals.get(tabId);
+      if (run) {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
-        return { sent: false, reason: 'outstanding_directive' };
+        const seq = preferencesStore.overlordRules.find((r) => r.id === run.ruleId)?.sequence ?? [];
+        const dup = seq.findIndex((s) => s.text === text);
+        const where =
+          `The rule "${run.ruleName}" is running its own sequence on that tab right now ` +
+          `(step ${Math.min(run.stepIndex + 1, run.stepCount)} of ${run.stepCount}). Nothing was typed.`;
+        // The blocked text IS one of that sequence's steps: the agent is hand-driving a
+        // ritual the engine owns. Waiting and retrying is the wrong remedy — the engine
+        // sends this step itself — so say so with a reason code that isn't "wait".
+        return dup >= 0
+          ? {
+              sent: false,
+              reason: 'already_running',
+              detail:
+                `${where} What you tried to send IS step ${dup + 1} of that sequence — the engine ` +
+                `sends it itself, so this is already being done. Stand down: do not retry, and do ` +
+                `not drive the rest of the sequence by hand either, or the human gets every ` +
+                `directive twice. The rules in your doctrine all run on their own.`,
+            }
+          : {
+              sent: false,
+              reason: 'outstanding_directive',
+              detail: `${where} Wait for that sequence to finish, then retry.`,
+            };
+      }
+      if (outstanding.has(tabId)) {
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
+        return {
+          sent: false,
+          reason: 'outstanding_directive',
+          detail:
+            'That tab still owes an answer to an earlier directive; nothing was typed. Its reply ' +
+            'is queued for you when its turn ends and you are rung for it, so wait for that ' +
+            'rather than retrying.',
+        };
       }
       const repl = await replState(tabId);
       if (repl !== 'ready') {

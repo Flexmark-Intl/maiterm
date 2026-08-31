@@ -156,12 +156,23 @@ The "one injection tool" both callers share, made concrete:
 driveTab({ tab_id: string, kind: 'process' | 'slash', text: string })
 → { sent: true }
   | { sent: false,
-      reason: 'no_live_repl' | 'outstanding_directive' | 'agent_busy'
-            | 'rate_limited' | 'runtime_mismatch' }
+      reason: 'no_live_repl' | 'outstanding_directive' | 'already_running'
+            | 'agent_busy' | 'awaiting_permission' | 'not_registered'
+            | 'not_classified' | 'rate_limited' | 'runtime_mismatch',
+      detail?: string }
 ```
 
 - Guards are evaluated **inside** the tool — a guard failure comes back to the
   agent as a structured refusal, never a silent drop, and both paths ledger.
+- **A refusal must say what is holding the tab.** The ritual branch was once the
+  only one without a `detail`, and a bare `outstanding_directive` reads as "busy,
+  retry" — so the agent retried a step the engine was already part-way through
+  sending, three times in ninety seconds, and the human got every directive twice
+  (2026-08-31). It now names the rule and its position in the sequence. When the
+  refused text **is** one of that sequence's steps, the reason is
+  `already_running` rather than `outstanding_directive`: the two call for opposite
+  responses, and only one of them is "wait and retry". `already_running` means
+  *the engine is doing this; stand down* — see §9.2.
 - MCP-exposed to Overlord-the-agent only (never to supervised agents).
 - **Pre-approved via allowlist** — the guards are mechanical, and a
   permission-prompt-per-injection would make Overlord useless. The contrast is
@@ -726,6 +737,26 @@ supervised in this window. So when told "go check on the EWS tabs", it improvise
 using the same thresholds, phrasings and ordering the automation would have used.
 Its judgment and its automation cannot drift apart, because they read the same
 document.
+
+**The ruleset is a description of what is already handled, not a playbook.** This
+is the one thing the rendering has to say out loud, and for a while it said the
+opposite: the heading invited the agent to "improvise with these same thresholds
+and phrasings", listing three-step sequences with no hint that anything else ran
+them. On 2026-08-31 the agent duly hand-drove `checkpoint_at_context_pressure` —
+the engine fired the same rule seven seconds after the agent's second step was
+answered, and the human got both prose steps twice. Nothing was deadlocked and
+nothing restarted: the locks, `cooldown` and `max_per_hour` all held, and the
+engine's own `/compact` completed. The agent had simply been handed instructions
+it was never meant to execute. The heading now leads with *the engine runs these
+rules itself, without you*, and `driveTab` reinforces it at the moment it matters
+by refusing a duplicated step with `already_running` (§4).
+
+The race is worth understanding, because it is structural rather than unlucky. A
+`driveTab` holds the tab's `outstanding` slot only from injection until the reply
+lands; a rule holds `rituals` for its **whole sequence**. So the instant an
+agent-driven step is answered the slot is free, and if the rule's condition is
+still true the engine's next tick claims it. The engine needs one tick; the agent
+needs a model round trip. The engine wins that race every time.
 
 > One ruleset, double duty: **declarative config to the engine, system-prompt
 > fragment to the agent.** Tune `"prepare for compaction"` once, both paths
