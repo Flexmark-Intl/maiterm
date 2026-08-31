@@ -97,33 +97,36 @@
     report: string | null;
   }
 
+  function unitFor(tab: Tab, ws: Workspace): FleetUnit {
+    const f = overlordStore.facts.get(tab.id);
+    const live = claudeStateStore.getState(tab.id);
+    const todos = f?.todos ?? [];
+    const active = todos.find((t) => t.status === 'in_progress');
+    const r = overlordStore.ritualProgress.find((x) => x.tabId === tab.id);
+    return {
+      tab,
+      ws,
+      state: live ? live.state : 'dormant',
+      pct: f?.context_pct ?? null,
+      lastTurn: f?.last_turn_ts,
+      todosDone: todos.filter((t) => t.status === 'completed').length,
+      todosTotal: todos.length,
+      topTodo: active?.content ?? todos.find((t) => t.status === 'pending')?.content ?? null,
+      ritual: r ? { ruleName: r.ruleName, step: r.step, steps: r.steps } : null,
+      loaded: overlordStore.tabLoaded(tab.id),
+      awaiting: !!overlordStore.outstandingFor(tab.id),
+      report: overlordStore.agentReports.get(tab.id)?.summary ?? null,
+    };
+  }
+
   const fleet = $derived.by<FleetUnit[]>(() => {
     void now;
-    const rituals = overlordStore.ritualProgress;
     const units: FleetUnit[] = [];
     for (const ws of boardWorkspaces) {
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
           if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
-          const f = overlordStore.facts.get(tab.id);
-          const live = claudeStateStore.getState(tab.id);
-          const todos = f?.todos ?? [];
-          const active = todos.find((t) => t.status === 'in_progress');
-          const r = rituals.find((x) => x.tabId === tab.id);
-          units.push({
-            tab,
-            ws,
-            state: live ? live.state : 'dormant',
-            pct: f?.context_pct ?? null,
-            lastTurn: f?.last_turn_ts,
-            todosDone: todos.filter((t) => t.status === 'completed').length,
-            todosTotal: todos.length,
-            topTodo: active?.content ?? todos.find((t) => t.status === 'pending')?.content ?? null,
-            ritual: r ? { ruleName: r.ruleName, step: r.step, steps: r.steps } : null,
-            loaded: overlordStore.tabLoaded(tab.id),
-            awaiting: !!overlordStore.outstandingFor(tab.id),
-            report: overlordStore.agentReports.get(tab.id)?.summary ?? null,
-          });
+          units.push(unitFor(tab, ws));
         }
       }
     }
@@ -133,11 +136,39 @@
     return units.sort((a, b) => rank(a) - rank(b) || (b.pct ?? 0) - (a.pct ?? 0));
   });
 
+  /**
+   * The Overlord agent's own tab, when it is stopped at a prompt.
+   *
+   * Its workspace is deliberately absent from `boardWorkspaces` — it is the supervisor, not
+   * a supervised tab, and every other card would be wrong or dangerous applied to it: a
+   * re-bind it can't accept (`isBoardableTab` refuses the tools), an Archive/Close button
+   * that would put away the supervisor, a checkpoint for a session nothing else supervises.
+   *
+   * But being blocked is the one state where that exclusion hurt. The agent's only sanctioned
+   * way to reach its human is AskUserQuestion, which stops it dead; supervision for the whole
+   * window stops with it; and the board the human opens to find out why showed an empty deck.
+   * So: this one signal, above everything else on the queue, with the same remedy any
+   * permission card offers — open the tab and answer it.
+   */
+  const supervisorBlocked = $derived.by<FleetUnit | null>(() => {
+    void now;
+    const ws = workspacesStore.workspaces.find((w) => w.overlord);
+    if (!ws) return null;
+    for (const pane of ws.panes) {
+      for (const tab of pane.tabs) {
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
+        if (claudeStateStore.getState(tab.id)?.state !== 'permission') continue;
+        return unitFor(tab, ws);
+      }
+    }
+    return null;
+  });
+
   // ── Triage signals — one severity-ordered queue ─────────────────────────────
   type Signal =
     | { sev: number; id: string; type: 'proposal'; p: (typeof overlordStore.proposals)[number] }
     | { sev: number; id: string; type: 'escalation'; e: (typeof overlordStore.escalations)[number] }
-    | { sev: number; id: string; type: 'permission' | 'pressure' | 'unready'; u: FleetUnit }
+    | { sev: number; id: string; type: 'permission' | 'pressure' | 'unready'; u: FleetUnit; supervisor?: boolean }
     | { sev: number; id: string; type: 'stale'; t: TaskRow }
     | { sev: number; id: string; type: 'spent'; s: SpentTab };
 
@@ -145,6 +176,11 @@
 
   const signals = $derived.by<Signal[]>(() => {
     const out: Signal[] = [];
+    // Ahead of the escalations, because a blocked supervisor is why there are no new ones:
+    // nothing else on this deck can advance until it is answered.
+    if (supervisorBlocked) {
+      out.push({ sev: -1, id: `perm-sup-${supervisorBlocked.tab.id}`, type: 'permission', u: supervisorBlocked, supervisor: true });
+    }
     // A finished session that has also gone dormant is not offered a re-bind: its agent
     // EXITED having done everything asked of it, so packing it away is the useful move.
     //
@@ -661,14 +697,20 @@
 
             {:else if s.type === 'permission'}
               <div class="signal-head">
-                <span class="ov-chip ov-chip-tone">permission</span>
+                <span class="ov-chip ov-chip-tone">{s.supervisor ? 'overlord blocked' : 'permission'}</span>
                 <button class="ov-chip ov-chip-tab" onclick={() => navigateToTab(s.u.tab.id)}>{s.u.tab.name}</button>
                 <span class="ov-chip">{s.u.ws.name}</span>
               </div>
               <p class="signal-text">
-                Waiting on your approval — the agent is stopped until you answer. This is the
-                one signal Overlord cannot clear for you: answering a permission prompt on
-                your behalf is exactly what that prompt exists to prevent.
+                {#if s.supervisor}
+                  Overlord itself is stopped at a prompt, waiting on you. Nothing else in this
+                  window is being supervised while it sits here — no rules are being judged, no
+                  escalations answered — so this comes before everything else on the deck.
+                {:else}
+                  Waiting on your approval — the agent is stopped until you answer. This is the
+                  one signal Overlord cannot clear for you: answering a permission prompt on
+                  your behalf is exactly what that prompt exists to prevent.
+                {/if}
               </p>
               <div class="signal-actions">
                 <button class="ov-btn ov-btn-primary" onclick={() => navigateToTab(s.u.tab.id)}>Open tab</button>

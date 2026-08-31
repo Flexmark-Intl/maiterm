@@ -233,6 +233,19 @@ The triage deck mixes two kinds of card and they have opposite lifetimes.
 **Derived** — pressure, permission, unready, spent — are computed from the workspace tree
 every tick. Close the tab and they stop being produced, with no cleanup anywhere.
 
+They are derived from `fleet`, which is built from `workspaces.filter(w => !w.overlord)` —
+and that exclusion is right for all four. The Overlord agent is the supervisor, not a
+supervised tab: `isBoardableTab` refuses it the lifecycle tools, so a re-bind card would
+offer a button that cannot fire, and an Archive/Close card would offer to put away the
+supervisor itself. **One state is the exception.** The agent's only sanctioned way to reach
+its human is `AskUserQuestion`, which stops it dead, and supervision of the entire window
+stops with it — while the board the human opens to find out why showed an empty deck. So a
+single extra signal, `supervisorBlocked`, derived separately rather than by widening `fleet`,
+carrying the same "Open tab" remedy as any permission card and sorted **above the
+escalations**: a blocked supervisor is usually why there are no newer ones. (An
+`AskUserQuestion` does read as `permission` here — `PreToolUse` sets `active`, but Claude
+fires a `permission_prompt` Notification while the ask waits, and that supersedes it.)
+
 **Queued** — proposals and escalations — are arrays the engine appends to. Nothing removed
 them when their tab went away, so closing a tab left its card on the deck, most visibly a
 `Re-bind a running agent` proposal offering to Send into a PTY that no longer exists.
