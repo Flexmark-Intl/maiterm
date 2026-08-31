@@ -820,6 +820,33 @@ says. That surfaces the real remedy, stops the re-type loop, and the card says w
 kind of `stopped` it is, because "the agent exited" is not what the human sees on a tab
 whose ssh is plainly alive. The verdict is dropped as soon as the tab stops being dormant.
 
+**And the verdict has to reach whoever asked for the recovery.** For a long time it did
+not: it only changed the deck's classification, while `recoverTab` had already returned
+`sent: true` forty-five seconds earlier and its caller had moved on. `sent` means the
+bytes were written — it has never meant the tab bound, and for a re-bind those are
+different claims, because an agent still coming up swallows the line silently. On
+2026-08-29 the Payment Server tab took `/maiterm init` twice (once from the rule, once
+from `recoverTab` reporting success), bound neither time, and sat unbound for **1h45m**
+until an unrelated app restart respawned it. The SSH bridge had already logged why —
+*skipping env-var injection, ssh session was not observed starting* — but nothing joined
+that to the recovery. A recovery that silently didn't happen is worse than one that
+fails loudly.
+
+Three changes close it: `recoverTab` returns `verified: false` and says so in its
+`detail`, so `sent: true` cannot be read as a result; the watch expiry raises a
+**`rebind_failed`** escalation naming the tab and the next remedy (call `recoverTab`
+again — it now reads `stopped`, so it resumes the agent rather than re-typing an init
+already shown not to work); and the **rule** path arms `rebindWatch` too, via
+`run.targetsUnready`. That last one matters for the same reason the rest of §2 does:
+`reinit_unbound_agent` types the identical line at the identical tab for the identical
+reason, and it was the one path not watching — its failures ended at a silent
+`timed_out`, since its `on_timeout` is `continue`. One injection, one verdict.
+
+The escalation is agent-addressed (`AGENT_ONLY_ESCALATIONS`). The human is already
+served: the tab reclassifies to `stopped` in the same pass, so the deck raises its own
+re-bind card. This copy exists for the agent, which asked for the recovery and is the
+only party still holding the belief that it worked.
+
 `MeshSetupModal` had the same guess and the same dead end — a dead remote agent showed
 as *Running · needs init*, its Init never completed, and the row sat on a "no response"
 tag beside a Retry that could only fail identically. It now draws the same conclusion

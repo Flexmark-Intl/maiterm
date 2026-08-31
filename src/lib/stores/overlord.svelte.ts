@@ -133,7 +133,12 @@ export interface OverlordEscalation {
     | 'task_handoff'
     /** The human deleted a task and the owning tab could not be told directly — the agent
      *  relays it, so the tab stops believing in work that is off the board. */
-    | 'task_dropped';
+    | 'task_dropped'
+    /** A `/maiterm init` was typed at an unbound tab and the tab never bound. `recoverTab`
+     *  can only report that it TYPED the line; whether the agent on the far side was in a
+     *  state to receive it is knowable only afterwards, and only by watching. This carries
+     *  that verdict back to whoever asked for the recovery. */
+    | 'rebind_failed';
   detail: string;
   /** The board task this is about (`task_handoff`), so the card's "Sent" receipt can be
    *  withdrawn if the handoff is ever swept undelivered. */
@@ -284,6 +289,10 @@ const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
   'permission_stuck',
   'task_handoff',
   'task_dropped',
+  // The human already has this one: the tab reclassifies to `stopped` in the same pass, so
+  // the deck raises its own re-bind card. This copy is addressed to the agent, which asked
+  // for the recovery and is the only party holding the belief that it worked.
+  'rebind_failed',
 ]);
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
@@ -1307,6 +1316,12 @@ function createOverlordStore() {
           return;
         }
         run.lastInjectionAt = Date.now();
+        // A rule re-binding an unready tab gets the same verification as `recoverTab`'s.
+        // Both type the identical line at the identical tab for the identical reason, and
+        // only one of them was watching the outcome — so a rule-driven re-bind that never
+        // took ended at a silent `timed_out` (this rule's `on_timeout` is `continue`) and
+        // nothing, human or agent, was told. One injection, one verdict.
+        if (run.targetsUnready) rebindWatch.set(tabId, Date.now());
         const directive: OutstandingDirective = {
           id: crypto.randomUUID(),
           ruleId: rule.id,
@@ -1836,6 +1851,27 @@ function createOverlordStore() {
       rebindFailed.add(id);
       changed = true;
       logInfo(`overlord: re-bind on ${id.slice(0, 8)} did not take — reclassifying as stopped`);
+      // Carry the verdict back to whoever asked for the recovery. `recoverTab` can only ever
+      // report that it TYPED `/maiterm init`; whether the far side was in a state to receive
+      // it is knowable only here, seconds later. Without this the caller keeps `sent: true`
+      // and nothing ever corrects it — the Payment Server tab sat unbound for 1h45m on
+      // 2026-08-29 after a recovery that reported success, and only came back when an app
+      // restart respawned it. A recovery that silently didn't happen is worse than one that
+      // fails loudly.
+      escalate(
+        id,
+        null,
+        'rebind_failed',
+        `The /maiterm init sent to ${tabDisplayName(id)} did not take — ${REBIND_VERIFY_MS / 1000}s later ` +
+          `that tab still has not registered, so it is NOT recovered however the recoverTab call read. ` +
+          `It is now classified 'stopped' rather than 'unbound' on the evidence: the cheap remedy was ` +
+          `typed and watched, and nothing happened. Common causes are an agent still mid-resume when the ` +
+          `line was typed (especially over SSH, where a remote agent that is replaying its transcript ` +
+          `swallows it), or a remote agent that has actually exited, leaving ssh in the foreground at a ` +
+          `shell prompt. Call recoverTab on it again — now that it reads 'stopped' that types the ` +
+          `runtime's resume command and relaunches the agent, rather than re-typing an init that has ` +
+          `already been shown not to work.`,
+      );
     }
     if (!candidates.length) {
       if (changed) bumpLive();
@@ -2791,7 +2827,9 @@ function createOverlordStore() {
      *  Deliberately does NOT go through driveTab, whose guards require a live REPL and an
      *  idle agent — both false here by definition. It keeps the quiescence rule (never
      *  type over a repaint) and ledgers verbatim like every other injection. */
-    async recoverTab(tabId: string): Promise<{ sent: boolean; kind?: UnreadyKind; reason?: string; detail?: string }> {
+    async recoverTab(
+      tabId: string,
+    ): Promise<{ sent: boolean; kind?: UnreadyKind; verified?: boolean; reason?: string; detail?: string }> {
       // Terminal first. A tab with no mounted pane has no liveness entry either — the probe
       // only considers tabs it can reach — so asking `unreadyKind` first answered
       // `not_unready`, which reads as "nothing wrong with that tab" for a tab nothing can
@@ -2851,7 +2889,26 @@ function createOverlordStore() {
       // re-probes and will re-raise it if the remedy didn't take.
       liveness.delete(tabId);
       bumpLive();
-      return { sent: true, kind };
+      // `sent` means the bytes were written, and that is ALL it has ever meant. For a
+      // re-bind that is not the same as recovered: a resuming agent can swallow the line
+      // and nothing here can tell. Say so at the call site rather than letting the caller
+      // read `sent: true` as a result, and name the watch that will correct it — the
+      // verdict lands as a `rebind_failed` escalation about 45s from now if it didn't take.
+      // A `stopped` recovery needs no such hedge: it relaunches the agent, and a relaunch
+      // that fails is visible as the tab staying dormant.
+      return kind === 'unbound'
+        ? {
+            sent: true,
+            kind,
+            verified: false,
+            detail:
+              `/maiterm init was typed into that tab. That is NOT confirmation it bound — an agent ` +
+              `still coming up, especially a remote one over SSH, swallows it silently. maiTerm ` +
+              `watches for ${REBIND_VERIFY_MS / 1000}s and raises a rebind_failed escalation if it ` +
+              `did not take. Until then treat the tab as still unbound: do not report it recovered, ` +
+              `and re-read its state from listWorkspaces before relying on it.`,
+          }
+        : { sent: true, kind, verified: false };
     },
 
     // ── Context pressure: checkpoint ─────────────────────────────────────────

@@ -79,6 +79,7 @@ export function escalationLabel(kind: string): string {
     case 'step_timeout': return 'timed out';
     case 'directive_unacked': return 'unacked';
     case 'agent_report': return 'from agent';
+    case 'rebind_failed': return 're-bind failed';
     default: return 'escalation';
   }
 }
