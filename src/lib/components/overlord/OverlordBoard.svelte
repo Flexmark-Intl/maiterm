@@ -703,9 +703,9 @@
               </div>
               <p class="signal-text">
                 {#if s.supervisor}
-                  Overlord itself is stopped at a prompt, waiting on you. Nothing else in this
-                  window is being supervised while it sits here — no rules are being judged, no
-                  escalations answered — so this comes before everything else on the deck.
+                  Overlord itself is stopped at a prompt, waiting on you. The engine keeps
+                  running its rules, but nothing is exercising judgment while it sits here —
+                  escalations go unanswered and no tab gets driven — so this comes first.
                 {:else}
                   Waiting on your approval — the agent is stopped until you answer. This is the
                   one signal Overlord cannot clear for you: answering a permission prompt on

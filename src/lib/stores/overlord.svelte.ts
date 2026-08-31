@@ -1370,7 +1370,18 @@ function createOverlordStore() {
         // step the rule gives 120s, and an init turn slow to reach its initSession call —
         // rate-limit backoff, a remote agent still replaying its transcript — was declared
         // failed while the ritual was still well inside its budget and about to succeed.
-        if (step.text === REBIND_COMMAND) rebindWatch.set(tabId, Date.now());
+        //
+        // `aborted` is excluded, and it is the branch that made this guarantee a half one.
+        // A gate aborts when the HUMAN types into the tab — likely, when they are looking at
+        // the tab they just watched a command appear in — and the init then never got the
+        // tolerance this line was moved here to give it. Arming anyway declared a re-bind
+        // failed 45s after an interruption, which pins the tab to `stopped` and offers a
+        // resume typed at a live agent. Only a gate that ran to its own conclusion, or that
+        // timed out having given the step its full budget, has anything to say about whether
+        // the binding took. Trimmed, because the step text is a free textarea in the rules
+        // editor and a trailing space would silently drop the verification while still
+        // re-binding — the exact silent-failure this whole path exists to end.
+        if (res !== 'aborted' && step.text.trim() === REBIND_COMMAND) rebindWatch.set(tabId, Date.now());
         if (outstanding.get(tabId)?.id === directive.id) clearOutstanding(tabId);
         if (res === 'aborted') {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
