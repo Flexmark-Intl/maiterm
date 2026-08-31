@@ -3,6 +3,7 @@
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
 
   interface Props { workspaceId: string; }
   let { workspaceId }: Props = $props();
@@ -79,25 +80,28 @@
   </div>
 
   <div class="filmstrip">
-    <button class="exit-btn" onclick={exit} title="Switch back to the normal tab/split layout">⊟ Tab view</button>
+    <Tooltip text="Switch back to the normal tab/split layout">
+      <button class="exit-btn" onclick={exit}>⊟ Tab view</button>
+    </Tooltip>
     {#if filmstrip.length === 0}
       <div class="strip-empty">{members.length === 0 ? 'No named agents in this mesh yet — name an agent tab to add it.' : 'All agents are on stage.'}</div>
     {/if}
     {#each filmstrip as m (m.tabId)}
-      <button
-        class="tile"
-        style="width: {tileW}px; height: {TILE_H}px;"
-        onclick={(e) => promote(m.tabId, e)}
-        title="Click → left panel · Shift+click → right panel"
-      >
-        <!-- Inner is the full stage panel size; the terminal fits to it (clientWidth ignores
-             the scale), then we visually shrink it to the tile with transform: scale. -->
-        <div class="tile-term" data-terminal-slot={m.tabId} style="width: {panelW}px; height: {panelH}px; transform: scale({tileScale});"></div>
-        <div class="tile-overlay">
-          <StatusDot color={dotColor(m.tabId)} pulse={dotColor(m.tabId) === 'accent'} />
-          <span class="tile-role">{m.role}</span>
-        </div>
-      </button>
+      <Tooltip text="Click → left panel · Shift+click → right panel">
+        <button
+          class="tile"
+          style="width: {tileW}px; height: {TILE_H}px;"
+          onclick={(e) => promote(m.tabId, e)}
+        >
+          <!-- Inner is the full stage panel size; the terminal fits to it (clientWidth ignores
+               the scale), then we visually shrink it to the tile with transform: scale. -->
+          <div class="tile-term" data-terminal-slot={m.tabId} style="width: {panelW}px; height: {panelH}px; transform: scale({tileScale});"></div>
+          <div class="tile-overlay">
+            <StatusDot color={dotColor(m.tabId)} pulse={dotColor(m.tabId) === 'accent'} />
+            <span class="tile-role">{m.role}</span>
+          </div>
+        </button>
+      </Tooltip>
     {/each}
   </div>
 </div>
@@ -136,6 +140,9 @@
   }
   .exit-btn:hover { color: var(--accent); border-color: var(--accent); }
   .strip-empty { color: var(--fg-dim); font-size: 12px; padding-left: 8px; }
+  /* The tooltip wrapper is the filmstrip's flex item now; without this the tiles and the
+     exit button shrink instead of scrolling. */
+  .filmstrip > :global(.tooltip-wrapper) { flex-shrink: 0; }
 
   .tile {
     flex-shrink: 0; position: relative;

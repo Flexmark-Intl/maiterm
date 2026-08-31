@@ -4,6 +4,8 @@
   import { computeGraph, topicHue } from '$lib/stores/meshGraph';
   import type { MeshMember } from '$lib/stores/meshRouting';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
+  import TooltipBubble from '$lib/components/TooltipBubble.svelte';
 
   interface Props {
     open: boolean;
@@ -46,11 +48,23 @@
   // Node labels are word-wrapped via <foreignObject>; LBL_* size the label box and GH leaves
   // vertical room above the top node / below the bottom node so 2-line labels don't clip.
   // Past LABEL_LIMIT nodes the labels can't fit around the ring without colliding, so we drop
-  // them entirely and let the per-node <title> tooltip carry the name instead.
+  // them entirely and let the hover tooltip carry the name instead.
   const GW = 260, GH = 240;
   const LBL_W = 104, LBL_H = 26, LBL_GAP = 12;
   const LABEL_LIMIT = 6;
   const dense = $derived(board.length > LABEL_LIMIT);
+  // A node is an SVG <g>, which can't be wrapped in Tooltip's <span>, so the hovered node
+  // anchors the bubble directly.
+  let hoverText = $state('');
+  let hoverEl = $state<Element | null>(null);
+  function hoverNode(e: MouseEvent, role: string) {
+    hoverEl = e.currentTarget as Element;
+    hoverText = role;
+  }
+  function unhoverNode() {
+    hoverEl = null;
+    hoverText = '';
+  }
   const graph = $derived.by(() => {
     void agentMeshStore.version; void tick;
     if (!ws || !isMesh) return { nodes: [], edges: [] };
@@ -128,7 +142,9 @@
         <span class="mesh-badge">MESH</span>
         <h2>{ws?.name ?? 'Workspace'}</h2>
         {#if isMesh}<span class="count">{board.length} agent{board.length === 1 ? '' : 's'}</span>{/if}
-        <button class="close-btn" onclick={onclose} title="Close (Esc)" aria-label="Close">×</button>
+        <Tooltip text="Close (Esc)">
+          <button class="close-btn" onclick={onclose} aria-label="Close">×</button>
+        </Tooltip>
       </header>
 
       {#if !ws}
@@ -189,8 +205,17 @@
               {/each}
               {#each graph.nodes as n (n.tabId)}
                 {@const below = n.y >= GH / 2}
-                <g class="node" class:active={n.active} class:offline={!n.live} onclick={() => openTab(n.tabId)} onkeydown={(e) => { if (e.key === 'Enter') openTab(n.tabId); }} role="button" tabindex="-1">
-                  <title>{n.role}</title>
+                <g
+                  class="node"
+                  class:active={n.active}
+                  class:offline={!n.live}
+                  onclick={() => openTab(n.tabId)}
+                  onkeydown={(e) => { if (e.key === 'Enter') openTab(n.tabId); }}
+                  onmouseenter={(e) => hoverNode(e, n.role)}
+                  onmouseleave={unhoverNode}
+                  role="button"
+                  tabindex="-1"
+                >
                   <circle cx={n.x} cy={n.y} r="9" />
                   {#if n.active}<circle class="halo" cx={n.x} cy={n.y} r="9" />{/if}
                   {#if !dense}
@@ -201,6 +226,7 @@
                 </g>
               {/each}
             </svg>
+            <TooltipBubble text={hoverText} anchor={hoverEl} />
             {#if dense}
               <p class="graph-hint">Names hidden — hover a node to see it, click to open its tab.</p>
             {/if}
@@ -213,14 +239,18 @@
             <div class="panel-head">
               <h3>Topics</h3>
               {#if completedCount > 0}
-                <button class="mini ghost" onclick={clearCompleted} title="Remove all completed topics from the list">Clear done ({completedCount})</button>
+                <Tooltip text="Remove all completed topics from the list">
+                  <button class="mini ghost" onclick={clearCompleted}>Clear done ({completedCount})</button>
+                </Tooltip>
               {/if}
             </div>
             {#each topics as t (t.id)}
               {@const isPaused = pausedIds.has(t.id)}
               <div class="topic" class:complete={t.state === 'complete'} class:paused={isPaused}>
                 <span class="swatch" style="background: hsl({topicHue(t.id)} 70% 62%)"></span>
-                <span class="t-label" title={t.label}>{t.label}</span>
+                <Tooltip text={t.label}>
+                  <span class="t-label">{t.label}</span>
+                </Tooltip>
                 <span class="t-meta">{roleOf(t.owner_tab_id)} · {t.turn} turn{t.turn === 1 ? '' : 's'}</span>
                 {#if t.state === 'complete'}
                   <span class="t-state done">done</span>
@@ -228,7 +258,9 @@
                   {#if isPaused}<button class="mini" onclick={() => resumeTopic(t.id)}>Resume</button>{/if}
                   <button class="mini ghost" onclick={() => completeTopic(t.id)}>Complete</button>
                 {/if}
-                <button class="t-del" onclick={() => deleteTopic(t.id)} title="Delete this topic" aria-label="Delete topic {t.label}">×</button>
+                <Tooltip text="Delete this topic">
+                  <button class="t-del" onclick={() => deleteTopic(t.id)} aria-label="Delete topic {t.label}">×</button>
+                </Tooltip>
               </div>
             {/each}
           </section>
@@ -244,18 +276,32 @@
             <div class="agent-card" class:needs={a.needsInput}>
               <div class="agent-head">
                 <StatusDot color={a.claudeState === 'active' ? 'accent' : a.live ? 'green' : 'dim'} pulse={a.claudeState === 'active'} />
-                <button class="role-link" onclick={() => openTab(a.tabId)} title="Open this agent's tab">{a.role}</button>
+                <Tooltip text="Open this agent's tab">
+                  <button class="role-link" onclick={() => openTab(a.tabId)}>{a.role}</button>
+                </Tooltip>
                 <span class="spacer"></span>
-                {#if a.needsInput}<button class="needs-you" onclick={() => openTab(a.tabId)} title="This agent is asking you — open its tab to answer">needs you</button>{/if}
-                {#if a.cwd}<span class="cwd" title={a.cwd}>{a.cwd.split('/').pop()}</span>{/if}
+                {#if a.needsInput}
+                  <Tooltip text="This agent is asking you — open its tab to answer">
+                    <button class="needs-you" onclick={() => openTab(a.tabId)}>needs you</button>
+                  </Tooltip>
+                {/if}
+                {#if a.cwd}
+                  <Tooltip text={a.cwd}>
+                    <span class="cwd">{a.cwd.split('/').pop()}</span>
+                  </Tooltip>
+                {/if}
               </div>
-              <input
-                class="purpose-input"
-                placeholder="optional steer — a boundary or scope the name doesn't say…"
-                title="Optional. The agent declares its own scope on join; use this only to constrain or correct it (e.g. 'auth flow only, not the whole API')."
-                value={a.purpose ?? ''}
-                onchange={(e) => setPurpose(a.tabId, e)}
-              />
+              <Tooltip
+                text="Optional. The agent declares its own scope on join; use this only to constrain or correct it (e.g. 'auth flow only, not the whole API')."
+                block
+              >
+                <input
+                  class="purpose-input"
+                  placeholder="optional steer — a boundary or scope the name doesn't say…"
+                  value={a.purpose ?? ''}
+                  onchange={(e) => setPurpose(a.tabId, e)}
+                />
+              </Tooltip>
             </div>
           {/each}
         </section>
@@ -306,6 +352,7 @@
     padding: 2px 5px; border-radius: 3px;
   }
   .count { font-size: 11px; color: var(--fg-dim); margin-left: auto; }
+  .cockpit-header :global(.tooltip-wrapper) { flex-shrink: 0; }
   .close-btn { background: none; border: none; color: var(--fg-dim); font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px; }
   .close-btn:hover { color: var(--fg); }
 
@@ -370,6 +417,7 @@
   .panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-dim); margin: 0 0 8px; }
   .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   .panel-head h3 { margin: 0; }
+  .panel-head :global(.tooltip-wrapper) { flex-shrink: 0; }
 
   .topic { display: flex; align-items: center; gap: 7px; padding: 4px 0; font-size: 12px; }
   .t-del { background: none; border: none; color: var(--fg-dim); font-size: 14px; line-height: 1; cursor: pointer; padding: 0 2px; flex-shrink: 0; }
@@ -378,6 +426,7 @@
   .topic.paused .t-label { color: var(--yellow); }
   .swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
   .t-label { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+  .topic :global(.tooltip-wrapper) { flex-shrink: 0; }
   .t-meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; white-space: nowrap; }
   .t-state.done { color: var(--green); font-size: 10px; text-transform: uppercase; }
 
@@ -387,6 +436,7 @@
   .role-link { background: none; border: none; color: var(--fg); font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; }
   .role-link:hover { color: var(--accent); }
   .spacer { flex: 1; }
+  .agent-head :global(.tooltip-wrapper) { flex-shrink: 0; }
   .cwd { font-size: 10px; color: var(--fg-dim); font-family: monospace; }
   .purpose-input {
     width: 100%; margin-top: 6px; box-sizing: border-box;
