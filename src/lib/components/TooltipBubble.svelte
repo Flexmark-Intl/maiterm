@@ -21,8 +21,9 @@
 
   $effect(() => {
     // Hidden again: drop `placed` so the next bubble can't flash at the last one's spot
-    // before it has been measured.
-    if (!anchor || !text) {
+    // before it has been measured. A detached anchor counts as hidden — its rect is all
+    // zeros, which would otherwise pin the bubble to the corner of the window.
+    if (!anchor || !text || !anchor.isConnected) {
       placed = false;
       return;
     }

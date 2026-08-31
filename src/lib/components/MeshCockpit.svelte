@@ -55,15 +55,15 @@
   const dense = $derived(board.length > LABEL_LIMIT);
   // A node is an SVG <g>, which can't be wrapped in Tooltip's <span>, so the hovered node
   // anchors the bubble directly.
-  let hoverText = $state('');
+  let hoverTabId = $state<string | null>(null);
   let hoverEl = $state<Element | null>(null);
-  function hoverNode(e: MouseEvent, role: string) {
+  function hoverNode(e: MouseEvent, tabId: string) {
     hoverEl = e.currentTarget as Element;
-    hoverText = role;
+    hoverTabId = tabId;
   }
   function unhoverNode() {
     hoverEl = null;
-    hoverText = '';
+    hoverTabId = null;
   }
   const graph = $derived.by(() => {
     void agentMeshStore.version; void tick;
@@ -75,6 +75,18 @@
       ? Math.min(100, 34 + members.length * 7)
       : Math.min(78, 30 + members.length * 8);
     return computeGraph(members, topics, agentMeshStore.getEdges(), active, Date.now(), { cx: GW / 2, cy: GH / 2, radius }, pausedIds);
+  });
+
+  // A hovered node can go away under a motionless pointer — clicking it closes the cockpit,
+  // and the 1s re-derive drops an agent that left the mesh — and neither fires mouseleave.
+  // Reading the label off the live graph hides the bubble the moment its node is gone.
+  const hoverText = $derived(
+    hoverTabId ? (graph.nodes.find((n) => n.tabId === hoverTabId)?.role ?? '') : ''
+  );
+  // Closing unmounts the graph without a mouseleave, so the next open would otherwise
+  // re-anchor to the detached <g> — a bubble pinned in the window's corner.
+  $effect(() => {
+    if (!open && hoverTabId) unhoverNode();
   });
 
   function reasonLabel(r: string): string {
@@ -211,7 +223,7 @@
                   class:offline={!n.live}
                   onclick={() => openTab(n.tabId)}
                   onkeydown={(e) => { if (e.key === 'Enter') openTab(n.tabId); }}
-                  onmouseenter={(e) => hoverNode(e, n.role)}
+                  onmouseenter={(e) => hoverNode(e, n.tabId)}
                   onmouseleave={unhoverNode}
                   role="button"
                   tabindex="-1"
@@ -426,7 +438,10 @@
   .topic.paused .t-label { color: var(--yellow); }
   .swatch { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
   .t-label { color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
-  .topic :global(.tooltip-wrapper) { flex-shrink: 0; }
+  /* The wrapper is the flex item now: the label's must shrink so it still ellipsizes,
+     the delete button's (always last) must not. */
+  .topic > :global(.tooltip-wrapper) { min-width: 0; }
+  .topic > :global(.tooltip-wrapper:last-child) { flex-shrink: 0; }
   .t-meta { color: var(--fg-dim); font-size: 11px; margin-left: auto; white-space: nowrap; }
   .t-state.done { color: var(--green); font-size: 10px; text-transform: uppercase; }
 
