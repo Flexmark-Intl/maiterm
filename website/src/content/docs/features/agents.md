@@ -25,7 +25,7 @@ There's **one** MCP/IDE server, shared by every agent. It starts automatically w
 - **Claude Code** — a lock file in `~/.claude/ide/`, an `mcpServers` entry in `~/.claude.json`, and lifecycle hooks in `~/.claude/settings.json`.
 - **Codex** — an MCP block in `~/.codex/config.toml`, lifecycle hooks in `~/.codex/hooks.json`, and a `maiterm` prompt in `~/.codex/prompts/`.
 
-When an agent connects, maiTerm identifies the runtime from the client's own handshake — so a Codex connection never binds to a Claude tab, and **Codex needs no manual `/maiterm init`**: the runtime is recognized from how it connected.
+When an agent connects, maiTerm identifies the runtime from the client's own handshake — so a Codex connection never binds to a Claude tab. And **no agent needs a manual registration step**: a tab names itself on the wire, and the session links itself the moment the agent process starts. See [Acting as the right tab](#acting-as-the-right-tab).
 
 ## Choosing your agents
 
@@ -49,6 +49,19 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 ### SSH MCP Bridge
 
 When you're SSH'd into a remote server, maiTerm bridges the MCP connection so an agent running remotely still has access to all IDE tools. A reverse SSH tunnel is set up automatically in the background — no manual port forwarding needed. For each enabled agent maiTerm writes the matching remote config (Claude Code's lock file and `~/.claude.json`, or Codex's `~/.codex/config.toml` and `hooks.json`), gracefully no-op'ing on a host that doesn't have that CLI installed. The bridge status is shown in the tab bar with a bolt icon (green = connected).
+
+#### Two computers, one remote account
+
+The remote configuration files live in the account's home directory, one copy shared by every session on that host — so if they named a particular maiTerm's connection, whichever machine connected last would own the account and every agent belonging to the other one would silently lose its tools and its hooks. A laptop and a desktop are enough to hit that; so are your own dev and release builds.
+
+Those files now name no maiTerm at all. Each agent works out which one to talk to from **its own terminal session's environment**, which maiTerm sets per tab when it opens the connection — so every machine writes identical bytes and there is nothing left to fight over. maiTerm also asks the remote host for a fixed port of its own rather than taking whatever it's given, and a tab that was told the old number is corrected as soon as its tunnel is up.
+
+One consequence worth knowing: a remote shell that **maiTerm didn't start itself** — one you opened inside `tmux`, or after `su`, or by typing `ssh` in another window — has none of that environment and can't reach maiTerm at all. (Before, it would reach *some* maiTerm, often the wrong one.) The remedy depends on how many tabs you have open to that host:
+
+- **One tab on the host** — maiTerm leaves the values in `~/.aiterm`, so `source ~/.aiterm` in the stray shell is enough.
+- **Several tabs on the same host** — that file is deliberately *removed* rather than written. Every tab on a host shares one tunnel, so a shell with no environment of its own can't be told apart from its siblings, and a fallback file would quietly hand it another tab's identity. Start the shell from a maiTerm tab instead.
+
+`claude mcp list` names what's missing if you're not sure which case you're in.
 
 ## Available Tools
 
@@ -120,11 +133,42 @@ Both agents connect to the same MCP server and can call the same tools.
 
 See [Agent Bridge](/features/agent-bridge/) for the full feature.
 
+### Tasks
+
+| Tool | Description |
+|------|-------------|
+| `listTasks` | List the project's tasks, grouped by workstream — this tab's, or the whole workspace |
+| `createTasks` | Create a batch of tasks, optionally into a named workstream |
+| `updateTasks` | Update a batch — status, title, detail, workstream, blockers |
+
+Three batched tools over one list you and your agent both edit. There is deliberately no delete tool — an agent may mark a task done, only a human removes one. See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
+
+### Send files to your phone
+
+| Tool | Description |
+|------|-------------|
+| `sendFilesToPhone` | Send files from this machine to your paired [maiLink](/features/mailink/) phone |
+
+Files land in that tab's chat on the phone and in a cross-chat **Files** list. Any file type, up to 1 GB each; each path succeeds or fails on its own, so one bad path doesn't sink the batch. An agent on an SSH tab passes its own remote paths and maiTerm fetches them back over the bridge tunnel. The bytes are copied at the moment of sending, so rewriting the file afterwards can't retroactively change what you were already given.
+
+### Supervision
+
+If [Overlord](/features/overlord/) is enabled and this window has an Overlord workspace, every supervised agent also gets `replyToOverlord`, and the supervisor agent gets a set of tools of its own — driving another tab, answering a prompt it's stuck at, proposing rule changes, and putting a finished session away. See [Overlord](/features/overlord/).
+
 ### Acting as the right tab
 
-An agent states which tab it's running in by calling `initSession` — that's what the SessionStart hook does for you, and what `/maiterm init` does by hand. If its connection drops and reconnects, which happens routinely over an SSH tunnel, maiTerm works the tab out again from what's running rather than making you re-register, and every tool that reads or acts on that tab keeps working.
+Every tool call an agent makes has to be attributed to the tab it's running in — that's what makes `getTabNotes` read *your* notes and `switchTab` mean something. maiTerm establishes that two ways, both automatic:
 
-That recovered identity is a deduction, though, not a statement — an MCP call carries nothing that proves who's calling — so the tools whose effect *leaves* the tab are refused on one: messaging or listing [bridge](/features/agent-bridge/) peers, [mesh](/features/mesh-workspace/) topics, and posting to a [Mattermost](/features/comms/) thread. Those speak under the tab's name into someone else's session, where a wrong guess can't be taken back. The refusal says so and names the fix: run `/maiterm init` in that session, or pass an explicit `tabId`.
+- **A tab names itself on every request.** maiTerm sets `MAITERM_TAB_ID` in each tab's environment, and the agent's own MCP configuration carries it as a header on every call it makes. Nothing is printed into the model's context and nothing is typed by anyone.
+- **A SessionStart hook links the session.** It runs inside the tab's own shell — so it can see which tab it is — and registers the agent's session id the moment the agent process starts, which is what wires up auto-resume and hands the agent its standing instructions.
+
+Between them, a restart, a resume, a fork or a compaction all come back correctly bound with nothing typed. That last part used to be the sharp edge: a resumed agent takes no turn until you type something, so before this there was no moment at which it could announce itself, and every restored tab sat unregistered — no tools, no hooks, invisible to maiLink and the mesh — until you noticed and re-registered it by hand.
+
+The two sources are cross-checked rather than trusted blindly. The session is durable and wins on *which* tab; the header is exact but only as good as the shell that launched the agent, so it raises confidence when the two agree. When they disagree, or when only a deduction is available — an SSH connection re-mints its transport every few seconds, and a shell started inside `tmux` or after `su` inherits somebody else's environment — the identity is treated as **inferred**, and the tools whose effect *leaves* the tab are refused on one: messaging or listing [bridge](/features/agent-bridge/) peers, [mesh](/features/mesh-workspace/) topics, posting to a [Mattermost](/features/comms/) thread, and [sending files to your phone](#send-files-to-your-phone). Those speak under the tab's name into someone else's session, where a wrong guess can't be taken back. The refusal says so and names the fix.
+
+#### `/maiterm init` is a repair tool now
+
+It still exists, and it still works — but it is no longer a startup step, and agents are told not to spend an opening turn on it. Run it when identity is genuinely wrong: a stale `MAITERM_TAB_ID` inherited from another shell, or an inferred-identity refusal like the one above. Everything else takes care of itself.
 
 ### Tab Context Discovery
 
@@ -155,7 +199,7 @@ A finished agent shows a **filled** green dot (unread); once you view its tab it
 
 ## Auto-resume
 
-When an agent registers, maiTerm captures its session ID and arms auto-resume so a restored or relaunched tab reconnects to the same conversation. Auto-resume is **runtime-aware**: the resume modal preselects the right command for whichever agent is running — `claude --resume …` for Claude Code, `codex resume …` for Codex — and hides itself entirely when a tab has no agent.
+The moment an agent's session starts, maiTerm captures its session ID and arms auto-resume so a restored or relaunched tab reconnects to the same conversation. Auto-resume is **runtime-aware**: the resume modal preselects the right command for whichever agent is running — `claude --resume …` for Claude Code, `codex resume …` for Codex — and hides itself entirely when a tab has no agent.
 
 ## Agent Bridge
 

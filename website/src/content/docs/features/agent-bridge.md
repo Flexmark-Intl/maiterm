@@ -47,7 +47,7 @@ The agents are kept fully aware of the situation they're in:
 
 A bridge is durable. The pairing is saved on both tabs, so it survives quitting and reopening maiTerm. On the next launch the bridge is rebuilt automatically, and because an agent can pick up a fresh session id when it auto-resumes, maiTerm re-binds the pair instead of dropping the link. If one side ends its session, the bridge is suspended rather than torn down — when that agent resumes, it reconnects. Only an explicit disconnect or closing the tab removes a bridge for good.
 
-What a restart can't rebuild on its own is an agent's *claim* to its own tab: when its connection comes back, maiTerm deduces which tab it belongs to, and a deduced identity isn't allowed to address a peer. So if `sendToBridgedAgent` refuses on those grounds, run `/maiterm init` in that session once and retry — see [acting as the right tab](/features/agents/#acting-as-the-right-tab).
+An agent's claim to its own tab comes back with it: a tab names itself on every request its agent makes, so a restarted or resumed session is bound without anyone typing anything. Addressing a peer speaks under your tab's name into someone else's session, so it's one of the few tools that needs a *stated* identity rather than a deduced one — if `sendToBridgedAgent` ever refuses on those grounds (a shell that inherited another tab's environment, say), run `/maiterm init` in that session once and retry. See [acting as the right tab](/features/agents/#acting-as-the-right-tab).
 
 Bridged tabs show a small link badge in the tab bar so you can see which sessions are paired at a glance. To break a bridge, right-click the tab and choose **Disconnect Agent Bridge** — the same tab menu that offers **Create Agent Bridge…**.
 

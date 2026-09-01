@@ -44,7 +44,8 @@ If you want to build maiTerm from source, you'll need:
 
 - **Cmd+T** — new tab
 - **Cmd+D** — split pane (duplicates current tab with full context)
-- **Cmd+N** — new workspace
+- **Cmd+Opt+N** — new workspace
+- **Cmd+E** — notes panel · **Cmd+Shift+E** — [task panel](/features/tasks/)
 - **Cmd+,** — open preferences
 - **Cmd+/** — help and keyboard shortcuts
 
@@ -55,5 +56,10 @@ maiTerm integrates with **Claude Code** and **OpenAI Codex**, both enabled by de
 1. Exposes MCP/IDE tools to the agent
 2. Tracks live state through the agent's hooks
 3. Captures the session ID and enables auto-resume
+4. Binds the session to the tab it's running in
 
-No configuration needed — it just works, and maiTerm detects which agent connected on its own (no manual `/maiterm init`). To choose which agents maiTerm wires up — locally and over SSH — open **Preferences → AI Agents**. See [Agent Integration](/features/agents/) for the full picture.
+No configuration needed, and **no registration step**: the tab identifies itself on the wire and the session links itself when the agent starts, so a restart, a resume or a compaction all come back correctly bound with nothing typed. (`/maiterm init` still exists, but only as a repair tool — see [acting as the right tab](/features/agents/#acting-as-the-right-tab).)
+
+To choose which agents maiTerm wires up — locally and over SSH — open **Preferences → AI Agents**. See [Agent Integration](/features/agents/) for the full picture.
+
+Your agent also shares a [task list](/features/tasks/) with you out of the box: it records what it's working on, you edit the same rows in a panel on `Cmd+Shift+E`, and each side sees the other's changes.

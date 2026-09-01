@@ -47,6 +47,7 @@ description: Complete list of maiTerm keyboard shortcuts.
 | `Cmd+Shift+M` | Open the Mesh cockpit ([Mesh Workspace](/features/mesh-workspace/)) |
 | `Cmd+Shift+C` | Toggle composer dock |
 | `Cmd+E` | Toggle notes panel |
+| `Cmd+Shift+E` | Toggle task panel ([Tasks](/features/tasks/)) |
 | `Cmd+B` | Toggle sidebar |
 | `Cmd+F` | Find in terminal |
 | `Cmd+K` | Clear terminal + scrollback |

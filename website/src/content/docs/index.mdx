@@ -36,6 +36,62 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 <section class="spotlight">
 
+<p class="spotlight-eyebrow">New — Tasks</p>
+
+## One task list, shared with your agents
+
+Agents keep private to-do lists. You watch one scroll past in a terminal, and that's the whole relationship — no way to add an item, correct one, or see across a window what's actually in flight. **maiTerm owns that state now**, and both sides read and write the same list.
+
+Tasks hang off the **workspace**, because a workspace is a project: they outlive a tab reload, a window move, and the agent that wrote them. Six lanes — **Backlog**, **To-do**, **Active**, **Blocked**, **Review**, **Done** — where *Backlog* is a parking lot for next month rather than an inbox, exempt from every staleness check, and new work starts in **To-do**. **Workstreams** name the separate jobs inside a project, so a tab asked to do two unrelated things doesn't flatten them into one list.
+
+Open the panel with `Cmd+Shift+E` — the same dock as notes, per tab. Add, retitle, annotate, park, reassign, hand a row to the agent with **Do it**, or delete it; your agent sees every one of those edits through the same tools it writes with. That's what makes it two-way: until now, task state was something you could only watch. On by default, in every runtime, local or over SSH.
+
+<CardGrid>
+  <Card title="It picks itself up" icon="approve-check">
+    Every agent tab is told about the list when its session starts, resumes, forks or compacts — including "if you already have a list for this project, move it here", so work already in flight becomes visible instead of just the next job.
+  </Card>
+  <Card title="Only a human deletes" icon="warning">
+    An agent may mark a task done; there is deliberately no delete tool. An agent tidying away work it didn't understand is unrecoverable — and when *you* delete a row, the agent carrying it is told.
+  </Card>
+  <Card title="Archived with its tab" icon="seti:time-cop">
+    Archive a tab and its work parks with it; restore the tab and the rows come back, still attributed. A parked prerequisite still blocks whatever was waiting on it.
+  </Card>
+</CardGrid>
+
+<p class="spotlight-cta"><a href="/features/tasks/">Explore Tasks →</a></p>
+
+</section>
+
+<section class="spotlight">
+
+<p class="spotlight-eyebrow">New — Overlord</p>
+
+## A supervisor for a window full of agents
+
+With a dozen agents running, what you lose isn't any single answer — it's track. Which tab is about to hit a compaction wall, which one has been sitting at a permission prompt for twenty minutes, which one quietly stopped being connected to maiTerm at all. **Overlord** watches all of them, per window, and acts on rules you write.
+
+A rule is a condition and a sequence: *when context reaches 55%, tell the agent to update its docs, then to prepare for compaction, then `/compact`* — waiting for each step to genuinely land before sending the next. **No model sits in that loop**, so it's predictable and costs nothing to run. Four rules ship: checkpoint before compaction, review after a commit, re-bind an agent that has lost its connection to maiTerm, and keep a task list.
+
+Overlord types with your authority, so **propose mode is on out of the box**: every directive is held for you to approve, showing the exact words it would send. The guards that decide whether a rule may fire at all are human-only and can't be edited by an agent, and your own keystrokes abort a sequence already in progress. Off until you switch it on.
+
+<CardGrid>
+  <Card title="An operations deck" icon="list-format">
+    **Triage** is one severity-ordered queue of everything wanting a person. **Fleet** is a card per agent — context ring, live state, time since its last turn, sequence in flight. **Board** is the task board indexed by workstream. **Ledger** is a verbatim record of every directive sent and what came back.
+  </Card>
+  <Card title="A supervisor agent, too" icon="star">
+    Optional: an agent with its own tools — pull the escalation queue, drive another tab, answer a prompt one is stuck at, propose rule changes for you to approve. It reaches tabs that are suspended, archived, or on the far end of an SSH connection.
+  </Card>
+  <Card title="Rules you actually tune" icon="setting">
+    Conditions fire on semantic state — context, commits, idle time, stale tasks, unbound agents, waiting permission prompts — not on scraped terminal output. Seeded, hideable and restorable like triggers; scoped globally or per workspace.
+  </Card>
+</CardGrid>
+
+<p class="spotlight-cta"><a href="/features/overlord/">Explore Overlord →</a></p>
+
+</section>
+
+<section class="spotlight">
+
 <p class="spotlight-eyebrow">Spotlight — Mesh Workspace</p>
 
 ## A team of specialist agents, not one giant context
@@ -72,7 +128,7 @@ It's not just a coordination win — it's a token win. One monolithic agent has 
 
 **maiLink** is a phone companion that connects **directly to maiTerm running on your own computer**. Watch your agents work, answer their questions, approve permissions, and interrupt a runaway turn — from the couch, the garden, anywhere in the house.
 
-It shows you what the agent is *doing*, not just what it said: its **task board** streams to the phone and ticks off as work lands (remote SSH sessions included), its **background shells** appear as a roster with a **Stop** button each — liveness confirmed against the process list, never guessed from the transcript — and agent-to-agent mesh and bridge traffic reads as its own kind of turn. Tap **New conversation** to start a fresh session beside the one you're reading: same host, same directory, clean history.
+It shows you what the agent is *doing*, not just what it said: its **task board** streams to the phone and ticks off as work lands (remote SSH sessions included), its **background shells** appear as a roster with a **Stop** button each — liveness confirmed against the process list, never guessed from the transcript — and agent-to-agent mesh and bridge traffic reads as its own kind of turn. Tap **New conversation** to start a fresh session beside the one you're reading: same host, same directory, clean history. Agents can **send you files**, too — any kind, arriving in that tab's chat and in a cross-chat **Files** list, from remote SSH sessions as readily as local ones.
 
 Now it manages your desk, too. **Rename** a tab, **archive** one for later (and restore it from the archived list — it respawns and resumes its agent), or **close** one for good. Tap **Resume workspace** to wake a suspended workspace back to life, bringing back exactly the tabs that were running. Mesh workspaces are badged in the inbox with a one-tap **Initialize all** that readies every agent in them, and any single tab that's stopped answering has an **Initialize** of its own.
 
@@ -109,13 +165,13 @@ A bug report lands in a **Mattermost** thread. Now maiTerm can be watching for i
 
 **It can start the conversation, too.** An agent that found a regression, or needs a human to settle a question, can **open its own thread** in a channel it monitors and stay bound to it — and because it asked, every reply comes back without anyone having to `@mention` a bot they didn't summon. Whichever way a thread arrives, the agent **acknowledges it first**, with its read of the ask in one line, so nobody is left wondering whether it was picked up.
 
-You stay in control of what it can act on. Only people you list can summon it, on a thread someone else started only messages that **`@mention` the bot** reach the agent, and each is scoped by its sender. The line is **read versus change**: investigating, explaining, reproducing and answering happen freely on anyone's ask, while editing code, deploying, or touching data needs an **authorized operator's** go-ahead — which the agent requests by `@mentioning` one of them. A monitoring tab works **up to three threads at once** — its `@` indicator is dim while idle, green with a count once threads are bound — and a finished thread is **released** as the agent posts its resolution, freeing the slot — an `@mention` summons it straight back with the full conversation if the fix turns out to be wrong.
+You stay in control of what it can act on. Only people you list can summon it, on a thread someone else started only messages that **`@mention` the bot** reach the agent, and each is scoped by its sender. The line is **read versus change**: investigating, explaining, reproducing and answering happen freely on anyone's ask, while editing code, deploying, or touching data needs an **authorized operator's** go-ahead — which the agent requests by `@mentioning` one of them. A monitoring tab works **up to six threads at once** — its `@` indicator is dim while idle, green with a count once threads are bound — and a finished thread is **released** as the agent posts its resolution, freeing the slot — an `@mention` summons it straight back if the fix turns out to be wrong, delivering only what's been said since rather than replaying the whole thread.
 
 **Attachments work both ways.** Whatever is attached to a report — a screenshot, a PDF, a spec document, a log — is staged where the agent can actually open it, with a note on how to read that kind of file, including for agents running on a remote host over SSH. The agent can attach files to its own replies too, so a before/after or visual proof of a fix goes back to the thread.
 
 <CardGrid>
   <Card title="Summoned, not pasted" icon="approve-check">
-    Monitor the channels the bot belongs to; an `@mention` in a thread binds it to your dispatcher tab automatically. The agent can open a thread of its own in those channels too. One tab handles up to three threads at once, and overflow queues.
+    Monitor the channels the bot belongs to; an `@mention` in a thread binds it to your dispatcher tab automatically. The agent can open a thread of its own in those channels too. One tab handles up to six threads at once, and overflow queues.
   </Card>
   <Card title="A tiered summon list" icon="comment-alt">
     Authorized operators carry your full authority; pickup users can summon the bot and get investigation and answers for free, but any change waits on an operator's go-ahead; everyone else is never picked up. Set both lists in Preferences.
@@ -138,13 +194,19 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     Interpolated tab names like `CustomName %title` combine your label with live terminal state. Name a tab "billing API" and always know what's running in it — no more guessing across 15 identical "bash" tabs.
   </Card>
   <Card title="Restart without losing anything" icon="rocket">
-    Reboot your machine, restart maiTerm — every tab comes back exactly as it was, out of the box. Scrollback, layout, SSH sessions, Claude Code sessions. Back up your state on a schedule or export it manually — and import it on a new machine.
+    Reboot your machine, restart maiTerm — every tab comes back exactly as it was, out of the box. Scrollback, layout, SSH sessions, Claude Code sessions — and each resumed agent comes back connected to its tab with nothing typed by anyone. Back up your state on a schedule or export it manually — and import it on a new machine.
   </Card>
   <Card title="Workspace Organization" icon="seti:folder">
     Group terminals by project. Each workspace has its own pane layout, tabs, and context. Suspend inactive workspaces to free resources — they resume instantly with full state when you need them.
   </Card>
   <Card title="AI Agent Integration" icon="puzzle">
-    Deep integration with Claude Code and OpenAI Codex through one runtime-neutral pipeline — pick which agents maiTerm wires up in Preferences. 40+ MCP tools let your agent navigate workspaces, manage notes, control preferences, review diffs, and discover what's running in your tabs. Real-time hooks track what each agent is doing — active tool, permission requests, compaction state. Per-tab, per-workspace, and a global footer dot roll up every agent's state — working, waiting for permission, or done — so you can see at a glance which ones need you. Works over SSH too via reverse tunnel.
+    Deep integration with Claude Code and OpenAI Codex through one runtime-neutral pipeline — pick which agents maiTerm wires up in Preferences. No registration step: a tab identifies itself on the wire and its session links itself when the agent starts, so restarts, resumes, forks and compactions all come back correctly bound with nothing typed. 40+ MCP tools let your agent navigate workspaces, manage tasks and notes, control preferences, review diffs, send you files, and discover what's running in your tabs. Real-time hooks track what each agent is doing — active tool, permission requests, compaction state. Per-tab, per-workspace, and a global footer dot roll up every agent's state — working, waiting for permission, or done — so you can see at a glance which ones need you. Works over SSH too via reverse tunnel.
+  </Card>
+  <Card title="Share a task list with your agents" icon="list-format">
+    maiTerm owns the task state, so it's the same list on both sides. Six lanes, named workstreams, a panel on `Cmd+Shift+E` where you add, retitle, park, reassign or hand a row to the agent — and it sees every edit through the same tools it writes with. Scoped to the project, so the work outlives a reload, a window move, and the agent that wrote it. Works in every runtime, local or over SSH.
+  </Card>
+  <Card title="Supervise a whole window of agents" icon="star">
+    Overlord watches every agent tab in a window and acts on rules you write — checkpoint before a compaction wall, review after a commit, re-bind an agent that dropped off. Deterministic, no model in the loop, and every directive held for your approval by default. Triage, Fleet, Board and Ledger views, plus an optional supervisor agent with tools of its own. Opt-in.
   </Card>
   <Card title="Bridge two agents" icon="comment-alt">
     Connect two running agent sessions — one local, one over SSH, two related projects, even a Claude Code and a Codex — so they collaborate directly. One agent asks the other questions, requests research, or shares context, and replies come back as new turns. maiTerm spawns a split pane so you see both sides, stamps every message with the sender's real identity, and keeps the agents deferring to you for the decisions.
@@ -153,7 +215,7 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     Bridge connects two agents — a mesh connects them all. Flip a workspace into a mesh and every named agent can message any other by role, addressed and routed so a rename never misroutes. Conversation groups into topics, with opt-in soft, hard, and time-to-live loop caps when you want backstops. Open the cockpit (`Cmd+Shift+M`) for a live conversation graph, a topic board, and a focused stage + filmstrip view of every agent.
   </Card>
   <Card title="Resolve support threads in-terminal" icon="approve-check">
-    Watch your Mattermost channels and the bot picks up threads on demand: `@mention` it and maiTerm binds the thread to a dispatcher tab, which works the bug to resolution — reading the whole thread, fixing it in that tab's repo, and posting back a support summary plus technical detail. One tab handles up to three threads at once, and the agent can open a thread of its own when it finds something the channel needs to know; you can still hand-pick a thread with `/maiterm resolve <permalink>`. Authorized operators carry your authority, everyone else gets investigation and answers for free but no changes without an operator's go-ahead, and a fix stays open until a human confirms. Configure the bot once in Preferences → Integrations.
+    Watch your Mattermost channels and the bot picks up threads on demand: `@mention` it and maiTerm binds the thread to a dispatcher tab, which works the bug to resolution — reading the whole thread, fixing it in that tab's repo, and posting back a support summary plus technical detail. One tab handles up to six threads at once, and the agent can open a thread of its own when it finds something the channel needs to know; you can still hand-pick a thread with `/maiterm resolve <permalink>`. Authorized operators carry your authority, everyone else gets investigation and answers for free but no changes without an operator's go-ahead. Posting the resolution releases the thread rather than camping on it — an `@mention` brings the agent straight back with only what's new. Configure the bot once in Preferences → Integrations.
   </Card>
   <Card title="Reach agents from your phone" icon="phone">
     maiLink, the companion app, connects directly to maiTerm over your LAN — encrypted, authenticated, no cloud in the data path. Watch live transcripts, follow the agent's task board and background shells (with a Stop button each), answer agent questions, approve permissions, and interrupt runaway turns from anywhere in the house. Manage the tabs themselves too — rename, archive, restore, close, start a fresh conversation, wake a suspended workspace, or ready a whole mesh in one tap. QR pairing with revocable per-device tokens.

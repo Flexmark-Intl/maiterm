@@ -39,6 +39,8 @@ export default defineConfig({
             { label: 'Workspaces & Panes', slug: 'features/workspaces' },
             { label: 'Code Editor', slug: 'features/editor' },
             { label: 'Agent Integration', slug: 'features/agents' },
+            { label: 'Tasks', slug: 'features/tasks' },
+            { label: 'Overlord', slug: 'features/overlord' },
             { label: 'Agent Bridge', slug: 'features/agent-bridge' },
             { label: 'Mesh Workspace', slug: 'features/mesh-workspace' },
             { label: 'maiLink Companion', slug: 'features/mailink' },
