@@ -1,5 +1,5 @@
 <script lang="ts">
-  type IconName = 'trash' | 'notes' | 'eye' | 'pencil' | 'list' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin';
+  type IconName = 'trash' | 'notes' | 'eye' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin';
 
   interface Props {
     name: IconName;
@@ -19,6 +19,14 @@
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2 2L5 13l-3 1 1-3L12 2Z"/></svg>
 {:else if name === 'list'}
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="5" y1="4" x2="14" y2="4"/><line x1="5" y1="8" x2="14" y2="8"/><line x1="5" y1="12" x2="14" y2="12"/><circle cx="2.5" cy="4" r="0.75" fill="currentColor" stroke="none"/><circle cx="2.5" cy="8" r="0.75" fill="currentColor" stroke="none"/><circle cx="2.5" cy="12" r="0.75" fill="currentColor" stroke="none"/></svg>
+{:else if name === 'lanes'}
+  <!-- The task board: three lanes filled to different depths. Solid on purpose — these
+       render at 14px, where nothing INSIDE a shape survives and only the silhouette does,
+       so it has to differ from `list` by orientation (columns vs rows) rather than by
+       detail. A checklist read as `list` at this size, which is how the tasks toggle and
+       the hidden-tabs button came to look identical. Sibling of `pause`, already two solid
+       rounded rects. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor"><rect x="1.5" y="2" width="3.6" height="12" rx="1.1"/><rect x="6.2" y="2" width="3.6" height="8.4" rx="1.1"/><rect x="10.9" y="2" width="3.6" height="5" rx="1.1"/></svg>
 {:else if name === 'archive'}
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="1" width="14" height="4" rx="1"/><path d="M2 5v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5"/><path d="M6 9h4"/></svg>
 {:else if name === 'search'}

@@ -1345,7 +1345,7 @@
       style="flex-shrink:0;-webkit-app-region:no-drag"
       onclick={() => workspacesStore.toggleTasks(pane.active_tab_id!)}
     >
-      <Icon name="list" />
+      <Icon name="lanes" />
     </IconButton>
     <IconButton
       tooltip="Toggle notes ({modLabel}+E)"
