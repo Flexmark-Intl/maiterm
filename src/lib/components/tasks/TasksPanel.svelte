@@ -42,6 +42,8 @@
   /** The group whose add button was pressed, or null when the modal is closed. Holding the
    *  workstream id here is what lets the modal ask nothing about destination. */
   let addingTo = $state<{ workstreamId: string | null; name: string | null } | null>(null);
+  /** Receipt for the last "Do it", so the row says whether the agent was actually told. */
+  let startedNote = $state<{ id: string; text: string } | null>(null);
   let showDone = $state(false);
   let showParked = $state(false);
   let showUnclaimed = $state(false);
@@ -231,6 +233,26 @@
     addingTo = null;
   }
 
+  /** "Do it": move the row to Active and tell this tab's agent to start on it now.
+   *
+   *  Through the engine, like delete, because it types into a terminal and that has to go
+   *  through the same quiescence guards and the same ledger as every other injection. What
+   *  it is NOT is a supervisor action — the human clicked it, so it works with Overlord
+   *  switched off; only the relay-if-unreachable fallback needs a supervisor. */
+  async function start(t: Task) {
+    const r = await overlordStore.startTask(t.id);
+    // Say what actually reached the agent. "Active" on the board and "the agent has been
+    // told" are different facts, and a button that implies the second while only doing the
+    // first is how a task sits Active for an hour with nobody working on it.
+    startedNote =
+      r.told === 'tab'
+        ? { id: t.id, text: 'Agent told.' }
+        : r.told === 'agent'
+          ? { id: t.id, text: 'Tab was busy — Overlord will pass it on.' }
+          : { id: t.id, text: 'Marked Active. Nothing could be told — the tab is not reachable.' };
+    setTimeout(() => { if (startedNote?.id === t.id) startedNote = null; }, 6000);
+  }
+
   function setAssignee(t: Task, mineNow: boolean) {
     tasksStore.update(workspaceId, t.id, { tab_id: mineNow ? tabId : null });
   }
@@ -401,7 +423,25 @@
                       </span>
                     </Tooltip>
                   {/if}
-                  <Tooltip text={group.unclaimed ? 'Claim for this tab' : 'Hand back — leave for whoever picks it up'}>
+                  {#if !group.unclaimed && t.status !== 'done'}
+                    {#if isParked(t.status)}
+                      <Tooltip text="Unpark — back to To-do">
+                        <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
+                      </Tooltip>
+                    {:else}
+                      <Tooltip text="Park — shelve this for later, exempt from stale checks">
+                        <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'backlog' })}>↓</button>
+                      </Tooltip>
+                    {/if}
+                    <Tooltip text="Do it — tell this tab's agent to start on it now">
+                      <button class="mini go" onclick={() => start(t)}>▶</button>
+                    </Tooltip>
+                  {/if}
+                  <Tooltip
+                    text={group.unclaimed
+                      ? 'Claim — assign this row to this tab'
+                      : 'Unassign — drop this tab\'s claim so any tab can pick it up. Stays in its current lane; this is not the same as parking it.'}
+                  >
                     <button
                       class="mini"
                       onclick={() => setAssignee(t, !!group.unclaimed)}
@@ -445,6 +485,9 @@
                 ></textarea>
               {:else if t.detail}
                 <button class="detail-preview" onclick={() => toggleDetail(t)}>{t.detail}</button>
+              {/if}
+              {#if startedNote?.id === t.id}
+                <p class="started-note">{startedNote.text}</p>
               {/if}
             </li>
           {/each}
@@ -613,6 +656,16 @@
 
   /* Gives the heading some mass against the rows below it, and answers "how much is in
      this job" without opening the board. */
+  /* Says what actually reached the agent. "Active on the board" and "the agent has been
+     told" are different facts, and a button that implies the second while only doing the
+     first is how a row sits Active for an hour with nobody working on it. */
+  .started-note {
+    color: var(--fg-dim);
+    font-size: 10px;
+    line-height: 1.4;
+    margin: 3px 0 0 22px;
+  }
+
   .group-add {
     align-items: center;
     background: none;
@@ -751,6 +804,9 @@
     color: var(--fg);
   }
   .mini.danger { color: var(--red, #f7768e); }
+  /* The only row control that types into a terminal, so it is the only one that gets the
+     accent — the rest just move data around on the board. */
+  .mini.go:hover { color: var(--accent); }
 
   .deps {
     color: var(--yellow, #e0af68);

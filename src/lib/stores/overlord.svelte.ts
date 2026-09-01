@@ -807,6 +807,47 @@ function createOverlordStore() {
     return next;
   }
 
+  /**
+   * Type a board notice at a tab with the HUMAN's authority. Returns whether it landed.
+   *
+   * Shared by every board action that has something to tell the tab carrying a task, so
+   * they cannot drift on the one thing that is easy to get wrong here — WHEN it is safe to
+   * type. Idle only, and re-checked AFTER the liveness round trip:
+   *
+   * `hasLiveRepl` says a process is alive; it says nothing about whether the tab can take
+   * typed text. It returns true for `active` (the notice would land mid-turn, which every
+   * rule-driven injection waits to avoid) and for `permission` — the one state driveTab,
+   * runSequence and answerPrompt all refuse, because a permission prompt is a keystroke
+   * menu where pasted prose is swallowed or corrupts the selection.
+   *
+   * Serialized per tab, because `bracketedPasteSubmit` is write → settle → CR: two notices
+   * for the same tab clicked inside that window would merge into one prompt and leave a
+   * stray carriage return behind. The checks run INSIDE the chain, so the second notice
+   * re-tests a tab the first one has just typed into.
+   *
+   * A notice is not a directive: it asks for nothing back, so it deliberately does NOT take
+   * the tab's outstanding slot, which would block every `only_if_no_outstanding` rule behind
+   * it for something nobody is waiting on.
+   */
+  async function noticeToTab(tabId: string, text: string, what: string): Promise<boolean> {
+    const inst = terminalsStore.get(tabId);
+    return serializeNotice(tabId, async () => {
+      if (!inst) return false;
+      if (mappedState(tabId) !== 'idle') return false;
+      if (!(await hasLiveRepl(tabId))) return false;
+      // State can move during the liveness round trip.
+      if (mappedState(tabId) !== 'idle') return false;
+      if (Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) < 1500) return false;
+      try {
+        await bracketedPasteSubmit(inst.ptyId, text);
+        return true;
+      } catch (e) {
+        logError(`overlord: ${what} notice failed for ${tabId.slice(0, 8)}: ${e}`);
+        return false;
+      }
+    });
+  }
+
   /** Record this tick's edges and report which are still offerable (§ `pendingEdges`). */
   function latchEdges(
     tabId: string,
@@ -2538,35 +2579,7 @@ function createOverlordStore() {
         `have never seen it, there is nothing to do and nothing was missed: it was created ` +
         `and removed between your reads of the board. Either way, don't add it later.`;
       const step: OverlordStep = { kind: 'process', text };
-      const inst = terminalsStore.get(tabId);
-      // Idle only, and re-checked AFTER the liveness round trip.
-      //
-      // `hasLiveRepl` says a process is alive; it says nothing about whether the tab can
-      // take typed text. It returns true for `active` (the notice lands mid-turn, which
-      // every rule-driven injection waits to avoid) and for `permission` — the one state
-      // driveTab, runSequence and answerPrompt all refuse, because a permission prompt is
-      // a keystroke menu where pasted prose is swallowed or corrupts the selection. This
-      // shipped alongside the change that unified that verdict and was left outside it.
-      //
-      // Serialized per tab, because `bracketedPasteSubmit` is write → settle → CR: two
-      // deletes on cards owned by the same tab, clicked inside that window, would merge
-      // into one prompt and leave a stray carriage return behind. The checks run INSIDE
-      // the chain so the second notice re-tests a tab the first one just typed into.
-      const sent = await serializeNotice(tabId, async () => {
-        if (!inst) return false;
-        if (mappedState(tabId) !== 'idle') return false;
-        if (!(await hasLiveRepl(tabId))) return false;
-        // State can move during the liveness round trip.
-        if (mappedState(tabId) !== 'idle') return false;
-        if (Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) < 1500) return false;
-        try {
-          await bracketedPasteSubmit(inst.ptyId, text);
-          return true;
-        } catch (e) {
-          logError(`overlord: drop notice failed for ${tabId.slice(0, 8)}: ${e}`);
-          return false;
-        }
-      });
+      const sent = await noticeToTab(tabId, text, 'drop');
       if (sent) {
         ledger(tabId, null, 'human', 0, step, 'sent');
         return { removed: true, told: 'tab' };
@@ -2585,6 +2598,64 @@ function createOverlordStore() {
           `and now you aren't" sends an agent that never saw it looking for what it missed.`,
       );
       return { removed: true, told: 'agent' };
+    },
+
+    /**
+     * "Do it" — tell the tab carrying this task to start on it now, and move it to `active`.
+     *
+     * This is the HUMAN typing, not the supervisor: they clicked the button, and the text
+     * goes to the tab they were already looking at. So unlike `deleteTask`'s notice it is
+     * NOT gated on `overlordEnabled` — refusing here would mean the button silently does
+     * nothing for everyone with the supervisor switched off, which is most people. Only the
+     * escalation FALLBACK belongs to Overlord, and that is skipped when there is no agent.
+     *
+     * The status moves either way. The human has said what they want done, and that is true
+     * whether or not the tab happened to be typeable at that instant — leaving the row in
+     * `todo` because a paste couldn't land would lose the decision. `told` reports what
+     * actually reached the agent, which is a different question and the caller's to surface.
+     */
+    async startTask(id: string): Promise<{ started: boolean; told: 'tab' | 'agent' | 'nobody' }> {
+      const hit = tasksStore.findAnywhere(id);
+      if (!hit) return { started: false, told: 'nobody' };
+      const { workspaceId, task } = hit;
+      const tabId = task.tab_id;
+      if (task.status !== 'active') tasksStore.update(workspaceId, id, { status: 'active' });
+      bumpLive();
+      // Nobody is carrying it, so there is nobody to tell. Claim it first (the row's
+      // hand-back/claim control) and the button means something.
+      if (!tabId) return { started: true, told: 'nobody' };
+
+      const text =
+        `Board update: please pick up "${task.title}" now — I've moved it to Active. ` +
+        (task.detail ? `\n\n${task.detail}\n\n` : '') +
+        `Track it with the maiTerm task tools (task id ${task.id}) and keep its status ` +
+        `current as you go. If you are mid-way through something else, finish that first ` +
+        `and come to this next rather than abandoning it.`;
+      const step: OverlordStep = { kind: 'process', text };
+      if (await noticeToTab(tabId, text, 'start')) {
+        ledger(tabId, null, 'human', 0, step, 'sent');
+        return { started: true, told: 'tab' };
+      }
+      ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+      // Busy, at a prompt, or unmounted. The supervisor relays it when the tab is reachable
+      // — the same act-or-escalate shape every other board action uses. With no supervisor
+      // to relay it, say so rather than reporting a delivery that did not happen.
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab()) {
+        return { started: true, told: 'nobody' };
+      }
+      escalate(
+        tabId,
+        null,
+        'task_handoff',
+        `The human pressed "Do it" on the task "${task.title}" (id ${task.id}), which is ` +
+          `carried by ${tabDisplayName(tabId)}. That tab could not be typed into just then — ` +
+          `it was mid-turn, stopped at a prompt, or not mounted — so it has NOT been told. ` +
+          `It is already marked Active on the board. Tell it when it is reachable: start on ` +
+          `this now, and keep the task's status current.` +
+          (task.detail ? `\n\nWhat the task says:\n${task.detail}` : ''),
+        task.id,
+      );
+      return { started: true, told: 'agent' };
     },
 
     /** Hand a board task to the Overlord agent to carry (the card's "Send").
