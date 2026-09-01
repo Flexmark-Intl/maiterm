@@ -304,6 +304,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /pair` | Redeem QR code → token | `{code,device_name}` → `{device_id,token,server_name}` |
 | `POST /push-register` | Store push token + relay capability for doorbell | `{token,platform,env,cap}` → `{ok}` (`platform`: `"apns"`\|`"fcm"`; `cap` from §6 `/push-capability`) |
 | `GET  /chats` | List maiLink-native chats + state | → `Chat[]` (see §4.3) |
+| `GET  /models` | What this machine can switch a Claude tab to — so the picker stops hardcoding a list that goes stale on every Claude release | → `ModelOption[]` |
 | `GET  /assets` | Every file an agent sent, newest first, across all chats — the Files view | → `FileAsset[]` (max 200) |
 | `GET  /assets/{assetId}` | The bytes | → the file. `Accept-Ranges: bytes`; honours `Range` with `206` + `Content-Range`, `416` for a start past the end. `Content-Type` from the name, `Content-Disposition: attachment` with both `filename=` and `filename*=`. `404` when unknown OR evicted — but the descriptor's `available` already said so, so never discover it here |
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
@@ -545,6 +546,33 @@ interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string;
 
 // A file an agent sent to the phone (`sendFilesToPhone`). Appears twice: as a `kind:"asset"` turn
 // in its chat's transcript, and in GET /assets across all chats.
+interface ModelOption {
+  value: string;            // exactly what goes after `/model`
+  name: string;
+  note: string;
+  source: 'account' | 'builtin';
+                            // NOT decoration — the two are not equally trustworthy.
+                            // 'account' came from this account's server-pushed model cache
+                            //   (~/.claude.json additionalModelOptionsCache): the account was
+                            //   really told about it, with the server's own label and value.
+                            //   This is how Fable 5.1 appeared with no code change anywhere.
+                            // 'builtin' is maiTerm's curated tier table — expected on every
+                            //   install, verified on none. There is an entitlement hook
+                            //   (modelAccessCache) but it is empty in the wild, so nothing here
+                            //   can confirm the account actually has it. Offer these, but a
+                            //   switch that gets refused at the TUI is a 'builtin' row's failure
+                            //   mode, not a bug.
+  // Account values are PINNED ids (`claude-fable-5-1[1m]`) because that is what the cache holds;
+  // builtin values are aliases (`opus[1m]`) so a point release inside a tier needs no edit.
+  // maiTerm does not rewrite one into the other — inventing an alias it cannot verify would fail
+  // at the TUI in front of the human instead of here, where it can simply not be claimed.
+  //
+  // No `confirm` field, deliberately: whether `/model X` pops a confirmation is a fact about
+  // Claude Code's TUI that maiTerm cannot observe, and asserting it would be the same hardcoded
+  // guess one process further along. A confirmation that does appear surfaces through the normal
+  // pending-prompt path the phone already answers.
+}
+
 interface FileAsset {
   asset_id: string;         // uuid — unguessable on purpose; a leaked id is a leaked file
   name: string;             // the original filename, what the phone saves it as

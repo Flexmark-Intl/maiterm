@@ -35,6 +35,7 @@ use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
 pub(crate) mod assets;
 pub(crate) mod mirror;
+pub(crate) mod models;
 pub(crate) mod shells;
 pub(crate) mod tasks;
 pub(crate) mod transcript;
@@ -318,6 +319,7 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/heartbeat", get(heartbeat))
         // Files an agent sent, newest first across every tab — the phone's Files view. Static
         // segment, and `{asset_id}` is a uuid, so neither can shadow the other.
+        .route("/mailink/v1/models", get(models_list))
         .route("/mailink/v1/assets", get(assets_list))
         .route("/mailink/v1/assets/{asset_id}", get(asset_bytes))
         .route("/mailink/v1/chats", get(chats_list))
@@ -429,6 +431,19 @@ async fn chats_list(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
     Ok(Json(json!(build_chats(&s.app))))
+}
+
+/// GET /mailink/v1/models — what this machine can switch a Claude tab to.
+///
+/// Exists so the phone stops hardcoding a list that goes stale on every Claude release. Each entry
+/// says where it came from (`source`), because the two sources are not equally trustworthy — see
+/// `models.rs`.
+async fn models_list(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(json!(models::available())))
 }
 
 /// How many assets `GET /assets` returns. The phone's Files view is a browse surface, not an
