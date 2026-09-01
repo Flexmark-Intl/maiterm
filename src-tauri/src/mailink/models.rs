@@ -57,7 +57,6 @@ const BUILTIN: [(&str, &str, &str); 5] = [
 ];
 
 /// Read `~/.claude.json` and return its `additionalModelOptionsCache` entries.
-///
 /// Values are passed through EXACTLY as the cache spells them, pinned release and all
 /// (`claude-fable-5-1[1m]`). Rewriting that to a `fable[1m]` alias would be nicer to read and a
 /// guess: nothing here knows that `fable` is a valid `/model` alias on this account, and a wrong
@@ -67,44 +66,79 @@ fn from_account_cache() -> Vec<ModelOption> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
     let Ok(raw) = std::fs::read(home.join(".claude.json")) else { return Vec::new() };
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&raw) else { return Vec::new() };
+    entries_from(&doc)
+}
+
+/// Strip control characters and surrounding whitespace from a server-pushed string.
+///
+/// These come from a cache maiTerm does not write, and go to a separate codebase that renders
+/// them. Interior control characters survive a plain `trim()`, and a newline is not cosmetic in a
+/// field documented as "exactly what goes after `/model`": the later feature that types it would
+/// submit the first line and hand the rest to the agent as a second input, chosen by a human who
+/// only ever saw the friendly name.
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string()
+}
+
+/// Project a parsed `~/.claude.json` into account model options. Pure, so it can be driven with a
+/// hostile document instead of whatever happens to be in the developer's home directory.
+fn entries_from(doc: &serde_json::Value) -> Vec<ModelOption> {
     let Some(entries) = doc.get("additionalModelOptionsCache").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
     entries
         .iter()
         .filter_map(|e| {
-            let value = e.get("value").and_then(|v| v.as_str())?.trim();
-            if value.is_empty() {
+            // A value we had to alter is a value we no longer know is correct, so drop the row
+            // rather than offer a repaired id that may switch to something else. Absent is
+            // visible; subtly wrong is not.
+            let raw = e.get("value").and_then(|v| v.as_str())?;
+            let value = clean(raw);
+            if value.is_empty() || value != raw.trim() {
                 return None;
             }
-            let name = e.get("label").and_then(|v| v.as_str()).unwrap_or(value);
-            let note = e.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            Some(ModelOption {
-                value: value.to_string(),
-                name: name.to_string(),
-                note: note.to_string(),
-                source: Source::Account,
-            })
+            // Display fields are repaired rather than dropped — losing a whole model over a stray
+            // character in its description would be the worse trade. An empty or blank label
+            // falls back to the value, so a row can never render nameless.
+            let name = e
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(clean)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| value.clone());
+            let note = e.get("description").and_then(|v| v.as_str()).map(clean).unwrap_or_default();
+            Some(ModelOption { value, name, note, source: Source::Account })
         })
         .collect()
 }
 
-/// Everything this machine can switch a Claude tab to. Account entries first — they are the ones
-/// we actually know about — then the curated tiers, minus any the cache already named.
-pub fn available() -> Vec<ModelOption> {
-    let mut out = from_account_cache();
-    for (value, name, note) in BUILTIN {
-        if out.iter().any(|m| m.value == value) {
-            continue;
+/// Account entries first — the ones we actually know about — then the curated tiers, minus any
+/// value already claimed. Pure, and deduping by a set covers account-vs-account duplicates too,
+/// which a scan against `BUILTIN` alone never saw.
+fn merge(account: Vec<ModelOption>) -> Vec<ModelOption> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(account.len() + BUILTIN.len());
+    for m in account {
+        if seen.insert(m.value.clone()) {
+            out.push(m);
         }
-        out.push(ModelOption {
-            value: value.to_string(),
-            name: name.to_string(),
-            note: note.to_string(),
-            source: Source::Builtin,
-        });
+    }
+    for (value, name, note) in BUILTIN {
+        if seen.insert(value.to_string()) {
+            out.push(ModelOption {
+                value: value.to_string(),
+                name: name.to_string(),
+                note: note.to_string(),
+                source: Source::Builtin,
+            });
+        }
     }
     out
+}
+
+/// Everything this machine can switch a Claude tab to.
+pub fn available() -> Vec<ModelOption> {
+    merge(from_account_cache())
 }
 
 #[cfg(test)]
@@ -128,37 +162,93 @@ mod tests {
 
     #[test]
     fn the_account_cache_outranks_the_curated_guess() {
-        // Same `value` from both sources must resolve to the account's copy, because that one is
-        // known to be offered to this account and carries the server's own label and description.
-        let mut out = vec![ModelOption {
+        // Drives the REAL merge, not a copy of it. The previous version re-implemented the loop
+        // inside the test, so deleting the dedup from `merge` left it passing while the endpoint
+        // emitted duplicate rows.
+        let out = merge(vec![ModelOption {
             value: "opus[1m]".into(),
             name: "Opus 5".into(),
             note: "from the server".into(),
             source: Source::Account,
-        }];
-        for (value, name, note) in BUILTIN {
-            if out.iter().any(|m| m.value == value) {
-                continue;
-            }
-            out.push(ModelOption {
-                value: value.into(),
-                name: name.into(),
-                note: note.into(),
-                source: Source::Builtin,
-            });
-        }
-        let opus_1m: Vec<&ModelOption> = out.iter().filter(|m| m.value == "opus[1m]").collect();
-        assert_eq!(opus_1m.len(), 1, "no duplicate rows for one value");
-        assert_eq!(opus_1m[0].source, Source::Account);
-        assert_eq!(opus_1m[0].note, "from the server");
+        }]);
+        let opus: Vec<&ModelOption> = out.iter().filter(|m| m.value == "opus[1m]").collect();
+        assert_eq!(opus.len(), 1, "no duplicate rows for one value");
+        assert_eq!(opus[0].source, Source::Account, "the account's copy wins");
+        assert_eq!(opus[0].note, "from the server");
+        assert_eq!(out.len(), BUILTIN.len(), "and the other tiers still come through");
     }
 
     #[test]
-    fn a_missing_or_unreadable_claude_json_is_not_an_error() {
-        // Every install without the cache key — a fresh one, or a runtime that never writes it —
-        // must still get the curated tiers rather than an empty picker.
-        let all = available();
-        assert!(all.iter().any(|m| m.value == "sonnet"));
-        assert!(all.iter().all(|m| !m.value.is_empty() && !m.name.is_empty()));
+    fn two_cache_entries_claiming_one_value_yield_one_row() {
+        // The old scan only asked whether an account entry collided with BUILTIN, so
+        // account-vs-account duplicates passed straight through as two rows doing the same thing.
+        let mk = |note: &str| ModelOption {
+            value: "dup".into(),
+            name: "Dup".into(),
+            note: note.into(),
+            source: Source::Account,
+        };
+        let out = merge(vec![mk("first"), mk("second")]);
+        let dups: Vec<&ModelOption> = out.iter().filter(|m| m.value == "dup").collect();
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].note, "first", "first wins, deterministically");
+    }
+
+    #[test]
+    fn a_hostile_or_broken_cache_yields_nothing_rather_than_a_bad_row() {
+        use serde_json::json;
+        // Every shape the server could hand us that isn't a usable entry. None may panic, and
+        // none may reach the wire.
+        let doc = json!({ "additionalModelOptionsCache": [
+            { "label": "no value at all" },
+            { "value": "" },
+            { "value": "   " },
+            { "value": 42 },
+            { "value": { "nested": "object" } },
+            "not an object",
+            ["not an object either"],
+            null,
+            // A value we would have to repair is one we no longer know is right: typing a
+            // "fixed" id could switch to a different model than the row promised.
+            { "value": "opus\nrm -rf ~" },
+            { "value": "opus\u{7}" },
+        ]});
+        assert!(entries_from(&doc).is_empty(), "{:?}", entries_from(&doc));
+
+        // ...and the shapes that mean "no cache" rather than "bad cache".
+        assert!(entries_from(&json!({})).is_empty());
+        assert!(entries_from(&json!({ "additionalModelOptionsCache": null })).is_empty());
+        assert!(entries_from(&json!({ "additionalModelOptionsCache": [] })).is_empty());
+        assert!(entries_from(&json!({ "additionalModelOptionsCache": "nope" })).is_empty());
+    }
+
+    #[test]
+    fn a_blank_label_never_renders_a_nameless_row() {
+        use serde_json::json;
+        // `label: ""` is PRESENT, so an `unwrap_or(value)` fallback never fired and the phone got
+        // a picker row with no name. Display fields are repaired rather than dropped — losing a
+        // whole model over a stray character in its description is the worse trade.
+        let out = entries_from(&json!({ "additionalModelOptionsCache": [
+            { "value": "claude-fable-5-1[1m]", "label": "  ", "description": " Fable 5.1 \u{7}" },
+        ]}));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "claude-fable-5-1[1m]", "falls back to the value");
+        assert_eq!(out[0].note, "Fable 5.1", "control characters and padding gone");
+    }
+
+    #[test]
+    fn a_real_cache_entry_survives_intact() {
+        use serde_json::json;
+        // The shape actually observed in ~/.claude.json, passed through byte-for-byte.
+        let out = entries_from(&json!({ "additionalModelOptionsCache": [{
+            "description": "Fable 5.1 \u{b7} Most capable for your hardest and longest-running tasks",
+            "label": "Fable",
+            "value": "claude-fable-5-1[1m]",
+        }]}));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].value, "claude-fable-5-1[1m]", "pinned id, not rewritten to an alias");
+        assert_eq!(out[0].name, "Fable");
+        assert!(out[0].note.starts_with("Fable 5.1 \u{b7} Most capable"));
+        assert_eq!(out[0].source, Source::Account);
     }
 }

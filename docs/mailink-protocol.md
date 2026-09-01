@@ -567,6 +567,14 @@ interface ModelOption {
   // maiTerm does not rewrite one into the other — inventing an alias it cannot verify would fail
   // at the TUI in front of the human instead of here, where it can simply not be claimed.
   //
+  // CLIENT CONTRACT for the three strings. They are server-pushed, maiTerm does not write them,
+  // and they cross into a separate codebase that renders them. maiTerm strips control characters
+  // and trims, and DROPS any entry whose `value` needed altering — a repaired id is one we no
+  // longer know switches to the model the row names, and absent is visible where subtly-wrong is
+  // not. `name` and `note` are repaired rather than dropped, since losing a whole model over a
+  // stray character in its description is the worse trade. Beyond that `value` is byte-for-byte
+  // what the cache held: clients MUST still treat it as untrusted input when typing it, and MUST
+  // NOT render `name`/`note` as markup.
   // No `confirm` field, deliberately: whether `/model X` pops a confirmation is a fact about
   // Claude Code's TUI that maiTerm cannot observe, and asserting it would be the same hardcoded
   // guess one process further along. A confirmation that does appear surfaces through the normal

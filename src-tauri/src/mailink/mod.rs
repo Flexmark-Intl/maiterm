@@ -317,9 +317,9 @@ const MAX_MESSAGE_BODY_BYTES: usize = 32 * 1024 * 1024;
 fn build_router(api: ApiState) -> Router {
     Router::new()
         .route("/mailink/v1/heartbeat", get(heartbeat))
+        .route("/mailink/v1/models", get(models_list))
         // Files an agent sent, newest first across every tab — the phone's Files view. Static
         // segment, and `{asset_id}` is a uuid, so neither can shadow the other.
-        .route("/mailink/v1/models", get(models_list))
         .route("/mailink/v1/assets", get(assets_list))
         .route("/mailink/v1/assets/{asset_id}", get(asset_bytes))
         .route("/mailink/v1/chats", get(chats_list))
