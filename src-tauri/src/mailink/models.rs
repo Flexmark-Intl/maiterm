@@ -48,6 +48,17 @@ pub struct ModelOption {
 /// Aliases, never pinned ids: `opus` keeps meaning the current Opus after a point release, so this
 /// table ages only in its labels. Deliberately short — anything genuinely new arrives through the
 /// account cache, which is the half that actually moves.
+///
+/// **`sonnet` and `sonnet[1m]` may be one model, and the pair stays anyway.** Strings in the CLI
+/// binary suggest `claude-sonnet-5` is natively 1M, which would make these two rows for one thing.
+/// I could not confirm it with anything better: no Sonnet session on this machine has ever passed
+/// 200k tokens (77k is the high-water mark), so the transcripts cannot settle it either way. Under
+/// that uncertainty, keeping both is the cheap error — a redundant row — while collapsing them
+/// removes a capability if the suffix does mean something on some account. The visible symptom is
+/// that only the non-1M row highlights, since `ASSUMED_1M_MODELS` has no `sonnet` entry and must
+/// not gain one on this evidence: guessing 1M for an account that has 200k overstates the window,
+/// and that direction has no backstop. Settle it with a Sonnet session that exceeds 200k, not with
+/// another read of the binary.
 const BUILTIN: [(&str, &str, &str); 5] = [
     ("opus", "Opus", "Everyday complex work"),
     ("opus[1m]", "Opus", "Everyday complex work · 1M context"),
