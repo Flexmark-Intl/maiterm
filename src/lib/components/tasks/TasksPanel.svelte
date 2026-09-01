@@ -23,6 +23,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import TaskAddModal from './TaskAddModal.svelte';
 
   interface Props {
     tabId: string;
@@ -38,6 +39,9 @@
   let detailFor = $state<string | null>(null);
   let detailValue = $state('');
   let confirmingDelete = $state<string | null>(null);
+  /** The group whose add button was pressed, or null when the modal is closed. Holding the
+   *  workstream id here is what lets the modal ask nothing about destination. */
+  let addingTo = $state<{ workstreamId: string | null; name: string | null } | null>(null);
   let showDone = $state(false);
   let showParked = $state(false);
   let showUnclaimed = $state(false);
@@ -208,6 +212,25 @@
   /** Take ownership of unclaimed work, or hand this tab's work back to the project. The
    *  only `Task.tab_id` writers in the UI — the board reassigns workstream and status, never
    *  the assignee. */
+  /** Add into the workstream whose button was pressed. Unlike the inline field, nothing is
+   *  inferred here — the destination came from the press, and the lane came from the modal. */
+  function addToGroup(v: { title: string; detail: string | null; status: TaskStatus }) {
+    if (!addingTo) return;
+    tasksStore.add(workspaceId, {
+      title: v.title,
+      detail: v.detail,
+      status: v.status,
+      tab_id: tabId,
+      origin: 'human',
+      workstream_id: addingTo.workstreamId,
+    });
+    // A row you just created must not vanish. Parked rows are hidden behind a toggle by
+    // default, so adding straight into Parked would otherwise look like the add silently
+    // failed — the panel would be unchanged except for a count that is also hidden.
+    if (isParked(v.status)) showParked = true;
+    addingTo = null;
+  }
+
   function setAssignee(t: Task, mineNow: boolean) {
     tasksStore.update(workspaceId, t.id, { tab_id: mineNow ? tabId : null });
   }
@@ -321,6 +344,20 @@
             {:else}<span class="group-loose">Ungrouped</span>{/if}
           </span>
           <span class="group-count">{group.list.length}</span>
+          <!-- Not offered on the unclaimed pile. That group is an ASSIGNMENT bucket, not a
+               workstream — its rows come from every job at once — so there is no destination
+               a press of this button could mean. The inline field above still adds there. -->
+          {#if !group.unclaimed}
+            <Tooltip text="Add a task to {group.name ?? 'no workstream'}">
+              <button
+                class="group-add"
+                aria-label="Add a task to {group.name ?? 'no workstream'}"
+                onclick={() => (addingTo = { workstreamId: group.key || null, name: group.name })}
+              >
+                <Icon name="plus" size={11} />
+              </button>
+            </Tooltip>
+          {/if}
         </h4>
       {/if}
       <ul class="task-list">
@@ -424,6 +461,14 @@
     {/if}
   </div>
 </div>
+
+{#if addingTo}
+  <TaskAddModal
+    workstreamName={addingTo.name}
+    onsubmit={addToGroup}
+    oncancel={() => (addingTo = null)}
+  />
+{/if}
 
 <style>
   .tasks-panel {
@@ -568,6 +613,21 @@
 
   /* Gives the heading some mass against the rows below it, and answers "how much is in
      this job" without opening the board. */
+  .group-add {
+    align-items: center;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    display: flex;
+    flex-shrink: 0;
+    justify-content: center;
+    padding: 2px;
+  }
+  .group-add:hover { background: var(--bg-light); color: var(--fg); }
+  .group-add:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
   .group-count {
     background: var(--bg-light);
     border-radius: 999px;
