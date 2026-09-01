@@ -18,7 +18,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { effectiveStatus, isInFlight, isParked, TASK_STATUSES } from '$lib/tasks/model';
+  import { effectiveStatus, hasUnmetDeps, isInFlight, isParked, TASK_STATUSES } from '$lib/tasks/model';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -218,7 +218,15 @@
    *  inferred here — the destination came from the press, and the lane came from the modal. */
   function addToGroup(v: { title: string; detail: string | null; status: TaskStatus }) {
     if (!addingTo) return;
-    tasksStore.add(workspaceId, {
+    // `add` is idempotent by normalized title: a matching row on this tab — including a
+    // LOOSE one, which is the common case here, since the add button only appears once
+    // there are two groups and one of them is usually Ungrouped — is returned instead of
+    // created, and the patch it applies carries neither `detail` nor, usually, `status`.
+    // Ignoring the return therefore threw away the two things this modal exists to collect,
+    // silently relocated a row the human never meant to touch, and closed as if it had
+    // added something. Compare ids to find out which happened, and say so either way.
+    const existing = new Set(tasksStore.forWorkspace(workspaceId).map((t) => t.id));
+    const row = tasksStore.add(workspaceId, {
       title: v.title,
       detail: v.detail,
       status: v.status,
@@ -226,10 +234,26 @@
       origin: 'human',
       workstream_id: addingTo.workstreamId,
     });
-    // A row you just created must not vanish. Parked rows are hidden behind a toggle by
-    // default, so adding straight into Parked would otherwise look like the add silently
-    // failed — the panel would be unchanged except for a count that is also hidden.
+    const merged = existing.has(row.id);
+    if (merged) {
+      // The lane is the human's instruction and applies either way. The description only
+      // fills a gap — overwriting one the row already carries would lose whatever it said,
+      // which is the same data loss in the other direction.
+      const patch: Partial<Task> = { status: v.status };
+      if (v.detail && !row.detail) patch.detail = v.detail;
+      tasksStore.update(workspaceId, row.id, patch);
+      note(
+        row.id,
+        v.detail && row.detail
+          ? 'Merged into the task already called that — it kept its own description.'
+          : 'Merged into the task already called that.',
+      );
+    }
+    // A row you just touched must not be invisible. Parked and done rows sit behind
+    // toggles, so landing in one would otherwise look like the add silently failed: an
+    // unchanged panel, and a count that is itself hidden.
     if (isParked(v.status)) showParked = true;
+    if (v.status === 'done') showDone = true;
     addingTo = null;
   }
 
@@ -239,18 +263,25 @@
    *  through the same quiescence guards and the same ledger as every other injection. What
    *  it is NOT is a supervisor action — the human clicked it, so it works with Overlord
    *  switched off; only the relay-if-unreachable fallback needs a supervisor. */
+  /** One-row receipt, cleared after a few seconds. */
+  function note(id: string, text: string) {
+    startedNote = { id, text };
+    setTimeout(() => { if (startedNote?.id === id) startedNote = null; }, 6000);
+  }
+
   async function start(t: Task) {
     const r = await overlordStore.startTask(t.id);
     // Say what actually reached the agent. "Active" on the board and "the agent has been
     // told" are different facts, and a button that implies the second while only doing the
     // first is how a task sits Active for an hour with nobody working on it.
-    startedNote =
+    note(
+      t.id,
       r.told === 'tab'
-        ? { id: t.id, text: 'Agent told.' }
+        ? 'Agent told.'
         : r.told === 'agent'
-          ? { id: t.id, text: 'Tab was busy — Overlord will pass it on.' }
-          : { id: t.id, text: 'Marked Active. Nothing could be told — the tab is not reachable.' };
-    setTimeout(() => { if (startedNote?.id === t.id) startedNote = null; }, 6000);
+          ? 'Tab was busy — Overlord will pass it on.'
+          : 'Marked Active. Nothing could be told — the tab is not reachable.',
+    );
   }
 
   function setAssignee(t: Task, mineNow: boolean) {
@@ -385,6 +416,7 @@
       <ul class="task-list">
           {#each group.list as t (t.id)}
             {@const eff = effectiveStatus(t, all, workspacesStore.parkedTaskIds)}
+            {@const depBlocked = hasUnmetDeps(t, all, workspacesStore.parkedTaskIds)}
             <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)}>
               <div class="task-main">
                 <Tooltip text="{STATUS_LABEL[eff]} — click to advance, shift-click to go back">
@@ -423,19 +455,31 @@
                       </span>
                     </Tooltip>
                   {/if}
+                  <!-- Held while a prerequisite is unfinished, for the reason the board
+                       already pins its steppers: these write the STORED status while the row
+                       displays the EFFECTIVE one, so on a dependency-blocked row the chip
+                       would not move — "Unpark — back to To-do" would leave it reading
+                       BLOCKED, and Do it would tell the agent to start work whose
+                       prerequisite has not landed. The "waiting on" line below says which. -->
                   {#if !group.unclaimed && t.status !== 'done'}
-                    {#if isParked(t.status)}
-                      <Tooltip text="Unpark — back to To-do">
-                        <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
+                    {#if depBlocked}
+                      <Tooltip text="Waiting on an unfinished prerequisite. Parking and starting are held until it lands — the lane would change underneath a row that stayed put.">
+                        <button class="mini" disabled aria-disabled="true">▶</button>
                       </Tooltip>
                     {:else}
-                      <Tooltip text="Park — shelve this for later, exempt from stale checks">
-                        <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'backlog' })}>↓</button>
+                      {#if isParked(t.status)}
+                        <Tooltip text="Unpark — back to To-do">
+                          <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
+                        </Tooltip>
+                      {:else}
+                        <Tooltip text="Park — shelve this for later, exempt from stale checks">
+                          <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'backlog' })}>↓</button>
+                        </Tooltip>
+                      {/if}
+                      <Tooltip text="Do it — tell this tab's agent to start on it now">
+                        <button class="mini go" onclick={() => start(t)}>▶</button>
                       </Tooltip>
                     {/if}
-                    <Tooltip text="Do it — tell this tab's agent to start on it now">
-                      <button class="mini go" onclick={() => start(t)}>▶</button>
-                    </Tooltip>
                   {/if}
                   <Tooltip
                     text={group.unclaimed
@@ -807,6 +851,8 @@
   /* The only row control that types into a terminal, so it is the only one that gets the
      accent — the rest just move data around on the board. */
   .mini.go:hover { color: var(--accent); }
+  .mini:disabled { cursor: default; opacity: 0.4; }
+  .mini:disabled:hover { background: none; color: var(--fg-dim); }
 
   .deps {
     color: var(--yellow, #e0af68);

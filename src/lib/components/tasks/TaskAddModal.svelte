@@ -37,6 +37,19 @@
   let title = $state('');
   let detail = $state('');
   let status = $state<TaskStatus>('todo');
+  let titleEl = $state<HTMLInputElement | null>(null);
+
+  /* Explicit focus, not the `autofocus` attribute. Svelte compiles that to a microtask that
+     focuses ONLY if `document.activeElement === body`, which holds when the modal was opened
+     by mouse (WebKit doesn't mouse-focus buttons) and fails when it was opened from the
+     keyboard — the `+` button keeps focus, and since it lives outside this backdrop, typing
+     went nowhere AND Escape never reached the handler below, because that handler is on the
+     backdrop and only sees events originating inside it. Same rAF pattern QuickOpen and
+     AgentBridgePicker already use. */
+  $effect(() => {
+    const id = requestAnimationFrame(() => titleEl?.focus());
+    return () => cancelAnimationFrame(id);
+  });
 
   const canSave = $derived(title.trim().length > 0);
 
@@ -87,12 +100,11 @@
     <div class="body">
       <label class="field">
         <span class="label">Title</span>
-        <!-- svelte-ignore a11y_autofocus -->
         <input
           class="text-input"
+          bind:this={titleEl}
           bind:value={title}
           placeholder="What needs doing"
-          autofocus
           onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } }}
         />
       </label>
