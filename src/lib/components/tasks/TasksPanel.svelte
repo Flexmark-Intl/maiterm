@@ -33,7 +33,6 @@
 
   let { tabId, workspaceId, onclose }: Props = $props();
 
-  let draft = $state('');
   let editingId = $state<string | null>(null);
   let editValue = $state('');
   let detailFor = $state<string | null>(null);
@@ -104,9 +103,13 @@
     return out;
   });
 
-  /** Headings only earn their space when there is more than one job in view — but the
-   *  unclaimed pile always needs its label, or it reads as this tab's own work. */
-  const showGroupHeadings = $derived(groups.length > 1 || groups.some((g) => g.unclaimed));
+  /* Headings are unconditional. They used to be hidden below two groups, on the reasoning
+     that a lone heading is a label for something with nothing to distinguish it from — which
+     treated the workstream as a divider. It isn't: it is the name of the JOB these rows
+     belong to, and that is context the reader needs whether or not a second job happens to
+     be on screen. A tab showing five rows under no heading at all does not say which of your
+     jobs it is looking at. It also made the per-heading add button disappear exactly when a
+     tab was doing one thing, which is most of the time. */
 
   const STATUS_LABEL: Record<TaskStatus, string> = {
     backlog: 'Parked',
@@ -117,28 +120,28 @@
     done: 'Done',
   };
 
-  /** Where a new task lands, with no picker to answer.
+  /** Where the HEADER's add button files a task, with no picker to answer.
    *
-   *  If everything this tab is working on belongs to ONE job, a task typed here obviously
+   *  If everything this tab is working on belongs to ONE job, a task added here obviously
    *  belongs to it too. If the tab is juggling two, guessing would be wrong, so it goes
-   *  loose and the board is where it gets filed. That covers both cases without asking a
-   *  question the panel used to ask on every single add. */
-  function addTask() {
-    const title = draft.trim();
-    if (!title) return;
+   *  loose — and the per-heading buttons are how you say otherwise, which is the whole
+   *  reason this can stay an inference rather than becoming a question.
+   *
+   *  The modal names the destination in its subtitle either way, so the guess is visible
+   *  before it is committed. That was the actual defect in the field this replaced: it made
+   *  the same inference and never showed it, so you found out where a task went later, on
+   *  the board. */
+  function openHeaderAdd() {
     // `isInFlight`, not `status !== 'done'`: backlog is the parking lot and is exempt from
     // every other in-flight question in the codebase. Counting it here meant a tab whose
     // only rows were parked (and therefore hidden) silently filed a new bug into a shelved
     // workstream, with no heading shown to reveal it.
     const streams = new Set(mine.filter(isInFlight).map((t) => t.workstream_id ?? ''));
     const only = streams.size === 1 ? [...streams][0] : '';
-    tasksStore.add(workspaceId, {
-      title,
-      tab_id: tabId,
-      origin: 'human',
-      workstream_id: only || null,
-    });
-    draft = '';
+    addingTo = {
+      workstreamId: only || null,
+      name: only ? (tasksStore.workstreams(workspaceId).find((w) => w.id === only)?.name ?? null) : null,
+    };
   }
 
   /** Click the status chip to advance; shift-click to go back. Cycling beats a dropdown
@@ -356,21 +359,15 @@
         {doneCount} done
       </button>
     {/if}
+    <!-- The always-available way in. The per-heading buttons only exist once there are two
+         groups to tell apart, so on a fresh tab, or one doing a single job, they render
+         nothing at all — this is the case they cannot cover. -->
+    <IconButton tooltip="Add a task" onclick={openHeaderAdd}>
+      <Icon name="plus" size={13} />
+    </IconButton>
     <IconButton tooltip="Close tasks" onclick={onclose}>
       <Icon name="close" size={13} />
     </IconButton>
-  </div>
-
-  <div class="add-row">
-    <input
-      class="add-input"
-      placeholder="Add a task…"
-      bind:value={draft}
-      onkeydown={(e) => {
-        if (e.key === 'Enter') addTask();
-      }}
-    />
-    <button class="add-btn" disabled={!draft.trim()} onclick={addTask} aria-label="Add task">+</button>
   </div>
 
   <div class="lists">
@@ -379,7 +376,7 @@
         {#if mine.length}
           Nothing in flight on this tab — the counts above hold the rest.
         {:else}
-          Nothing tracked on this tab yet. Add a task above — the agent here reads and
+          Nothing tracked on this tab yet. Add one with + above — the agent here reads and
           updates the same list.
         {/if}
       </p>
@@ -389,17 +386,18 @@
       <!-- A wrapper per job, so the separation can live BETWEEN groups. Heading and list
            used to be loose siblings, which left nothing to hang a rule on. -->
       <section class="ws-group">
-      {#if showGroupHeadings}
         <h4 class="group">
           <span class="group-name">
             {#if group.unclaimed}<span class="group-loose">Unclaimed — nobody is on these</span>
             {:else if group.name}{group.name}
-            {:else}<span class="group-loose">Ungrouped</span>{/if}
+            {:else}<span class="group-loose">No workstream</span>{/if}
           </span>
           <span class="group-count">{group.list.length}</span>
           <!-- Not offered on the unclaimed pile. That group is an ASSIGNMENT bucket, not a
                workstream — its rows come from every job at once — so there is no destination
-               a press of this button could mean. The inline field above still adds there. -->
+               a press of this button could mean. Nor is there a way to add INTO it, by
+               design: every add here claims for this tab, and a row becomes unclaimed by
+               being released from one (the row's ↥) or by outliving the tab that held it. -->
           {#if !group.unclaimed}
             <Tooltip text="Add a task to {group.name ?? 'no workstream'}">
               <button
@@ -412,7 +410,6 @@
             </Tooltip>
           {/if}
         </h4>
-      {/if}
       <ul class="task-list">
           {#each group.list as t (t.id)}
             {@const eff = effectiveStatus(t, all, workspacesStore.parkedTaskIds)}
@@ -611,42 +608,6 @@
   .done-toggle.on {
     color: var(--accent);
     border-color: var(--accent);
-  }
-
-  .add-row {
-    display: flex;
-    gap: 4px;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--bg-light);
-    flex-shrink: 0;
-  }
-  .add-input {
-    flex: 1;
-    min-width: 0;
-    background: var(--bg-dark);
-    border: 1px solid var(--bg-light);
-    border-radius: 4px;
-    color: var(--fg);
-    font-size: 12px;
-    padding: 4px 6px;
-  }
-  .add-input:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-  .add-btn {
-    background: var(--bg-dark);
-    border: 1px solid var(--bg-light);
-    border-radius: 4px;
-    color: var(--fg);
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1;
-    padding: 0 8px;
-  }
-  .add-btn:disabled {
-    opacity: 0.35;
-    cursor: default;
   }
 
   .lists {
