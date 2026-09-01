@@ -46,11 +46,15 @@
     }
   }
 
-  /** One rendered line of a release's notes. A `heading` is a `###` section within the
-   *  version; a `bullet` carries its nesting depth so sub-points read as sub-points. */
+  /** One rendered block of a release's notes. A `heading` is a `###` section within the
+   *  version; a `bullet` carries its nesting depth so sub-points read as sub-points; a
+   *  `para` is prose between them. Prose MUST be a kind of its own: once headings render,
+   *  a section whose body is paragraphs (v2.0.0's file-sending section) would otherwise
+   *  draw its title with nothing underneath it. */
   export type ChangelogItem =
     | { kind: 'heading'; text: string }
-    | { kind: 'bullet'; text: string; depth: number };
+    | { kind: 'bullet'; text: string; depth: number }
+    | { kind: 'para'; text: string };
 
   export interface ChangelogEntry {
     version: string;
@@ -65,9 +69,17 @@
   function parseChangelog(raw: string): ChangelogEntry[] {
     const entries: ChangelogEntry[] = [];
     let current: ChangelogEntry | null = null;
+    // Consecutive prose lines are one paragraph: a body written with hard-wrapped lines
+    // would otherwise render as a stack of orphaned fragments.
+    let para: string[] = [];
+    const flushPara = () => {
+      if (para.length && current) current.items.push({ kind: 'para', text: para.join(' ') });
+      para = [];
+    };
     for (const line of raw.split('\n')) {
       const versionMatch = line.match(/^## v(.+)/);
       if (versionMatch) {
+        flushPara();
         current = { version: versionMatch[1], items: [] };
         entries.push(current);
         continue;
@@ -75,6 +87,7 @@
       if (!current) continue;
       const headingMatch = line.match(/^#{3,} (.+)/);
       if (headingMatch) {
+        flushPara();
         current.items.push({ kind: 'heading', text: headingMatch[1] });
         continue;
       }
@@ -82,14 +95,19 @@
       // column 0 — v1.25.0's three maiLink views never appeared in this modal.
       const itemMatch = line.match(/^(\s*)- (.+)/);
       if (itemMatch) {
+        flushPara();
         // Keep raw markdown — rendered inline at display time via renderItem()
         current.items.push({
           kind: 'bullet',
           text: itemMatch[2],
           depth: Math.min(1, Math.floor(itemMatch[1].length / INDENT)),
         });
+        continue;
       }
+      if (line.trim() === '') flushPara();
+      else para.push(line.trim());
     }
+    flushPara();
     return entries;
   }
 
@@ -119,6 +137,8 @@
               {#each entry.items as item}
                 {#if item.kind === 'heading'}
                   <h4>{@html renderItem(item.text)}</h4>
+                {:else if item.kind === 'para'}
+                  <p class="para">{@html renderItem(item.text)}</p>
                 {:else}
                   <div class="item" class:sub={item.depth > 0}>{@html renderItem(item.text)}</div>
                 {/if}
@@ -223,6 +243,13 @@
     margin-top: 0;
   }
 
+  .para {
+    margin: 0 0 8px 0;
+    font-size: 1rem;
+    color: var(--fg-dim);
+    line-height: 1.5;
+  }
+
   .item {
     position: relative;
     padding-left: 18px;
@@ -254,15 +281,19 @@
     margin-bottom: 0;
   }
 
+  .para :global(strong),
   .item :global(strong) {
     font-weight: 600;
     color: var(--fg);
   }
 
+  .para :global(em),
   .item :global(em) {
     font-style: italic;
   }
 
+  h4 :global(code),
+  .para :global(code),
   .item :global(code) {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.85em;
@@ -272,11 +303,13 @@
     padding: 0.5px 4px;
   }
 
+  .para :global(a),
   .item :global(a) {
     color: var(--accent);
     text-decoration: none;
   }
 
+  .para :global(a:hover),
   .item :global(a:hover) {
     text-decoration: underline;
   }

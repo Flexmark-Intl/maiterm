@@ -30,22 +30,41 @@ function isNewerVersion(a: string, b: string): boolean {
  *  differently from the same release read out of the app's own CHANGELOG.md. */
 function parseReleaseBody(body: string): ChangelogItem[] {
   const items: ChangelogItem[] = [];
+  const strip = (s: string) => s.replace(/`([^`]+)`/g, '$1');
+  // Consecutive prose lines form one paragraph — release bodies are often hard-wrapped.
+  let para: string[] = [];
+  const flushPara = () => {
+    if (para.length) items.push({ kind: 'para', text: strip(para.join(' ')) });
+    para = [];
+  };
   for (const line of body.split('\n')) {
     const heading = line.match(/^#{3,} (.+)/);
     if (heading) {
-      items.push({ kind: 'heading', text: heading[1] });
+      flushPara();
+      items.push({ kind: 'heading', text: strip(heading[1]) });
       continue;
     }
     const bullet = line.match(/^(\s*)[-*] (.+)/);
     if (bullet) {
+      flushPara();
       items.push({
         kind: 'bullet',
-        text: bullet[2].replace(/`([^`]+)`/g, '$1'),
+        text: strip(bullet[2]),
         depth: Math.min(1, Math.floor(bullet[1].length / 2)),
       });
+      continue;
     }
+    // A `## vX.Y.Z` line can lead a body pasted straight from CHANGELOG.md; it names the
+    // version the entry already carries, so it is dropped rather than shown as prose.
+    if (/^#{1,2} /.test(line)) {
+      flushPara();
+      continue;
+    }
+    if (line.trim() === '') flushPara();
+    else para.push(line.trim());
   }
-  if (items.some(i => i.kind === 'bullet')) return items;
+  flushPara();
+  if (items.some(i => i.kind === 'bullet' || i.kind === 'para')) return items;
   // Fallback: a release body written as bare paragraph(s) with no bullet markers
   // (e.g. a single-fix release) would otherwise parse to zero items and be dropped
   // from the What's New modal entirely. Treat each non-empty, non-heading line as an item.
