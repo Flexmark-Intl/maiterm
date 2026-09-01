@@ -3607,7 +3607,19 @@ fn preview_for(state: &str, tool: Option<&str>) -> String {
 /// specific (`opus-5`, not `opus`) — a blanket family rule would also claim 1M for older Opus
 /// releases that don't have it, and being wrong in that direction UNDERSTATES context usage,
 /// which is the harmful direction (no warning before a surprise compaction).
-const ASSUMED_1M_MODELS: [&str; 2] = ["opus-4-8", "opus-5"];
+///
+/// `fable-5` covers `claude-fable-5` and `claude-fable-5-1`, which is how live transcripts spell
+/// it (29k+ lines across this machine's sessions, never once with `[1m]`). A handful say bare
+/// `fable`; those fall to the `observed_tokens` backstop, which is the right place for a spelling
+/// we have seen eight times.
+///
+/// **The residual risk is per-ACCOUNT, not per-version, and there is no backstop for it.** These
+/// entries assert an entitlement, and entitlements differ between maiLink users — a 1M grant on
+/// this account says nothing about anyone else's. Guessing 1M for an account that only has 200k
+/// OVERSTATES the window, the gauge reads a fifth of the truth, and unlike the understating
+/// direction nothing self-corrects it. Add a family here only when that tier has no 200k variant
+/// to be wrong about.
+const ASSUMED_1M_MODELS: [&str; 3] = ["opus-4-8", "opus-5", "fable-5"];
 
 /// The context window for a model id: 1M-context variants vs the 200k default.
 ///
@@ -4575,6 +4587,10 @@ mod tests {
         // …and the assumed-1M ids resolve without one, since the transcript id never carries it.
         assert_eq!(context_limit_for("claude-opus-4-8", 0), 1_000_000);
         assert_eq!(context_limit_for("claude-opus-5", 0), 1_000_000);
+        // Both spellings Fable actually uses in live transcripts. Missing these read a 200k gauge
+        // on a 1M session, pegging it at ~100% until the observed-tokens backstop tripped.
+        assert_eq!(context_limit_for("claude-fable-5", 0), 1_000_000);
+        assert_eq!(context_limit_for("claude-fable-5-1", 0), 1_000_000);
         // Everything else defaults to 200k — including other Opus releases, which a blanket
         // "any opus is 1M" rule would have wrongly promoted.
         assert_eq!(context_limit_for("claude-sonnet-4-5", 0), 200_000);
