@@ -1,6 +1,6 @@
 {
   "name": "aiterm",
-  "version": "1.25.4",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "dev": "vite dev",
