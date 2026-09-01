@@ -553,12 +553,17 @@
     text-transform: uppercase;
   }
 
+  /* Wraps, deliberately. Clipping to one line cost more than it bought: the heading is the
+     thing that tells two jobs apart, and at the default 320px panel most real workstream
+     names here are long enough to truncate — two that share a prefix then clip to the same
+     visible string, which is the opposite of what this heading is for. It has no tooltip, so
+     the clipped half was unreachable at any width below the drag. `overflow-wrap` only
+     catches a pathological unbroken token. Not being an overflow container also keeps the
+     flex baseline a real text baseline, so the count sits on the first line properly. */
   .group-name {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
   /* Gives the heading some mass against the rows below it, and answers "how much is in
