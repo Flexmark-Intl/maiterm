@@ -6,7 +6,7 @@ import { toastStore } from './toasts.svelte';
 import { terminalsStore } from './terminals.svelte';
 import * as commands from '$lib/tauri/commands';
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
-import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
+import type { ChangelogEntry, ChangelogItem } from '$lib/components/ChangelogModal.svelte';
 
 interface GitHubRelease {
   tag_name: string;
@@ -24,20 +24,35 @@ function isNewerVersion(a: string, b: string): boolean {
   return false;
 }
 
-/** Parse a GitHub release body into changelog items. */
-function parseReleaseBody(body: string): string[] {
-  const bullets = body.split('\n')
-    .map(line => line.match(/^\s*[-*] (.+)/))
-    .filter((m): m is RegExpMatchArray => m !== null)
-    .map(m => m[1].replace(/`([^`]+)`/g, '$1'));
-  if (bullets.length > 0) return bullets;
+/** Parse a GitHub release body into changelog items. Release notes are the CHANGELOG
+ *  section verbatim, so this has to read the same shapes the bundled parser does —
+ *  `###` sections and nested bullets included, or a release fetched from GitHub renders
+ *  differently from the same release read out of the app's own CHANGELOG.md. */
+function parseReleaseBody(body: string): ChangelogItem[] {
+  const items: ChangelogItem[] = [];
+  for (const line of body.split('\n')) {
+    const heading = line.match(/^#{3,} (.+)/);
+    if (heading) {
+      items.push({ kind: 'heading', text: heading[1] });
+      continue;
+    }
+    const bullet = line.match(/^(\s*)[-*] (.+)/);
+    if (bullet) {
+      items.push({
+        kind: 'bullet',
+        text: bullet[2].replace(/`([^`]+)`/g, '$1'),
+        depth: Math.min(1, Math.floor(bullet[1].length / 2)),
+      });
+    }
+  }
+  if (items.some(i => i.kind === 'bullet')) return items;
   // Fallback: a release body written as bare paragraph(s) with no bullet markers
   // (e.g. a single-fix release) would otherwise parse to zero items and be dropped
   // from the What's New modal entirely. Treat each non-empty, non-heading line as an item.
   return body.split(/\n\s*\n/)
     .map(p => p.trim().replace(/\s*\n\s*/g, ' '))
     .filter(p => p.length > 0 && !p.startsWith('#'))
-    .map(p => p.replace(/`([^`]+)`/g, '$1'));
+    .map(p => ({ kind: 'bullet' as const, text: p.replace(/`([^`]+)`/g, '$1'), depth: 0 }));
 }
 
 function createUpdaterStore() {

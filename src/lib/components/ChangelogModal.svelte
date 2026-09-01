@@ -46,10 +46,21 @@
     }
   }
 
+  /** One rendered line of a release's notes. A `heading` is a `###` section within the
+   *  version; a `bullet` carries its nesting depth so sub-points read as sub-points. */
+  export type ChangelogItem =
+    | { kind: 'heading'; text: string }
+    | { kind: 'bullet'; text: string; depth: number };
+
   export interface ChangelogEntry {
     version: string;
-    items: string[];
+    items: ChangelogItem[];
   }
+
+  /** Indent width of one nesting level in CHANGELOG.md — two spaces, as markdown lists
+   *  are written here. Deeper nesting is clamped at depth 1: the modal is 420px wide and
+   *  a third level has nowhere left to go. */
+  const INDENT = 2;
 
   function parseChangelog(raw: string): ChangelogEntry[] {
     const entries: ChangelogEntry[] = [];
@@ -61,10 +72,22 @@
         entries.push(current);
         continue;
       }
-      const itemMatch = line.match(/^- (.+)/);
-      if (itemMatch && current) {
+      if (!current) continue;
+      const headingMatch = line.match(/^#{3,} (.+)/);
+      if (headingMatch) {
+        current.items.push({ kind: 'heading', text: headingMatch[1] });
+        continue;
+      }
+      // Sub-bullets are indented, and were dropped entirely before this anchored on
+      // column 0 — v1.25.0's three maiLink views never appeared in this modal.
+      const itemMatch = line.match(/^(\s*)- (.+)/);
+      if (itemMatch) {
         // Keep raw markdown — rendered inline at display time via renderItem()
-        current.items.push(itemMatch[1]);
+        current.items.push({
+          kind: 'bullet',
+          text: itemMatch[2],
+          depth: Math.min(1, Math.floor(itemMatch[1].length / INDENT)),
+        });
       }
     }
     return entries;
@@ -92,11 +115,15 @@
         {#each changelog as entry}
           <section>
             <h3 class:current={entry.version === version}>v{entry.version}{entry.version === version ? ' (current)' : ''}</h3>
-            <ul>
+            <div class="items">
               {#each entry.items as item}
-                <li>{@html renderItem(item)}</li>
+                {#if item.kind === 'heading'}
+                  <h4>{@html renderItem(item.text)}</h4>
+                {:else}
+                  <div class="item" class:sub={item.depth > 0}>{@html renderItem(item.text)}</div>
+                {/if}
               {/each}
-            </ul>
+            </div>
           </section>
         {/each}
       </div>
@@ -183,33 +210,60 @@
     color: var(--accent);
   }
 
-  ul {
-    margin: 0;
-    padding-left: 18px;
-    list-style: disc;
+  h4 {
+    margin: 14px 0 6px 0;
+    font-size: 0.923rem;
+    font-weight: 600;
+    color: var(--fg);
   }
 
-  li {
+  /* A section heading opening the version needs no gap above it — the version
+     heading is already there. */
+  .items h4:first-child {
+    margin-top: 0;
+  }
+
+  .item {
+    position: relative;
+    padding-left: 18px;
     font-size: 1rem;
     color: var(--fg-dim);
     line-height: 1.5;
     margin-bottom: 4px;
   }
 
-  li:last-child {
+  /* Bullets are drawn rather than list markers so a heading can break the flow
+     without splitting the notes into several lists. */
+  .item::before {
+    content: '•';
+    position: absolute;
+    left: 6px;
+    color: var(--fg-dim);
+  }
+
+  .item.sub {
+    padding-left: 34px;
+  }
+
+  .item.sub::before {
+    content: '◦';
+    left: 22px;
+  }
+
+  .item:last-child {
     margin-bottom: 0;
   }
 
-  li :global(strong) {
+  .item :global(strong) {
     font-weight: 600;
     color: var(--fg);
   }
 
-  li :global(em) {
+  .item :global(em) {
     font-style: italic;
   }
 
-  li :global(code) {
+  .item :global(code) {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.85em;
     background: var(--bg-dark);
@@ -218,12 +272,12 @@
     padding: 0.5px 4px;
   }
 
-  li :global(a) {
+  .item :global(a) {
     color: var(--accent);
     text-decoration: none;
   }
 
-  li :global(a:hover) {
+  .item :global(a:hover) {
     text-decoration: underline;
   }
 
