@@ -310,11 +310,17 @@
     {/if}
 
     {#each groups as group (group.key)}
+      <!-- A wrapper per job, so the separation can live BETWEEN groups. Heading and list
+           used to be loose siblings, which left nothing to hang a rule on. -->
+      <section class="ws-group">
       {#if showGroupHeadings}
         <h4 class="group">
-          {#if group.unclaimed}<span class="group-loose">Unclaimed — nobody is on these</span>
-          {:else if group.name}{group.name}
-          {:else}<span class="group-loose">Ungrouped</span>{/if}
+          <span class="group-name">
+            {#if group.unclaimed}<span class="group-loose">Unclaimed — nobody is on these</span>
+            {:else if group.name}{group.name}
+            {:else}<span class="group-loose">Ungrouped</span>{/if}
+          </span>
+          <span class="group-count">{group.list.length}</span>
         </h4>
       {/if}
       <ul class="task-list">
@@ -406,6 +412,7 @@
             </li>
           {/each}
         </ul>
+      </section>
     {/each}
 
     {#if elsewhere > 0}
@@ -525,14 +532,51 @@
 
   .group-loose { font-style: italic; opacity: 0.7; text-transform: none; letter-spacing: 0; }
 
+  /* A workstream is a different JOB, and the separation has to outweigh the hairline
+     between two rows of the SAME job. It didn't: the heading was 10px dim text with no rule,
+     sitting among rows that each carry a border, so it read as one more row and two jobs
+     blurred into one list — the exact thing workstreams exist to prevent. */
+  .ws-group + .ws-group {
+    border-top: 1px solid var(--bg-light);
+    margin-top: 16px;
+  }
+
   .group {
-    color: var(--fg-dim);
+    align-items: baseline;
+    color: var(--fg);
+    display: flex;
     font-size: 10px;
     font-weight: 600;
+    gap: 8px;
     letter-spacing: 0.08em;
-    margin: 10px 10px 4px;
+    margin: 10px 10px 5px;
     text-transform: uppercase;
   }
+
+  .group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Gives the heading some mass against the rows below it, and answers "how much is in
+     this job" without opening the board. */
+  .group-count {
+    background: var(--bg-light);
+    border-radius: 999px;
+    color: var(--fg-dim);
+    flex-shrink: 0;
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+    padding: 1px 6px;
+  }
+
+  /* Without this the last row's hairline sat directly above the next group's heading, so the
+     boundary looked like it belonged to the heading rather than closing the group. */
+  .task-list .task:last-child { border-bottom: none; }
 
   .elsewhere {
     border-top: 1px solid var(--bg-light);
