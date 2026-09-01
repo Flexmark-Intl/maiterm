@@ -2525,9 +2525,18 @@ function createOverlordStore() {
         return { removed: true, told: 'nobody' };
       }
 
+      // Written for a tab that may never have heard of this task. A human can create a row
+      // and delete it inside a minute, and nothing here knows whether the agent has read the
+      // board since — `listTasks` is a pull, so delivery is not a fact this side holds. The
+      // old wording ("Drop it from your own list too") asserted it did, and an agent that had
+      // never seen the row answered that it has no such task and went looking for what it had
+      // missed. Same shape as every other bug this file has had: stating as fact something
+      // that is only knowable elsewhere. Cover both readings in one notice instead.
       const text =
         `Board update: I removed the task "${task.title}" from the board — it is no longer ` +
-        `something I want done. Drop it from your own list too, and don't re-add it.`;
+        `something I want done. If it is on your list, drop it and don't re-add it. If you ` +
+        `have never seen it, there is nothing to do and nothing was missed: it was created ` +
+        `and removed between your reads of the board. Either way, don't add it later.`;
       const step: OverlordStep = { kind: 'process', text };
       const inst = terminalsStore.get(tabId);
       // Idle only, and re-checked AFTER the liveness round trip.
@@ -2569,7 +2578,11 @@ function createOverlordStore() {
         'task_dropped',
         `The human deleted the task "${task.title}" from the board. ${tabDisplayName(tabId)} was ` +
           `carrying it and could not be told directly. Tell it when it is reachable: the task is ` +
-          `off the board, it should drop it from its own list and not re-add it.`,
+          `off the board, it should drop it from its own list and not re-add it. Word that for a ` +
+          `tab that may never have heard of the task — a row can be created and deleted between ` +
+          `an agent's reads of the board, and nothing here knows whether it was ever delivered. ` +
+          `"Drop it if you have it, and don't add it later" is right; "you were asked to do this ` +
+          `and now you aren't" sends an agent that never saw it looking for what it missed.`,
       );
       return { removed: true, told: 'agent' };
     },
