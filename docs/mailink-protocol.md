@@ -4,6 +4,31 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.4 changelog** (2026-09-01, built with the maiLink agent). Three additions and one rule
+> that outranks them.
+>
+> **The rule — a field's ABSENCE is never a claim.** Four bugs in three days came from one shape:
+> a value that is correct in the component that defines it, read by a consumer that means
+> something else by it. `chat_state` frames are MERGED over rows built by `GET /chats`, so an
+> omitted field is indistinguishable from a field claimed empty — every field on a frame is now
+> always present, carrying an explicit `null`, with `meta` the single documented exception.
+> `state:"idle"` no longer implies a turn finished (a starting session registers as idle), so
+> `unread` and both attention announcers were rebuilt on facts rather than on that word. See the
+> notes under `state`, `unread` and `chat_state`; they are the load-bearing part of this release.
+>
+> **Files (`sendFilesToPhone` + `GET /assets`, `GET /assets/{id}`).** An agent sends files to the
+> paired phone; they appear as a `kind:"asset"` transcript turn and in a cross-chat Files view.
+> `FileAsset` carries `available` because a 404 cannot distinguish an eviction from a broken
+> server. maiTerm decodes nothing — no dimensions, duration or thumbnails, and no thumbnail
+> endpoint — since the phone derives all of it from a downloaded file for free.
+>
+> **Models (`GET /models`).** The picker stops hardcoding a list that went stale the day Fable 5.1
+> shipped. Each row says whether it came from this account's server-pushed cache or maiTerm's
+> curated tiers, because those are not equally trustworthy. No `confirm` field: whether `/model`
+> pops a confirmation is a TUI fact maiTerm cannot observe, and the Fable gate turned out to be a
+> multi-option billing dialog where a blind Enter could have declined the switch it was meant to
+> complete.
+>
 > **v0.3 changelog** (agreed with the maiLink agent): the surface is now **topic-threaded**.
 > Per-tab `/chats` is superseded by **`/threads`** (a thread is `kind:"topic"` for a mesh
 > conversation or `kind:"solo"` for a lone agent tab); `thread_id` is the canonical key and
