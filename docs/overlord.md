@@ -1456,8 +1456,15 @@ exactly while one of those is happening. So the closed-tab sweep treats an
 exempt tab as closed: on the next tick its ritual is aborted, its
 outstanding/liveness/drive-watch/handoff entries dropped, its proposals and
 escalations removed. Between clicks and ticks, `runSequence` re-checks
-exemption before every paste and `proposalStillHolds` is false for an exempt
-tab, which covers "Send it" and "Run all". `isBoardableTab` is false for an exempt tab, so the scan and
+exemption AFTER its injectable wait and directly before the paste (the wait
+can hold for minutes and return the instant the agent goes quiet), and
+`proposalStillHolds` is false for an exempt tab, which covers "Send it" and
+"Run all". Two exceptions to the sweep, both because exemption is about
+supervision and not the work: escalations carrying the human's own board
+actions (`task_handoff`, `task_dropped`) survive it, and an escalation with
+no tab at all ("Send" on an unassigned task passes `''`) is nobody's to
+sweep — it used to die on the next tick, so handing an unassigned task to
+the agent had never worked. `isBoardableTab` is false for an exempt tab, so the scan and
 reply paths create no placeholder rows for it either. `listWorkspaces` marks
 the tab and the workspace `overlordExempt: true`, and doctrine v8 tells the
 agent what that means — including not raising the refusal to the human, since

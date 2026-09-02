@@ -853,6 +853,13 @@ function createWorkspacesStore() {
           : sourceTab.name;
         await commands.renameTab(workspaceId, newPane.id, newTabId, tabName, sourceTab.custom_name);
 
+        // Overlord exemption is a property of the work, so the split keeps it. This is the
+        // Cmd+D path, a second field-by-field copy list beside duplicateTab's — a clone that
+        // came back supervised is the exemption silently failing on the most common fork.
+        if (sourceTab.overlord_exempt) {
+          await commands.setTabOverlordExempt(workspaceId, newPane.id, newTabId, true);
+        }
+
         // Copy notes
         if (preferencesStore.cloneNotes && sourceTab.notes) {
           await commands.setTabNotes(workspaceId, newPane.id, newTabId, sourceTab.notes);

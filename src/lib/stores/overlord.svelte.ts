@@ -301,6 +301,10 @@ const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
   'rebind_failed',
 ]);
 
+/** Escalations that carry a HUMAN's board action to the agent rather than the engine's own
+ *  judgement. They outlive exemption of the tab they name (see `sweepClosedTabs`). */
+const HUMAN_BOARD_ESCALATIONS = new Set<OverlordEscalation['kind']>(['task_handoff', 'task_dropped']);
+
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
  *  guards are human-only, unreachable from the MCP surface. Exported so the approval modal
  *  can warn about the rule the human would ACTUALLY get, not the one the agent asked for. */
@@ -1110,7 +1114,18 @@ function createOverlordStore() {
     if (!present.size) return;
 
     const deadProposals = proposals.filter((p) => !live.has(p.tabId));
-    const deadEscalations = escalations.filter((e) => !live.has(e.tabId));
+    // An escalation dies with its tab — but an exempt tab is still HERE, and exemption is
+    // about supervision, not the work: the human's own board actions on it ("Do it",
+    // "Send", a deleted task) are relays the human just clicked, and sweeping them turned a
+    // "Sent" receipt back into "Send" five seconds later with the supervisor already woken
+    // to find nothing. Those survive exemption; the engine's own (permission handoffs,
+    // drive replies, re-bind failures) do not. And an escalation with NO tab — "Send" on an
+    // unassigned task passes '' — belongs to nobody's tab and must not die with one.
+    const deadEscalations = escalations.filter((e) => {
+      if (!e.tabId) return false;
+      if (!present.has(e.tabId)) return true;
+      return !live.has(e.tabId) && !HUMAN_BOARD_ESCALATIONS.has(e.kind);
+    });
     // Seeded from every per-tab map, not just the four with visible symptoms. A tab can sit
     // in one of these and NO other: the ritual path records a permission handoff and returns
     // before `setOutstanding`, and its `rituals` entry is dropped in the same `finally` — so
@@ -1420,13 +1435,6 @@ function createOverlordStore() {
     try {
       for (let i = 0; i < rule.sequence.length; i++) {
         const step = rule.sequence[i];
-        // Exempted since the run started. The tick's sweep aborts the run too, but a step
-        // gate can be seconds from typing when the human clicks, and this is the last check
-        // before the paste.
-        if (isExemptTab(tabId)) {
-          ledger(tabId, rule.id, origin, i, step, 'aborted');
-          return;
-        }
         // A step with no text would still submit — `bracketedPasteSubmit` wraps the empty
         // string and presses Enter, sending whatever the human had half-typed at the agent.
         // The rules editor persists "New rule" with one blank step before anything is typed
@@ -1452,6 +1460,14 @@ function createOverlordStore() {
         }
         if (humanTypedSince(tabId, run.lastInjectionAt)) {
           // Human typed into this tab since our last injection — their tab, their turn (§7).
+          ledger(tabId, rule.id, origin, i, step, 'aborted');
+          return;
+        }
+        // Exempted since the run started. The tick's sweep aborts the run too, but the wait
+        // just above can hold for minutes and return the instant the agent goes quiet — the
+        // human who exempted the tab while watching Overlord type into it gets the next
+        // step anyway unless this sits AFTER the wait and directly before the paste.
+        if (isExemptTab(tabId)) {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
