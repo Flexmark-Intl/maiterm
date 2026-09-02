@@ -359,9 +359,10 @@
   /** A proposal refused for a permission prompt stays on the deck; say why the click did
    *  nothing, or the button reads as broken. */
   function approve(id: string) {
-    if (overlordStore.approveProposal(id) === 'permission') {
-      recoverNote = fireRefusal('tab_permission', 'that');
-    }
+    const r = overlordStore.approveProposal(id);
+    // Cleared on success like every other path here: the refusal from the first click
+    // must not outlive the retry that worked, or that send reads as a second refusal.
+    recoverNote = r === 'permission' ? fireRefusal('tab_permission', 'that') : null;
   }
 
   // ── Fleet: manual trigger ──────────────────────────────────────────────────

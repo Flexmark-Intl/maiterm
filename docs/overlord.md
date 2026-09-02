@@ -1476,14 +1476,16 @@ Two scope decisions:
   rule on the tab blocked, the composer's toast having said it started. Nothing
   clears that but the human answering, so `tab_permission` says so up front.
   A rule whose `agent_state` guard admits `permission` is let through. The
-  same check (`permissionBlocks`) guards "Send it" on a proposal card, which
-  had the identical stall — there the card stays, since the proposal is still
-  true. The engine's own tick never had it: `guardsPassSync` tests
+  same check (`permissionBlocks`) guards "Send it" on a proposal card and the
+  batch "Run all", which had the identical stall — there the card stays,
+  since the proposal is still true, and the run counts it as skipped. The
+  engine's own tick never had it: `guardsPassSync` tests
   `agent_state` before firing. It is the human-initiated paths, which skip
   the guards on purpose, that need the one guard a human can't override.
-- **Three call sites asked "has a sequence" and each counted steps.**
+- **Five call sites asked "has a sequence" and each counted steps.**
   `hasRunnableSequence` (a step with text) is now the one answer, used by
-  `rulesForTab`, `checkpointRuleFor` and the tick. The second was the worst:
+  `rulesForTab`, `fireRule`, `checkpointRuleFor`, `checkpointThreshold` and
+  the tick. The second was the worst:
   a blank `context_pct` rule prepended by the editor at a lower threshold won
   `checkpointRuleFor`'s strict tie-break, so the deck's Checkpoint button
   reported `started` and ran nothing, instead of the real checkpoint rule.

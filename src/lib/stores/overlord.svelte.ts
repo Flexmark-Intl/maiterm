@@ -3503,9 +3503,13 @@ function createOverlordStore() {
               // away, since the snapshot. And re-CHECK: run all is exactly where a stale
               // proposal does the most damage, since it fires a whole queue at once without
               // anyone reading the cards one by one.
+              // A tab stopped at a prompt is skipped, and its card KEPT, for the same reason
+              // "Send it" refuses it: the proposal is still true, it just can't be typed
+              // until the human answers, and firing it would hold that tab's ritual slot
+              // for the whole waitInjectable cap while counting here as sent.
               const p = proposals.find((x) => x.id === job.id);
               const rule = p && preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
-              if (p && rule && !rituals.has(p.tabId) && proposalStillHolds(p, Date.now())) {
+              if (p && rule && !rituals.has(p.tabId) && !permissionBlocks(rule, p.tabId) && proposalStillHolds(p, Date.now())) {
                 proposals = proposals.filter((x) => x.id !== p.id);
                 void runSequence($state.snapshot(rule) as OverlordRule, p.tabId, 'rule');
                 ok = true;
