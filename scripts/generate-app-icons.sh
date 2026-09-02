@@ -23,7 +23,7 @@ ICON="$ICONS/AppIcon.icon"
 ICTOOL="/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
 PLEX="$ROOT/scripts/assets/fonts/IBMPlexMono-Regular.ttf"   # vendored, OFL-1.1 (see OFL.txt)
 
-MARK="$STATIC/logo-mark-light.png"          # white "m" + periwinkle accents
+EMBLEM="$ROOT/scripts/generate-emblem.py"    # the mark, drawn parametrically
 # Periwinkle #7880BE in extended-srgb (system derives the gradient + appearances)
 BG_FILL='extended-srgb:0.47059,0.50196,0.74510,1.00000'
 MARK_W=600                                   # mark width on the 1024 canvas (~58%)
@@ -60,8 +60,19 @@ else
 fi
 
 # --- author the .icon (icon.json + Assets/mark.png) ---
+# The mark is drawn white-on-transparent: Icon Composer shapes and lights the
+# GLASS LAYER from its alpha, so the alpha has to be the true silhouette. It adds
+# its own specular, blur and shadow -- nothing here may carry baked lighting.
 rm -rf "$ICON"; mkdir -p "$ICON/Assets"
-magick "$MARK" -resize ${MARK_W}x -background none -gravity center -extent 1024x1024 "$ICON/Assets/mark.png"
+if ! command -v rsvg-convert >/dev/null 2>&1; then
+  echo "ERROR: rsvg-convert not found (brew install librsvg) — cannot render the emblem" >&2; exit 1
+fi
+EMW="$(mktemp -d)"
+python3 "$EMBLEM" --fg '#ffffff' --transparent > "$EMW/emblem.svg"
+rsvg-convert -w 1024 -h 1024 "$EMW/emblem.svg" -o "$EMW/emblem.png"
+magick "$EMW/emblem.png" -trim +repage -resize ${MARK_W}x \
+  -background none -gravity center -extent 1024x1024 "$ICON/Assets/mark.png"
+rm -rf "$EMW"
 cat > "$ICON/icon.json" <<JSON
 {
   "fill": { "automatic-gradient": "$BG_FILL" },
