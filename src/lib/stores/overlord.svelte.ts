@@ -1144,7 +1144,12 @@ function createOverlordStore() {
 
     if (deadProposals.length) proposals = proposals.filter((p) => live.has(p.tabId));
     if (deadEscalations.length) {
-      escalations = escalations.filter((e) => live.has(e.tabId));
+      // Remove exactly what was judged dead above. Filtering on `live` here again would
+      // delete the spared ones too — the human's relay and the tabless '' — but only on
+      // ticks where something ELSE was dead, and without clearing their `handedOff`
+      // receipt: a "Sent" that never reverts, for a handoff the agent never received.
+      const deadIds = new Set(deadEscalations.map((e) => e.id));
+      escalations = escalations.filter((e) => !deadIds.has(e.id));
       for (const e of deadEscalations) {
         unNudged.delete(e.id);
         // Same reason as the sweep above: a "Sent" receipt must not outlive its errand.
