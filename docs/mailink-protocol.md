@@ -27,7 +27,13 @@
 > curated tiers, because those are not equally trustworthy. No `confirm` field: whether `/model`
 > pops a confirmation is a TUI fact maiTerm cannot observe, and the Fable gate turned out to be a
 > multi-option billing dialog where a blind Enter could have declined the switch it was meant to
-> complete.
+> complete. Rows also carry `display` and `family`, added after the label turned out not to name
+> the model — the server labels `claude-fable-5-1[1m]` as bare "Fable", so a client matching on
+> `name` told four live Fable 5 sessions they were already on Fable 5.1. `name` is now cosmetic by
+> contract and the two matchable fields are derived from `value`. There is deliberately no
+> `resolves`: what an alias lands on is decided inside Claude Code at switch time and maiTerm
+> cannot observe it, so a guess matched exactly would be silently wrong where a stated granularity
+> is merely coarse.
 >
 > **v0.3 changelog** (agreed with the maiLink agent): the surface is now **topic-threaded**.
 > Per-tab `/chats` is superseded by **`/threads`** (a thread is `kind:"topic"` for a mesh
@@ -573,7 +579,18 @@ interface Message { msg_id: string; role: 'agent'|'user'|'system'; text: string;
 // in its chat's transcript, and in GET /assets across all chats.
 interface ModelOption {
   value: string;            // exactly what goes after `/model`
-  name: string;
+  name: string;             // COSMETIC ONLY — never match on it, never parse it. On an account row
+                            // it is the server's marketing label, which does NOT name the model:
+                            // `claude-fable-5-1[1m]` is labelled just "Fable". Matching on it lit
+                            // "already on this" for Fable 5 sessions against the Fable 5.1 row.
+  display: string;          // what `meta.model` reads for a session on THIS value — the same
+                            // renderer the chat rows use, so compare the two strings directly.
+                            // An alias renders with NO version ("Opus"), because a version is not
+                            // something an alias names; so an "Opus 4.6" session correctly does
+                            // not equal the `opus` row.
+  family: string;           // lowercase family this row switches into: opus|sonnet|haiku|fable.
+                            // Stated so a client can offer a deliberate family-granular
+                            // affordance without inferring one from punctuation in a label.
   note: string;
   source: 'account' | 'builtin';
                             // NOT decoration — the two are not equally trustworthy.
@@ -602,8 +619,24 @@ interface ModelOption {
   // NOT render `name`/`note` as markup.
   // No `confirm` field, deliberately: whether `/model X` pops a confirmation is a fact about
   // Claude Code's TUI that maiTerm cannot observe, and asserting it would be the same hardcoded
-  // guess one process further along. A confirmation that does appear surfaces through the normal
-  // pending-prompt path the phone already answers.
+  // guess one process further along.
+  // CORRECTION (2026-09-01): an earlier draft of this section said such a confirmation "surfaces
+  // through the normal pending-prompt path". It does NOT. `prompt` is only ever set from an
+  // AskUserQuestion tool call or `state == "permission"`, both hook-driven; a TUI modal is
+  // neither, so a tab parked at one most likely reads plain `idle` and the switch silently does
+  // not happen. Verify the outcome instead — `meta.model` changing on the next reply — rather
+  // than waiting for a prompt that will not arrive. Unverified on hardware; see the board item.
+  //
+  // No `resolves` field either, and this one is a REQUEST maiTerm declined rather than an
+  // oversight. It would carry the concrete id an alias lands on (`opus` → `claude-opus-5`) so a
+  // client could match exactly everywhere. maiTerm does not know it: alias resolution happens
+  // inside Claude Code at switch time, nothing in maiTerm's state records it, and observation
+  // cannot recover it — this machine ran claude-opus-4-8 and claude-opus-5 within two minutes of
+  // each other, because a session's id reflects what its tab was set to, not what the alias
+  // yields today. Sending a guess would be worse than sending nothing: a client matching it
+  // EXACTLY and confidently would show no checkmark for a session genuinely on the alias's
+  // target, and would be silently wrong. `display` + `family` give the same ergonomics at the
+  // granularity that is actually knowable.
 }
 
 interface FileAsset {

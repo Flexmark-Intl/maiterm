@@ -36,11 +36,40 @@ pub struct ModelOption {
     /// tier follows on its own; the account cache supplies pinned ids and we pass those through
     /// unchanged rather than inventing an alias we cannot verify (see `from_account_cache`).
     pub value: String,
-    /// Short display name.
+    /// Short display name. COSMETIC ONLY — it is the server's marketing label on an account row
+    /// ("Fable" for `claude-fable-5-1[1m]`), so it does not name the model and must never be
+    /// parsed. Match on `display`/`family` instead.
     pub name: String,
     /// One line of what it is for.
     pub note: String,
     pub source: Source,
+    /// What `meta.model` reads for a session ON this exact value — the same `display_model`
+    /// rendering the chat rows use, so a consumer can compare the two strings directly instead of
+    /// re-deriving one from the other.
+    ///
+    /// An alias renders WITHOUT a version ("Opus"), because that is all an alias names. A session
+    /// on "Opus 4.6" therefore does not equal the `opus` row, which is correct: we do not know
+    /// that `/model opus` would leave it where it is.
+    pub display: String,
+    /// The model family this row switches into, lowercase and stated rather than parsed out of a
+    /// label: `opus`, `sonnet`, `haiku`, `fable`. Lets a consumer offer a deliberate
+    /// family-granular affordance without inferring one from punctuation.
+    pub family: String,
+}
+
+/// Everything after the provider prefix and the window marker: `claude-fable-5-1[1m]` → `fable`.
+fn family_of(value: &str) -> String {
+    let s = value.replace("[1m]", "");
+    let s = s.strip_prefix("claude-").unwrap_or(&s).to_string();
+    let s = s.strip_suffix("-1m").unwrap_or(&s).to_string();
+    s.split('-').next().unwrap_or_default().to_lowercase()
+}
+
+/// Build a row, deriving the two matchable fields from `value` so they can never disagree with it.
+fn option(value: String, name: String, note: String, source: Source) -> ModelOption {
+    let display = super::display_model(&value);
+    let family = family_of(&value);
+    ModelOption { value, name, note, source, display, family }
 }
 
 /// The tiers every Claude Code install is expected to offer, as `/model` aliases.
@@ -118,7 +147,7 @@ fn entries_from(doc: &serde_json::Value) -> Vec<ModelOption> {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| value.clone());
             let note = e.get("description").and_then(|v| v.as_str()).map(clean).unwrap_or_default();
-            Some(ModelOption { value, name, note, source: Source::Account })
+            Some(option(value, name, note, Source::Account))
         })
         .collect()
 }
@@ -136,12 +165,12 @@ fn merge(account: Vec<ModelOption>) -> Vec<ModelOption> {
     }
     for (value, name, note) in BUILTIN {
         if seen.insert(value.to_string()) {
-            out.push(ModelOption {
-                value: value.to_string(),
-                name: name.to_string(),
-                note: note.to_string(),
-                source: Source::Builtin,
-            });
+            out.push(option(
+                value.to_string(),
+                name.to_string(),
+                note.to_string(),
+                Source::Builtin,
+            ));
         }
     }
     out
@@ -176,12 +205,12 @@ mod tests {
         // Drives the REAL merge, not a copy of it. The previous version re-implemented the loop
         // inside the test, so deleting the dedup from `merge` left it passing while the endpoint
         // emitted duplicate rows.
-        let out = merge(vec![ModelOption {
-            value: "opus[1m]".into(),
-            name: "Opus 5".into(),
-            note: "from the server".into(),
-            source: Source::Account,
-        }]);
+        let out = merge(vec![option(
+            "opus[1m]".into(),
+            "Opus 5".into(),
+            "from the server".into(),
+            Source::Account,
+        )]);
         let opus: Vec<&ModelOption> = out.iter().filter(|m| m.value == "opus[1m]").collect();
         assert_eq!(opus.len(), 1, "no duplicate rows for one value");
         assert_eq!(opus[0].source, Source::Account, "the account's copy wins");
@@ -193,12 +222,7 @@ mod tests {
     fn two_cache_entries_claiming_one_value_yield_one_row() {
         // The old scan only asked whether an account entry collided with BUILTIN, so
         // account-vs-account duplicates passed straight through as two rows doing the same thing.
-        let mk = |note: &str| ModelOption {
-            value: "dup".into(),
-            name: "Dup".into(),
-            note: note.into(),
-            source: Source::Account,
-        };
+        let mk = |note: &str| option("dup".into(), "Dup".into(), note.into(), Source::Account);
         let out = merge(vec![mk("first"), mk("second")]);
         let dups: Vec<&ModelOption> = out.iter().filter(|m| m.value == "dup").collect();
         assert_eq!(dups.len(), 1);
@@ -245,6 +269,50 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "claude-fable-5-1[1m]", "falls back to the value");
         assert_eq!(out[0].note, "Fable 5.1", "control characters and padding gone");
+    }
+
+    #[test]
+    fn the_label_never_names_the_model_but_display_always_does() {
+        use serde_json::json;
+        // The live defect this pair exists to end: the server's label for
+        // `claude-fable-5-1[1m]` is the bare family word "Fable", so a consumer matching on
+        // `name` lit "you are already on this" for four sessions running Fable 5 against a row
+        // pinned to Fable 5.1 — a row that would in fact have moved them.
+        let out = entries_from(&json!({ "additionalModelOptionsCache": [
+            { "value": "claude-fable-5-1[1m]", "label": "Fable", "description": "d" },
+        ]}));
+        assert_eq!(out[0].name, "Fable", "the label stays exactly as the server wrote it");
+        assert_eq!(out[0].display, "Fable 5.1", "but display names the actual model");
+        assert_eq!(out[0].family, "fable");
+        assert_ne!(out[0].display, "Fable 5", "so a Fable 5 session cannot match this row");
+    }
+
+    #[test]
+    fn an_alias_row_renders_without_a_version_because_that_is_all_it_names() {
+        // We do NOT know what `/model opus` resolves to — this machine ran claude-opus-4-8 and
+        // claude-opus-5 within two minutes of each other, so even observation cannot settle it.
+        // `display` therefore stops at the family, and an "Opus 4.6" session correctly fails to
+        // equal it rather than being told it is already there.
+        let opus = merge(Vec::new()).into_iter().find(|m| m.value == "opus").unwrap();
+        assert_eq!(opus.display, "Opus");
+        assert_eq!(opus.family, "opus");
+        assert_ne!(opus.display, "Opus 4.6");
+
+        // The window marker is not part of the model's identity, so both windows render alike.
+        let opus_1m = merge(Vec::new()).into_iter().find(|m| m.value == "opus[1m]").unwrap();
+        assert_eq!(opus_1m.display, "Opus", "[1m] is a window, not a different model");
+        assert_eq!(opus_1m.family, "opus");
+    }
+
+    #[test]
+    fn every_row_derives_its_matchable_fields_from_its_own_value() {
+        // The two fields a consumer matches on are built from `value` at construction, so no
+        // future edit to a label or note can leave them disagreeing with what the row switches to.
+        for m in merge(Vec::new()) {
+            assert_eq!(m.display, super::super::display_model(&m.value), "{}", m.value);
+            assert_eq!(m.family, family_of(&m.value), "{}", m.value);
+            assert!(!m.family.is_empty(), "{} produced no family", m.value);
+        }
     }
 
     #[test]
