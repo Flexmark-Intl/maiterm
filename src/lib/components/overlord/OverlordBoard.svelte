@@ -80,7 +80,7 @@
   let view = $state<View>('deck');
 
   // ── Fleet derivation ────────────────────────────────────────────────────────
-  const boardWorkspaces = $derived(workspacesStore.workspaces.filter((w) => !w.overlord));
+  const boardWorkspaces = $derived(workspacesStore.workspaces.filter((w) => !w.overlord && !w.overlord_exempt));
 
   interface FleetUnit {
     tab: Tab;
@@ -134,7 +134,22 @@
       if (!ws.suspended) continue;
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.runtime) n++;
+          if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.runtime && !tab.overlord_exempt) n++;
+        }
+      }
+    }
+    return n;
+  });
+
+  /** Agent tabs the human exempted, by tab flag or workspace flag. Counted in the bar, never
+   *  shown: a card for one would offer actions every one of which is refused. */
+  const exemptCount = $derived.by(() => {
+    let n = 0;
+    for (const ws of workspacesStore.workspaces) {
+      if (ws.overlord) continue;
+      for (const pane of ws.panes) {
+        for (const tab of pane.tabs) {
+          if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.runtime && (ws.overlord_exempt || tab.overlord_exempt)) n++;
         }
       }
     }
@@ -148,7 +163,7 @@
       if (ws.suspended) continue;
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
+          if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime || tab.overlord_exempt) continue;
           units.push(unitFor(tab, ws));
         }
       }
@@ -939,15 +954,20 @@
       {#if fleet.length === 0}
         <div class="allclear ov-in"><div class="allclear-rule"></div><span class="ov-label">{parkedCount ? 'every agent tab is in a suspended workspace' : 'no agent tabs in this window'}</span><div class="allclear-rule"></div></div>
       {/if}
-      {#if fleet.length > 0 || parkedCount > 0}
+      {#if fleet.length > 0 || parkedCount > 0 || exemptCount > 0}
         <div class="fleet-bar ov-in">
           <span class="ov-label">sort</span>
           <div class="fleet-sort" role="group" aria-label="Sort the fleet">
             <button class="fleet-sort-btn" class:on={fleetSort === 'context'} onclick={() => (fleetSort = 'context')}>peak context</button>
             <button class="fleet-sort-btn" class:on={fleetSort === 'activity'} onclick={() => (fleetSort = 'activity')}>latest activity</button>
           </div>
-          {#if parkedCount > 0}
-            <span class="ov-label fleet-parked">{parkedCount} agent tab{parkedCount === 1 ? '' : 's'} in suspended workspaces — not shown</span>
+          {#if parkedCount > 0 || exemptCount > 0}
+            <span class="ov-label fleet-parked">
+              {[
+                parkedCount > 0 ? `${parkedCount} in suspended workspaces` : '',
+                exemptCount > 0 ? `${exemptCount} exempt` : '',
+              ].filter(Boolean).join(' · ')} — not shown
+            </span>
           {/if}
         </div>
       {/if}

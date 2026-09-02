@@ -646,6 +646,20 @@
                 onclick={(e) => { e.stopPropagation(); if (workspace.id !== workspacesStore.activeWorkspaceId) handleItemClick(workspace.id); window.dispatchEvent(new CustomEvent('open-mesh-cockpit')); }}
               >MESH</button>
             {/if}
+            {#if preferencesStore.overlordEnabled && !workspace.overlord}
+              <!-- Overlord exemption for the whole workspace (docs/overlord.md §11). Stays
+                   visible while exempt, not hover-only: an exemption you can't see is one
+                   you forget you set, and then wonder why the fleet is missing a workspace. -->
+              <IconButton
+                tooltip={workspace.overlord_exempt ? 'Exempt from Overlord — click to supervise again' : 'Exempt this workspace from Overlord'}
+                class="workspace-close-btn {workspace.overlord_exempt ? 'ws-exempt-on' : ''}"
+                active={!!workspace.overlord_exempt}
+                style="--icon-btn-hover: var(--bg-dark)"
+                onclick={(e) => { e.stopPropagation(); workspacesStore.setWorkspaceOverlordExempt(workspace.id, !workspace.overlord_exempt); }}
+              >
+                <Icon name="eye-off" size={10} />
+              </IconButton>
+            {/if}
             {#if workspace.suspended}
               <IconButton
                 tooltip="Delete workspace"
@@ -1094,7 +1108,8 @@
   }
 
   .workspace-item:hover :global(.workspace-close-btn),
-  .workspace-item.active :global(.workspace-close-btn) {
+  .workspace-item.active :global(.workspace-close-btn),
+  .workspace-item :global(.workspace-close-btn.ws-exempt-on) {
     opacity: 1;
   }
 

@@ -509,6 +509,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 notes_mode: tab.notes_mode.clone(),
                 notes_open: tab.notes_open,
                 tasks_open: tab.tasks_open,
+                overlord_exempt: tab.overlord_exempt,
                 composer_open: tab.composer_open,
                 composer_draft: tab.composer_draft.clone(),
                 mesh_purpose: tab.mesh_purpose.clone(),
@@ -629,6 +630,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
         workstreams: new_workstreams,
         // Never duplicate an Overlord workspace — at most one per window.
         overlord: false,
+        // An exemption is a property of the work, not the window: it travels.
+        overlord_exempt: ws.overlord_exempt,
         archived_tabs: Vec::new(),
         import_highlight: false,
         suspended: false,

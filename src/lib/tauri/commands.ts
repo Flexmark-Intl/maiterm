@@ -547,6 +547,14 @@ export async function setTabTasksOpen(workspaceId: string, paneId: string, tabId
   return invoke('set_tab_tasks_open', { workspaceId, paneId, tabId, open });
 }
 
+export async function setTabOverlordExempt(workspaceId: string, paneId: string, tabId: string, exempt: boolean): Promise<void> {
+  return invoke('set_tab_overlord_exempt', { workspaceId, paneId, tabId, exempt });
+}
+
+export async function setWorkspaceOverlordExempt(workspaceId: string, exempt: boolean): Promise<void> {
+  return invoke('set_workspace_overlord_exempt', { workspaceId, exempt });
+}
+
 export async function setTabNotesMode(workspaceId: string, paneId: string, tabId: string, notesMode: string | null): Promise<void> {
   return invoke('set_tab_notes_mode', { workspaceId, paneId, tabId, notesMode });
 }

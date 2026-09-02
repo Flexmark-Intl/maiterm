@@ -1004,6 +1004,36 @@ pub fn set_tab_tasks_open(
     Ok(())
 }
 
+/// Exempt one tab from (or return it to) Overlord supervision (docs/overlord.md §11).
+#[tauri::command]
+pub fn set_tab_overlord_exempt(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    pane_id: String,
+    tab_id: String,
+    exempt: bool,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    let workspace = win.workspaces.iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    let pane = workspace.panes.iter_mut()
+        .find(|p| p.id == pane_id)
+        .ok_or("Pane not found")?;
+    let tab = pane.tabs.iter_mut()
+        .find(|t| t.id == tab_id)
+        .ok_or("Tab not found")?;
+
+    tab.overlord_exempt = exempt;
+
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
 #[tauri::command]
 pub fn set_tab_notes_mode(
     window: tauri::Window,
@@ -3062,6 +3092,7 @@ mod reload_carry_tests {
             notes_mode: Some("render".to_string()),
             notes_open: true,
             tasks_open: true,
+            overlord_exempt: false,
             composer_open: Some(true),
             composer_draft: Some("half-typed".to_string()),
             mesh_purpose: Some("owns the chat channel".to_string()),

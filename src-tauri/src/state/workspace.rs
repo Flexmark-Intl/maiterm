@@ -276,6 +276,12 @@ pub struct Tab {
     /// `notes_open` — persisted per tab so a reopened tab comes back as it was left.
     #[serde(default)]
     pub tasks_open: bool,
+    /// Exempt from Overlord (docs/overlord.md §11): the engine never evaluates rules on,
+    /// probes, proposes for, or shows a card for this tab, and the Overlord agent's tools
+    /// refuse it. A workspace-level flag covers every tab in it; this one covers one tab
+    /// inside a supervised workspace. Rides with the tab record on move/duplicate/reload.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overlord_exempt: bool,
     /// Whether the composer dock is open for this tab.
     /// `None` = inherit `composer_default_open` preference; `Some(x)` = user explicitly toggled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -588,6 +594,10 @@ pub struct Workspace {
     /// list and reordering. Suspending it stops the agent, never the engine.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overlord: bool,
+    /// Exempt every tab in this workspace from Overlord (docs/overlord.md §11). See
+    /// `Tab::overlord_exempt` for the per-tab form.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overlord_exempt: bool,
     #[serde(default)]
     pub archived_tabs: Vec<Tab>,
     /// Transient flag set after merge import — cleared on workspace activation.
@@ -1605,6 +1615,7 @@ impl Tab {
             notes_mode: None,
             notes_open: false,
             tasks_open: false,
+            overlord_exempt: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -1652,6 +1663,7 @@ impl Tab {
             notes_mode: None,
             notes_open: false,
             tasks_open: false,
+            overlord_exempt: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -1699,6 +1711,7 @@ impl Tab {
             notes_mode: None,
             notes_open: false,
             tasks_open: false,
+            overlord_exempt: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -1755,6 +1768,7 @@ impl Workspace {
             tasks: Vec::new(),
             workstreams: Vec::new(),
             overlord: false,
+            overlord_exempt: false,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,

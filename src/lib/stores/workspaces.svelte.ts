@@ -481,6 +481,14 @@ function createWorkspacesStore() {
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeWorkspace(workspaceId));
     },
 
+    /** Overlord: exempt every tab in a workspace, or return them (docs/overlord.md §11). */
+    async setWorkspaceOverlordExempt(workspaceId: string, exempt: boolean) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (!ws || (ws.overlord_exempt ?? false) === exempt) return;
+      ws.overlord_exempt = exempt;
+      await commands.setWorkspaceOverlordExempt(workspaceId, exempt);
+    },
+
     async suspendWorkspace(workspaceId: string) {
       const ws = workspaces.find(w => w.id === workspaceId);
       if (!ws || ws.suspended) return;
@@ -1531,6 +1539,16 @@ function createWorkspacesStore() {
       if (!tab || (tab.mailink_excluded ?? false) === excluded) return;
       tab.mailink_excluded = excluded;
       await commands.setTabMailinkExcluded(workspaceId, paneId, tabId, excluded);
+    },
+
+    /** Overlord: exempt one tab from supervision, or return it (docs/overlord.md §11). */
+    async setTabOverlordExempt(workspaceId: string, paneId: string, tabId: string, exempt: boolean) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      const pane = ws?.panes.find(p => p.id === paneId);
+      const tab = pane?.tabs.find(t => t.id === tabId);
+      if (!tab || (tab.overlord_exempt ?? false) === exempt) return;
+      tab.overlord_exempt = exempt;
+      await commands.setTabOverlordExempt(workspaceId, paneId, tabId, exempt);
     },
 
     /** Operator kill switch: end a tab's comms thread binding(s). Omit rootId = all. */

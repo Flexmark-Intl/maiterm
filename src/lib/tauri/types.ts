@@ -50,6 +50,9 @@ export interface Tab {
   notes_open: boolean;
   /** Whether this tab's task panel is open (docs/tasks.md §6). */
   tasks_open?: boolean;
+  /** Exempt from Overlord (docs/overlord.md §11): no rules, probes, proposals, cards or
+   *  agent tools touch this tab. `Workspace.overlord_exempt` covers a whole workspace. */
+  overlord_exempt?: boolean;
   /** Composer dock open state: null/absent = inherit composer_default_open pref. */
   composer_open?: boolean | null;
   /** Persisted in-progress composer draft text. */
@@ -239,6 +242,8 @@ export interface Workspace {
   workstreams?: Workstream[];
   /** Overlord workspace flag — hosts the board + agent tab; at most one per window. */
   overlord?: boolean;
+  /** Every tab in this workspace is exempt from Overlord (docs/overlord.md §11). */
+  overlord_exempt?: boolean;
   archived_tabs: Tab[];
   import_highlight?: boolean;
   suspended?: boolean;

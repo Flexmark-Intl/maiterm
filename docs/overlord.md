@@ -1421,6 +1421,44 @@ under a tab id that no longer exists anywhere.
 `tabDisplayName` resolves archived tabs, so any chip still naming one reads as the
 session's name rather than a truncated id.
 
+### Exempting a tab or a workspace (2026-09-02)
+
+`Tab.overlord_exempt` and `Workspace.overlord_exempt`, both persisted, both
+`false` by default. A tab is exempt when either is set. Set from the tab's
+context menu ("Exempt from Overlord" / "Supervise with Overlord", shown for
+agent tabs while Overlord is on) and from a per-workspace eye-off button in
+the sidebar, which stays visible while the exemption is on — an exemption you
+can't see is one you forget you set, and then wonder why the fleet is missing
+a workspace. When the workspace is exempt the tab item is disabled and says so;
+the workspace flag wins.
+
+**What exempt means: the engine cannot see the tab.** `agentTabs()` is the one
+enumeration every engine path starts from — the tick (rules, facts poll, task
+mirror, census), the liveness probe, `spentTabs`, `rulesForTab` — and it skips
+exempt tabs there, so nothing downstream has to remember. No rule evaluates, no
+proposal is raised, no card appears on the deck or the fleet (the bar counts
+them: "2 exempt — not shown"), no Trigger menu or composer bolt is offered.
+`boardWorkspaces` also drops an exempt workspace, so its tabs never reach the
+deck's signals.
+
+**The agent's tools refuse, and say why.** They take a tab id from outside, so
+they check `isExemptTab` explicitly and answer `reason: 'exempt'` with a detail
+that tells the agent to leave it alone: `driveTab`, `recoverTab`, `archiveTab`,
+`closeTab` (via `retireGuard`), `resumeTab`, `resumeWorkspace`, `getTabPrompt`,
+`answerTabPrompt`. `isBoardableTab` is false for an exempt tab, so the scan and
+reply paths create no placeholder rows for it either. `listWorkspaces` marks
+the tab and the workspace `overlordExempt: true`, and doctrine v8 tells the
+agent what that means — including not raising the refusal to the human, since
+being left alone is what they asked for.
+
+**What exempt does not mean.** The tab's task rows stay on the board: tasks
+are maiTerm's, the board is the workspace's index, and hiding work because its
+tab is unsupervised would make the exemption cost something it shouldn't. The
+human's own actions on the tab (the panel's "Do it", the composer) are
+untouched. The flag rides with the `Tab` record through reload, duplicate,
+move and window duplication, and a duplicated workspace keeps its flag: an
+exemption is a property of the work, not the window.
+
 ### Fleet: parked workspaces, sort, View, Trigger (2026-09-02)
 
 **Tabs in a suspended workspace are not on the fleet.** They used to be, as

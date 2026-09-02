@@ -147,6 +147,7 @@ Workspace
 ├── active_pane_id
 ├── split_root: SplitNode (binary tree of pane layout)
 ├── overlord (bool — hosts the Overlord board + agent; one per window, own sidebar accessor row)
+├── overlord_exempt (bool — every tab in it is invisible to the Overlord engine and refused by its tools)
 └── notes: WorkspaceNote[] (workspace-level notes)
 
 Pane
@@ -165,6 +166,7 @@ Tab
 ├── scrollback (serialized terminal state)
 ├── notes, notes_open, notes_mode (per-tab markdown notes)
 ├── tasks_open (per-tab task panel visibility)
+├── overlord_exempt (per-tab Overlord exemption; the workspace flag covers all its tabs)
 └── trigger_variables (persisted variable map from triggers)
 
 SplitNode = SplitLeaf { pane_id } | SplitBranch { id, direction, ratio, children }

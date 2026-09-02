@@ -236,6 +236,7 @@ function createClaudeCodeStore() {
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
           else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'getTabPrompt is available only to the Overlord agent tab.' };
           else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else if (overlordStore.isExemptTab(a.tab_id)) result = { error: 'That tab is exempt from Overlord — the human marked it, or its workspace, exempt. Leave it alone.' };
           else result = { prompt: await overlordStore.tabPrompt(a.tab_id) };
           break;
         }
@@ -253,6 +254,7 @@ function createClaudeCodeStore() {
           // Answering your own prompt is a loop: the agent would resolve the very ask it
           // raised to reach the human, and the human would never see it.
           else if (a.tab_id === a.tabId) result = { ok: false, reason: 'cannot answer your own prompt' };
+          else if (overlordStore.isExemptTab(a.tab_id)) result = { ok: false, reason: 'exempt', detail: 'That tab is exempt from Overlord — the human marked it, or its workspace, exempt. Leave it alone.' };
           else if (!a.choice && !a.answers?.length) result = { ok: false, reason: 'bad_request', detail: 'pass choice (permission) or answers (question)' };
           else result = await overlordStore.answerPrompt(a.tab_id, a.prompt_id ?? null, a.choice ?? null, a.answers ?? null);
           break;
@@ -762,6 +764,7 @@ function createClaudeCodeStore() {
         name: ws.name,
         isActive: ws.id === workspacesStore.activeWorkspaceId,
         suspended: ws.suspended ?? false,
+        ...(ws.overlord_exempt ? { overlordExempt: true } : {}),
         noteCount: ws.workspace_notes.length,
         archivedTabCount: ws.archived_tabs?.length ?? 0,
         panes: ws.panes.map(pane => ({
@@ -783,6 +786,8 @@ function createClaudeCodeStore() {
               ...(isAgent
                 ? {
                     runtime: tab.runtime,
+                    // Off limits to the engine and every Overlord tool — the human said so.
+                    ...(overlordStore.isExemptTab(tab.id) ? { overlordExempt: true } : {}),
                     pty: overlordStore.tabPtyState(tab.id),
                     state: overlordStore.tabAgentState(tab.id),
                     loaded: overlordStore.tabLoaded(tab.id),

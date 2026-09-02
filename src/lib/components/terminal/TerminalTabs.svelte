@@ -1007,6 +1007,20 @@
         };
       }
     }
+    // Overlord exemption (docs/overlord.md §11). Only meaningful for a tab the engine would
+    // otherwise supervise: an agent tab, outside the Overlord workspace, with Overlord on.
+    // A workspace-wide exemption is set from the sidebar and overrides this per-tab item.
+    const isWsExempt = !!ws?.overlord_exempt;
+    const isTabExempt = !!tabObj?.overlord_exempt;
+    const overlordItem: MenuItem | null =
+      preferencesStore.overlordEnabled && isTerminalTab && isAgentTab && !ws?.overlord
+        ? isWsExempt
+          ? { label: 'Exempt from Overlord (whole workspace)', action: () => {}, disabled: true }
+          : {
+              label: isTabExempt ? 'Supervise with Overlord' : 'Exempt from Overlord',
+              action: () => workspacesStore.setTabOverlordExempt(workspaceId, pane.id, tabId, !isTabExempt),
+            }
+        : null;
     const boundCount = tabObj?.comms_bindings?.length ?? 0;
     const commsItem: MenuItem | null = boundCount > 0
       ? {
@@ -1067,6 +1081,7 @@
         label: isPinned ? 'Unpin tab' : 'Pin tab',
         action: () => workspacesStore.setTabPinned(workspaceId, pane.id, tabId, !isPinned),
       },
+      ...(overlordItem ? [overlordItem] : []),
       ...(mailinkItem ? [mailinkItem] : []),
       ...(commsMonitorItem ? [commsMonitorItem] : []),
       ...(commsItem ? [commsItem] : []),

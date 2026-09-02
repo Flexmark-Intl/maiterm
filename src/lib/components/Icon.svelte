@@ -1,5 +1,5 @@
 <script lang="ts">
-  type IconName = 'trash' | 'notes' | 'eye' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin';
+  type IconName = 'trash' | 'notes' | 'eye' | 'eye-off' | 'pencil' | 'list' | 'lanes' | 'archive' | 'word-wrap' | 'settings' | 'help' | 'bug' | 'lightbulb' | 'pause' | 'bolt' | 'resume' | 'pdf' | 'image' | 'file' | 'diff' | 'restore' | 'close' | 'duplicate' | 'check' | 'cross' | 'warning' | 'circle' | 'circle-outline' | 'plus' | 'arrow-right' | 'search' | 'pin';
 
   interface Props {
     name: IconName;
@@ -15,6 +15,9 @@
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5L9 1Z"/><path d="M9 1v4h4"/><path d="M6 9h4"/><path d="M6 12h2"/></svg>
 {:else if name === 'eye'}
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/><circle cx="8" cy="8" r="2"/></svg>
+{:else if name === 'eye-off'}
+  <!-- Same eye, struck through. At 10–14px the slash is the only difference that survives. -->
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z"/><circle cx="8" cy="8" r="2"/><line x1="2.5" y1="13.5" x2="13.5" y2="2.5"/></svg>
 {:else if name === 'pencil'}
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2 2L5 13l-3 1 1-3L12 2Z"/></svg>
 {:else if name === 'list'}

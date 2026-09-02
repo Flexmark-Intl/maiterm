@@ -281,8 +281,11 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  says which to use; an agent on v5 believes it cannot put a finished session away. v7
  *  reverses what the rendered ruleset MEANS: an agent on v6 reads it as a playbook to
  *  improvise from and hand-drives sequences the engine is already running, which is the
- *  whole reason v7 exists — so this is a contract change however much it looks like wording. */
-const DOCTRINE_VERSION = '7';
+ *  whole reason v7 exists — so this is a contract change however much it looks like wording.
+ *  v8 adds exemption: an agent on v7 sees `overlordExempt` tabs in listWorkspaces with no
+ *  rule about them and will try to drive one — refused, but it will then raise the refusal to
+ *  the human, which is the opposite of what exempting the tab asked for. */
+const DOCTRINE_VERSION = '8';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -561,6 +564,32 @@ function createOverlordStore() {
 
   // ── Tab / workspace helpers ─────────────────────────────────────────────────
 
+  /**
+   * Exempt from Overlord, by the tab's own flag or its workspace's (docs/overlord.md §11).
+   * Checked here, at the ONE enumeration every engine path starts from, so exemption is not
+   * a test each consumer has to remember: the tick (rules, facts, task mirror, census), the
+   * liveness probe, `spentTabs`, `rulesForTab` — an exempt tab is simply not an agent tab
+   * as far as the engine can see. The agent's tools ask `isExemptTab` explicitly, because
+   * they take a tab id from outside and have to say WHY they refused.
+   */
+  function tabExempt(tab: Tab, ws: Workspace): boolean {
+    return !!tab.overlord_exempt || !!ws.overlord_exempt;
+  }
+
+  function isExemptTab(tabId: string): boolean {
+    for (const ws of workspacesStore.workspaces) {
+      for (const pane of ws.panes) {
+        const tab = pane.tabs.find((t) => t.id === tabId);
+        if (tab) return tabExempt(tab, ws);
+      }
+    }
+    return false;
+  }
+
+  const EXEMPT_DETAIL =
+    'That tab is exempt from Overlord — the human marked it, or its workspace, exempt. ' +
+    'Leave it alone: nothing here will drive, recover, answer, archive or close it.';
+
   function agentTabs(): { tab: Tab; ws: Workspace }[] {
     const out: { tab: Tab; ws: Workspace }[] = [];
     for (const ws of workspacesStore.workspaces) {
@@ -568,6 +597,7 @@ function createOverlordStore() {
         for (const tab of pane.tabs) {
           if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
           if (!tab.runtime) continue; // never hosted an agent → not supervised
+          if (tabExempt(tab, ws)) continue; // the human said hands off
           out.push({ tab, ws });
         }
       }
@@ -1266,6 +1296,7 @@ function createOverlordStore() {
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports THREE independent facts: \`pty\` ('live' | 'suspended' | 'none' — the terminal underneath), \`state\` (what the agent is doing, meaningful only over a live pty), and \`loaded\` (whether anything can reach it at all). Read all three. An 'idle' agent with loaded:false is healthy and undrivable; a suspended tab is not a dead one.\n` +
       `  - Every state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · pty 'suspended' → resumeTab · a tab in a suspended WORKSPACE → resumeWorkspace · a tab in that workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
       `  - Four things that get confused, and are reported separately: a SUSPENDED TAB (pty:'suspended') sits in the pane tree of an ACTIVE workspace with its terminal killed — suspending every tab but the active one is routine, so most of these are perfectly ordinary; a SUSPENDED WORKSPACE parks all of its tabs at once; ARCHIVED tabs are lifted out of the pane tree entirely; loaded:false only means the pane is not mounted right now, and can be true of a tab whose agent is alive and working. Never describe one as another — say which one you mean.\n` +
+      `  - A tab or workspace marked \`overlordExempt: true\` in listWorkspaces is off limits: the human exempted it. The engine runs nothing on it, it has no card, and every tool refuses it with reason 'exempt'. Do not drive, recover, answer, archive, close or resume it, and do not raise it to the human — being left alone is what they asked for.\n` +
       `  - Judging a tab's age: listWorkspaces gives \`lastTurnAt\` (its last real turn) and \`contextPct\` for agent tabs whose session could be resolved, plus \`suspendedAt\` for suspended ones. Both are absent — not zero — when there is no readable transcript for that tab (no live session and no remembered session id), which is itself worth knowing: nothing can be read back from that tab. Archived tabs carry \`archivedAt\`, and getTabNotes reads an archived tab's notes without restoring it — read those before deciding what a session was for.\n` +
       `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered. deleteArchivedTab prunes the archive itself when an archived session is no longer worth keeping.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
@@ -1883,7 +1914,7 @@ function createOverlordStore() {
    *  badge and eventually surfaces as a phantom "stale" card. */
   function isBoardableTab(tabId: string): boolean {
     const ws = workspaceForTab(tabId);
-    return !!ws && !ws.overlord;
+    return !!ws && !ws.overlord && !isExemptTab(tabId);
   }
 
   /** SCAN path: stand up a placeholder row for a running tab, or keep an existing one
@@ -2280,6 +2311,7 @@ function createOverlordStore() {
      *  respawn a session purely so it could wait for it to idle and then kill it again. */
     allowParked = false,
   ): { reason: string; detail: string } | null {
+    if (isExemptTab(tabId)) return { reason: 'exempt', detail: EXEMPT_DETAIL };
     if (!isBoardableTab(tabId)) {
       return {
         reason: 'not_boardable',
@@ -2933,6 +2965,11 @@ function createOverlordStore() {
       return !!terminalsStore.get(tabId);
     },
 
+    /** Exempt from Overlord by its own flag or its workspace's (docs/overlord.md §11). */
+    isExemptTab(tabId: string): boolean {
+      return isExemptTab(tabId);
+    },
+
     /**
      * ONE vocabulary for what a tab's agent is doing, for every consumer that has to pick an
      * action for it — the deck, the doctrine, and `listWorkspaces`.
@@ -2985,6 +3022,7 @@ function createOverlordStore() {
     async resumeTabById(tabId: string): Promise<{ ok: boolean; reason?: string; detail?: string }> {
       const loc = workspacesStore._locateTab(tabId);
       if (!loc) return { ok: false, reason: 'not_found', detail: 'No tab with that id in this window.' };
+      if (isExemptTab(tabId)) return { ok: false, reason: 'exempt', detail: EXEMPT_DETAIL };
       // Workspace first. Testing `pty_id` first made `workspace_suspended` unreachable in the
       // exact case it was written for: suspendWorkspace leaves a stale `pty_id` in the mirror,
       // so every tab in a parked workspace answered "already live — nothing to resume".
@@ -3364,6 +3402,7 @@ function createOverlordStore() {
       const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
       if (!ws) return { ok: false, reason: 'not_found', detail: 'No workspace with that id in this window.' };
       if (ws.overlord) return { ok: false, reason: 'not_boardable', detail: 'That is the Overlord workspace.' };
+      if (ws.overlord_exempt) return { ok: false, reason: 'exempt', detail: 'That workspace is exempt from Overlord — the human marked it so. Leave it alone.' };
       if (!ws.suspended) return { ok: false, reason: 'not_suspended', detail: `"${ws.name}" is not suspended. If its tabs still read loaded:false, its panes simply are not mounted — switch to it.` };
       try {
         await workspacesStore.resumeWorkspace(workspaceId);
@@ -3839,6 +3878,7 @@ function createOverlordStore() {
       kind: 'process' | 'slash',
       text: string,
     ): Promise<{ sent: boolean; reason?: string; detail?: string }> {
+      if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
       const step: OverlordStep = { kind, text };
       if (kind === 'slash') {
         const rt = workspacesStore.getTabRuntime(tabId);

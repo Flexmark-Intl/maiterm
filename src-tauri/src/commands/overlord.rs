@@ -189,3 +189,27 @@ pub fn set_workspace_overlord(
     };
     save_state(&data_clone)
 }
+
+/// Exempt every tab in a workspace from (or return them to) Overlord supervision
+/// (docs/overlord.md §11).
+#[tauri::command]
+pub fn set_workspace_overlord_exempt(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    exempt: bool,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        workspace.overlord_exempt = exempt;
+        app_data.clone()
+    };
+    save_state(&data_clone)
+}
