@@ -238,7 +238,8 @@ pub fn run() {
                     .inner_size(w, h)
                     .min_inner_size(800.0, 600.0)
                     .resizable(true)
-                    .fullscreen(false);
+                    .fullscreen(false)
+                    .background_color(commands::window::DEFAULT_WINDOW_BG);
 
                 #[cfg(target_os = "macos")]
                 {
@@ -598,6 +599,7 @@ pub fn run() {
             commands::window::save_window_geometry,
             commands::window::get_monitor_count,
             commands::window::restore_window_geometry,
+            commands::window::set_window_background,
             commands::window::reset_window,
             commands::window::get_window_count,
             commands::window::open_preferences_window,

@@ -1,3 +1,5 @@
+import { setWindowBackground } from '$lib/tauri/commands';
+
 export interface UiColors {
   bg_dark: string;
   bg_medium: string;
@@ -548,4 +550,9 @@ export function applyUiTheme(ui: UiColors): void {
   // rather than a brightness() filter, which can't recolor two tones correctly.
   const isLight = luminance(ui.bg_dark) > 0.2;
   root.style.setProperty('--logo-url', isLight ? 'url(/logo-dark.png)' : 'url(/logo-light.png)');
+
+  // The native window paints this wherever the page hasn't — notably for a second or
+  // two after unlock, when WebKit rebuilds the layers it dropped while the display
+  // slept. Without it that flash is white.
+  setWindowBackground(ui.bg_dark).catch(() => {});
 }

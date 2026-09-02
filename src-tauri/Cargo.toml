@@ -62,6 +62,12 @@ ignore = "0.4"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
+# Window/webview base colour (commands::window::set_window_background). Same versions
+# wry already pulls in; default features off so only the two bindings we call land.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSColor"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "WKWebView", "objc2-app-kit"] }
+
 [dev-dependencies]
 # `ServiceExt::oneshot` — drives the maiLink router in-process (no TLS, no listener).
 tower = { version = "0.5", features = ["util"] }

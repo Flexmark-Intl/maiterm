@@ -5,6 +5,48 @@ use tauri::webview::WebviewWindowBuilder;
 use crate::state::{save_state, AppState, Pane, Tab, WindowData, Workspace};
 use crate::state::workspace::{SplitNode};
 
+/// The colour a window shows wherever the page hasn't painted. Tokyo Night's `--bg-dark`,
+/// the default theme: the frontend overrides it from `applyUiTheme` once it knows the
+/// real one, so this only covers the moments before the first frame.
+pub const DEFAULT_WINDOW_BG: tauri::window::Color = tauri::window::Color(26, 27, 38, 255);
+
+/// Paint the native window — and on macOS the WKWebView's own base layer — in the theme's
+/// background colour. WebKit discards the page's compositing layers while the window is
+/// occluded (display sleep, lock screen) and rebuilds them on wake; until that first frame
+/// the window shows these colours, which default to white. That is the "white malformed
+/// window" seen for a second or two on unlock. Tauri's webview-layer colour is a no-op on
+/// macOS, hence the direct `underPageBackgroundColor` call.
+#[tauri::command]
+pub fn set_window_background(window: tauri::WebviewWindow, hex: String) -> Result<(), String> {
+    let (r, g, b) = parse_hex_rgb(&hex).ok_or_else(|| format!("not a #rrggbb colour: {hex}"))?;
+    window
+        .set_background_color(Some(tauri::window::Color(r, g, b, 255)))
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    window
+        .with_webview(move |wv| unsafe {
+            let view = &*(wv.inner() as *const objc2_web_kit::WKWebView);
+            let color = objc2_app_kit::NSColor::colorWithSRGBRed_green_blue_alpha(
+                r as f64 / 255.0,
+                g as f64 / 255.0,
+                b as f64 / 255.0,
+                1.0,
+            );
+            view.setUnderPageBackgroundColor(Some(&color));
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let s = hex.trim().trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let ch = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
+    Some((ch(0)?, ch(2)?, ch(4)?))
+}
+
 #[tauri::command]
 pub fn get_window_data(window: tauri::Window, state: State<'_, Arc<AppState>>) -> Result<WindowData, String> {
     let label = window.label().to_string();
@@ -269,7 +311,8 @@ pub fn open_preferences_window(window: tauri::WebviewWindow, app: tauri::AppHand
             .inner_size(pref_w, pref_h)
             .min_inner_size(500.0, 400.0)
             .resizable(true)
-            .fullscreen(false);
+            .fullscreen(false)
+            .background_color(DEFAULT_WINDOW_BG);
 
         #[cfg(target_os = "macos")]
         {
@@ -337,7 +380,8 @@ pub fn open_help_window(window: tauri::WebviewWindow, app: tauri::AppHandle, sec
             .inner_size(help_w, help_h)
             .min_inner_size(500.0, 400.0)
             .resizable(true)
-            .fullscreen(false);
+            .fullscreen(false)
+            .background_color(DEFAULT_WINDOW_BG);
 
         #[cfg(target_os = "macos")]
         {
@@ -388,7 +432,8 @@ fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
         .inner_size(w, h)
         .min_inner_size(800.0, 600.0)
         .resizable(true)
-        .fullscreen(false);
+        .fullscreen(false)
+        .background_color(DEFAULT_WINDOW_BG);
 
     #[cfg(target_os = "macos")]
     {

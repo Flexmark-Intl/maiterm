@@ -816,6 +816,11 @@ export async function saveWindowGeometry(monitorCount: number): Promise<void> {
   return invoke('save_window_geometry', { monitorCount });
 }
 
+/** Paint this window's native background (what shows before WebKit's first frame) in the theme bg. */
+export async function setWindowBackground(hex: string): Promise<void> {
+  return invoke('set_window_background', { hex });
+}
+
 export async function getMonitorCount(): Promise<number> {
   return invoke('get_monitor_count');
 }
