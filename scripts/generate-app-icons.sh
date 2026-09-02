@@ -116,28 +116,51 @@ else
   echo "WARN: actool not found; kept existing $ICONS/Assets.car" >&2
 fi
 
-# --- website logo + favicon: FLAT dark/light icons (not glass) ---
-# Starlight swaps these by theme: light theme -> cream tile (black m), dark theme
-# -> the navy master. Flat tiles read better than the glass render on flat headers.
+# --- FLAT tiles: the non-Liquid-Glass icon, for Windows, Linux, pre-macOS-26 ---
+# Also the website header, which Starlight swaps by theme (cream on light pages,
+# navy on dark). Flat tiles read better than the glass render on a flat header.
+#
+# The navy master used to be a committed, hand-made PNG; it is generated now, so
+# the emblem has exactly one source. Both tiles stay MONOCHROME on their ground,
+# matching what the old "m" did — the active/idle distinction is carried by node
+# size, so no accent colour is needed here any more than in the glass layer.
 NAVY="$ICONS/icon-source-1024.png"
-if command -v magick >/dev/null 2>&1 && [ -f "$NAVY" ]; then
+if command -v magick >/dev/null 2>&1 && command -v rsvg-convert >/dev/null 2>&1; then
   FW="$(mktemp -d)"
+  # tile silhouette (the slight downward offset is the original's, kept for continuity)
   magick -size 1024x1024 xc:black -fill white -draw 'roundrectangle 88,72 935,919 165,165' "$FW/mask.png"
-  magick "$NAVY" -alpha extract "$FW/na.png"
-  magick -size 1024x1024 xc:black -colorspace sRGB "$FW/na.png" -alpha off \
+  # Soft ground shadow, from the same silhouette. The -colorspace sRGB here and in
+  # the composite below are load-bearing: a drawn mask is a GRAYSCALE image, and the
+  # first image in a composite sets the output colorspace — without these the whole
+  # tile is written greyscale and every colour collapses to its red channel
+  # (#2A2F4D -> #282828, #5965D6 -> #595959).
+  magick "$FW/mask.png" -blur 0x26 -roll +0+16 -negate "$FW/sm.png"
+  magick -size 1024x1024 xc:'#000' -colorspace sRGB "$FW/sm.png" -alpha off \
     -compose CopyOpacity -composite -colorspace sRGB -type TrueColorAlpha "$FW/shadow.png"
-  magick "$STATIC/logo-mark-dark.png" -fuzz 22% -fill '#5965D6' -opaque '#7880BE' "$FW/mk.png"
-  magick -size 1024x1024 canvas:none -sparse-color barycentric '0,0 #FFFDF7 1023,1023 #F2E9D6' "$FW/g.png"
-  magick "$FW/g.png" "$FW/mask.png" -alpha off -compose CopyOpacity -composite "$FW/t.png"
-  magick "$FW/shadow.png" -colorspace sRGB -type TrueColorAlpha "$FW/t.png" -compose over -composite "$FW/ts.png"
-  magick "$FW/ts.png" \( "$FW/mk.png" -resize 82.6% \) -gravity NorthWest -geometry +242+297 \
-    -compose over -composite -type TrueColorAlpha "$WEB/src/assets/icon-light.png"
+
+  flat_tile() {  # $1=gradient stops  $2=mark colour  $3=output
+    python3 "$EMBLEM" --fg "$2" --transparent > "$FW/e.svg"
+    rsvg-convert -w 1024 -h 1024 "$FW/e.svg" -o "$FW/e.png"
+    magick "$FW/e.png" -trim +repage -resize 500x "$FW/mk.png"
+    magick -size 1024x1024 canvas:none -sparse-color barycentric "$1" "$FW/g.png"
+    magick "$FW/g.png" -colorspace sRGB "$FW/mask.png" -alpha off \
+      -compose CopyOpacity -composite -colorspace sRGB -type TrueColorAlpha "$FW/t.png"
+    magick "$FW/shadow.png" -colorspace sRGB -type TrueColorAlpha \
+      "$FW/t.png" -compose over -composite "$FW/ts.png"
+    # tile centre, not canvas centre: the silhouette sits 16px low
+    magick "$FW/ts.png" "$FW/mk.png" -gravity center -geometry +0-16 \
+      -compose over -composite -type TrueColorAlpha "$3"
+  }
+
+  flat_tile '0,0 #2A2F4D 1023,1023 #1E2133' '#E1E3F0' "$NAVY"
+  flat_tile '0,0 #FFFDF7 1023,1023 #F2E9D6' '#5965D6' "$WEB/src/assets/icon-light.png"
   cp "$NAVY" "$WEB/src/assets/icon-dark.png"
   magick "$NAVY" -resize 256x256 "$WEB/public/favicon.png"
+  magick "$NAVY" -resize 256x256 "$STATIC/favicon.png"
   rm -rf "$FW"
-  echo "wrote website icon-light.png (cream) + icon-dark.png (navy) + favicon.png (navy)"
+  echo "wrote $NAVY + website icon-light/icon-dark/favicon + static/favicon"
 else
-  echo "WARN: magick or navy master missing; skipped website assets" >&2
+  echo "WARN: magick or rsvg-convert missing; skipped flat tiles" >&2
 fi
 
 # --- optional Liquid Glass appearance preview sheet for iteration ---
