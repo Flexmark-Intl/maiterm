@@ -1475,7 +1475,18 @@ Two scope decisions:
   five-minute cap holding the ritual slot — strip frozen at 1/N, every other
   rule on the tab blocked, the composer's toast having said it started. Nothing
   clears that but the human answering, so `tab_permission` says so up front.
-  A rule whose `agent_state` guard admits `permission` is let through.
+  A rule whose `agent_state` guard admits `permission` is let through. The
+  same check (`permissionBlocks`) guards "Send it" on a proposal card, which
+  had the identical stall — there the card stays, since the proposal is still
+  true. The engine's own tick never had it: `guardsPassSync` tests
+  `agent_state` before firing. It is the human-initiated paths, which skip
+  the guards on purpose, that need the one guard a human can't override.
+- **Three call sites asked "has a sequence" and each counted steps.**
+  `hasRunnableSequence` (a step with text) is now the one answer, used by
+  `rulesForTab`, `checkpointRuleFor` and the tick. The second was the worst:
+  a blank `context_pct` rule prepended by the editor at a lower threshold won
+  `checkpointRuleFor`'s strict tie-break, so the deck's Checkpoint button
+  reported `started` and ran nothing, instead of the real checkpoint rule.
 
 **The same menu at the bottom of every agent tab.** When Overlord is enabled
 and `rulesForTab` is non-empty, `ComposerDock` shows a bolt button — next to

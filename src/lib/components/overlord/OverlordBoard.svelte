@@ -356,6 +356,14 @@
     }
   }
 
+  /** A proposal refused for a permission prompt stays on the deck; say why the click did
+   *  nothing, or the button reads as broken. */
+  function approve(id: string) {
+    if (overlordStore.approveProposal(id) === 'permission') {
+      recoverNote = fireRefusal('tab_permission', 'that');
+    }
+  }
+
   // ── Fleet: manual trigger ──────────────────────────────────────────────────
   /** Which card's Trigger menu is open, and where. */
   let triggerMenu = $state<{ x: number; y: number; tabId: string; anchor: HTMLElement } | null>(null);
@@ -745,7 +753,7 @@
                 <p class="signal-note">+ {s.p.stepCount - 1} more step{s.p.stepCount > 2 ? 's' : ''} once this one lands.</p>
               {/if}
               <div class="signal-actions">
-                <button class="ov-btn ov-btn-primary" onclick={() => overlordStore.approveProposal(s.p.id)}>Send it</button>
+                <button class="ov-btn ov-btn-primary" onclick={() => approve(s.p.id)}>Send it</button>
                 <button class="ov-btn" onclick={() => overlordStore.dismissProposal(s.p.id)}>Not now</button>
               </div>
 

@@ -617,6 +617,31 @@ function createOverlordStore() {
 
   // ── Rule scoping + supersedes (§6) ──────────────────────────────────────────
 
+  /**
+   * A rule has a sequence when a step has TEXT, not when a step exists. The rules editor
+   * persists "New rule" with one blank step the moment it is added, so every ruleset passes
+   * through that state — and a blank step still submits (`bracketedPasteSubmit('')` wraps
+   * nothing and presses Enter). Every place that asks "can this rule run" asks this; the
+   * three that counted steps each found the blank rule a different way (a global "New rule ·
+   * off" in every Trigger menu; the deck's Checkpoint button silently running it instead
+   * of the real checkpoint rule).
+   */
+  function hasRunnableSequence(rule: OverlordRule): boolean {
+    return rule.sequence.some((s) => s.text.trim() !== '');
+  }
+
+  /**
+   * Whether a permission prompt on the tab stops this rule. The tab is `ready` there —
+   * registered, process alive — but a rule wanting `idle` would sit in `waitInjectable` for
+   * its whole cap (5 min) holding the ritual slot: strip frozen at 1/N, every other rule on
+   * the tab blocked, having told the human it started. Nothing resolves that but the human
+   * answering the prompt, so the human-initiated paths refuse up front. A rule whose guard
+   * admits `permission` was written to fire there and goes through to the handoff.
+   */
+  function permissionBlocks(rule: OverlordRule, tabId: string): boolean {
+    return mappedState(tabId) === 'permission' && !(rule.guards.agent_state ?? ['idle']).includes('permission');
+  }
+
   /** Enabled rules that apply to a tab's workspace, with supersedes resolved. */
   function rulesForWorkspace(wsId: string): OverlordRule[] {
     const inScope = preferencesStore.overlordRules.filter(
@@ -1319,16 +1344,7 @@ function createOverlordStore() {
     const repl = await replState(tabId);
     const want: ReplState = rule.when.event === 'agent_unready' ? 'unbound' : 'ready';
     if (repl !== want) return { started: false, reason: `tab_${repl}` };
-    // A tab stopped at a permission prompt IS `ready` — registered, process alive — but a
-    // rule that wants `idle` would sit in `waitInjectable` for its whole cap (5 min) holding
-    // the ritual slot, with the card's strip frozen at 1/N and every other rule on that tab
-    // blocked, having told the human it started. Nothing resolves that but the human
-    // answering the prompt, so say so now instead. A rule whose guard admits `permission`
-    // is the exception: it was written to fire there.
-    const st = mappedState(tabId);
-    if (st === 'permission' && !(rule.guards.agent_state ?? ['idle']).includes('permission')) {
-      return { started: false, reason: 'tab_permission' };
-    }
+    if (permissionBlocks(rule, tabId)) return { started: false, reason: 'tab_permission' };
     void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'human');
     logInfo(`overlord: manual fire of "${rule.name}" on ${tabId.slice(0, 8)}`);
     return { started: true };
@@ -2081,7 +2097,7 @@ function createOverlordStore() {
     const ws = workspaceForTab(tabId);
     let best: OverlordRule | null = null;
     for (const r of preferencesStore.overlordRules) {
-      if (!r.enabled || r.when.event !== 'context_pct' || !r.sequence.length) continue;
+      if (!r.enabled || r.when.event !== 'context_pct' || !hasRunnableSequence(r)) continue;
       if (r.workspaces.length && (!ws || !r.workspaces.includes(ws.id))) continue;
       const at = r.when.at_or_above;
       if (!best || at < (best.when as { at_or_above: number }).at_or_above) best = r;
@@ -2423,7 +2439,7 @@ function createOverlordStore() {
         }
         // 2) Rule evaluation
         for (const rule of rulesForWorkspace(ws.id)) {
-          if (!rule.sequence.length) continue;
+          if (!hasRunnableSequence(rule)) continue;
           if (!conditionFires(rule, tab, now, edges.turnEnded, edges.committed)) continue;
           if (!guardsPassSync(rule, tab.id, now)) continue;
           if (preferencesStore.overlordProposeMode) {
@@ -2515,23 +2531,27 @@ function createOverlordStore() {
     },
 
     // ── Propose-mode (§3) ────────────────────────────────────────────────────
-    /** Returns false when the proposal was no longer true and so did NOT run — the card is
-     *  removed either way, since a proposal that has stopped applying is not pending. */
-    approveProposal(id: string): boolean {
+    /** `stale`: the proposal was no longer true and did NOT run — the card is removed, since
+     *  a proposal that has stopped applying is not pending. `permission`: the tab is stopped
+     *  at a prompt, so the card STAYS — the proposal is still true, it just can't be typed
+     *  until the human answers, and running it would hold the tab's ritual slot for the
+     *  whole `waitInjectable` cap doing nothing (see `permissionBlocks`). */
+    approveProposal(id: string): 'started' | 'stale' | 'permission' {
       const p = proposals.find((x) => x.id === id);
-      if (!p) return false;
-      proposals = proposals.filter((x) => x.id !== id);
+      if (!p) return 'stale';
       const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
-      if (!rule) return false;
+      if (rule && permissionBlocks(rule, p.tabId)) return 'permission';
+      proposals = proposals.filter((x) => x.id !== id);
+      if (!rule) return 'stale';
       // Re-check at fire time, not just on the tick that rendered the card. The human can
       // click a card the moment it stops being true, and the whole point is that a
       // proposal is a snapshot — approving one must never act on a stale one.
       if (!proposalStillHolds(p, Date.now())) {
         logInfo(`overlord: refused stale proposal "${p.ruleName}" for ${p.tabName} at approval`);
-        return false;
+        return 'stale';
       }
       void runSequence($state.snapshot(rule) as OverlordRule, p.tabId, 'rule');
-      return true;
+      return 'started';
     },
     dismissProposal(id: string) {
       proposals = proposals.filter((x) => x.id !== id);
@@ -3105,7 +3125,7 @@ function createOverlordStore() {
       // deck's severity ramp, and a scoped rule still narrows what actually fires.
       let lowest: number | null = null;
       for (const r of preferencesStore.overlordRules) {
-        if (!r.enabled || r.when.event !== 'context_pct' || !r.sequence.length) continue;
+        if (!r.enabled || r.when.event !== 'context_pct' || !hasRunnableSequence(r)) continue;
         const at = (r.when as { at_or_above: number }).at_or_above;
         if (lowest === null || at < lowest) lowest = at;
       }
@@ -3160,18 +3180,15 @@ function createOverlordStore() {
       const found = agentTabs().find((p) => p.tab.id === tabId);
       if (!found) return [];
       const wsId = found.ws.id;
-      // "Has a sequence" means a step with TEXT. The rules editor saves "New rule" with one
-      // blank step the moment it is added, and offering that here put a global "New rule ·
-      // off" in every menu in the window whose only effect was a bare Enter at the agent.
       return preferencesStore.overlordRules
-        .filter((r) => r.sequence.some((s) => s.text.trim()) && (r.workspaces.length === 0 || r.workspaces.includes(wsId)))
+        .filter((r) => hasRunnableSequence(r) && (r.workspaces.length === 0 || r.workspaces.includes(wsId)))
         .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
     },
 
     /** Run any rule's sequence on a tab now, whatever its `when` clause says. See `fireRuleNow`. */
     async fireRule(tabId: string, ruleId: string): Promise<{ started: boolean; reason?: string }> {
       const rule = preferencesStore.overlordRules.find((r) => r.id === ruleId);
-      if (!rule || !rule.sequence.length) return { started: false, reason: 'no_rule' };
+      if (!rule || !hasRunnableSequence(rule)) return { started: false, reason: 'no_rule' };
       return fireRuleNow(rule, tabId);
     },
 
