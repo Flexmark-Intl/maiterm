@@ -241,6 +241,8 @@ export function fireRefusal(reason: string | undefined, what = 'that'): string {
       return "That tab's agent is running but hasn't run /maiterm init, so nothing can be sent to it yet — re-bind it first.";
     case 'tab_ready':
       return "That tab's agent is already bound and running. This rule re-binds one that isn't.";
+    case 'tab_permission':
+      return 'That tab is stopped at a permission prompt. Answer it first — this rule waits for the agent to be idle.';
     case 'tab_stopped':
       return `Nothing is running in that tab, so there's nothing to run ${what} on.`;
     case 'tab_unknown':

@@ -26,7 +26,7 @@ import { getVariables, interpolateVariables, setVariable } from '$lib/stores/tri
 import { getResumeCommand } from '$lib/agents/resume';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { findImportedDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
-import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
+import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
 /**
  * Overlord-the-engine (docs/overlord.md §2) — the deterministic, headless, per-window
@@ -1319,6 +1319,16 @@ function createOverlordStore() {
     const repl = await replState(tabId);
     const want: ReplState = rule.when.event === 'agent_unready' ? 'unbound' : 'ready';
     if (repl !== want) return { started: false, reason: `tab_${repl}` };
+    // A tab stopped at a permission prompt IS `ready` — registered, process alive — but a
+    // rule that wants `idle` would sit in `waitInjectable` for its whole cap (5 min) holding
+    // the ritual slot, with the card's strip frozen at 1/N and every other rule on that tab
+    // blocked, having told the human it started. Nothing resolves that but the human
+    // answering the prompt, so say so now instead. A rule whose guard admits `permission`
+    // is the exception: it was written to fire there.
+    const st = mappedState(tabId);
+    if (st === 'permission' && !(rule.guards.agent_state ?? ['idle']).includes('permission')) {
+      return { started: false, reason: 'tab_permission' };
+    }
     void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'human');
     logInfo(`overlord: manual fire of "${rule.name}" on ${tabId.slice(0, 8)}`);
     return { started: true };
@@ -1348,6 +1358,14 @@ function createOverlordStore() {
     try {
       for (let i = 0; i < rule.sequence.length; i++) {
         const step = rule.sequence[i];
+        // A step with no text would still submit — `bracketedPasteSubmit` wraps the empty
+        // string and presses Enter, sending whatever the human had half-typed at the agent.
+        // The rules editor persists "New rule" with one blank step before anything is typed
+        // into it, so this is a state every ruleset passes through, not a corrupt one.
+        if (!step.text.trim()) {
+          logWarn(`overlord: rule "${rule.name}" step ${i + 1} has no text; skipped`);
+          continue;
+        }
         // Runtime capability check (§6): a slash command a runtime doesn't know lands
         // as garbage in a live REPL — skip and ledger, never inject.
         if (step.kind === 'slash' && step.runtimes && !step.runtimes.includes(runtime)) {
@@ -3142,8 +3160,11 @@ function createOverlordStore() {
       const found = agentTabs().find((p) => p.tab.id === tabId);
       if (!found) return [];
       const wsId = found.ws.id;
+      // "Has a sequence" means a step with TEXT. The rules editor saves "New rule" with one
+      // blank step the moment it is added, and offering that here put a global "New rule ·
+      // off" in every menu in the window whose only effect was a bare Enter at the agent.
       return preferencesStore.overlordRules
-        .filter((r) => r.sequence.length > 0 && (r.workspaces.length === 0 || r.workspaces.includes(wsId)))
+        .filter((r) => r.sequence.some((s) => s.text.trim()) && (r.workspaces.length === 0 || r.workspaces.includes(wsId)))
         .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
     },
 

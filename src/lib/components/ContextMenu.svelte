@@ -14,9 +14,14 @@
     x: number;
     y: number;
     onclose: () => void;
+    /** The button that opened the menu, when there is one. A mousedown on it is left to
+     *  that button's own click handler (which toggles), instead of closing here first and
+     *  then having the click reopen it — the sequence that made a dropdown un-closable
+     *  from its own button. */
+    anchor?: HTMLElement | null;
   }
 
-  let { items, x, y, onclose }: Props = $props();
+  let { items, x, y, onclose, anchor = null }: Props = $props();
 
   let menuEl = $state<HTMLDivElement | null>(null);
 
@@ -63,7 +68,9 @@
   // inheritance issues when rendered inside pointer-events:none containers)
   onMount(() => {
     function onMousedown(e: MouseEvent) {
-      if (menuEl && !menuEl.contains(e.target as Node)) {
+      const t = e.target as Node;
+      if (anchor?.contains(t)) return;
+      if (menuEl && !menuEl.contains(t)) {
         onclose();
       }
     }

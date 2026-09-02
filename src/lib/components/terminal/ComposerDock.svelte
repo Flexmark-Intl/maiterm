@@ -53,13 +53,16 @@
   // Overlord is on and there is something to run; `rulesForTab` is empty for a tab that
   // has never hosted an agent, so a plain shell never gets a button that types into bash.
   const overlordRules = $derived(preferencesStore.overlordEnabled ? overlordStore.rulesForTab(tabId) : []);
-  let ruleMenu = $state<{ x: number; y: number } | null>(null);
+  let ruleMenu = $state<{ x: number; y: number; anchor: HTMLElement } | null>(null);
 
+  /** Toggles; the menu ignores a mousedown on its anchor so a second press lands here. */
   function openRuleMenu(e: MouseEvent) {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    if (ruleMenu) { ruleMenu = null; return; }
+    const anchor = e.currentTarget as HTMLElement;
+    const r = anchor.getBoundingClientRect();
     // Anchored to the button's top edge: the menu opens upward when it won't fit below,
     // which at the bottom of a tab is always.
-    ruleMenu = { x: r.left, y: r.top - 4 };
+    ruleMenu = { x: r.left, y: r.top - 4, anchor };
   }
 
   const ruleItems = $derived(overlordRules.map((rule) => ({
@@ -468,7 +471,7 @@
 {/snippet}
 
 {#if ruleMenu}
-  <ContextMenu items={ruleItems} x={ruleMenu.x} y={ruleMenu.y} onclose={() => (ruleMenu = null)} />
+  <ContextMenu items={ruleItems} x={ruleMenu.x} y={ruleMenu.y} anchor={ruleMenu.anchor} onclose={() => (ruleMenu = null)} />
 {/if}
 
 {#if !open}

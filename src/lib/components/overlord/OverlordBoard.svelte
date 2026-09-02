@@ -358,14 +358,18 @@
 
   // ── Fleet: manual trigger ──────────────────────────────────────────────────
   /** Which card's Trigger menu is open, and where. */
-  let triggerMenu = $state<{ x: number; y: number; tabId: string } | null>(null);
+  let triggerMenu = $state<{ x: number; y: number; tabId: string; anchor: HTMLElement } | null>(null);
   /** A refusal, shown on the card that was clicked rather than in the deck's note slot:
    *  the fleet is a grid, and a message at the top of it doesn't say which card it means. */
   let unitNotes = $state<Record<string, string>>({});
 
+  /** Toggles. The menu leaves a mousedown on its anchor alone, so this is the only
+   *  handler that runs for a second press on the same button. */
   function openTrigger(e: MouseEvent, tabId: string) {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    triggerMenu = { x: r.left, y: r.bottom + 4, tabId };
+    if (triggerMenu?.tabId === tabId) { triggerMenu = null; return; }
+    const anchor = e.currentTarget as HTMLElement;
+    const r = anchor.getBoundingClientRect();
+    triggerMenu = { x: r.left, y: r.bottom + 4, tabId, anchor };
   }
 
   function triggerItems(tabId: string) {
@@ -1055,7 +1059,7 @@
 </div>
 
 {#if triggerMenu}
-  <ContextMenu items={triggerItems(triggerMenu.tabId)} x={triggerMenu.x} y={triggerMenu.y} onclose={() => (triggerMenu = null)} />
+  <ContextMenu items={triggerItems(triggerMenu.tabId)} x={triggerMenu.x} y={triggerMenu.y} anchor={triggerMenu.anchor} onclose={() => (triggerMenu = null)} />
 {/if}
 
 <style>

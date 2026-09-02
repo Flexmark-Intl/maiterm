@@ -1444,8 +1444,12 @@ with it.
 **View and Trigger.** The card is no longer one big button. `View` (bottom
 left) navigates to the tab. `Trigger ▾` (bottom right) opens a menu of every
 rule that can be fired at that tab by hand — `overlordStore.rulesForTab`:
-every rule with a non-empty sequence whose scope covers the tab's workspace,
-enabled ones first, disabled ones tagged `off`. Picking one calls
+every rule with at least one step that has TEXT whose scope covers the tab's
+workspace, enabled ones first, disabled ones tagged `off`. (The rules editor
+persists "New rule" with one blank step the moment it is added; counting
+steps rather than text put a global "New rule · off" in every menu in the
+window, and firing it pressed a bare Enter at the agent — `runSequence` now
+skips blank steps as well.) Picking one calls
 `overlordStore.fireRule(tabId, ruleId)`, which is `checkpointTab` generalised
 (that button now delegates to it): the rule's `when` clause and rate limiters
 are skipped, because a human clicking is the override they guard, and the
@@ -1466,6 +1470,12 @@ Two scope decisions:
   unbound tab, so it fires only at one (`tab_ready` refusal otherwise: "already
   bound — this rule re-binds one that isn't"); every other rule needs a bound,
   running agent. Fired at a stopped tab either would type into bash.
+- **A permission prompt is a refusal, not a wait.** The tab IS `ready` there,
+  but a rule wanting `idle` would sit in `waitInjectable` for its whole
+  five-minute cap holding the ritual slot — strip frozen at 1/N, every other
+  rule on the tab blocked, the composer's toast having said it started. Nothing
+  clears that but the human answering, so `tab_permission` says so up front.
+  A rule whose `agent_state` guard admits `permission` is let through.
 
 **The same menu at the bottom of every agent tab.** When Overlord is enabled
 and `rulesForTab` is non-empty, `ComposerDock` shows a bolt button — next to
