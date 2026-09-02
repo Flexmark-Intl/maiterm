@@ -37,6 +37,8 @@ Press `Cmd+Shift+E` — or click the lanes icon in the tab bar — to open the t
 
 The panel answers one question — *what am I doing here* — so it shows **this tab's work**, grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked` and `N done`, and a closing line says how many tasks are in flight on other tabs.
 
+![The task panel beside a terminal, showing one workstream's rows with review, active and blocked lanes and a count of finished work in the header](/screenshots/tasks-panel.webp)
+
 Per row you can:
 
 - **Click the status chip** to advance a task a lane, or shift-click to move it back.

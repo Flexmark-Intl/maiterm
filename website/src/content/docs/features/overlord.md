@@ -65,6 +65,8 @@ Every rule is scoped **Everywhere** in the window by default, or to specific wor
 
 With Overlord enabled, a **♔ Overlord** row appears above the workspace list in the sidebar, badged with how many things are waiting on you. It opens the deck, which has four views and a strip of readouts across the top: how many tabs are watched, the peak context in the window, how many sequences are in flight, how many things need you, and how many directives were sent in the last 24 hours.
 
+![The Overlord deck showing the Board view — workstreams from four workspaces indexed down the left, and task cards laid out across the backlog, to-do, active and blocked lanes](/screenshots/overlord-board.webp)
+
 - **Triage** — one severity-ordered queue of everything wanting a person: proposals, escalations, permission prompts, context pressure, stale work, tabs that have stopped answering. Not six stacked lists. Every card carries its own remedy, and a **Run all** clears the two things that need no judgement — re-bind every unbound agent, then approve every pending proposal — paced so a deck of forty signals doesn't become forty simultaneous API streams. It reports what came back, not what it typed: a `/maiterm init` typed at a tab whose agent is gone is delivered perfectly and achieves nothing, so the run stays open until each target has either re-bound or run out of time, and says how many never answered.
 - **Fleet** — a card per agent tab: context ring, live state, how long since its last turn, what it's working on, and any sequence in flight with its step progress.
 - **Board** — the [task board](/features/tasks/) for the whole window, indexed by workstream rather than by workspace, with cards you drag between lanes.
