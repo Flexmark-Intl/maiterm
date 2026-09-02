@@ -44,6 +44,59 @@ fn get_conflict_path(timestamp_ms: u64) -> Option<PathBuf> {
     })
 }
 
+/// How many conflict snapshots to keep. A conflict is retried on every save, so
+/// without a cap a guard that stays tripped writes one full state file per second
+/// until the disk fills — 373 files (~1GB) in the incident that prompted this.
+const MAX_CONFLICT_FILES: usize = 5;
+
+fn prune_conflict_files() {
+    let Some(dir) = dirs::data_dir().map(|p| p.join(app_data_slug())) else { return };
+    let Ok(entries) = fs::read_dir(&dir) else { return };
+    let mut conflicts: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("aiterm-state.conflict-") && n.ends_with(".json"))
+        })
+        .collect();
+    if conflicts.len() <= MAX_CONFLICT_FILES {
+        return;
+    }
+    // The timestamp is in the name, but sorting by mtime avoids trusting it.
+    conflicts.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+    let doomed = conflicts.len() - MAX_CONFLICT_FILES;
+    for path in conflicts.into_iter().take(doomed) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Is another copy of this executable running right now?
+///
+/// The conflict guard exists to protect against a second maiTerm writing the same
+/// state file. Asking the process table directly is what makes the guard
+/// *recoverable*: a baseline lost to an instance that has since exited leaves
+/// nothing to protect, and must not block this process forever.
+///
+/// Errs toward "yes" — if we cannot enumerate processes or identify ourselves, keep
+/// guarding rather than risk clobbering a live peer.
+fn another_instance_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    let Ok(me_exe) = std::env::current_exe() else { return true };
+    let me_pid = std::process::id();
+
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+    );
+    sys.processes().values().any(|p| {
+        p.pid().as_u32() != me_pid && p.exe().is_some_and(|exe| exe == me_exe)
+    })
+}
+
 pub fn get_save_stats() -> (u64, u64, u64, u64) {
     (
         SAVE_COUNT.load(Ordering::Relaxed),
@@ -512,6 +565,28 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
     let known_mtime = LAST_KNOWN_DISK_MTIME.load(Ordering::Relaxed);
     if known_mtime > 0 {
         if let Some(disk_mtime) = file_mtime_ms(&path) {
+            // A stale baseline must not outlive the process that invalidated it. The
+            // guard only re-records after a *successful* save, so aborting while the
+            // other writer is already gone would latch this process out of saving for
+            // the rest of its life — every tab, task and pane change silently failing,
+            // with a conflict file written every second. Nothing can be clobbered when
+            // no peer is alive, so take ownership instead; the pre-rename backup below
+            // still preserves whatever is on disk.
+            if disk_mtime > known_mtime && !another_instance_running() {
+                log::warn!(
+                    "State file changed underneath us (disk mtime {} > known {}), but no other maiTerm is running — the writer has exited. Re-baselining and saving.",
+                    disk_mtime,
+                    known_mtime
+                );
+                record_disk_mtime(&path);
+            }
+        }
+    }
+
+    let known_mtime = LAST_KNOWN_DISK_MTIME.load(Ordering::Relaxed);
+    if known_mtime > 0 {
+        if let Some(disk_mtime) = file_mtime_ms(&path) {
+            // Still newer with a live peer: a genuine two-instance conflict.
             if disk_mtime > known_mtime {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -536,6 +611,7 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
                 let json = serde_json::to_string_pretty(&filtered).map_err(|e| e.to_string())?;
                 fs::write(&conflict_path, &json)
                     .map_err(|e| format!("Failed to write conflict file: {}", e))?;
+                prune_conflict_files();
                 log::error!(
                     "State save aborted: disk mtime {} > known {}. Another maiTerm process likely wrote since this one loaded. In-memory state preserved at {:?}.",
                     disk_mtime,

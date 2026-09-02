@@ -131,12 +131,27 @@
       logError(formatErrorPayload(`onerror${where}`, e.error ?? e.message, e.error?.stack))
         .catch(() => {});
     };
+    // A save that can't reach disk makes every button look broken — the click fires,
+    // the command rejects, and nothing visibly happens. Say so once, loudly, instead of
+    // leaving the user to conclude the app has locked up.
+    let warnedStateSaveFailed = false;
     const onUnhandledRejection = (e: PromiseRejectionEvent) => {
       const reason = e.reason as unknown;
       const stack = (reason && typeof reason === 'object' && 'stack' in reason)
         ? String((reason as { stack?: unknown }).stack ?? '')
         : undefined;
       logError(formatErrorPayload('unhandledrejection', reason, stack)).catch(() => {});
+
+      if (!warnedStateSaveFailed && String(reason).includes('State conflict detected')) {
+        warnedStateSaveFailed = true;
+        import('$lib/stores/notificationDispatch').then(({ dispatch }) => {
+          dispatch(
+            'Changes are not being saved',
+            'Another maiTerm wrote the state file, so this window has stopped saving. Quit any other maiTerm window, then restart this one.',
+            'error'
+          );
+        }).catch(() => {});
+      }
     };
     window.addEventListener('error', onWindowError);
     window.addEventListener('unhandledrejection', onUnhandledRejection);
