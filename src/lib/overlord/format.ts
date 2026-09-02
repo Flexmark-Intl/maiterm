@@ -227,6 +227,36 @@ export function fmtAge(at: number | string | undefined | null): string {
   return 'now';
 }
 
+// ── Manual fire ───────────────────────────────────────────────────────────────
+
+/**
+ * Why `fireRule` / `checkpointTab` refused, in words. One vocabulary for the deck's
+ * Checkpoint button, the fleet card's Trigger menu and the composer bar's, so a refusal
+ * reads the same wherever the human met it. A button that silently does nothing is the
+ * exact failure the Overlord surfaces were built to remove.
+ */
+export function fireRefusal(reason: string | undefined, what = 'that'): string {
+  switch (reason) {
+    case 'tab_unbound':
+      return "That tab's agent is running but hasn't run /maiterm init, so nothing can be sent to it yet — re-bind it first.";
+    case 'tab_ready':
+      return "That tab's agent is already bound and running. This rule re-binds one that isn't.";
+    case 'tab_stopped':
+      return `Nothing is running in that tab, so there's nothing to run ${what} on.`;
+    case 'tab_unknown':
+    case 'tab_no_terminal':
+      return "That tab isn't loaded in this window, so it can't be checked or driven. Open its workspace and try again.";
+    case 'outstanding':
+      return 'That tab is still working on an earlier directive.';
+    case 'already_running':
+      return 'A ritual is already running on that tab.';
+    case 'no_rule':
+      return 'No rule with a sequence to run.';
+    default:
+      return `Couldn't start ${what} (${reason ?? 'unknown'}).`;
+  }
+}
+
 /** Cooldown in human units for the rules editor. */
 export function fmtSeconds(s: number): string {
   if (s <= 0) return 'none';

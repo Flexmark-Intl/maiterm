@@ -1296,6 +1296,34 @@ function createOverlordStore() {
     return workspaceForTab(tabId)?.overlord === true;
   }
 
+  /**
+   * Run a rule's sequence on a tab because a human asked — the Checkpoint button, the
+   * fleet card's Trigger menu, the composer bar's.
+   *
+   * Bypasses the rate limiters and the `when` clause — `cooldown` and `max_per_hour` exist
+   * to stop the ENGINE nagging, and a human clicking is the override they are guarding
+   * against being unable to make. The mechanical guards are NOT bypassed: `runSequence`
+   * still re-checks the live REPL at every step and `waitInjectable` still holds for the
+   * agent-state and quiet window, so clicking while the agent is mid-turn queues the
+   * sequence rather than typing over its output.
+   *
+   * The readiness test depends on the rule. An `agent_unready` rule is FOR an unbound tab —
+   * its sequence re-binds one — so fired at a bound agent it would type `/maiterm init` into
+   * a session that already has one, and fired at a stopped tab it would type into bash.
+   * Every other rule needs the agent bound and running. Same distinction the deck and
+   * driveTab make: an unbound tab is not a dead one.
+   */
+  async function fireRuleNow(rule: OverlordRule, tabId: string): Promise<{ started: boolean; reason?: string }> {
+    if (rituals.has(tabId)) return { started: false, reason: 'already_running' };
+    if (outstanding.has(tabId)) return { started: false, reason: 'outstanding' };
+    const repl = await replState(tabId);
+    const want: ReplState = rule.when.event === 'agent_unready' ? 'unbound' : 'ready';
+    if (repl !== want) return { started: false, reason: `tab_${repl}` };
+    void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'human');
+    logInfo(`overlord: manual fire of "${rule.name}" on ${tabId.slice(0, 8)}`);
+    return { started: true };
+  }
+
   /** Run a rule's sequence against a tab. All ledger writes for the run happen here. */
   async function runSequence(rule: OverlordRule, tabId: string, origin: OverlordLedgerEntry['origin']) {
     if (rituals.has(tabId)) return;
@@ -3089,28 +3117,41 @@ function createOverlordStore() {
       return { kind: 'ready' };
     },
 
-    /**
-     * Run the checkpoint on this tab now.
-     *
-     * Bypasses the rate limiters — `cooldown` and `max_per_hour` exist to stop the ENGINE
-     * nagging, and a human clicking the button is the override they are guarding against
-     * being unable to make. The mechanical guards are NOT bypassed: `runSequence` still
-     * re-checks the live REPL at every step and `waitInjectable` still holds for the
-     * agent-state and quiet window, so clicking while the agent is mid-turn queues the
-     * checkpoint rather than typing over its output.
-     */
+    /** Run the checkpoint on this tab now — `fireRule` with the tab's checkpoint rule. */
     async checkpointTab(tabId: string): Promise<{ started: boolean; reason?: string }> {
       const rule = checkpointRuleFor(tabId);
       if (!rule) return { started: false, reason: 'no_rule' };
-      if (rituals.has(tabId)) return { started: false, reason: 'already_running' };
-      if (outstanding.has(tabId)) return { started: false, reason: 'outstanding' };
-      // Same distinction the deck and driveTab make: an unbound tab is not a dead one, and
-      // "no_live_repl" on a running agent reads as "that terminal is gone".
-      const repl = await replState(tabId);
-      if (repl !== 'ready') return { started: false, reason: `tab_${repl}` };
-      void runSequence($state.snapshot(rule) as OverlordRule, tabId, 'human');
-      logInfo(`overlord: manual checkpoint on ${tabId.slice(0, 8)} via "${rule.name}"`);
-      return { started: true };
+      return fireRuleNow(rule, tabId);
+    },
+
+    /**
+     * Rules a human may fire BY HAND at this tab — the Trigger menu on a fleet card and on
+     * the composer bar.
+     *
+     * Wider than `rulesForWorkspace`: a disabled rule is still a defined routine ("don't
+     * run this on its own, but let me run it"), and a superseded one is still a sequence
+     * somebody wrote. Narrower in one way: scope holds. A rule pinned to a workspace was
+     * pinned because its steps belong there, and typing them into another workspace's tab
+     * is the one thing the scope field exists to prevent. What a manual fire skips is the
+     * `when` clause — that is the whole point of the button.
+     *
+     * Empty for a tab that has never hosted an agent: nothing here can be typed into bash.
+     * The supervisor's own tab is NOT excluded — the ruleset is its harness too (§9.2).
+     */
+    rulesForTab(tabId: string): OverlordRule[] {
+      const found = agentTabs().find((p) => p.tab.id === tabId);
+      if (!found) return [];
+      const wsId = found.ws.id;
+      return preferencesStore.overlordRules
+        .filter((r) => r.sequence.length > 0 && (r.workspaces.length === 0 || r.workspaces.includes(wsId)))
+        .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
+    },
+
+    /** Run any rule's sequence on a tab now, whatever its `when` clause says. See `fireRuleNow`. */
+    async fireRule(tabId: string, ruleId: string): Promise<{ started: boolean; reason?: string }> {
+      const rule = preferencesStore.overlordRules.find((r) => r.id === ruleId);
+      if (!rule || !rule.sequence.length) return { started: false, reason: 'no_rule' };
+      return fireRuleNow(rule, tabId);
     },
 
     // ── Spent sessions: archive or close out ─────────────────────────────────

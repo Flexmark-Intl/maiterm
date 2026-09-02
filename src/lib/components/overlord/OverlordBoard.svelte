@@ -7,8 +7,9 @@
   import type { Workspace, Tab } from '$lib/tauri/types';
   import { isInFlight, type TaskRow } from '$lib/tasks/model';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { escalationLabel, fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
+  import { escalationLabel, fireRefusal, fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import ContextMenu from '$lib/components/ContextMenu.svelte';
   import OverlordBoardView from './OverlordBoardView.svelte';
   import '$lib/overlord/deck.css';
 
@@ -119,10 +120,32 @@
     };
   }
 
+  /** `context` — most-in-need first: busy rituals, then permission, then pressure, then
+   *  staleness, highest context within each. `activity` — most recent real turn first. */
+  type FleetSort = 'context' | 'activity';
+  let fleetSort = $state<FleetSort>('context');
+
+  /** Agent tabs whose whole workspace is suspended. Parked, not dormant: every PTY in it is
+   *  killed by design, so a card for one would say "not loaded" about a tab nobody expects
+   *  to be running. They are counted so the fleet says where they went, not shown. */
+  const parkedCount = $derived.by(() => {
+    let n = 0;
+    for (const ws of boardWorkspaces) {
+      if (!ws.suspended) continue;
+      for (const pane of ws.panes) {
+        for (const tab of pane.tabs) {
+          if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.runtime) n++;
+        }
+      }
+    }
+    return n;
+  });
+
   const fleet = $derived.by<FleetUnit[]>(() => {
     void now;
     const units: FleetUnit[] = [];
     for (const ws of boardWorkspaces) {
+      if (ws.suspended) continue;
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
           if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
@@ -130,7 +153,9 @@
         }
       }
     }
-    // Most-in-need first: busy rituals, then permission, then pressure, then staleness.
+    if (fleetSort === 'activity') {
+      return units.sort((a, b) => (b.lastTurn ?? 0) - (a.lastTurn ?? 0) || (b.pct ?? 0) - (a.pct ?? 0));
+    }
     const rank = (u: FleetUnit) =>
       (u.ritual ? 0 : u.state === 'permission' ? 1 : (u.pct ?? 0) >= PRESSURE_PCT ? 2 : u.state === 'dormant' ? 4 : 3);
     return units.sort((a, b) => rank(a) - rank(b) || (b.pct ?? 0) - (a.pct ?? 0));
@@ -325,22 +350,47 @@
     checkpointing = tabId;
     try {
       const r = await overlordStore.checkpointTab(tabId);
-      recoverNote = r.started
-        ? null
-        : r.reason === 'tab_unbound'
-          ? "That tab's agent is running but hasn't run /maiterm init, so nothing can be sent to it yet — re-bind it first."
-          : r.reason === 'tab_stopped'
-            ? "Nothing is running in that tab, so there's nothing to checkpoint."
-            : r.reason === 'tab_unknown' || r.reason === 'tab_no_terminal'
-              ? "That tab isn't loaded in this window, so it can't be checked or driven. Open its workspace and try again."
-          : r.reason === 'outstanding'
-            ? 'That tab is still working on an earlier directive.'
-            : r.reason === 'already_running'
-              ? 'A ritual is already running on that tab.'
-              : `Couldn't start a checkpoint (${r.reason}).`;
+      recoverNote = r.started ? null : fireRefusal(r.reason, 'a checkpoint');
     } finally {
       checkpointing = null;
     }
+  }
+
+  // ── Fleet: manual trigger ──────────────────────────────────────────────────
+  /** Which card's Trigger menu is open, and where. */
+  let triggerMenu = $state<{ x: number; y: number; tabId: string } | null>(null);
+  /** A refusal, shown on the card that was clicked rather than in the deck's note slot:
+   *  the fleet is a grid, and a message at the top of it doesn't say which card it means. */
+  let unitNotes = $state<Record<string, string>>({});
+
+  function openTrigger(e: MouseEvent, tabId: string) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    triggerMenu = { x: r.left, y: r.bottom + 4, tabId };
+  }
+
+  function triggerItems(tabId: string) {
+    return overlordStore.rulesForTab(tabId).map((rule) => ({
+      label: rule.name,
+      // A disabled rule is still offered — "don't run this on its own, but let me run it" —
+      // and says so, since firing it is the one time its switch position matters.
+      shortcut: rule.enabled ? undefined : 'off',
+      action: () => void fire(tabId, rule.id),
+    }));
+  }
+
+  function clearNote(tabId: string) {
+    if (!(tabId in unitNotes)) return;
+    const next = { ...unitNotes };
+    delete next[tabId];
+    unitNotes = next;
+  }
+
+  async function fire(tabId: string, ruleId: string) {
+    clearNote(tabId);
+    const r = await overlordStore.fireRule(tabId, ruleId);
+    if (r.started) return; // the card's ritual strip is the feedback
+    unitNotes = { ...unitNotes, [tabId]: fireRefusal(r.reason, 'that rule') };
+    setTimeout(() => clearNote(tabId), 8000);
   }
 
   // ── Archive / close ────────────────────────────────────────────────────────
@@ -874,12 +924,23 @@
     <!-- ── Fleet ───────────────────────────────────────────────────────── -->
     {#if view === 'fleet'}
       {#if fleet.length === 0}
-        <div class="allclear ov-in"><div class="allclear-rule"></div><span class="ov-label">no agent tabs in this window</span><div class="allclear-rule"></div></div>
+        <div class="allclear ov-in"><div class="allclear-rule"></div><span class="ov-label">{parkedCount ? 'every agent tab is in a suspended workspace' : 'no agent tabs in this window'}</span><div class="allclear-rule"></div></div>
+      {/if}
+      {#if fleet.length > 0 || parkedCount > 0}
+        <div class="fleet-bar ov-in">
+          <span class="ov-label">sort</span>
+          <div class="fleet-sort" role="group" aria-label="Sort the fleet">
+            <button class="fleet-sort-btn" class:on={fleetSort === 'context'} onclick={() => (fleetSort = 'context')}>peak context</button>
+            <button class="fleet-sort-btn" class:on={fleetSort === 'activity'} onclick={() => (fleetSort = 'activity')}>latest activity</button>
+          </div>
+          {#if parkedCount > 0}
+            <span class="ov-label fleet-parked">{parkedCount} agent tab{parkedCount === 1 ? '' : 's'} in suspended workspaces — not shown</span>
+          {/if}
+        </div>
       {/if}
       <div class="fleet">
         {#each fleet as u, i (u.tab.id)}
-          <button class="unit ov-panel ov-in" class:unit-busy={!!u.ritual} style:--i={i}
-                  onclick={() => navigateToTab(u.tab.id)}>
+          <div class="unit ov-panel ov-in" class:unit-busy={!!u.ritual} style:--i={i}>
             <div class="unit-head">
               <span class="ov-dot" class:ov-dot-live={u.state === 'active' || u.state === 'permission'}
                     style:--tone={stateTone(u.state)}></span>
@@ -932,7 +993,25 @@
             {#if u.awaiting && !u.ritual}
               <span class="ov-chip ov-chip-tone unit-flag" style:--tone="var(--ov-warn)">awaiting reply</span>
             {/if}
-          </button>
+
+            {#if unitNotes[u.tab.id]}
+              <div class="unit-note unit-refusal">{unitNotes[u.tab.id]}</div>
+            {/if}
+
+            <div class="unit-foot">
+              <button class="ov-btn" onclick={() => navigateToTab(u.tab.id)}>View</button>
+              {#if overlordStore.rulesForTab(u.tab.id).length > 0}
+                <button class="ov-btn unit-trigger" class:on={triggerMenu?.tabId === u.tab.id}
+                        onclick={(e) => openTrigger(e, u.tab.id)} aria-haspopup="menu">
+                  Trigger <span class="unit-caret">▾</span>
+                </button>
+              {:else}
+                <Tooltip text="No Overlord rule with a sequence applies to this tab.">
+                  <button class="ov-btn unit-trigger" disabled>Trigger <span class="unit-caret">▾</span></button>
+                </Tooltip>
+              {/if}
+            </div>
+          </div>
         {/each}
       </div>
     {/if}
@@ -974,6 +1053,10 @@
     {/if}
   </div>
 </div>
+
+{#if triggerMenu}
+  <ContextMenu items={triggerItems(triggerMenu.tabId)} x={triggerMenu.x} y={triggerMenu.y} onclose={() => (triggerMenu = null)} />
+{/if}
 
 <style>
   /* ── Shell ────────────────────────────────────────────────────────────── */
@@ -1291,21 +1374,61 @@
     gap: 10px;
   }
 
+  .fleet-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .fleet-sort {
+    display: inline-flex;
+    border: 1px solid var(--ov-hair);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .fleet-sort-btn {
+    padding: 3px 10px;
+    font-size: 0.74rem;
+    color: var(--ov-ink-dim);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+  }
+  .fleet-sort-btn + .fleet-sort-btn { border-left: 1px solid var(--ov-hair); }
+  .fleet-sort-btn:hover { color: var(--ov-ink); }
+  .fleet-sort-btn.on {
+    color: var(--ov-ink);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .fleet-parked { margin-left: auto; opacity: 0.8; }
+
   .unit {
     text-align: left;
-    padding: 11px 12px 12px;
+    padding: 11px 12px 10px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    cursor: pointer;
-    transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
+    transition: border-color 0.16s ease, background 0.16s ease;
   }
   .unit:hover {
-    border-color: color-mix(in srgb, var(--ov-live) 55%, transparent);
+    border-color: color-mix(in srgb, var(--ov-live) 45%, transparent);
     background: var(--ov-panel-lift);
-    transform: translateY(-2px);
   }
   .unit-busy { border-color: color-mix(in srgb, var(--ov-live) 45%, transparent); }
+
+  .unit-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: auto;
+    padding-top: 8px;
+    border-top: 1px solid color-mix(in srgb, var(--ov-hair) 60%, transparent);
+  }
+  .unit-trigger.on { border-color: var(--accent); color: var(--ov-ink); }
+  .unit-caret { font-size: 0.7em; opacity: 0.7; margin-left: 2px; }
+  .unit-refusal { color: var(--ov-warn); }
 
   .unit-head { display: flex; align-items: center; gap: 7px; }
   .unit-name {

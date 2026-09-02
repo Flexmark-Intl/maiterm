@@ -1421,6 +1421,62 @@ under a tab id that no longer exists anywhere.
 `tabDisplayName` resolves archived tabs, so any chip still naming one reads as the
 session's name rather than a truncated id.
 
+### Fleet: parked workspaces, sort, View, Trigger (2026-09-02)
+
+**Tabs in a suspended workspace are not on the fleet.** They used to be, as
+dormant cards reading "not loaded — open its workspace to check on it" — a
+description of a tab nobody expects to be running, one per agent tab in the
+parked workspace. Parked is not dormant: every PTY in that workspace was killed
+on purpose. The fleet counts them in its bar ("3 agent tabs in suspended
+workspaces — not shown") so the human knows where they went, and the empty
+state says "every agent tab is in a suspended workspace" rather than "no agent
+tabs" when that is what happened. The deck's own `unready` signal was already
+gated on `loaded`, so nothing else changes. A tab suspended on its own inside
+an active workspace is still shown — that is routine (every tab but the active
+one is suspended on a timer) and its card carries the resume remedy.
+
+**Sort.** `peak context` (default) is the original most-in-need order — busy
+rituals, then permission, then pressure, then staleness, highest context within
+each. `latest activity` is the most recent real turn first, nothing else. The
+choice lives in the component, so it holds for the window's life and resets
+with it.
+
+**View and Trigger.** The card is no longer one big button. `View` (bottom
+left) navigates to the tab. `Trigger ▾` (bottom right) opens a menu of every
+rule that can be fired at that tab by hand — `overlordStore.rulesForTab`:
+every rule with a non-empty sequence whose scope covers the tab's workspace,
+enabled ones first, disabled ones tagged `off`. Picking one calls
+`overlordStore.fireRule(tabId, ruleId)`, which is `checkpointTab` generalised
+(that button now delegates to it): the rule's `when` clause and rate limiters
+are skipped, because a human clicking is the override they guard, and the
+mechanical guards are not — `runSequence` still re-checks the live REPL at
+every step and `waitInjectable` still waits for idle and quiet. The card's
+ritual strip is the success feedback; a refusal shows on the card itself for
+eight seconds (`fireRefusal` in `overlord/format.ts` is the one vocabulary for
+those, shared with the Checkpoint button and the composer).
+
+Two scope decisions:
+
+- **Scope holds; `when` doesn't.** A rule pinned to a workspace was pinned
+  because its steps belong there; typing them into another workspace's tab is
+  what the scope field exists to prevent. Disabled and superseded rules ARE
+  offered — "don't run this on its own, but let me run it" is a legitimate
+  configuration and the menu is the only place it can be exercised.
+- **The readiness test depends on the rule.** An `agent_unready` rule is FOR an
+  unbound tab, so it fires only at one (`tab_ready` refusal otherwise: "already
+  bound — this rule re-binds one that isn't"); every other rule needs a bound,
+  running agent. Fired at a stopped tab either would type into bash.
+
+**The same menu at the bottom of every agent tab.** When Overlord is enabled
+and `rulesForTab` is non-empty, `ComposerDock` shows a bolt button — next to
+the collapsed handle, and in the actions row when the composer is open —
+opening the same rule menu. Feedback there is a toast, since the tab is what
+the human is looking at and the deck's note slot isn't on screen.
+`rulesForTab` is empty for a tab that has never hosted an agent, so a plain
+shell never gets a button that types into bash. The supervisor's own tab is
+NOT excluded: the ruleset is its harness too (§9.2), and the engine's tick
+already runs rules on it.
+
 ### Triage: run all
 
 One button clears the deck of everything Overlord already decided on — added
