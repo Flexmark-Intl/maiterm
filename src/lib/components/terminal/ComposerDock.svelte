@@ -11,7 +11,10 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
+  import { fireRefusal } from '$lib/overlord/format';
+  import ContextMenu from '$lib/components/ContextMenu.svelte';
   import { writeTerminal, terminalBracketedPaste, readClipboardFilePaths, saveClipboardImage, getPtyInfo } from '$lib/tauri/commands';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
@@ -43,6 +46,33 @@
   let value = $state(draft ?? '');
   let textareaEl = $state<HTMLTextAreaElement | null>(null);
   let open = $derived(workspacesStore.isComposerOpen(tabId));
+
+  // ── Overlord: fire a rule by hand ──────────────────────────────────────────
+  // Every defined rule with a sequence, in scope for this tab, offered at the bottom of
+  // the tab itself so a routine can be run without going to the deck. Present only when
+  // Overlord is on and there is something to run; `rulesForTab` is empty for a tab that
+  // has never hosted an agent, so a plain shell never gets a button that types into bash.
+  const overlordRules = $derived(preferencesStore.overlordEnabled ? overlordStore.rulesForTab(tabId) : []);
+  let ruleMenu = $state<{ x: number; y: number } | null>(null);
+
+  function openRuleMenu(e: MouseEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    // Anchored to the button's top edge: the menu opens upward when it won't fit below,
+    // which at the bottom of a tab is always.
+    ruleMenu = { x: r.left, y: r.top - 4 };
+  }
+
+  const ruleItems = $derived(overlordRules.map((rule) => ({
+    label: rule.name,
+    shortcut: rule.enabled ? undefined : 'off',
+    action: () => void fireRule(rule.id, rule.name),
+  })));
+
+  async function fireRule(ruleId: string, name: string) {
+    const r = await overlordStore.fireRule(tabId, ruleId);
+    if (r.started) toastStore.addToast(name, 'Running on this tab — it types once the agent is idle.', 'success');
+    else toastStore.addToast(`Couldn't run “${name}”`, fireRefusal(r.reason, 'that rule'), 'error');
+  }
 
   // Attachments survive tab switches (keyed remounts) via this module-level map,
   // but are not persisted to disk — pasted screenshots live in temp files anyway.
@@ -411,6 +441,11 @@
         onpaste={onPaste}
       ></textarea>
       <div class="composer-actions">
+        {#if overlordRules.length > 0}
+          <IconButton tooltip="Run an Overlord rule on this tab" size={26} onclick={openRuleMenu} active={!!ruleMenu} aria-label="Run an Overlord rule" aria-haspopup="menu">
+            {@render bolt()}
+          </IconButton>
+        {/if}
         <IconButton tooltip="Collapse composer ({modLabel}+Shift+C)" size={26} onclick={toggle} aria-label="Collapse composer">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
             <path d="M4 6.5 8 10.5 12 6.5"/>
@@ -426,8 +461,25 @@
     </div>
   </div>
 </div>
+{#snippet bolt()}
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+    <path d="M9.2 1.2 3.4 9h4l-1.2 5.8L12.6 7h-4z"/>
+  </svg>
+{/snippet}
+
+{#if ruleMenu}
+  <ContextMenu items={ruleItems} x={ruleMenu.x} y={ruleMenu.y} onclose={() => (ruleMenu = null)} />
+{/if}
+
 {#if !open}
   <div class="composer-handle-pos">
+    {#if overlordRules.length > 0}
+      <Tooltip text="Run an Overlord rule on this tab">
+        <button class="composer-handle" class:on={!!ruleMenu} onclick={openRuleMenu} aria-label="Run an Overlord rule" aria-haspopup="menu">
+          {@render bolt()}
+        </button>
+      </Tooltip>
+    {/if}
     <Tooltip text="Open composer ({modLabel}+Shift+C)">
       <button class="composer-handle" onclick={toggle} aria-label="Open composer">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
@@ -559,6 +611,9 @@
     right: 14px;
     bottom: 8px;
     z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .composer-handle {
@@ -576,7 +631,8 @@
     transition: opacity 0.15s, color 0.15s, background 0.15s;
   }
 
-  .composer-handle:hover {
+  .composer-handle:hover,
+  .composer-handle.on {
     opacity: 1;
     color: var(--fg);
     background: var(--bg-light);
