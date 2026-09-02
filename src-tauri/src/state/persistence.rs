@@ -412,7 +412,7 @@ pub fn migrate_app_data(data: &mut AppData) {
                 let mut win = WindowData::new("main".to_string());
                 win.workspaces = old_workspaces;
                 win.active_workspace_id = data.active_workspace_id.take();
-                win.sidebar_width = data.sidebar_width.unwrap_or(240);
+                win.sidebar_width = data.sidebar_width.unwrap_or(215);
                 win.sidebar_collapsed = data.sidebar_collapsed.unwrap_or(false);
                 data.windows.push(win);
                 log::info!("Migration: moved old workspaces into WindowData 'main'");

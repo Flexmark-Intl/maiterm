@@ -752,10 +752,11 @@
   }
 
   /* The full wordmark, not a compact mark: the emblem is illegible at this size
-     (mesh collapses to specks below ~32px), so the sidebar carries the name. 16px
-     keeps the row clear of the version/DEV badges at the 240px default width. */
+     (mesh collapses to specks below ~32px), so the sidebar carries the name. 13px
+     is the ceiling — at 70px wide it leaves the DEV + version badges and the
+     collapse chevron room inside the 183px content box of a 215px sidebar. */
   .sidebar-logo {
-    height: 16px;
+    height: 13px;
     aspect-ratio: 1725 / 320;
     opacity: 0.7;
     pointer-events: none;
