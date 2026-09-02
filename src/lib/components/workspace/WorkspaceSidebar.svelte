@@ -754,11 +754,16 @@
   /* The full wordmark, not a compact mark: the emblem is illegible at this size
      (mesh collapses to specks below ~32px), so the sidebar carries the name. 13px
      is the ceiling — at 70px wide it leaves the DEV + version badges and the
-     collapse chevron room inside the 183px content box of a 215px sidebar. */
+     collapse chevron room inside the 183px content box of a 215px sidebar.
+
+     No opacity here, unlike the loading and empty-pane logos: the wordmark is
+     duo-tone, and a multiplier pulls both tones toward the background together,
+     so at 13px "Term" stopped reading as a different colour from "mai" at all
+     (3.95:1 against the background at 0.7, 6.67:1 at full). The other two slots
+     keep theirs — they are meant to be ghosts, not identity. */
   .sidebar-logo {
     height: 13px;
     aspect-ratio: 1725 / 320;
-    opacity: 0.7;
     pointer-events: none;
     background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
