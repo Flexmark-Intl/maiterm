@@ -1575,6 +1575,48 @@ the row. Making that mechanically impossible needs a persisted drop list that
 `findDuplicate` consults — a schema change. What shipped closes the "nobody ever
 told it" hole, which was the actual bug.
 
+**The notice must not assume the agent ever had the task** (2026-08-31, `69e38a6`).
+It read *"Drop it from your own list too"*, and a human who creates a row and
+deletes it a minute later produces an agent that has never heard of it — which
+answers that it has no such task, then goes looking for what it apparently
+missed. Nothing on this side knows whether it was ever delivered: `listTasks` is
+a **pull**, so a row can be created and destroyed entirely between an agent's
+reads of the board. Same shape as the rest of this file's bugs — asserting as
+fact something only knowable somewhere else. The notice now covers both readings
+(drop it if you have it; if you have never seen it there is nothing to do and
+nothing was missed), and the escalation carries the same correction, since there
+the agent relays it in its own words and would otherwise reproduce the original.
+The better fix — stamping rows as they go out through `listTasks`, so the notice
+can be *skipped* rather than hedged — is schema plus plumbing for a case a
+sentence covers.
+
+### `startTask` — the panel's "Do it"
+
+The other half of the same machinery (`ef04b49`). The task panel's ▶ moves a row
+to `active` and types a notice at the tab carrying it. Two things distinguish it
+from the delete notice:
+
+- It is **not gated on `overlord_enabled`.** The human clicked the button and the
+  text goes to the tab they were already looking at, so this is the human typing,
+  not maiTerm acting on behalf of a supervisor that has been switched off —
+  refusing would mean a dead button for everyone running without Overlord. Only
+  the escalate-when-unreachable fallback belongs to the supervisor, and it is
+  skipped when there is no agent tab to relay it.
+- **The status moves whether or not the notice lands**, and the caller is told
+  which happened (`told: 'tab' | 'agent' | 'nobody'`). The human's decision is
+  true regardless of whether a paste could land at that instant; but "Active on
+  the board" and "the agent has been told" are different facts, and a surface
+  that implies the second while doing only the first is how a task sits Active
+  for an hour with nobody working on it.
+
+The guard block both share is `noticeToTab(tabId, text, what)`. It exists as one
+function because the genuinely tricky part here — *when it is safe to type at a
+tab* — is exactly the thing that drifts when it is written twice: idle only,
+re-checked after the liveness round trip, 1500ms of output quiet, and serialized
+per tab. A notice deliberately does **not** take the tab's outstanding slot,
+which would block every `only_if_no_outstanding` rule behind something nobody is
+waiting on.
+
 Both new kinds are agent-only (hidden from the deck, deleted on delivery) and
 both are named in the doctrine, so `DOCTRINE_VERSION` went to **5**.
 

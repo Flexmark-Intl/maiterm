@@ -361,12 +361,87 @@ Mirrors the notes panel exactly — that pattern is proven and the muscle memory
 **Scope: THIS TAB'S WORK ONLY** (trimmed 2026-08-24). The panel answers one question —
 "what am I doing here" — and hands every other question to the board.
 
-Content: this tab's tasks grouped by workstream (headings only when there is more than
-one job in view), inline add, click-to-edit title/detail, status cycling, delete, a
-blocked-by indicator, and `N parked` / `N done` / `N unclaimed` collapses. One closing
-line reports how many tasks are **in flight on other tabs** — a pointer to the board,
-never a list, and never a raw row count (that grew with every task the project ever
-finished, so it shouted loudest when nothing was happening).
+Content: this tab's tasks grouped by workstream, click-to-edit title/detail, status
+cycling, park/unpark, "Do it", claim/unassign, delete, a blocked-by indicator, and
+`N parked` / `N done` / `N unclaimed` collapses. One closing line reports how many tasks
+are **in flight on other tabs** — a pointer to the board, never a list, and never a raw
+row count (that grew with every task the project ever finished, so it shouted loudest
+when nothing was happening).
+
+**Workstream headings are unconditional** (2026-09-01). They were hidden below two groups,
+on the reasoning that a lone heading labels something with nothing to distinguish it from.
+That treats a workstream as a *divider*; it is the name of the **job** the rows belong to,
+and that is context the reader needs whether or not a second job is on screen — five rows
+under no heading do not say which of your jobs this tab is on. Each heading carries its
+visible-row count and its own **add** button, and hiding them also hid that button exactly
+when a tab was doing one thing, which is most of the time.
+
+### Adding a task
+
+The inline "Add a task…" field is **gone** (`4edcf31`, `467d522`). It could carry only a
+title, and it inferred the workstream — one job in flight and the task joined it, two or
+more and it went loose — without ever showing which. Both outcomes were invisible at the
+moment of typing, so you learned where a task went later, from the board. The inference
+was never the bug; the silence was.
+
+Adding is now a modal (`TaskAddModal.svelte`) carrying **title, description and starting
+lane**, opened from either:
+
+- a **workstream heading's `+`** — destination comes from which button was pressed, so
+  nothing has to ask, which is what lets the no-picker rule survive; or
+- the **panel header's `+`** — the always-available way in, using the same inference the
+  old field used, with the destination now named in the modal's subtitle. It is not
+  redundant with the heading buttons: a tab with no tasks has no groups, hence no headings
+  and no buttons at all, and a tab whose rows are all done or all parked with those filters
+  off is in the same state.
+
+Only `todo` / `active` / `backlog` are offered. `blocked` needs something to be blocked on,
+`review` needs something to review, and `done` is not a thing you create.
+
+Two traps this created, both found by review:
+
+- **`tasksStore.add` is idempotent by normalized title** and returns the existing row with
+  a patch carrying neither `detail` nor, usually, `status`. Ignoring that return threw away
+  everything the modal exists to collect — and worse than a no-op in the common case, since
+  the button only appears with 2+ groups and one is usually *No workstream*: adding a title
+  that matches a LOOSE row files **that** row into the named job, so it vanishes from one
+  heading and reappears under another with no description, still in To-do. Compare ids;
+  apply the lane either way; fill the description only when the row has none.
+- **`autofocus` is not focus.** Svelte compiles it to a microtask that focuses only if
+  `document.activeElement === body` — true when a mouse opened the modal (WebKit does not
+  mouse-focus buttons), false from the keyboard, where the `+` keeps focus. That button is
+  *outside* the backdrop, and the Escape handler is *on* the backdrop, so keyboard users got
+  no typing, no Escape, and a mouse-only exit. Focus explicitly on rAF.
+
+### Row actions, and the two axes they act on
+
+`↥` / `↧` write **`Task.tab_id`** and nothing else. A task handed back stays in its lane and
+merely stops belonging to this tab. Park writes **`Task.status`**. These are different axes,
+and labelling the first "Hand back" described an intent rather than an effect — since it was
+also the only control on the row writing ownership rather than status, it read as whichever
+one you expected. It now says *"Unassign — drop this tab's claim… Stays in its current lane;
+this is not the same as parking it."*
+
+**"Do it"** moves the row to `active` and types a notice at the tab carrying it
+(`overlordStore.startTask`), naming the task, its detail and its id. Two rules:
+
+- It is **not** gated on `overlord_enabled`, unlike the delete notice. The human clicked it
+  and the text goes to the tab they were looking at, so this is the human typing, not maiTerm
+  acting for a supervisor that has been switched off. Only the relay-when-unreachable
+  fallback belongs to Overlord, and it is skipped when there is no agent tab.
+- The row reports **what actually reached the agent**. "Active on the board" and "the agent
+  has been told" are different facts — the tab can be mid-turn, at a permission prompt, or
+  unmounted, all of which refuse a paste — and a button that implies the second while doing
+  only the first is how a task sits Active for an hour with nobody working on it. The status
+  moves either way: the human has said what they want, and that stays true whether or not a
+  paste could land at that instant.
+
+**All three are held while a prerequisite is unfinished.** They write the STORED status
+while the row displays the EFFECTIVE one, so on a dependency-blocked row the chip does not
+move: "Unpark — back to To-do" left it reading BLOCKED, and Do it told an agent to start work
+whose prerequisite had not landed, with nothing on screen changing. This is verbatim what the
+board already guards with `PINNED_WHY` — and unlike the board's steppers, Do it also emits a
+terminal injection.
 
 **`N unclaimed` is not a scope violation, it is the only way to reach that work.** The
 panel is the sole writer of `Task.tab_id` in the whole frontend — the board reassigns
@@ -374,7 +449,11 @@ workstream and status, and `updateTasks` over MCP has no assignee field. So with
 claim control, a row released by `releaseTab` when its tab closed would be unreadable,
 uneditable and undeletable from every surface, forever, while still inflating counts.
 Unclaimed work is also genuinely this panel's business: it is the pile you can pick up
-*here*, not another tab's work. Collapsed by default; ↧ claims, ↥ hands back.
+*here*, not another tab's work. Collapsed by default; ↧ claims, ↥ unassigns. There is
+deliberately no way to add **into** the unclaimed pile: every add claims for this tab, and a
+row becomes unclaimed by being released from one or by outliving the tab that held it. That
+group is also the one heading with no add button — it is an *assignment* bucket whose rows
+come from every job at once, so no destination could be meant by pressing one.
 
 Removed, and why: it also listed **the rest of the project**, offered a **workstream
 picker** on every add, and a **per-row workstream dropdown**. All three are *organizing*
@@ -383,8 +462,9 @@ is indexed by workstream (`docs/overlord.md`), where a drag moves a task between
 the whole window is legible at once. Reproducing that in a 280px dock made the panel a
 worse board and buried the one list the tab actually needs.
 
-A new task inherits the workstream when every unfinished task on the tab shares one, and
-goes loose otherwise — which covers both cases without the picker asking on every add.
+The add modal is **not** that picker returning: it never asks where the task goes, it
+*states* it, because the destination came from which button opened it.
+
 `effectiveStatus` still resolves against the whole workspace list, since a prerequisite
 can live on another tab; that list is simply never rendered.
 
