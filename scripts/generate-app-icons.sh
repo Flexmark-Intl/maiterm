@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Generates maiTerm's macOS 26 "Liquid Glass" app icon (Icon Composer .icon) and
-# the website logo/favicon rendered from it.
+# Generates maiTerm's brand assets: the IBM Plex Mono wordmark, the macOS 26
+# "Liquid Glass" app icon (Icon Composer .icon), and the website logo/favicon.
 #
 # On macOS 26+ (Xcode 26 / actool >= 26), Tauri 2.11+ compiles the .icon listed
 # in tauri.conf `bundle > icon` into an Assets.car and wires CFBundleIconName, so
@@ -21,11 +21,38 @@ STATIC="$ROOT/static"
 WEB="$ROOT/website"
 ICON="$ICONS/AppIcon.icon"
 ICTOOL="/Applications/Xcode.app/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+PLEX="$ROOT/scripts/assets/fonts/IBMPlexMono-Regular.ttf"   # vendored, OFL-1.1 (see OFL.txt)
 
 MARK="$STATIC/logo-mark-light.png"          # white "m" + periwinkle accents
 # Periwinkle #7880BE in extended-srgb (system derives the gradient + appearances)
 BG_FILL='extended-srgb:0.47059,0.50196,0.74510,1.00000'
 MARK_W=600                                   # mark width on the 1024 canvas (~58%)
+
+# --- wordmark: static/logo-light.png (dark themes) + logo-dark.png (light themes) ---
+# IBM Plex Mono Regular, duo-tone. "mai" recedes, "Term" carries the accent.
+# The in-app "mai" is deliberately LIGHTER than the marketing value (#5C6173): the
+# three consumers knock the logo back with CSS opacity (sidebar .7, loading .5,
+# empty pane .3) and a slate that dark dissolves at .3. Ratio feeds the hardcoded
+# `aspect-ratio` in WorkspaceSidebar/.sidebar-logo, +page/.loading-logo and
+# SplitPane/.empty-logo — update all three if the glyph set or size changes.
+if command -v magick >/dev/null 2>&1 && [ -f "$PLEX" ]; then
+  wordmark() {  # $1=mai colour  $2=Term colour  $3=output
+    local t; t="$(mktemp -d)"
+    magick -background none -fill "$1" -font "$PLEX" -pointsize 700 label:'mai'  "$t/a.png"
+    magick -background none -fill "$2" -font "$PLEX" -pointsize 700 label:'Term' "$t/b.png"
+    # +repage after +append: the appended image keeps the FIRST frame's page
+    # geometry, and any later -flatten would crop back to it.
+    magick "$t/a.png" "$t/b.png" +append +repage -trim +repage \
+      -background none -alpha background -colorspace RGB -resize x320 -colorspace sRGB \
+      +repage -strip "$3"
+    rm -rf "$t"
+  }
+  wordmark '#8B93A7' '#87A0E6' "$STATIC/logo-light.png"
+  wordmark '#5C6173' '#5965D6' "$STATIC/logo-dark.png"
+  echo "wrote $STATIC/logo-light.png + logo-dark.png ($(magick identify -format '%wx%h' "$STATIC/logo-light.png"))"
+else
+  echo "WARN: magick or vendored Plex Mono missing; skipped wordmark" >&2
+fi
 
 # --- author the .icon (icon.json + Assets/mark.png) ---
 rm -rf "$ICON"; mkdir -p "$ICON/Assets"
