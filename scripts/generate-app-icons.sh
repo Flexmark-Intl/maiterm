@@ -30,11 +30,16 @@ MARK_W=600                                   # mark width on the 1024 canvas (~5
 
 # --- wordmark: static/logo-light.png (dark themes) + logo-dark.png (light themes) ---
 # IBM Plex Mono Regular, duo-tone. "mai" recedes, "Term" carries the accent.
-# The in-app "mai" is deliberately LIGHTER than the marketing value (#5C6173): the
-# three consumers knock the logo back with CSS opacity (sidebar .7, loading .5,
-# empty pane .3) and a slate that dark dissolves at .3. Ratio feeds the hardcoded
-# `aspect-ratio` in WorkspaceSidebar/.sidebar-logo, +page/.loading-logo and
-# SplitPane/.empty-logo — update all three if the glyph set or size changes.
+# The in-app "mai" is deliberately LIGHTER than the marketing value (#5C6173):
+# the loading and empty-pane logos knock it back with CSS opacity (.5 and .3) and
+# a slate that dark dissolves at .3.
+# The two tones need LUMINANCE separation, not just a hue difference. #87A0E6 sat
+# at nearly the same brightness as the "mai" slate (1.20:1) and read as one colour
+# at 13px; #A8BCFF lifts that to 1.65:1. The light-theme pair is unaffected — its
+# Term is a much deeper #5965D6, which needs to stay dark against cream.
+# Ratio feeds the hardcoded `aspect-ratio` in WorkspaceSidebar/.sidebar-logo,
+# +page/.loading-logo and SplitPane/.empty-logo — update all three if the glyph
+# set or size changes.
 if command -v magick >/dev/null 2>&1 && [ -f "$PLEX" ]; then
   wordmark() {  # $1=mai colour  $2=Term colour  $3=output
     local t; t="$(mktemp -d)"
@@ -47,7 +52,7 @@ if command -v magick >/dev/null 2>&1 && [ -f "$PLEX" ]; then
       +repage -strip "$3"
     rm -rf "$t"
   }
-  wordmark '#8B93A7' '#87A0E6' "$STATIC/logo-light.png"
+  wordmark '#8B93A7' '#A8BCFF' "$STATIC/logo-light.png"
   wordmark '#5C6173' '#5965D6' "$STATIC/logo-dark.png"
   echo "wrote $STATIC/logo-light.png + logo-dark.png ($(magick identify -format '%wx%h' "$STATIC/logo-light.png"))"
 else
