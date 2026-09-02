@@ -14,27 +14,31 @@
  */
 const REPO = 'Flexmark-Intl/maiterm';
 const RELEASES = `https://github.com/${REPO}/releases/latest`;
+/** Permanent per-file URL. GitHub redirects this to whichever release is current, but it
+ *  keys on the FILENAME — which is why each release also uploads a copy under these
+ *  version-less names alongside the versioned ones. */
+const latestUrl = (name: string) => `https://github.com/${REPO}/releases/latest/download/${name}`;
 
 const PLATFORMS = [
   {
     id: 'macos',
     name: 'macOS',
     note: 'Apple Silicon (M1 and later)',
-    files: [{ key: 'dmg', label: 'Download .dmg', primary: true }],
+    files: [{ key: 'dmg', stable: 'maiTerm-macos-aarch64.dmg', label: 'Download .dmg', primary: true }],
   },
   {
     id: 'windows',
     name: 'Windows',
     note: '64-bit (x64)',
-    files: [{ key: 'exe', label: 'Download installer', primary: true }],
+    files: [{ key: 'exe', stable: 'maiTerm-windows-x64-setup.exe', label: 'Download installer', primary: true }],
   },
   {
     id: 'linux',
     name: 'Linux',
     note: '64-bit (x86_64)',
     files: [
-      { key: 'appimage', label: 'Download .AppImage', primary: true },
-      { key: 'deb', label: 'Download .deb', primary: false },
+      { key: 'appimage', stable: 'maiTerm-linux-amd64.AppImage', label: 'Download .AppImage', primary: true },
+      { key: 'deb', stable: 'maiTerm-linux-amd64.deb', label: 'Download .deb', primary: false },
     ],
   },
 ];
@@ -65,8 +69,8 @@ const PLATFORMS = [
             <a
               class={f.primary ? 'dl-btn' : 'dl-btn dl-btn-secondary'}
               data-file={f.key}
-              data-label={f.label}
-              href={RELEASES}
+              data-stable={f.stable}
+              href={latestUrl(f.stable)}
             >
               {f.label}
             </a>
@@ -136,16 +140,37 @@ const PLATFORMS = [
         release.assets ?? [];
       const version: string = release.tag_name ?? '';
 
-      const resolved = new Map<string, { url: string; size: number }>();
+      const byName = new Map(assets.map((a) => [a.name, a]));
+
+      /** Three tiers, best first. The static href is already the permanent
+       *  /releases/latest/download/<stable> URL, so tier 1 changes no link — it only
+       *  confirms the file is there and supplies its size. Tier 2 covers a release that
+       *  shipped without the version-less copies: the permanent URL would 404, so the
+       *  link is repointed at the versioned asset, which always exists. Tier 3 is a
+       *  platform missing from the release entirely. */
+      const resolved = new Map<string, { url: string | null; size: number }>();
       for (const [key, test] of Object.entries(MATCH)) {
-        const hit = assets.find((a) => !a.name.endsWith('.sig') && test(a.name));
-        if (hit) resolved.set(key, { url: hit.browser_download_url, size: hit.size });
+        const el = root.querySelector<HTMLAnchorElement>(`a[data-file="${key}"]`);
+        const stable = el?.dataset.stable && byName.get(el.dataset.stable);
+        if (stable) {
+          resolved.set(key, { url: null, size: stable.size });
+          continue;
+        }
+        const versioned = assets.find((a) => !a.name.endsWith('.sig') && test(a.name));
+        if (versioned) {
+          resolved.set(key, { url: versioned.browser_download_url, size: versioned.size });
+        }
       }
 
       for (const el of root.querySelectorAll<HTMLAnchorElement>('a[data-file]')) {
         const hit = resolved.get(el.dataset.file!);
-        if (!hit) continue; // leave the releases-page href in place
-        el.href = hit.url;
+        if (!hit) {
+          // Nothing for this platform in the current release — the permanent URL would
+          // 404, so send them somewhere that always exists.
+          el.href = root.dataset.releases!;
+          continue;
+        }
+        if (hit.url) el.href = hit.url;
         const size = el.querySelector('.dl-size') ?? document.createElement('span');
         size.className = 'dl-size';
         size.textContent = fmtSize(hit.size);
@@ -178,7 +203,8 @@ const PLATFORMS = [
         const box = root.querySelector<HTMLElement>('.dl-detected')!;
         const btn = box.querySelector<HTMLAnchorElement>('.dl-detected-btn')!;
         const name = card.querySelector('h3')!.textContent;
-        btn.href = primaryHit.url;
+        // Take the href the card's own button ended up with, whichever tier resolved it.
+        btn.href = primary.href;
         btn.querySelector('.dl-detected-label')!.textContent = `Download for ${name}`;
         btn.querySelector('.dl-detected-meta')!.textContent =
           `${version} · ${card.querySelector('.dl-note')!.textContent} · ${fmtSize(primaryHit.size)}`;
