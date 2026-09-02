@@ -142,6 +142,14 @@ suggests the most recent active topic as the likely default in tool descriptions
   maiTerm-minted handle**; the human-editable role name is the *display* label, not the
   routing key, so a rename/duplicate/casing change can't misroute (Codex #2).
   `listBridgedPeers` returns `{ handle, role, tabId, cwd, purpose }` per member.
+- **Renames.** The roster is derived from the live tab name, so tools and the cockpit see a
+  rename at once; what goes stale is what the agents were *told*. When an onboarded member's
+  role changes, maiTerm tells that agent its new name once (a short `⟦MESH⟧` prompt, queued
+  if it is busy) and records the old name as a *former role* (persisted per tab as the
+  `meshFormerRoles` trigger variable). A peer that still addresses the old name resolves to
+  the same handle (a current role always shadows a former one; two peers sharing a former
+  name is an error) and the send result tells it the current name — no peer spends a turn
+  on a rename announcement. Naming a previously unnamed agent tab primes it immediately.
 - **Clarification is just a message.** If a role label is ambiguous to a peer, it asks the
   agent directly over the mesh — but routing itself never depends on the label, only the
   handle, so a send can't silently misroute on an ambiguous name.

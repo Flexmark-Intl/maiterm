@@ -28,10 +28,20 @@ export interface MeshMember {
   tabId: string;
   /** Human-given descriptive name — the addressable label, display only (never the key). */
   role: string;
+  /** Names this member was introduced to peers under BEFORE its current role (the human renamed
+   *  the tab after it was onboarded). Peers whose transcripts still carry an old name keep
+   *  routing without spending a turn on a "no such peer" error. Never a current role. */
+  formerRoles?: string[];
   cwd: string | null;
   purpose: string | null;
   /** Has a live agent session right now (vs dormant/booting). */
   live: boolean;
+}
+
+/** A tab's addressable role: its display name with any legacy bridge glyph stripped. The one
+ *  definition shared by the mesh and the 1:1 bridge, so both label an agent identically. */
+export function roleName(tabName: string): string {
+  return tabName.replace(/^[⇄↔→⌗]\s*/u, '').trim() || 'agent';
 }
 
 export interface MeshRouterDeps {
@@ -44,7 +54,9 @@ export interface MeshRouterDeps {
 }
 
 export type RecipientResolution =
-  | { ok: true; tabId: string; role: string }
+  /** `viaFormerRole` is set when the sender addressed a peer by a name it no longer has —
+   *  the send path uses it to teach the sender the current role in the tool result. */
+  | { ok: true; tabId: string; role: string; viaFormerRole?: string }
   | { ok: false; error: string };
 
 export type TopicResolution =
@@ -113,6 +125,21 @@ export function createMeshRouter(deps: MeshRouterDeps) {
       return {
         ok: false,
         error: `Role "${arg}" is ambiguous — ${byRole.length} peers share that name. Address by tabId handle instead (see listBridgedPeers).`,
+      };
+    }
+
+    // 3. Unique match on a FORMER role — the peer was renamed after this sender learned its
+    //    name. A current role always shadows a former one (step 2 ran first); ambiguity across
+    //    former names is still an error, never a guess.
+    const byFormer = members.filter((m) => (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === lc));
+    if (byFormer.length === 1) {
+      if (byFormer[0].tabId === senderTabId) return { ok: false, error: 'Cannot send to yourself.' };
+      return { ok: true, tabId: byFormer[0].tabId, role: byFormer[0].role, viaFormerRole: arg };
+    }
+    if (byFormer.length > 1) {
+      return {
+        ok: false,
+        error: `"${arg}" is a former name of ${byFormer.length} peers. Address by current role or tabId handle instead (see listBridgedPeers).`,
       };
     }
     return { ok: false, error: `No peer named "${arg}" in this mesh.${rosterHint()}` };

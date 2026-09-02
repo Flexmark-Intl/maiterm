@@ -1635,10 +1635,7 @@ function createWorkspacesStore() {
     async renameTab(workspaceId: string, paneId: string, tabId: string, name: string, customName?: boolean) {
       await commands.renameTab(workspaceId, paneId, tabId, name, customName);
       const { tab } = findTab(workspaceId, paneId, tabId);
-      if (tab) {
-        tab.name = name;
-        if (customName !== undefined) tab.custom_name = customName;
-      }
+      if (tab) this._applyTabRename(tab, name, customName);
     },
 
     /**
@@ -1647,16 +1644,22 @@ function createWorkspacesStore() {
      * tab strip reflects the new title without a reload. No command call — that would double-write.
      */
     applyExternalRename(tabId: string, name: string) {
-      for (const ws of workspaces) {
-        for (const pane of ws.panes) {
-          const tab = pane.tabs.find(t => t.id === tabId);
-          if (tab) {
-            tab.name = name;
-            tab.custom_name = true;
-            return;
-          }
-        }
-      }
+      const loc = this._locateTab(tabId);
+      if (loc) this._applyTabRename(loc.tab, name, true);
+    },
+
+    /**
+     * The ONE place the in-memory mirror takes a new tab name (user rename, OSC title, phone
+     * rename, mesh setup). Anything that has told an agent its name — the mesh — hears about
+     * the change from here, so a rename can never update the tab strip and leave the mesh
+     * believing the old name.
+     */
+    _applyTabRename(tab: Tab, name: string, customName?: boolean) {
+      const prev = { name: tab.name, custom_name: !!tab.custom_name };
+      tab.name = name;
+      if (customName !== undefined) tab.custom_name = customName;
+      if (prev.name === tab.name && prev.custom_name === !!tab.custom_name) return;
+      import('$lib/stores/agentMesh.svelte').then(m => m.agentMeshStore.handleTabRenamed(tab.id, prev)).catch(() => {});
     },
 
     async updateEditorTabFile(tabId: string, name: string, fileInfo: EditorFileInfo) {

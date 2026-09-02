@@ -7,7 +7,7 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
-import { createMeshRouter, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
+import { createMeshRouter, roleName, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
 import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores/meshSend';
 import { createLoopController, type LoopReason } from '$lib/stores/meshLoopControl';
 import { getVariables, setVariable, replayAutoResume } from '$lib/stores/triggers.svelte';
@@ -47,6 +47,11 @@ const TOPIC_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 // so a resumed agent — whose transcript already holds the opener — isn't re-onboarded on every
 // app restart. Survives restart without a new Tab field.
 const MESH_ONBOARDED_VAR = 'meshOnboarded';
+// Persisted (per-tab trigger variable) JSON list of roles this agent was introduced under
+// before a rename — see MeshMember.formerRoles. Newest last; capped so a much-renamed tab
+// doesn't accrete forever.
+const MESH_FORMER_ROLES_VAR = 'meshFormerRoles';
+const MESH_FORMER_ROLES_MAX = 5;
 
 function createAgentMeshStore() {
   // One router per mesh workspace (each scopes its roster + owns its topic registry).
@@ -101,9 +106,15 @@ function createAgentMeshStore() {
     return workspacesStore.workspaces.find((w) => w.id === wsId) ?? null;
   }
 
-  /** Clean display name (strips any bridge glyph), the member's addressable role. */
-  function roleName(tabName: string): string {
-    return tabName.replace(/^[⇄↔→⌗]\s*/u, '').trim() || 'agent';
+  function formerRolesOf(tabId: string): string[] {
+    const raw = getVariables(tabId)?.get(MESH_FORMER_ROLES_VAR);
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string' && !!v) : [];
+    } catch {
+      return [];
+    }
   }
 
   function getCwd(tabId: string): string | null {
@@ -139,9 +150,11 @@ function createAgentMeshStore() {
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
         if (!isAgentMember(tab)) continue;
+        const former = formerRolesOf(tab.id);
         out.push({
           tabId: tab.id,
           role: roleName(tab.name),
+          ...(former.length ? { formerRoles: former } : {}),
           cwd: getCwd(tab.id),
           purpose: tab.mesh_purpose ?? null,
           live: !!claudeStateStore.getState(tab.id),
@@ -257,6 +270,14 @@ function createAgentMeshStore() {
       `⟦MESH⟧ Message from "${senderRole}"${where} — a peer AI agent, NOT your human operator. [topic: ${topic.label}] [turn ${turn}]\n` +
       `Reply with the sendToBridgedAgent tool, tagging topic "${topic.id}". If this fully answers it, just stop — don't reply only to acknowledge.\n\n` +
       message
+    );
+  }
+
+  function buildRenameNotice(oldRole: string, newRole: string): string {
+    return (
+      `⟦MESH⟧ Your human renamed your tab: on this mesh you are now "${newRole}" (you joined as "${oldRole}"). ` +
+      `Treat it as a clarification of your existing purpose, not a new assignment. Peers see your messages as from "${newRole}" ` +
+      `and can still reach you by the old name. Don't announce this to anyone — just use the new name from here on and carry on.`
     );
   }
 
@@ -448,6 +469,7 @@ function createAgentMeshStore() {
           removeMember(m.tabId);
           primed.delete(m.tabId);
           void setVariable(m.tabId, MESH_ONBOARDED_VAR, null); // re-enabling should re-onboard
+          void setVariable(m.tabId, MESH_FORMER_ROLES_VAR, null); // …under its current name only
         }
         routers.delete(wsId);
       }
@@ -755,6 +777,34 @@ function createAgentMeshStore() {
       );
       bump();
       return result;
+    },
+
+    /** The in-memory mirror took a new tab name (workspacesStore._applyTabRename). The roster
+     *  is derived, so listBridgedPeers / the cockpit / envelopes already show the new name —
+     *  what goes stale is what the AGENTS were told. Three cases:
+     *    • an onboarded member whose role changed → it is told its new name once (a short
+     *      prompt, queued if busy) and the old name is recorded as a former role, so peers
+     *      whose transcripts still say "Bob" keep routing and learn "Billing API" from the
+     *      send result — no turn spent on any peer.
+     *    • a tab that became a member BY being named → primed now, not on its next Stop.
+     *    • a cosmetic change (casing, glyph) or a tab outside any mesh → nothing to tell. */
+    async handleTabRenamed(tabId: string, prev: { name: string; custom_name: boolean }) {
+      const ws = meshWorkspaceForTab(tabId);
+      if (!ws) return;
+      const member = membersOf(ws).find((m) => m.tabId === tabId);
+      if (!member) return; // name reset / not an agent: the derived roster already dropped it
+      const onboarded = getVariables(tabId)?.get(MESH_ONBOARDED_VAR) === '1';
+      if (!onboarded || !prev.custom_name) { void tryPrime(tabId); return; } // the opener will carry the right name
+      const oldRole = roleName(prev.name);
+      if (oldRole.toLowerCase() === member.role.toLowerCase()) return;
+      // Record the old name (newest last, deduped, never the current role, capped).
+      const former = formerRolesOf(tabId).filter((f) => f.toLowerCase() !== oldRole.toLowerCase() && f.toLowerCase() !== member.role.toLowerCase());
+      former.push(oldRole);
+      await setVariable(tabId, MESH_FORMER_ROLES_VAR, JSON.stringify(former.slice(-MESH_FORMER_ROLES_MAX)));
+      ensureMember(tabId);
+      const status = await deliveryCtl.deliver(tabId, buildRenameNotice(oldRole, member.role));
+      logInfo(`agentMesh: "${oldRole}" → "${member.role}" (${tabId.slice(0, 8)}) in mesh "${ws.name}" — notice ${status}`);
+      bump();
     },
 
     /** A tab is being closed — drop its mesh delivery slot. Topics persist (it may reopen). */

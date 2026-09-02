@@ -7,6 +7,7 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
+import { roleName } from '$lib/stores/meshRouting';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -111,11 +112,11 @@ function createAgentBridgeStore() {
     return resolveTab(tabId) !== null;
   }
 
-  /** Clean display name for identity envelopes (strips bridge glyphs). */
+  /** Clean display name for identity envelopes (same helper as the mesh — one label per agent). */
   function label(tabId: string): string {
     const loc = resolveTab(tabId);
     if (!loc) return 'unknown agent';
-    return loc.tab.name.replace(/^[⇄↔→]\s*/u, '').trim() || 'agent';
+    return roleName(loc.tab.name);
   }
 
   function getCwd(tabId: string): string | null {

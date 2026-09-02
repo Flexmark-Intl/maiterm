@@ -116,17 +116,20 @@ export async function performMeshSend(
   }
 
   const summary = { id: tr.topic.id, label: tr.topic.label };
+  // The sender used a name the peer no longer has — teach it the current one here, in the
+  // tool result, rather than spending a turn of the peer's on a rename announcement.
+  const renamed = rr.viaFormerRole ? ` (Note: "${rr.viaFormerRole}" is now named "${rr.role}" — address them as "${rr.role}" from now on.)` : '';
   if (status === 'delivered') {
     return {
       ok: true, delivered: true, queued: false, recipient: rr.role, topic: summary,
-      note: `Delivered to ${rr.role} on topic "${tr.topic.label}". Their reply arrives as a new prompt — finish your turn now.`,
+      note: `Delivered to ${rr.role} on topic "${tr.topic.label}". Their reply arrives as a new prompt — finish your turn now.${renamed}`,
     };
   }
   const offline = !deps.isLive(rr.tabId);
   return {
     ok: true, delivered: false, queued: true, recipient: rr.role, topic: summary,
-    note: offline
+    note: (offline
       ? `${rr.role} is offline; your message is queued on topic "${tr.topic.label}" and delivers when it resumes.`
-      : `${rr.role} is busy; your message is queued on topic "${tr.topic.label}" and delivers when they're free.`,
+      : `${rr.role} is busy; your message is queued on topic "${tr.topic.label}" and delivers when they're free.`) + renamed,
   };
 }

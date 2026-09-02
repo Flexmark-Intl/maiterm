@@ -71,6 +71,32 @@ describe('resolveRecipient', () => {
   it('requires an explicit recipient when 2+ peers exist', () => {
     expect(router.resolveRecipient('t-api', undefined).ok).toBe(false);
   });
+
+  describe('former roles (peer renamed after this sender learned its name)', () => {
+    const renamed = (tabId: string, role: string, formerRoles: string[]): MeshMember => ({ ...member(tabId, role), formerRoles });
+
+    it('resolves a unique former name to the current member and reports the rename', () => {
+      const { router: r2 } = makeHarness([member('a', 'Alice'), renamed('b', 'Billing API', ['Bob'])]);
+      expect(r2.resolveRecipient('a', 'bob')).toEqual({ ok: true, tabId: 'b', role: 'Billing API', viaFormerRole: 'bob' });
+    });
+
+    it('lets a CURRENT role shadow another member\'s former name', () => {
+      const { router: r2 } = makeHarness([member('a', 'Alice'), renamed('b', 'Billing', ['Bob']), member('c', 'Bob')]);
+      expect(r2.resolveRecipient('a', 'Bob')).toEqual({ ok: true, tabId: 'c', role: 'Bob' });
+    });
+
+    it('errors when a former name belonged to two peers', () => {
+      const { router: r2 } = makeHarness([member('a', 'Alice'), renamed('b', 'B1', ['Worker']), renamed('c', 'C1', ['Worker'])]);
+      const r = r2.resolveRecipient('a', 'Worker');
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain('former name of 2 peers');
+    });
+
+    it('still rejects a self-send by a former name', () => {
+      const { router: r2 } = makeHarness([renamed('a', 'Alice v2', ['Alice']), member('b', 'Bob')]);
+      expect(r2.resolveRecipient('a', 'Alice').ok).toBe(false);
+    });
+  });
 });
 
 describe('topic registry', () => {
