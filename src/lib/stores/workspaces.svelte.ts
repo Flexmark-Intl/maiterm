@@ -13,6 +13,7 @@ import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
 // step the command returns in. tasks.svelte does not import this module, so no cycle.
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { getVariables } from '$lib/stores/triggers.svelte';
+import { MESH_IDENTITY_VARS } from '$lib/stores/meshRouting';
 import { CLAUDE_RESUME_COMMAND } from '$lib/triggers/defaults';
 import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 
@@ -2145,12 +2146,15 @@ function createWorkspacesStore() {
         await commands.setTabNotesMode(workspaceId, paneId, newTab.id, sourceTab.notes_mode);
       }
 
-      // 7c. Copy trigger variables (pref-gated, skip in shallow mode — variables are session-specific)
+      // 7c. Copy trigger variables (pref-gated, skip in shallow mode — variables are session-specific).
+      // The mesh's identity markers describe ONE agent's history and are never cloned: the copy is
+      // a new member that needs its own opener, and inheriting a former name would make that name
+      // ambiguous between the two. (A reload still carries them — carry_tab_state_on_reload.)
       if (!shallow && preferencesStore.cloneVariables) {
         const srcVars = getVariables(tabId);
         if (srcVars && srcVars.size > 0) {
           const plain: Record<string, string> = {};
-          for (const [k, v] of srcVars) plain[k] = v;
+          for (const [k, v] of srcVars) if (!MESH_IDENTITY_VARS.includes(k)) plain[k] = v;
           await commands.setTabTriggerVariables(workspaceId, paneId, newTab.id, plain).catch(e =>
             logError(`Failed to copy trigger variables: ${e}`)
           );

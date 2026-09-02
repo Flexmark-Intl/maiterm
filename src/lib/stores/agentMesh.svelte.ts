@@ -7,7 +7,7 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
-import { createMeshRouter, roleName, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
+import { createMeshRouter, roleName, MESH_ONBOARDED_VAR, MESH_FORMER_ROLES_VAR, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
 import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores/meshSend';
 import { createLoopController, type LoopReason } from '$lib/stores/meshLoopControl';
 import { getVariables, setVariable, replayAutoResume } from '$lib/stores/triggers.svelte';
@@ -43,14 +43,11 @@ const EDGE_RING_MAX = 300;
 const TOPIC_STALE_OPEN_MS = 7 * 24 * 60 * 60 * 1000;
 const TOPIC_COMPLETED_RETENTION_MS = 48 * 60 * 60 * 1000;
 const TOPIC_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
-// Persisted (per-tab trigger variable) marker that an agent has been introduced to the mesh,
-// so a resumed agent — whose transcript already holds the opener — isn't re-onboarded on every
-// app restart. Survives restart without a new Tab field.
-const MESH_ONBOARDED_VAR = 'meshOnboarded';
-// Persisted (per-tab trigger variable) JSON list of roles this agent was introduced under
-// before a rename — see MeshMember.formerRoles. Newest last; capped so a much-renamed tab
-// doesn't accrete forever.
-const MESH_FORMER_ROLES_VAR = 'meshFormerRoles';
+// MESH_ONBOARDED_VAR (persisted per-tab trigger variable, see meshRouting.ts): an agent has
+// been introduced to the mesh, so a resumed agent — whose transcript already holds the opener —
+// isn't re-onboarded on every app restart. MESH_FORMER_ROLES_VAR: JSON list of the roles it was
+// introduced under before a rename (MeshMember.formerRoles), newest last, capped so a
+// much-renamed tab doesn't accrete forever.
 const MESH_FORMER_ROLES_MAX = 5;
 
 function createAgentMeshStore() {
@@ -117,6 +114,34 @@ function createAgentMeshStore() {
     }
   }
 
+  const sameRole = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+  /** Rewrite a tab's former-role list: never its current role, `add` (if given) moved to the
+   *  end as the newest, capped. Writes only on change (a variable write re-evaluates
+   *  variable-mode triggers, so don't churn it). */
+  async function updateFormerRoles(tabId: string, currentRole: string, add: string | null) {
+    const before = formerRolesOf(tabId);
+    let next = before.filter((f) => !sameRole(f, currentRole) && (add === null || !sameRole(f, add)));
+    if (add !== null && !sameRole(add, currentRole)) next.push(add);
+    next = next.slice(-MESH_FORMER_ROLES_MAX);
+    if (next.length === before.length && next.every((f, i) => f === before[i])) return;
+    await setVariable(tabId, MESH_FORMER_ROLES_VAR, next.length ? JSON.stringify(next) : null);
+  }
+
+  /** Role names currently held by ANY custom-named terminal tab in the workspace — including
+   *  one whose agent hasn't registered yet and so isn't a roster member. A former role that a
+   *  tab has since claimed must not route to its previous holder (a silent misroute); until
+   *  the new holder's agent is up the name is simply unknown, as it was before renames. */
+  function claimedRoles(ws: Workspace): string[] {
+    const out: string[] = [];
+    for (const pane of ws.panes) {
+      for (const tab of pane.tabs) {
+        if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
+      }
+    }
+    return out;
+  }
+
   function getCwd(tabId: string): string | null {
     const osc = terminalsStore.getOsc(tabId);
     return osc?.cwd ?? osc?.promptCwd ?? null;
@@ -147,10 +172,11 @@ function createAgentMeshStore() {
   /** The roster of a mesh workspace (all addressable agent members). */
   function membersOf(ws: Workspace): MeshMember[] {
     const out: MeshMember[] = [];
+    const claimed = claimedRoles(ws);
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
         if (!isAgentMember(tab)) continue;
-        const former = formerRolesOf(tab.id);
+        const former = formerRolesOf(tab.id).filter((f) => !claimed.includes(f.toLowerCase()));
         out.push({
           tabId: tab.id,
           role: roleName(tab.name),
@@ -275,7 +301,7 @@ function createAgentMeshStore() {
 
   function buildRenameNotice(oldRole: string, newRole: string): string {
     return (
-      `⟦MESH⟧ Your human renamed your tab: on this mesh you are now "${newRole}" (you joined as "${oldRole}"). ` +
+      `⟦MESH⟧ Your human renamed your tab: on this mesh you are now "${newRole}" (formerly "${oldRole}"). ` +
       `Treat it as a clarification of your existing purpose, not a new assignment. Peers see your messages as from "${newRole}" ` +
       `and can still reach you by the old name. Don't announce this to anyone — just use the new name from here on and carry on.`
     );
@@ -791,16 +817,23 @@ function createAgentMeshStore() {
     async handleTabRenamed(tabId: string, prev: { name: string; custom_name: boolean }) {
       const ws = meshWorkspaceForTab(tabId);
       if (!ws) return;
-      const member = membersOf(ws).find((m) => m.tabId === tabId);
-      if (!member) return; // name reset / not an agent: the derived roster already dropped it
       const onboarded = getVariables(tabId)?.get(MESH_ONBOARDED_VAR) === '1';
-      if (!onboarded || !prev.custom_name) { void tryPrime(tabId); return; } // the opener will carry the right name
-      const oldRole = roleName(prev.name);
-      if (oldRole.toLowerCase() === member.role.toLowerCase()) return;
-      // Record the old name (newest last, deduped, never the current role, capped).
-      const former = formerRolesOf(tabId).filter((f) => f.toLowerCase() !== oldRole.toLowerCase() && f.toLowerCase() !== member.role.toLowerCase());
-      former.push(oldRole);
-      await setVariable(tabId, MESH_FORMER_ROLES_VAR, JSON.stringify(former.slice(-MESH_FORMER_ROLES_MAX)));
+      const member = membersOf(ws).find((m) => m.tabId === tabId);
+      if (!member) {
+        // Not an agent, or its name was RESET to a default (custom_name → false), which drops it
+        // from the derived roster. If it was an onboarded member, remember the name it was known
+        // by: the re-name that follows a reset arrives with a non-custom `prev`, and this is the
+        // only way that re-name can still tell the agent and its peers what changed.
+        if (onboarded && prev.custom_name) await updateFormerRoles(tabId, '', roleName(prev.name));
+        return;
+      }
+      if (!onboarded) { void tryPrime(tabId); return; } // joined by being named: the opener carries the right name
+      // The name it was known by: the previous custom name, or — after a reset — the last one recorded.
+      const known = formerRolesOf(tabId);
+      const oldRole = prev.custom_name ? roleName(prev.name) : known[known.length - 1];
+      if (!oldRole) return;
+      if (sameRole(oldRole, member.role)) { await updateFormerRoles(tabId, member.role, null); return; } // cosmetic, or back to a known name
+      await updateFormerRoles(tabId, member.role, oldRole);
       ensureMember(tabId);
       const status = await deliveryCtl.deliver(tabId, buildRenameNotice(oldRole, member.role));
       logInfo(`agentMesh: "${oldRole}" → "${member.role}" (${tabId.slice(0, 8)}) in mesh "${ws.name}" — notice ${status}`);

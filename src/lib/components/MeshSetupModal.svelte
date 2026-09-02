@@ -3,6 +3,7 @@
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
+  import { roleName } from '$lib/stores/meshRouting';
   import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
   import { getAgentLiveness, writeTerminal } from '$lib/tauri/commands';
   import { replayAutoResume } from '$lib/stores/triggers.svelte';
@@ -93,9 +94,6 @@
     return () => clearInterval(id);
   });
 
-  function roleName(name: string): string {
-    return name.replace(/^[⇄↔→⌗]\s*/u, '').trim() || 'agent';
-  }
   function isGeneric(role: string): boolean {
     return /^(zsh|bash|sh|fish|terminal|node|claude|codex|gemini|shell|untitled|tab\s*\d+)\b/i.test(role);
   }

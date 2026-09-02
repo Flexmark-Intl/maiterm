@@ -149,7 +149,11 @@ suggests the most recent active topic as the likely default in tool descriptions
   `meshFormerRoles` trigger variable). A peer that still addresses the old name resolves to
   the same handle (a current role always shadows a former one; two peers sharing a former
   name is an error) and the send result tells it the current name — no peer spends a turn
-  on a rename announcement. Naming a previously unnamed agent tab primes it immediately.
+  on a rename announcement. A former name that another tab has since been given stops
+  resolving at once, even before that tab's agent is up (never a misroute to the previous
+  holder). Resetting a name and re-naming later is treated as one rename. Duplicates never
+  inherit `meshOnboarded` / `meshFormerRoles` (`MESH_IDENTITY_VARS`); a reload does.
+  Naming a previously unnamed agent tab primes it immediately.
 - **Clarification is just a message.** If a role label is ambiguous to a peer, it asks the
   agent directly over the mesh — but routing itself never depends on the label, only the
   handle, so a send can't silently misroute on an ambiguous name.

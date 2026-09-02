@@ -39,10 +39,20 @@ export interface MeshMember {
 }
 
 /** A tab's addressable role: its display name with any legacy bridge glyph stripped. The one
- *  definition shared by the mesh and the 1:1 bridge, so both label an agent identically. */
+ *  definition shared by the mesh, the 1:1 bridge and the setup modal, so all label an agent
+ *  identically. */
 export function roleName(tabName: string): string {
   return tabName.replace(/^[⇄↔→⌗]\s*/u, '').trim() || 'agent';
 }
+
+/** Per-tab trigger variables the mesh uses as persisted identity markers (no new Tab field):
+ *  "this agent has been introduced" and "the names it was introduced under before a rename".
+ *  They describe ONE agent's history, so a DUPLICATE must not inherit them — a clone is a new
+ *  member that needs its own opener, and a shared former name would make the old name
+ *  ambiguous. A RELOAD keeps them (same agent, new id) via Rust `carry_tab_state_on_reload`. */
+export const MESH_ONBOARDED_VAR = 'meshOnboarded';
+export const MESH_FORMER_ROLES_VAR = 'meshFormerRoles';
+export const MESH_IDENTITY_VARS: readonly string[] = [MESH_ONBOARDED_VAR, MESH_FORMER_ROLES_VAR];
 
 export interface MeshRouterDeps {
   /** Current roster (the store derives this from workspace membership). */
