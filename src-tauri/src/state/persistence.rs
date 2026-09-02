@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use super::workspace::{AppData, Layout, SplitDirection, SplitNode, TabType, Task, WindowData};
 
@@ -16,6 +17,16 @@ static LOADED_SUCCESSFULLY: AtomicBool = AtomicBool::new(false);
 /// Zero means "no baseline yet" — the guard is skipped on first save after a
 /// fresh launch with no existing state file.
 static LAST_KNOWN_DISK_MTIME: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes save_state(). Saves are fired from the main thread, from tokio tasks,
+/// and from the Claude Code / maiLink / comms HTTP handlers — 78 call sites, none of
+/// which held a lock. Two overlapping saves would stomp the shared temp file (the
+/// "Failed to rename temp file: No such file or directory" warnings in the log are
+/// exactly that), and could interleave the stat-then-store in record_disk_mtime so
+/// the baseline ended up BELOW the file's real mtime — permanently tripping the
+/// conflict guard against this process's own write. Hold this for the whole
+/// write-rename-rebaseline sequence so it is atomic with respect to other saves.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 // Save timing diagnostics (global atomics — no AppState dependency needed)
 static SAVE_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -37,36 +48,49 @@ fn record_disk_mtime(path: &PathBuf) {
     }
 }
 
+/// Our in-memory state, written when we refuse to overwrite someone else's file.
+const CONFLICT_PREFIX: &str = "aiterm-state.conflict-";
+/// The on-disk file we displaced when taking ownership back from a departed writer.
+const SUPERSEDED_PREFIX: &str = "aiterm-state.superseded-";
+
 fn get_conflict_path(timestamp_ms: u64) -> Option<PathBuf> {
     dirs::data_dir().map(|p| {
         p.join(app_data_slug())
-            .join(format!("aiterm-state.conflict-{}.json", timestamp_ms))
+            .join(format!("{}{}.json", CONFLICT_PREFIX, timestamp_ms))
     })
 }
 
-/// How many conflict snapshots to keep. A conflict is retried on every save, so
-/// without a cap a guard that stays tripped writes one full state file per second
-/// until the disk fills — 373 files (~1GB) in the incident that prompted this.
-const MAX_CONFLICT_FILES: usize = 5;
+fn get_superseded_path(timestamp_ms: u64) -> Option<PathBuf> {
+    dirs::data_dir().map(|p| {
+        p.join(app_data_slug())
+            .join(format!("{}{}.json", SUPERSEDED_PREFIX, timestamp_ms))
+    })
+}
 
-fn prune_conflict_files() {
+/// How many snapshots to keep per kind. A conflict is retried on every save, so
+/// without a cap a guard that stays tripped writes one full state file per second
+/// until the disk fills — 644 files (~1.7GB) in the incident that prompted this.
+const MAX_SNAPSHOTS: usize = 5;
+
+fn prune_snapshots(prefix: &str) {
     let Some(dir) = dirs::data_dir().map(|p| p.join(app_data_slug())) else { return };
     let Ok(entries) = fs::read_dir(&dir) else { return };
-    let mut conflicts: Vec<PathBuf> = entries
+    let mut snapshots: Vec<PathBuf> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("aiterm-state.conflict-") && n.ends_with(".json"))
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".json"))
         })
         .collect();
-    if conflicts.len() <= MAX_CONFLICT_FILES {
+    if snapshots.len() <= MAX_SNAPSHOTS {
         return;
     }
     // The timestamp is in the name, but sorting by mtime avoids trusting it.
-    conflicts.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
-    let doomed = conflicts.len() - MAX_CONFLICT_FILES;
-    for path in conflicts.into_iter().take(doomed) {
+    // Unreadable metadata sorts to the front (None first) and is dropped first.
+    snapshots.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
+    let doomed = snapshots.len() - MAX_SNAPSHOTS;
+    for path in snapshots.into_iter().take(doomed) {
         let _ = fs::remove_file(path);
     }
 }
@@ -80,10 +104,20 @@ fn prune_conflict_files() {
 ///
 /// Errs toward "yes" — if we cannot enumerate processes or identify ourselves, keep
 /// guarding rather than risk clobbering a live peer.
+///
+/// Matches on the executable's FILE NAME, not its full path. On macOS sysinfo reads
+/// `exe` from KERN_PROCARGS2, which is the path as passed to execve — `cargo run`
+/// gives `target/debug/aiterm`, while current_exe() is always absolute, so comparing
+/// whole paths finds no peer in the two configurations that actually share a data
+/// dir: two `tauri:dev` sessions, and a second bundle copy (LaunchServices refuses to
+/// start a second instance of the *same* bundle, so a real duplicate is always a
+/// different path). A name match can only over-report, which costs a spurious abort;
+/// a path match under-reports, which costs the user's state.
 fn another_instance_running() -> bool {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
     let Ok(me_exe) = std::env::current_exe() else { return true };
+    let Some(me_name) = me_exe.file_name() else { return true };
     let me_pid = std::process::id();
 
     let mut sys = System::new();
@@ -93,7 +127,8 @@ fn another_instance_running() -> bool {
         ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
     );
     sys.processes().values().any(|p| {
-        p.pid().as_u32() != me_pid && p.exe().is_some_and(|exe| exe == me_exe)
+        p.pid().as_u32() != me_pid
+            && p.exe().and_then(|exe| exe.file_name()).is_some_and(|name| name == me_name)
     })
 }
 
@@ -122,8 +157,14 @@ fn get_backup_path() -> Option<PathBuf> {
     dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-state.bak.json"))
 }
 
+/// Per-process temp file. SAVE_LOCK keeps this process's own saves off each other's
+/// toes, but a second instance sharing the data dir has its own lock — a shared temp
+/// name lets its rename pull the file out from under ours mid-save.
 fn get_temp_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|p| p.join(app_data_slug()).join("aiterm-state.tmp.json"))
+    dirs::data_dir().map(|p| {
+        p.join(app_data_slug())
+            .join(format!("aiterm-state.tmp-{}.json", std::process::id()))
+    })
 }
 
 fn get_memory_trend_path() -> Option<PathBuf> {
@@ -549,6 +590,10 @@ pub fn migrate_app_data(data: &mut AppData) {
 }
 
 pub fn save_state(data: &AppData) -> Result<(), String> {
+    // Held for the whole sequence — see SAVE_LOCK. A poisoned lock still gives us the
+    // guard (a panicking save is not a reason to stop saving), so recover it.
+    let _saving = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let save_start = std::time::Instant::now();
     let path = get_state_path().ok_or("Could not determine data directory")?;
     let temp_path = get_temp_path().ok_or("Could not determine temp path")?;
@@ -569,16 +614,34 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
             // guard only re-records after a *successful* save, so aborting while the
             // other writer is already gone would latch this process out of saving for
             // the rest of its life — every tab, task and pane change silently failing,
-            // with a conflict file written every second. Nothing can be clobbered when
-            // no peer is alive, so take ownership instead; the pre-rename backup below
-            // still preserves whatever is on disk.
+            // with a conflict file written every second. Nothing is protected by that,
+            // so take ownership instead.
+            //
+            // The file we are about to overwrite gets its own snapshot first. The
+            // rolling .bak.json is NOT enough: it is rewritten on every save, so it
+            // would hold the rescued content for about one second. Whoever wrote this
+            // — a departed instance, or the user restoring a backup by hand while the
+            // app runs — deserves better than that.
             if disk_mtime > known_mtime && !another_instance_running() {
-                log::warn!(
-                    "State file changed underneath us (disk mtime {} > known {}), but no other maiTerm is running — the writer has exited. Re-baselining and saving.",
-                    disk_mtime,
-                    known_mtime
-                );
-                record_disk_mtime(&path);
+                match get_superseded_path(disk_mtime).map(|dest| (fs::copy(&path, &dest), dest)) {
+                    Some((Ok(_), dest)) => {
+                        prune_snapshots(SUPERSEDED_PREFIX);
+                        log::warn!(
+                            "State file changed underneath us (disk mtime {} > known {}), but no other maiTerm is running — the writer has exited. Its copy is preserved at {:?}; re-baselining and saving.",
+                            disk_mtime,
+                            known_mtime,
+                            dest
+                        );
+                        record_disk_mtime(&path);
+                    }
+                    // Couldn't preserve it — then don't destroy it. Fall through to the
+                    // abort path, which keeps our own state in a conflict file.
+                    other => {
+                        if let Some((Err(e), dest)) = other {
+                            log::error!("Could not snapshot the superseded state file to {:?}: {}. Leaving it alone.", dest, e);
+                        }
+                    }
+                }
             }
         }
     }
@@ -611,7 +674,7 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
                 let json = serde_json::to_string_pretty(&filtered).map_err(|e| e.to_string())?;
                 fs::write(&conflict_path, &json)
                     .map_err(|e| format!("Failed to write conflict file: {}", e))?;
-                prune_conflict_files();
+                prune_snapshots(CONFLICT_PREFIX);
                 log::error!(
                     "State save aborted: disk mtime {} > known {}. Another maiTerm process likely wrote since this one loaded. In-memory state preserved at {:?}.",
                     disk_mtime,

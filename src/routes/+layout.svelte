@@ -132,9 +132,15 @@
         .catch(() => {});
     };
     // A save that can't reach disk makes every button look broken — the click fires,
-    // the command rejects, and nothing visibly happens. Say so once, loudly, instead of
-    // leaving the user to conclude the app has locked up.
-    let warnedStateSaveFailed = false;
+    // the command rejects, and nothing visibly happens. Say so, instead of leaving the
+    // user to conclude the app has locked up.
+    //
+    // Deliberately NOT dispatch(): that honours notification_mode, so 'disabled' (or
+    // 'native' with OS permission denied) would show nothing at all. This is a
+    // state-loss condition, not a routine notification. Re-armed on a cooldown rather
+    // than shown once, because the toast auto-dismisses while the failures continue.
+    const STATE_SAVE_WARN_COOLDOWN_MS = 60_000;
+    let lastStateSaveWarnAt = 0;
     const onUnhandledRejection = (e: PromiseRejectionEvent) => {
       const reason = e.reason as unknown;
       const stack = (reason && typeof reason === 'object' && 'stack' in reason)
@@ -142,15 +148,17 @@
         : undefined;
       logError(formatErrorPayload('unhandledrejection', reason, stack)).catch(() => {});
 
-      if (!warnedStateSaveFailed && String(reason).includes('State conflict detected')) {
-        warnedStateSaveFailed = true;
-        import('$lib/stores/notificationDispatch').then(({ dispatch }) => {
-          dispatch(
-            'Changes are not being saved',
-            'Another maiTerm wrote the state file, so this window has stopped saving. Quit any other maiTerm window, then restart this one.',
-            'error'
-          );
-        }).catch(() => {});
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (
+        message.includes('State conflict detected') &&
+        Date.now() - lastStateSaveWarnAt > STATE_SAVE_WARN_COOLDOWN_MS
+      ) {
+        lastStateSaveWarnAt = Date.now();
+        toastStore.addToast(
+          'Changes are not being saved',
+          'Another maiTerm is writing the same state file, so this window has stopped saving. Quit the other one, then restart this window.',
+          'error'
+        );
       }
     };
     window.addEventListener('error', onWindowError);
