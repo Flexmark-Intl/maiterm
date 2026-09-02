@@ -55,21 +55,61 @@ pub struct ModelOption {
     /// label: `opus`, `sonnet`, `haiku`, `fable`. Lets a consumer offer a deliberate
     /// family-granular affordance without inferring one from punctuation.
     pub family: String,
+    /// True when another row in the SAME response carries this `display`, so matching it does not
+    /// identify one row.
+    ///
+    /// It is set on every `[1m]` pair, because the window marker is not part of a model's identity
+    /// and `display_model` strips it: `opus` and `opus[1m]` both render "Opus". A session whose
+    /// transcript stamps the bare alias therefore equals both, and only one of them would leave
+    /// its context window alone.
+    ///
+    /// maiTerm cannot break the tie, and that is the point of saying so here rather than in prose.
+    /// A session's window is inferred per FAMILY (`ASSUMED_1M_MODELS`) because the transcript does
+    /// not reliably carry the marker, so "is this session on the 1M variant" is not a question this
+    /// side can answer. A consumer must treat a match on an ambiguous row as "on this model",
+    /// never as "on this row", and must not promise an outcome that only distinguishing the two
+    /// could confirm.
+    pub ambiguous: bool,
 }
 
 /// Everything after the provider prefix and the window marker: `claude-fable-5-1[1m]` → `fable`.
+///
+/// Empty segments are skipped, exactly as [`display_model`](super::display_model) skips them.
+/// The two must agree: a single doubled hyphen in the server cache (`claude--fable-5-1[1m]`)
+/// otherwise leaves `display` looking perfectly correct — "Fable 5.1" — while `family` comes back
+/// empty, so one derived field silently contradicts the other on a value neither of them rejected.
+/// Empty means "this value names no family", which the caller treats as naming no model.
 fn family_of(value: &str) -> String {
     let s = value.replace("[1m]", "");
     let s = s.strip_prefix("claude-").unwrap_or(&s).to_string();
     let s = s.strip_suffix("-1m").unwrap_or(&s).to_string();
-    s.split('-').next().unwrap_or_default().to_lowercase()
+    s.split('-').find(|p| !p.is_empty()).unwrap_or_default().to_lowercase()
 }
 
 /// Build a row, deriving the two matchable fields from `value` so they can never disagree with it.
+///
+/// `ambiguous` starts false and is settled by [`merge`], since whether a `display` is unique is a
+/// property of the whole response rather than of one row.
 fn option(value: String, name: String, note: String, source: Source) -> ModelOption {
     let display = super::display_model(&value);
     let family = family_of(&value);
-    ModelOption { value, name, note, source, display, family }
+    ModelOption { value, name, note, source, display, family, ambiguous: false }
+}
+
+/// Flag every row whose `display` is shared with another row in the same response.
+fn mark_ambiguous(rows: &mut [ModelOption]) {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in rows.iter() {
+        *counts.entry(r.display.as_str()).or_default() += 1;
+    }
+    let shared: std::collections::HashSet<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(d, _)| d.to_string())
+        .collect();
+    for r in rows.iter_mut() {
+        r.ambiguous = shared.contains(&r.display);
+    }
 }
 
 /// The tiers every Claude Code install is expected to offer, as `/model` aliases.
@@ -137,6 +177,13 @@ fn entries_from(doc: &serde_json::Value) -> Vec<ModelOption> {
             if value.is_empty() || value != raw.trim() {
                 return None;
             }
+            // A value that names no family names no model — `claude-`, `[1m]`, a bare marker.
+            // These survive the alteration check above (nothing needed cleaning) but there is
+            // nothing for `/model` to switch to, so drop them rather than emit a row whose
+            // `family` contradicts its own documented contract.
+            if family_of(&value).is_empty() {
+                return None;
+            }
             // Display fields are repaired rather than dropped — losing a whole model over a stray
             // character in its description would be the worse trade. An empty or blank label
             // falls back to the value, so a row can never render nameless.
@@ -173,6 +220,7 @@ fn merge(account: Vec<ModelOption>) -> Vec<ModelOption> {
             ));
         }
     }
+    mark_ambiguous(&mut out);
     out
 }
 
@@ -302,6 +350,77 @@ mod tests {
         let opus_1m = merge(Vec::new()).into_iter().find(|m| m.value == "opus[1m]").unwrap();
         assert_eq!(opus_1m.display, "Opus", "[1m] is a window, not a different model");
         assert_eq!(opus_1m.family, "opus");
+    }
+
+    #[test]
+    fn a_malformed_id_never_reaches_the_wire_with_a_contradictory_family() {
+        use serde_json::json;
+        // Found by review. `family_of` split on '-' without skipping empty segments while
+        // `display_model` skips them, so these four passed the alteration check (nothing needed
+        // cleaning) and shipped with `family: ""`. The first is the sharp one: a single doubled
+        // hyphen leaves `display` reading a perfect "Fable 5.1" while family silently disagrees.
+        //
+        // This drives the ACCOUNT path deliberately. The previous version of this check iterated
+        // `merge(Vec::new())` — builtin rows only, all compile-time literals — so it never touched
+        // the one path where `value` is untrusted, which is the only path that can produce this.
+        for bad in ["claude--fable-5-1[1m]", "claude-", "-opus-5", "[1m]", "--", "-"] {
+            let out = entries_from(&json!({ "additionalModelOptionsCache": [{ "value": bad }] }));
+            let families: Vec<&str> = out.iter().map(|m| m.family.as_str()).collect();
+            assert!(
+                out.is_empty() || !families.contains(&""),
+                "{bad} emitted a row with no family: {out:?}"
+            );
+        }
+
+        // A doubled hyphen now resolves to the same family the display already implied, rather
+        // than being dropped — repairing the derivation, not the value.
+        let ok = entries_from(&json!({ "additionalModelOptionsCache": [
+            { "value": "claude--fable-5-1[1m]" },
+        ]}));
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].family, "fable");
+        assert_eq!(ok[0].display, "Fable 5.1", "and display was right all along");
+
+        // A value naming no family at all names no model, so it is dropped outright.
+        for empty in ["claude-", "[1m]", "-", "--"] {
+            let out = entries_from(&json!({ "additionalModelOptionsCache": [{ "value": empty }] }));
+            assert!(out.is_empty(), "{empty} should name no model, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_shared_display_is_flagged_so_a_match_is_not_read_as_identifying_one_row() {
+        // Found by review. `display_model` strips `[1m]`, so `opus` and `opus[1m]` both render
+        // "Opus" — and a transcript stamping the bare alias (53 real occurrences on this machine)
+        // equals BOTH, one of which would change the context window. maiTerm cannot break the tie:
+        // a session's window is inferred per family, not observed. So the response says so.
+        let out = merge(Vec::new());
+        for pair in ["opus", "sonnet"] {
+            let rows: Vec<&ModelOption> = out.iter().filter(|m| m.family == pair).collect();
+            assert_eq!(rows.len(), 2, "{pair} should have a 1M pair");
+            assert_eq!(rows[0].display, rows[1].display, "which render identically");
+            assert!(rows.iter().all(|r| r.ambiguous), "{pair} rows must admit the tie");
+        }
+        // Haiku is unpaired, so its match DOES identify its row.
+        let haiku: Vec<&ModelOption> = out.iter().filter(|m| m.family == "haiku").collect();
+        assert_eq!(haiku.len(), 1);
+        assert!(!haiku[0].ambiguous, "an unpaired row must not be flagged");
+    }
+
+    #[test]
+    fn an_account_row_that_collides_with_a_builtin_display_is_flagged_too() {
+        // Ambiguity is a property of the RESPONSE, not of the builtin table: an account row can
+        // collide with a curated one. Here a pinned id renders "Haiku", the same as the alias row,
+        // which on its own would have left the previously-unique haiku row silently ambiguous.
+        let out = merge(vec![option(
+            "claude-haiku[1m]".into(),
+            "Haiku".into(),
+            "pinned".into(),
+            Source::Account,
+        )]);
+        let haiku: Vec<&ModelOption> = out.iter().filter(|m| m.display == "Haiku").collect();
+        assert_eq!(haiku.len(), 2, "the account row and the alias row both render Haiku");
+        assert!(haiku.iter().all(|r| r.ambiguous), "both must be flagged, not just the builtin");
     }
 
     #[test]

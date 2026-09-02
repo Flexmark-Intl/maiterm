@@ -591,6 +591,17 @@ interface ModelOption {
   family: string;           // lowercase family this row switches into: opus|sonnet|haiku|fable.
                             // Stated so a client can offer a deliberate family-granular
                             // affordance without inferring one from punctuation in a label.
+                            // Never empty: a value naming no family names no model, and is dropped.
+  ambiguous: boolean;       // another row in THIS response shares this `display`, so matching it
+                            // does not identify this row. Set on every [1m] pair — the window
+                            // marker is not part of a model's identity and `display` strips it, so
+                            // `opus` and `opus[1m]` both render "Opus" and a session stamping the
+                            // bare alias equals both, though only one leaves its window alone.
+                            // maiTerm CANNOT break that tie: a session's window is inferred per
+                            // family (transcripts do not reliably carry the marker), not observed.
+                            // So: treat a match on an ambiguous row as "on this model", never as
+                            // "on this row", and never promise an outcome that only telling the
+                            // two apart could confirm.
   note: string;
   source: 'account' | 'builtin';
                             // NOT decoration — the two are not equally trustworthy.
