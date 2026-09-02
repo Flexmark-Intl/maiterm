@@ -751,12 +751,15 @@
     border-bottom: 1px solid var(--bg-light);
   }
 
+  /* The full wordmark, not a compact mark: the emblem is illegible at this size
+     (mesh collapses to specks below ~32px), so the sidebar carries the name. 16px
+     keeps the row clear of the version/DEV badges at the 240px default width. */
   .sidebar-logo {
-    height: 20px;
-    aspect-ratio: 3700 / 2717;
+    height: 16px;
+    aspect-ratio: 1725 / 320;
     opacity: 0.7;
     pointer-events: none;
-    background: var(--logo-mark-url, url(/logo-mark-light.png)) center / contain no-repeat;
+    background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }
 
   .dev-badge {

@@ -430,7 +430,6 @@
     <span class="titlebar-text">
       {#if workspacesStore.activeWorkspace}{workspacesStore.activeWorkspace.name}{/if}
     </span>
-    <div class="titlebar-logo" role="img" aria-label="maiTerm"></div>
   </div>
   <div class="app-body">
     {#if loading}
@@ -608,18 +607,6 @@
     pointer-events: none;
   }
 
-  .titlebar-logo {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    height: 16px;
-    aspect-ratio: 2745 / 489;
-    opacity: 0.8;
-    pointer-events: none;
-    background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
-  }
-
   .app-body {
     flex: 1;
     display: flex;
@@ -635,7 +622,7 @@
 
   .loading-logo {
     height: 48px;
-    aspect-ratio: 2745 / 489;
+    aspect-ratio: 1725 / 320;
     opacity: 0.5;
     background: var(--logo-url, url(/logo-light.png)) center / contain no-repeat;
   }

@@ -760,7 +760,7 @@ impl AppData {
 
 fn default_sidebar_width() -> u32 {
     // Keep in sync with SIDEBAR_DEFAULT_WIDTH in workspaces.svelte.ts.
-    215
+    240
 }
 
 fn default_font_size() -> u32 {

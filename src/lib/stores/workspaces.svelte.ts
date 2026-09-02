@@ -19,10 +19,13 @@ import { disableBridge } from '$lib/stores/sshMcpBridge.svelte';
 /** Sidebar width bounds + default. The minimum reserves room for the footer's
  *  three agent-status indicators (working / waiting / finished) alongside the
  *  corner buttons while keeping workspace names readable — see WorkspaceSidebar's
- *  footer layout. Keep in sync with `default_sidebar_width()` in Rust. */
+ *  footer layout. The default is wider than the minimum because the titlebar row
+ *  now carries the full wordmark (86px at 16px tall) rather than a compact mark:
+ *  at 215px the DEV + version badges overflow it in dev builds. Keep in sync with
+ *  `default_sidebar_width()` in Rust. */
 const SIDEBAR_MIN_WIDTH = 215;
 const SIDEBAR_MAX_WIDTH = 400;
-const SIDEBAR_DEFAULT_WIDTH = 215;
+const SIDEBAR_DEFAULT_WIDTH = 240;
 
 /**
  * Extract the remote cwd from the terminal prompt using user-configured patterns.
