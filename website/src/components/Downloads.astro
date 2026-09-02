@@ -40,7 +40,13 @@ const PLATFORMS = [
 ];
 ---
 
-<div class="dl" data-repo={REPO} data-releases={RELEASES}>
+{/* `not-content` is Starlight's escape hatch, and it is load-bearing here rather than
+    tidiness: `.sl-markdown-content a:not(:where(.not-content *))` sets link colour at
+    specificity (0,1,1), which beats an Astro-scoped `.dl-btn:where(...)` at (0,1,0) no
+    matter the source order. Without it the buttons take `--sl-color-text-accent`, which
+    in the light theme IS `--sl-color-accent` — the same variable the button paints its
+    background with, so the label goes invisible at 1:1 contrast. */}
+<div class="dl not-content" data-repo={REPO} data-releases={RELEASES}>
   <div class="dl-detected" hidden>
     <a class="dl-detected-btn" href={RELEASES}>
       <span class="dl-detected-label">Download</span>
@@ -104,6 +110,10 @@ const PLATFORMS = [
         return navigator.maxTouchPoints > 2 ? null : 'macos';
       }
       if (/Win/i.test(s)) return 'windows';
+      // ChromeOS reports "X11; CrOS x86_64" and platform "Chrome OS", so it would match
+      // the Linux test below. Running an AppImage there needs Crostini and is impossible
+      // on an ARM Chromebook — same call as iPadOS above: claim nothing.
+      if (/CrOS|Chrome OS/i.test(s)) return null;
       if (/Linux|X11/i.test(s) && !/Android/i.test(s)) return 'linux';
       return null;
     };
@@ -287,7 +297,10 @@ const PLATFORMS = [
     border-color: var(--sl-color-gray-5);
   }
 
-  .dl-size {
+  /* Built by the script, so they never carry Astro's scope class — a plain `.dl-size`
+     rule compiles to `.dl-size:where(.astro-xxxx)` and matches nothing. Scope through
+     the parent instead and leave the child selector global. */
+  .dl :global(.dl-size) {
     font-size: 0.75rem;
     font-weight: 400;
     opacity: 0.8;
@@ -300,7 +313,8 @@ const PLATFORMS = [
     color: var(--sl-color-gray-3);
   }
 
-  .dl-version-tag {
+  /* Same reason as .dl-size — inserted at runtime, so it needs a global child selector. */
+  .dl :global(.dl-version-tag) {
     font-weight: 600;
     color: var(--sl-color-white);
   }
