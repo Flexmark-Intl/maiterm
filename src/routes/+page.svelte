@@ -254,20 +254,13 @@
   }
 
   // Resolve once the tab's TerminalPane has registered (PTY spawned/reattached),
-  // or after a timeout so one wedged tab can't stall the queue. The trailing
-  // breather lets that mount's layout/reflow finish before the next one starts.
-  function waitForTabSettled(tabId: string, timeoutMs = 5000): Promise<void> {
-    return new Promise((resolve) => {
-      const start = Date.now();
-      const tick = () => {
-        if (terminalsStore.get(tabId) || Date.now() - start > timeoutMs) {
-          setTimeout(resolve, 120);
-          return;
-        }
-        setTimeout(tick, 50);
-      };
-      tick();
-    });
+  // or after a timeout so one wedged tab can't stall the queue. Event-driven, not
+  // polled — see terminalsStore.waitForRegister for why (occluded-window timer
+  // throttling). The trailing breather lets that mount's layout/reflow finish
+  // before the next one starts.
+  async function waitForTabSettled(tabId: string, timeoutMs = 5000): Promise<void> {
+    await terminalsStore.waitForRegister(tabId, timeoutMs);
+    await new Promise((resolve) => setTimeout(resolve, 120));
   }
 
   // Drive a restore list serially, updating the progress modal as it goes.

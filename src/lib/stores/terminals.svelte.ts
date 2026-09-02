@@ -80,6 +80,8 @@ function createTerminalsStore() {
   // on their first live transition. One-shot: consumed the first time the tab
   // goes live (unlike suspend→resume, which should still be promoted).
   const restoredFromArchive = new Set<string>();
+  // Resolvers parked by waitForRegister(), fired the moment the tab registers.
+  const registerWaiters = new Map<string, Set<() => void>>();
 
   function emitOscChange(tabId: string, osc: OscState) {
     for (const fn of oscListeners) fn(tabId, osc);
@@ -166,6 +168,40 @@ function createTerminalsStore() {
         spawningTabs = s;
       }
       instanceVersion++;
+      const waiters = registerWaiters.get(tabId);
+      if (waiters) {
+        registerWaiters.delete(tabId);
+        for (const wake of waiters) wake();
+      }
+    },
+
+    /**
+     * Resolves once the tab has registered (PTY spawned or reattached), or after
+     * `timeoutMs` so one wedged tab can't stall a queue. Event-driven rather than
+     * polled: WKWebView throttles timers to ~1 s while the window is occluded
+     * (display sleep, lock screen), which turned a 50 ms poll into a multi-second
+     * wait per tab during a session restore.
+     */
+    waitForRegister(tabId: string, timeoutMs: number): Promise<void> {
+      if (instances.has(tabId)) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        let set = registerWaiters.get(tabId);
+        if (!set) {
+          set = new Set();
+          registerWaiters.set(tabId, set);
+        }
+        const waiters = set;
+        const wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          waiters.delete(wake);
+          if (waiters.size === 0 && registerWaiters.get(tabId) === waiters) registerWaiters.delete(tabId);
+          resolve();
+        }, timeoutMs);
+        waiters.add(wake);
+      });
     },
 
     unregister(tabId: string) {

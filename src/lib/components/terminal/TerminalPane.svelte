@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
   import { countedListen as listen } from '$lib/utils/listenCounter';
+  import { afterLayout, nextLayout } from '$lib/utils/layout';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { Terminal } from '@xterm/xterm';
@@ -422,7 +423,7 @@
     if (slot && containerRef && containerRef.parentElement !== slot) {
       slot.appendChild(containerRef);
       if (visible && initialized) {
-        requestAnimationFrame(() => {
+        afterLayout(() => {
           fitWithPadding();
           const { cols, rows } = terminal;
           resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
@@ -508,8 +509,11 @@
     // restoreTerminalScrollback needs the terminal handle to exist first.
     // The initialScrollback value is held and restored below.
 
-    // Wait for container to have dimensions
-    await new Promise(resolve => requestAnimationFrame(resolve));
+    // Wait for container to have dimensions. Not a bare rAF: WKWebView never fires
+    // one while the window is occluded (display sleep / lock screen), and this is
+    // the step that gates the PTY spawn — a tab created from maiLink or restored
+    // by a deploy while the screens slept would otherwise sit PTY-less until wake.
+    await nextLayout();
     await new Promise(resolve => setTimeout(resolve, 100)); // Extra delay for layout
     fitWithPadding();
 
@@ -1350,7 +1354,7 @@
   $effect(() => {
     if (visible && initialized && fitAddon) {
       // Delay fit to ensure container is visible
-      requestAnimationFrame(() => {
+      afterLayout(() => {
         fitWithPadding();
         // Always sync PTY dimensions when becoming visible — the PTY may have been
         // writing at a different size while the terminal was in the background
@@ -1432,7 +1436,7 @@
     terminal.options.theme = getTheme(themeId, preferencesStore.customThemes).terminal;
 
     // Re-fit after font changes
-    requestAnimationFrame(() => {
+    afterLayout(() => {
       if (fitAddon && visible) {
         fitWithPadding();
         const { cols, rows } = terminal;
