@@ -1,0 +1,40 @@
+---
+title: Download maiTerm
+description: Download maiTerm for macOS, Windows or Linux — always the latest release.
+---
+
+import Downloads from '../../components/Downloads.astro';
+
+<Downloads />
+
+## After you install
+
+maiTerm updates itself. When a new version is out you'll get a prompt with the release
+notes and an **Install & Restart** button — you won't need to come back here.
+
+### macOS
+
+The app is signed with a Developer ID certificate and notarized by Apple, so it opens
+normally. Builds are **Apple Silicon only** — there is no Intel build, and an Intel Mac
+can't run it.
+
+### Windows
+
+The installer is unsigned, so SmartScreen shows a "Windows protected your PC" warning
+the first time. Choose **More info → Run anyway**.
+
+### Linux
+
+The **AppImage** runs anywhere — `chmod +x` it and go. The **.deb** is for Debian and
+Ubuntu, and is the better choice if you want a menu entry and normal package management.
+
+Both are built against `webkit2gtk-4.1` on Ubuntu 24.04, so they need a distribution of
+roughly that vintage or newer. On Debian/Ubuntu:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-0
+```
+
+## Building from source
+
+If you'd rather build it yourself, see the [build guide](/guides/building/).

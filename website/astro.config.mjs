@@ -32,6 +32,7 @@ export default defineConfig({
       ],
       customCss: ['./src/styles/custom.css'],
       sidebar: [
+        { label: 'Download', slug: 'download' },
         {
           label: 'Features',
           items: [

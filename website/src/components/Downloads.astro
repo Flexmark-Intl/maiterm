@@ -1,0 +1,307 @@
+---
+/**
+ * Per-platform download cards.
+ *
+ * The installer filenames carry the version (maiTerm_2.0.0_aarch64.dmg), so no direct
+ * asset URL survives a release. GitHub's /releases/latest/download/<name> redirect only
+ * helps for assets whose NAME is constant — true for latest.json and maiTerm.app.tar.gz,
+ * false for every installer here. So the real links are resolved at page load from the
+ * releases API.
+ *
+ * Progressive enhancement, deliberately: every button below ships with a working href to
+ * the releases page. If the fetch is blocked, rate-limited or offline, the visitor still
+ * lands somewhere they can download from — they just don't get a one-click file.
+ */
+const REPO = 'Flexmark-Intl/maiterm';
+const RELEASES = `https://github.com/${REPO}/releases/latest`;
+
+const PLATFORMS = [
+  {
+    id: 'macos',
+    name: 'macOS',
+    note: 'Apple Silicon (M1 and later)',
+    files: [{ key: 'dmg', label: 'Download .dmg', primary: true }],
+  },
+  {
+    id: 'windows',
+    name: 'Windows',
+    note: '64-bit (x64)',
+    files: [{ key: 'exe', label: 'Download installer', primary: true }],
+  },
+  {
+    id: 'linux',
+    name: 'Linux',
+    note: '64-bit (x86_64)',
+    files: [
+      { key: 'appimage', label: 'Download .AppImage', primary: true },
+      { key: 'deb', label: 'Download .deb', primary: false },
+    ],
+  },
+];
+---
+
+<div class="dl" data-repo={REPO} data-releases={RELEASES}>
+  <div class="dl-detected" hidden>
+    <a class="dl-detected-btn" href={RELEASES}>
+      <span class="dl-detected-label">Download</span>
+      <span class="dl-detected-meta"></span>
+    </a>
+    <p class="dl-detected-alt">Not your platform? Pick one below.</p>
+  </div>
+
+  <div class="dl-grid">
+    {PLATFORMS.map((p) => (
+      <div class="dl-card" data-platform={p.id}>
+        <h3>{p.name}</h3>
+        <p class="dl-note">{p.note}</p>
+        <div class="dl-actions">
+          {p.files.map((f) => (
+            <a
+              class={f.primary ? 'dl-btn' : 'dl-btn dl-btn-secondary'}
+              data-file={f.key}
+              data-label={f.label}
+              href={RELEASES}
+            >
+              {f.label}
+            </a>
+          ))}
+        </div>
+      </div>
+    ))}
+  </div>
+
+  <p class="dl-version">
+    <a href={RELEASES}>All releases and release notes →</a>
+  </p>
+</div>
+
+<script>
+  // Resolve the current release's asset URLs. See the component comment for why this is
+  // done at runtime rather than baked in at build: the site only rebuilds when
+  // website/** changes, so a build-time fetch would go stale on the next release that
+  // doesn't touch the docs — which is most of them.
+  const root = document.querySelector<HTMLElement>('.dl');
+  if (root) {
+    const repo = root.dataset.repo;
+
+    /** Which asset each button wants, matched on filename suffix. `.sig` files are
+     *  updater signatures, never a download — the `!` guards keep them out. */
+    const MATCH: Record<string, (n: string) => boolean> = {
+      dmg: (n) => n.endsWith('.dmg'),
+      exe: (n) => n.endsWith('.exe'),
+      appimage: (n) => n.endsWith('.AppImage'),
+      deb: (n) => n.endsWith('.deb'),
+    };
+
+    const detectPlatform = (): string | null => {
+      const ua = navigator.userAgent;
+      // userAgentData is the modern source but is Chromium-only, so the UA string
+      // stays as the fallback rather than the other way round.
+      const p = (navigator as any).userAgentData?.platform || navigator.platform || '';
+      const s = `${p} ${ua}`;
+      if (/Mac|Darwin/i.test(s)) {
+        // iPadOS reports as Mac; it can't run a desktop build, so claim nothing.
+        return navigator.maxTouchPoints > 2 ? null : 'macos';
+      }
+      if (/Win/i.test(s)) return 'windows';
+      if (/Linux|X11/i.test(s) && !/Android/i.test(s)) return 'linux';
+      return null;
+    };
+
+    const fmtSize = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+    (async () => {
+      let release: any;
+      try {
+        const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+          headers: { Accept: 'application/vnd.github+json' },
+        });
+        if (!res.ok) return; // rate-limited or offline — the static hrefs stand
+        release = await res.json();
+      } catch {
+        return;
+      }
+
+      const assets: Array<{ name: string; browser_download_url: string; size: number }> =
+        release.assets ?? [];
+      const version: string = release.tag_name ?? '';
+
+      const resolved = new Map<string, { url: string; size: number }>();
+      for (const [key, test] of Object.entries(MATCH)) {
+        const hit = assets.find((a) => !a.name.endsWith('.sig') && test(a.name));
+        if (hit) resolved.set(key, { url: hit.browser_download_url, size: hit.size });
+      }
+
+      for (const el of root.querySelectorAll<HTMLAnchorElement>('a[data-file]')) {
+        const hit = resolved.get(el.dataset.file!);
+        if (!hit) continue; // leave the releases-page href in place
+        el.href = hit.url;
+        const size = el.querySelector('.dl-size') ?? document.createElement('span');
+        size.className = 'dl-size';
+        size.textContent = fmtSize(hit.size);
+        el.appendChild(size);
+      }
+
+      const versionEl = root.querySelector('.dl-version');
+      if (versionEl && version) {
+        const date = release.published_at
+          ? new Date(release.published_at).toLocaleDateString(undefined, {
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric',
+            })
+          : '';
+        versionEl.insertAdjacentHTML(
+          'afterbegin',
+          `<span class="dl-version-tag">${version}</span>${date ? ` · released ${date} · ` : ' · '}`,
+        );
+      }
+
+      // Promote the visitor's own platform, but only when we actually have a file for
+      // it — a headline button falling back to the releases page is worse than no
+      // headline button.
+      const plat = detectPlatform();
+      const card = plat && root.querySelector<HTMLElement>(`.dl-card[data-platform="${plat}"]`);
+      const primary = card?.querySelector<HTMLAnchorElement>('a[data-file]');
+      const primaryHit = primary && resolved.get(primary.dataset.file!);
+      if (card && primary && primaryHit) {
+        const box = root.querySelector<HTMLElement>('.dl-detected')!;
+        const btn = box.querySelector<HTMLAnchorElement>('.dl-detected-btn')!;
+        const name = card.querySelector('h3')!.textContent;
+        btn.href = primaryHit.url;
+        btn.querySelector('.dl-detected-label')!.textContent = `Download for ${name}`;
+        btn.querySelector('.dl-detected-meta')!.textContent =
+          `${version} · ${card.querySelector('.dl-note')!.textContent} · ${fmtSize(primaryHit.size)}`;
+        box.hidden = false;
+        card.classList.add('is-detected');
+      }
+    })();
+  }
+</script>
+
+<style>
+  .dl {
+    margin: 2rem 0;
+  }
+
+  .dl-detected {
+    text-align: center;
+    margin-bottom: 2.5rem;
+  }
+
+  .dl-detected-btn {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.9rem 2rem;
+    border-radius: 10px;
+    background: var(--sl-color-accent);
+    color: var(--sl-color-black);
+    text-decoration: none;
+    font-weight: 600;
+    line-height: 1.3;
+    transition: filter 0.15s ease;
+  }
+
+  .dl-detected-btn:hover {
+    filter: brightness(1.1);
+  }
+
+  .dl-detected-label {
+    font-size: 1.1rem;
+  }
+
+  .dl-detected-meta {
+    font-size: 0.8rem;
+    font-weight: 400;
+    opacity: 0.85;
+  }
+
+  .dl-detected-alt {
+    margin: 0.75rem 0 0;
+    font-size: 0.85rem;
+    color: var(--sl-color-gray-3);
+  }
+
+  .dl-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+
+  .dl-card {
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 10px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .dl-card.is-detected {
+    border-color: var(--sl-color-accent);
+  }
+
+  .dl-card h3 {
+    margin: 0;
+    font-size: 1.05rem;
+  }
+
+  .dl-note {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--sl-color-gray-3);
+  }
+
+  .dl-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+
+  .dl-btn {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.9rem;
+    border-radius: 7px;
+    border: 1px solid var(--sl-color-accent);
+    background: var(--sl-color-accent);
+    color: var(--sl-color-black);
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-align: center;
+    transition: filter 0.15s ease;
+  }
+
+  .dl-btn:hover {
+    filter: brightness(1.1);
+  }
+
+  .dl-btn-secondary {
+    background: transparent;
+    color: var(--sl-color-white);
+    border-color: var(--sl-color-gray-5);
+  }
+
+  .dl-size {
+    font-size: 0.75rem;
+    font-weight: 400;
+    opacity: 0.8;
+  }
+
+  .dl-version {
+    margin-top: 1.5rem;
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--sl-color-gray-3);
+  }
+
+  .dl-version-tag {
+    font-weight: 600;
+    color: var(--sl-color-white);
+  }
+</style>

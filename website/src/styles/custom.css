@@ -33,6 +33,17 @@
   display: block;
 }
 
+/* The hero icons link to /download, so they need to read as clickable. */
+a.platform {
+  text-decoration: none;
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+a.platform:hover {
+  color: var(--sl-color-accent-high);
+  transform: translateY(-2px);
+}
+
 .platform span {
   font-size: var(--sl-text-sm);
 }
