@@ -40,7 +40,8 @@ pub fn set_window_background(window: tauri::WebviewWindow, hex: String) -> Resul
 
 fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     let s = hex.trim().trim_start_matches('#');
-    if s.len() != 6 {
+    // Byte-sliced below, so a non-ASCII string (hand-edited state) must fail here, not panic.
+    if s.len() != 6 || !s.is_ascii() {
         return None;
     }
     let ch = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).ok();
