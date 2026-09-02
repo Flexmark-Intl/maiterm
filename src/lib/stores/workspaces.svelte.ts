@@ -2142,6 +2142,14 @@ function createWorkspacesStore() {
         await commands.renameTab(workspaceId, paneId, newTab.id, dupName, true);
       }
 
+      // 4b. Overlord exemption is a property of the work, so the copy keeps it. A reload
+      //     carries the whole record; this path copies fields one by one, and a clone that
+      //     came back supervised would be the exemption silently failing on Cmd+D.
+      if (sourceTab.overlord_exempt) {
+        newTab.overlord_exempt = true;
+        await commands.setTabOverlordExempt(workspaceId, paneId, newTab.id, true);
+      }
+
       // 5. Set scrollback (skip in shallow mode)
       if (!shallow && scrollback) {
         await commands.setTabScrollback(newTab.id, scrollback);

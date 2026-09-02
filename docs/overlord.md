@@ -1443,9 +1443,21 @@ deck's signals.
 
 **The agent's tools refuse, and say why.** They take a tab id from outside, so
 they check `isExemptTab` explicitly and answer `reason: 'exempt'` with a detail
-that tells the agent to leave it alone: `driveTab`, `recoverTab`, `archiveTab`,
-`closeTab` (via `retireGuard`), `resumeTab`, `resumeWorkspace`, `getTabPrompt`,
-`answerTabPrompt`. `isBoardableTab` is false for an exempt tab, so the scan and
+that tells the agent to leave it alone: `driveTab`, `recoverTab`, `archiveTab`
+and `closeTab` (via `retireGuard`), `deleteArchivedTab` (workspace flag only —
+an archived tab is in no pane), `resumeTab`, `resumeWorkspace`, `getTabPrompt`,
+`answerTabPrompt`.
+
+**Exempting releases what the engine already holds.** The filter in
+`agentTabs()` stops new work, but a ritual mid-sequence, an outstanding
+directive, a drive watch reading the tab's transcript, a proposal card offering
+to type into it, all outlive that filter — and the human reaches for "exempt"
+exactly while one of those is happening. So the closed-tab sweep treats an
+exempt tab as closed: on the next tick its ritual is aborted, its
+outstanding/liveness/drive-watch/handoff entries dropped, its proposals and
+escalations removed. Between clicks and ticks, `runSequence` re-checks
+exemption before every paste and `proposalStillHolds` is false for an exempt
+tab, which covers "Send it" and "Run all". `isBoardableTab` is false for an exempt tab, so the scan and
 reply paths create no placeholder rows for it either. `listWorkspaces` marks
 the tab and the workspace `overlordExempt: true`, and doctrine v8 tells the
 agent what that means — including not raising the refusal to the human, since
@@ -1455,9 +1467,10 @@ being left alone is what they asked for.
 are maiTerm's, the board is the workspace's index, and hiding work because its
 tab is unsupervised would make the exemption cost something it shouldn't. The
 human's own actions on the tab (the panel's "Do it", the composer) are
-untouched. The flag rides with the `Tab` record through reload, duplicate,
-move and window duplication, and a duplicated workspace keeps its flag: an
-exemption is a property of the work, not the window.
+untouched. The flag rides with the `Tab` record through reload, move and
+window duplication; `duplicateTab` copies fields one by one and copies this
+one explicitly; and a duplicated workspace keeps its flag: an exemption is a
+property of the work, not the window.
 
 ### Fleet: parked workspaces, sort, View, Trigger (2026-09-02)
 

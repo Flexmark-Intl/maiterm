@@ -1085,14 +1085,29 @@ function createOverlordStore() {
    * Also drops the tab's engine bookkeeping, which only ever grew — a long-lived window
    * that opens and closes tabs leaked an entry per tab across a dozen maps.
    */
+  /**
+   * Release everything the engine holds for a tab that is no longer supervised — closed, or
+   * EXEMPTED (docs/overlord.md §11). Exemption is the same event from the engine's side:
+   * `agentTabs()` stops seeing the tab, but a ritual mid-sequence, an outstanding directive,
+   * a drive watch reading its transcript, a proposal card offering to type into it, all
+   * outlive that filter unless something lets go of them. The human reaches for "exempt"
+   * exactly while one of those is happening, so leaving them to run out is leaving the
+   * exemption silently false for minutes.
+   */
   function sweepClosedTabs() {
+    const present = new Set<string>();
     const live = new Set<string>();
     for (const ws of workspacesStore.workspaces) {
-      for (const pane of ws.panes) for (const tab of pane.tabs) live.add(tab.id);
+      for (const pane of ws.panes) {
+        for (const tab of pane.tabs) {
+          present.add(tab.id);
+          if (!tabExempt(tab, ws)) live.add(tab.id);
+        }
+      }
     }
     // An empty tree means the window is still loading, not that every tab was closed.
     // Sweeping on it would throw away the whole queue at startup.
-    if (!live.size) return;
+    if (!present.size) return;
 
     const deadProposals = proposals.filter((p) => !live.has(p.tabId));
     const deadEscalations = escalations.filter((e) => !live.has(e.tabId));
@@ -1154,7 +1169,7 @@ function createOverlordStore() {
 
     bumpLive();
     logInfo(
-      `overlord: swept ${deadTabs.size} closed tab(s) — dropped ${deadProposals.length} ` +
+      `overlord: swept ${deadTabs.size} closed or exempt tab(s) — dropped ${deadProposals.length} ` +
         `proposal(s), ${deadEscalations.length} escalation(s)`,
     );
   }
@@ -1405,6 +1420,13 @@ function createOverlordStore() {
     try {
       for (let i = 0; i < rule.sequence.length; i++) {
         const step = rule.sequence[i];
+        // Exempted since the run started. The tick's sweep aborts the run too, but a step
+        // gate can be seconds from typing when the human clicks, and this is the last check
+        // before the paste.
+        if (isExemptTab(tabId)) {
+          ledger(tabId, rule.id, origin, i, step, 'aborted');
+          return;
+        }
         // A step with no text would still submit — `bracketedPasteSubmit` wraps the empty
         // string and presses Enter, sending whatever the human had half-typed at the agent.
         // The rules editor persists "New rule" with one blank step before anything is typed
@@ -1573,6 +1595,9 @@ function createOverlordStore() {
    * time so the gap between rendering a card and clicking it can't be exploited.
    */
   function proposalStillHolds(p: OverlordProposal, now: number): boolean {
+    // Exempted after the card was raised — very plausibly BECAUSE of the card. The sweep
+    // drops it on the next tick; this is for "Send it" and "Run all" clicked before then.
+    if (isExemptTab(p.tabId)) return false;
     const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
     // Rule deleted or switched off while the proposal waited.
     if (!rule || !rule.enabled) return false;
@@ -3064,6 +3089,7 @@ function createOverlordStore() {
     async recoverTab(
       tabId: string,
     ): Promise<{ sent: boolean; kind?: UnreadyKind; verified?: boolean; reason?: string; detail?: string }> {
+      if (isExemptTab(tabId)) return { sent: false, reason: 'exempt', detail: EXEMPT_DETAIL };
       // Terminal first. A tab with no mounted pane has no liveness entry either — the probe
       // only considers tabs it can reach — so asking `unreadyKind` first answered
       // `not_unready`, which reads as "nothing wrong with that tab" for a tab nothing can
@@ -3377,6 +3403,11 @@ function createOverlordStore() {
           reason: 'not_archived',
           detail: 'No archived tab with that id in this window. This deletes ARCHIVED tabs only — a tab still in a pane is closeTab\'s job.',
         };
+      }
+      // An archived tab is not in any pane, so `isExemptTab` cannot see it; the workspace
+      // flag is the only one that can apply, and this is the one irreversible verb.
+      if (ws.overlord_exempt) {
+        return { ok: false, reason: 'exempt', detail: 'That workspace is exempt from Overlord — the human marked it so. Leave its archive alone.' };
       }
       const name = (ws.archived_tabs ?? []).find((t) => t.id === tabId)?.archived_name ?? tabId.slice(0, 8);
       try {
