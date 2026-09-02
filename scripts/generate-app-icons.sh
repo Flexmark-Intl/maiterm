@@ -63,15 +63,21 @@ fi
 # The mark is drawn white-on-transparent: Icon Composer shapes and lights the
 # GLASS LAYER from its alpha, so the alpha has to be the true silhouette. It adds
 # its own specular, blur and shadow -- nothing here may carry baked lighting.
-rm -rf "$ICON"; mkdir -p "$ICON/Assets"
+# Everything this needs is checked BEFORE the rm -rf: AppIcon.icon/{icon.json,
+# Assets/mark.png} are tracked files, and wiping them before knowing we can
+# rebuild them turns a missing dependency into a deleted build input.
 if ! command -v rsvg-convert >/dev/null 2>&1; then
   echo "ERROR: rsvg-convert not found (brew install librsvg) — cannot render the emblem" >&2; exit 1
 fi
+if ! python3 "$EMBLEM" --fg '#ffffff' --transparent > /dev/null 2>&1; then
+  echo "ERROR: $EMBLEM failed under $(python3 -V 2>&1) — cannot render the emblem" >&2; exit 1
+fi
 EMW="$(mktemp -d)"
+rm -rf "$ICON"; mkdir -p "$ICON/Assets"
 python3 "$EMBLEM" --fg '#ffffff' --transparent > "$EMW/emblem.svg"
 rsvg-convert -w 1024 -h 1024 "$EMW/emblem.svg" -o "$EMW/emblem.png"
 magick "$EMW/emblem.png" -trim +repage -resize ${MARK_W}x \
-  -background none -gravity center -extent 1024x1024 "$ICON/Assets/mark.png"
+  -background none -gravity center -extent 1024x1024 -strip "$ICON/Assets/mark.png"
 rm -rf "$EMW"
 cat > "$ICON/icon.json" <<JSON
 {
@@ -134,9 +140,14 @@ if command -v magick >/dev/null 2>&1 && command -v rsvg-convert >/dev/null 2>&1;
   # first image in a composite sets the output colorspace — without these the whole
   # tile is written greyscale and every colour collapses to its red channel
   # (#2A2F4D -> #282828, #5965D6 -> #595959).
-  magick "$FW/mask.png" -blur 0x26 -roll +0+16 -negate "$FW/sm.png"
+  # NO -negate here. The mask is white INSIDE the silhouette, which is already the
+  # alpha a drop shadow wants; negating it paints opaque black everywhere OUTSIDE
+  # the tile instead, giving a black square with the tile inset in it. That shipped
+  # once — corner alpha 0 -> 1 on every tile and both favicons.
+  magick "$FW/mask.png" -blur 0x26 -roll +0+16 "$FW/sm.png"
   magick -size 1024x1024 xc:'#000' -colorspace sRGB "$FW/sm.png" -alpha off \
-    -compose CopyOpacity -composite -colorspace sRGB -type TrueColorAlpha "$FW/shadow.png"
+    -compose CopyOpacity -composite -channel A -evaluate multiply 0.42 +channel \
+    -colorspace sRGB -type TrueColorAlpha "$FW/shadow.png"
 
   flat_tile() {  # $1=gradient stops  $2=mark colour  $3=output
     python3 "$EMBLEM" --fg "$2" --transparent > "$FW/e.svg"
@@ -147,18 +158,31 @@ if command -v magick >/dev/null 2>&1 && command -v rsvg-convert >/dev/null 2>&1;
       -compose CopyOpacity -composite -colorspace sRGB -type TrueColorAlpha "$FW/t.png"
     magick "$FW/shadow.png" -colorspace sRGB -type TrueColorAlpha \
       "$FW/t.png" -compose over -composite "$FW/ts.png"
-    # tile centre, not canvas centre: the silhouette sits 16px low
+    # tile centre, not canvas centre: the silhouette sits 16px above centre
+    # (its box is 88,72-935,919, so its middle is y=495.5 against a canvas 512).
+    # -strip on every output: without it ImageMagick embeds a png:tIME chunk and
+    # the file churns on every run even when the pixels are identical.
     magick "$FW/ts.png" "$FW/mk.png" -gravity center -geometry +0-16 \
-      -compose over -composite -type TrueColorAlpha "$3"
+      -compose over -composite -type TrueColorAlpha -strip "$3"
   }
 
   flat_tile '0,0 #2A2F4D 1023,1023 #1E2133' '#E1E3F0' "$NAVY"
   flat_tile '0,0 #FFFDF7 1023,1023 #F2E9D6' '#5965D6' "$WEB/src/assets/icon-light.png"
   cp "$NAVY" "$WEB/src/assets/icon-dark.png"
-  magick "$NAVY" -resize 256x256 "$WEB/public/favicon.png"
-  magick "$NAVY" -resize 256x256 "$STATIC/favicon.png"
+  magick "$NAVY" -resize 256x256 -strip "$WEB/public/favicon.png"
+  magick "$NAVY" -resize 256x256 -strip "$STATIC/favicon.png"
+
+  # The files tauri.conf.json `bundle.icon` actually ships. Regenerating only the
+  # 1024 master leaves these stale: the bundler synthesises the macOS .icns and the
+  # Windows .ico from THIS list, not from the master, so a rebrand that skips them
+  # ships the old mark everywhere except macOS 26's Assets.car.
+  for spec in "32x32.png 32" "64x64.png 64" "128x128.png 128" "128x128@2x.png 256" "icon.png 1024"; do
+    set -- $spec
+    magick "$NAVY" -resize "$2x$2" -strip "$ICONS/$1"
+  done
+  magick "$NAVY" -define icon:auto-resize=256,128,64,48,32,16 -strip "$ICONS/icon.ico"
   rm -rf "$FW"
-  echo "wrote $NAVY + website icon-light/icon-dark/favicon + static/favicon"
+  echo "wrote $NAVY + bundle PNGs + icon.ico + website icon-light/icon-dark/favicon + static/favicon"
 else
   echo "WARN: magick or rsvg-convert missing; skipped flat tiles" >&2
 fi

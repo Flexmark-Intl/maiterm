@@ -23,6 +23,7 @@ gradient, glow, bevel or shadow -- baked lighting would double up.
 """
 import math
 import sys
+from typing import Optional
 
 S = 1024                 # canvas
 C = S / 2
@@ -32,7 +33,10 @@ R_IDLE    = 40           # diagonal node radius  (1.9x ratio: reads at 16px)
 R_CORE    = 131          # centre disc
 
 
-def emblem(fg: str = "#000", bg: str | None = "#fff") -> str:
+# Optional[str], not `str | None`: PEP 604 in an annotated default is evaluated at
+# def time, so it is a hard TypeError on Python 3.9 -- which is what /usr/bin/python3
+# still is on stock macOS. This module must run on the system interpreter.
+def emblem(fg: str = "#000", bg: Optional[str] = "#fff") -> str:
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {S} {S}" '
            f'width="{S}" height="{S}">']
     if bg:
@@ -49,6 +53,11 @@ def emblem(fg: str = "#000", bg: str | None = "#fff") -> str:
 
 
 if __name__ == "__main__":
-    fg = sys.argv[sys.argv.index("--fg") + 1] if "--fg" in sys.argv else "#000"
+    fg = "#000"
+    if "--fg" in sys.argv:
+        i = sys.argv.index("--fg")
+        if i + 1 >= len(sys.argv):
+            sys.exit("--fg needs a colour, e.g. --fg '#ffffff'")
+        fg = sys.argv[i + 1]
     bg = None if "--transparent" in sys.argv else "#fff"
     sys.stdout.write(emblem(fg, bg))
