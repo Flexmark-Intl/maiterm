@@ -26,7 +26,7 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     sequence: [
       {
         kind: 'process',
-        text: 'Before we continue — make sure any relevant docs, memory and tasks are updated if needed.',
+        text: 'Before we continue — make sure any relevant docs, memory, code comments and tasks are updated if needed.',
         await: { until: 'turn_end' },
         timeout_seconds: 900,
         on_timeout: 'abort',
