@@ -13,9 +13,11 @@ import config from 'virtual:starlight/user-config';
 const { siteTitle, siteTitleHref } = Astro.locals.starlightRoute;
 
 // "mai" in slate, "Term" in blue — the same split the app and the README use.
-// Any other title (a translation, a rename) falls through to plain text rather
-// than being mis-split.
-const wordmark = siteTitle.startsWith('mai') ? ['mai', siteTitle.slice(3)] : null;
+// Matched exactly, not by prefix: the face is subset to the six glyphs in
+// "maiTerm", so a sibling name like "maiLink" would take `mai` and the `i`
+// from Plex Mono and the rest from the fallback stack — one word, two sets of
+// letterforms. Any other title falls through to plain text instead.
+const wordmark = siteTitle === 'maiTerm' ? ['mai', 'Term'] : null;
 ---
 
 <a href={siteTitleHref} class="site-title sl-flex">

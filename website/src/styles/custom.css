@@ -167,9 +167,11 @@ a.platform:hover {
        --layout-features='' --no-hinting --desubroutinize --name-IDs='' \
        --output-file=website/public/fonts/maiterm-wordmark.woff2
 
-   It is deliberately NOT general-purpose IBM Plex Mono: any other character
-   set in it renders as tofu. That is why the family is named for the wordmark
-   rather than for the typeface — so nobody reaches for it as a body font.
+   It is deliberately NOT general-purpose IBM Plex Mono. Font matching is
+   per-character, so any other text set in it silently takes its missing
+   letters from the fallback stack and comes out in two sets of letterforms.
+   That is why the family is named for the wordmark rather than for the
+   typeface — so nobody reaches for it as a body font.
    IBM Plex is OFL-1.1; the licence ships beside the font at /fonts/OFL.txt.
 --------------------------------------------------------------------------- */
 @font-face {
@@ -194,9 +196,11 @@ a.platform:hover {
   color: var(--wordmark-term);
 }
 
-/* The two pairs the app ships (src/lib/themes/index.ts). The tones need
+/* The two pairs the app ships (scripts/generate-app-icons.sh). The tones need
    luminance separation, not just hue, or they read as a single colour.
-   Dark is the default here because the site is. */
+   Dark goes on bare :root because Starlight's ThemeProvider always writes a
+   literal light/dark before first paint, and with JS off the site has no
+   prefers-color-scheme fallback at all — it is unconditionally dark. */
 :root {
   --wordmark-mai: #8b93a7;
   --wordmark-term: #a8bcff;
@@ -204,4 +208,16 @@ a.platform:hover {
 :root[data-theme='light'] {
   --wordmark-mai: #5c6173;
   --wordmark-term: #5965d6;
+}
+
+/* Starlight's print stylesheet forces a light page whatever the theme, but it
+   only remaps its own --sl-color-* tokens — these would survive unchanged and
+   print #a8bcff on near-white at 1.7:1, on the landing h1 and every page's
+   header. Print always gets the light pair. */
+@media print {
+  :root,
+  :root[data-theme='dark'] {
+    --wordmark-mai: #5c6173;
+    --wordmark-term: #5965d6;
+  }
 }
