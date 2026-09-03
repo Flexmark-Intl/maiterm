@@ -439,7 +439,20 @@ pub async fn start_ssh_tunnel(
         // report on stderr, but ControlMaster-multiplexed ones use stdout instead.
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
         let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
-        match await_forward_result(stdout, stderr, listen).await? {
+        // Kill before propagating. The timeout arm is reached only while BOTH pipes are still
+        // open — i.e. the ssh is provably alive and merely slow to authenticate — and tokio
+        // does not kill on drop, so returning here used to abandon a running process that
+        // goes on to bind its remote port with no entry in `ssh_tunnels` to reach it by. That
+        // is the same orphan this file's startup sweep exists to clean up, except created
+        // fresh, and the frontend's retry loop can mint another on the next term-title event.
+        let outcome = match await_forward_result(stdout, stderr, listen).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                let _ = child.kill().await;
+                return Err(e);
+            }
+        };
+        match outcome {
             ForwardOutcome::Ready(port) => {
                 established = Some((child, port));
                 break;
@@ -574,11 +587,20 @@ pub fn get_ssh_tunnel(
     })
 }
 
-/// Whether a `ps` command line is one of OUR reverse tunnels. `needle` carries the trailing
-/// separator so `…/cm/` cannot match `…/cm-dev/`; `-R` excludes the short-lived muxed clients
-/// (transcript fetches, scp) that share the same socket and are none of our business to kill.
-fn is_orphaned_tunnel(cmd: &str, needle: &str) -> bool {
-    cmd.contains(needle) && cmd.contains(" -R ")
+/// Whether a `ps` row is one of OUR reverse tunnels AND genuinely orphaned.
+///
+/// `needle` carries the trailing separator so `…/cm/` cannot match `…/cm-dev/`; `-R` excludes
+/// the short-lived muxed clients (transcript fetches, scp) that share the same socket and are
+/// none of our business to kill.
+///
+/// `ppid == 1` is the part that makes this safe to run at all, and it only became checkable
+/// with `ControlPersist=no`: a tunnel belonging to a LIVE maiTerm is now that process's child,
+/// while one whose owner is gone has been reparented to init. Without it the sweep rests on
+/// "no other instance of my flavour is running", which nothing enforces — there is no
+/// single-instance guard, and on Linux a second launch is simply a second process. It would
+/// then SIGTERM the live instance's tunnels and take its remote agents offline.
+fn is_orphaned_tunnel(cmd: &str, ppid: u32, needle: &str) -> bool {
+    ppid == 1 && cmd.contains(needle) && cmd.contains(" -R ")
 }
 
 /// Kill reverse tunnels left behind by a previous run (called at startup).
@@ -598,17 +620,20 @@ pub fn kill_orphaned_tunnels() {
         return;
     };
     let needle = format!("ControlPath={}/", dir.display());
-    let Ok(out) = std::process::Command::new("ps").args(["-eo", "pid=,command="]).output() else {
+    let Ok(out) = std::process::Command::new("ps").args(["-eo", "pid=,ppid=,command="]).output() else {
         return;
     };
     let mut killed = 0;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let line = line.trim_start();
-        let Some((pid, cmd)) = line.split_once(char::is_whitespace) else { continue };
-        if !is_orphaned_tunnel(cmd, &needle) {
+        let mut fields = line.trim_start().splitn(3, char::is_whitespace);
+        let (Some(pid), Some(ppid), Some(cmd)) = (fields.next(), fields.next(), fields.next())
+        else {
             continue;
-        }
-        if let Ok(pid) = pid.parse::<u32>() {
+        };
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.trim().parse::<u32>()) else {
+            continue;
+        };
+        if is_orphaned_tunnel(cmd, ppid, &needle) {
             log::info!("Killing orphaned SSH tunnel from a previous run (pid {}): {}", pid, cmd);
             kill_process(pid);
             killed += 1;
@@ -617,8 +642,21 @@ pub fn kill_orphaned_tunnels() {
     if killed > 0 {
         log::info!("Killed {} orphaned SSH tunnel(s) left by a previous run", killed);
     }
-    // Their sockets are meaningless now; the next tunnel start would unlink them anyway.
-    let _ = std::fs::remove_dir_all(&dir);
+    // Only the sockets of what we just killed. NOT the whole directory: a live sibling
+    // instance of this flavour keeps its own masters' sockets in here, and deleting one
+    // silently downgrades every muxed client (transcript fetches, remote image staging) to a
+    // fresh authenticated connection.
+    if killed > 0 {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                // A socket whose master answers is somebody's live tunnel — leave it.
+                if !std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -1056,16 +1094,28 @@ mod tests {
     fn the_orphan_sweep_matches_only_our_own_tunnels() {
         let prod = "ControlPath=/Users/d/.maiterm/cm/";
         let tunnel = "ssh -N -v -o ControlMaster=yes -o ControlPath=/Users/d/.maiterm/cm/ews@nova.sock -R 28616:127.0.0.1:30375 -x -C ews@nova";
-        assert!(is_orphaned_tunnel(tunnel, prod));
+        assert!(is_orphaned_tunnel(tunnel, 1, prod));
 
         // The dev sibling's tunnel, which prod must leave strictly alone.
         let dev_tunnel = tunnel.replace("/cm/", "/cm-dev/");
-        assert!(!is_orphaned_tunnel(&dev_tunnel, prod));
-        assert!(is_orphaned_tunnel(&dev_tunnel, "ControlPath=/Users/d/.maiterm/cm-dev/"));
+        assert!(!is_orphaned_tunnel(&dev_tunnel, 1, prod));
+        assert!(is_orphaned_tunnel(&dev_tunnel, 1, "ControlPath=/Users/d/.maiterm/cm-dev/"));
 
         // A muxed client over the same socket — no forwarding, not ours to kill.
         let mux = "ssh -o ControlMaster=no -o ControlPath=/Users/d/.maiterm/cm/ews@nova.sock -o BatchMode=yes -T ews@nova tail -c +1 /home/ews/.claude/x.jsonl";
-        assert!(!is_orphaned_tunnel(mux, prod));
+        assert!(!is_orphaned_tunnel(mux, 1, prod));
+    }
+
+    /// The sweep runs at startup and kills by pattern, so its safety cannot rest on "no other
+    /// instance of my flavour is running" — nothing enforces that, and on Linux a second
+    /// launch is just a second process. A tunnel owned by a LIVE maiTerm is that process's
+    /// child; only a reparented one is genuinely abandoned.
+    #[test]
+    fn a_live_instances_tunnel_is_not_an_orphan() {
+        let prod = "ControlPath=/Users/d/.maiterm/cm/";
+        let tunnel = "ssh -N -v -o ControlMaster=yes -o ControlPath=/Users/d/.maiterm/cm/ews@nova.sock -R 28616:127.0.0.1:30375 -x -C ews@nova";
+        assert!(is_orphaned_tunnel(tunnel, 1, prod), "reparented: ours to clean up");
+        assert!(!is_orphaned_tunnel(tunnel, 80701, prod), "still owned by a running maiTerm");
     }
 
     /// The draw must actually vary. `subsec_nanos()` was the first source used here and is a
