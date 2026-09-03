@@ -192,6 +192,11 @@ pub fn run() {
                 None => log::warn!("RLIMIT_NOFILE soft limit not raised (already at max or setrlimit failed)"),
             }
 
+            // Before anything opens a tunnel of its own: whatever still holds one of our
+            // ControlPath sockets belongs to a run that did not exit cleanly, and would
+            // otherwise squat its remote port for as long as the machine stays up.
+            commands::ssh_tunnel::kill_orphaned_tunnels();
+
             // Window title is set dynamically from the frontend (workspace name)
 
             // Restore additional windows beyond "main"

@@ -291,10 +291,26 @@ fn build_tunnel_args(host_key: &str, ssh_args: &str, local_port: u16, listen: Op
     // (transcript-mirror fetches, scp) get free mux'd commands over the already-
     // authenticated tunnel. The socket lives and dies with the tunnel process — no
     // ControlPersist, so no daemonized master escapes our pid tracking.
+    //
+    // ControlPersist MUST be forced off, and it is the whole reason tunnels used to leak.
+    // We override ControlMaster and ControlPath but inherited ControlPersist from the user's
+    // ~/.ssh/config (600 here), and a master with ControlPersist set FORKS ITSELF INTO THE
+    // BACKGROUND once the connection is up. The pid we recorded was the parent, which exits
+    // seconds later, so `is_process_alive` was false for every tunnel we owned: the reuse
+    // path never hit, `detach_ssh_tunnel` and `kill_all_tunnels` killed a pid that was
+    // already gone, and the real process — reparented to init, holding its remote port —
+    // was abandoned. Every launch then found its own previous tunnel squatting the port and
+    // walked to the next one, which is what marched ews@nova from 28599 to 28616 and left
+    // ten orphans alive. Verified both ways against a live host: with ControlPersist
+    // inherited the recorded pid is dead within 6s and an unparented ssh holds the forward;
+    // with `no` the recorded pid stays alive, killing it removes the tunnel, and muxed
+    // clients still work over the socket.
     #[cfg(unix)]
     if let Some(sock) = prepare_cm_socket(host_key) {
         cmd_args.push("-o".to_string());
         cmd_args.push("ControlMaster=yes".to_string());
+        cmd_args.push("-o".to_string());
+        cmd_args.push("ControlPersist=no".to_string());
         cmd_args.push("-o".to_string());
         cmd_args.push(format!("ControlPath={}", sock.display()));
     } else {
@@ -469,19 +485,26 @@ pub async fn start_ssh_tunnel(
     }
 
     // Spawn background task to monitor the process and clean up on exit.
-    // Note: ControlMaster mux clients exit immediately after setting up the
-    // forwarding (the master holds it). Don't remove tunnel state if the
-    // process exits with code 0 — the forwarding is still alive in the master.
+    //
+    // This used to keep the tunnel's state on a clean exit, reasoning that the process was a
+    // ControlMaster mux client whose master still held the forwarding. That reading was
+    // wrong: what actually exited was the master forking itself into the background under an
+    // inherited ControlPersist (see build_tunnel_args). The entry it preserved held a pid
+    // that was already dead, which is how a leaked tunnel stayed invisible. With
+    // ControlPersist forced off we own the master and it does not fork, so an exit — clean
+    // or not — means the forwarding is gone and the tabs on it need to hear about it.
     let state_clone = state.inner().clone();
     let hk = host_key.clone();
     let app_clone = app.clone();
     tokio::spawn(async move {
         let status = child.wait().await;
         let exit_ok = status.map(|s| s.success()).unwrap_or(false);
-        if exit_ok {
-            log::info!("SSH tunnel process exited cleanly for {} (likely ControlMaster mux)", hk);
-        } else {
-            log::info!("SSH tunnel process exited with error for {}", hk);
+        {
+            log::info!(
+                "SSH tunnel process for {} exited {} — dropping the tunnel",
+                hk,
+                if exit_ok { "cleanly" } else { "with an error" }
+            );
             cleanup_cm_socket(&hk);
             let tab_ids: Vec<String> = {
                 let mut tunnels = state_clone.ssh_tunnels.write();
@@ -550,6 +573,56 @@ pub fn get_ssh_tunnel(
         host_key: t.host_key.clone(),
     })
 }
+
+/// Whether a `ps` command line is one of OUR reverse tunnels. `needle` carries the trailing
+/// separator so `…/cm/` cannot match `…/cm-dev/`; `-R` excludes the short-lived muxed clients
+/// (transcript fetches, scp) that share the same socket and are none of our business to kill.
+fn is_orphaned_tunnel(cmd: &str, needle: &str) -> bool {
+    cmd.contains(needle) && cmd.contains(" -R ")
+}
+
+/// Kill reverse tunnels left behind by a previous run (called at startup).
+///
+/// `kill_all_tunnels` runs on a clean exit, and a crash or an externally-issued quit — which
+/// is how the local deploy script restarts maiTerm — bypasses it. Anything still holding one
+/// of our ControlPath sockets at startup is therefore an orphan by definition: this process
+/// has not opened a tunnel yet. Left alone they squat their remote ports, and the port walk
+/// steps over them, which is how one host marched from 28599 to 28616.
+///
+/// Matched on our OWN socket directory, with the separator included so the prod sweep cannot
+/// reach `cm-dev/` — dev and prod run at the same time by design, and each must only ever
+/// kill its own.
+#[cfg(unix)]
+pub fn kill_orphaned_tunnels() {
+    let Some(dir) = cm_socket_path("x").and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+        return;
+    };
+    let needle = format!("ControlPath={}/", dir.display());
+    let Ok(out) = std::process::Command::new("ps").args(["-eo", "pid=,command="]).output() else {
+        return;
+    };
+    let mut killed = 0;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let line = line.trim_start();
+        let Some((pid, cmd)) = line.split_once(char::is_whitespace) else { continue };
+        if !is_orphaned_tunnel(cmd, &needle) {
+            continue;
+        }
+        if let Ok(pid) = pid.parse::<u32>() {
+            log::info!("Killing orphaned SSH tunnel from a previous run (pid {}): {}", pid, cmd);
+            kill_process(pid);
+            killed += 1;
+        }
+    }
+    if killed > 0 {
+        log::info!("Killed {} orphaned SSH tunnel(s) left by a previous run", killed);
+    }
+    // Their sockets are meaningless now; the next tunnel start would unlink them anyway.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(unix))]
+pub fn kill_orphaned_tunnels() {}
 
 /// Kill all SSH tunnels (called on app exit).
 pub fn kill_all_tunnels(state: &Arc<AppState>) {
@@ -973,6 +1046,26 @@ mod tests {
             classify_forward_line(line, None),
             Some(ForwardOutcome::Ready(45015))
         ));
+    }
+
+    /// The startup sweep kills by command line, so its match has to be exact about two
+    /// things: dev and prod run at the same time by design and must never kill each other's
+    /// tunnels, and the muxed clients sharing the socket (transcript fetches, scp) are not
+    /// tunnels at all.
+    #[test]
+    fn the_orphan_sweep_matches_only_our_own_tunnels() {
+        let prod = "ControlPath=/Users/d/.maiterm/cm/";
+        let tunnel = "ssh -N -v -o ControlMaster=yes -o ControlPath=/Users/d/.maiterm/cm/ews@nova.sock -R 28616:127.0.0.1:30375 -x -C ews@nova";
+        assert!(is_orphaned_tunnel(tunnel, prod));
+
+        // The dev sibling's tunnel, which prod must leave strictly alone.
+        let dev_tunnel = tunnel.replace("/cm/", "/cm-dev/");
+        assert!(!is_orphaned_tunnel(&dev_tunnel, prod));
+        assert!(is_orphaned_tunnel(&dev_tunnel, "ControlPath=/Users/d/.maiterm/cm-dev/"));
+
+        // A muxed client over the same socket — no forwarding, not ours to kill.
+        let mux = "ssh -o ControlMaster=no -o ControlPath=/Users/d/.maiterm/cm/ews@nova.sock -o BatchMode=yes -T ews@nova tail -c +1 /home/ews/.claude/x.jsonl";
+        assert!(!is_orphaned_tunnel(mux, prod));
     }
 
     /// The draw must actually vary. `subsec_nanos()` was the first source used here and is a
