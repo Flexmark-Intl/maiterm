@@ -3,6 +3,10 @@ title: maiTerm
 description: A terminal built for AI workflows — not AI built into a terminal.
 template: splash
 hero:
+  # Starlight renders hero.title with set:html, so the duo-tone wordmark needs
+  # no component override here — unlike the header. `title` above stays plain
+  # text for <title> and the social cards.
+  title: '<span class="wordmark"><span class="wm-mai">mai</span><span class="wm-term">Term</span></span>'
   tagline: A terminal for devs juggling multiple projects and AI agents at once. No built-in LLM, no chat sidebar — just a proper terminal that keeps you organized and picks up exactly where you left off.
   image:
     dark: ../../assets/icon-dark.png

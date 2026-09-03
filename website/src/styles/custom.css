@@ -156,3 +156,52 @@ a.platform:hover {
   font-size: var(--sl-text-xs);
   color: var(--sl-color-gray-3);
 }
+
+/* ---------------------------------------------------------------------------
+   Wordmark — IBM Plex Mono Regular, duo-tone, matching the app and the README.
+
+   The face is a 764-byte subset holding exactly the six glyphs in "maiTerm"
+   (T a e i m r), cut from scripts/assets/fonts/IBMPlexMono-Regular.ttf with:
+
+     pyftsubset IBMPlexMono-Regular.ttf --text="maiTerm" --flavor=woff2 \
+       --layout-features='' --no-hinting --desubroutinize --name-IDs='' \
+       --output-file=website/public/fonts/maiterm-wordmark.woff2
+
+   It is deliberately NOT general-purpose IBM Plex Mono: any other character
+   set in it renders as tofu. That is why the family is named for the wordmark
+   rather than for the typeface — so nobody reaches for it as a body font.
+   IBM Plex is OFL-1.1; the licence ships beside the font at /fonts/OFL.txt.
+--------------------------------------------------------------------------- */
+@font-face {
+  font-family: 'maiTerm Wordmark';
+  src: url('/fonts/maiterm-wordmark.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.wordmark {
+  font-family: 'maiTerm Wordmark', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Only Regular is subset — let nothing synthesise a bold or an oblique.
+     The header sets font-weight 600 on .site-title, which this must beat. */
+  font-weight: 400;
+  font-synthesis: none;
+}
+.wordmark .wm-mai {
+  color: var(--wordmark-mai);
+}
+.wordmark .wm-term {
+  color: var(--wordmark-term);
+}
+
+/* The two pairs the app ships (src/lib/themes/index.ts). The tones need
+   luminance separation, not just hue, or they read as a single colour.
+   Dark is the default here because the site is. */
+:root {
+  --wordmark-mai: #8b93a7;
+  --wordmark-term: #a8bcff;
+}
+:root[data-theme='light'] {
+  --wordmark-mai: #5c6173;
+  --wordmark-term: #5965d6;
+}

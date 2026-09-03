@@ -15,6 +15,11 @@ export default defineConfig({
         dark: './src/assets/icon-dark.png',
       },
       favicon: '/favicon.png',
+      components: {
+        // Duo-tone wordmark in the header — see the component for why an
+        // override is needed rather than CSS.
+        SiteTitle: './src/components/SiteTitle.astro',
+      },
       social: {
         github: 'https://github.com/Flexmark-Intl/maiterm',
       },
