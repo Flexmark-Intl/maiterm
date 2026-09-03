@@ -603,6 +603,37 @@ fn is_orphaned_tunnel(cmd: &str, ppid: u32, needle: &str) -> bool {
     ppid == 1 && cmd.contains(needle) && cmd.contains(" -R ")
 }
 
+/// One `ps -eo pid=,ppid=,command=` row → `(pid, ppid, command)`.
+///
+/// Both numeric columns are RIGHT-ALIGNED in a padded field, so what separates them is a RUN
+/// of spaces, not one. The first version of this split with `splitn(3, char::is_whitespace)`,
+/// which breaks on each single space: for `"  134     1 /usr/libexec/logd"` the middle field
+/// came out EMPTY, the `u32` parse failed, and the row was skipped. That discarded every row
+/// whose ppid is short — which is every orphan, the only rows this sweep looks for. Measured
+/// against a live process table: 670 rows with ppid 1, none of them seen, so `killed` was
+/// always 0. Nothing logs on zero kills, so the sweep looked like it was working while doing
+/// nothing at all; the ports kept walking (28607 → 28609 on the first boot after it shipped).
+///
+/// Consume a whole run of whitespace per column, and keep the command verbatim after it —
+/// `is_orphaned_tunnel` matches on `" -R "`, so the interior spacing has to survive.
+fn parse_ps_row(line: &str) -> Option<(u32, u32, &str)> {
+    let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+    let (ppid, cmd) = rest.trim_start().split_once(char::is_whitespace)?;
+    Some((pid.parse().ok()?, ppid.parse().ok()?, cmd.trim_start()))
+}
+
+/// The pids of our abandoned tunnels in a `ps` dump. Split out from the sweep so the parse and
+/// the predicate can be tested together against REAL `ps` output — testing the predicate alone
+/// on pre-split fields is what let the row parse ship broken.
+fn orphaned_tunnel_pids<'a>(ps_output: &'a str, needle: &str) -> Vec<(u32, &'a str)> {
+    ps_output
+        .lines()
+        .filter_map(parse_ps_row)
+        .filter(|(_, ppid, cmd)| is_orphaned_tunnel(cmd, *ppid, needle))
+        .map(|(pid, _, cmd)| (pid, cmd))
+        .collect()
+}
+
 /// Kill reverse tunnels left behind by a previous run (called at startup).
 ///
 /// `kill_all_tunnels` runs on a clean exit, and a crash or an externally-issued quit — which
@@ -624,20 +655,11 @@ pub fn kill_orphaned_tunnels() {
         return;
     };
     let mut killed = 0;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut fields = line.trim_start().splitn(3, char::is_whitespace);
-        let (Some(pid), Some(ppid), Some(cmd)) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.trim().parse::<u32>()) else {
-            continue;
-        };
-        if is_orphaned_tunnel(cmd, ppid, &needle) {
-            log::info!("Killing orphaned SSH tunnel from a previous run (pid {}): {}", pid, cmd);
-            kill_process(pid);
-            killed += 1;
-        }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for (pid, cmd) in orphaned_tunnel_pids(&stdout, &needle) {
+        log::info!("Killing orphaned SSH tunnel from a previous run (pid {}): {}", pid, cmd);
+        kill_process(pid);
+        killed += 1;
     }
     if killed > 0 {
         log::info!("Killed {} orphaned SSH tunnel(s) left by a previous run", killed);
@@ -1116,6 +1138,56 @@ mod tests {
         let tunnel = "ssh -N -v -o ControlMaster=yes -o ControlPath=/Users/d/.maiterm/cm/ews@nova.sock -R 28616:127.0.0.1:30375 -x -C ews@nova";
         assert!(is_orphaned_tunnel(tunnel, 1, prod), "reparented: ours to clean up");
         assert!(!is_orphaned_tunnel(tunnel, 80701, prod), "still owned by a running maiTerm");
+    }
+
+    /// Verbatim `ps -eo pid=,ppid=,command=` output, captured on macOS 25.5. The padding is
+    /// the whole point: both numeric columns are right-aligned in a five-wide field, so a
+    /// three-digit pid carries two leading spaces and a ppid of 1 carries four. The last two
+    /// rows are real maiTerm tunnels (pid/ppid both five digits, ppid = the live app), edited
+    /// only to shorten the ControlPath.
+    const REAL_PS_OUTPUT: &str = "\
+    1     0 /sbin/launchd
+  134     1 /Applications/Copy 'Em Helper.app/Contents/MacOS/Copy 'Em Helper
+  612     1 /usr/libexec/logd
+  142 39047 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper
+33251 32792 ssh -N -v -o ControlMaster=yes -o ControlPersist=no -o ControlPath=/Users/d/.maiterm/cm/-x_-C_root@nova2.sock -R 28701:127.0.0.1:13075 -x -C root@nova2
+35452     1 ssh -N -v -o ControlMaster=yes -o ControlPersist=no -o ControlPath=/Users/d/.maiterm/cm/-x_-C_ews@nova.sock -R 28617:127.0.0.1:13075 -x -C ews@nova";
+
+    /// The regression that shipped in v2.1.0: the row parse, not the predicate.
+    ///
+    /// `splitn(3, char::is_whitespace)` broke on each SINGLE space, so every row with a padded
+    /// (i.e. short) ppid lost its middle field to the empty string and was discarded — which
+    /// is exactly and only the orphans. The sweep could never kill anything, and said nothing
+    /// about it. The old tests passed because they called `is_orphaned_tunnel` with fields
+    /// already split by hand, so they never touched the parse. This one feeds real output.
+    #[test]
+    fn the_sweep_reads_real_ps_output() {
+        let (pid, ppid, cmd) = parse_ps_row("  134     1 /usr/libexec/logd").expect("padded row");
+        assert_eq!((pid, ppid), (134, 1), "right-aligned columns are one field each");
+        assert_eq!(cmd, "/usr/libexec/logd");
+
+        // The command keeps its interior spacing — ` -R ` is matched inside it.
+        let (_, _, cmd) = parse_ps_row(REAL_PS_OUTPUT.lines().last().unwrap()).unwrap();
+        assert!(cmd.contains(" -R "), "command survives verbatim: {cmd}");
+
+        // Rows that are not three fields, or not numeric, are skipped rather than panicking.
+        assert!(parse_ps_row("").is_none());
+        assert!(parse_ps_row("12345").is_none());
+        assert!(parse_ps_row("  pid  ppid command").is_none());
+
+        let prod = "ControlPath=/Users/d/.maiterm/cm/";
+        let found = orphaned_tunnel_pids(REAL_PS_OUTPUT, prod);
+        assert_eq!(
+            found.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            vec![35452],
+            "only the reparented tunnel: not launchd, not logd, not the live app's own tunnel"
+        );
+
+        // And the isolation still holds through the real-output path.
+        assert!(
+            orphaned_tunnel_pids(REAL_PS_OUTPUT, "ControlPath=/Users/d/.maiterm/cm-dev/").is_empty(),
+            "a prod dump holds nothing for the dev sweep"
+        );
     }
 
     /// The draw must actually vary. `subsec_nanos()` was the first source used here and is a
