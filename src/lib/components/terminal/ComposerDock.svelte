@@ -430,6 +430,20 @@
       </div>
     {/if}
     <div class="composer-row">
+      <!-- Everything that is not Send sits left of the input, so the right-hand button is
+           only ever the one that sends. Collapse is outermost. -->
+      <div class="composer-actions">
+        <IconButton tooltip="Collapse composer ({modLabel}+Shift+C)" size={26} onclick={toggle} aria-label="Collapse composer">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <path d="M4 6.5 8 10.5 12 6.5"/>
+          </svg>
+        </IconButton>
+        {#if overlordRules.length > 0}
+          <IconButton tooltip="Run an Overlord rule on this tab" size={26} onclick={openRuleMenu} active={!!ruleMenu} aria-label="Run an Overlord rule" aria-haspopup="menu">
+            {@render bolt()}
+          </IconButton>
+        {/if}
+      </div>
       <textarea
         bind:this={textareaEl}
         bind:value
@@ -444,16 +458,6 @@
         onpaste={onPaste}
       ></textarea>
       <div class="composer-actions">
-        {#if overlordRules.length > 0}
-          <IconButton tooltip="Run an Overlord rule on this tab" size={26} onclick={openRuleMenu} active={!!ruleMenu} aria-label="Run an Overlord rule" aria-haspopup="menu">
-            {@render bolt()}
-          </IconButton>
-        {/if}
-        <IconButton tooltip="Collapse composer ({modLabel}+Shift+C)" size={26} onclick={toggle} aria-label="Collapse composer">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-            <path d="M4 6.5 8 10.5 12 6.5"/>
-          </svg>
-        </IconButton>
         <IconButton tooltip="Send ({modLabel}+Enter)" size={26} onclick={send} disabled={sending} aria-label="Send">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
             <path d="M1.7 8 1 2.4c-.1-.6.5-1 1-.8l12.6 5.7c.5.2.5 1 0 1.2L2 14.4c-.5.2-1.1-.2-1-.8L1.7 8Zm0 0h6.6"
