@@ -176,7 +176,11 @@ if command -v magick >/dev/null 2>&1 && command -v rsvg-convert >/dev/null 2>&1;
   # 1024 master leaves these stale: the bundler synthesises the macOS .icns and the
   # Windows .ico from THIS list, not from the master, so a rebrand that skips them
   # ships the old mark everywhere except macOS 26's Assets.car.
-  for spec in "32x32.png 32" "64x64.png 64" "128x128.png 128" "128x128@2x.png 256" "icon.png 1024"; do
+  # icon.png is 512, NOT 1024. The bundler maps each of these to an icns type by
+  # (pixel size, density), and density is 1 unless the NAME says @2x — so 512 is the
+  # largest a plain name can be. At 1024 it matches nothing and the macOS bundle dies
+  # on "No matching IconType", taking the whole build with it.
+  for spec in "32x32.png 32" "64x64.png 64" "128x128.png 128" "128x128@2x.png 256" "icon.png 512"; do
     set -- $spec
     magick "$NAVY" -resize "$2x$2" -strip "$ICONS/$1"
   done
