@@ -1145,8 +1145,10 @@ mod tests {
     /// three-digit pid carries two leading spaces and a ppid of 1 carries four. The last two
     /// rows are real maiTerm tunnels (pid/ppid both five digits, ppid = the live app), edited
     /// only to shorten the ControlPath.
-    const REAL_PS_OUTPUT: &str = "\
-    1     0 /sbin/launchd
+    // No `\`-continuation after the opening quote: it strips the leading whitespace of the
+    // line that follows, which would eat the launchd row's own padding — in a fixture whose
+    // entire purpose is that padding.
+    const REAL_PS_OUTPUT: &str = "    1     0 /sbin/launchd
   134     1 /Applications/Copy 'Em Helper.app/Contents/MacOS/Copy 'Em Helper
   612     1 /usr/libexec/logd
   142 39047 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper
