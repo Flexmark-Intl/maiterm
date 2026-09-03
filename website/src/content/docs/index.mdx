@@ -83,9 +83,11 @@ A rule is a condition and a sequence: *when context reaches 55%, tell the agent 
 
 Overlord types with your authority, so **propose mode is on out of the box**: every directive is held for you to approve, showing the exact words it would send. The guards that decide whether a rule may fire at all are human-only and can't be edited by an agent, and your own keystrokes abort a sequence already in progress. Off until you switch it on.
 
+You keep the manual controls too. Fire any rule yourself — **Trigger ▾** on a fleet card, or a bolt in the composer of the tab you're already in — whatever its condition says. And take a tab, or a whole workspace, **off the board** when it shouldn't be supervised at all: the engine then can't see it, and releases anything it was already holding for it.
+
 <CardGrid>
   <Card title="An operations deck" icon="list-format">
-    **Triage** is one severity-ordered queue of everything wanting a person. **Fleet** is a card per agent — context ring, live state, time since its last turn, sequence in flight. **Board** is the task board indexed by workstream. **Ledger** is a verbatim record of every directive sent and what came back.
+    **Triage** is one severity-ordered queue of everything wanting a person. **Fleet** is a card per agent — context ring, live state, time since its last turn, sequence in flight — sorted by peak context or latest activity. **Board** is the task board indexed by workstream. **Ledger** is a verbatim record of every directive sent and what came back.
   </Card>
   <Card title="A supervisor agent, too" icon="star">
     Optional: an agent with its own tools — pull the escalation queue, drive another tab, answer a prompt one is stuck at, propose rule changes for you to approve. It reaches tabs that are suspended, archived, or on the far end of an SSH connection.
@@ -215,7 +217,7 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
     maiTerm owns the task state, so it's the same list on both sides. Six lanes, named workstreams, a panel on `Cmd+Shift+E` where you add, retitle, park, reassign or hand a row to the agent — and it sees every edit through the same tools it writes with. Scoped to the project, so the work outlives a reload, a window move, and the agent that wrote it. Works in every runtime, local or over SSH.
   </Card>
   <Card title="Supervise a whole window of agents" icon="star">
-    Overlord watches every agent tab in a window and acts on rules you write — checkpoint before a compaction wall, review after a commit, re-bind an agent that dropped off. Deterministic, no model in the loop, and every directive held for your approval by default. Triage, Fleet, Board and Ledger views, plus an optional supervisor agent with tools of its own. Opt-in.
+    Overlord watches every agent tab in a window and acts on rules you write — checkpoint before a compaction wall, review after a commit, re-bind an agent that dropped off. Deterministic, no model in the loop, and every directive held for your approval by default. Triage, Fleet, Board and Ledger views, plus an optional supervisor agent with tools of its own. Fire any rule by hand, or exempt a tab or workspace that shouldn't be supervised. Opt-in.
   </Card>
   <Card title="Bridge two agents" icon="comment-alt">
     Connect two running agent sessions — one local, one over SSH, two related projects, even a Claude Code and a Codex — so they collaborate directly. One agent asks the other questions, requests research, or shares context, and replies come back as new turns. maiTerm spawns a split pane so you see both sides, stamps every message with the sender's real identity, and keeps the agents deferring to you for the decisions.

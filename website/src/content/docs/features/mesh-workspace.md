@@ -20,6 +20,12 @@ A mesh inverts that. Each agent is small and **purpose-trained on its own reposi
 
 There is no broadcast. Every message is **addressed** to a specific recipient and routed off a stable handle, so renaming an agent never misroutes a message. An unknown or ambiguous recipient is a hard error that lists the current roster, never a silent drop — an agent always knows whether its message landed.
 
+### Renaming an agent mid-flight
+
+Rename a tab in a mesh and the mesh is told. The renamed agent is informed of its new role name once — queued if it's busy — so it stops introducing itself by the name it was given in its opener, and the roster, cockpit and message envelopes follow immediately.
+
+The name it *used* to have keeps resolving too, so a peer that addressed it thirty seconds ago doesn't get a hard "no peer named" error for a name that was correct at the time; the send tells that peer the current name, so nobody spends a turn on an announcement. A former name stops resolving the moment another tab actually claims it — the name is then simply unknown until its new holder is up, rather than quietly routing to its previous holder. Cosmetic edits — casing, an emoji — tell nobody.
+
 ## Topics
 
 Conversation in a mesh is organized into **topics**. A topic is owned by whoever starts it, and topics dedupe by normalized label — start "auth refactor" twice and you get the same topic, not two parallel threads talking past each other.

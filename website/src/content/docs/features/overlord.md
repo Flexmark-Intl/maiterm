@@ -15,7 +15,7 @@ With a dozen agents running, what you lose isn't any single answer — it's trac
 
 ## Rules
 
-A rule is a **condition**, a set of **guards**, and a **sequence** of steps. The checkpoint rule that ships with it is the worked example: *when context reaches 55%, tell the agent to update its docs; when that turn ends, tell it to prepare for compaction; when that turn ends, send `/compact`* — waiting for each step to genuinely land before sending the next, rather than firing three directives into a busy tab.
+A rule is a **condition**, a set of **guards**, and a **sequence** of steps. The checkpoint rule that ships with it is the worked example: *when context reaches 55%, tell the agent to bring its docs, memory, code comments and tasks up to date; when that turn ends, tell it to prepare for compaction; when that turn ends, send `/compact`* — waiting for each step to genuinely land before sending the next, rather than firing three directives into a busy tab.
 
 Conditions fire on **semantic state**, not on terminal output (that's what [triggers](/features/triggers/) are for):
 
@@ -48,7 +48,7 @@ Guards are **human-only**. The supervisor agent can propose changes to a rule's 
 
 | Rule | What it does |
 |------|--------------|
-| **Checkpoint before compaction** | At ~55% context, have the agent update docs and memory, prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought |
+| **Checkpoint before compaction** | At ~55% context, have the agent update its docs, memory, code comments and [task list](/features/tasks/), prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought |
 | **Review after commit** | After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on |
 | **Re-bind a running agent** | A tab whose agent is running but not connected to maiTerm gets a `/maiterm init`, restoring its tools and hooks. Only fires when the agent process is confirmed alive — a tab sitting at a shell is left alone |
 | **Keep a task list** | A tab doing sustained work with nothing on the [maiTerm task list](/features/tasks/) gets nudged to record it |
@@ -68,13 +68,34 @@ With Overlord enabled, a **♔ Overlord** row appears above the workspace list i
 ![The Overlord deck showing the Board view — workstreams from four workspaces indexed down the left, and task cards laid out across the backlog, active and blocked lanes](/screenshots/overlord-board.webp)
 
 - **Triage** — one severity-ordered queue of everything wanting a person: proposals, escalations, permission prompts, context pressure, stale work, tabs that have stopped answering. Not six stacked lists. Every card carries its own remedy, and a **Run all** clears the two things that need no judgement — re-bind every unbound agent, then approve every pending proposal — paced so a deck of forty signals doesn't become forty simultaneous API streams. It reports what came back, not what it typed: a `/maiterm init` typed at a tab whose agent is gone is delivered perfectly and achieves nothing, so the run stays open until each target has either re-bound or run out of time, and says how many never answered.
-- **Fleet** — a card per agent tab: context ring, live state, how long since its last turn, what it's working on, and any sequence in flight with its step progress.
+- **Fleet** — a card per agent tab: context ring, live state, how long since its last turn, what it's working on, and any sequence in flight with its step progress. Sort the grid by **peak context** (most in need first) or by **latest activity**. **View** navigates to the tab and **Trigger ▾** fires a rule at it by hand. Tabs inside a suspended workspace get no card each — a dozen rows describing agents nobody expects to be running — and the bar above the grid counts them so you can see where they went; a tab suspended on its own inside a live workspace is still shown.
 - **Board** — the [task board](/features/tasks/) for the whole window, indexed by workstream rather than by workspace, with cards you drag between lanes.
 - **Ledger** — a verbatim record of every directive sent: which tab, which rule (or you, or the agent), the exact bytes, and what came of it. Because injections are by design indistinguishable from you typing, this is the only way to reconstruct who told a project to do something at 3am.
 
 Two buttons sit in the command bar: **Scan tabs**, which reads every running agent tab and populates the board from it (safe to repeat — nothing is typed into anything), and **Re-bind *N***, which appears when more than one tab's agent is running unbound.
 
 The deck takes its colours from whichever [theme](/features/themes/) you're running, and goes still under reduced-motion.
+
+## Firing a rule by hand
+
+A rule's condition decides when it fires *on its own*. It doesn't decide when **you** may fire it — sometimes you can see that a tab needs checkpointing now, at 30% context rather than 55%.
+
+**Trigger ▾** on any fleet card lists every rule that could run at that tab — enabled ones first, disabled ones tagged `off` — and fires the one you pick, whatever its when-clause says. Scope still holds: a rule pinned to a workspace stays pinned, because its steps were written for that workspace. Only the *when* is set aside. A rule you've added but not yet written any steps for doesn't appear at all.
+
+The same menu is available from the tab you're already in. With Overlord on, the [composer dock](/features/terminal/#composer-dock) grows a **bolt** — beside the collapsed handle, and in the actions row when it's open — so you can fire a rule at the tab in front of you without going to the deck. A tab that has never hosted an agent doesn't get one, so a plain shell never sprouts a button that types into `bash`.
+
+A manual fire obeys the same guards as an automatic one, and when it can't happen it says why on the card you clicked (or as a toast, from the composer) rather than as a note at the top of a grid that doesn't say which card it means. The common refusals: the tab has no live agent, another sequence already owns it, or it's sitting at a permission prompt — which looks ready but isn't, so the fire is declined up front instead of holding the tab's slot for the full wait typing nothing.
+
+## Taking a tab off the board
+
+Not everything in a window wants supervising: a scratch session, a demo window, a tab you're driving yourself step by step.
+
+- **A single tab** — right-click its tab and choose **Exempt from Overlord**. The same item reads **Supervise with Overlord** to put it back.
+- **A whole workspace** — the eye-off button on its row in the sidebar. It stays visible while the exemption is on rather than appearing on hover, because an exemption you can't see is one you forget you set. While a workspace is exempt, the per-tab item inside it is disabled and says so.
+
+Exempt means the engine cannot see the tab **at all**: no rule evaluates against it, no proposal is raised for it, it gets no fleet card, no Trigger menu and no bolt in its composer, and the supervisor agent's own tools refuse to touch it. It also **releases what the engine was already holding** — a sequence mid-flight, an outstanding directive still reading the tab's replies, a queued proposal — because you reach for "exempt" exactly while one of those is happening.
+
+Task rows stay on the [board](/features/tasks/): exemption is about supervision, not about the work. The flag rides with the tab through reload, duplicate, split and window duplication.
 
 ## The supervisor agent
 

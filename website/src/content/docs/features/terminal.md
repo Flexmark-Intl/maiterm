@@ -32,6 +32,8 @@ It handles attachments too. Paste a screenshot or drop files onto the dock and t
 
 Drafts are per tab and persistent: switch tabs, restart maiTerm, and your half-written prompt is still there. When closed, the dock collapses to a small corner handle; whether new tabs start with it open is a preference under **Tabs**.
 
+With [Overlord](/features/overlord/) switched on, an agent tab's dock also carries a **bolt** — beside the collapsed handle, and in the actions row when open — that fires any Overlord rule at the tab you're looking at, without a trip to the deck. A tab that has never hosted an agent doesn't get one.
+
 ## Rendering
 
 Because the screen buffer and scrollback live in the Rust backend, the frontend never holds more than a single screen of content — xterm.js runs with zero scrollback and simply paints the viewport the backend hands it. With nothing to scroll through on the frontend, GPU acceleration buys nothing, so maiTerm defaults to xterm.js's lightweight DOM renderer. That also sidesteps the glyph-ghosting artifacts the GPU renderers showed under maiTerm's full-frame streaming. A Canvas renderer is still available under **Terminal → Rendering** if you want to compare.

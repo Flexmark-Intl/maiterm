@@ -56,6 +56,8 @@ The remote configuration files live in the account's home directory, one copy sh
 
 Those files now name no maiTerm at all. Each agent works out which one to talk to from **its own terminal session's environment**, which maiTerm sets per tab when it opens the connection — so every machine writes identical bytes and there is nothing left to fight over. maiTerm also asks the remote host for a fixed port of its own rather than taking whatever it's given, and a tab that was told the old number is corrected as soon as its tunnel is up.
 
+It now keeps that port, too. Tunnels are closed when maiTerm exits, and anything an earlier run left behind is cleared out at startup instead of squatting the port and pushing the next launch onto a different number. If you have more than one copy of maiTerm running — a dev build beside a release one — the cleanup only ever removes connections nobody owns, never the live ones belonging to the other copy.
+
 One consequence worth knowing: a remote shell that **maiTerm didn't start itself** — one you opened inside `tmux`, or after `su`, or by typing `ssh` in another window — has none of that environment and can't reach maiTerm at all. (Before, it would reach *some* maiTerm, often the wrong one.) The remedy depends on how many tabs you have open to that host:
 
 - **One tab on the host** — maiTerm leaves the values in `~/.aiterm`, so `source ~/.aiterm` in the stray shell is enough.
