@@ -187,6 +187,23 @@ async function handleManifest(request, env, ctx, url) {
 //
 // Stateless. The phone wakes, opens its WS over LAN/WireGuard, and pulls the real content.
 
+// `kind` is three-valued (docs §6.1: permission | question | idle_done) and maiLink registers no
+// didReceiveRemoteNotification handler — iOS renders what we send, verbatim — so this table IS the
+// notification the human reads. The default sits on the URGENT end on purpose: an unrecognised kind
+// is one the desktop grew after this relay shipped, and guessing "Agent finished" would announce the
+// opposite of a human being waited on. A wrongly-urgent push costs a glance; a wrongly-calm one
+// costs the turn, and `question` self-destructs after ~60s.
+const KIND_BODY = {
+  permission: "Needs your approval",
+  question: "Needs your answer",
+  idle_done: "Agent finished",
+};
+
+const kindBody = (kind) => KIND_BODY[kind] ?? "Needs you";
+
+// Only a finished turn is an FYI. Every other kind, known or not, is someone waiting.
+const kindIsWaiting = (kind) => kind !== "idle_done";
+
 function b64urlFromBytes(bytes) {
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
@@ -283,11 +300,11 @@ async function sendApns(env, msg) {
     aps: {
       alert: {
         title: msg.title || "maiTerm",
-        body: msg.kind === "permission" ? "Needs your approval" : "Agent finished",
+        body: kindBody(msg.kind),
       },
       sound: "default",
       "thread-id": msg.tab_id,
-      "interruption-level": msg.kind === "permission" ? "time-sensitive" : "active",
+      "interruption-level": kindIsWaiting(msg.kind) ? "time-sensitive" : "active",
     },
     tabId: msg.tab_id,
     kind: msg.kind,
@@ -362,8 +379,11 @@ async function sendFcm(env, msg) {
       token: msg.push_token,
       notification: {
         title: msg.title || "maiTerm",
-        body: msg.kind === "permission" ? "Needs your approval" : "Agent finished",
+        body: kindBody(msg.kind),
       },
+      // `priority` here is a DELIVERY-latency knob, not a presentation one — the APNs
+      // interruption-level split has no FCM counterpart. Downgrading idle_done to "normal" would
+      // let Doze defer the wake, which breaks the doorbell's actual job rather than fixing copy.
       android: { collapse_key: String(msg.tab_id), priority: "high" },
       data: { tabId: String(msg.tab_id), kind: String(msg.kind) },
     },

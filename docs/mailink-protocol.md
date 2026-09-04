@@ -991,12 +991,19 @@ The relay fans out by `platform` (`apns`→JWT/APNs, `fcm`→HTTP-v1/FCM). Same 
 payload either way; `cap` is the per-device capability (below).
 
 - **Payload is content-light.** No prompt text, no terminal output, no cwd — only the tab
-  `title` + `kind` (`permission`/`idle_done`), which is all the alert renders. Apple and the
-  relay learn *that* an agent wants you and which tab, never the prompt. The phone wakes, opens
-  the WS over LAN/WireGuard, and pulls the real content.
+  `title` + `kind` (`permission`/`question`/`idle_done`), which is all the alert renders. Apple
+  and the relay learn *that* an agent wants you and which tab, never the prompt. The phone wakes,
+  opens the WS over LAN/WireGuard, and pulls the real content.
 - `tab_id` drives `apns-collapse-id`/`thread-id` so repeated pings for one tab coalesce.
 - `apns-priority: 10` + a time-sensitive alert for permission/question; an `active` alert for
   done/idle. Respect the phone's own mute.
+- **The relay's copy table is the notification.** maiLink registers no
+  `didReceiveRemoteNotification` handler, so iOS renders the relay's `body` verbatim — the phone
+  cannot correct it. `permission` → "Needs your approval", `question` → "Needs your answer",
+  `idle_done` → "Agent finished", and **an unrecognised kind falls back to "Needs you" at
+  time-sensitive**, never to "Agent finished". A kind this relay doesn't know is one the desktop
+  grew after it shipped; defaulting to "finished" would announce the opposite of a human being
+  waited on. Only `idle_done` is an FYI.
 
 > **The phone needs TWO routes at once — by design.** The doorbell splits across networks:
 > the **wake path** (the phone registering its APNs/FCM token, the relay cap mint, and Apple/
