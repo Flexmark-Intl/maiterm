@@ -997,9 +997,18 @@ payload either way; `cap` is the per-device capability (below).
 - `tab_id` drives `apns-collapse-id`/`thread-id` so repeated pings for one tab coalesce.
 - `apns-priority: 10` + a time-sensitive alert for permission/question; an `active` alert for
   done/idle. Respect the phone's own mute.
-- **The relay's copy table is the notification.** maiLink registers no
-  `didReceiveRemoteNotification` handler, so iOS renders the relay's `body` verbatim — the phone
-  cannot correct it. `permission` → "Needs your approval", `question` → "Needs your answer",
+- **`interruption-level: time-sensitive` is currently INERT — the app has no entitlement for it.**
+  `ios/App/App/App.entitlements` carries only `aps-environment`;
+  `com.apple.developer.usernotifications.time-sensitive` is absent, and both build configurations
+  point at that one file. So the level is sent, APNs accepts it (1237 doorbell pushes on this
+  machine, zero non-200 — an unentitled level is NOT rejected, it is ignored), and a Focus mode
+  still holds the alert. This has been true since the doorbell shipped, silently, for `permission`
+  too. **The line above states intent, not observed behaviour, until that key is added and the
+  provisioning profile regenerated.** Don't read the relay's code as evidence it works.
+- **The relay's copy table is the notification.** No maiLink code path rewrites the alert:
+  `@capacitor/push-notifications` does register a `UNUserNotificationCenterDelegate`, but it only
+  reads `content.title`/`.body` and never builds a `UNMutableNotificationContent`. iOS renders the
+  relay's `body` verbatim and the phone cannot correct it. `permission` → "Needs your approval", `question` → "Needs your answer",
   `idle_done` → "Agent finished", and **an unrecognised kind falls back to "Needs you" at
   time-sensitive**, never to "Agent finished". A kind this relay doesn't know is one the desktop
   grew after it shipped; defaulting to "finished" would announce the opposite of a human being

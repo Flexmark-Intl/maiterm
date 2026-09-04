@@ -199,7 +199,13 @@ const KIND_BODY = {
   idle_done: "Agent finished",
 };
 
-const kindBody = (kind) => KIND_BODY[kind] ?? "Needs you";
+// `Object.hasOwn`, not `??`: `kind` arrives over the network, and a plain object literal answers
+// inherited Object.prototype keys with truthy NON-STRINGS that sail past `??`. `kind:"toString"`
+// yields a function, which JSON.stringify drops — a push with a title and no body; `"__proto__"`
+// yields an object, which FCM's type-checked `notification.body` rejects as 400, so the human is
+// told nothing at all. Unreachable from a real desktop (the Rust side emits three literals), but
+// this relay is public and multi-tenant, so the lookup is closed rather than argued about.
+const kindBody = (kind) => (Object.hasOwn(KIND_BODY, kind) ? KIND_BODY[kind] : "Needs you");
 
 // Only a finished turn is an FYI. Every other kind, known or not, is someone waiting.
 const kindIsWaiting = (kind) => kind !== "idle_done";
