@@ -283,8 +283,13 @@
         const oldCount = currentMonitorCount;
         currentMonitorCount = count;
         logInfo(`Monitor count changed: ${oldCount} → ${count}, repositioning window`);
-        // Save current position under old monitor count before repositioning
-        await commands.saveWindowGeometry(oldCount).catch(() => {});
+        // Save current position under the old monitor count before repositioning —
+        // but only when we watched the change happen. If the displays changed while
+        // they were asleep (unplugged the external overnight), macOS has already
+        // relocated this window onto what's left, so its position now describes the
+        // NEW configuration; saving it under the old count would overwrite the
+        // arrangement we want back when those displays return.
+        if (!wasAsleep) await commands.saveWindowGeometry(oldCount).catch(() => {});
         // Restore saved geometry for the new monitor count (if any)
         await commands.restoreWindowGeometry(count).catch(() => {});
       }, 2000);
@@ -292,8 +297,17 @@
 
     function saveGeometryDebounced() {
       clearTimeout(geometryTimer);
-      geometryTimer = setTimeout(() => {
-        if (displaysAsleep || currentMonitorCount === null) return;
+      geometryTimer = setTimeout(async () => {
+        if (currentMonitorCount === null) return;
+        // Ask for the count here rather than trusting `displaysAsleep`: the events
+        // that bring us here are macOS shuffling the window around the screens it is
+        // putting to sleep, and they fire up to a full poll interval before the flag
+        // flips — so most of them would slip past a flag check and persist a
+        // sleep-time rect as the layout to restore on wake.
+        if (await readMonitorCount() === 0) {
+          displaysAsleep = true;
+          return;
+        }
         commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
       }, 500);
     }

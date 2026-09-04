@@ -788,6 +788,14 @@ fn spawn_resize_applier(app_handle: AppHandle, state: Arc<AppState>, pty_id: Str
 
             if state.live_grid_size(&pty_id) != Some((cols, rows)) {
                 let _ = apply_resize(&app_handle, &state, &pty_id, cols, rows);
+            } else {
+                // The coalesced requests cancelled out (dragged an edge away and back
+                // while output was hot), so the PTY needs nothing — but the frontend
+                // re-fitted its xterm at every step of that drag and, with no
+                // scrollback of its own, threw away whatever the narrower fits pushed
+                // off. Repaint it. Every request that returned early on `pending_exists`
+                // is waiting on this thread for its frame.
+                emit_frame(&app_handle, &state, &pty_id);
             }
 
             // Remove the entry only if no newer request landed while applying;
