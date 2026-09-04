@@ -699,7 +699,13 @@ pub fn epoch_millis() -> u64 {
 /// arrive while the PTY is actively streaming are coalesced with a trailing
 /// debounce and only the final size is applied — and not at all if it matches
 /// the current grid (e.g. an 80×24→fitted flap during tab reattach).
-pub fn resize_pty(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> Result<(), String> {
+pub fn resize_pty(
+    app_handle: &AppHandle,
+    state: &Arc<AppState>,
+    pty_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     if !state.pty_registry.read().contains_key(pty_id) {
         return Err("PTY not found".to_string());
     }
@@ -721,8 +727,11 @@ pub fn resize_pty(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> 
         return Ok(());
     }
 
-    // No-op resizes never reach the PTY.
+    // No-op resizes never reach the PTY — but still repaint, since the caller is a
+    // frontend that just re-fitted its xterm (tab shown, font change, window moved
+    // back to where it was) and may be holding a viewport the fit blanked.
     if state.live_grid_size(pty_id) == Some((cols, rows)) {
+        emit_frame(app_handle, state, pty_id);
         return Ok(());
     }
 
@@ -736,19 +745,19 @@ pub fn resize_pty(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> 
     };
 
     if !output_hot {
-        return apply_resize(state, pty_id, cols, rows);
+        return apply_resize(app_handle, state, pty_id, cols, rows);
     }
 
     state.pending_resizes.write().insert(
         pty_id.to_string(),
         crate::state::PendingResize { cols, rows, last_request: std::time::Instant::now() },
     );
-    spawn_resize_applier(Arc::clone(state), pty_id.to_string());
+    spawn_resize_applier(app_handle.clone(), Arc::clone(state), pty_id.to_string());
     Ok(())
 }
 
 /// Waits out the trailing debounce, then applies the latest pending size.
-fn spawn_resize_applier(state: Arc<AppState>, pty_id: String) {
+fn spawn_resize_applier(app_handle: AppHandle, state: Arc<AppState>, pty_id: String) {
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_millis(50));
@@ -778,7 +787,7 @@ fn spawn_resize_applier(state: Arc<AppState>, pty_id: String) {
             };
 
             if state.live_grid_size(&pty_id) != Some((cols, rows)) {
-                let _ = apply_resize(&state, &pty_id, cols, rows);
+                let _ = apply_resize(&app_handle, &state, &pty_id, cols, rows);
             }
 
             // Remove the entry only if no newer request landed while applying;
@@ -792,8 +801,30 @@ fn spawn_resize_applier(state: Arc<AppState>, pty_id: String) {
     });
 }
 
+/// Render the current grid and push it to the frontend.
+///
+/// Frames are otherwise emitted only as the PTY writes, and the frontend's xterm
+/// carries no scrollback of its own (`scrollback: 0`) — so anything that disturbs
+/// its buffer without producing output, a resize above all, leaves the viewport
+/// blank or half-painted until the next byte arrives. On a tab holding an idle
+/// agent that can be hours. One frame from the grid, which is authoritative, puts
+/// the viewport back.
+fn emit_frame(app_handle: &AppHandle, state: &Arc<AppState>, pty_id: &str) {
+    let registry = state.terminal_registry.read();
+    if let Some(handle) = registry.get(pty_id) {
+        let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
+        let _ = app_handle.emit(&format!("term-frame-{}", pty_id), &frame);
+    }
+}
+
 /// Immediately resize the kernel PTY and the alacritty grid.
-fn apply_resize(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> Result<(), String> {
+fn apply_resize(
+    app_handle: &AppHandle,
+    state: &Arc<AppState>,
+    pty_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     {
         let registry = state.pty_registry.read();
         let handle = registry.get(pty_id).ok_or("PTY not found")?;
@@ -814,6 +845,8 @@ fn apply_resize(state: &Arc<AppState>, pty_id: &str, cols: u16, rows: u16) -> Re
             });
         }
     }
+
+    emit_frame(app_handle, state, pty_id);
 
     Ok(())
 }

@@ -121,12 +121,13 @@ pub fn write_terminal(
 
 #[tauri::command]
 pub fn resize_terminal(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    pty::resize_pty(&*state, &pty_id, cols, rows)
+    pty::resize_pty(&app_handle, &*state, &pty_id, cols, rows)
 }
 
 #[tauri::command]

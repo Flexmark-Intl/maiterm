@@ -212,9 +212,12 @@
     let unlistenQuit: (() => void) | undefined;
     listen('quit-requested', async () => {
       logInfo('quit-requested — saving scrollback before exit');
-      // Save window geometry before exit (don't wait for debounce)
+      // Save window geometry before exit (don't wait for debounce). Skipped while the
+      // displays are asleep — the geometry then isn't the one the user arranged.
       clearTimeout(geometryTimer);
-      await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+      if (currentMonitorCount !== null && !displaysAsleep) {
+        await commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
+      }
       await terminalsStore.saveAllScrollback();
       try {
         await invoke('sync_state');
@@ -232,32 +235,65 @@
 
     // Save window geometry per monitor count on resize/move (debounced).
     // Polls for monitor changes to auto-reposition windows when docking/undocking.
-    let currentMonitorCount = 1;
+    //
+    // Zero monitors is NOT a display configuration. macOS reports every screen gone
+    // while the displays sleep or the lock screen is up (a Studio Display setup goes
+    // straight 2 → 0), and reports them back on wake. Treating that as a dock/undock
+    // saved the awake layout under a "0" key and then moved and RESIZED every window
+    // to a phantom layout while the webview was occluded — which refits every terminal
+    // in it, and an idle tab has nothing to repaint from (xterm here keeps no
+    // scrollback of its own, and frames only arrive when the PTY writes), so it came
+    // back blank. While the count reads 0 we hold everything: no save, no restore, and
+    // no geometry writes from the window's own resize/move events either, so a shuffle
+    // by macOS can't overwrite the layout we want back on wake.
+    let currentMonitorCount: number | null = null;
+    let displaysAsleep = false;
     let geometryTimer: ReturnType<typeof setTimeout> | undefined;
     let monitorPollTimer: ReturnType<typeof setInterval> | undefined;
 
-    // Initialize monitor count
-    commands.getMonitorCount().then(count => {
-      currentMonitorCount = count;
+    // An IPC failure is an absence, not a count — hold, same as 0.
+    const readMonitorCount = () => commands.getMonitorCount().catch(() => 0);
+
+    // Initialize monitor count (0 → leave it unknown until the displays are back)
+    readMonitorCount().then(count => {
+      if (count > 0) currentMonitorCount = count;
 
       // Poll for monitor changes (handles dock/undock)
       monitorPollTimer = setInterval(async () => {
-        const count = await commands.getMonitorCount().catch(() => currentMonitorCount);
-        if (count !== currentMonitorCount) {
-          const oldCount = currentMonitorCount;
-          currentMonitorCount = count;
-          logInfo(`Monitor count changed: ${oldCount} → ${count}, repositioning window`);
-          // Save current position under old monitor count before repositioning
-          await commands.saveWindowGeometry(oldCount).catch(() => {});
-          // Restore saved geometry for the new monitor count (if any)
-          await commands.restoreWindowGeometry(count).catch(() => {});
+        const count = await readMonitorCount();
+        if (count === 0) {
+          if (!displaysAsleep) {
+            displaysAsleep = true;
+            logInfo('Monitor count is 0 (displays asleep or locked) — holding window geometry');
+          }
+          return;
         }
+        const wasAsleep = displaysAsleep;
+        displaysAsleep = false;
+        if (currentMonitorCount === null) {
+          currentMonitorCount = count;
+          return;
+        }
+        if (count === currentMonitorCount) {
+          // Same displays as before the sleep — but macOS may have shuffled the window
+          // around while they were gone, so put it back where this layout had it.
+          if (wasAsleep) await commands.restoreWindowGeometry(count).catch(() => {});
+          return;
+        }
+        const oldCount = currentMonitorCount;
+        currentMonitorCount = count;
+        logInfo(`Monitor count changed: ${oldCount} → ${count}, repositioning window`);
+        // Save current position under old monitor count before repositioning
+        await commands.saveWindowGeometry(oldCount).catch(() => {});
+        // Restore saved geometry for the new monitor count (if any)
+        await commands.restoreWindowGeometry(count).catch(() => {});
       }, 2000);
     });
 
     function saveGeometryDebounced() {
       clearTimeout(geometryTimer);
       geometryTimer = setTimeout(() => {
+        if (displaysAsleep || currentMonitorCount === null) return;
         commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
       }, 500);
     }
