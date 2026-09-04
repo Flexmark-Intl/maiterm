@@ -997,14 +997,19 @@ payload either way; `cap` is the per-device capability (below).
 - `tab_id` drives `apns-collapse-id`/`thread-id` so repeated pings for one tab coalesce.
 - `apns-priority: 10` + a time-sensitive alert for permission/question; an `active` alert for
   done/idle. Respect the phone's own mute.
-- **`interruption-level: time-sensitive` is currently INERT — the app has no entitlement for it.**
-  `ios/App/App/App.entitlements` carries only `aps-environment`;
-  `com.apple.developer.usernotifications.time-sensitive` is absent, and both build configurations
-  point at that one file. So the level is sent, APNs accepts it (1237 doorbell pushes on this
-  machine, zero non-200 — an unentitled level is NOT rejected, it is ignored), and a Focus mode
-  still holds the alert. This has been true since the doorbell shipped, silently, for `permission`
-  too. **The line above states intent, not observed behaviour, until that key is added and the
-  provisioning profile regenerated.** Don't read the relay's code as evidence it works.
+- **`interruption-level` needs BOTH repos, and the relay half is the half you can see.** Sending
+  `time-sensitive` is necessary and not sufficient: it does nothing unless maiLink ships
+  `com.apple.developer.usernotifications.time-sensitive` in `ios/App/App/App.entitlements` (and
+  the App ID has the capability, and the profile was regenerated for it). An unentitled level is
+  **ignored, never rejected** — APNs still answers 200, so the desktop's logs look identical
+  either way and a Focus mode still holds the alert. **To know whether this works, read that
+  plist. Never infer it from this relay's code, which reads like evidence and isn't.**
+
+  *Observed 2026-09-03:* the key was absent, and had been since the doorbell shipped — so
+  `permission` had silently never broken through Focus either. Found only by reviewing the
+  `question` fix; verified against 1237 local doorbell pushes, zero non-200. maiLink added it the
+  same day. This paragraph is a dated observation, not a status: re-read the plist rather than
+  trusting it.
 - **The relay's copy table is the notification.** No maiLink code path rewrites the alert:
   `@capacitor/push-notifications` does register a `UNUserNotificationCenterDelegate`, but it only
   reads `content.title`/`.body` and never builds a `UNMutableNotificationContent`. iOS renders the
