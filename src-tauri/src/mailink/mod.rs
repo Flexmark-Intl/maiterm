@@ -123,8 +123,12 @@ fn ws_covered(live: bool, last_drop_ms: u64, now_ms: u64) -> bool {
 /// The per-tab attention signature the WS/doorbell tickers diff: chat state PLUS the open-prompt
 /// kind (the `prompt` field build_chats computes). Including the prompt kind means an
 /// AskUserQuestion that opens without moving `state` (no coincident permission notification)
-/// still registers as a transition — and a permission that resolves straight into a question
-/// re-fires rather than being masked by the unchanged state.
+/// still registers as a transition.
+///
+/// It does NOT make `permission` → `question` re-fire, and shouldn't: `rings_attention` needs the
+/// PREVIOUS key to be outside attention, and `permission|` is already inside it. Both keys are
+/// attention, so the key changing is not an edge. That is the wanted behaviour — it is one ask
+/// changing shape, and the human was already rung for it (see the `attn_key` test).
 fn attn_key(state: &str, prompt: Option<&str>) -> String {
     format!("{state}|{}", prompt.unwrap_or(""))
 }
@@ -2899,9 +2903,15 @@ fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String,
 }
 
 /// Per-ASK prompt id for an open AskUserQuestion: `q_<tab>_<asked_at>`. The capture timestamp
-/// makes successive asks on one tab distinct, so a late `/respond` against an EXPIRED ask
-/// (Claude auto-resolves after ~60s) can never pass the stale-guard and answer a newer
-/// question that opened meanwhile. Opaque to the app — it just echoes it.
+/// makes successive asks on one tab distinct, so a late `/respond` against an ask that is no
+/// longer the open one can never pass the stale-guard and answer a newer question that opened
+/// meanwhile. Opaque to the app — it just echoes it.
+///
+/// The guard does NOT depend on asks expiring, and must not be justified by a timer: whether an
+/// unanswered ask auto-resolves at all is version- and setting-gated (`ask_deadline_ms` — never
+/// before CC 2.1.198, a hard 60s in 2.1.198–2.1.199 only, opt-in and defaulting to NEVER from
+/// 2.1.200). Superseding is enough on its own — the human answering in the TUI, or a second ask
+/// opening, both move `asked_at` with no timer involved.
 fn question_prompt_id(app: &AppState, tab_id: &str) -> String {
     let at = pending_question_at_for_tab(app, tab_id).unwrap_or(0);
     format!("q_{tab_id}_{at}")

@@ -192,7 +192,7 @@ async function handleManifest(request, env, ctx, url) {
 // notification the human reads. The default sits on the URGENT end on purpose: an unrecognised kind
 // is one the desktop grew after this relay shipped, and guessing "Agent finished" would announce the
 // opposite of a human being waited on. A wrongly-urgent push costs a glance; a wrongly-calm one
-// costs the turn, and `question` self-destructs after ~60s.
+// costs the turn.
 const KIND_BODY = {
   permission: "Needs your approval",
   question: "Needs your answer",
