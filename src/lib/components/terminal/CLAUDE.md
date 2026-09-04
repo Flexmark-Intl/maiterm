@@ -31,9 +31,9 @@ Frontend (xterm.js scrollback=0):
 - `search.rs` — buffer search using `RegexSearch` (replaces @xterm/addon-search)
 - `serialize.rs` — buffer serialization/restore via VTE parser (replaces @xterm/addon-serialize)
 
-**Tauri commands** (7 new):
+**Tauri commands** (6 new):
 - `scroll_terminal`, `scroll_terminal_to`, `get_terminal_scrollback_info`
-- `search_terminal`, `serialize_terminal`, `restore_terminal_scrollback`, `resize_terminal_grid`
+- `search_terminal`, `serialize_terminal`, `restore_terminal_scrollback`
 
 **Frontend event listeners** (TerminalPane.svelte):
 - `term-frame-{ptyId}` — rendered ANSI viewport from Rust → `terminal.write(frame.ansi)`

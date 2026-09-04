@@ -10,7 +10,7 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, resizeTerminalGrid, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
   import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';

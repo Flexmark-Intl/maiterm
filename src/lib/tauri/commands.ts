@@ -346,10 +346,6 @@ export async function restoreTerminalScrollback(ptyId: string, scrollback: numbe
   return invoke('restore_terminal_scrollback', { ptyId, scrollback });
 }
 
-export async function resizeTerminalGrid(ptyId: string, cols: number, rows: number): Promise<void> {
-  return invoke('resize_terminal_grid', { ptyId, cols, rows });
-}
-
 export async function clearTerminalScrollback(ptyId: string): Promise<void> {
   return invoke('clear_terminal_scrollback', { ptyId });
 }

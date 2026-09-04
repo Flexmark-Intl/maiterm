@@ -499,7 +499,6 @@ pub fn run() {
             commands::terminal::get_agent_liveness_batch,
             commands::terminal::serialize_terminal,
             commands::terminal::restore_terminal_scrollback,
-            commands::terminal::resize_terminal_grid,
             commands::terminal::clear_terminal_scrollback,
             commands::terminal::get_terminal_selection_text,
             commands::terminal::start_selection,

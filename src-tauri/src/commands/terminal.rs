@@ -3,7 +3,6 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::pty;
 use crate::state::AppState;
-use crate::terminal::handle::TermDimensions;
 use crate::terminal::render::{self, TerminalFrame};
 use crate::terminal::search;
 use crate::terminal::serialize;
@@ -689,24 +688,6 @@ pub fn recent_text(
     }
 
     Ok(lines.join("\n"))
-}
-
-/// Resize the alacritty_terminal instance (called alongside PTY resize).
-#[tauri::command]
-pub fn resize_terminal_grid(
-    state: State<'_, Arc<AppState>>,
-    pty_id: String,
-    cols: u16,
-    rows: u16,
-) -> Result<(), String> {
-    let mut registry = state.terminal_registry.write();
-    if let Some(handle) = registry.get_mut(&pty_id) {
-        handle.term.resize(TermDimensions {
-            cols: cols as usize,
-            rows: rows as usize,
-        });
-    }
-    Ok(())
 }
 
 // --- Selection commands ---
