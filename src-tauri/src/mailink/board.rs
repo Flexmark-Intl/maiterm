@@ -15,21 +15,59 @@
 //! Every field is always present and absence is a stated `null` — the contract rule from
 //! mailink-protocol v0.4 (a consumer that never receives a field concludes something).
 
-use crate::state::workspace::Task;
+use crate::state::workspace::{Task, Workspace};
 use crate::state::AppState;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+
+/// Task ids parked on this workspace's ARCHIVED tabs. They are out of `Workspace.tasks` but
+/// not gone, and `effective_status` needs the distinction (see there).
+fn parked_ids(ws: &Workspace) -> HashSet<&str> {
+    ws.archived_tabs
+        .iter()
+        .flat_map(|tab| tab.archived_tasks.iter().map(|t| t.id.as_str()))
+        .collect()
+}
+
+/// The status the desktop DISPLAYS, which is not always the one it stores. Mirror of
+/// `effectiveStatus` in src/lib/tasks/model.ts — change the two together:
+///
+/// An unfinished task with an unmet dependency renders as `blocked` whatever its stored lane
+/// says, so a dependency chain is visible without anyone restating it. A `blocked_by` id that
+/// resolves to nothing is treated as MET (a deleted prerequisite must not wedge its dependents
+/// forever) — unless it is parked on an archived tab, which is not deleted, only off the list,
+/// and treating that as met silently unblocked every dependent the moment a tab was archived.
+///
+/// This crosses the wire as its own field because the phone cannot derive it: it would need
+/// the workspace's whole list AND the parked set, and it receives neither with a tab's rows.
+/// Serving only the stored status made a task the desktop shows as blocked arrive as `todo`.
+fn effective_status<'a>(t: &'a Task, ws: &Workspace, parked: &HashSet<&str>) -> &'a str {
+    if t.status == "done" {
+        return "done";
+    }
+    let unmet = t.blocked_by.iter().any(|id| match ws.tasks.iter().find(|d| &d.id == id) {
+        Some(dep) => dep.status != "done",
+        None => parked.contains(id.as_str()),
+    });
+    if unmet {
+        "blocked"
+    } else {
+        &t.status
+    }
+}
 
 /// One task row for the phone. `tab_title`/`workstream` are the display names the ids resolve
 /// to on THIS desktop right now — a tab id is not durable across a reload
-/// (docs/tasks.md), so the phone must never key anything on `tabId` alone.
-fn task_view(t: &Task, tab_title: Option<&str>, workstream: Option<&str>) -> Value {
+/// (docs/tasks.md), so the phone must never key anything on `tabId` alone. `status` is the
+/// STORED lane (what a phone edit writes back); `effectiveStatus` is what to RENDER.
+fn task_view(t: &Task, effective: &str, tab_title: Option<&str>, workstream: Option<&str>) -> Value {
     json!({
         "id": t.id,
         "title": t.title,
         "detail": t.detail,
         "status": t.status,
+        "effectiveStatus": effective,
         "tabId": t.tab_id,
         "tabTitle": tab_title,
         "blockedBy": t.blocked_by,
@@ -67,13 +105,19 @@ pub(crate) fn tasks_for_tab(app: &AppState, tab_id: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for win in &data.windows {
         for ws in &win.workspaces {
+            let parked = parked_ids(ws);
             for t in ws.tasks.iter().filter(|t| t.tab_id.as_deref() == Some(tab_id)) {
                 let stream = t
                     .workstream_id
                     .as_deref()
                     .and_then(|id| ws.workstreams.iter().find(|w| w.id == id))
                     .map(|w| w.name.as_str());
-                out.push(task_view(t, titles.get(tab_id).copied(), stream));
+                out.push(task_view(
+                    t,
+                    effective_status(t, ws, &parked),
+                    titles.get(tab_id).copied(),
+                    stream,
+                ));
             }
         }
     }
@@ -90,12 +134,16 @@ pub(crate) fn tab_change_key(app: &AppState, tab_id: &str) -> Option<u64> {
     let mut any = false;
     for win in &data.windows {
         for ws in &win.workspaces {
+            let parked = parked_ids(ws);
             for t in ws.tasks.iter().filter(|t| t.tab_id.as_deref() == Some(tab_id)) {
                 any = true;
                 t.id.hash(&mut h);
                 t.title.hash(&mut h);
                 t.detail.hash(&mut h);
                 t.status.hash(&mut h);
+                // The rendered status depends on OTHER rows: a blocker finishing on another
+                // tab changes this tab's lock, and nothing on this tab's own rows moved.
+                effective_status(t, ws, &parked).hash(&mut h);
                 t.blocked_by.hash(&mut h);
                 t.updated_at.hash(&mut h);
                 t.workstream_id.hash(&mut h);
@@ -120,6 +168,7 @@ pub(crate) fn board(app: &AppState) -> Value {
                 id.and_then(|id| ws.workstreams.iter().find(|w| w.id == id))
                     .map(|w| w.name.as_str())
             };
+            let parked = parked_ids(ws);
             workspaces.push(json!({
                 "workspaceId": ws.id,
                 "workspace": ws.name,
@@ -129,6 +178,7 @@ pub(crate) fn board(app: &AppState) -> Value {
                 "workstreams": ws.workstreams.iter().map(|w| json!({ "id": w.id, "name": w.name })).collect::<Vec<_>>(),
                 "tasks": ws.tasks.iter().map(|t| task_view(
                     t,
+                    effective_status(t, ws, &parked),
                     t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                     name_of(t.workstream_id.as_deref()),
                 )).collect::<Vec<_>>(),
@@ -227,6 +277,72 @@ mod tests {
             data.windows[0].workspaces[0].tasks.retain(|t| t.tab_id.as_deref() != Some(tab.as_str()));
         }
         assert_eq!(tab_change_key(&app, &tab), None, "emptied reads as None so the streamer emits [] once");
+    }
+
+    #[test]
+    fn the_rendered_status_is_derived_like_the_desktop_does_and_moves_the_key() {
+        use crate::state::workspace::Tab;
+        let app = AppState::new();
+        let (tab_a, tab_b) = {
+            let mut data = app.app_data.write();
+            let mut win = WindowData::new("main".into());
+            let mut ws = Workspace::new("Proj".into());
+            let tab_a = ws.panes[0].tabs[0].id.clone();
+            let b = Tab::new("b".into());
+            let tab_b = b.id.clone();
+            ws.panes[0].tabs.push(b);
+            // A prerequisite parked on an archived tab: off the list, not gone.
+            let mut archived = Tab::new("old".into());
+            archived.archived_tasks.push(task("parked", "Migrate schema", None, None));
+            ws.archived_tabs.push(archived);
+
+            ws.tasks.push(task("blocker", "Land the API", Some(&tab_b), None)); // todo, on B
+            let mut done_dep = task("finished", "Old dep", Some(&tab_b), None);
+            done_dep.status = "done".into();
+            ws.tasks.push(done_dep);
+            let mut waits = task("waits", "Wire the UI", Some(&tab_a), None);
+            waits.blocked_by = vec!["blocker".into()];
+            ws.tasks.push(waits);
+            let mut freed = task("freed", "Ship it", Some(&tab_a), None);
+            freed.blocked_by = vec!["finished".into()];
+            ws.tasks.push(freed);
+            let mut orphaned = task("orphaned", "Depends on nothing now", Some(&tab_a), None);
+            orphaned.blocked_by = vec!["deleted-long-ago".into()];
+            ws.tasks.push(orphaned);
+            let mut parked_dep = task("parked-dep", "Needs the migration", Some(&tab_a), None);
+            parked_dep.blocked_by = vec!["parked".into()];
+            ws.tasks.push(parked_dep);
+            let mut done_anyway = task("done-anyway", "Already shipped", Some(&tab_a), None);
+            done_anyway.status = "done".into();
+            done_anyway.blocked_by = vec!["blocker".into()];
+            ws.tasks.push(done_anyway);
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            (tab_a, tab_b)
+        };
+        let rows = tasks_for_tab(&app, &tab_a);
+        let eff = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap()["effectiveStatus"].clone();
+        // Stored `todo`, shown `blocked` — the desktop's dependency override, cross-tab.
+        assert_eq!(eff("waits"), "blocked");
+        assert_eq!(rows.iter().find(|r| r["id"] == "waits").unwrap()["status"], "todo", "the stored lane is untouched");
+        assert_eq!(eff("freed"), "todo", "a finished prerequisite gates nothing");
+        assert_eq!(eff("orphaned"), "todo", "an id that resolves to nothing is MET, not a permanent wedge");
+        assert_eq!(eff("parked-dep"), "blocked", "an id parked on an archived tab is WAITING, not gone");
+        assert_eq!(eff("done-anyway"), "done", "done is done whatever it was blocked by");
+
+        // The peer's scenario: the blocker finishes on ITS tab, nothing on tab A's own rows
+        // changes, and tab A's lock must still lift — so tab A's change key must move.
+        let k0 = tab_change_key(&app, &tab_a).unwrap();
+        {
+            let mut data = app.app_data.write();
+            let ws = &mut data.windows[0].workspaces[0];
+            ws.tasks.iter_mut().find(|t| t.id == "blocker").unwrap().status = "done".into();
+        }
+        assert_ne!(tab_change_key(&app, &tab_a), Some(k0), "a lock lifting on tab A must wake tab A's socket");
+        assert_eq!(
+            tasks_for_tab(&app, &tab_a).iter().find(|r| r["id"] == "waits").unwrap()["effectiveStatus"],
+            "todo"
+        );
     }
 
     #[test]
