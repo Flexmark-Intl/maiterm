@@ -38,6 +38,7 @@ pub(crate) mod mirror;
 pub(crate) mod models;
 pub(crate) mod shells;
 pub(crate) mod tasks;
+pub(crate) mod board;
 pub(crate) mod transcript;
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
@@ -327,6 +328,9 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/assets", get(assets_list))
         .route("/mailink/v1/assets/{asset_id}", get(asset_bytes))
         .route("/mailink/v1/chats", get(chats_list))
+        // The whole maiTerm task board — every workspace's workstreams + rows (mailink/board.rs).
+        // Per-tab rows also ride on `chat_detail.tasks` and the WS `tasks` event.
+        .route("/mailink/v1/tasks", get(tasks_board))
         // Static segment — must be registered before `/chats/{tab_id}` so it isn't shadowed.
         .route("/mailink/v1/chats/archived", get(chats_archived))
         .route("/mailink/v1/chats/{tab_id}", get(chat_detail))
@@ -448,6 +452,16 @@ async fn models_list(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
     Ok(Json(json!(models::available())))
+}
+
+/// `GET /tasks` — the maiTerm task board across every workspace (mailink/board.rs). Pure
+/// in-memory read of persisted state; no transcript I/O, so it's safe to poll.
+async fn tasks_board(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(board::board(&s.app)))
 }
 
 /// How many assets `GET /assets` returns. The phone's Files view is a browse surface, not an
@@ -1907,9 +1921,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut mtimes: HashMap<String, u64> = HashMap::new();
-    // Per-tab task-board change key (tasks::change_key) — the `tasks` WS event fires only when a
-    // board actually changed. Baseline emission on connect is deliberate: the phone gets every
-    // existing board without opening threads, and a reconnect catches changes it slept through.
+    // Per-tab task change key (board::tab_change_key) — the `tasks` WS event fires only when a
+    // tab's maiTerm task rows actually changed. Baseline emission on connect is deliberate: the
+    // phone gets every tab's tasks without opening threads, and a reconnect catches changes it
+    // slept through.
     let mut task_keys: HashMap<String, u64> = HashMap::new();
     // Same discipline for the background-shell roster.
     let mut shell_keys: HashMap<String, u64> = HashMap::new();
@@ -2271,13 +2286,13 @@ async fn stream_new_messages(
     shell_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
     for t in designated_tabs(app) {
+        // maiTerm tasks — BEFORE the session gate and the transcript-mtime gate: a task is
+        // edited on the board, by an agent over MCP, or from the phone, none of which touches
+        // the transcript, and a tab with no live session can still own rows. Any runtime: the
+        // task store is maiTerm's, not the agent's (docs/tasks.md). In-memory read, no I/O.
+        stream_tasks_if_changed(socket, app, &t.tab_id, task_keys).await?;
         let Some((rt, sid)) = resolved_session_for_tab(app, &t.tab_id) else { continue };
-        // Task-board diff — BEFORE the transcript-mtime gate: a subagent claiming/completing
-        // tasks rewrites board files without appending to the MAIN transcript, so the board
-        // needs its own change key. Cost per tick per tab is one readdir of a tiny dir (or one
-        // ENOENT stat for the no-board majority). Claude only — no board elsewhere.
         if rt == AgentRuntime::Claude {
-            stream_tasks_if_changed(socket, &t.tab_id, &sid, task_keys).await?;
             // Background shells: also outside the transcript-mtime gate — a shell EXITING appends
             // nothing to the transcript, and that transition is exactly what the strip must show.
             stream_shells_if_changed(socket, app, &t.tab_id, shell_keys).await?;
@@ -2370,13 +2385,17 @@ async fn stream_shells_if_changed(
 /// Full-array replace semantics — boards are tiny, so no per-task diffing. A board that
 /// disappears (session ended, tasks all deleted) emits one final empty array so the phone
 /// clears its strip.
+/// Emit the tab's maiTerm task rows when they changed since the last tick (full replace — a
+/// tab's rows are few). `None` from the change key means the tab owns no rows: emit `[]` once
+/// if it used to, and nothing at all if it never did, so a socket with 300 task-less tabs
+/// isn't sent 300 empty arrays on connect.
 async fn stream_tasks_if_changed(
     socket: &mut WebSocket,
+    app: &AppState,
     tab_id: &str,
-    session_id: &str,
     task_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
-    let event = match tasks::change_key(session_id) {
+    let event = match board::tab_change_key(app, tab_id) {
         Some(key) => {
             if task_keys.get(tab_id) == Some(&key) {
                 return Ok(());
@@ -2385,7 +2404,7 @@ async fn stream_tasks_if_changed(
             json!({
                 "type": "tasks",
                 "tabId": tab_id,
-                "tasks": tasks::tasks_for_session(session_id).unwrap_or_default(),
+                "tasks": board::tasks_for_tab(app, tab_id),
                 "ts": now_ms(),
             })
         }
@@ -4124,14 +4143,12 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     }
     let ms_meta = ph.elapsed().as_millis(); // locate_jsonl + meta tail read
 
-    // The session's Claude Code task board (TaskCreate/TaskUpdate — the strip above the prompt
-    // in the TUI), invisible in structured chat without this. Present only when non-empty;
-    // live updates ride the WS `tasks` event (see stream_new_messages). mailink/tasks.rs.
-    if let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) {
-        if let Some(board) = tasks::tasks_for_session(&sid) {
-            detail["tasks"] = json!(board);
-        }
-    }
+    // This tab's maiTerm tasks (docs/tasks.md) — ALWAYS present, `[]` when it owns none, so a
+    // phone that sees no key knows the server is old rather than the tab idle. Live updates ride
+    // the WS `tasks` event (stream_tasks_if_changed). This replaced the Claude session board in
+    // v0.5: the importer already folds that board into these rows, so serving both showed the
+    // same work twice. mailink/board.rs.
+    detail["tasks"] = json!(board::tasks_for_tab(app, tab_id));
 
     // Messages typed while the agent was busy and NOT yet consumed. The phone renders these as
     // genuinely "queued" rather than a spinner, and it's the precondition for offering to pull one
