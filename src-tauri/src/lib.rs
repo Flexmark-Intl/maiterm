@@ -507,6 +507,8 @@ pub fn run() {
             commands::terminal::copy_selection,
             commands::terminal::select_all,
             commands::terminal::scroll_selection,
+            commands::terminal::set_terminal_visible,
+            commands::terminal::refresh_terminal_frame,
             commands::terminal::get_terminal_recent_text,
             commands::terminal::save_terminal_scrollback,
             commands::terminal::save_all_scrollback,

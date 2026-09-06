@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, Task, Workstream, TerminalFrame, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -175,12 +175,23 @@ export async function detectWindowsShells(): Promise<ShellInfo[]> {
 }
 
 // Terminal backend commands (alacritty_terminal)
-export async function scrollTerminal(ptyId: string, delta: number): Promise<TerminalFrame> {
+export async function scrollTerminal(ptyId: string, delta: number): Promise<FrameMeta> {
   return invoke('scroll_terminal', { ptyId, delta });
 }
 
-export async function scrollTerminalTo(ptyId: string, offset: number): Promise<TerminalFrame> {
+export async function scrollTerminalTo(ptyId: string, offset: number): Promise<FrameMeta> {
   return invoke('scroll_terminal_to', { ptyId, offset });
+}
+
+/** Hidden tabs get no frames from Rust; showing one triggers a full repaint. */
+export async function setTerminalVisible(ptyId: string, visible: boolean): Promise<void> {
+  return invoke('set_terminal_visible', { ptyId, visible });
+}
+
+/** xterm's buffer changed under Rust (a resize reflow) — ask for a full repaint
+ *  so subsequent delta frames have a true baseline. */
+export async function refreshTerminalFrame(ptyId: string, cols: number, rows: number): Promise<void> {
+  return invoke('refresh_terminal_frame', { ptyId, cols, rows });
 }
 
 export async function getTerminalScrollbackInfo(ptyId: string): Promise<ScrollInfo> {
@@ -358,15 +369,15 @@ export async function getTerminalRecentText(ptyId: string, lineCount: number): P
   return invoke('get_terminal_recent_text', { ptyId, lineCount });
 }
 
-export async function startSelection(ptyId: string, col: number, row: number, side: string, selectionType: string): Promise<TerminalFrame> {
+export async function startSelection(ptyId: string, col: number, row: number, side: string, selectionType: string): Promise<FrameMeta> {
   return invoke('start_selection', { ptyId, col, row, side, selectionType });
 }
 
-export async function updateSelection(ptyId: string, col: number, row: number, side: string): Promise<TerminalFrame> {
+export async function updateSelection(ptyId: string, col: number, row: number, side: string): Promise<FrameMeta> {
   return invoke('update_selection', { ptyId, col, row, side });
 }
 
-export async function clearSelection(ptyId: string): Promise<TerminalFrame> {
+export async function clearSelection(ptyId: string): Promise<FrameMeta> {
   return invoke('clear_selection', { ptyId });
 }
 
@@ -374,11 +385,11 @@ export async function copySelection(ptyId: string): Promise<string | null> {
   return invoke('copy_selection', { ptyId });
 }
 
-export async function selectAll(ptyId: string): Promise<TerminalFrame> {
+export async function selectAll(ptyId: string): Promise<FrameMeta> {
   return invoke('select_all', { ptyId });
 }
 
-export async function scrollSelection(ptyId: string, delta: number, col: number): Promise<TerminalFrame> {
+export async function scrollSelection(ptyId: string, delta: number, col: number): Promise<FrameMeta> {
   return invoke('scroll_selection', { ptyId, delta, col });
 }
 

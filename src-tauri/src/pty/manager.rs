@@ -11,7 +11,6 @@ use crate::state::persistence::app_data_slug;
 use crate::terminal::event_proxy::AitermEventProxy;
 use crate::terminal::handle::{create_terminal, TerminalHandle};
 use crate::terminal::osc::OscEvent;
-use crate::terminal::render;
 
 /// Frame interval for coalesced emission (~60fps). During a burst of PTY output
 /// the emitter thread renders at most one frame per interval; a trailing frame is
@@ -483,13 +482,12 @@ pub fn spawn_pty(
                 }
 
                 {
-                    let registry = emitter_state.terminal_registry.read();
-                    if let Some(handle) = registry.get(&emitter_pty_id) {
-                        let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
-                        let _ = emitter_app.emit(
-                            &format!("term-frame-{}", emitter_pty_id),
-                            &frame,
-                        );
+                    // Write lock: the frame is a delta against the rows xterm
+                    // already has, and that cache lives on the handle. A hidden
+                    // tab renders nothing at all (see TerminalHandle::emit_frame).
+                    let mut registry = emitter_state.terminal_registry.write();
+                    if let Some(handle) = registry.get_mut(&emitter_pty_id) {
+                        handle.emit_frame(&emitter_app, &emitter_pty_id, false);
                     }
                 }
 
@@ -620,20 +618,21 @@ pub fn spawn_pty(
             }
         }
 
-        // Emit final frame before closing
+        // Emit final frame before closing. Even a hidden tab gets this one: the
+        // handle is about to be removed, so a later reveal can't ask for a
+        // catch-up frame — this is the last content the tab will ever show.
         {
-            let registry = state_reader.terminal_registry.read();
-            if let Some(handle) = registry.get(&pty_id_clone) {
-                let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
-                let _ = app_handle_clone.emit(
-                    &format!("term-frame-{}", pty_id_clone),
-                    &frame,
-                );
+            let mut registry = state_reader.terminal_registry.write();
+            if let Some(handle) = registry.get_mut(&pty_id_clone) {
+                let was_hidden = !handle.visible;
+                handle.visible = true;
+                handle.emit_frame(&app_handle_clone, &pty_id_clone, was_hidden);
             }
         }
 
-        // Stop the emitter thread. The final frame above is emitted directly so it
-        // can't be lost to the coalescing window.
+        // Stop the emitter thread. The final frame above went through emit_frame
+        // ourselves rather than via the dirty flag, so it can't be lost to the
+        // coalescing window.
         {
             let (lock, cvar) = &*reader_signal;
             let mut st = lock.lock().unwrap();
@@ -817,11 +816,13 @@ fn spawn_resize_applier(app_handle: AppHandle, state: Arc<AppState>, pty_id: Str
 /// blank or half-painted until the next byte arrives. On a tab holding an idle
 /// agent that can be hours. One frame from the grid, which is authoritative, puts
 /// the viewport back.
+///
+/// Always a full repaint: every caller here has just resized or re-fitted, which
+/// reflows xterm's buffer behind the row cache's back.
 fn emit_frame(app_handle: &AppHandle, state: &Arc<AppState>, pty_id: &str) {
-    let registry = state.terminal_registry.read();
-    if let Some(handle) = registry.get(pty_id) {
-        let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
-        let _ = app_handle.emit(&format!("term-frame-{}", pty_id), &frame);
+    let mut registry = state.terminal_registry.write();
+    if let Some(handle) = registry.get_mut(pty_id) {
+        handle.emit_frame(app_handle, pty_id, true);
     }
 }
 

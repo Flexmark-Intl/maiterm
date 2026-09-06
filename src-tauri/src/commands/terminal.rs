@@ -1,9 +1,9 @@
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::pty;
 use crate::state::AppState;
-use crate::terminal::render::{self, TerminalFrame};
+use crate::terminal::render::FrameMeta;
 use crate::terminal::search;
 use crate::terminal::serialize;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -225,23 +225,25 @@ fn detect_windows_shells_impl() -> Vec<ShellInfo> {
 /// Scroll terminal display by delta lines (positive = up, negative = down).
 #[tauri::command]
 pub fn scroll_terminal(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     delta: i32,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     handle.term.scroll_display(Scroll::Delta(delta));
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
 }
 
 /// Scroll terminal to an absolute position (0 = bottom/live).
 #[tauri::command]
 pub fn scroll_terminal_to(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     offset: usize,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     // First scroll to bottom, then scroll up by the desired offset
@@ -249,7 +251,50 @@ pub fn scroll_terminal_to(
     if offset > 0 {
         handle.term.scroll_display(Scroll::Delta(offset as i32));
     }
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
+}
+
+/// Tell Rust whether this terminal's tab is on screen. Hidden tabs get no
+/// frames (their xterm has nothing to show them to); showing one again emits a
+/// full repaint so xterm catches up in a single write.
+#[tauri::command]
+pub fn set_terminal_visible(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+    visible: bool,
+) -> Result<(), String> {
+    let mut registry = state.terminal_registry.write();
+    let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
+    // Every `visible: true` repaints in full, not just the hidden→visible edge:
+    // a pane that reattaches to a live PTY (window reload, tab moved between
+    // panes) mounts an EMPTY xterm while the handle still says visible from the
+    // pane it left.
+    handle.visible = visible;
+    if visible {
+        handle.emit_frame(&app_handle, &pty_id, true);
+    }
+    Ok(())
+}
+
+/// The frontend's xterm just reflowed on `terminal.resize(cols, rows)`, which
+/// happens the instant a pane changes size while the PTY resize is debounced
+/// for up to 400ms behind it. Record xterm's geometry and repaint in full;
+/// `emit_frame` keeps repainting in full until the grid catches up, since a
+/// delta addressed at the old row count would land on the wrong rows.
+#[tauri::command]
+pub fn refresh_terminal_frame(
+    app_handle: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+    cols: usize,
+    rows: usize,
+) -> Result<(), String> {
+    let mut registry = state.terminal_registry.write();
+    let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
+    handle.xterm_dims = Some((cols, rows));
+    handle.emit_frame(&app_handle, &pty_id, true);
+    Ok(())
 }
 
 /// Scrollback metadata.
@@ -570,8 +615,7 @@ pub fn clear_terminal_scrollback(
     // Move cursor to home so shell prompt redraws at top
     handle.term.goto(0, 0);
     // Emit a frame immediately so the frontend sees the cleared state
-    let frame = render::render_viewport(&handle.term, handle.selection.as_ref());
-    let _ = app_handle.emit(&format!("term-frame-{}", pty_id), &frame);
+    handle.emit_frame(&app_handle, &pty_id, false);
     Ok(())
 }
 
@@ -721,13 +765,14 @@ fn parse_selection_type(ty: &str) -> SelectionType {
 /// Start a new selection at the given viewport position.
 #[tauri::command]
 pub fn start_selection(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     col: usize,
     row: usize,
     side: String,
     selection_type: String,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     let display_offset = handle.term.grid().display_offset();
@@ -737,18 +782,19 @@ pub fn start_selection(
         point,
         parse_side(&side),
     ));
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
 }
 
 /// Update the end of the current selection.
 #[tauri::command]
 pub fn update_selection(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     col: usize,
     row: usize,
     side: String,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     let display_offset = handle.term.grid().display_offset();
@@ -756,19 +802,20 @@ pub fn update_selection(
     if let Some(ref mut sel) = handle.selection {
         sel.update(point, parse_side(&side));
     }
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
 }
 
 /// Clear the current selection.
 #[tauri::command]
 pub fn clear_selection(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     handle.selection = None;
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
 }
 
 /// Copy the current selection text.
@@ -789,9 +836,10 @@ pub fn copy_selection(
 /// Select all content in the terminal buffer.
 #[tauri::command]
 pub fn select_all(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     let top = handle.term.topmost_line();
@@ -804,18 +852,19 @@ pub fn select_all(
     );
     sel.update(Point::new(bottom, last_col), Side::Right);
     handle.selection = Some(sel);
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
 }
 
 /// Scroll the viewport while maintaining an active selection, updating the
 /// selection endpoint to the edge of the viewport in the scroll direction.
 #[tauri::command]
 pub fn scroll_selection(
+    app_handle: AppHandle,
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     delta: i32,
     col: usize,
-) -> Result<TerminalFrame, String> {
+) -> Result<FrameMeta, String> {
     let mut registry = state.terminal_registry.write();
     let handle = registry.get_mut(&pty_id).ok_or("Terminal not found")?;
     handle.term.scroll_display(Scroll::Delta(delta));
@@ -826,5 +875,5 @@ pub fn scroll_selection(
     if let Some(ref mut sel) = handle.selection {
         sel.update(point, if delta > 0 { Side::Left } else { Side::Right });
     }
-    Ok(render::render_viewport(&handle.term, handle.selection.as_ref()))
+    Ok(handle.emit_frame(&app_handle, &pty_id, false))
 }

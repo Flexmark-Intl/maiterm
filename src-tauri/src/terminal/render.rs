@@ -8,7 +8,10 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 /// A rendered viewport frame sent to the frontend.
 #[derive(serde::Serialize, Clone)]
 pub struct TerminalFrame {
-    /// Full viewport as ANSI escape sequences (raw UTF-8 bytes).
+    /// ANSI escape sequences (raw UTF-8 bytes) that bring the frontend's xterm
+    /// from the previous frame to this one. Either a full repaint (`ESC[H ESC[2J`
+    /// + every row) or a delta: only the rows that changed, each preceded by an
+    /// absolute cursor move. xterm consumes both identically.
     /// Sent as bytes to avoid WebView string encoding issues with non-ASCII characters.
     pub ansi: Vec<u8>,
     pub cursor_x: usize,
@@ -24,13 +27,72 @@ pub struct TerminalFrame {
     pub has_selection: bool,
 }
 
-/// Extract the visible viewport from a Term and produce an ANSI string.
-/// The frontend xterm.js (scrollback=0) receives this and renders it.
+/// What a frame-producing command reports back to its caller. The pixels travel
+/// on the `term-frame-{pty}` event like every other frame; the response carries
+/// only the state the caller's UI (scrollbar, selection affordances) needs.
+#[derive(serde::Serialize, Clone, Copy)]
+pub struct FrameMeta {
+    pub display_offset: usize,
+    pub total_lines: usize,
+    pub alternate_screen: bool,
+    pub has_selection: bool,
+}
+
+impl From<&TerminalFrame> for FrameMeta {
+    fn from(f: &TerminalFrame) -> Self {
+        FrameMeta {
+            display_offset: f.display_offset,
+            total_lines: f.total_lines,
+            alternate_screen: f.alternate_screen,
+            has_selection: f.has_selection,
+        }
+    }
+}
+
+/// Current metadata without rendering anything.
+pub fn frame_meta<T: EventListener>(term: &Term<T>, ext_selection: Option<&Selection>) -> FrameMeta {
+    FrameMeta {
+        display_offset: term.grid().display_offset(),
+        total_lines: term.grid().total_lines(),
+        alternate_screen: term.mode().contains(TermMode::ALT_SCREEN),
+        has_selection: ext_selection.is_some(),
+    }
+}
+
+/// The rows of the last frame delivered to a terminal's xterm, so the next
+/// frame can be a delta against them. Every row string is self-contained: it
+/// starts from default attributes and ends with a reset and any hyperlink
+/// closed, so it renders identically whether written in sequence or jumped to
+/// with an absolute cursor move.
+///
+/// The frontend's xterm keeps no scrollback and gets nothing except these
+/// frames, so as long as every frame is applied in order the cache is exact.
+/// Anything that can disturb xterm's buffer behind our back (a resize reflow, a
+/// tab that was hidden and skipped frames) must drop the cache so the next
+/// frame is a full repaint.
+pub struct FrameCache {
+    rows: Vec<String>,
+    cols: usize,
+    display_offset: usize,
+    alt_screen: bool,
+}
+
+/// Render the next frame for `term`.
+///
+/// If `cache` holds the previous frame and the viewport geometry is unchanged,
+/// only the rows whose rendered form differs are emitted, each addressed with
+/// `ESC[row;1H`. A scroll changes every row, so when more than half the rows
+/// differ the classic full repaint is emitted instead (it is smaller — no
+/// per-row cursor moves). Under a streaming agent the common frame is a few
+/// rows out of fifty; xterm's DOM renderer then rebuilds only those rows
+/// instead of all of them.
+///
 /// If `ext_selection` is provided, it's used for highlight rendering instead of
 /// `term.selection` (which gets cleared by VTE processing).
-pub fn render_viewport<T: EventListener>(
+pub fn render_frame<T: EventListener>(
     term: &Term<T>,
     ext_selection: Option<&Selection>,
+    cache: &mut Option<FrameCache>,
 ) -> TerminalFrame {
     let content = term.renderable_content();
     let num_cols = term.columns();
@@ -46,12 +108,9 @@ pub fn render_viewport<T: EventListener>(
         .and_then(|s| s.to_range(term))
         .or(content.selection);
 
-    // Pre-allocate output — rough estimate: 10 bytes per cell for ANSI + content
-    let mut out = String::with_capacity(num_cols * num_lines * 10);
-
-    // Clear screen and home cursor
-    out.push_str("\x1b[H\x1b[2J");
-
+    // --- Render every viewport row to its own self-contained string ---
+    let mut rows: Vec<String> = Vec::with_capacity(num_lines);
+    let mut row = String::with_capacity(num_cols * 4);
     let mut prev_fg = Color::Named(NamedColor::Foreground);
     let mut prev_bg = Color::Named(NamedColor::Background);
     let mut prev_flags = Flags::empty();
@@ -63,16 +122,11 @@ pub fn render_viewport<T: EventListener>(
         let point = indexed.point;
         let cell = indexed.cell;
 
-        // Track line changes for newlines
+        // Line change: close the row (reset attributes, close hyperlink) and start a new one.
         if point.line.0 != current_line {
             if current_line != i32::MIN {
-                // Close hyperlink before line break
-                if active_hyperlink_uri.is_some() {
-                    out.push_str("\x1b]8;;\x1b\\");
-                    active_hyperlink_uri = None;
-                }
-                // Reset attributes at end of line and emit newline
-                out.push_str("\x1b[0m\r\n");
+                finish_row(&mut row, &mut active_hyperlink_uri);
+                rows.push(std::mem::replace(&mut row, String::with_capacity(num_cols * 4)));
                 prev_fg = Color::Named(NamedColor::Foreground);
                 prev_bg = Color::Named(NamedColor::Background);
                 prev_flags = Flags::empty();
@@ -80,10 +134,12 @@ pub fn render_viewport<T: EventListener>(
             current_line = point.line.0;
         }
 
-        // Skip wide char spacers (the trailing cell of a double-width char)
-        if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-            || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
-        {
+        // Skip the trailing cell of a double-width char — the glyph covers it.
+        // A LEADING spacer is different: it is a real blank in the last column
+        // that alacritty writes when a wide glyph didn't fit and wrapped. It
+        // must be emitted as a space, or the row comes out one column short
+        // and a delta leaves the previous frame's last column standing.
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             continue;
         }
 
@@ -91,19 +147,16 @@ pub fn render_viewport<T: EventListener>(
         let cell_uri = cell.hyperlink().map(|h| h.uri().to_string());
         match (&active_hyperlink_uri, &cell_uri) {
             (None, Some(uri)) => {
-                // Open new hyperlink
-                out.push_str(&format!("\x1b]8;;{}\x1b\\", uri));
+                row.push_str(&format!("\x1b]8;;{}\x1b\\", uri));
                 active_hyperlink_uri = Some(uri.clone());
             }
             (Some(prev), Some(uri)) if prev != uri => {
-                // Close old, open new
-                out.push_str("\x1b]8;;\x1b\\");
-                out.push_str(&format!("\x1b]8;;{}\x1b\\", uri));
+                row.push_str("\x1b]8;;\x1b\\");
+                row.push_str(&format!("\x1b]8;;{}\x1b\\", uri));
                 active_hyperlink_uri = Some(uri.clone());
             }
             (Some(_), None) => {
-                // Close hyperlink
-                out.push_str("\x1b]8;;\x1b\\");
+                row.push_str("\x1b]8;;\x1b\\");
                 active_hyperlink_uri = None;
             }
             _ => {} // Same link or both None — no change
@@ -120,7 +173,7 @@ pub fn render_viewport<T: EventListener>(
         // Emit SGR changes if attributes differ
         let needs_sgr = cell.fg != prev_fg || cell.bg != prev_bg || flags != prev_flags;
         if needs_sgr {
-            emit_sgr(&mut out, cell.fg, cell.bg, flags);
+            emit_sgr(&mut row, cell.fg, cell.bg, flags);
             prev_fg = cell.fg;
             prev_bg = cell.bg;
             prev_flags = flags;
@@ -133,26 +186,58 @@ pub fn render_viewport<T: EventListener>(
         // tab in an 86-col grid produces 8+85 = 93 visible columns → line wrap.
         let c = cell.c;
         if c == '\0' || c == ' ' || c.is_ascii_control() {
-            out.push(' ');
+            row.push(' ');
         } else {
-            out.push(c);
+            row.push(c);
         }
 
         // Append zero-width characters
         if let Some(zerowidth) = cell.zerowidth() {
             for &zw in zerowidth {
-                out.push(zw);
+                row.push(zw);
             }
         }
     }
-
-    // Close any open hyperlink
-    if active_hyperlink_uri.is_some() {
-        out.push_str("\x1b]8;;\x1b\\");
+    if current_line != i32::MIN {
+        finish_row(&mut row, &mut active_hyperlink_uri);
+        rows.push(row);
     }
 
-    // Reset at end
-    out.push_str("\x1b[0m");
+    // --- Decide: delta against the cache, or full repaint ---
+    let reusable = cache.as_ref().map_or(false, |c| {
+        c.cols == num_cols
+            && c.rows.len() == rows.len()
+            && c.display_offset == display_offset
+            && c.alt_screen == alternate_screen
+    });
+    let changed: Vec<usize> = if reusable {
+        let old = &cache.as_ref().unwrap().rows;
+        (0..rows.len()).filter(|&i| rows[i] != old[i]).collect()
+    } else {
+        Vec::new()
+    };
+    let full = !reusable || changed.len() * 2 > rows.len();
+
+    let mut out = String::with_capacity(if full {
+        num_cols * num_lines * 10
+    } else {
+        changed.len() * (num_cols * 4 + 16) + 32
+    });
+    if full {
+        // Clear screen and home cursor, then every row
+        out.push_str("\x1b[H\x1b[2J");
+        for (i, r) in rows.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\r\n");
+            }
+            out.push_str(r);
+        }
+    } else {
+        for &i in &changed {
+            out.push_str(&format!("\x1b[{};1H", i + 1));
+            out.push_str(&rows[i]);
+        }
+    }
 
     // Position cursor (hidden when scrolled into history)
     if cursor_visible && display_offset == 0 {
@@ -167,6 +252,13 @@ pub fn render_viewport<T: EventListener>(
         out.push_str("\x1b[?25l"); // Hide cursor when browsing scrollback
     }
 
+    *cache = Some(FrameCache {
+        rows,
+        cols: num_cols,
+        display_offset,
+        alt_screen: alternate_screen,
+    });
+
     TerminalFrame {
         ansi: out.into_bytes(),
         cursor_x: cursor.point.column.0,
@@ -180,6 +272,16 @@ pub fn render_viewport<T: EventListener>(
         alternate_screen,
         has_selection: selection_range.is_some(),
     }
+}
+
+/// Close a row: any open hyperlink, then reset attributes, so the row is
+/// self-contained regardless of what is written after it.
+fn finish_row(row: &mut String, active_hyperlink_uri: &mut Option<String>) {
+    if active_hyperlink_uri.is_some() {
+        row.push_str("\x1b]8;;\x1b\\");
+        *active_hyperlink_uri = None;
+    }
+    row.push_str("\x1b[0m");
 }
 
 /// Emit SGR escape sequence for the given attributes.

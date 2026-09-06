@@ -546,6 +546,16 @@ export interface TerminalFrame {
   has_selection: boolean;
 }
 
+/** What a viewport/selection command reports back. The pixels arrive on the
+ *  term-frame event like every other frame; this is just the state the UI
+ *  (scrollbar, selection affordances) needs from the response. */
+export interface FrameMeta {
+  display_offset: number;
+  total_lines: number;
+  alternate_screen: boolean;
+  has_selection: boolean;
+}
+
 export interface ScrollInfo {
   display_offset: number;
   total_lines: number;

@@ -1,4 +1,3 @@
-import type { Terminal } from '@xterm/xterm';
 import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
@@ -33,16 +32,21 @@ const SIDEBAR_DEFAULT_WIDTH = 215;
  * Extract the remote cwd from the terminal prompt using user-configured patterns.
  * Patterns are defined in preferences and compiled to regexes at runtime.
  */
-function extractRemoteCwd(terminal: Terminal): string | null {
-  const buffer = terminal.buffer.active;
-  const cursorLine = buffer.baseY + buffer.cursorY;
+// Scan the last few lines for a prompt pattern. Reads Rust's grid, not xterm's
+// buffer: a hidden tab's xterm receives no frames and is frozen at whatever
+// was on screen when it was hidden.
+async function extractRemoteCwd(ptyId: string): Promise<string | null> {
   const patterns = getCompiledPatterns(preferencesStore.promptPatterns);
   if (patterns.length === 0) return null;
 
-  for (let i = cursorLine; i >= Math.max(0, cursorLine - 5); i--) {
-    const line = buffer.getLine(i);
-    if (!line) continue;
-    const text = line.translateToString(true).trim();
+  let lines: string[];
+  try {
+    lines = (await commands.getTerminalRecentText(ptyId, 6)).split('\n');
+  } catch {
+    return null; // PTY gone
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const text = lines[i].trim();
     if (!text) continue;
 
     for (const re of patterns) {
@@ -915,7 +919,7 @@ function createWorkspacesStore() {
             // if they match, OSC 7 is stale → fall back to promptCwd then buffer scan.
             const isOsc7Stale = osc7Cwd === cwd;
             const osc7RemoteCwd = (osc7Cwd && !isOsc7Stale) ? osc7Cwd : null;
-            remoteCwd = osc7RemoteCwd ?? promptCwd ?? (instance ? extractRemoteCwd(instance.terminal) : null);
+            remoteCwd = osc7RemoteCwd ?? promptCwd ?? (instance ? await extractRemoteCwd(instance.ptyId) : null);
           } else if (preferencesStore.cloneCwd) {
             // No SSH: OSC 7 reports local cwd, can supplement lsof
             cwd = cwd ?? osc7Cwd;
@@ -1789,7 +1793,7 @@ function createWorkspacesStore() {
      * Store split context (cwd/SSH) for a newly created tab so TerminalPane
      * consumes it on mount.
      */
-    _storeSplitContext(sourceTabId: string, newTabId: string, cwd: string | null, sshCommand: string | null, instance: { terminal: import('@xterm/xterm').Terminal } | undefined) {
+    async _storeSplitContext(sourceTabId: string, newTabId: string, cwd: string | null, sshCommand: string | null, instance: { ptyId: string } | undefined): Promise<void> {
       if (!preferencesStore.cloneCwd && !preferencesStore.cloneSsh) return;
 
       const oscState = terminalsStore.getOsc(sourceTabId);
@@ -1800,7 +1804,7 @@ function createWorkspacesStore() {
       if (sshCommand) {
         const isOsc7Stale = osc7Cwd === cwd;
         const osc7RemoteCwd = (osc7Cwd && !isOsc7Stale) ? osc7Cwd : null;
-        remoteCwd = osc7RemoteCwd ?? promptCwd ?? (instance ? extractRemoteCwd(instance.terminal) : null);
+        remoteCwd = osc7RemoteCwd ?? promptCwd ?? (instance ? await extractRemoteCwd(instance.ptyId) : null);
       } else if (preferencesStore.cloneCwd) {
         cwd = cwd ?? osc7Cwd;
       }
@@ -1890,7 +1894,7 @@ function createWorkspacesStore() {
       }
 
       // Store split context for the new terminal
-      this._storeSplitContext(sourceTabId, newTab.id, cwd, sshCommand, instance);
+      await this._storeSplitContext(sourceTabId, newTab.id, cwd, sshCommand, instance);
 
       // Mark as unreviewed activity so the tab shows the activity dot
       activityStore.markActive(newTab.id);
@@ -2080,7 +2084,7 @@ function createWorkspacesStore() {
             const promptCwd = oscState?.promptCwd ?? null;
             const isOsc7Stale = osc7Cwd === ctx.cwd;
             const osc7RemoteCwd = (osc7Cwd && !isOsc7Stale) ? osc7Cwd : null;
-            remoteCwd = osc7RemoteCwd ?? promptCwd ?? extractRemoteCwd(ctx.instance.terminal);
+            remoteCwd = osc7RemoteCwd ?? promptCwd ?? (await extractRemoteCwd(ctx.instance.ptyId));
           }
 
           tabContexts.push({
@@ -2208,7 +2212,7 @@ function createWorkspacesStore() {
 
       // 8. Store split context for the new TerminalPane to consume on mount
       terminalsStore.markSpawning(newTab.id);
-      this._storeSplitContext(tabId, newTab.id, cwd, sshCommand, instance);
+      await this._storeSplitContext(tabId, newTab.id, cwd, sshCommand, instance);
 
       // 9. Reorder to place new tab right after source
       const currentIds = pane!.tabs.map(t => t.id);
@@ -2259,7 +2263,7 @@ function createWorkspacesStore() {
       // Where to run — the ONLY thing inherited. Nothing else: no scrollback, notes, history,
       // trigger variables (so no session id) or the source's own auto-resume command.
       terminalsStore.markSpawning(newTab.id);
-      this._storeSplitContext(tabId, newTab.id, cwd, sshCommand, instance);
+      await this._storeSplitContext(tabId, newTab.id, cwd, sshCommand, instance);
       // _storeSplitContext is pref-gated (clone_cwd/clone_ssh) and skips writing a context when
       // both are off; re-read it so the auto-resume fields agree with what will actually be used.
       const ctx = terminalsStore.peekSplitContext(newTab.id);
@@ -2422,7 +2426,7 @@ function createWorkspacesStore() {
               const promptCwd = oscState?.promptCwd ?? null;
               const isOsc7Stale = osc7Cwd === ctx.cwd;
               const osc7RemoteCwd = (osc7Cwd && !isOsc7Stale) ? osc7Cwd : null;
-              remoteCwd = osc7RemoteCwd ?? promptCwd ?? extractRemoteCwd(ctx.instance.terminal);
+              remoteCwd = osc7RemoteCwd ?? promptCwd ?? (await extractRemoteCwd(ctx.instance.ptyId));
             }
 
             tabContexts.push({

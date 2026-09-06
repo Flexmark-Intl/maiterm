@@ -10,8 +10,8 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection } from '$lib/tauri/commands';
-  import type { TerminalFrame, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText } from '$lib/tauri/commands';
+  import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
   import { readText as clipboardReadText, writeText as clipboardWriteText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
@@ -191,10 +191,12 @@
     return { col, row, side };
   }
 
-  function applyFrame(frame: TerminalFrame) {
-    terminal.write(new Uint8Array(frame.ansi));
-    hasRustSelection = frame.has_selection;
-    updateScrollbar(frame.display_offset, frame.total_lines);
+  // Commands that move the viewport or the selection no longer return pixels —
+  // the frame arrives on term-frame-{ptyId} like every other one, so xterm sees
+  // exactly one ordered stream of deltas. The response carries only metadata.
+  function applyFrame(meta: FrameMeta) {
+    hasRustSelection = meta.has_selection;
+    updateScrollbar(meta.display_offset, meta.total_lines);
   }
 
   function stopAutoScroll() {
@@ -343,6 +345,12 @@
     if (cols < 10 || rows < 2) return;
     if (cols === terminal.cols && rows === terminal.rows) return;
     terminal.resize(cols, rows);
+    // xterm just reflowed its buffer, and Rust's delta frames are diffs against
+    // what it believes xterm holds. The PTY resize is debounced (150ms here, up
+    // to 250ms more in Rust while output is hot), so tell Rust xterm's new size
+    // now: it repaints in full, and keeps every frame full until the grid
+    // matches — otherwise deltas land on a reflowed buffer at the wrong rows.
+    if (ptyId) refreshTerminalFrame(ptyId, cols, rows).catch(() => {});
   }
   let contextMenu = $state<{ x: number; y: number } | null>(null);
   let hoveredLinkUri: string | null = null;
@@ -547,29 +555,28 @@
     // Listen for rendered frames from Rust (alacritty_terminal renders viewport as ANSI bytes).
     // When user is scrolled back, new PTY data causes alacritty to snap display_offset to 0.
     // We hold the user's scroll position by re-requesting the frame at their offset.
+    // Every frame is a delta against the one before it (or a full repaint), so
+    // every frame must be written, in order — never skipped.
     unlistenOutput = await listen<TerminalFrame>(`term-frame-${ptyId}`, (event) => {
       const frame = event.payload;
       lastFrameAlternateScreen = frame.alternate_screen;
       scrollTotalLines = frame.total_lines;
       scrollViewportRows = terminal.rows;
+      scrollDisplayOffset = frame.display_offset;
 
-      // Alternate screen (TUI apps like Claude/vim) has no scrollback — clear hold
       if (frame.alternate_screen) {
+        // Alternate screen (TUI apps like Claude/vim) has no scrollback — clear hold
         userScrollOffset = 0;
       } else if (userScrollOffset > 0 && frame.display_offset === 0) {
-        // User is scrolled back but alacritty snapped to bottom — re-request at their offset.
-        // Still update total_lines so scrollbar reflects new content.
+        // User is scrolled back but alacritty snapped to bottom — re-request at
+        // their offset. That frame arrives through this listener like any other.
         scrollTerminalTo(ptyId, userScrollOffset).then(held => {
           userScrollOffset = held.display_offset;
-          scrollDisplayOffset = held.display_offset;
-          scrollTotalLines = held.total_lines;
-          terminal.write(new Uint8Array(held.ansi));
         }).catch(() => {});
-        return;
+      } else if (frame.display_offset === 0) {
+        userScrollOffset = 0;
       }
 
-      scrollDisplayOffset = frame.display_offset;
-      if (frame.display_offset === 0) userScrollOffset = 0;
       hasRustSelection = frame.has_selection;
       terminal.write(new Uint8Array(frame.ansi));
     });
@@ -980,7 +987,6 @@
           e.preventDefault();
           scrollTerminal(ptyId, terminal.rows).then(frame => {
             userScrollOffset = frame.display_offset;
-            terminal.write(new Uint8Array(frame.ansi));
             updateScrollbar(frame.display_offset, frame.total_lines);
           }).catch(() => {});
           return false;
@@ -989,7 +995,6 @@
           e.preventDefault();
           scrollTerminal(ptyId, -terminal.rows).then(frame => {
             userScrollOffset = frame.display_offset;
-            terminal.write(new Uint8Array(frame.ansi));
             updateScrollbar(frame.display_offset, frame.total_lines);
           }).catch(() => {});
           return false;
@@ -998,7 +1003,6 @@
           e.preventDefault();
           scrollTerminal(ptyId, 1).then(frame => {
             userScrollOffset = frame.display_offset;
-            terminal.write(new Uint8Array(frame.ansi));
             updateScrollbar(frame.display_offset, frame.total_lines);
           }).catch(() => {});
           return false;
@@ -1007,7 +1011,6 @@
           e.preventDefault();
           scrollTerminal(ptyId, -1).then(frame => {
             userScrollOffset = frame.display_offset;
-            terminal.write(new Uint8Array(frame.ansi));
             updateScrollbar(frame.display_offset, frame.total_lines);
           }).catch(() => {});
           return false;
@@ -1090,7 +1093,6 @@
 
       scrollTerminal(ptyId, lines).then((frame) => {
         userScrollOffset = frame.display_offset;
-        terminal.write(new Uint8Array(frame.ansi));
         updateScrollbar(frame.display_offset, frame.total_lines);
       }).catch(() => { /* terminal may have been killed */ });
     }, { passive: false, capture: true });
@@ -1351,6 +1353,15 @@
     }
   });
 
+  // Rust renders no frames for a hidden tab and repaints it in full when it is
+  // shown again, so a background tab costs the renderer nothing. Runs once when
+  // `initialized` flips (the tab's starting state) and on every change after.
+  $effect(() => {
+    if (initialized && ptyId) {
+      setTerminalVisible(ptyId, visible).catch(() => {});
+    }
+  });
+
   $effect(() => {
     if (visible && initialized && fitAddon) {
       // Delay fit to ensure container is visible
@@ -1508,14 +1519,13 @@
               const osc7RemoteCwd = (osc7Cwd && !isOsc7Stale) ? osc7Cwd : null;
               remoteCwd = osc7RemoteCwd ?? promptCwd ?? null;
               if (!remoteCwd) {
-                // Last resort: scan buffer for prompt pattern
+                // Last resort: scan the last few lines for a prompt pattern. Read
+                // them from Rust's grid, not xterm's buffer — a hidden tab's xterm
+                // is frozen at whatever was on screen when it was hidden.
                 const patterns = getCompiledPatterns(preferencesStore.promptPatterns);
-                const buffer = terminal.buffer.active;
-                const cursorLine = buffer.baseY + buffer.cursorY;
-                for (let i = cursorLine; i >= Math.max(0, cursorLine - 5); i--) {
-                  const line = buffer.getLine(i);
-                  if (!line) continue;
-                  const text = line.translateToString(true).trim();
+                const lines = (await getTerminalRecentText(ptyId, 6)).split('\n');
+                for (let i = lines.length - 1; i >= 0; i--) {
+                  const text = lines[i].trim();
                   if (!text) continue;
                   for (const re of patterns) {
                     const match = text.match(re);
@@ -2080,7 +2090,6 @@
         const targetOffset = Math.round((1 - fraction) * maxOffset);
         scrollTerminalTo(ptyId, targetOffset).then(frame => {
           userScrollOffset = frame.display_offset;
-          terminal.write(new Uint8Array(frame.ansi));
           updateScrollbar(frame.display_offset, frame.total_lines);
         }).catch(() => {});
       }}
@@ -2105,7 +2114,6 @@
             const clamped = Math.max(0, Math.min(maxOffset, targetOffset));
             scrollTerminalTo(ptyId, clamped).then(frame => {
               userScrollOffset = frame.display_offset;
-              terminal.write(new Uint8Array(frame.ansi));
               updateScrollbar(frame.display_offset, frame.total_lines);
             }).catch(() => {});
           };
