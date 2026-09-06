@@ -2285,12 +2285,15 @@ async fn stream_new_messages(
     task_keys: &mut HashMap<String, u64>,
     shell_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
+    // maiTerm task change keys for the whole roster, ONE pass under one read lock per tick
+    // (per-tab it was O(tabs × tasks); see board::tab_change_keys). In-memory, no I/O.
+    let keys = board::tab_change_keys(app);
     for t in designated_tabs(app) {
         // maiTerm tasks — BEFORE the session gate and the transcript-mtime gate: a task is
         // edited on the board, by an agent over MCP, or from the phone, none of which touches
         // the transcript, and a tab with no live session can still own rows. Any runtime: the
-        // task store is maiTerm's, not the agent's (docs/tasks.md). In-memory read, no I/O.
-        stream_tasks_if_changed(socket, app, &t.tab_id, task_keys).await?;
+        // task store is maiTerm's, not the agent's (docs/tasks.md).
+        stream_tasks_if_changed(socket, app, &t.tab_id, keys.get(&t.tab_id).copied(), task_keys).await?;
         let Some((rt, sid)) = resolved_session_for_tab(app, &t.tab_id) else { continue };
         if rt == AgentRuntime::Claude {
             // Background shells: also outside the transcript-mtime gate — a shell EXITING appends
@@ -2386,16 +2389,17 @@ async fn stream_shells_if_changed(
 /// disappears (session ended, tasks all deleted) emits one final empty array so the phone
 /// clears its strip.
 /// Emit the tab's maiTerm task rows when they changed since the last tick (full replace — a
-/// tab's rows are few). `None` from the change key means the tab owns no rows: emit `[]` once
-/// if it used to, and nothing at all if it never did, so a socket with 300 task-less tabs
-/// isn't sent 300 empty arrays on connect.
+/// tab's rows are few). `key` is this tab's entry from the tick's `board::tab_change_keys`;
+/// `None` means the tab owns no rows: emit `[]` once if it used to, and nothing at all if it
+/// never did, so a socket with 300 task-less tabs isn't sent 300 empty arrays on connect.
 async fn stream_tasks_if_changed(
     socket: &mut WebSocket,
     app: &AppState,
     tab_id: &str,
+    key: Option<u64>,
     task_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
-    let event = match board::tab_change_key(app, tab_id) {
+    let event = match key {
         Some(key) => {
             if task_keys.get(tab_id) == Some(&key) {
                 return Ok(());
