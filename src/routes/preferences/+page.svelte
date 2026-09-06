@@ -997,6 +997,25 @@
           </button>
         </div>
 
+        <h3 class="section-heading">Dragging</h3>
+
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="drag-to-split">Drag to Split</label>
+            <p class="setting-hint">Dropping a dragged tab near a pane's edge splits that pane. Off by default: the top edge zone sits right under the tab bar, so a few pixels of drift while clicking a tab can split the pane instead of selecting it. Splitting is still available from the tab's right-click menu and <kbd>{modLabel}+D</kbd>.</p>
+          </div>
+          <button
+            id="drag-to-split"
+            class="toggle"
+            class:active={preferencesStore.dragToSplit}
+            onclick={() => preferencesStore.setDragToSplit(!preferencesStore.dragToSplit)}
+            aria-pressed={preferencesStore.dragToSplit}
+            aria-label="Toggle drag to split"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+
       {:else if activeSection === 'workspace'}
         <h3 class="section-heading">Sidebar</h3>
 

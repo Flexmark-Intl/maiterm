@@ -394,6 +394,7 @@ export interface Preferences {
   clone_auto_resume: boolean;
   clone_variables: boolean;
   number_duplicated_tabs: boolean;
+  drag_to_split: boolean;
   theme: string;
   shell_title_integration: boolean;
   shell_integration: boolean;

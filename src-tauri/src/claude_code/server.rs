@@ -621,6 +621,7 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
         ("restore_session", PrefMeta { description: "Restore tabs and workspaces on app restart", ptype: "boolean", category: "General", read_only: false }),
         ("number_duplicated_tabs", PrefMeta { description: "Prefix duplicated tab names with numbers", ptype: "boolean", category: "Tabs", read_only: false }),
         ("tab_button_style", PrefMeta { description: "Tab close button visibility (hover, always)", ptype: "string", category: "Tabs", read_only: false }),
+        ("drag_to_split", PrefMeta { description: "Dragging a tab onto a pane edge creates a new split", ptype: "boolean", category: "Tabs", read_only: false }),
         ("clone_cwd", PrefMeta { description: "Copy working directory when duplicating tabs", ptype: "boolean", category: "Tabs", read_only: false }),
         ("clone_scrollback", PrefMeta { description: "Copy scrollback buffer when duplicating tabs", ptype: "boolean", category: "Tabs", read_only: false }),
         ("clone_ssh", PrefMeta { description: "Copy SSH session when duplicating tabs", ptype: "boolean", category: "Tabs", read_only: false }),

@@ -23,6 +23,7 @@ function createPreferencesStore() {
   let cloneAutoResume = $state(true);
   let cloneVariables = $state(true);
   let numberDuplicatedTabs = $state(true);
+  let dragToSplit = $state(false);
   let theme = $state('tokyo-night');
   let shellTitleIntegration = $state(false);
   let shellIntegration = $state(false);
@@ -111,6 +112,7 @@ function createPreferencesStore() {
     get cloneAutoResume() { return cloneAutoResume; },
     get cloneVariables() { return cloneVariables; },
     get numberDuplicatedTabs() { return numberDuplicatedTabs; },
+    get dragToSplit() { return dragToSplit; },
     get theme() { return theme; },
     get shellTitleIntegration() { return shellTitleIntegration; },
     get shellIntegration() { return shellIntegration; },
@@ -203,6 +205,7 @@ function createPreferencesStore() {
       cloneAutoResume = prefs.clone_auto_resume ?? true;
       cloneVariables = prefs.clone_variables ?? true;
       numberDuplicatedTabs = prefs.number_duplicated_tabs ?? true;
+      dragToSplit = prefs.drag_to_split ?? false;
       theme = prefs.theme;
       shellTitleIntegration = prefs.shell_title_integration;
       shellIntegration = prefs.shell_integration ?? false;
@@ -356,6 +359,11 @@ function createPreferencesStore() {
 
     async setNumberDuplicatedTabs(value: boolean) {
       numberDuplicatedTabs = value;
+      await this.save();
+    },
+
+    async setDragToSplit(value: boolean) {
+      dragToSplit = value;
       await this.save();
     },
 
@@ -730,6 +738,7 @@ function createPreferencesStore() {
       cloneAutoResume = prefs.clone_auto_resume ?? true;
       cloneVariables = prefs.clone_variables ?? true;
       numberDuplicatedTabs = prefs.number_duplicated_tabs ?? true;
+      dragToSplit = prefs.drag_to_split ?? false;
       theme = prefs.theme;
       shellTitleIntegration = prefs.shell_title_integration;
       shellIntegration = prefs.shell_integration ?? false;
@@ -822,6 +831,7 @@ function createPreferencesStore() {
         clone_auto_resume: cloneAutoResume,
         clone_variables: cloneVariables,
         number_duplicated_tabs: numberDuplicatedTabs,
+        drag_to_split: dragToSplit,
         theme,
         shell_title_integration: shellTitleIntegration,
         shell_integration: shellIntegration,

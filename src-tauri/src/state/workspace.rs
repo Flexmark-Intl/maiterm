@@ -1140,6 +1140,12 @@ pub struct Preferences {
     pub clone_variables: bool,
     #[serde(default = "default_true")]
     pub number_duplicated_tabs: bool,
+    /// Let a tab dragged onto a pane's edge zone create a new split. Off by default:
+    /// the top edge zone sits directly under the tab bar, so a few pixels of downward
+    /// drift while clicking a tab splits the pane instead of selecting the tab.
+    /// Splitting stays available from the tab context menu and Cmd+D.
+    #[serde(default)]
+    pub drag_to_split: bool,
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default)]
@@ -1515,6 +1521,7 @@ impl Default for Preferences {
             clone_auto_resume: true,
             clone_variables: true,
             number_duplicated_tabs: true,
+            drag_to_split: false,
             theme: default_theme(),
             shell_title_integration: false,
             shell_integration: true,

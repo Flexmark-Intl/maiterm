@@ -728,11 +728,18 @@
               e.clientY < rect.top || e.clientY > rect.bottom) continue;
           const paneId = paneEl.getAttribute('data-pane-id');
           if (!paneId) break;
-          const rx = (e.clientX - rect.left) / rect.width;
-          const ry = (e.clientY - rect.top) / rect.height;
-          const edges: Array<[DropEdge, number]> = [['left', rx], ['right', 1 - rx], ['top', ry], ['bottom', 1 - ry]];
-          edges.sort((a, b) => a[1] - b[1]);
-          const edge: DropEdge = edges[0][1] < 0.3 ? edges[0][0] : 'center';
+          // Edge zones are opt-in (preferences → Tabs → Drag to Split). The top
+          // zone sits right under the tab bar, so with them on a few pixels of
+          // downward drift while clicking a tab splits the pane. With them off
+          // the whole body reads as 'center' — a plain move into the pane.
+          let edge: DropEdge = 'center';
+          if (preferencesStore.dragToSplit) {
+            const rx = (e.clientX - rect.left) / rect.width;
+            const ry = (e.clientY - rect.top) / rect.height;
+            const edges: Array<[DropEdge, number]> = [['left', rx], ['right', 1 - rx], ['top', ry], ['bottom', 1 - ry]];
+            edges.sort((a, b) => a[1] - b[1]);
+            if (edges[0][1] < 0.3) edge = edges[0][0];
+          }
           const isOwnPane = paneId === pane.id;
           // Dropping a tab in its own pane's center is a no-op; splitting a
           // pane off with its only tab just churns pane IDs.
