@@ -4,6 +4,23 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.5 changelog** (2026-09-06, built with the maiLink agent). **One BREAKING change**, in one
+> go, by the product owner's decision: `tasks` — on `ChatDetail` and the WS event — is now
+> maiTerm's own task board (`MaitermTask`), not Claude Code's session board (`AgentTask`, gone).
+> docs/tasks.md had already demoted that board to an importer INPUT: maiTerm's `Workspace.tasks`
+> is the source of truth and the importer folds the Claude board into it, so for a Claude tab both
+> pipes carried the same work — serving both would have shown it twice and left the phone to pick.
+> Rows are richer (six lanes, workstreams, assignee, origin, dependencies) and now come from any
+> runtime and from tabs with no live session. New `GET /tasks` serves the whole board. Two rules
+> came out of the peer's first implementation and are stated once under `MaitermTask`: render from
+> `effectiveStatus`, count from `status`; derive nothing from `blockedBy`. `effectiveStatus` exists
+> because the desktop's "blocked" is DERIVED at render time from information the phone never
+> receives — the field crosses the seam where a note could not. The WS change key hashes what rows
+> render AS (names, effective status), not their own fields, after a review showed a rename or a
+> cross-tab blocker finishing would otherwise never reach a connected phone. `GET /tasks` honours
+> designation (§7) exactly as the chat does — an excluded tab's rows and name never appear. The
+> Overlord surface (§13) is designed and NOT yet on the wire; this release is the tasks half.
+>
 > **v0.4 changelog** (2026-09-01, built with the maiLink agent). Three additions and one rule
 > that outranks them.
 >
@@ -336,6 +353,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /push-register` | Store push token + relay capability for doorbell | `{token,platform,env,cap}` → `{ok}` (`platform`: `"apns"`\|`"fcm"`; `cap` from §6 `/push-capability`) |
 | `GET  /chats` | List maiLink-native chats + state | → `Chat[]` (see §4.3) |
 | `GET  /models` | What this machine can switch a Claude tab to — so the picker stops hardcoding a list that goes stale on every Claude release | → `ModelOption[]` |
+| `GET  /tasks` | The maiTerm task board (§4.3 `TaskBoard`): every workspace with a designated tab, its workstreams and rows. Pure in-memory read, safe to poll; fetch once on roster load and let the WS `tasks` event keep per-tab rows current | → `TaskBoard` |
 | `GET  /assets` | Every file an agent sent, newest first, across all chats — the Files view | → `FileAsset[]` (max 200) |
 | `GET  /assets/{assetId}` | The bytes | → the file. `Accept-Ranges: bytes`; honours `Range` with `206` + `Content-Range`, `416` for a start past the end. `Content-Type` from the name, `Content-Disposition: attachment` with both `filename=` and `filename*=`. `404` when unknown OR evicted — but the descriptor's `available` already said so, so never discover it here |
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
@@ -431,15 +449,22 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // flag, OR a tab's `registered` flag changed; re-GET /chats. This is a
                                                      // ROSTER signal only — it does not refresh an open thread, which is why
                                                      // `registered` also rides on `chat_state`.
-{ "type": "tasks", "tabId": "...", "tasks": [/* AgentTask[] */], "ts": 0 }
+{ "type": "tasks", "tabId": "...", "tasks": [/* MaitermTask[] */], "ts": 0 }
+                                                     // the tab's maiTerm task rows changed — REPLACE the whole array (a tab's
+                                                     // rows are few; no per-task diffing). ANY runtime, and a tab with no live
+                                                     // session too: the task store is maiTerm's, not the agent's. Emitted for
+                                                     // every designated tab that owns rows on WS connect (baseline — so the
+                                                     // roster-wide per-tab counts need nothing beyond this plus one GET /tasks),
+                                                     // then only on change; [] ONCE when a tab's rows empty; never for a tab
+                                                     // that never had any. "Change" includes what a row only REFERENCES — a
+                                                     // workstream or tab rename, or a blocker finishing on another tab — because
+                                                     // the change key hashes what the rows RENDER AS, not the rows' own fields.
+                                                     // Nothing deletes rows on completion: `done` is a lane.
 { "type": "shells", "tabId": "...", "shells": [/* AgentShell[] */], "ts": 0 }
                                                      // the tab's background-shell roster changed — REPLACE the whole
                                                      // array. Same baseline-on-connect discipline as `tasks`; [] clears.
                                                      // Fires on a shell EXITING too, which appends nothing to the
                                                      // transcript. Claude + local tabs only.
-                                                     // the tab's Claude task board changed — REPLACE the whole board (they're
-                                                     // tiny; no per-task diffing). Emitted per board on WS connect (baseline),
-                                                     // then only on change; [] when the board empties/disappears. Claude only.
 ```
 
 Client→server frames are optional conveniences mirroring the REST actions (`message`,
@@ -521,18 +546,12 @@ interface Chat {
 }
 interface ChatDetail extends Chat {
   transcript: Message[];    // distilled turns, newest last
-  tasks?: AgentTask[];      // Claude session task board (the strip above the TUI prompt), sorted
-                            // by numeric id; present only when non-empty. Live updates ride the
-                            // WS `tasks` event (full-array replace). Claude runtime only.
-                            // NOTE: Claude Code DELETES a session's task files once every task
-                            // reaches `completed` — an all-done board vanishes on its own, with
-                            // no user action, FASTER than the ~400ms WS diff interval (measured
-                            // <100ms). So a client typically never observes the all-done board
-                            // at all: the last event before the clear still shows one task
-                            // unfinished, then `tasks: []` arrives. Treat that as normal
-                            // completion, NOT an error or a dropped session — and do NOT design
-                            // an "all tasks complete" state; it is unreachable in practice, not
-                            // merely brief. A session that finished its work reports no board.
+  tasks: MaitermTask[];     // this tab's maiTerm tasks (docs/tasks.md) — the rows whose `tabId`
+                            // is this chat, in BOARD ORDER. ALWAYS present, `[]` when the tab owns
+                            // none: a phone that sees no key is talking to a pre-v0.5 desktop, not
+                            // an idle tab. Live updates ride the WS `tasks` event (full replace).
+                            // v0.5 REPLACED the Claude session board (`AgentTask`) here — see the
+                            // changelog for why, and `MaitermTask` for the rules.
   queued?: { text: string; queuedAt: number }[];
                             // messages typed while the agent was BUSY and not yet consumed, oldest
                             //   first. Render these as genuinely "queued" (the agent is busy),
@@ -744,18 +763,71 @@ interface AgentGoal {
                             //   OUTCOME, not by version.
 }
 
-// One entry of a Claude session's task board (~/.claude/tasks/<sid>/<id>.json passed through
-// verbatim — unknown future fields flow to the app unchanged; render what you know).
-interface AgentTask {
-  id: string;               // stringified counter; list is sorted numerically by this
-  subject: string;          // imperative title — the primary display string
-  description: string;      // longer body; show on expand/tap
-  activeForm?: string;      // present-continuous label while in_progress ("Running tests")
-  status: 'pending' | 'in_progress' | 'completed';
-  blocks: string[];         // task ids this task gates
-  blockedBy: string[];      // open task ids that gate this task
-  owner?: string;           // claiming agent id, when a subagent picked it up
+// One maiTerm task (docs/tasks.md; Rust `Task` in state/workspace.rs, camelCased). Every field
+// is ALWAYS present; absence is a stated `null`, never a missing key (the v0.4 rule).
+type TaskLane = 'backlog' | 'todo' | 'active' | 'blocked' | 'review' | 'done';
+interface MaitermTask {
+  id: string;               // uuid. NOT a number and NOT an ordering — there is no short row
+                            // number anywhere in maiTerm; agents refer to tasks by title. Don't
+                            // invent one.
+  title: string;
+  detail: string | null;    // markdown body
+  status: TaskLane;         // the STORED lane — what an edit writes back. Do not RENDER from it.
+  effectiveStatus: TaskLane;// what the desktop RENDERS — the mirror of `effectiveStatus()` in
+                            // src/lib/tasks/model.ts, computed desktop-side because the phone
+                            // cannot: an unfinished row with any open `blockedBy` dep renders
+                            // `blocked` whatever its stored lane; a dep id resolving to nothing is
+                            // MET (a deleted prerequisite must not wedge its dependents forever)
+                            // UNLESS it is parked on an archived tab anywhere in the window, which
+                            // is off the list but not gone. The phone receives neither the
+                            // workspace's full list nor that parked set with a tab's rows.
+  tabId: string | null;     // assignee tab; null = the workspace's unassigned backlog. A tab id is
+                            // NOT durable across a reload — never key anything on it alone.
+  tabTitle: string | null;  // the assignee's name resolved on the desktop NOW; null when the tab
+                            // no longer exists OR is not designated (its name is gated content).
+  blockedBy: string[];      // prerequisite task ids. NAMES ONLY — never derive a lock from these;
+                            // `effectiveStatus` already did, with information you don't have. An
+                            // id absent from this tab's list is on another tab or the backlog;
+                            // GET /tasks resolves it.
+  origin: 'human' | 'agent' | 'overlord' | 'imported';   // phone-created rows are 'human'
+  createdAt: string;        // ISO 8601
+  updatedAt: string;
+  workstreamId: string | null;  // the named job within the workspace this row belongs to
+  workstream: string | null;    // its display name, resolved now
+  topicId: string | null;   // mesh topic that is this task's conversation vehicle, if any
 }
+
+// GET /tasks — the whole board. Only workspaces with at least one DESIGNATED tab appear, and
+// within one, only rows that are unassigned or assigned to a designated tab: "Make unavailable
+// in maiLink" (§7) gates task content exactly as it gates the chat. Task-less workspaces are
+// included (so "add a task here" is offerable); the Overlord workspace is flagged, not filtered.
+interface TaskBoard {
+  workspaces: {
+    workspaceId: string;
+    workspace: string;
+    windowLabel: string;    // Overlord is per WINDOW; this is the key the Overlord surface uses
+    overlord: boolean;      // this is the window's Overlord workspace (docs/overlord.md §11)
+    suspended: boolean;
+    workstreams: { id: string; name: string }[];
+    tasks: MaitermTask[];   // board order
+  }[];
+}
+
+// Rules both boards agree on — stated once here so neither side re-derives them:
+//
+// 1. WIRE ORDER IS DISPLAY ORDER. The desktop guarantees it (a human can reorder on the board;
+//    that is what comes down). Never sort.
+// 2. RENDER FROM `effectiveStatus`, COUNT FROM `status`. Chip, lane, lock icon: `effectiveStatus`.
+//    Progress denominator, parked count, hidden-behind-"show parked": the desktop predicate
+//    `isInFlight = status !== 'done' && !isParked(status)` on the STORED lane, where parked
+//    means `backlog` (src/lib/tasks/model.ts:24-31). Backlog is a parking lot, exempt from EVERY
+//    in-flight question, not only progress. So a backlog row with an open dep shows a blocked chip
+//    AND is counted parked AND is excluded from progress — same as the desktop. Six lanes; there
+//    is no seventh "waiting" value.
+// 3. DERIVE NOTHING FROM `blockedBy`. It is names. A client that adds its own lock from it will
+//    disagree with the desktop the first time a blocker sits on another tab.
+// 4. NEVER expect `subject`. A row carries `title`, never both; the phone's one-release adapter
+//    discriminates on that, and its removal is gated on the wire protocol version, not a date.
 
 // GET /chats/archived — recoverable tabs (NOT in GET /chats). Flat across workspaces; group by
 // workspaceId client-side. tabId is what POST /chats/{tabId}/restore takes.
