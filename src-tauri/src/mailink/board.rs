@@ -312,14 +312,40 @@ pub(crate) enum WriteError {
     Persist(String),
 }
 
+/// Mirror of `findDuplicate` in src/lib/tasks/model.ts, tier for tier — change the two together.
+/// A one-pass "same tab OR unassigned" got this wrong twice in review: it resurrected a DONE
+/// backlog row onto a new tab, and with two tabs legitimately owning "write the tests" it
+/// matched the released one first and re-owned it, so the real row's tab showed it twice.
 fn find_duplicate<'a>(
     list: &'a [Task],
     normalized: &str,
     tab_id: Option<&str>,
+    stream: Option<&str>,
 ) -> Option<&'a Task> {
-    list.iter().find(|t| {
-        t.normalized_title == normalized && (t.tab_id.as_deref() == tab_id || t.tab_id.is_none())
-    })
+    let same_title = |t: &Task| t.normalized_title == normalized;
+    let mine = |t: &Task| t.tab_id.as_deref() == tab_id && same_title(t);
+    let in_stream = |t: &Task| t.workstream_id.as_deref() == stream;
+    // 1. Exact: same tab, same job. Two jobs may each own a task by this title.
+    if let Some(t) = list.iter().find(|t| mine(t) && in_stream(t)) {
+        return Some(t);
+    }
+    // 2. Grouping drift: the same tab's row recorded loose then restated under a job (or the
+    //    reverse — only when exactly one candidate, so an ambiguous title isn't merged).
+    let drifted = match stream {
+        Some(_) => list.iter().find(|t| mine(t) && t.workstream_id.is_none()),
+        None => {
+            let c: Vec<&Task> = list.iter().filter(|t| mine(t)).collect();
+            (c.len() == 1).then(|| c[0])
+        }
+    };
+    if drifted.is_some() {
+        return drifted;
+    }
+    // 3. Reclaim work released to the backlog when its tab closed — UNFINISHED only: a
+    //    closed-out task is not resurrected because a new tab restated it.
+    tab_id?;
+    list.iter()
+        .find(|t| t.tab_id.is_none() && t.status != "done" && in_stream(t) && same_title(t))
 }
 
 /// Build the phone views for a workspace's rows after a write. Titles/parked recomputed from
@@ -415,7 +441,7 @@ fn create_in(
         let title = spec.title.trim().to_string();
         let normalized = Task::normalize_title(&title);
         let want_tab = spec.assign.then_some(tab_id);
-        let dup_pos = find_duplicate(&ws.tasks, &normalized, want_tab)
+        let dup_pos = find_duplicate(&ws.tasks, &normalized, want_tab, stream_id.as_deref())
             .map(|d| d.id.clone())
             .and_then(|id| ws.tasks.iter().position(|t| t.id == id));
         if let Some(pos) = dup_pos {
@@ -783,14 +809,40 @@ mod tests {
         let again = create_in(&mut data, &designated, now, &tab, None, vec![spec("rotate keys.", true)]).unwrap();
         assert_eq!(again.rows[0]["id"], id);
         assert_eq!(again.tasks.len(), 5, "idempotent by normalized title within the tab");
-        // An unassigned duplicate ("Someday" is t3, in the backlog) is ADOPTED by the tab, and
-        // a NEW workstream is created on demand.
-        let adopt = create_in(&mut data, &designated, now, &tab, Some("Later"), vec![spec("Someday", true)]).unwrap();
+        // An unassigned, UNFINISHED duplicate ("Someday" is t3, loose in the backlog) is
+        // ADOPTED by the tab when the incoming item is loose too (tier 3 of findDuplicate).
+        let adopt = create_in(&mut data, &designated, now, &tab, None, vec![spec("Someday", true)]).unwrap();
         assert_eq!(adopt.rows[0]["id"], "t3");
         assert_eq!(adopt.rows[0]["tabId"], tab, "reclaimed from the backlog");
-        assert_eq!(adopt.rows[0]["workstream"], "Later", "a loose row is filed under the named job");
-        assert_eq!(adopt.workstreams.len(), 2);
         assert_eq!(adopt.tasks.len(), 5);
+        // The same tab restating its now-owned loose row UNDER a job files it (tier 2) and
+        // creates the workstream on demand.
+        let filed = create_in(&mut data, &designated, now, &tab, Some("Later"), vec![spec("Someday", true)]).unwrap();
+        assert_eq!(filed.rows[0]["id"], "t3");
+        assert_eq!(filed.rows[0]["workstream"], "Later", "the tab's loose row is filed under the named job");
+        assert_eq!(filed.workstreams.len(), 2);
+        assert_eq!(filed.tasks.len(), 5);
+        // A DONE row in the backlog is never resurrected by a restated title: new row.
+        {
+            let ws = &mut data.windows[0].workspaces[0];
+            let mut old = task("olddone", "Deploy to staging", None, None);
+            old.status = "done".into();
+            ws.tasks.push(old);
+        }
+        let fresh = create_in(&mut data, &designated, now, &tab, None, vec![spec("Deploy to staging", true)]).unwrap();
+        assert_ne!(fresh.rows[0]["id"], "olddone", "a closed-out task is not re-owned because a new tab restated it");
+        assert_eq!(fresh.rows[0]["status"], "todo");
+        assert_eq!(fresh.tasks.len(), 7);
+        // Two tabs each legitimately own "Write the tests" (t2 is this tab's); a released copy
+        // sits first in the list. Restating it from THIS tab must hit this tab's row, not
+        // re-own the released one — the tiered match, not first-in-list.
+        {
+            let ws = &mut data.windows[0].workspaces[0];
+            ws.tasks.insert(0, task("released", "Write the test", None, None));
+        }
+        let mine = create_in(&mut data, &designated, now, &tab, None, vec![spec("Write the test", true)]).unwrap();
+        assert_eq!(mine.rows[0]["id"], "t2", "exact same-tab match wins over a released twin earlier in the list");
+        assert!(mine.tasks.iter().find(|t| t.id == "released").unwrap().tab_id.is_none(), "the released twin stays released");
         // assign:false leaves the row in the backlog of the tab's workspace.
         let loose = create_in(&mut data, &designated, now, &tab, None, vec![spec("Think about it", false)]).unwrap();
         assert!(loose.rows[0]["tabId"].is_null());

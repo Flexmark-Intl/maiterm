@@ -1675,7 +1675,9 @@ interface OverlordWindow {
   version: number;            // monotonic per window — what the WS ticker diffs on
   asOf: number;               // unix ms, DESKTOP clock, when the engine BUILT this snapshot
   receivedAt: number;         // unix ms, desktop clock, when Rust stored it
-  running: boolean;           // engine on. false after destroy(); a stale true never lingers
+  running: boolean;           // Overlord is ENABLED in this window. Every window's engine ticks
+                              // regardless (a no-op when disabled), so this is the preference,
+                              // not the ticker — a default install publishes running:false
   escalations: Escalation[];  // HUMAN-addressed only (see below)
   proposals: Proposal[];
   agentReports: AgentReport[];
@@ -1716,7 +1718,11 @@ interface OutstandingDirective {
 - **`asOf` is load-bearing — render its age.** The desktop may have slept for an hour; this is
   the only field that says so. Staleness is **`(ts − asOf) + elapsed since receipt`**, never
   `phone.now − asOf`: `ts` and `asOf` are the same desktop clock, and phone-clock skew is not
-  age. A snapshot with no visible staleness is absence read as a claim.
+  age. A snapshot with no visible staleness is absence read as a claim. **An awake desktop
+  republishes every ~5 s whether or not anything changed** (version moves, a frame goes out),
+  so an `asOf` that stops advancing means asleep or off — a quiet board is not a stale one.
+  (A first draft skipped unchanged publishes; that froze an idle board's `asOf` at launch and
+  made a quiet desktop indistinguishable from a sleeping one.)
 - **Only human-addressed escalations cross.** The engine also raises agent-only kinds
   (`drive_reply`, `permission_stuck`, `task_handoff`, `task_dropped`, `rebind_failed`); the
   desktop deck hides them because nobody can dismiss them. On the phone they would light a badge
@@ -1724,10 +1730,14 @@ interface OutstandingDirective {
   list the phone can receive.
 - **Designation gates the mirror.** Every row that names a tab (`escalations`, `proposals`,
   `agentReports`, `outstandingDirectives`, `ritualProgress`, `spentTabs`) is dropped desktop-side
-  when that tab is not designated — an escalation's `detail` is agent text. Rows naming no tab
-  (`tabId: ""`) are about the window and stay. `needsAttention` for a chat is derived from this
-  snapshot by `tabId`; there is deliberately no per-chat flag on `/chats`, because an escalation
-  can name a tab that is not a chat, and those belong in the Overlord view.
+  when that tab is not designated — an escalation's `detail` is agent text. So are the two
+  non-array carriers: `pendingRuleChanges` becomes `null` when its `tabId` is not designated (its
+  `rationale` is agent prose), and `lastScan.silent` keeps only designated tab ids. **A window
+  with no designated tab at all is ABSENT from `windows`**, not present as an empty board — its
+  engine still runs and publishes, but nothing in it can be opened from the phone. Rows naming no
+  tab (`tabId: ""`) are about the window and stay. `needsAttention` for a chat is derived from
+  this snapshot by `tabId`; there is deliberately no per-chat flag on `/chats`, because an
+  escalation can name a tab that is not a chat, and those belong in the Overlord view.
 - **The doorbell rings for a new escalation.** Each publish diffs escalation ids against the
   previous snapshot; a new one, with no phone holding the WS, rings `kind: "escalation"` with the
   tab's title (or "Overlord" for a window-level one). The relay's copy table did not know that
@@ -1744,9 +1754,16 @@ interface OutstandingDirective {
 - **Synchronous.** Rust writes `Workspace.tasks`, saves, then answers. Plain HTTP status — no
   `accepted/confirmed` here, because nothing crossed into the webview. Works while the desktop
   screen is asleep.
-- **Idempotent by normalized title within the tab.** A repeated title returns the existing row;
-  an unassigned duplicate in the backlog is ADOPTED by the tab; a loose duplicate is filed under
-  the named `workstream`. Same rule as the desktop's `addMany` (`findDuplicate`, model.ts).
+- **Idempotent by normalized title within the tab** — the desktop's `findDuplicate` (model.ts),
+  tier for tier: (1) the same tab's row in the same workstream; (2) the same tab's row recorded
+  loose and restated under a job, or the reverse when unambiguous — filed under the job; (3) an
+  UNFINISHED row released to the backlog when its tab closed, in the same grouping — adopted by
+  the tab. A `done` backlog row is never resurrected by a restated title; a released twin of a
+  title another tab still owns is never re-owned by that tab.
+- **Known narrow race, not fixed:** a desktop drag and a phone write within the same IPC hop
+  can each persist a whole list the other didn't see; the desktop's edit or the phone's row
+  loses for one edit cycle. Versioned persistence would close it; at this user base it is noted
+  rather than built.
 - `assign` defaults true: the row is this chat's. `false` parks it in the workspace backlog
   (`tabId: null`). `workstream` is a NAME — reused by normalized name or created.
 - `origin` is `"human"`. The phone is the human.

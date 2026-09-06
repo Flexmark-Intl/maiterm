@@ -123,10 +123,14 @@ function createTasksStore() {
     /** Replace one workspace's copy with what the BACKEND just wrote — a phone edit through
      *  maiLink (`mailink-tasks-changed`). No persist: Rust already saved it, and this store's
      *  whole-list persist would otherwise clobber the phone's row on the next desktop edit,
-     *  which is the reason the event exists. Ignored for a workspace this window doesn't hold —
-     *  the event is app-wide and persisting a foreign workspace would fail "not found". */
+     *  which is the reason the event exists.
+     *
+     *  Sets the key even when this store has none for the workspace: a workspace created after
+     *  `rehydrate()` (sidebar "+") has no key here, and a "not in the map" guard silently
+     *  dropped the phone's rows for it — then the next desktop edit persisted `[newRow]` over
+     *  them, on disk. The CALLER (+layout) decides "does this window hold the workspace", from
+     *  the workspaces store; the event is app-wide and every window receives it. */
     applyFromBackend(workspaceId: string, tasks: Task[], workstreams: Workstream[]) {
-      if (!byWorkspace.has(workspaceId)) return;
       byWorkspace.set(workspaceId, tasks);
       byWorkspace = new Map(byWorkspace);
       streamsByWorkspace.set(workspaceId, workstreams);

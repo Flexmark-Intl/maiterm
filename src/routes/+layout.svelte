@@ -488,6 +488,10 @@
     // an Overlord action has to run in THIS window's engine, so Rust asks and we answer.
     let unlistenMailinkTasks: (() => void) | undefined;
     appWindow.listen<{ workspaceId: string; tasks: import('$lib/tauri/types').Task[]; workstreams: import('$lib/tauri/types').Workstream[] }>('mailink-tasks-changed', async (event) => {
+      // App-wide event; only the window that HOLDS the workspace may take it — judged from the
+      // workspaces store, not from whether the tasks store already has a key (it won't, for a
+      // workspace created after boot, and that is exactly the row that must not be dropped).
+      if (!workspacesStore.workspaces.some((w) => w.id === event.payload.workspaceId)) return;
       const { tasksStore } = await import('$lib/stores/tasks.svelte');
       tasksStore.applyFromBackend(event.payload.workspaceId, event.payload.tasks ?? [], event.payload.workstreams ?? []);
     }).then(unlisten => { unlistenMailinkTasks = unlisten; });

@@ -4624,6 +4624,13 @@ async fn doorbell_loop(app: Arc<AppState>) {
     // finished turn.
     let mut last: HashMap<String, (String, bool)> = HashMap::new();
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2000));
+    // Anything queued for a loop that wasn't running is stale by definition — an escalation
+    // raised while maiLink was off has been sitting on the desktop board since. Discard, don't
+    // burst.
+    let stale = overlord::take_pending_rings(&app).len();
+    if stale > 0 {
+        log::info!("[maiLink] doorbell: discarded {stale} escalation ring(s) queued while the loop was down");
+    }
     loop {
         ticker.tick().await;
         // Stop ringing once the bridge is disabled (runtime toggle clears mailink_info). A fresh

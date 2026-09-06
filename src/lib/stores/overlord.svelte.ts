@@ -957,16 +957,20 @@ function createOverlordStore() {
    *  window's timers, which is exactly when a phone is in use. Rust stamps version/window and
    *  gates rows on tab designation; `asOf` is set here, at build time, so the phone can render
    *  how old what it is looking at is. Only human-addressed escalations cross: an agent-only
-   *  row would light a badge nothing on the phone can clear. Debounced and de-duplicated, so
-   *  the mutation paths can call `scheduleMirror()` freely. */
+   *  row would light a badge nothing on the phone can clear. Debounced, so the mutation paths
+   *  can call `scheduleMirror()` freely. */
   let mirrorTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastMirror = '';
   function publishMirror() {
     mirrorTimer = null;
     // The module-level store — initialised long before any timer can fire.
     const s = overlordStore;
+    // Published EVERY tick, changed or not: `asOf` is the phone's only liveness signal, and a
+    // "skip if unchanged" made a quiet awake desktop indistinguishable from a sleeping one (an
+    // idle board froze at launch). ~5 s of desktop clock per window is the cost.
     const snapshot = $state.snapshot({
-      running,
+      // `running` means the engine is ON for this window: rehydrate() starts the ticker in every
+      // window regardless (tick() no-ops when disabled), so the preference is the truth here.
+      running: running && preferencesStore.overlordEnabled,
       escalations: s.humanEscalations,
       proposals: s.proposals,
       agentReports: [...agentReports.values()],
@@ -976,9 +980,6 @@ function createOverlordStore() {
       pendingRuleChanges: s.pendingRuleChanges,
       lastScan: s.lastScan,
     }) as Record<string, unknown>;
-    const key = JSON.stringify(snapshot);
-    if (key === lastMirror) return;
-    lastMirror = key;
     commands
       .publishOverlordSnapshot({ ...snapshot, asOf: Date.now() })
       .catch((e) => logWarn(`overlord: maiLink mirror publish failed: ${e}`));

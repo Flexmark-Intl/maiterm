@@ -69,22 +69,51 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
                 });
             }
         }
+        // Two non-array carriers of tab-scoped content, missed by the array sweep in review:
+        // a pending rule-change batch is one OBJECT whose `rationale` is up to 1000 chars of
+        // agent prose about a tab, and a scan's `silent` list is bare tab ids.
+        // (`Map` indexing panics on a missing key; the frontend may omit the field.)
+        let hide_batch = obj
+            .get("pendingRuleChanges")
+            .and_then(|b| b.get("tabId"))
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.is_empty() && !designated.contains(t));
+        if hide_batch {
+            obj.insert("pendingRuleChanges".to_string(), Value::Null);
+        }
+        if let Some(silent) = obj.get_mut("lastScan").and_then(|s| s.get_mut("silent")).and_then(Value::as_array_mut) {
+            silent.retain(|id| id.as_str().is_some_and(|t| designated.contains(t)));
+        }
     }
 
     // A closed window's snapshot would otherwise linger with an ever-older `asOf` — honest,
-    // but noise. Prune to the windows that exist. (Read of app_data, dropped before our write.)
-    let live: HashSet<String> = app
-        .app_data
-        .read()
-        .windows
-        .iter()
-        .map(|w| w.label.clone())
-        .collect();
+    // but noise. Prune to the windows that exist. And a window with NOTHING designated is not
+    // the phone's to see at all: its engine still runs and publishes (every window's does),
+    // but nothing in it can be opened from the phone, so it is dropped rather than served as
+    // an empty board. (One read of app_data, dropped before our write below.)
+    let (live, this_window_exposed) = {
+        let data = app.app_data.read();
+        let live: HashSet<String> = data.windows.iter().map(|w| w.label.clone()).collect();
+        let exposed = data.windows.iter().find(|w| w.label == label).is_some_and(|w| {
+            w.workspaces
+                .iter()
+                .flat_map(|ws| ws.panes.iter())
+                .flat_map(|p| p.tabs.iter())
+                .any(|t| designated.contains(t.id.as_str()))
+        });
+        (live, exposed)
+    };
+    // Rings only reach a phone while maiLink runs; queued while it is off they would burst
+    // out, hours stale, on the next enable. The loop also discards leftovers when it starts.
+    let mailink_on = app.mailink_info.read().is_some();
 
     let new_rings: Vec<(String, String)>;
     {
         let mut snaps = app.overlord_snapshots.write();
-        snaps.retain(|k, _| live.contains(k));
+        snaps.retain(|k, _| live.contains(k) && (k != label || this_window_exposed));
+        if !this_window_exposed {
+            return;
+        }
         let prev = snaps.get(label);
         let version = prev.and_then(|p| p["version"].as_u64()).unwrap_or(0) + 1;
         let prev_ids = prev.map(escalation_ids).unwrap_or_default();
@@ -115,10 +144,19 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
         snapshot["receivedAt"] = json!(now_ms());
         snaps.insert(label.to_string(), snapshot);
     }
-    if !new_rings.is_empty() {
-        app.mailink_pending_rings.lock().extend(new_rings);
+    if mailink_on && !new_rings.is_empty() {
+        let mut q = app.mailink_pending_rings.lock();
+        q.extend(new_rings);
+        // Bounded: the doorbell drains every 2 s, so anything past this is a loop that isn't
+        // running, and a burst of stale pushes is worse than a dropped one.
+        if q.len() > MAX_PENDING_RINGS {
+            let drop = q.len() - MAX_PENDING_RINGS;
+            q.drain(..drop);
+        }
     }
 }
+
+const MAX_PENDING_RINGS: usize = 32;
 
 /// `GET /overlord`: every window's last snapshot, stable order. `[]` until the first publish —
 /// a phone that sees an empty list on a desktop it knows has Overlord is looking at a webview
@@ -167,9 +205,10 @@ mod tests {
     use crate::state::workspace::{Tab, WindowData, Workspace};
     use crate::state::AgentRuntime;
 
-    /// One window "main" with a designated tab and an excluded one.
+    /// One window "main" with a designated tab and an excluded one; maiLink "running".
     fn fixture() -> (AppState, String, String) {
         let app = AppState::new();
+        *app.mailink_info.write() = Some(("test".into(), 1));
         let (shown, hidden) = {
             let mut data = app.app_data.write();
             data.preferences.mailink_expose_all = true;
@@ -216,6 +255,44 @@ mod tests {
         assert_eq!(w["version"], 1);
         assert_eq!(w["asOf"], 5, "the frontend's build stamp is passed through untouched");
         assert!(w["receivedAt"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn the_non_array_carriers_are_gated_too_and_an_unexposed_window_is_not_served() {
+        let (app, shown, hidden) = fixture();
+        publish(&app, "main", json!({
+            "escalations": [],
+            "pendingRuleChanges": { "id": "b1", "tabId": hidden, "rationale": "client-payroll sat at the Stripe-key prompt", "changes": [] },
+            "lastScan": { "at": 1, "tabsSeen": 2, "silent": [shown, hidden] },
+        }));
+        let w = snapshots(&app)["windows"][0].clone();
+        assert!(w["pendingRuleChanges"].is_null(), "a batch about an excluded tab is a stated null");
+        assert!(!w.to_string().contains("Stripe"), "the rationale leaked");
+        assert_eq!(w["lastScan"]["silent"], json!([shown]), "excluded tab ids are dropped from the scan summary");
+        // A batch about a VISIBLE tab passes through untouched.
+        publish(&app, "main", json!({ "escalations": [], "pendingRuleChanges": { "id": "b2", "tabId": shown, "rationale": "ok", "changes": [] } }));
+        assert_eq!(snapshots(&app)["windows"][0]["pendingRuleChanges"]["id"], "b2");
+
+        // A second window with nothing designated publishes too (every window's engine runs)
+        // — and must not appear, even as an empty board.
+        {
+            let mut data = app.app_data.write();
+            let mut win = WindowData::new("personal".into());
+            win.workspaces.push(Workspace::new("Home".into())); // plain shell tab, no runtime
+            data.windows.push(win);
+        }
+        publish(&app, "personal", json!({ "running": true, "escalations": [esc("e9", "")], "pendingRuleChanges": { "id": "b3", "tabId": "", "rationale": "secret" } }));
+        let labels: Vec<String> = snapshots(&app)["windows"].as_array().unwrap().iter().map(|w| w["windowLabel"].as_str().unwrap().to_string()).collect();
+        assert_eq!(labels, vec!["main"], "a window with no designated tab is absent, not empty");
+        assert!(take_pending_rings(&app).is_empty(), "and it rings nothing");
+    }
+
+    #[test]
+    fn rings_are_not_queued_while_mailink_is_off() {
+        let (app, shown, _) = fixture();
+        *app.mailink_info.write() = None;
+        publish(&app, "main", json!({ "escalations": [esc("e1", &shown)] }));
+        assert!(take_pending_rings(&app).is_empty(), "no loop will drain them; queuing would burst on re-enable");
     }
 
     #[test]
