@@ -239,17 +239,21 @@ pub fn render_frame<T: EventListener>(
         }
     }
 
-    // Position cursor (hidden when scrolled into history)
+    // Position cursor, or hide it — when the app hid it (DECTCEM off, as a TUI
+    // does while it draws its own) and when browsing scrollback. xterm keeps
+    // whatever cursor state the last write left, and a delta frame ends at the
+    // end of the last changed row, so an unhidden cursor would hop around the
+    // right edge with every frame.
     if cursor_visible && display_offset == 0 {
-        out.push_str("\x1b[?25h"); // Re-show cursor (may have been hidden by scrollback)
+        out.push_str("\x1b[?25h"); // Re-show cursor (may have been hidden)
         let cursor_viewport_line = cursor.point.line.0;
         if cursor_viewport_line >= 0 {
             let cy = cursor_viewport_line as usize + 1; // 1-based
             let cx = cursor.point.column.0 + 1; // 1-based
             out.push_str(&format!("\x1b[{};{}H", cy, cx));
         }
-    } else if display_offset > 0 {
-        out.push_str("\x1b[?25l"); // Hide cursor when browsing scrollback
+    } else {
+        out.push_str("\x1b[?25l");
     }
 
     *cache = Some(FrameCache {
