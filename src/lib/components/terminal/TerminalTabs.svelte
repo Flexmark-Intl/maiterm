@@ -822,6 +822,11 @@
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
 
     const wasDragging = !!dragTabId;
+    const draggedTabId = dragTabId;
+    // Whether the drag resolved to an actual move/reorder. A drag that resolved
+    // to nothing still suppresses the click that follows (justDragged), so
+    // without this the tab the user grabbed would silently stay unselected.
+    let dropped = false;
 
     if (dragTabId && dropWorkspaceId) {
       // Drop onto a workspace — copy (Alt/Option) or move
@@ -879,11 +884,20 @@
           const [moved] = ids.splice(fromIndex, 1);
           ids.splice(toIndex, 0, moved);
           workspacesStore.reorderTabs(workspaceId, pane.id, ids);
+          dropped = true;
         }
       }
     }
 
     clearDragState();
+
+    // A drag that landed nowhere — most often a few pixels of drift while
+    // clicking a tab — should still do what the click would have done. The
+    // click event that follows is suppressed by justDragged below, so select
+    // the tab here instead of leaving the press with no effect at all.
+    if (wasDragging && !dropped && draggedTabId) {
+      handleTabClick(draggedTabId);
+    }
 
     // After any drag, re-focus the active terminal. During the drag the pointer
     // capture moves focus away from the xterm canvas, and the DOM reorder of
