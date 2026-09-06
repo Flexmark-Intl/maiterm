@@ -951,6 +951,43 @@ function createOverlordStore() {
     if (e.turnEnded === undefined && e.committed === undefined) pendingEdges.delete(tabId);
   }
 
+  // ── maiLink mirror (docs/mailink-protocol.md §13) ───────────────────────────
+  /** The phone is served a SNAPSHOT of this engine, published from here, never by asking this
+   *  webview — Rust cannot read a frontend store, and an occluded screen throttles this
+   *  window's timers, which is exactly when a phone is in use. Rust stamps version/window and
+   *  gates rows on tab designation; `asOf` is set here, at build time, so the phone can render
+   *  how old what it is looking at is. Only human-addressed escalations cross: an agent-only
+   *  row would light a badge nothing on the phone can clear. Debounced and de-duplicated, so
+   *  the mutation paths can call `scheduleMirror()` freely. */
+  let mirrorTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastMirror = '';
+  function publishMirror() {
+    mirrorTimer = null;
+    // The module-level store — initialised long before any timer can fire.
+    const s = overlordStore;
+    const snapshot = $state.snapshot({
+      running,
+      escalations: s.humanEscalations,
+      proposals: s.proposals,
+      agentReports: [...agentReports.values()],
+      outstandingDirectives: s.outstandingDirectives,
+      ritualProgress: s.ritualProgress,
+      spentTabs: s.spentTabs,
+      pendingRuleChanges: s.pendingRuleChanges,
+      lastScan: s.lastScan,
+    }) as Record<string, unknown>;
+    const key = JSON.stringify(snapshot);
+    if (key === lastMirror) return;
+    lastMirror = key;
+    commands
+      .publishOverlordSnapshot({ ...snapshot, asOf: Date.now() })
+      .catch((e) => logWarn(`overlord: maiLink mirror publish failed: ${e}`));
+  }
+  function scheduleMirror() {
+    if (mirrorTimer) return;
+    mirrorTimer = setTimeout(publishMirror, 750);
+  }
+
   function escalate(
     tabId: string,
     ruleId: string | null,
@@ -973,6 +1010,7 @@ function createOverlordStore() {
         read: false,
       },
     ];
+    scheduleMirror();
     unNudged.add(id);
     void wakeOverlordAgent();
     return id;
@@ -2596,9 +2634,12 @@ function createOverlordStore() {
       try {
         recentLedger = await commands.getOverlordLedger();
       } catch { /* fresh window */ }
-      ticker = setInterval(() => void tick(), TICK_MS);
+      // Each tick re-publishes the maiLink mirror if anything changed; the mutation paths
+      // schedule it sooner. Both funnel through the same changed-check, so this is cheap.
+      ticker = setInterval(() => { void tick().then(scheduleMirror, scheduleMirror); }, TICK_MS);
       running = true;
       logInfo('overlord: engine started');
+      scheduleMirror();
     },
 
     destroy() {
@@ -2606,6 +2647,9 @@ function createOverlordStore() {
       ticker = null;
       running = false;
       for (const run of rituals.values()) run.aborted = true;
+      // Tell the phone the engine is off rather than leaving a `running: true` snapshot to age.
+      if (mirrorTimer) clearTimeout(mirrorTimer);
+      publishMirror();
     },
 
     // ── Propose-mode (§3) ────────────────────────────────────────────────────
@@ -2633,6 +2677,7 @@ function createOverlordStore() {
     },
     dismissProposal(id: string) {
       proposals = proposals.filter((x) => x.id !== id);
+      scheduleMirror();
     },
 
     // ── Escalations (§9.1) ───────────────────────────────────────────────────
@@ -2654,6 +2699,7 @@ function createOverlordStore() {
     dismissEscalation(id: string) {
       escalations = escalations.filter((e) => e.id !== id);
       unNudged.delete(id);
+      scheduleMirror();
     },
     /** Resolve an 'ack' gate / clear the outstanding directive for a tab (§8). */
     ackOutstanding(tabId: string) {

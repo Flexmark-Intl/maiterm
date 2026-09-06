@@ -39,6 +39,7 @@ pub(crate) mod models;
 pub(crate) mod shells;
 pub(crate) mod tasks;
 pub(crate) mod board;
+pub(crate) mod overlord;
 pub(crate) mod transcript;
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
@@ -331,6 +332,9 @@ fn build_router(api: ApiState) -> Router {
         // The whole maiTerm task board — every workspace's workstreams + rows (mailink/board.rs).
         // Per-tab rows also ride on `chat_detail.tasks` and the WS `tasks` event.
         .route("/mailink/v1/tasks", get(tasks_board))
+        // The Overlord engine mirror, every window (mailink/overlord.rs). Baseline on connect;
+        // the WS `overlord` frame carries changes inline.
+        .route("/mailink/v1/overlord", get(overlord_windows))
         // Static segment — must be registered before `/chats/{tab_id}` so it isn't shadowed.
         .route("/mailink/v1/chats/archived", get(chats_archived))
         .route("/mailink/v1/chats/{tab_id}", get(chat_detail))
@@ -462,6 +466,16 @@ async fn tasks_board(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
     Ok(Json(board::board(&s.app)))
+}
+
+/// `GET /overlord` — each window's last published engine snapshot (mailink/overlord.rs).
+/// In-memory read; `windows: []` until a webview has published.
+async fn overlord_windows(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(overlord::snapshots(&s.app)))
 }
 
 /// How many assets `GET /assets` returns. The phone's Files view is a browse surface, not an
@@ -1926,6 +1940,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // phone gets every tab's tasks without opening threads, and a reconnect catches changes it
     // slept through.
     let mut task_keys: HashMap<String, u64> = HashMap::new();
+    // Overlord mirror versions this socket has been sent, per window — empty means the first
+    // tick is the baseline (mailink/overlord.rs::changed_frames).
+    let mut overlord_versions: HashMap<String, u64> = HashMap::new();
     // Same discipline for the background-shell roster.
     let mut shell_keys: HashMap<String, u64> = HashMap::new();
     // Asset batches already streamed, per tab, plus the manifest mtime that gates the whole pass.
@@ -2024,6 +2041,13 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 mirror::refresh_tabs(&s.app, &tabs);
             }
             _ = ticker.tick() => {
+                // Overlord mirror: any window whose published snapshot moved goes out inline,
+                // full replace (docs §13). In-memory diff on a version stamp; nothing else.
+                for frame in overlord::changed_frames(&s.app, &mut overlord_versions) {
+                    if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
                 // Summaries, not full chats: this fires forever at 1.5s, and the full build's
                 // scrollback + per-tab transcript reads were constant background lock pressure.
                 // The rare transitioning tab is enriched below.
@@ -4359,6 +4383,18 @@ async fn doorbell_loop(app: Arc<AppState>) {
                 .load(std::sync::atomic::Ordering::SeqCst),
             now_ms(),
         );
+
+        // Overlord escalations queued by the publish path (mailink/overlord.rs) — rung HERE
+        // because this loop is what knows coverage and holds the relay client. Covered means a
+        // phone holds the WS and got the snapshot frame, so the ring is dropped, same as every
+        // attention edge below. `kind:"escalation"` is new to the relay: it falls back to
+        // "Needs you" at time-sensitive until the relay's copy table learns the word, which is
+        // the fallback direction that made adding a kind before a relay deploy safe.
+        for (tab_id, title) in overlord::take_pending_rings(&app) {
+            if !covered {
+                ring_devices(&client, &app, &relay_url, &tab_id, &title, "escalation").await;
+            }
+        }
 
         // Summaries only — the doorbell consumes tabId/title/state/prompt and nothing else, and
         // this loop runs forever at 2s whether or not a phone exists (being UNcovered is exactly

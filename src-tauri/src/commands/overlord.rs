@@ -111,6 +111,20 @@ pub fn append_overlord_ledger(
     save_state(&data_clone)
 }
 
+/// Publish this window's Overlord engine snapshot for maiLink (mailink/overlord.rs,
+/// docs/mailink-protocol.md §13). Frontend-owned shape, passed through; Rust gates it on tab
+/// designation, stamps `windowLabel`/`version`/`receivedAt`, and queues a doorbell for each
+/// escalation that is new since the last publish.
+#[tauri::command]
+pub fn publish_overlord_snapshot(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    snapshot: Value,
+) -> Result<(), String> {
+    crate::mailink::overlord::publish(state.inner(), window.label(), snapshot);
+    Ok(())
+}
+
 /// This window's Overlord ledger, oldest first.
 #[tauri::command]
 pub fn get_overlord_ledger(

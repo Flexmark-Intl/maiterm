@@ -324,6 +324,13 @@ export async function getOverlordLedger(): Promise<OverlordLedgerEntry[]> {
   return invoke('get_overlord_ledger');
 }
 
+/** Publish this window's Overlord engine snapshot for maiLink (docs/mailink-protocol.md §13).
+ *  Rust gates it on tab designation, stamps it, and serves it to the phone — so the phone never
+ *  has to ask a webview that may be asleep. */
+export async function publishOverlordSnapshot(snapshot: Record<string, unknown>): Promise<void> {
+  return invoke('publish_overlord_snapshot', { snapshot });
+}
+
 /** Replace one workspace's task list (docs/tasks.md). Whole-list persistence, like
  *  setWorkspaceMeshTopics; Rust recomputes `normalized_title` on the way in. */
 export async function setWorkspaceTasks(

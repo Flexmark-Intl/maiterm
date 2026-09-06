@@ -205,6 +205,14 @@ pub struct AppState {
     // momentary count==0 lets an attention transition ring the doorbell spuriously. The doorbell
     // treats a tab as covered for a short grace after this instant even at count==0. 0 ⇒ never dropped.
     pub mailink_ws_last_drop_ms: AtomicU64,
+    /// Overlord engine mirrors, keyed by window label (mailink/overlord.rs). The engine is a
+    /// per-window FRONTEND store; it publishes a snapshot here on change so maiLink can serve
+    /// the phone without a webview round trip — which stalls when the screen is asleep. In
+    /// memory only: the engine republishes on launch.
+    pub overlord_snapshots: RwLock<HashMap<String, serde_json::Value>>,
+    /// `(tab_id, title)` doorbell rings queued by the Overlord publish path, drained by the
+    /// maiLink doorbell loop — the one place that knows whether a phone is covered.
+    pub mailink_pending_rings: parking_lot::Mutex<Vec<(String, String)>>,
 }
 
 impl AppState {
@@ -246,6 +254,8 @@ impl AppState {
             mailink_shutdown: RwLock::new(None),
             mailink_ws_count: std::sync::atomic::AtomicUsize::new(0),
             mailink_ws_last_drop_ms: AtomicU64::new(0),
+            overlord_snapshots: RwLock::new(HashMap::new()),
+            mailink_pending_rings: parking_lot::Mutex::new(Vec::new()),
         }
     }
 

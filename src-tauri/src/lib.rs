@@ -588,6 +588,7 @@ pub fn run() {
             commands::overlord::get_tab_prompt,
             commands::overlord::answer_tab_prompt,
             commands::overlord::append_overlord_ledger,
+            commands::overlord::publish_overlord_snapshot,
             commands::overlord::get_overlord_ledger,
             commands::overlord::set_workspace_overlord,
             commands::overlord::set_workspace_overlord_exempt,
