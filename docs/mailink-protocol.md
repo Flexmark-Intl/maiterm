@@ -1644,3 +1644,149 @@ export interface WsAttentionEvent {
   Emitted on the `/chats` object, in `chat_detail`, and on the WS `chat_state` event (so the
   gauge steps live per turn). `effort` is omitted (only in Claude Code's statusLine payload,
   not received). Gemini tabs get no `meta` (no transcript source yet).
+
+## 13. v0.5 — Overlord on the phone, and phone writes
+
+The Overlord (docs/overlord.md) is the per-window supervisor: escalations that need a human,
+propose-mode rule proposals awaiting approval, agent reports, outstanding directives, ritual
+progress. v0.5 puts that board on the phone — read, and the four things a human does to it
+(dismiss, approve, answer, drive) — and lets the phone write maiTerm tasks (§4.3 `MaitermTask`).
+
+### 13.1 The one fact that shapes everything: the engine lives in the webview
+
+The engine is a **frontend store, per window**. Rust holds none of its state, and it cannot ask:
+an occluded WKWebView throttles its timers, so a request that waited on the webview would hang
+exactly when a phone is in use — desktop asleep. So:
+
+- **Reads are served from a MIRROR.** The engine publishes a snapshot to Rust on change
+  (debounced ~750 ms, and after every 5 s engine tick); Rust gates it, stamps it, and serves the
+  last one. The phone never waits on the desktop to read.
+- **Task writes go to Rust.** `Workspace.tasks` is Rust state; Rust writes it, saves, and tells the
+  desktop's store to replace its copy. Synchronous, confirmable, works while the screen is asleep.
+- **Overlord actions cross into the webview**, because there is nowhere else the engine's state
+  exists. They answer `{accepted, confirmed}` (13.4), never a bare ok.
+
+### 13.2 Reading the board — `GET /overlord`, WS `overlord`
+
+```ts
+// GET /overlord → { windows: OverlordWindow[] }   ([] until a webview has published)
+interface OverlordWindow {
+  windowLabel: string;        // Overlord is per WINDOW; the key every action route takes
+  version: number;            // monotonic per window — what the WS ticker diffs on
+  asOf: number;               // unix ms, DESKTOP clock, when the engine BUILT this snapshot
+  receivedAt: number;         // unix ms, desktop clock, when Rust stored it
+  running: boolean;           // engine on. false after destroy(); a stale true never lingers
+  escalations: Escalation[];  // HUMAN-addressed only (see below)
+  proposals: Proposal[];
+  agentReports: AgentReport[];
+  outstandingDirectives: OutstandingDirective[];
+  ritualProgress: { tabId: string; ruleName: string; step: number; steps: number; startedAt: number }[];
+  spentTabs: { tabId: string; name: string; done: number; parked: number; lastActivity?: number }[];
+  pendingRuleChanges: { id: string; tabId: string; rationale: string; changes: unknown[] } | null;
+  lastScan: unknown | null;   // ScanSummary — render if you know it, ignore if not
+}
+interface Escalation {
+  id: string; ts: number; tabId: string; workspaceId: string; ruleId: string | null;
+  kind: 'step_timeout' | 'blocked' | 'directive_unacked' | 'agent_report';
+  detail: string; taskId?: string; read: boolean;
+}
+interface Proposal {
+  id: string; ruleId: string; ruleName: string; tabId: string; tabName: string;
+  workspaceId: string; workspaceName: string; preview: string; stepCount: number; createdAt: number;
+}
+interface AgentReport {
+  tabId: string; kind: 'ready' | 'ack' | 'status' | 'escalate';
+  state: 'working' | 'blocked' | 'done' | 'idle'; summary: string; task?: string; ts: number;
+}
+interface OutstandingDirective {
+  id: string; ruleId: string | null; tabId: string; stepIndex: number; text: string; sentAt: number; acked: boolean;
+}
+```
+
+```
+{ "type": "overlord", "windowLabel": "main", "window": OverlordWindow, "ts": 0 }
+                        // a window's snapshot version moved — the WHOLE snapshot, inline, full
+                        // replace (a signal-then-GET would double the window in which the phone
+                        // acts on something stale). Baseline on connect for every window; then
+                        // only on change. `window: null` = that window closed — a stated absence.
+```
+
+**Rules:**
+
+- **`asOf` is load-bearing — render its age.** The desktop may have slept for an hour; this is
+  the only field that says so. Staleness is **`(ts − asOf) + elapsed since receipt`**, never
+  `phone.now − asOf`: `ts` and `asOf` are the same desktop clock, and phone-clock skew is not
+  age. A snapshot with no visible staleness is absence read as a claim.
+- **Only human-addressed escalations cross.** The engine also raises agent-only kinds
+  (`drive_reply`, `permission_stuck`, `task_handoff`, `task_dropped`, `rebind_failed`); the
+  desktop deck hides them because nobody can dismiss them. On the phone they would light a badge
+  nothing clears. The frontend publishes `humanEscalations`, and the union above is the whole
+  list the phone can receive.
+- **Designation gates the mirror.** Every row that names a tab (`escalations`, `proposals`,
+  `agentReports`, `outstandingDirectives`, `ritualProgress`, `spentTabs`) is dropped desktop-side
+  when that tab is not designated — an escalation's `detail` is agent text. Rows naming no tab
+  (`tabId: ""`) are about the window and stay. `needsAttention` for a chat is derived from this
+  snapshot by `tabId`; there is deliberately no per-chat flag on `/chats`, because an escalation
+  can name a tab that is not a chat, and those belong in the Overlord view.
+- **The doorbell rings for a new escalation.** Each publish diffs escalation ids against the
+  previous snapshot; a new one, with no phone holding the WS, rings `kind: "escalation"` with the
+  tab's title (or "Overlord" for a window-level one). The relay's copy table did not know that
+  word when this shipped and falls back to "Needs you" at time-sensitive — the fallback
+  direction chosen in §6.1, earning its keep.
+
+### 13.3 Writing tasks — `POST /tasks`, `POST /tasks/{id}`
+
+| Method + path | Body | Returns |
+|---|---|---|
+| `POST /tasks` | `{ tabId, workstream?: string, tasks: [{ title, detail?, status?: TaskLane, assign?: boolean }] }` | `{ tasks: MaitermTask[] }` — one row per spec |
+| `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
+
+- **Synchronous.** Rust writes `Workspace.tasks`, saves, then answers. Plain HTTP status — no
+  `accepted/confirmed` here, because nothing crossed into the webview. Works while the desktop
+  screen is asleep.
+- **Idempotent by normalized title within the tab.** A repeated title returns the existing row;
+  an unassigned duplicate in the backlog is ADOPTED by the tab; a loose duplicate is filed under
+  the named `workstream`. Same rule as the desktop's `addMany` (`findDuplicate`, model.ts).
+- `assign` defaults true: the row is this chat's. `false` parks it in the workspace backlog
+  (`tabId: null`). `workstream` is a NAME — reused by normalized name or created.
+- `origin` is `"human"`. The phone is the human.
+- In a patch, absent means leave alone; `null` means clear. `tabId` may only be set to a
+  designated tab in the same workspace; `workstreamId` must exist there.
+- Errors: `404` a row the phone cannot see (unknown, on an excluded tab, or a backlog row in a
+  workspace with nothing designated — one answer for all three, on purpose); `400` a lane outside
+  the six, an empty title, or a target outside the workspace or the gate.
+- The desktop's tasks store is told by event (`mailink-tasks-changed`) to replace its copy —
+  without that, its next whole-list persist would clobber the phone's row. Implementation detail,
+  but it is why this path is safe.
+
+### 13.4 Overlord actions — `POST /overlord/{windowLabel}/…`
+
+| Path | Body | Runs |
+|---|---|---|
+| `escalations/{id}/dismiss` | `{}` | `dismissEscalation` |
+| `proposals/{id}` | `{ action: 'approve' \| 'dismiss' }` | `approveProposal` → `result.outcome: 'started' \| 'stale' \| 'permission'` (a proposal is a snapshot — `stale` is an outcome, not an error) / `dismissProposal` |
+| `rule-changes/{batchId}` | `{ approvedIdx: number[] }` | `resolveRuleChanges` |
+| `drive` | `{ tabId, kind?: 'process' \| 'slash', text }` | `driveTab` — types into the tab with the human's authority THROUGH the engine (ledgered; the reply harvest sees it). Designated tabs only |
+| `rules/{ruleId}/fire` | `{ tabId }` | `fireRule` |
+| `recover` | `{ tabId }` | `recoverTab` — `result.sent` means TYPED, not recovered (docs/overlord.md) |
+
+**Every answer is:**
+```ts
+{ accepted: boolean; confirmed: boolean; result?: unknown; reason?: string }
+```
+- `accepted:true, confirmed:true` — the window ran it; `result` is the engine's own answer.
+- `accepted:false, confirmed:true` — the window REFUSED (`reason`: exempt tab, stale, …).
+- `accepted:true, confirmed:false` — the window did not answer within 15 s. **Its screen may be
+  asleep and the action may still land when it wakes.** Render "sent, not confirmed" and let the
+  next `overlord` snapshot settle it. Never success, never failure — the `recoverTab` lesson,
+  `sent ≠ done`.
+- `accepted:false, confirmed:false` — the desktop dropped it.
+
+Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately not here.
+
+### 13.5 Version on the wire — `GET /heartbeat`
+
+`{ ok, now, server_name, fp, protocolVersion: "0.5" }`. The second breaking change in a week
+found there was no version anywhere on the wire. The phone gates compatibility shims (the
+`subject`→`title` adapter, `effectiveStatus ?? status`) on this, not on a calendar; absent means
+pre-0.5.
