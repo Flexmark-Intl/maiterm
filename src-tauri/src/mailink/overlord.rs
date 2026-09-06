@@ -58,6 +58,12 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
     let designated: HashSet<&str> = metas.iter().map(|m| m.tab_id.as_str()).collect();
     let titles: HashMap<&str, &str> = metas.iter().map(|m| (m.tab_id.as_str(), m.title.as_str())).collect();
 
+    // Every escalation id the engine currently holds, BEFORE the gate below removes the ones
+    // about hidden tabs. This is the ring baseline: an id known here is not "new" next time,
+    // even if the gate hid it meanwhile — otherwise making a tab unavailable and available
+    // again re-pushed everything still open about it.
+    let all_ids: Vec<String> = escalation_ids(&snapshot).into_iter().collect();
+
     if let Some(obj) = snapshot.as_object_mut() {
         for key in TAB_SCOPED {
             if let Some(rows) = obj.get_mut(key).and_then(Value::as_array_mut) {
@@ -110,13 +116,19 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
     let new_rings: Vec<(String, String)>;
     {
         let mut snaps = app.overlord_snapshots.write();
-        snaps.retain(|k, _| live.contains(k) && (k != label || this_window_exposed));
-        if !this_window_exposed {
-            return;
-        }
+        snaps.retain(|k, _| live.contains(k));
         let prev = snaps.get(label);
-        let version = prev.and_then(|p| p["version"].as_u64()).unwrap_or(0) + 1;
-        let prev_ids = prev.map(escalation_ids).unwrap_or_default();
+        // Strictly monotonic per window ACROSS DESKTOP RESTARTS, not just within a process: the
+        // phone guards on `version` and drops anything older than it holds, so a restart that
+        // began again at 1 while the phone held 400 would make it ignore the fresh board until a
+        // manual refresh. Seeding from the clock (ms) makes a fresh process's first version
+        // exceed any counter a previous one reached, on the same clock assumption `asOf` makes.
+        let version = (prev.and_then(|p| p["version"].as_u64()).unwrap_or(0) + 1).max(now_ms());
+        // The previous publish's UNGATED ids (see `all_ids`), not its served escalations.
+        let prev_ids: HashSet<String> = prev
+            .and_then(|p| p[SEEN].as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
 
         // Every human-addressed escalation the phone has not been told about yet. Rung from the
         // doorbell loop (which owns coverage and the relay client), not here: if a phone holds
@@ -142,9 +154,14 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
         snapshot["windowLabel"] = json!(label);
         snapshot["version"] = json!(version);
         snapshot["receivedAt"] = json!(now_ms());
+        // Stored EVEN WHEN UNEXPOSED, and never served then (see `served`). Dropping the entry
+        // instead lost the ring baseline: toggling a tab's availability off and on made every
+        // escalation still open on the board read as new and re-pushed the lot.
+        snapshot[EXPOSED] = json!(this_window_exposed);
+        snapshot[SEEN] = json!(all_ids);
         snaps.insert(label.to_string(), snapshot);
     }
-    if mailink_on && !new_rings.is_empty() {
+    if mailink_on && this_window_exposed && !new_rings.is_empty() {
         let mut q = app.mailink_pending_rings.lock();
         q.extend(new_rings);
         // Bounded: the doorbell drains every 2 s, so anything past this is a loop that isn't
@@ -158,14 +175,34 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
 
 const MAX_PENDING_RINGS: usize = 32;
 
-/// `GET /overlord`: every window's last snapshot, stable order. `[]` until the first publish —
-/// a phone that sees an empty list on a desktop it knows has Overlord is looking at a webview
-/// that has not published yet (asleep, or the engine is off), not at an empty board.
+/// Internal marker on a stored snapshot: whether the window has a designated tab. Stripped
+/// before anything reaches the wire — a served snapshot is exposed by construction.
+const EXPOSED: &str = "__exposed";
+/// Internal: every escalation id the engine held at publish time, ungated — the ring baseline.
+const SEEN: &str = "__seen_escalations";
+
+fn is_exposed(snap: &Value) -> bool {
+    snap[EXPOSED].as_bool().unwrap_or(false)
+}
+
+/// The wire form of a stored snapshot: the internal markers removed.
+fn served(snap: &Value) -> Value {
+    let mut out = snap.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.remove(EXPOSED);
+        o.remove(SEEN);
+    }
+    out
+}
+
+/// `GET /overlord`: every EXPOSED window's last snapshot, stable order. `[]` until the first
+/// publish — a phone that sees an empty list on a desktop it knows has Overlord is looking at a
+/// webview that has not published yet (asleep, or the engine is off), not at an empty board.
 pub(crate) fn snapshots(app: &AppState) -> Value {
     let snaps = app.overlord_snapshots.read();
-    let mut labels: Vec<&String> = snaps.keys().collect();
+    let mut labels: Vec<&String> = snaps.keys().filter(|l| is_exposed(&snaps[*l])).collect();
     labels.sort();
-    json!({ "windows": labels.iter().map(|l| snaps[*l].clone()).collect::<Vec<_>>() })
+    json!({ "windows": labels.iter().map(|l| served(&snaps[*l])).collect::<Vec<_>>() })
 }
 
 /// WS `overlord` frames for every window whose version moved since this socket last looked —
@@ -175,18 +212,19 @@ pub(crate) fn snapshots(app: &AppState) -> Value {
 pub(crate) fn changed_frames(app: &AppState, seen: &mut HashMap<String, u64>) -> Vec<Value> {
     let snaps = app.overlord_snapshots.read();
     let mut out = Vec::new();
-    let mut labels: Vec<&String> = snaps.keys().collect();
+    let mut labels: Vec<&String> = snaps.keys().filter(|l| is_exposed(&snaps[*l])).collect();
     labels.sort();
-    for label in labels {
-        let snap = &snaps[label];
+    for label in &labels {
+        let snap = &snaps[*label];
         let version = snap["version"].as_u64().unwrap_or(0);
-        if seen.get(label) == Some(&version) {
+        if seen.get(*label) == Some(&version) {
             continue;
         }
-        seen.insert(label.clone(), version);
-        out.push(json!({ "type": "overlord", "windowLabel": label, "window": snap, "ts": now_ms() }));
+        seen.insert((*label).clone(), version);
+        out.push(json!({ "type": "overlord", "windowLabel": label, "window": served(snap), "ts": now_ms() }));
     }
-    let gone: Vec<String> = seen.keys().filter(|k| !snaps.contains_key(*k)).cloned().collect();
+    // Closed windows AND windows that stopped being exposed both read as gone to the socket.
+    let gone: Vec<String> = seen.keys().filter(|k| !labels.iter().any(|l| *l == *k)).cloned().collect();
     for label in gone {
         seen.remove(&label);
         out.push(json!({ "type": "overlord", "windowLabel": label, "window": Value::Null, "ts": now_ms() }));
@@ -252,9 +290,58 @@ mod tests {
         assert_eq!(ids, vec!["e1", "e3"], "the designated tab's row and the window-level row survive");
         assert_eq!(w["agentReports"].as_array().unwrap().len(), 1);
         assert_eq!(w["windowLabel"], "main");
-        assert_eq!(w["version"], 1);
+        assert!(w["version"].as_u64().unwrap() >= 1_700_000_000_000, "version is clock-seeded so it survives a restart");
         assert_eq!(w["asOf"], 5, "the frontend's build stamp is passed through untouched");
         assert!(w["receivedAt"].as_u64().unwrap() > 0);
+        assert!(w.get("__exposed").is_none() && w.get("__seen_escalations").is_none(), "the internal markers never reach the wire");
+    }
+
+    #[test]
+    fn version_is_strictly_monotonic_and_a_fresh_process_starts_above_any_old_counter() {
+        let (app, shown, _) = fixture();
+        publish(&app, "main", json!({ "escalations": [esc("e1", &shown)] }));
+        let v1 = snapshots(&app)["windows"][0]["version"].as_u64().unwrap();
+        publish(&app, "main", json!({ "escalations": [esc("e1", &shown)] }));
+        let v2 = snapshots(&app)["windows"][0]["version"].as_u64().unwrap();
+        assert!(v2 > v1, "two publishes inside one millisecond must still order");
+        // A "restart": a fresh AppState (empty map) publishes; its version must exceed a
+        // counter any previous process could plausibly have reached.
+        let (fresh, shown2, _) = fixture();
+        publish(&fresh, "main", json!({ "escalations": [esc("e1", &shown2)] }));
+        let v3 = snapshots(&fresh)["windows"][0]["version"].as_u64().unwrap();
+        assert!(v3 >= v2 && v3 > 10_000_000, "clock-seeded: a restart never hands the phone a smaller version");
+    }
+
+    #[test]
+    fn hiding_and_re_exposing_a_window_does_not_re_ring_its_open_escalations() {
+        // The review's case: a window whose only agent tab is made "unavailable in maiLink" and
+        // then available again. The snapshot is HIDDEN meanwhile, not dropped — dropping it lost
+        // the ring baseline, and every still-open escalation was pushed a second time.
+        let (app, shown, _) = fixture();
+        let three = json!({ "escalations": [esc("e1", &shown), esc("e2", &shown), esc("e3", &shown)] });
+        publish(&app, "main", three.clone());
+        assert_eq!(take_pending_rings(&app).len(), 3, "first raise rings");
+        publish(&app, "main", three.clone());
+        assert!(take_pending_rings(&app).is_empty());
+        let mut seen = HashMap::new();
+        assert_eq!(changed_frames(&app, &mut seen).len(), 1);
+
+        app.app_data.write().windows[0].workspaces[0].panes[0].tabs[0].mailink_excluded = true;
+        publish(&app, "main", three.clone());
+        assert!(snapshots(&app)["windows"].as_array().unwrap().is_empty(), "hidden while unexposed");
+        let frames = changed_frames(&app, &mut seen);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0]["window"].is_null(), "the socket is told the window went away");
+        assert!(take_pending_rings(&app).is_empty(), "an unexposed window rings nothing");
+
+        app.app_data.write().windows[0].workspaces[0].panes[0].tabs[0].mailink_excluded = false;
+        publish(&app, "main", three);
+        assert!(take_pending_rings(&app).is_empty(), "re-exposure must not re-push three already-seen escalations");
+        assert_eq!(snapshots(&app)["windows"].as_array().unwrap().len(), 1);
+        assert_eq!(changed_frames(&app, &mut seen).len(), 1, "and the socket gets the board back");
+        // A genuinely new escalation after re-exposure still rings exactly once.
+        publish(&app, "main", json!({ "escalations": [esc("e1", &shown), esc("e4", &shown)] }));
+        assert_eq!(take_pending_rings(&app).len(), 1);
     }
 
     #[test]
@@ -310,7 +397,6 @@ mod tests {
         // Same escalations again — nothing is new, nothing rings, the version still moves.
         publish(&app, "main", json!({ "escalations": [esc("e1", &shown), esc("e3", "")] }));
         assert!(take_pending_rings(&app).is_empty());
-        assert_eq!(snapshots(&app)["windows"][0]["version"], 2);
         // One more arrives → exactly one ring.
         publish(&app, "main", json!({ "escalations": [esc("e1", &shown), esc("e3", ""), esc("e4", &shown)] }));
         assert_eq!(take_pending_rings(&app).len(), 1);
@@ -325,10 +411,10 @@ mod tests {
         let frames = changed_frames(&app, &mut seen);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0]["type"], "overlord");
-        assert_eq!(frames[0]["window"]["version"], 1, "the snapshot rides INLINE, full replace");
+        let v1 = frames[0]["window"]["version"].as_u64().expect("the snapshot rides INLINE, full replace");
         assert!(changed_frames(&app, &mut seen).is_empty(), "unchanged → silent");
         publish(&app, "main", json!({ "escalations": [] }));
-        assert_eq!(changed_frames(&app, &mut seen)[0]["window"]["version"], 2);
+        assert!(changed_frames(&app, &mut seen)[0]["window"]["version"].as_u64().unwrap() > v1);
         // The window closes: the next publish from any window prunes it; the socket is told.
         app.app_data.write().windows[0].label = "other".into();
         {

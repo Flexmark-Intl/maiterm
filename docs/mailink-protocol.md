@@ -1672,7 +1672,10 @@ exactly when a phone is in use — desktop asleep. So:
 // GET /overlord → { windows: OverlordWindow[] }   ([] until a webview has published)
 interface OverlordWindow {
   windowLabel: string;        // Overlord is per WINDOW; the key every action route takes
-  version: number;            // monotonic per window — what the WS ticker diffs on
+  version: number;            // STRICTLY monotonic per window, across desktop restarts too (clock-
+                              // seeded, ms-scale — not a small counter). A phone may guard on it
+                              // and drop anything older than it holds; a restart never hands it
+                              // a smaller number. What the WS ticker diffs on
   asOf: number;               // unix ms, DESKTOP clock, when the engine BUILT this snapshot
   receivedAt: number;         // unix ms, desktop clock, when Rust stored it
   running: boolean;           // Overlord is ENABLED in this window. Every window's engine ticks
