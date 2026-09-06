@@ -389,14 +389,25 @@ pub fn restore_terminal_scrollback(
 /// Serialize + save scrollback to SQLite in one shot.
 /// This is the preferred path for auto-save and shutdown saves.
 #[tauri::command]
-pub fn save_terminal_scrollback(
+pub async fn save_terminal_scrollback(
     state: State<'_, Arc<AppState>>,
     pty_id: String,
     tab_id: String,
 ) -> Result<(), String> {
+    // Serializing up to 10k lines and writing ~1MB to SQLite is milliseconds of
+    // work per tab, every 30s, for every tab with new output. A sync command
+    // would do that on the main thread, where every keystroke's write_terminal
+    // is queued behind it — the periodic hitch that made typing feel clunky.
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || save_scrollback_blocking(&state, &pty_id, &tab_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn save_scrollback_blocking(state: &Arc<AppState>, pty_id: &str, tab_id: &str) -> Result<(), String> {
     let (scrollback, size) = {
         let registry = state.terminal_registry.read();
-        let handle = registry.get(&pty_id).ok_or("Terminal not found")?;
+        let handle = registry.get(pty_id).ok_or("Terminal not found")?;
         if handle.term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
             return Err("Alternate screen active".to_string());
         }
@@ -404,7 +415,7 @@ pub fn save_terminal_scrollback(
         (serialize::serialize_buffer(&handle.term), size)
     };
 
-    state.scrollback_db.save(&tab_id, &scrollback, Some(size))
+    state.scrollback_db.save(tab_id, &scrollback, Some(size))
 }
 
 /// Serialize and persist the scrollback of EVERY live terminal across ALL
@@ -416,32 +427,28 @@ pub fn save_terminal_scrollback(
 /// (TUI content) are skipped, matching `save_terminal_scrollback`; best-effort
 /// per tab, so one failure never blocks the rest.
 #[tauri::command]
-pub fn save_all_scrollback(state: State<'_, Arc<AppState>>) -> usize {
-    // Snapshot tab→pty pairs up front so the map lock isn't held across serialize.
-    let pairs: Vec<(String, String)> = {
-        let tab_map = state.tab_pty_map.read();
-        tab_map.iter().map(|(t, p)| (t.clone(), p.clone())).collect()
-    };
-
-    let mut saved = 0;
-    for (tab_id, pty_id) in pairs {
-        let serialized = {
-            let registry = state.terminal_registry.read();
-            let Some(handle) = registry.get(&pty_id) else { continue };
-            if handle.term.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN) {
-                continue;
-            }
-            let size = (handle.term.columns() as u16, handle.term.screen_lines() as u16);
-            (serialize::serialize_buffer(&handle.term), size)
+pub async fn save_all_scrollback(state: State<'_, Arc<AppState>>) -> Result<usize, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Snapshot tab→pty pairs up front so the map lock isn't held across serialize.
+        let pairs: Vec<(String, String)> = {
+            let tab_map = state.tab_pty_map.read();
+            tab_map.iter().map(|(t, p)| (t.clone(), p.clone())).collect()
         };
-        if state.scrollback_db.save(&tab_id, &serialized.0, Some(serialized.1)).is_ok() {
-            saved += 1;
+
+        let mut saved = 0;
+        for (tab_id, pty_id) in pairs {
+            if save_scrollback_blocking(&state, &pty_id, &tab_id).is_ok() {
+                saved += 1;
+            }
         }
-    }
-    if saved > 0 {
-        log::info!("save_all_scrollback: flushed {} terminal(s) across all windows", saved);
-    }
-    saved
+        if saved > 0 {
+            log::info!("save_all_scrollback: flushed {} terminal(s) across all windows", saved);
+        }
+        saved
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Terminal size (cols, rows) recorded with the tab's last scrollback save.
