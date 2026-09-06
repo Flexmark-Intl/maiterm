@@ -120,6 +120,19 @@ function createTasksStore() {
     /** Add one task. Returns the created row, or the existing one when an identical
      *  title is already on the same tab — callers treat creation as idempotent so a
      *  re-primed agent re-sending its list is a no-op rather than a duplication. */
+    /** Replace one workspace's copy with what the BACKEND just wrote — a phone edit through
+     *  maiLink (`mailink-tasks-changed`). No persist: Rust already saved it, and this store's
+     *  whole-list persist would otherwise clobber the phone's row on the next desktop edit,
+     *  which is the reason the event exists. Ignored for a workspace this window doesn't hold —
+     *  the event is app-wide and persisting a foreign workspace would fail "not found". */
+    applyFromBackend(workspaceId: string, tasks: Task[], workstreams: Workstream[]) {
+      if (!byWorkspace.has(workspaceId)) return;
+      byWorkspace.set(workspaceId, tasks);
+      byWorkspace = new Map(byWorkspace);
+      streamsByWorkspace.set(workspaceId, workstreams);
+      streamsByWorkspace = new Map(streamsByWorkspace);
+    },
+
     add(workspaceId: string, input: TaskInput): Task {
       const list = this.forWorkspace(workspaceId);
       const dup = findDuplicate(list, input.title, input.tab_id, input.workstream_id);

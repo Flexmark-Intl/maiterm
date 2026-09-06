@@ -21,11 +21,38 @@
 //! designated tabs. `tasks_for_tab` does not re-check — its callers already do (chat_detail
 //! after `is_designated`, the streamer over `designated_tabs`).
 
-use crate::state::workspace::{AppData, Task, WindowData, Workspace};
+use crate::state::persistence::save_state;
+use crate::state::workspace::{AppData, Task, WindowData, Workspace, Workstream};
 use crate::state::AppState;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+
+const LANES: [&str; 6] = ["backlog", "todo", "active", "blocked", "review", "done"];
+
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ` from the wall clock — the same shape `new Date().toISOString()`
+/// stamps on rows the frontend writes, so `createdAt`/`updatedAt` sort together whoever wrote
+/// them. Hand-rolled (civil-from-days) rather than pulling in chrono for one format.
+pub(crate) fn iso_now() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
+    let (h, m, s, milli) = (rem / 3_600_000, rem / 60_000 % 60, rem / 1000 % 60, rem % 1000);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}.{milli:03}Z")
+}
 
 /// Task ids parked on this WINDOW's archived tabs. Window-wide, not per workspace, because that
 /// is the desktop's set (`workspacesStore.parkedTaskIds` unions `archived_tasks` across every
@@ -232,10 +259,310 @@ pub(crate) fn board(app: &AppState) -> Value {
     json!({ "workspaces": workspaces })
 }
 
+// ─── Writes ─────────────────────────────────────────────────────────────────────────────
+//
+// The phone writes here, into Rust state, and the handler EMITS `mailink-tasks-changed` so the
+// frontend store replaces its copy — because that store persists whole lists and would clobber
+// a row it never saw on its next edit. Synchronous and confirmable, and it works while the
+// desktop's screen is asleep, which is the phone's whole use case; routing the write through
+// the webview would have failed exactly then. The Overlord actions are different: they mutate
+// engine state that exists only in the webview, so those DO cross (mailink/rpc.rs).
+//
+// Dedup mirrors `findDuplicate` in src/lib/tasks/model.ts and must stay in lockstep with it:
+// same normalized title, on the same tab or sitting unclaimed in the backlog. The normalizer is
+// `Task::normalize_title`, the one Rust already owns — this is a second dedup SITE, not a
+// second normalizer.
+
+/// One row the phone wants created. `assign: false` leaves it in the workspace backlog.
+pub(crate) struct CreateSpec {
+    pub title: String,
+    pub detail: Option<String>,
+    pub status: Option<String>,
+    pub assign: bool,
+}
+
+/// Fields `POST /tasks/{id}` may change. Outer `None` = leave alone; inner `None` = clear.
+#[derive(Default)]
+pub(crate) struct UpdatePatch {
+    pub status: Option<String>,
+    pub title: Option<String>,
+    pub detail: Option<Option<String>>,
+    pub tab_id: Option<Option<String>>,
+    pub workstream_id: Option<Option<String>>,
+}
+
+/// What a write produced: the rows to answer with (phone view) and the workspace's whole list
+/// (what the frontend store is told to replace its copy with).
+pub(crate) struct Written {
+    pub workspace_id: String,
+    pub rows: Vec<Value>,
+    pub tasks: Vec<Task>,
+    pub workstreams: Vec<Workstream>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum WriteError {
+    /// No such row visible to the phone — unknown id, OR a row on a tab the gate hides, OR a
+    /// backlog row in a workspace with nothing designated. One answer for all three, on purpose.
+    NotFound,
+    BadStatus,
+    /// The assignee/workstream named by a patch is not in this workspace, or not designated.
+    BadTarget,
+    Empty,
+    Persist(String),
+}
+
+fn find_duplicate<'a>(
+    list: &'a [Task],
+    normalized: &str,
+    tab_id: Option<&str>,
+) -> Option<&'a Task> {
+    list.iter().find(|t| {
+        t.normalized_title == normalized && (t.tab_id.as_deref() == tab_id || t.tab_id.is_none())
+    })
+}
+
+/// Build the phone views for a workspace's rows after a write. Titles/parked recomputed from
+/// the post-write state so `effectiveStatus` reflects what was just done.
+fn views_for(data: &AppData, win: &WindowData, ws: &Workspace, ids: &[String], designated: &HashSet<String>) -> Vec<Value> {
+    let titles = tab_titles(data, designated);
+    let parked = parked_ids(win);
+    ids.iter()
+        .filter_map(|id| ws.tasks.iter().find(|t| &t.id == id))
+        .map(|t| {
+            task_view(
+                t,
+                effective_status(t, ws, &parked),
+                t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
+                workstream_name(ws, t.workstream_id.as_deref()),
+            )
+        })
+        .collect()
+}
+
+/// `POST /tasks`: create rows in the workspace that owns `tab_id` (which the handler has
+/// already checked is designated). Idempotent by normalized title within the tab: a repeat
+/// returns the existing row, adopting it if it sat unassigned and filing it under `workstream`
+/// if it was loose — the same two refinements the frontend's `addMany` applies. `origin` is
+/// "human": the phone is the human. Workstream by NAME, reused via `normalized_name` or created.
+pub(crate) fn create_tasks(
+    app: &AppState,
+    tab_id: &str,
+    workstream: Option<&str>,
+    specs: Vec<CreateSpec>,
+) -> Result<Written, WriteError> {
+    let designated = designated_set(app);
+    let now = iso_now();
+    let (written, snapshot) = {
+        let mut data = app.app_data.write();
+        let written = create_in(&mut data, &designated, &now, tab_id, workstream, specs)?;
+        (written, data.clone())
+    };
+    save_state(&snapshot).map_err(WriteError::Persist)?;
+    Ok(written)
+}
+
+/// The pure half of `create_tasks`, on already-locked state. Tests drive THIS: `save_state`
+/// writes the real state file, and a test that reached it would overwrite the dev install.
+fn create_in(
+    data: &mut AppData,
+    designated: &HashSet<String>,
+    now: &str,
+    tab_id: &str,
+    workstream: Option<&str>,
+    specs: Vec<CreateSpec>,
+) -> Result<Written, WriteError> {
+    let specs: Vec<CreateSpec> = specs.into_iter().filter(|s| !s.title.trim().is_empty()).collect();
+    if specs.is_empty() {
+        return Err(WriteError::Empty);
+    }
+    if let Some(bad) = specs.iter().filter_map(|s| s.status.as_deref()).find(|s| !LANES.contains(s)) {
+        log::warn!("[maiLink] create_tasks: unknown status {bad:?}");
+        return Err(WriteError::BadStatus);
+    }
+    // Locate the owning workspace by tab; borrow the window immutably afterwards for views.
+    let mut found: Option<(usize, usize)> = None;
+    for (wi, win) in data.windows.iter().enumerate() {
+        for (si, ws) in win.workspaces.iter().enumerate() {
+            if ws.panes.iter().flat_map(|p| p.tabs.iter()).any(|t| t.id == tab_id) {
+                found = Some((wi, si));
+            }
+        }
+    }
+    let Some((wi, si)) = found else { return Err(WriteError::NotFound) };
+    let ws = &mut data.windows[wi].workspaces[si];
+
+    let stream_id = workstream.map(str::trim).filter(|n| !n.is_empty()).map(|name| {
+        let norm = Workstream::normalize_name(name);
+        match ws.workstreams.iter().find(|w| w.normalized_name == norm) {
+            Some(w) => w.id.clone(),
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                ws.workstreams.push(Workstream {
+                    id: id.clone(),
+                    name: name.to_string(),
+                    normalized_name: norm,
+                    created_at: now.to_string(),
+                    updated_at: now.to_string(),
+                });
+                id
+            }
+        }
+    });
+
+    let mut ids = Vec::new();
+    for spec in specs {
+        let title = spec.title.trim().to_string();
+        let normalized = Task::normalize_title(&title);
+        let want_tab = spec.assign.then_some(tab_id);
+        let dup_pos = find_duplicate(&ws.tasks, &normalized, want_tab)
+            .map(|d| d.id.clone())
+            .and_then(|id| ws.tasks.iter().position(|t| t.id == id));
+        if let Some(pos) = dup_pos {
+            let dup = &mut ws.tasks[pos];
+            let mut touched = false;
+            if dup.tab_id.is_none() && want_tab.is_some() {
+                dup.tab_id = want_tab.map(str::to_string);
+                if let Some(s) = &spec.status {
+                    dup.status = s.clone();
+                }
+                touched = true;
+            }
+            if stream_id.is_some() && dup.workstream_id.is_none() {
+                dup.workstream_id = stream_id.clone();
+                touched = true;
+            }
+            if touched {
+                dup.updated_at = now.to_string();
+            }
+            if !ids.contains(&dup.id) {
+                ids.push(dup.id.clone());
+            }
+            continue;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        ws.tasks.push(Task {
+            id: id.clone(),
+            title,
+            normalized_title: normalized,
+            detail: spec.detail.filter(|d| !d.trim().is_empty()),
+            status: spec.status.unwrap_or_else(|| "todo".to_string()),
+            tab_id: want_tab.map(str::to_string),
+            blocked_by: Vec::new(),
+            origin: "human".to_string(),
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            workstream_id: stream_id.clone(),
+            topic_id: None,
+        });
+        ids.push(id);
+    }
+    let win = &data.windows[wi];
+    let ws = &win.workspaces[si];
+    Ok(Written {
+        workspace_id: ws.id.clone(),
+        rows: views_for(data, win, ws, &ids, designated),
+        tasks: ws.tasks.clone(),
+        workstreams: ws.workstreams.clone(),
+    })
+}
+
+/// `POST /tasks/{id}`: patch one row the phone can see. `updated_at` is stamped here so every
+/// writer gets it for free (same contract as the frontend's `update`); `normalized_title` is
+/// recomputed when the title changes so the dedup key can never drift from it.
+pub(crate) fn update_task(app: &AppState, id: &str, patch: UpdatePatch) -> Result<Written, WriteError> {
+    let designated = designated_set(app);
+    let now = iso_now();
+    let (written, snapshot) = {
+        let mut data = app.app_data.write();
+        let written = update_in(&mut data, &designated, &now, id, patch)?;
+        (written, data.clone())
+    };
+    save_state(&snapshot).map_err(WriteError::Persist)?;
+    Ok(written)
+}
+
+/// The pure half of `update_task` (see `create_in` for why it is split).
+fn update_in(
+    data: &mut AppData,
+    designated: &HashSet<String>,
+    now: &str,
+    id: &str,
+    patch: UpdatePatch,
+) -> Result<Written, WriteError> {
+    if let Some(s) = &patch.status {
+        if !LANES.contains(&s.as_str()) {
+            return Err(WriteError::BadStatus);
+        }
+    }
+    if patch.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return Err(WriteError::BadTarget);
+    }
+    let mut found: Option<(usize, usize, usize)> = None;
+    for (wi, win) in data.windows.iter().enumerate() {
+        for (si, ws) in win.workspaces.iter().enumerate() {
+            if let Some(ti) = ws.tasks.iter().position(|t| t.id == id) {
+                found = Some((wi, si, ti));
+            }
+        }
+    }
+    let Some((wi, si, ti)) = found else { return Err(WriteError::NotFound) };
+    {
+        let ws = &data.windows[wi].workspaces[si];
+        // Visibility, exactly as `board()` decides it — the gate is a gate for writes too.
+        let exposed = ws.panes.iter().flat_map(|p| p.tabs.iter()).any(|t| designated.contains(&t.id));
+        let visible = match ws.tasks[ti].tab_id.as_deref() {
+            None => exposed,
+            Some(t) => designated.contains(t),
+        };
+        if !visible {
+            return Err(WriteError::NotFound);
+        }
+        if let Some(Some(t)) = &patch.tab_id {
+            let in_ws = ws.panes.iter().flat_map(|p| p.tabs.iter()).any(|tab| &tab.id == t);
+            if !in_ws || !designated.contains(t) {
+                return Err(WriteError::BadTarget);
+            }
+        }
+        if let Some(Some(w)) = &patch.workstream_id {
+            if !ws.workstreams.iter().any(|x| &x.id == w) {
+                return Err(WriteError::BadTarget);
+            }
+        }
+    }
+    let ws = &mut data.windows[wi].workspaces[si];
+    let t = &mut ws.tasks[ti];
+    if let Some(s) = patch.status {
+        t.status = s;
+    }
+    if let Some(title) = patch.title {
+        t.title = title.trim().to_string();
+        t.normalized_title = Task::normalize_title(&t.title);
+    }
+    if let Some(d) = patch.detail {
+        t.detail = d.filter(|d| !d.trim().is_empty());
+    }
+    if let Some(tab) = patch.tab_id {
+        t.tab_id = tab;
+    }
+    if let Some(w) = patch.workstream_id {
+        t.workstream_id = w;
+    }
+    t.updated_at = now.to_string();
+    let win = &data.windows[wi];
+    let ws = &win.workspaces[si];
+    Ok(Written {
+        workspace_id: ws.id.clone(),
+        rows: views_for(data, win, ws, &[id.to_string()], designated),
+        tasks: ws.tasks.clone(),
+        workstreams: ws.workstreams.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::workspace::{Tab, Workstream};
+    use crate::state::workspace::Tab;
     use crate::state::AgentRuntime;
 
     fn task(id: &str, title: &str, tab: Option<&str>, stream: Option<&str>) -> Task {
@@ -428,6 +755,96 @@ mod tests {
             tasks_for_tab(&app, &tab_a).iter().find(|r| r["id"] == "waits").unwrap()["effectiveStatus"],
             "todo"
         );
+    }
+
+    fn spec(title: &str, assign: bool) -> CreateSpec {
+        CreateSpec { title: title.into(), detail: None, status: None, assign }
+    }
+
+    #[test]
+    fn creating_from_the_phone_is_idempotent_by_title_and_files_and_adopts_like_the_desktop() {
+        let (app, tab) = fixture();
+        let designated = designated_set(&app);
+        let mut data = app.app_data.write();
+        let now = "2026-09-06T10:00:00.000Z";
+        // New row, assigned, filed under an EXISTING workstream matched by normalized name.
+        let w = create_in(&mut data, &designated, now, &tab, Some("auth  refactor"), vec![spec("Rotate keys", true)]).unwrap();
+        assert_eq!(w.rows.len(), 1);
+        let row = &w.rows[0];
+        assert_eq!(row["origin"], "human", "the phone is the human");
+        assert_eq!(row["tabId"], tab);
+        assert_eq!(row["workstreamId"], "ws-1", "reused by normalized name, not created twice");
+        assert_eq!(row["status"], "todo");
+        assert_eq!(row["createdAt"], now);
+        assert_eq!(w.tasks.len(), 5);
+        assert_eq!(w.workstreams.len(), 1);
+        let id = row["id"].as_str().unwrap().to_string();
+        // Repeat → the same row, nothing added.
+        let again = create_in(&mut data, &designated, now, &tab, None, vec![spec("rotate keys.", true)]).unwrap();
+        assert_eq!(again.rows[0]["id"], id);
+        assert_eq!(again.tasks.len(), 5, "idempotent by normalized title within the tab");
+        // An unassigned duplicate ("Someday" is t3, in the backlog) is ADOPTED by the tab, and
+        // a NEW workstream is created on demand.
+        let adopt = create_in(&mut data, &designated, now, &tab, Some("Later"), vec![spec("Someday", true)]).unwrap();
+        assert_eq!(adopt.rows[0]["id"], "t3");
+        assert_eq!(adopt.rows[0]["tabId"], tab, "reclaimed from the backlog");
+        assert_eq!(adopt.rows[0]["workstream"], "Later", "a loose row is filed under the named job");
+        assert_eq!(adopt.workstreams.len(), 2);
+        assert_eq!(adopt.tasks.len(), 5);
+        // assign:false leaves the row in the backlog of the tab's workspace.
+        let loose = create_in(&mut data, &designated, now, &tab, None, vec![spec("Think about it", false)]).unwrap();
+        assert!(loose.rows[0]["tabId"].is_null());
+        // Validation.
+        assert_eq!(
+            create_in(&mut data, &designated, now, &tab, None, vec![CreateSpec { status: Some("urgent".into()), ..spec("x", true) }]).err(),
+            Some(WriteError::BadStatus)
+        );
+        assert_eq!(create_in(&mut data, &designated, now, "no-such-tab", None, vec![spec("x", true)]).err(), Some(WriteError::NotFound));
+        assert_eq!(create_in(&mut data, &designated, now, &tab, None, vec![spec("   ", true)]).err(), Some(WriteError::Empty));
+    }
+
+    #[test]
+    fn updating_from_the_phone_stamps_and_stays_inside_the_gate() {
+        let (app, tab) = fixture();
+        {
+            // Add an excluded tab holding a row the phone must not be able to touch.
+            let mut data = app.app_data.write();
+            let ws = &mut data.windows[0].workspaces[0];
+            let mut secret = agent_tab("client-secrets");
+            secret.mailink_excluded = true;
+            let hidden = secret.id.clone();
+            ws.panes[0].tabs.push(secret);
+            ws.tasks.push(task("s1", "Rotate the prod DB password", Some(&hidden), None));
+        }
+        let designated = designated_set(&app);
+        let mut data = app.app_data.write();
+        let now = "2026-09-06T11:00:00.000Z";
+        let w = update_in(&mut data, &designated, now, "t2", UpdatePatch { status: Some("done".into()), ..Default::default() }).unwrap();
+        assert_eq!(w.rows[0]["status"], "done");
+        assert_eq!(w.rows[0]["updatedAt"], now, "stamped here so every writer gets it");
+        assert_eq!(w.rows[0]["createdAt"], "2026-09-06T00:00:00Z", "creation is history");
+        let w = update_in(&mut data, &designated, now, "t2", UpdatePatch { title: Some("  Write the TESTS ".into()), ..Default::default() }).unwrap();
+        assert_eq!(w.rows[0]["title"], "Write the TESTS");
+        assert_eq!(w.tasks.iter().find(|t| t.id == "t2").unwrap().normalized_title, "write the tests", "dedup key follows the title");
+        // The gate: a row on an excluded tab reads as not found, same as GET would say.
+        assert_eq!(update_in(&mut data, &designated, now, "s1", UpdatePatch { status: Some("done".into()), ..Default::default() }).err(), Some(WriteError::NotFound));
+        // Reassigning to a tab the phone can't see is refused; to nothing (backlog) is fine.
+        let hidden = data.windows[0].workspaces[0].panes[0].tabs.iter().find(|t| t.name == "client-secrets").unwrap().id.clone();
+        assert_eq!(update_in(&mut data, &designated, now, "t1", UpdatePatch { tab_id: Some(Some(hidden)), ..Default::default() }).err(), Some(WriteError::BadTarget));
+        assert!(update_in(&mut data, &designated, now, "t1", UpdatePatch { tab_id: Some(None), ..Default::default() }).unwrap().rows[0]["tabId"].is_null());
+        assert_eq!(update_in(&mut data, &designated, now, "t1", UpdatePatch { status: Some("later".into()), ..Default::default() }).err(), Some(WriteError::BadStatus));
+        assert_eq!(update_in(&mut data, &designated, now, "nope", UpdatePatch::default()).err(), Some(WriteError::NotFound));
+        let _ = tab;
+    }
+
+    #[test]
+    fn iso_now_has_the_shape_the_frontend_stamps() {
+        let s = iso_now();
+        // 2026-09-06T10:00:00.000Z — 24 chars, T at 10, Z at the end, all-numeric elsewhere.
+        assert_eq!(s.len(), 24, "{s}");
+        assert_eq!(&s[10..11], "T");
+        assert!(s.ends_with('Z'));
+        assert!(s.starts_with("20"), "{s}");
     }
 
     #[test]

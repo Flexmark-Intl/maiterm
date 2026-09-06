@@ -2664,6 +2664,7 @@ function createOverlordStore() {
       const rule = preferencesStore.overlordRules.find((r) => r.id === p.ruleId);
       if (rule && permissionBlocks(rule, p.tabId)) return 'permission';
       proposals = proposals.filter((x) => x.id !== id);
+      scheduleMirror();
       if (!rule) return 'stale';
       // Re-check at fire time, not just on the tick that rendered the card. The human can
       // click a card the moment it stops being true, and the whole point is that a

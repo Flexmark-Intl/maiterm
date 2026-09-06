@@ -40,6 +40,7 @@ pub(crate) mod shells;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod overlord;
+pub(crate) mod rpc;
 pub(crate) mod transcript;
 
 /// Default LAN port. The pairing QR carries the actual host:port, so this is just a
@@ -331,10 +332,28 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/chats", get(chats_list))
         // The whole maiTerm task board — every workspace's workstreams + rows (mailink/board.rs).
         // Per-tab rows also ride on `chat_detail.tasks` and the WS `tasks` event.
-        .route("/mailink/v1/tasks", get(tasks_board))
+        // POST creates rows in the workspace that owns `tabId`; synchronous, answered with the
+        // rows, and it works while the desktop's screen is asleep (board.rs "Writes").
+        .route("/mailink/v1/tasks", get(tasks_board).post(post_tasks_create))
+        .route("/mailink/v1/tasks/{task_id}", post(post_task_update))
         // The Overlord engine mirror, every window (mailink/overlord.rs). Baseline on connect;
         // the WS `overlord` frame carries changes inline.
         .route("/mailink/v1/overlord", get(overlord_windows))
+        // Overlord ACTIONS run inside the named window's webview (mailink/rpc.rs) and answer
+        // `{accepted, confirmed}` — the webview may be asleep, and the phone must not read a
+        // timeout as either success or failure.
+        .route(
+            "/mailink/v1/overlord/{window}/escalations/{id}/dismiss",
+            post(post_overlord_dismiss_escalation),
+        )
+        .route("/mailink/v1/overlord/{window}/proposals/{id}", post(post_overlord_proposal))
+        .route(
+            "/mailink/v1/overlord/{window}/rule-changes/{batch_id}",
+            post(post_overlord_rule_changes),
+        )
+        .route("/mailink/v1/overlord/{window}/drive", post(post_overlord_drive))
+        .route("/mailink/v1/overlord/{window}/rules/{rule_id}/fire", post(post_overlord_fire))
+        .route("/mailink/v1/overlord/{window}/recover", post(post_overlord_recover))
         // Static segment — must be registered before `/chats/{tab_id}` so it isn't shadowed.
         .route("/mailink/v1/chats/archived", get(chats_archived))
         .route("/mailink/v1/chats/{tab_id}", get(chat_detail))
@@ -433,8 +452,15 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
         "now": now_ms(),
         "server_name": s.server_name,
         "fp": s.fingerprint,
+        // The wire contract this desktop speaks (docs/mailink-protocol.md changelog). The phone
+        // gates compatibility shims on this, not on a calendar — added when the second breaking
+        // change in a week found there was no version anywhere on the wire.
+        "protocolVersion": PROTOCOL_VERSION,
     }))
 }
+
+/// Bump with the changelog at the top of docs/mailink-protocol.md.
+const PROTOCOL_VERSION: &str = "0.5";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -476,6 +502,248 @@ async fn overlord_windows(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
     Ok(Json(overlord::snapshots(&s.app)))
+}
+
+// ─── Task writes (board.rs "Writes") ───────────────────────────────────────────────────────
+
+/// `Option<Option<T>>` from JSON: absent → `None` (leave alone), `null` → `Some(None)` (clear),
+/// value → `Some(Some(v))`. Serde's default collapses absent and null; a patch must not.
+fn some_opt<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    <Option<T> as serde::Deserialize>::deserialize(d).map(Some)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TasksCreateBody {
+    tab_id: String,
+    workstream: Option<String>,
+    tasks: Vec<TaskSpecBody>,
+}
+
+#[derive(serde::Deserialize)]
+struct TaskSpecBody {
+    title: String,
+    detail: Option<String>,
+    status: Option<String>,
+    /// Default true: the row is this chat's. `false` parks it in the workspace backlog.
+    assign: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TaskPatchBody {
+    status: Option<String>,
+    title: Option<String>,
+    #[serde(default, deserialize_with = "some_opt")]
+    detail: Option<Option<String>>,
+    #[serde(default, deserialize_with = "some_opt")]
+    tab_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "some_opt")]
+    workstream_id: Option<Option<String>>,
+}
+
+fn write_status(e: board::WriteError) -> StatusCode {
+    use board::WriteError::*;
+    match e {
+        NotFound => StatusCode::NOT_FOUND,
+        BadStatus | BadTarget | Empty => StatusCode::BAD_REQUEST,
+        Persist(msg) => {
+            log::error!("[maiLink] task write persisted in memory but not to disk: {msg}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+/// The frontend tasks store owns its copy and persists WHOLE lists — a row it never saw is
+/// clobbered by its next edit. Same rule as every phone-initiated tab mutation: a backend
+/// mutation needs a frontend event. App-wide; each window applies only workspaces it holds.
+fn announce_tasks(s: &ApiState, w: &board::Written) {
+    if let Some(h) = &s.app_handle {
+        let _ = h.emit(
+            "mailink-tasks-changed",
+            json!({ "workspaceId": w.workspace_id, "tasks": w.tasks, "workstreams": w.workstreams }),
+        );
+    }
+}
+
+/// `POST /tasks` → `{ tasks: MaitermTask[] }`, one row per spec (an existing row for a repeated
+/// title). Synchronous: the write is in Rust state and on disk before this answers.
+async fn post_tasks_create(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<TasksCreateBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &body.tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let specs = body
+        .tasks
+        .into_iter()
+        .map(|t| board::CreateSpec {
+            title: t.title,
+            detail: t.detail,
+            status: t.status,
+            assign: t.assign.unwrap_or(true),
+        })
+        .collect();
+    let w = board::create_tasks(&s.app, &body.tab_id, body.workstream.as_deref(), specs)
+        .map_err(write_status)?;
+    announce_tasks(&s, &w);
+    Ok(Json(json!({ "tasks": w.rows })))
+}
+
+/// `POST /tasks/{id}` → `{ tasks: [MaitermTask] }`. 404 for a row the phone cannot see, 400 for
+/// a lane outside the six or a target (tab/workstream) outside the workspace or the gate.
+async fn post_task_update(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(body): Json<TaskPatchBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let patch = board::UpdatePatch {
+        status: body.status,
+        title: body.title,
+        detail: body.detail,
+        tab_id: body.tab_id,
+        workstream_id: body.workstream_id,
+    };
+    let w = board::update_task(&s.app, &task_id, patch).map_err(write_status)?;
+    announce_tasks(&s, &w);
+    Ok(Json(json!({ "tasks": w.rows })))
+}
+
+// ─── Overlord actions (rpc.rs) ─────────────────────────────────────────────────────────────
+
+async fn overlord_act(s: &ApiState, window: &str, verb: &str, args: Value) -> Json<Value> {
+    Json(rpc::response(rpc::request(&s.app, s.app_handle.as_ref(), window, verb, args).await))
+}
+
+#[derive(serde::Deserialize)]
+struct ProposalActionBody {
+    action: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuleChangesBody {
+    approved_idx: Vec<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DriveBody {
+    tab_id: String,
+    kind: Option<String>,
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TabBody {
+    tab_id: String,
+}
+
+async fn post_overlord_dismiss_escalation(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((window, id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(overlord_act(&s, &window, "overlord.dismissEscalation", json!({ "id": id })).await)
+}
+
+/// `{action: "approve" | "dismiss"}`. Approve answers `result.outcome` of `started | stale |
+/// permission` — a proposal is a snapshot, so `stale` is a normal outcome, not an error.
+async fn post_overlord_proposal(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((window, id)): Path<(String, String)>,
+    Json(body): Json<ProposalActionBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let verb = match body.action.as_str() {
+        "approve" => "overlord.approveProposal",
+        "dismiss" => "overlord.dismissProposal",
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    Ok(overlord_act(&s, &window, verb, json!({ "id": id })).await)
+}
+
+async fn post_overlord_rule_changes(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((window, batch_id)): Path<(String, String)>,
+    Json(body): Json<RuleChangesBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(overlord_act(
+        &s,
+        &window,
+        "overlord.resolveRuleChanges",
+        json!({ "batchId": batch_id, "approvedIdx": body.approved_idx }),
+    )
+    .await)
+}
+
+/// Type into a tab with the human's authority, THROUGH the engine (ledgered, and the reply
+/// harvest sees it) rather than as a bare `/message`. Only a designated tab — the phone can
+/// drive what it can see.
+async fn post_overlord_drive(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(window): Path<String>,
+    Json(body): Json<DriveBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &body.tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if body.text.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let kind = match body.kind.as_deref() {
+        Some("slash") => "slash",
+        _ => "process",
+    };
+    Ok(overlord_act(
+        &s,
+        &window,
+        "overlord.driveTab",
+        json!({ "tabId": body.tab_id, "kind": kind, "text": body.text }),
+    )
+    .await)
+}
+
+async fn post_overlord_fire(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((window, rule_id)): Path<(String, String)>,
+    Json(body): Json<TabBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &body.tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(overlord_act(&s, &window, "overlord.fireRule", json!({ "tabId": body.tab_id, "ruleId": rule_id })).await)
+}
+
+async fn post_overlord_recover(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(window): Path<String>,
+    Json(body): Json<TabBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &body.tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(overlord_act(&s, &window, "overlord.recoverTab", json!({ "tabId": body.tab_id })).await)
 }
 
 /// How many assets `GET /assets` returns. The phone's Files view is a browse surface, not an

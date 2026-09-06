@@ -1,0 +1,82 @@
+/**
+ * Phone actions that must run in THIS window's webview (docs/mailink-protocol.md §13).
+ *
+ * The Overlord engine is a per-window frontend store, so a phone dismissing an escalation or
+ * approving a proposal reaches Rust, which emits `mailink-frontend-request` to the owning
+ * window; this answers it through the same oneshot map the MCP tool path uses
+ * (`claudeCodeRespond`). Deliberately its OWN event and its OWN dispatcher — not a case in the
+ * `claude-code-tool` switch — because `tools/call` does not validate tool names, so a verb
+ * reachable from that switch is reachable by every agent over MCP, and these act with the
+ * human's authority.
+ *
+ * Every branch MUST respond, even on a thrown error: an unanswered request leaves the phone
+ * waiting the full timeout and then told "not confirmed" for an action that in fact failed.
+ */
+import * as commands from '$lib/tauri/commands';
+import { overlordStore } from '$lib/stores/overlord.svelte';
+import { error as logError } from '@tauri-apps/plugin-log';
+
+export interface MailinkRequest {
+  request_id: string;
+  verb: string;
+  args: Record<string, unknown>;
+}
+
+export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
+  const { request_id, verb } = req;
+  const a = (req.args ?? {}) as Record<string, string | number[] | undefined>;
+  let result: unknown;
+  try {
+    switch (verb) {
+      case 'overlord.dismissEscalation': {
+        if (typeof a.id !== 'string') result = { error: 'id is required' };
+        else { overlordStore.dismissEscalation(a.id); result = { ok: true }; }
+        break;
+      }
+      case 'overlord.approveProposal': {
+        // 'started' | 'stale' | 'permission' — a proposal is a snapshot; stale is an outcome, not an error.
+        if (typeof a.id !== 'string') result = { error: 'id is required' };
+        else result = { outcome: overlordStore.approveProposal(a.id) };
+        break;
+      }
+      case 'overlord.dismissProposal': {
+        if (typeof a.id !== 'string') result = { error: 'id is required' };
+        else { overlordStore.dismissProposal(a.id); result = { ok: true }; }
+        break;
+      }
+      case 'overlord.resolveRuleChanges': {
+        if (typeof a.batchId !== 'string') result = { error: 'batchId is required' };
+        else {
+          overlordStore.resolveRuleChanges(a.batchId, Array.isArray(a.approvedIdx) ? a.approvedIdx : []);
+          result = { ok: true };
+        }
+        break;
+      }
+      case 'overlord.driveTab': {
+        if (typeof a.tabId !== 'string' || typeof a.text !== 'string' || !a.text) result = { error: 'tabId and text are required' };
+        else result = await overlordStore.driveTab(a.tabId, a.kind === 'slash' ? 'slash' : 'process', a.text);
+        break;
+      }
+      case 'overlord.fireRule': {
+        if (typeof a.tabId !== 'string' || typeof a.ruleId !== 'string') result = { error: 'tabId and ruleId are required' };
+        else result = await overlordStore.fireRule(a.tabId, a.ruleId);
+        break;
+      }
+      case 'overlord.recoverTab': {
+        if (typeof a.tabId !== 'string') result = { error: 'tabId is required' };
+        else result = await overlordStore.recoverTab(a.tabId);
+        break;
+      }
+      default:
+        result = { error: `Unknown maiLink request: ${verb}` };
+    }
+  } catch (err) {
+    logError(`maiLink request ${verb} failed: ${err}`);
+    result = { error: String(err) };
+  }
+  try {
+    await commands.claudeCodeRespond(request_id, result);
+  } catch (err) {
+    logError(`maiLink request ${verb}: respond failed: ${err}`);
+  }
+}

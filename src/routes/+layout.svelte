@@ -483,6 +483,20 @@
       workspacesStore.applyCommsBindings(event.payload.tab_id, event.payload.bindings ?? []);
     }).then(unlisten => { unlistenCommsBindings = unlisten; });
 
+    // maiLink (docs/mailink-protocol.md §13). A phone task edit lands in Rust and is announced
+    // here so the tasks store replaces its copy instead of clobbering it on its next persist;
+    // an Overlord action has to run in THIS window's engine, so Rust asks and we answer.
+    let unlistenMailinkTasks: (() => void) | undefined;
+    appWindow.listen<{ workspaceId: string; tasks: import('$lib/tauri/types').Task[]; workstreams: import('$lib/tauri/types').Workstream[] }>('mailink-tasks-changed', async (event) => {
+      const { tasksStore } = await import('$lib/stores/tasks.svelte');
+      tasksStore.applyFromBackend(event.payload.workspaceId, event.payload.tasks ?? [], event.payload.workstreams ?? []);
+    }).then(unlisten => { unlistenMailinkTasks = unlisten; });
+    let unlistenMailinkRequests: (() => void) | undefined;
+    appWindow.listen<import('$lib/stores/mailinkRequests').MailinkRequest>('mailink-frontend-request', async (event) => {
+      const { handleMailinkRequest } = await import('$lib/stores/mailinkRequests');
+      await handleMailinkRequest(event.payload);
+    }).then(unlisten => { unlistenMailinkRequests = unlisten; });
+
     // Chat-monitor summon events: pickups, queued summons, unauthorized attempts.
     let unlistenCommsSummon: (() => void) | undefined;
     appWindow.listen<{ tab_id: string; kind: string; channel: string; from: string; preview: string; reason?: string; reason_detail?: string }>('comms-summon', async (event) => {
@@ -1093,6 +1107,8 @@
       unlistenCommsPending?.();
       unlistenCommsSummon?.();
       unlistenCommsBindings?.();
+      unlistenMailinkTasks?.();
+      unlistenMailinkRequests?.();
       claudeStateStore.destroy();
       agentBridgeStore.destroy();
       agentMeshStore.destroy();
