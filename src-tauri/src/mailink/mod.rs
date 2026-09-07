@@ -1344,6 +1344,15 @@ pub(crate) async fn respond_to_prompt(
         // permission menu: a single keystroke selects the option (no bracketed paste);
         // the key is runtime-specific — see permission_key.
         "permission" => {
+            // Re-checked at the moment of injection, not only when the card was built: automatic
+            // review can settle an approval between the phone rendering it and the human tapping,
+            // and the keystroke would then land in the composer of a working agent. Reported as
+            // `stale` so the phone takes its existing "prompt went away" branch (review C7).
+            if runtime == AgentRuntime::Codex && !codex_approval_overlay_open(app, tab_id) {
+                log::info!("[maiLink] refusing permission keystroke for tab {tab_id}: no Codex approval overlay on screen");
+                return json!({ "ok": false, "reason": "stale",
+                    "detail": "that approval is no longer open in the terminal" });
+            }
             let key = permission_key(runtime, choice.unwrap_or(""));
             if crate::pty::write_pty(app, &pty, key.as_bytes()).is_err() {
                 return json!({ "ok": false, "reason": "inject_failed" });
@@ -3203,6 +3212,81 @@ async fn drive_question_answers(
 /// The tab's currently-open prompt, as (kind, prompt_id, runtime). Mirrors what
 /// `build_chat_detail` synthesizes, so `/respond`'s stale-guard agrees with what the client was
 /// shown; the runtime picks the keystroke dialect for the answer injection.
+/// Header lines Codex's TUI prints directly above an OPEN approval overlay (read from the
+/// shipped codex-cli 0.153.4 binary). The option rows underneath vary in count and wording
+/// with the kind of request; these four do not.
+const CODEX_APPROVAL_HEADERS: &[&str] = &[
+    "Would you like to run the following command?",
+    "Would you like to make the following edits?",
+    "Would you like to grant these permissions?",
+    "Would you like to send input to the existing terminal?",
+];
+
+/// Whether `tab_id`'s terminal is showing a Codex approval overlay RIGHT NOW.
+///
+/// Session state cannot answer this. Codex's `PermissionRequest` hook fires before the approval
+/// flow has decided anything, so automatic review can settle a request without the human ever
+/// seeing an overlay (review C7) — and a permission keystroke sent when nothing is open does not
+/// vanish. It lands in the composer, or on whatever selector is there instead.
+///
+/// Reads the VIEWPORT, never the buffer: scrollback would answer with approvals already dealt
+/// with. FAILS CLOSED — no PTY, no terminal handle, or no header on screen all read as "not
+/// open", because the cost of a false negative is a card the human answers in the terminal
+/// instead, and the cost of a false positive is a stray keystroke in a live agent.
+///
+/// Known limit: Codex fires no hook when a request is DENIED, and the overlay text lingers for a
+/// redraw, so there is a brief window where this still reads true after a denial. The per-request
+/// prompt id is what stops that window answering a LATER approval, and the turn-boundary clear in
+/// the hook handler closes the window itself.
+fn codex_approval_overlay_open(app: &AppState, tab_id: &str) -> bool {
+    let Some(pty) = pty_for_tab(app, tab_id) else {
+        return false;
+    };
+    let registry = app.terminal_registry.read();
+    let Some(handle) = registry.get(&pty) else {
+        return false;
+    };
+    let text = crate::terminal::render::viewport_text(&handle.term);
+    viewport_shows_codex_approval(&text)
+}
+
+/// Does this viewport text contain a Codex approval header?
+///
+/// Whitespace is squashed out of both sides first. The TUI wraps its header to the pane width,
+/// and a narrow split pane can break it mid-word, so a plain substring test on the rendered rows
+/// misses exactly the case where a human is most likely reaching for their phone. The headers are
+/// long enough that ignoring whitespace costs nothing in precision.
+fn viewport_shows_codex_approval(text: &str) -> bool {
+    fn squash(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+    let squashed = squash(text);
+    CODEX_APPROVAL_HEADERS
+        .iter()
+        .any(|h| squashed.contains(&squash(h)))
+}
+
+/// The approval a Codex tab is currently gated on — oldest first, so the card describes the same
+/// request the TUI is showing. `None` for Claude, which files no approvals here.
+fn oldest_approval(app: &AppState, tab_id: &str) -> Option<crate::state::app_state::PendingApproval> {
+    let sessions = app.agent_sessions.read();
+    sessions
+        .values()
+        .filter(|s| s.tab_id == tab_id)
+        .filter_map(|s| s.pending_approvals.first().cloned())
+        .min_by_key(|a| a.seq)
+}
+
+/// Prompt id for a permission card. Per-REQUEST for Codex (`p_<tab>_<seq>`), so a card built for
+/// an approval that has since been retired can never pass the stale-guard and answer a newer one;
+/// Claude keeps the per-tab form, which is all its single-gate model needs.
+fn permission_prompt_id(app: &AppState, tab_id: &str) -> String {
+    match oldest_approval(app, tab_id) {
+        Some(a) => format!("p_{tab_id}_{}", a.seq),
+        None => format!("p_{tab_id}"),
+    }
+}
+
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
     let states = session_states(app);
     let (st, rt, tool, _) = states.get(tab_id)?;
@@ -3211,7 +3295,7 @@ fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String,
     if tool.as_deref() == Some("AskUserQuestion") {
         Some(("question", question_prompt_id(app, tab_id), *rt))
     } else if map_state(*st) == "permission" {
-        Some(("permission", format!("p_{tab_id}"), *rt))
+        Some(("permission", permission_prompt_id(app, tab_id), *rt))
     } else {
         None
     }
@@ -4517,24 +4601,48 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         }
         detail["pendingPrompt"] = pp;
     } else if state == "permission" {
-        // Synthesized from session state, not proof a TUI prompt is still open. Codex
-        // automatic review can leave that state stale (docs/codex-integration-review.md C7).
-        // The hook carries no structured options; the keystroke response path uses the
-        // compact tool_detail (captured from PreToolUse / Codex PermissionRequest tool_input)
-        // to describe the requested operation, e.g. "Bash(rm -rf ./dist) — approve?".
-        let text = match (tool.as_deref(), tool_detail_for_tab(app, tab_id).as_deref()) {
-            (Some(t), Some(d)) => format!("{t}({d}) — approve?"),
-            (Some(t), None) => format!("{t} — approve?"),
-            _ => "Permission requested".to_string(),
+        // The hook carries no structured options; the keystroke response path uses the compact
+        // tool_detail (captured from PreToolUse / Codex PermissionRequest tool_input) to describe
+        // the requested operation, e.g. "Bash(rm -rf ./dist) — approve?".
+        let approval = oldest_approval(app, tab_id);
+        // Describe THIS request from its own record. The session's live tool_name/tool_detail
+        // move on to whatever Codex is doing now, which for a parallel call is a different tool
+        // than the one being approved. Codex's own `description` beats both when present.
+        let text = match approval.as_ref() {
+            Some(a) => match (a.description.as_deref(), a.detail.as_deref()) {
+                (Some(d), _) => d.to_string(),
+                (None, Some(d)) => format!("{}({}) — approve?", a.tool_name, d),
+                (None, None) if !a.tool_name.is_empty() => format!("{} — approve?", a.tool_name),
+                _ => "Permission requested".to_string(),
+            },
+            None => match (tool.as_deref(), tool_detail_for_tab(app, tab_id).as_deref()) {
+                (Some(t), Some(d)) => format!("{t}({d}) — approve?"),
+                (Some(t), None) => format!("{t} — approve?"),
+                _ => "Permission requested".to_string(),
+            },
         };
-        detail["pendingPrompt"] = json!({
-            "prompt_id": format!("p_{tab_id}"),
+        // For Codex the state is NOT proof a human was asked, so the card is answerable only
+        // while the overlay is really on screen; a request automatic review already settled
+        // renders as context, not as something to tap. Claude's permission Notification does
+        // mean the human is being asked, so its card is unchanged.
+        let respondable = match approval.as_ref() {
+            Some(_) => codex_approval_overlay_open(app, tab_id),
+            None => true,
+        };
+        let mut pp = json!({
+            "prompt_id": permission_prompt_id(app, tab_id),
             "thread_id": tab_id,
             "kind": "permission",
-            "respondable": true,
+            "respondable": respondable,
             "text": text,
             "options": ["Yes", "Yes, don't ask again", "No"],
         });
+        // Display-only, like the question card's: how long this request has been sitting. No
+        // expires_at — nothing auto-resolves a Codex approval on a clock.
+        if let Some(a) = approval.as_ref() {
+            pp["asked_at"] = json!(a.requested_at);
+        }
+        detail["pendingPrompt"] = pp;
     }
 
     let ms_total = t_total.elapsed().as_millis();
@@ -5049,6 +5157,72 @@ mod tests {
         // than a missing one, which degrades to stale-guard + composer fallback).
         assert_eq!(ask_deadline_ms(None, Some("60s")), None);
         assert_eq!(ask_deadline_ms(Some("weird"), Some("60s")), None);
+    }
+
+    // ─── Codex approval respondability (review C7) ───────────────────────────
+
+    #[test]
+    fn codex_approval_header_is_found_even_when_the_pane_wrapped_it() {
+        use super::viewport_shows_codex_approval;
+        assert!(viewport_shows_codex_approval("  Would you like to run the following command?"));
+        // A narrow split pane wraps the header, and can break it mid-word. Matching the rendered
+        // rows literally would miss exactly the case where the human reaches for their phone.
+        assert!(viewport_shows_codex_approval("Would you like to run the fol\nlowing command?"));
+        assert!(viewport_shows_codex_approval("Would you like to make the following edits?"));
+        assert!(viewport_shows_codex_approval("Would you like to grant these permissions?"));
+        // Nothing open: an ordinary screen, and the agent merely TALKING about approvals.
+        assert!(!viewport_shows_codex_approval("$ ls -la\ntotal 0\n"));
+        assert!(!viewport_shows_codex_approval("I'll ask you to approve the following command."));
+    }
+
+    #[test]
+    fn codex_permission_prompt_id_is_per_request_and_claudes_is_per_tab() {
+        use crate::state::app_state::{AgentSessionInfo, PendingApproval};
+        let app = AppState::new();
+        let mk = |tab: &str, rt: AgentRuntime, approvals: Vec<PendingApproval>| AgentSessionInfo {
+            runtime: rt,
+            tab_id: tab.to_string(),
+            cwd: None,
+            state: AgentSessionState::WaitingPermission,
+            tool_name: None,
+            tool_detail: None,
+            pending_question: None,
+            pending_question_at: None,
+            pending_approvals: approvals,
+            approval_seq: 0,
+            recent_tool_calls: Vec::new(),
+            model: None,
+            transcript_path: None,
+            finished_a_turn: false,
+            connection_id: None,
+        };
+        let approval = |seq: u64| PendingApproval {
+            seq,
+            turn_id: "turn-1".into(),
+            tool_name: "Bash".into(),
+            tool_use_id: Some(format!("exec-{seq}")),
+            detail: None,
+            description: None,
+            requested_at: 0,
+        };
+        {
+            let mut s = app.agent_sessions.write();
+            // Two outstanding approvals: the card must describe the OLDER one, which is what the
+            // TUI is showing, and carry its seq so answering the retired one can't hit the newer.
+            s.insert("sid-codex".into(), mk("tab-codex", AgentRuntime::Codex, vec![approval(4), approval(5)]));
+            s.insert("sid-claude".into(), mk("tab-claude", AgentRuntime::Claude, vec![]));
+        }
+        assert_eq!(super::permission_prompt_id(&app, "tab-codex"), "p_tab-codex_4");
+        // Claude files no approvals here; its single-gate model keeps the per-tab id.
+        assert_eq!(super::permission_prompt_id(&app, "tab-claude"), "p_tab-claude");
+    }
+
+    #[test]
+    fn a_tab_with_no_terminal_is_never_respondable() {
+        // Fails closed: the cost of a false negative is answering in the terminal instead, the
+        // cost of a false positive is a stray keystroke in a working agent.
+        let app = AppState::new();
+        assert!(!super::codex_approval_overlay_open(&app, "tab-with-no-pty"));
     }
 
     #[test]

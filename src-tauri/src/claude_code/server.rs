@@ -3643,6 +3643,7 @@ async fn hooks_handler(
             // Clear tool fields, and retire the approval THIS tool call was gated on — matched by
             // its own tool_use_id, so a gate held for a parallel tool survives untouched. The
             // session leaves WaitingPermission only once nothing is outstanding.
+            let mut approvals_open = 0usize;
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
@@ -3673,6 +3674,7 @@ async fn hooks_handler(
                             session.state = AgentSessionState::Active;
                         }
                     }
+                    approvals_open = session.pending_approvals.len();
                 }
             }
 
@@ -3684,6 +3686,10 @@ async fn hooks_handler(
                 "tab_id": tab_id,
                 "tool_name": tool_name,
                 "tool_input": event.get("tool_input"),
+                // How many approvals this session is STILL gated on. The frontend mirror used to
+                // go active on any tool completing, which disagreed with Rust the moment a
+                // parallel call was still awaiting a decision (review C7).
+                "approvals_open": approvals_open,
             }));
         }
 

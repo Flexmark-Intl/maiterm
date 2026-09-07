@@ -418,3 +418,26 @@ fn emit_color_sgr(
         }
     }
 }
+
+/// Plain text of the VISIBLE viewport, one line per row, trailing blanks trimmed.
+///
+/// Deliberately the viewport and not the buffer: callers use this to ask what is on screen
+/// RIGHT NOW, and scrollback would answer with things that have already been dealt with.
+pub fn viewport_text<T: EventListener>(term: &Term<T>) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(term.screen_lines());
+    let mut row = String::new();
+    let mut current_line: i32 = i32::MIN;
+    for indexed in term.renderable_content().display_iter {
+        if indexed.point.line.0 != current_line {
+            if current_line != i32::MIN {
+                lines.push(std::mem::take(&mut row).trim_end().to_string());
+            }
+            current_line = indexed.point.line.0;
+        }
+        if !indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            row.push(indexed.cell.c);
+        }
+    }
+    lines.push(row.trim_end().to_string());
+    lines.join("\n")
+}

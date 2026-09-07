@@ -389,10 +389,15 @@ function createAgentStateStore() {
       unlisteners.push(u7);
 
       // PostToolUse: tool finished, clear tool info (still active/thinking)
-      const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string }>('agent-hook-post-tool-use', (e) => {
-        const { session_id, tab_id } = e.payload;
+      const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string; approvals_open?: number }>('agent-hook-post-tool-use', (e) => {
+        const { session_id, tab_id, approvals_open } = e.payload;
         if (!tab_id) return;
-        setState(tab_id, session_id, 'active', undefined, undefined, runtimeOf(e.payload));
+        // A tool finishing does NOT mean the tab is unblocked: Codex runs tools in parallel, so
+        // another call can still be waiting on an approval. Rust keeps the session in
+        // WaitingPermission until nothing is outstanding, and this mirror has to agree — it used
+        // to go active regardless, which is how the desktop and the phone could disagree about
+        // whether a tab was gated (docs/codex-integration-review.md C7).
+        if (!approvals_open) setState(tab_id, session_id, 'active', undefined, undefined, runtimeOf(e.payload));
         setVariable(tab_id, 'claudeAction', '');
       });
       unlisteners.push(u8);
