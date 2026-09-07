@@ -1,13 +1,22 @@
 # Codex integration review
 
 Reviewed 2026-09-07 against the repository, installed `codex-cli 0.153.4`, official
-documentation, and project memory. C7 is fixed; C1–C6 are outstanding.
+documentation, and project memory. **All seven findings were addressed the same day.** Each
+section below now records what was verified, what changed, and what is still unproven — the
+last part matters most, because almost none of this was exercised live.
+
 Implementation progress belongs in maiTerm's **Codex integration follow-up** workstream;
 this document records evidence and acceptance criteria, not a second task board.
 
-C7 (stale maiLink permission cards after automatic approval review) was observed by the user
-during the documentation pass and fixed the same day — see that section for the captured hook
-trace, which also settles facts C5 depends on. C1 and C2 remain the high-priority pair.
+Two things here are durable reference rather than history, and are worth reading before
+touching Codex integration again:
+
+- The **captured hook trace** in C7 — the authoritative event order and payload shapes for
+  codex-cli 0.153.4, including that `PermissionRequest` fires before the approval flow decides
+  and carries no `tool_use_id`.
+- The **URL-expansion probe** in C1 — Codex does not expand `${VAR}` in an MCP `url`, so the
+  Claude "every instance writes identical bytes" trick is unavailable, and the MCP entry stays
+  per-instance.
 
 ## Findings and acceptance criteria
 
@@ -48,9 +57,7 @@ is not, nothing writes `~/.aiterm`, so an env-less shell (tmux, `su`) has no `$M
 its hooks no longer authenticate. They used to, via the baked token. A stable trusted definition
 is worth more than that case, and `claude_code_ide_ssh` is on by default.
 
-Original finding follows.
-
-### C1 (original text)
+**Original finding, kept for the record:**
 
 `CodexRegistrar` uses distinct MCP names for dev/prod, but one `agent-hook.sh`, one
 prompt, and one matching hook group per event. Installation replaces the group's
@@ -96,19 +103,40 @@ itself is on Codex's side of the boundary. Compaction source matching (`source: 
 is untested — Codex re-runs SessionStart hooks after a compaction, so priming should re-arrive,
 but that was not exercised.
 
-### C3. Ineffective settings (P2)
+### C3. Ineffective settings — FIXED 2026-09-07
 
-`install()` ignores `codex_hooks`, and so does the SSH path: `sshMcpBridge.svelte.ts`
-gates the remote Codex setup on `codexIde && codexIdeSsh` alone, so a disabled hooks
-toggle still installs hooks on every bridged remote. `codex_hooks_bypass_trust` is
-persisted but never affects a launch. These two are the only dead Codex controls —
-`codex_ide_ssh` and `codex_auto_resume` are honored, so the toggle group reads as
-working. Wire the controls through the applicable registration/launch paths, or
-remove unsupported controls. Keep bypass opt-in; it is not the remedy for commands
-whose definitions change every restart. The Preferences description also incorrectly
-calls Codex disabled by default: its actual default is enabled.
+`install()` ignored `codex_hooks`, and so did the SSH path (`sshMcpBridge.svelte.ts` gated the
+remote Codex setup on `codexIde && codexIdeSsh` alone), so a disabled hooks toggle still
+installed hooks on every bridged remote. `codex_hooks_bypass_trust` was persisted and read by
+nothing. Those two were the only dead Codex controls — `codex_ide_ssh` and `codex_auto_resume`
+are honored — which is exactly what made the group read as working.
 
-### C4. Configuration preservation (P2, reproduced or source-confirmed)
+Both paths honor `codex_hooks` now, and the OFF branch REMOVES our entries rather than skipping
+the write: a toggle the user turns off has to stop Codex reporting, not just stop being
+refreshed. Local removal is shared with `unregister`; the remote gets `CODEX_HOOKS_STRIP_PY`,
+which takes out only `agent-hook.sh` entries, drops event keys it empties, and leaves a file it
+cannot parse alone.
+
+`codex_hooks_bypass_trust` now adds `--dangerously-bypass-hook-trust` to the launch maiTerm
+builds, through `resumeCommandFor()` so every call site picks it up. Gated on `codex_hooks` too,
+since bypassing trust for hooks that are not installed is meaningless, and it can only ever
+affect a launch maiTerm builds — never a `codex` the user starts by hand. It stays opt-in and is
+not the remedy for changing definitions; C1 is.
+
+The Preferences copy claiming Codex is "opt-in and disabled by default" is corrected.
+
+### C4. Configuration preservation — FIXED 2026-09-07
+
+All four defects were in what the code DOES to a real file, so all four now have tests that
+execute the shipped code against one rather than reading it. `put_codex_mcp_entry` uses
+`as_table_like_mut`, accepting and preserving either TOML representation, and refuses (without
+writing) a non-table `mcp_servers`. `read_json` reports malformed JSON instead of calling it
+absent, logged at error level. `CODEX_TOML_MERGE_PY` recognises whitespace, a trailing comment
+and a quoted key, and refuses before writing unless exactly one declaration would result.
+`CODEX_HOOKS_MERGE_PY` distinguishes a missing file (start fresh) from an unparseable one
+(refuse on stderr). No new remote dependency: still line-based, still no `tomllib`.
+
+**Original finding:**
 
 - Local `put_codex_mcp_entry()` panics for valid inline parent or child TOML tables.
   Accept both representations, preserving unrelated settings and comments.
@@ -127,7 +155,19 @@ remote `tomllib`/`tomli_w` dependency or require a Python upgrade for this fix.
 Prefer a focused compatible merge fix; if parsing is moved locally, preserve the
 same remote round-trip and user-config safety requirements.
 
-### C5. Lifecycle completion (P2)
+### C5. Lifecycle completion — FIXED 2026-09-07
+
+`Interrupt` and `SessionEnd` are registered, with the per-event 3s timeout Codex caps them at
+(registering them at our usual 5s would be rejected). `Interrupt` has its own `HookPhase` and
+cancels everything the turn was waiting on — the approval gate C7 files, the tool in flight, any
+open ask — and is deliberately NOT treated as a `Stop`: no turn completed, so `finished_a_turn`
+stays unset and the tab does not become an unread result. The frontend mirror follows and marks
+the tab read, since the human who pressed Esc is looking straight at it.
+
+Not exercised live: a real interrupt, a real session end, and the queued-delivery behaviour
+after each.
+
+**Original finding:**
 
 The registrar omits `Interrupt` and `SessionEnd`; the normalizer also ignores
 `Interrupt`. Current [Codex hook documentation](https://learn.chatgpt.com/docs/hooks)
@@ -254,14 +294,21 @@ trace, and source reading, and per project rule that is not evidence the phone f
 - Codex hook order and payload schema captured live from codex-cli 0.153.4: logging command
   hooks under an isolated `CODEX_HOME`, one `codex exec` triggering a sandbox escalation.
   That trace is quoted in C7 and is the basis of its fix.
-- After the C7 fix: 208 Rust lib tests, 113 Vitest, `npm run check` 0 errors.
+- MCP `url` env expansion probed against a live maiTerm server from an isolated `CODEX_HOME`,
+  with a dead-port and a wrong-token control to make the `Auth` column readable. Quoted in C1.
+- After all seven fixes: 222 Rust lib tests, 126 Vitest, `npm run check` 0 errors.
 - `cargo test --lib codex --offline`: 18 passed.
 - Related Vitest suites (`agentDelivery`, `autoResumeContext`, `sshCommand`): 22 passed.
 - Executing the actual local TOML helper in isolation reproduced both inline-table panics.
 - Executing the actual remote merge snippet against in-memory files reproduced
   duplicate table declarations for a commented header.
-- Live SSH workflows, hook trust across restarts, interruption, and phone workflows
-  were not exercised in this review. Unit-test success is not evidence those work.
+- **Live SSH workflows, hook trust across restarts, interruption, the phone permission flow,
+  and the Codex fork picker were not exercised.** Unit-test success is not evidence those work,
+  and most of what changed here lives on the other side of that boundary. The highest-value
+  manual checks, in order: (1) restart maiTerm twice and confirm Codex hooks still fire without
+  a new `/hooks` trust prompt (C1); (2) answer a Codex approval from the phone, and confirm an
+  auto-approved one stops being answerable (C7); (3) bridge two Codex tabs via the picker (C6);
+  (4) run the SSH bridge against `ews@nova` (C1/C3/C4).
 
 Use `ews@nova` for subsequent SSH verification. Back up and restore its Codex
 configuration and remove test artifacts. The review itself changed no runtime behavior.
