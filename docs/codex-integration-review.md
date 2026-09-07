@@ -1,12 +1,13 @@
 # Codex integration review
 
 Reviewed 2026-09-07 against the repository, installed `codex-cli 0.153.4`, official
-documentation, and project memory. These are outstanding findings, not shipped fixes.
+documentation, and project memory. C7 is fixed; C1–C6 are outstanding.
 Implementation progress belongs in maiTerm's **Codex integration follow-up** workstream;
 this document records evidence and acceptance criteria, not a second task board.
 
-The user also observed stale maiLink permission cards after automatic approval review
-during this documentation pass. C7 is a high-priority correctness issue alongside C1/C2.
+C7 (stale maiLink permission cards after automatic approval review) was observed by the user
+during the documentation pass and fixed the same day — see that section for the captured hook
+trace, which also settles facts C5 depends on. C1 and C2 remain the high-priority pair.
 
 ## Findings and acceptance criteria
 
@@ -83,7 +84,10 @@ same remote round-trip and user-config safety requirements.
 
 The registrar omits `Interrupt` and `SessionEnd`; the normalizer also ignores
 `Interrupt`. Current [Codex hook documentation](https://learn.chatgpt.com/docs/hooks)
-supports both. Handle interruption without leaving active/permission state behind;
+supports both, and the C7 trace observed `SessionEnd` firing for real (alongside `Stop`
+and `UserPromptSubmit`), so this is a registration gap, not a runtime limitation.
+C7's approval clearing depends on it: until `Interrupt` is registered, an interrupted
+turn's approvals clear at the following `Stop` rather than at the interrupt. Handle interruption without leaving active/permission state behind;
 add termination coverage while retaining process-based cleanup for crashes and
 missing hooks. Use each event's supported timeout (Interrupt/SessionEnd cap at 3s),
 not the existing general 5s timeout blindly.
@@ -102,12 +106,48 @@ duplicate/reload; create a distinct session when two tabs run concurrently; resu
 the new fork's own session thereafter. Preserve tab/task/bridge remapping and the
 tool-capable handshake. Do not strip copied IDs or fork again on every restore.
 
-### C7. Auto-resolved approvals remain answerable in maiLink (high priority)
+### C7. Auto-resolved approvals remain answerable in maiLink — FIXED 2026-09-07
 
 User-observed on 2026-09-07: Codex's current automatic approval reviewer resolves a
 permission request, but maiLink still asks the human to answer it.
 
-Source-confirmed state mismatch:
+**Verified before fixing** (logging hooks on an isolated `CODEX_HOME`, codex-cli 0.153.4,
+plus the [hooks reference](https://learn.chatgpt.com/docs/hooks)). One gated Bash call:
+
+```
+SessionStart → UserPromptSubmit → PreToolUse(tool_use_id=exec-9244…)
+             → PermissionRequest(no tool_use_id) → PostToolUse(exec-9244…) → Stop → SessionEnd
+```
+
+- `PermissionRequest` fires *before* the approval flow decides anything, and the hook may
+  itself allow/deny/decline. maiTerm returns `{}`, so automatic review then settles it. The
+  hook never meant "the human must act" — the root error was mapping it to Claude's
+  `permission_prompt` Notification at all.
+- `PermissionRequest` carries **no** `tool_use_id`; `PreToolUse` and `PostToolUse` carry the
+  same one. `tool_input.description` on the request is Codex's own reason for asking.
+- No hook fires when a request is denied or auto-resolved. Approve ⇒ the tool runs ⇒
+  `PostToolUse`. Deny ⇒ nothing at all.
+- Guardian review took 6.2s; maiTerm sat in `WaitingPermission` throughout and beyond.
+- `Stop`, `UserPromptSubmit` and `SessionEnd` all fire for Codex (bears on C5).
+
+**Fixed in `ea5efec` + `224910a`.** `PermissionRequest` has its own `HookPhase` and files a
+`PendingApproval` bound to the `tool_use_id` of the matching preceding `PreToolUse`;
+`PostToolUse` retires exactly that one, so a gate held for a parallel tool survives an
+unrelated completion. `Stop`/`UserPromptSubmit`/a new `turn_id` drop the rest, which is the
+backstop for a denial. The session leaves `WaitingPermission` only when nothing is
+outstanding, and only for Codex. Respondability is corroborated against the tab's live
+viewport (`codex_approval_overlay_open`, failing closed) both when the card is built and
+again inside `respond_to_prompt` before injecting; prompt ids became `p_<tab>_<seq>`.
+`PostToolUse` carries `approvals_open` so the frontend mirror stops disagreeing with Rust.
+
+**Residual, deliberately not chased:** Codex reports a denial through no hook, and the
+overlay text lingers for a redraw, so for a moment after a denial the viewport check still
+reads true. The per-request prompt id stops that window answering a *later* approval, and the
+turn-boundary clear closes the window itself. Overlay detection is also text-based against
+0.153.4's four headers — a Codex TUI rewording breaks it toward "not respondable", never
+toward a stray keystroke.
+
+Original source-confirmed state mismatch, kept for the record:
 - `normalize_hook_event()` maps every Codex `PermissionRequest` to a human-facing
   permission notification; the handler sets Rust `AgentSessionState::WaitingPermission`.
   An approval request does not establish that the human must act: automatic review
@@ -120,22 +160,19 @@ Source-confirmed state mismatch:
   Rust state alone. `current_prompt()` also accepts that stale state, and permission
   IDs are only `p_<tab_id>`, not specific to an approval request.
 
-Distinguish actual human-waiting state from automatic review and clear a resolved
-request using an authoritative, correlated outcome. Verify what the installed CLI
-exposes before selecting the mechanism. Cover automatic allow, automatic deny,
-cancel/interrupt, and manual decisions. Do not merely clear every permission on any
-PostToolUse: another parallel tool may still have a genuine pending approval. A
-denied operation may produce no PostToolUse at all. Do not use a timer or disable
-automatic review as the product fix.
+Acceptance as met: automatic allow retires the approval on its own `PostToolUse`; automatic
+deny and manual deny fall to the turn boundary; a manual approval retires like any other.
+No timer is involved and automatic review is untouched. Parallel approvals are independent
+(`post_tool_use_retires_only_the_approval_it_belongs_to`,
+`a_bound_approval_is_never_retired_by_the_fallback`), and clearing does not wait for an
+unrelated tool or for `Stop`. Unit coverage lives in `claude_code::server::tests` and
+`mailink::tests`; 208 Rust and 113 Vitest tests pass.
 
-Keep Rust state, desktop indicators, maiLink's live pendingPrompt, and response
-validation consistent. A resolved/superseded card must not inject an answer into
-an ordinary prompt or a different approval. Test this before waiting for the next
-unrelated tool or Stop hook, including two overlapping tool requests.
-
-The current production log contains no DEBUG hook sequence for this incident, so
-the precise event order was not captured. The state mismatch above is confirmed
-from source; full live reproduction and the choice of resolution signal remain pending.
+Still open on this finding: **interrupt is not covered end to end**, because the registrar
+does not install Codex's `Interrupt` hook at all — that is C5. Until it lands, an interrupted
+turn's approvals clear at the following `Stop` rather than at the interrupt. **The live
+phone-side flow was not exercised**; the fix is verified by unit tests, the captured hook
+trace, and source reading, and per project rule that is not evidence the phone flow works.
 
 ## Constraints from project history
 
@@ -154,6 +191,10 @@ from source; full live reproduction and the choice of resolution signal remain p
 
 ## Verification recorded
 
+- Codex hook order and payload schema captured live from codex-cli 0.153.4: logging command
+  hooks under an isolated `CODEX_HOME`, one `codex exec` triggering a sandbox escalation.
+  That trace is quoted in C7 and is the basis of its fix.
+- After the C7 fix: 208 Rust lib tests, 113 Vitest, `npm run check` 0 errors.
 - `cargo test --lib codex --offline`: 18 passed.
 - Related Vitest suites (`agentDelivery`, `autoResumeContext`, `sshCommand`): 22 passed.
 - Executing the actual local TOML helper in isolation reproduced both inline-table panics.

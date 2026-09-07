@@ -3,7 +3,10 @@
 maiTerm exposes an MCP server that Claude Code CLI discovers and connects to, providing IDE-like capabilities.
 
 Codex shares this server through `/mcp`. See the [Codex integration review](../../../docs/codex-integration-review.md)
-for its current gaps and acceptance criteria (2026-09-07; fixes outstanding).
+for its current gaps and acceptance criteria (2026-09-07; C7 fixed, C1–C6 outstanding). It
+also carries the captured codex-cli 0.153.4 hook trace — the authoritative event order and
+payload shapes, including the fact that `PermissionRequest` fires BEFORE the approval flow
+decides anything and carries no `tool_use_id`. Read it before changing Codex hook handling.
 
 ## Architecture
 
