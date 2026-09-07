@@ -50,11 +50,15 @@ check compaction source matching as part of the lifecycle work.
 
 ### C3. Ineffective settings (P2)
 
-`install()` ignores `codex_hooks`; `codex_hooks_bypass_trust` is persisted but never
-affects a launch. Wire the controls through the applicable registration/launch
-paths, or remove unsupported controls. Keep bypass opt-in; it is not the remedy
-for commands whose definitions change every restart. The Preferences description
-also incorrectly calls Codex disabled by default: its actual default is enabled.
+`install()` ignores `codex_hooks`, and so does the SSH path: `sshMcpBridge.svelte.ts`
+gates the remote Codex setup on `codexIde && codexIdeSsh` alone, so a disabled hooks
+toggle still installs hooks on every bridged remote. `codex_hooks_bypass_trust` is
+persisted but never affects a launch. These two are the only dead Codex controls —
+`codex_ide_ssh` and `codex_auto_resume` are honored, so the toggle group reads as
+working. Wire the controls through the applicable registration/launch paths, or
+remove unsupported controls. Keep bypass opt-in; it is not the remedy for commands
+whose definitions change every restart. The Preferences description also incorrectly
+calls Codex disabled by default: its actual default is enabled.
 
 ### C4. Configuration preservation (P2, reproduced or source-confirmed)
 
@@ -62,6 +66,10 @@ also incorrectly calls Codex disabled by default: its actual default is enabled.
   Accept both representations, preserving unrelated settings and comments.
 - `read_json()` treats malformed hooks JSON as absent, allowing installation to
   overwrite user hooks. Return a visible parse error and leave the file intact.
+- Remote `CODEX_HOOKS_MERGE_PY` fails the same way and is worse: it falls back to an
+  empty document on any read error and then rewrites the whole file, so a malformed
+  remote `~/.codex/hooks.json` loses every user hook, not just our event groups. Both
+  merges need the same refusal, not just the local one.
 - Remote `CODEX_TOML_MERGE_PY` matches only an exact header line. A valid
   `[mcp_servers.maiterm] # comment` survives and receives a duplicate table on setup.
   Preserve comments and supported table forms; refuse an unsafe merge before writing.
