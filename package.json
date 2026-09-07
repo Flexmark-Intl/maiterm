@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "lsof -ti :1420 | xargs kill -9 2>/dev/null; tauri dev --features mcp-bridge --config src-tauri/tauri.dev.conf.json",
-    "tauri:build": "tauri build",
+    "tauri:build": "./scripts/build-release.sh",
     "licenses": "./scripts/generate-licenses.sh",
     "sweep": "cargo sweep --time 7 src-tauri || (echo '\\nInstall cargo-sweep first: cargo install cargo-sweep'; exit 1)",
     "sweep:nuclear": "cd src-tauri && cargo clean"
