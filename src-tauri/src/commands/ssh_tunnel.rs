@@ -774,16 +774,37 @@ const CODEX_TOML_MERGE_PY: &str = concat!(
     "name=os.environ.get(\"__codex_name\",\"\")\n",
     "block=sys.stdin.read()\n",
     "try:\n src=open(p).read()\nexcept Exception:\n src=\"\"\n",
+    // Recognise the table header in every form TOML allows for it, not just the exact string
+    // we happen to emit: leading/inner whitespace, a trailing comment, and a quoted key.
+    // Matching literally meant `[mcp_servers.maiterm] # note` survived the strip and the block
+    // was appended anyway — two declarations of one table, which Codex then cannot parse
+    // (review C4).
+    "def is_target(line):\n",
+    " s=line.strip()\n",
+    " if not s.startswith(\"[\"):\n  return False\n",
+    " h=s.split(\"#\",1)[0].strip()\n",
+    " if not (h.startswith(\"[\") and h.endswith(\"]\")):\n  return False\n",
+    " parts=h[1:-1].strip().split(\".\")\n",
+    " if len(parts)!=2:\n  return False\n",
+    " a=parts[0].strip().strip(chr(34))\n",
+    " b=parts[1].strip().strip(chr(34))\n",
+    " return a==\"mcp_servers\" and b==name\n",
     "lines=src.splitlines(True)\n",
-    "out=[]\ni=0\ntarget=\"[mcp_servers.\"+name+\"]\"\nhdr=re.compile(r\"^\\s*\\[\")\n",
+    "out=[]\ni=0\nhdr=re.compile(r\"^\\s*\\[\")\n",
     "while i<len(lines):\n",
-    " if lines[i].strip()==target:\n",
+    " if is_target(lines[i]):\n",
     "  i+=1\n",
     "  while i<len(lines) and not hdr.match(lines[i]):\n   i+=1\n",
     "  continue\n",
     " out.append(lines[i])\n i+=1\n",
     "base=\"\".join(out).rstrip()\n",
     "res=(base+\"\\n\\n\"+block.strip()+\"\\n\") if base else (block.strip()+\"\\n\")\n",
+    // Refuse before writing rather than leaving a file Codex cannot load. Exactly one
+    // declaration of our table is the only acceptable outcome.
+    "n=len([l for l in res.splitlines() if is_target(l)])\n",
+    "if n!=1:\n",
+    " sys.stderr.write(\"maiterm: refusing config.toml merge, mcp_servers.\"+name+\" would appear \"+str(n)+\" times\\n\")\n",
+    " sys.exit(1)\n",
     "open(p,\"w\").write(res)\n",
 );
 
@@ -796,8 +817,19 @@ const CODEX_HOOKS_MERGE_PY: &str = concat!(
     "p=os.path.expanduser(\"~/.codex/hooks.json\")\n",
     "shim=os.environ.get(\"MAITERM_SHIM\",\"\")\n",
     "ours=json.loads(sys.stdin.read().replace(\"__MAITERM_SHIM__\",shim))\n",
-    "try:\n cur=json.load(open(p))\nexcept Exception:\n cur={}\n",
-    "if not isinstance(cur,dict):\n cur={}\n",
+    // A MISSING file is fine — start fresh. A file that exists and will not parse is not:
+    // falling back to {} here rewrote the whole file and took every user hook with it
+    // (review C4). Refuse, and say so on stderr where ssh_run_setup surfaces it.
+    "try:\n f=open(p)\n",
+    "except IOError:\n cur={}\n",
+    "else:\n",
+    " try:\n  cur=json.load(f)\n",
+    " except Exception:\n",
+    "  sys.stderr.write(\"maiterm: refusing to rewrite unparseable ~/.codex/hooks.json\\n\")\n",
+    "  sys.exit(1)\n",
+    "if not isinstance(cur,dict):\n",
+    " sys.stderr.write(\"maiterm: refusing to rewrite ~/.codex/hooks.json, top level is not an object\\n\")\n",
+    " sys.exit(1)\n",
     "ch=cur.get(\"hooks\")\n",
     "if not isinstance(ch,dict):\n ch={}\n cur[\"hooks\"]=ch\n",
     "def isours(e):\n",
@@ -1273,6 +1305,119 @@ mod tests {
         child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
         let out = child.wait_with_output().unwrap();
         (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+
+    /// Run one embedded python snippet against a throwaway HOME and return
+    /// (exit_ok, stderr, contents of ~/.codex/<file> afterwards).
+    ///
+    /// Compile-checking these is not enough: every C4 defect was in what they DO to a real
+    /// file, and both were reproduced by executing the shipped snippet, not by reading it.
+    fn run_snippet(src: &str, file: &str, before: Option<&str>, stdin: &str, env: &[(&str, &str)])
+        -> (bool, String, Option<String>)
+    {
+        let home = std::env::temp_dir().join(format!("maiterm-c4-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let codex = home.join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let target = codex.join(file);
+        if let Some(b) = before {
+            std::fs::write(&target, b).unwrap();
+        }
+        let mut cmd = Command::new("python3");
+        cmd.args(["-c", src]).env("HOME", &home);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = match cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(c) => c,
+            Err(_) => return (true, "python3 not available — skipped".into(), before.map(String::from)),
+        };
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let after = std::fs::read_to_string(&target).ok();
+        let _ = std::fs::remove_dir_all(&home);
+        (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned(), after)
+    }
+
+    #[test]
+    fn toml_merge_replaces_a_commented_header_instead_of_duplicating_it() {
+        // The reproduced C4 defect: the header matched literally, so a trailing comment made
+        // the old table survive AND the new block get appended — two declarations of one
+        // table, which Codex cannot parse.
+        let before = "model = \"gpt-6\"\n\n[mcp_servers.maiterm] # installed by maiTerm\nurl = \"http://127.0.0.1:1/mcp\"\n\n[projects.\"/tmp\"]\ntrust_level = \"trusted\"\n";
+        let block = "[mcp_servers.maiterm]\nurl = \"http://127.0.0.1:4242/mcp\"\n";
+        let (ok, err, after) = run_snippet(CODEX_TOML_MERGE_PY, "config.toml", Some(before), block,
+            &[("__codex_name", "maiterm")]);
+        assert!(ok, "merge failed: {err}");
+        let Some(after) = after else { return }; // python3 unavailable
+        assert_eq!(after.matches("[mcp_servers.maiterm]").count(), 1, "exactly one table:\n{after}");
+        assert!(after.contains("4242"), "new port applied:\n{after}");
+        assert!(!after.contains("127.0.0.1:1/mcp"), "old entry gone:\n{after}");
+        // Unrelated user settings survive.
+        assert!(after.contains("model = \"gpt-6\""), "user keys preserved:\n{after}");
+        assert!(after.contains("trust_level = \"trusted\""), "user tables preserved:\n{after}");
+    }
+
+    #[test]
+    fn toml_merge_matches_a_quoted_table_key_too() {
+        let before = "[mcp_servers.\"maiterm-dev\"]\nurl = \"http://127.0.0.1:1/mcp\"\n";
+        let block = "[mcp_servers.maiterm-dev]\nurl = \"http://127.0.0.1:9/mcp\"\n";
+        let (ok, err, after) = run_snippet(CODEX_TOML_MERGE_PY, "config.toml", Some(before), block,
+            &[("__codex_name", "maiterm-dev")]);
+        assert!(ok, "merge failed: {err}");
+        let Some(after) = after else { return };
+        assert!(!after.contains("127.0.0.1:1/mcp"), "quoted form was replaced:\n{after}");
+    }
+
+    #[test]
+    fn hooks_merge_refuses_an_unparseable_file_instead_of_replacing_it() {
+        // Reproduced C4 defect: `except Exception: cur={}` then a whole-file write, so a
+        // malformed hooks.json lost every user hook.
+        let before = "{ this is not json";
+        let ours = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"__MAITERM_SHIM__ TOK\"}]}]}}";
+        let (ok, err, after) = run_snippet(CODEX_HOOKS_MERGE_PY, "hooks.json", Some(before), ours,
+            &[("MAITERM_SHIM", "/home/u/.codex/hooks/agent-hook.sh")]);
+        if after.is_none() { return }
+        assert!(!ok, "must exit non-zero");
+        assert!(err.contains("refusing"), "says why: {err}");
+        assert_eq!(after.unwrap(), before, "the file is untouched");
+    }
+
+    #[test]
+    fn hooks_merge_preserves_user_hooks_and_a_missing_file_is_fine() {
+        let before = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"/usr/bin/mine.sh\"}]}]},\"description\":\"mine\"}";
+        let ours = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"__MAITERM_SHIM__ TOK\"}]}]}}";
+        let env = [("MAITERM_SHIM", "/home/u/.codex/hooks/agent-hook.sh")];
+        let (ok, err, after) = run_snippet(CODEX_HOOKS_MERGE_PY, "hooks.json", Some(before), ours, &env);
+        assert!(ok, "merge failed: {err}");
+        let Some(after) = after else { return };
+        assert!(after.contains("/usr/bin/mine.sh"), "user hook kept:\n{after}");
+        assert!(after.contains("agent-hook.sh"), "ours added:\n{after}");
+        assert!(after.contains("\"description\""), "other top-level keys kept:\n{after}");
+
+        // No file at all: start fresh, no refusal.
+        let (ok2, err2, after2) = run_snippet(CODEX_HOOKS_MERGE_PY, "hooks.json", None, ours, &env);
+        assert!(ok2, "absent file is not an error: {err2}");
+        assert!(after2.unwrap().contains("agent-hook.sh"));
+    }
+
+    #[test]
+    fn hooks_strip_removes_only_ours() {
+        let before = "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"/usr/bin/mine.sh\"}]},{\"hooks\":[{\"type\":\"command\",\"command\":\"/h/.codex/hooks/agent-hook.sh TOK\"}]}],\"PreToolUse\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"/h/.codex/hooks/agent-hook.sh TOK\"}]}]},\"description\":\"mine\"}";
+        let (ok, err, after) = run_snippet(CODEX_HOOKS_STRIP_PY, "hooks.json", Some(before), "", &[]);
+        assert!(ok, "strip failed: {err}");
+        let Some(after) = after else { return };
+        assert!(after.contains("/usr/bin/mine.sh"), "user hook kept:\n{after}");
+        assert!(!after.contains("agent-hook.sh"), "ours gone:\n{after}");
+        assert!(!after.contains("PreToolUse"), "emptied event key dropped:\n{after}");
+        assert!(after.contains("\"description\""), "other top-level keys kept:\n{after}");
+
+        // An unparseable file is left exactly as it is, same rule as the merge.
+        let bad = "{ nope";
+        let (_, _, after_bad) = run_snippet(CODEX_HOOKS_STRIP_PY, "hooks.json", Some(bad), "", &[]);
+        if let Some(a) = after_bad {
+            assert_eq!(a, bad, "unparseable file untouched");
+        }
     }
 
     #[test]

@@ -81,11 +81,14 @@ impl Registrar for CodexRegistrar {
         let config_path = codex_dir.join("config.toml");
         match read_document(&config_path) {
             Ok(mut doc) => {
-                put_codex_mcp_entry(&mut doc, name, port, auth);
-                if let Err(e) = atomic_write(&config_path, &doc.to_string()) {
-                    log::warn!("Codex install: failed to write {:?}: {}", config_path, e);
-                } else {
-                    wrote_mcp = true;
+                // A refusal (a non-table `mcp_servers`) must not be followed by a write:
+                // the point of refusing is to leave the user's file exactly as it was.
+                if put_codex_mcp_entry(&mut doc, name, port, auth) {
+                    if let Err(e) = atomic_write(&config_path, &doc.to_string()) {
+                        log::warn!("Codex install: failed to write {:?}: {}", config_path, e);
+                    } else {
+                        wrote_mcp = true;
+                    }
                 }
             }
             Err(e) => log::warn!("Codex install: failed to read {:?}: {}", config_path, e),
@@ -125,7 +128,9 @@ impl Registrar for CodexRegistrar {
                         Err(e) => log::warn!("Codex install: failed to serialize hooks.json: {}", e),
                     }
                 }
-                Err(e) => log::warn!("Codex install: failed to read {:?}: {}", hooks_path, e),
+                // Loud: an unparseable hooks.json means Codex reports nothing to maiTerm for
+                // the rest of the session, and we deliberately will not repair it by clobbering.
+                Err(e) => log::error!("Codex install: not writing hooks — {}", e),
             }
         } else {
             remove_our_hooks(&hooks_path, &shim_path);
@@ -247,24 +252,44 @@ fn mcp_name() -> &'static str {
 /// `[mcp_servers.<name>]` headers, so we explicitly ensure `mcp_servers` and the
 /// per-name child are standard (non-inline) tables before writing the leaf values.
 #[allow(dead_code)]
-fn put_codex_mcp_entry(doc: &mut DocumentMut, name: &str, port: u16, auth: &str) {
-    let servers = doc
+fn put_codex_mcp_entry(doc: &mut DocumentMut, name: &str, port: u16, auth: &str) -> bool {
+    // `as_table_like_mut` accepts BOTH representations. `mcp_servers = { … }` and
+    // `[mcp_servers.x] … ` are both valid TOML for the same thing, and the previous
+    // `as_table_mut().expect(…)` panicked on the inline one — a user who wrote their config
+    // that way crashed the install (review C4). An existing inline table keeps its
+    // representation; only a table we create ourselves is made a standard one, so the entry
+    // still renders as `[mcp_servers.<name>]` in the common case.
+    let servers = match doc
         .entry("mcp_servers")
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .expect("mcp_servers is a standard table");
-    let entry = servers
+        .as_table_like_mut()
+    {
+        Some(t) => t,
+        None => {
+            // `mcp_servers` exists and is not a table at all. Overwriting would destroy
+            // whatever the user meant by it, so refuse and leave the file alone.
+            log::error!("Codex: ~/.codex/config.toml has a non-table `mcp_servers`; refusing to overwrite it");
+            return false;
+        }
+    };
+    let entry = match servers
         .entry(name)
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
-        .as_table_mut()
-        .expect("mcp_servers.<name> is a standard table");
-    entry["url"] = toml_edit::value(format!("http://127.0.0.1:{}/mcp", port));
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_like_mut()
+    {
+        Some(t) => t,
+        None => {
+            log::error!("Codex: ~/.codex/config.toml has a non-table `mcp_servers.{name}`; refusing to overwrite it");
+            return false;
+        }
+    };
+    entry.insert("url", toml_edit::value(format!("http://127.0.0.1:{}/mcp", port)));
     // Codex rejects `bearer_token` for streamable_http servers ("bearer_token is not
     // supported for streamable_http"), so pass the auth via http_headers instead — our
     // server's extract_auth accepts the x-maiterm-authorization header (raw token).
     let mut headers = toml_edit::InlineTable::new();
     headers.insert("x-maiterm-authorization", toml_edit::Value::from(auth));
-    entry["http_headers"] = toml_edit::value(headers);
+    entry.insert("http_headers", toml_edit::value(headers));
     // Codex's equivalent of Claude's `${VAR}` header expansion: `env_http_headers` maps a
     // header name to an ENV VAR NAME that Codex resolves from the agent's environment. It
     // gives the server the caller's tab on every request, so tool calls target the right
@@ -275,9 +300,10 @@ fn put_codex_mcp_entry(doc: &mut DocumentMut, name: &str, port: u16, auth: &str)
     // read, which is the pre-header behavior.
     let mut env_headers = toml_edit::InlineTable::new();
     env_headers.insert("x-maiterm-tab", toml_edit::Value::from("MAITERM_TAB_ID"));
-    entry["env_http_headers"] = toml_edit::value(env_headers);
+    entry.insert("env_http_headers", toml_edit::value(env_headers));
     // Drop any stale bearer_token from a previous (rejected) format.
     entry.remove("bearer_token");
+    true
 }
 
 /// Remove `[mcp_servers.<name>]` from the document. Returns true if anything changed.
@@ -461,7 +487,9 @@ pub fn render_codex_remote_artifacts(remote_port: u16, auth: &str) -> (String, S
     let name = mcp_name();
 
     let mut doc = DocumentMut::new();
-    put_codex_mcp_entry(&mut doc, name, remote_port, auth);
+    // Always applies: the document is freshly created here, so there is no user content to
+    // refuse over. The bool matters only for the local install's read-modify-write.
+    let _ = put_codex_mcp_entry(&mut doc, name, remote_port, auth);
     // Suppress the redundant bare `[mcp_servers]` parent header. The remote merge does a
     // textual block-replace keyed on `[mcp_servers.<name>]`; if the rendered block also
     // carried a lone `[mcp_servers]` header, every reconnect re-run would append another
@@ -496,15 +524,21 @@ fn read_document(path: &Path) -> Result<DocumentMut, String> {
         .map_err(|e| format!("parse {:?}: {}", path, e))
 }
 
-/// Read a JSON file into a `Value`, or `None` if absent. Malformed JSON returns `None`
-/// (best-effort, mirroring the Claude path's `unwrap_or` tolerance).
+/// Read a JSON file into a `Value`, or `None` if absent.
+///
+/// Malformed JSON is an ERROR, not `None`. It used to be swallowed, which made an unparseable
+/// `~/.codex/hooks.json` look like an empty one — so the merge started from scratch and the
+/// install wrote maiTerm's hooks over every hook the user had (review C4). Every caller treats
+/// `Err` as "log it and write nothing", which is the only safe reading of a file we cannot parse.
 #[allow(dead_code)]
 fn read_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
     if !path.exists() {
         return Ok(None);
     }
     let raw = fs::read_to_string(path).map_err(|e| format!("read {:?}: {}", path, e))?;
-    Ok(serde_json::from_str(&raw).ok())
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("parse {:?}: {} (leaving the file untouched)", path, e))
 }
 
 /// Atomic write: write to a temp file, then rename over the target.
@@ -709,6 +743,70 @@ mod tests {
             rendered
         );
         assert!(!rendered.contains("bearer_token"), "no bearer_token in our entry:\n{}", rendered);
+    }
+
+    #[test]
+    fn put_codex_mcp_entry_accepts_an_inline_parent_table() {
+        // `mcp_servers = { … }` is valid TOML for the same thing as `[mcp_servers.x]`. The old
+        // `as_table_mut().expect(…)` panicked on it, so a user who wrote their config this way
+        // crashed the install (review C4).
+        let name = "maiterm-dev";
+        let user_toml = "model = \"o3\"\nmcp_servers = { other = { url = \"http://localhost:9999/mcp\" } }\n";
+        let mut doc = user_toml.parse::<DocumentMut>().unwrap();
+        assert!(put_codex_mcp_entry(&mut doc, name, 7000, "NEWTOK"));
+
+        let out = doc.to_string();
+        assert_eq!(doc["mcp_servers"]["other"]["url"].as_str(), Some("http://localhost:9999/mcp"));
+        assert_eq!(doc["mcp_servers"][name]["url"].as_str(), Some("http://127.0.0.1:7000/mcp"));
+        assert!(out.contains("model = \"o3\""), "user key preserved:\n{}", out);
+        // Still valid TOML after the edit.
+        assert!(out.parse::<DocumentMut>().is_ok(), "round-trips:\n{}", out);
+    }
+
+    #[test]
+    fn put_codex_mcp_entry_accepts_an_inline_child_table() {
+        let name = "maiterm-dev";
+        let user_toml = format!(
+            "[mcp_servers]\nother = {{ url = \"http://localhost:9999/mcp\" }}\n{name} = {{ url = \"http://127.0.0.1:1/mcp\" }}\n"
+        );
+        let mut doc = user_toml.parse::<DocumentMut>().unwrap();
+        assert!(put_codex_mcp_entry(&mut doc, name, 7000, "NEWTOK"));
+
+        let out = doc.to_string();
+        assert_eq!(doc["mcp_servers"][name]["url"].as_str(), Some("http://127.0.0.1:7000/mcp"));
+        assert_eq!(doc["mcp_servers"]["other"]["url"].as_str(), Some("http://localhost:9999/mcp"));
+        assert!(out.contains("NEWTOK"), "token written into the inline table:\n{}", out);
+        assert!(out.parse::<DocumentMut>().is_ok(), "round-trips:\n{}", out);
+    }
+
+    #[test]
+    fn put_codex_mcp_entry_refuses_a_non_table_and_changes_nothing() {
+        // Overwriting would destroy whatever the user meant by it. Refusing returns false, and
+        // the install skips the write on false.
+        let name = "maiterm-dev";
+        let user_toml = "mcp_servers = \"not a table\"\n";
+        let mut doc = user_toml.parse::<DocumentMut>().unwrap();
+        assert!(!put_codex_mcp_entry(&mut doc, name, 7000, "TOK"));
+        assert_eq!(doc.to_string(), user_toml, "document untouched");
+    }
+
+    #[test]
+    fn read_json_reports_a_malformed_file_rather_than_calling_it_absent() {
+        // `None` meant "no file", so the merge started from scratch and the install wrote over
+        // every hook the user had (review C4).
+        let dir = std::env::temp_dir().join(format!("maiterm-c4-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("hooks.json");
+
+        std::fs::write(&p, "{ not json").unwrap();
+        assert!(read_json(&p).is_err(), "malformed is an error, not None");
+
+        std::fs::write(&p, "{\"hooks\":{}}").unwrap();
+        assert!(read_json(&p).unwrap().is_some(), "valid parses");
+
+        std::fs::remove_file(&p).unwrap();
+        assert!(read_json(&p).unwrap().is_none(), "absent is None");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
