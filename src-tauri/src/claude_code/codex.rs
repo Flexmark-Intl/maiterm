@@ -459,11 +459,14 @@ fn is_maiterm_entry(entry: &serde_json::Value) -> bool {
 fn codex_prompt_body(mcp_name: &str) -> String {
     format!(
         "# maiTerm\n\n\
-You are running inside a maiTerm terminal tab. Immediately call the `{name}` \
-`initSession` tool with the tabId from the `$MAITERM_TAB_ID` environment variable \
-before responding to the user. You can run it in parallel with your other opening \
-tool calls to save a round-trip, but not alongside other maiterm calls. This registers \
-your session so tool calls target the correct tab.\n",
+You are running inside a maiTerm terminal tab. Your tab is identified automatically: the \
+`x-maiterm-tab` header rides every MCP request you make, and the SessionStart hook registers \
+your session. You do NOT need to call `initSession`, and should not spend an opening turn on \
+it.\n\n\
+`initSession` is a REPAIR tool. Call it only when a `{name}` tool answers that it does not \
+know your tab, that your tab was inferred rather than stated, or when the human asks \
+(`/maiterm init`). Pass the tabId from `$MAITERM_TAB_ID`, and do not batch that call with \
+other `{name}` calls — it would race the registration and can target the wrong tab.\n",
         name = mcp_name,
     )
 }
@@ -743,6 +746,62 @@ mod tests {
             rendered
         );
         assert!(!rendered.contains("bearer_token"), "no bearer_token in our entry:\n{}", rendered);
+    }
+
+    /// Run the shipped shim with a payload and return its stdout.
+    fn run_shim(payload: &str, env: &[(&str, &str)]) -> Option<String> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let dir = std::env::temp_dir().join(format!(
+            "maiterm-shim-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join("agent-hook.sh");
+        std::fs::write(&path, AGENT_HOOK_SHIM).ok()?;
+        let mut cmd = Command::new("bash");
+        // HOME points at an empty dir so the ~/.aiterm fallback finds nothing.
+        cmd.arg(&path).arg("TOKEN").env("HOME", &dir);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        child.stdin.take().unwrap().write_all(payload.as_bytes()).ok()?;
+        let out = child.wait_with_output().ok()?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    #[test]
+    fn shim_always_emits_valid_json_even_with_nothing_to_talk_to() {
+        // The fail-safe that matters: a hook printing anything but JSON is a hook error in the
+        // agent's face on every event. No port, and an unreachable port, must both answer {}.
+        let start = "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"s\"}";
+        let stop = "{\"hook_event_name\":\"Stop\",\"session_id\":\"s\"}";
+        for payload in [start, stop] {
+            assert_eq!(run_shim(payload, &[]).as_deref(), Some("{}"), "no port configured");
+            // 9 is reserved/discard — nothing is listening, so curl fails fast.
+            assert_eq!(
+                run_shim(payload, &[("MAITERM_PORT", "9"), ("MAITERM_TAB_ID", "tab-1")]).as_deref(),
+                Some("{}"),
+                "unreachable server"
+            );
+        }
+    }
+
+    #[test]
+    fn shim_asks_for_priming_on_session_start_only() {
+        // Both query params are load-bearing and were absent entirely until review C2:
+        // `prime=1` is what makes the server answer with a body at all, and `format=codex` is
+        // what makes that body Codex's SessionStart output shape instead of bare text — which
+        // Codex would fail to parse as JSON.
+        assert!(AGENT_HOOK_SHIM.contains("prime=1&format=codex"), "SessionStart asks for both");
+        assert!(AGENT_HOOK_SHIM.contains("hook_event_name\\\":\\\"SessionStart")
+            || AGENT_HOOK_SHIM.contains("\"hook_event_name\":\"SessionStart\""),
+            "gated on the event name");
+        // Every other event stays observational: its curl still discards the response.
+        assert!(AGENT_HOOK_SHIM.contains(">/dev/null 2>&1 || true"), "non-priming branch intact");
     }
 
     #[test]

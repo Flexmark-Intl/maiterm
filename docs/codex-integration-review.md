@@ -35,19 +35,27 @@ Verify local dev/prod coexistence, quitting either instance, repeated restarts a
 trusting hooks, and two machines bridging the same remote account. Do not default
 to relocating the entire Codex home or adding repeated config rewrites.
 
-### C2. Startup instructions are missing from the Codex hook (high priority)
+### C2. Startup instructions are missing from the Codex hook — FIXED 2026-09-07
 
-`agent-hook.sh` does not request `prime=1`, discards the HTTP response, and returns
-`{}`. Session registration still happens, but the task/Overlord text from
-`session_priming_text()` never reaches Codex through this hook. Meanwhile
-`codex_prompt_body()` still instructs unconditional `initSession`.
+`agent-hook.sh` did not request `prime=1`, discarded the HTTP response, and returned `{}`.
+Session registration happened, but the task/Overlord text from `session_priming_text()` never
+reached Codex. `codex_prompt_body()` also still instructed unconditional `initSession`.
 
-Deliver SessionStart priming using Codex's supported hook output, sharing the
-server's existing text. Preserve no-op output on observational tool/Stop hooks.
-Align the installed prompt with `initSession` being repair-only. Preserve the
-Agent Bridge distinction between a hook registration and a tool-capable handshake.
-Verify fresh and resumed sessions receive instructions without an opening init call;
-check compaction source matching as part of the lifecycle work.
+The shim now asks for `prime=1&format=codex` on SessionStart only, matched on the raw payload
+(this runs on every hook of every turn, and jq/python are not guaranteed on a remote). The
+server returns the shared priming text already wrapped in Codex's documented
+`hookSpecificOutput.additionalContext` shape — deliberately server-side, since wrapping a
+multi-line string with quotes in it would mean JSON-escaping by hand in bash. Other events keep
+discarding their response and answering `{}`, and an unreachable server, unknown tab or timeout
+all fall back to `{}`, so a broken maiTerm degrades to "no priming" rather than a malformed hook
+reply. The installed prompt now describes `initSession` as repair-only, matching the MCP
+`instructions` and the Claude skill.
+
+Not verified: that a fresh and a resumed Codex session actually *show* the instructions in
+context. The shim's fail-safe behaviour is tested by executing the shipped script; the delivery
+itself is on Codex's side of the boundary. Compaction source matching (`source: "compact"`)
+is untested — Codex re-runs SessionStart hooks after a compaction, so priming should re-arrive,
+but that was not exercised.
 
 ### C3. Ineffective settings (P2)
 

@@ -3780,7 +3780,21 @@ async fn hooks_handler(
     // agent's context. It's how the standing instructions reach an agent that never calls
     // initSession — including a resumed one, which takes no turn until its human types.
     if let Some(tab) = prime_tab.as_deref() {
-        return session_priming_text(&srv.state, tab).into_response();
+        let text = session_priming_text(&srv.state, tab);
+        // Codex parses a command hook's stdout as JSON and takes the model-visible text from
+        // `hookSpecificOutput.additionalContext`. The server owns that encoding rather than the
+        // shim: wrapping a multi-line string with quotes in it would mean JSON-escaping by hand
+        // in bash. Claude's hook echoes the bare text and asks for no format.
+        if params.get("format").map(String::as_str) == Some("codex") {
+            return axum::Json(serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": text,
+                }
+            }))
+            .into_response();
+        }
+        return text.into_response();
     }
 
     StatusCode::OK.into_response()

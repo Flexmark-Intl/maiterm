@@ -465,9 +465,12 @@ auto-resume wiring — for **every** runtime now, not just the non-Claude ones t
 initSession carrying a session id. The `prime=1` reply is `session_priming_text()` (Overlord
 standing instruction + task-tool instruction, shared verbatim with `initSession`'s response),
 which the Claude command hook echoes into the agent's SessionStart context.
-**Codex gap (2026-09-07):** its shim registers the session but does not request
-`prime=1` and discards the response; its installed prompt still demands initSession.
-The shared server support is present, but Codex startup priming is not wired yet.
+**Codex primes through the same text.** Its shim asks for `prime=1&format=codex` on
+SessionStart only; `format=codex` makes the server return the priming text already wrapped in
+Codex's `hookSpecificOutput.additionalContext` shape, so nothing has to JSON-escape a
+multi-line string in bash. Every other Codex event is observational and answers a bare `{}` —
+a hook that prints non-JSON is a hook error in the agent's face on every event, so the shim
+falls back to `{}` on an unreachable server, an unknown tab, or a timeout.
 - **Only our curl may get a response body.** A runtime parses an http hook's response body as
   hook output, and Claude's own http hooks post to the same endpoint — with no query string.
   The `prime=1` gate is what keeps a body away from them.
