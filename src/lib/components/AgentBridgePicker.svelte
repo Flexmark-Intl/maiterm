@@ -4,6 +4,7 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { getAdapter } from '$lib/agents/adapter';
+  import type { AgentRuntime } from '$lib/agents/types';
   import { getDescriptor } from '$lib/agents/descriptor';
   import { getPtyInfo } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -19,6 +20,8 @@
 
   interface Candidate {
     tabId: string;
+    /** Which CLI owns this session — decides the fork command establishBridge spawns. */
+    runtime: AgentRuntime;
     sessionId: string;
     tabName: string;
     workspaceName: string;
@@ -66,14 +69,17 @@
           }
           const cs = claudeStateStore.getState(tab.id);
           if (!cs) continue;
-          // Fork is a Claude-only capability — a runtime that can't fork must not be
-          // offered as a fork target (Codex's fork is an in-TUI /fork, not a launch flag).
+          // A runtime that can't fork must not be offered as a fork target. Claude appends
+          // --fork-session to a resume; Codex uses its `codex fork` subcommand; Gemini has
+          // neither. The runtime is carried on the candidate because establishBridge needs it
+          // to pick the right spawn command.
           // Existing-tab bridging supports all runtimes (cross-runtime bridging is fine).
           const runtime = workspacesStore.getTabRuntime(tab.id);
           if (mode === 'fork' && !getAdapter(runtime).supportsFork) continue;
           const osc = terminalsStore.getOsc(tab.id);
           out.push({
             tabId: tab.id,
+            runtime,
             sessionId: cs.sessionId,
             tabName: tab.name,
             workspaceName: ws.name,
@@ -164,6 +170,7 @@
 
       const res = await agentBridgeStore.establishBridge(callerTabId, {
         sessionId: c.sessionId,
+        runtime: c.runtime,
         tabName: c.tabName,
         workspaceName: c.workspaceName,
         cwd,

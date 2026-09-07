@@ -3,9 +3,11 @@ import {
   buildForkCommand,
   getResumeCommand,
   isForkCommand,
+  isResumeTemplate,
   supportsFork,
   toForkCommand,
 } from './resume';
+import { getAdapter } from './adapter';
 
 // The runtimes do not agree on the SHAPE of a fork. Claude appends `--fork-session` to a
 // resume; Codex has a distinct `codex fork SESSION_ID` subcommand. Modelling only the flag is
@@ -96,5 +98,43 @@ describe('getResumeCommand', () => {
   it('keeps a bypassing resume recognisable as a resume, not a fork', () => {
     // Otherwise handleEnableAutoResume would discard it as a fork command.
     expect(isForkCommand('codex', getResumeCommand('codex', { bypassHookTrust: true }))).toBe(false);
+  });
+});
+
+describe('isResumeTemplate', () => {
+  // A stored auto_resume_command beats a freshly built template, which is right for a command
+  // the user edited and wrong for one maiTerm wrote itself — that is how toggling
+  // codex_hooks_bypass_trust could never reach a tab that already had auto-resume configured.
+  it('recognises both option variants of its own template', () => {
+    expect(isResumeTemplate('codex', 'codex resume %codexSessionId')).toBe(true);
+    expect(isResumeTemplate('codex', 'codex resume --dangerously-bypass-hook-trust %codexSessionId')).toBe(true);
+    expect(isResumeTemplate('claude', 'claude --resume %claudeSessionId')).toBe(true);
+  });
+
+  it('leaves a command the user actually edited alone', () => {
+    expect(isResumeTemplate('codex', 'cd /srv && codex resume %codexSessionId')).toBe(false);
+    expect(isResumeTemplate('codex', 'codex resume --model gpt-6 %codexSessionId')).toBe(false);
+    expect(isResumeTemplate('codex', 'codex fork %codexSessionId')).toBe(false);
+    expect(isResumeTemplate('codex', null)).toBe(false);
+  });
+
+  it('ignores surrounding whitespace, which a text field will produce', () => {
+    expect(isResumeTemplate('codex', '  codex resume %codexSessionId  ')).toBe(true);
+  });
+});
+
+describe('adapter and spec agree', () => {
+  // The regression this pins: supportsFork was flipped on for Codex while the actual spawn
+  // path still hardcoded Claude's command, so the picker offered a fork that booted the wrong
+  // CLI. Anything that claims it can fork must be able to produce a command.
+  it.each(['claude', 'codex', 'gemini'] as const)('%s: supportsFork matches buildForkCommand', (runtime) => {
+    const adapter = getAdapter(runtime);
+    expect(adapter.supportsFork).toBe(supportsFork(runtime));
+    expect(adapter.buildForkCommand('sid-1') === null).toBe(!adapter.supportsFork);
+  });
+
+  it('never builds one runtime a command that launches another', () => {
+    expect(getAdapter('claude').buildForkCommand('sid')).toMatch(/^claude /);
+    expect(getAdapter('codex').buildForkCommand('sid')).toMatch(/^codex /);
   });
 });

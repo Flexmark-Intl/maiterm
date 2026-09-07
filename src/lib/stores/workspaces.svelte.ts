@@ -1,6 +1,7 @@
 import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
+import { getAdapter } from '$lib/agents/adapter';
 import * as commands from '$lib/tauri/commands';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -729,11 +730,15 @@ function createWorkspacesStore() {
     },
 
     /**
-     * Split a pane and boot a *forked* Claude session into the new tab — the core
-     * spawn for Agent Bridge. The new tab auto-resumes `claude --resume <sessionId>
-     * --fork-session` in the target's cwd (and SSH context if remote), giving an
-     * isolated peer with the target session's full context without disturbing the
-     * original. Returns { newPaneId, newTabId } so the caller can register the bridge.
+     * Split a pane and boot a *forked* agent session into the new tab — the core spawn for
+     * Agent Bridge. The new tab auto-resumes the runtime's fork command in the target's cwd
+     * (and SSH context if remote), giving an isolated peer with the target session's full
+     * context without disturbing the original. Returns { newPaneId, newTabId } so the caller
+     * can register the bridge, or null if this runtime cannot fork.
+     *
+     * The command MUST come from the runtime's adapter. It was hardcoded to Claude's
+     * `--fork-session` form, which was invisible while Codex could not be picked as a fork
+     * target and became a broken spawn the moment it could (review C6).
      *
      * Ordering matters: the split context + auto-resume command must be set on the
      * backend BEFORE the reactive `workspaces` array updates (which mounts the new
@@ -744,17 +749,23 @@ function createWorkspacesStore() {
     async forkSessionIntoSplit(
       workspaceId: string,
       sourcePaneId: string,
-      target: { sessionId: string; cwd: string | null; sshCommand: string | null; remoteCwd: string | null },
+      target: { sessionId: string; runtime: AgentRuntime; cwd: string | null; sshCommand: string | null; remoteCwd: string | null },
       tabName: string,
       direction: SplitDirection = 'horizontal',
     ): Promise<{ newPaneId: string; newTabId: string } | null> {
+      // Refuse before splitting: a runtime with no fork would otherwise get a pane that
+      // boots someone else's command.
+      const forkCommand = getAdapter(target.runtime).buildForkCommand(target.sessionId);
+      if (!forkCommand) {
+        logError(`forkSessionIntoSplit: ${target.runtime} cannot fork a session`);
+        return null;
+      }
+
       const newPane = await commands.splitPane(workspaceId, sourcePaneId, direction);
       const newTabId = newPane.tabs[0]?.id;
       if (!newTabId) return null;
 
       await commands.renameTab(workspaceId, newPane.id, newTabId, tabName, true);
-
-      const forkCommand = `claude --resume ${target.sessionId} --fork-session`;
       await commands.setTabAutoResumeContext(
         workspaceId, newPane.id, newTabId,
         target.cwd, target.sshCommand, target.remoteCwd,

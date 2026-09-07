@@ -5,6 +5,7 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
+import type { AgentRuntime } from '$lib/agents/types';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
 import { roleName } from '$lib/stores/meshRouting';
@@ -370,7 +371,7 @@ function createAgentBridgeStore() {
      */
     async establishBridge(
       callerTabId: string,
-      target: { sessionId: string; tabName: string; workspaceName: string; cwd: string | null; sshCommand?: string | null; remoteCwd?: string | null },
+      target: { sessionId: string; runtime: AgentRuntime; tabName: string; workspaceName: string; cwd: string | null; sshCommand?: string | null; remoteCwd?: string | null },
       purpose?: string,
     ): Promise<{ ok: true; partnerTabId: string; partnerLabel: string } | { ok: false; error: string }> {
       const loc = resolveTab(callerTabId);
@@ -388,6 +389,8 @@ function createAgentBridgeStore() {
         loc.pane.id,
         {
           sessionId: target.sessionId,
+          // Decides which fork command is spawned; a wrong value boots another runtime's CLI.
+          runtime: target.runtime,
           cwd: target.cwd,
           sshCommand: target.sshCommand ?? null,
           remoteCwd: target.remoteCwd ?? null,

@@ -63,6 +63,20 @@ export function toForkCommand(runtime: AgentRuntime, cmd: string): string | null
   return spec.toFork(cmd);
 }
 
+/**
+ * Is `cmd` an unmodified maiTerm resume template for this runtime, in any option variant?
+ *
+ * A stored `auto_resume_command` normally wins over a freshly built template, which is right
+ * for a command the user edited and wrong for one maiTerm wrote itself: a preference that
+ * changes the template (`codex_hooks_bypass_trust`) could never reach a tab that already had
+ * auto-resume configured, in either direction (review C3).
+ */
+export function isResumeTemplate(runtime: AgentRuntime, cmd: string | null | undefined): boolean {
+  if (!cmd) return false;
+  const t = cmd.trim();
+  return t === getResumeCommand(runtime) || t === getResumeCommand(runtime, { bypassHookTrust: true });
+}
+
 /** True if `cmd` is a fork-spawn command for this runtime (must never be reused as a resume command). */
 export function isForkCommand(runtime: AgentRuntime, cmd: string | null | undefined): boolean {
   const spec = FORK_SPECS[runtime];

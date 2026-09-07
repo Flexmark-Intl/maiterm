@@ -382,13 +382,20 @@ function createAgentStateStore() {
       unlisteners.push(u6);
 
       // PreToolUse: track which tool Claude is about to use + set %claudeAction variable
-      const u7 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; tool_input: Record<string, unknown> | null; runtime?: string }>('agent-hook-pre-tool-use', (e) => {
-        const { session_id, tab_id, tool_name, tool_input } = e.payload;
+      const u7 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; tool_input: Record<string, unknown> | null; runtime?: string; approvals_open?: number }>('agent-hook-pre-tool-use', (e) => {
+        const { session_id, tab_id, tool_name, tool_input, approvals_open } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         const action = buildActionString(runtime, tool_name, tool_input);
         const detail = getDescriptor(runtime).summarizeTool(tool_name, tool_input);
-        setState(tab_id, session_id, 'active', tool_name, detail, runtime);
+        // A tool STARTING does not unblock a session whose other tool is still gated: Codex
+        // runs tools in parallel, so this can land between a PermissionRequest and its
+        // PostToolUse. Going 'active' here cleared the sidebar alert and dropped the workspace
+        // rollup out of 'permission' while the TUI was still blocking and maiLink still showed
+        // the card. Rust makes the same call; this mirror has to agree
+        // (docs/codex-integration-review.md C7).
+        const held = approvals_open ? sessions.get(tab_id)?.state : undefined;
+        setState(tab_id, session_id, held ?? 'active', tool_name, detail, runtime);
         setVariable(tab_id, 'claudeAction', action);
         // AskUserQuestion is the agent's native "ask the human" tool — the single canonical
         // "needs you" signal (alongside permission prompts). When it fires on a tab you're not
@@ -408,8 +415,10 @@ function createAgentStateStore() {
         // another call can still be waiting on an approval. Rust keeps the session in
         // WaitingPermission until nothing is outstanding, and this mirror has to agree — it used
         // to go active regardless, which is how the desktop and the phone could disagree about
-        // whether a tab was gated (docs/codex-integration-review.md C7).
-        if (!approvals_open) setState(tab_id, session_id, 'active', undefined, undefined, runtimeOf(e.payload));
+        // whether a tab was gated (docs/codex-integration-review.md C7). The tool fields are
+        // cleared either way, exactly as Rust clears them.
+        const held = approvals_open ? sessions.get(tab_id)?.state : undefined;
+        setState(tab_id, session_id, held ?? 'active', undefined, undefined, runtimeOf(e.payload));
         setVariable(tab_id, 'claudeAction', '');
       });
       unlisteners.push(u8);

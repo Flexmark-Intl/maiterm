@@ -30,12 +30,12 @@
   import { processOutput, cleanupTab, loadTabVariables, interpolateVariables, getVariables, clearTabVariables, suppressTab, unsuppressTab, replayAutoResume } from '$lib/stores/triggers.svelte';
   import { dispatch } from '$lib/stores/notificationDispatch';
   import { toastStore } from '$lib/stores/toasts.svelte';
-  import { getResumeCommand, sessionIdVar } from '$lib/agents/resume';
+  import { sessionIdVar } from '$lib/agents/resume';
   import type { AgentRuntime } from '$lib/agents/types';
   import { createFilePathLinkProvider } from '$lib/utils/filePathDetector';
   import { openFileFromTerminal } from '$lib/utils/openFile';
   import { enableBridge, disableBridge, hasBridge, getBridgeInfo, getBridgeStatus, buildUserSetupScript, isInteractiveSshSession, isRemoteShellForeground } from '$lib/stores/sshMcpBridge.svelte';
-  import { claudeStateStore } from '$lib/stores/agentState.svelte';
+  import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
   import { sshDisconnectStore } from '$lib/stores/sshDisconnect.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -2060,7 +2060,7 @@
         {#if arRuntime}
           <div class="auto-resume-presets">
             <span class="auto-resume-presets-label">Presets</span>
-            <Button variant="secondary" onclick={() => { autoResumePromptValue = getResumeCommand(arRuntime); }} style="padding:6px 14px;border-radius:4px;font-size: 0.923rem;background:var(--bg-dark);border-color:var(--bg-light)" title="Resumes by %{arSessionVar}">{runtimeLabel(arRuntime)} Resume</Button>
+            <Button variant="secondary" onclick={() => { autoResumePromptValue = resumeCommandFor(arRuntime); }} style="padding:6px 14px;border-radius:4px;font-size: 0.923rem;background:var(--bg-dark);border-color:var(--bg-light)" title="Resumes by %{arSessionVar}">{runtimeLabel(arRuntime)} Resume</Button>
           </div>
         {/if}
         <span style="flex: 1;"></span>

@@ -9,7 +9,7 @@ import { dispatch } from './notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { mergeAutoResumeContext } from '$lib/stores/autoResumeContext';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
-import { isForkCommand, sessionIdVar, toForkCommand } from '$lib/agents/resume';
+import { isForkCommand, isResumeTemplate, sessionIdVar, toForkCommand } from '$lib/agents/resume';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 
@@ -377,7 +377,14 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
     // session id, resume must use the standard `claude --resume %claudeSessionId`
     // template (claudeState sets %claudeSessionId to the fork's id before calling
     // this). So never preserve a fork command — let the template take over.
-    const existing = isForkCommand(workspacesStore.getTabRuntime(tabId), existingRaw) ? null : existingRaw;
+    // A stored command that is one of maiTerm's OWN templates is not a user customization, so a
+    // preference that changes the template must be able to refresh it — otherwise toggling
+    // codex_hooks_bypass_trust never reaches a tab that already had auto-resume configured, in
+    // either direction. A command the user actually edited is still preserved.
+    const arRuntime = workspacesStore.getTabRuntime(tabId);
+    const supersede = isForkCommand(arRuntime, existingRaw)
+      || (!!commandTemplate && isResumeTemplate(arRuntime, existingRaw));
+    const existing = supersede ? null : existingRaw;
     const cmd = existing || (commandTemplate || null);
 
     // Prevent SSH context downgrade: if the tab already has an SSH auto-resume

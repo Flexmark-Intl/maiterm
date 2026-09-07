@@ -3598,6 +3598,7 @@ async fn hooks_handler(
                 .to_string();
 
             // Update session state back to active + track current tool
+            let mut approvals_open = 0usize;
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
@@ -3647,6 +3648,7 @@ async fn hooks_handler(
                         session.pending_question = None;
                         session.pending_question_at = None;
                     }
+                    approvals_open = session.pending_approvals.len();
                 }
             }
 
@@ -3658,6 +3660,11 @@ async fn hooks_handler(
                 "tab_id": tab_id,
                 "tool_name": tool_name,
                 "tool_input": event.get("tool_input"),
+                // Same reason as PostToolUse: a parallel tool STARTING does not unblock a
+                // session whose other tool is still gated, and the frontend mirror has to make
+                // the same call Rust does or the desktop clears its permission alert while
+                // maiLink still shows the approval (review C7).
+                "approvals_open": approvals_open,
             }));
         }
 
