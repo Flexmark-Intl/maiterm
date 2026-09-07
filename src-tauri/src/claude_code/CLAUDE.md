@@ -2,6 +2,9 @@
 
 maiTerm exposes an MCP server that Claude Code CLI discovers and connects to, providing IDE-like capabilities.
 
+Codex shares this server through `/mcp`. See the [Codex integration review](../../../docs/codex-integration-review.md)
+for its current gaps and acceptance criteria (2026-09-07; fixes outstanding).
+
 ## Architecture
 
 ```
@@ -458,7 +461,10 @@ tab but not the Claude *session*, so the command hook forwards the event to
 auto-resume wiring — for **every** runtime now, not just the non-Claude ones that never had an
 initSession carrying a session id. The `prime=1` reply is `session_priming_text()` (Overlord
 standing instruction + task-tool instruction, shared verbatim with `initSession`'s response),
-which the hook echoes into the agent's SessionStart context.
+which the Claude command hook echoes into the agent's SessionStart context.
+**Codex gap (2026-09-07):** its shim registers the session but does not request
+`prime=1` and discards the response; its installed prompt still demands initSession.
+The shared server support is present, but Codex startup priming is not wired yet.
 - **Only our curl may get a response body.** A runtime parses an http hook's response body as
   hook output, and Claude's own http hooks post to the same endpoint — with no query string.
   The `prime=1` gate is what keeps a body away from them.
@@ -556,13 +562,11 @@ agent's chat — where the trailing newline sends it. Observed in the wild: an i
 11:28:45 followed by that tab's `initSession` at 11:29:03, i.e. the user pressing Enter on
 `/maiterm init` is what triggered the injection that polluted their message.
 
-**The remote config is a per-ACCOUNT singleton, and nothing arbitrates it.** `~/.claude.json`
-and `~/.claude/settings.json` on the remote hold ONE maiterm entry and ONE hooks URL, each
-naming a specific reverse-tunnel port. `buildSetupScript` writes them unconditionally on every
-bridge — no liveness check, no ownership check — so the last writer wins, ACROSS INSTANCES AND
-MACHINES. A peer maiTerm (or your own dev build: the remote key is hardcoded `maiterm`, not the
-dev key) points every agent on that account at its tunnel, and when that tunnel goes the whole
-account loses hooks and MCP.
+**Historical failure: remote config is a per-ACCOUNT singleton.** The former remote
+`~/.claude.json` and `~/.claude/settings.json` named a specific tunnel port/token.
+Every bridge overwrote them, so the last writer won across instances and machines.
+The shared command/env configuration below replaced this for Claude; Codex's baked
+configuration still has the same contention problem.
 
 Diagnostic signature, distinguishing it from ordinary port churn: **ECONNREFUSED on a port that
 appears in NO local log, while this instance's tunnel process is alive and its server is
@@ -592,8 +596,9 @@ visibly-absent: `claude mcp list` names the missing variables. `source ~/.aiterm
 manual fix, and it now carries all three values, so it restores hooks *and* MCP for that shell.
 
 Still baked, and still contended, on a remote that also runs Codex: `render_codex_remote_artifacts`
-writes a `config.toml` naming the port. Codex's `env_http_headers` maps a header to an env var
-NAME, so the header half is already instance-independent; whether its `url` can be too is untested.
+writes a `config.toml` naming the port and a static auth header. Its `env_http_headers`
+already resolves the tab id per process; that does not make its auth or URL dynamic.
+Whether its URL can expand environment variables is untested. See review C1.
 
 The fallback if this does not hold up is per-instance `CLAUDE_CONFIG_DIR`, which isolates instead
 of converging. It relocates the ENTIRE root including `projects/`, `sessions/` and
@@ -607,7 +612,13 @@ agents.
 - "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
-**Remote hooks:** All hook events (SessionStart, SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse, PreCompact) are registered on the remote with HTTP hooks pointing to `127.0.0.1:{remotePort}/hooks`. These tunnel back through the SSH reverse tunnel to the local MCP server's hooks handler. A command hook on SessionStart reads `$MAITERM_TAB_ID` (from env var injection), POSTs the event back through the tunnel with `?tab_id=…&prime=1`, and echoes the tab ID plus the server's reply into Claude's context — the remote mirror of the local hook in `build_our_hooks`, so change the two together. Its `curl --max-time` matters more here than anywhere: this URL *is* the reverse tunnel, and a zombie tunnel port accepts the connect and then never answers. Hooks require python3 on the remote for the settings.json merge.
+**Remote Claude hooks:** All eight events use command hooks reading `MAITERM_PORT`,
+`MAITERM_AUTH`, and `MAITERM_TAB_ID` from the process environment. SessionStart also
+requests `prime=1` and echoes the tab id and returned instructions into Claude's
+context. Preserve `curl --max-time`: a zombie tunnel can accept a connection and
+never answer. The settings merge uses remote Python 3; nova's documented version
+is older than 3.11, so do not require `tomllib`. Codex has its own shim and outstanding
+priming/configuration work described in the review.
 
 **Remote cleanup:** Stale lockfile detection on reconnect tests dead ports via `/dev/tcp/localhost/{port}`. No EXIT trap (background SSH has no persistent shell on remote). Stale hooks with dead port URLs are NOT silent — Claude Code prints `hook error / connect ECONNREFUSED` in every session until they're removed. On an ordinary remote they linger until the next bridge setup rewrites them; when the "remote" is itself a maiTerm machine, its own hook self-heal sweeps them (tunnel lockfiles have `pid: 0`, so liveness is the port probe in `lockfile_is_live()`).
 

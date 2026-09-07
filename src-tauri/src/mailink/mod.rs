@@ -4517,10 +4517,11 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         }
         detail["pendingPrompt"] = pp;
     } else if state == "permission" {
-        // A real permission prompt (some other tool, e.g. Bash). Synthesized: the hook carries no
-        // structured options; that keystroke respond path is proven, so respondable now. The
-        // compact tool_detail (captured from the PreToolUse / Codex PermissionRequest tool_input)
-        // shows WHAT is being approved, e.g. "Bash(rm -rf ./dist) — approve?".
+        // Synthesized from session state, not proof a TUI prompt is still open. Codex
+        // automatic review can leave that state stale (docs/codex-integration-review.md C7).
+        // The hook carries no structured options; the keystroke response path uses the
+        // compact tool_detail (captured from PreToolUse / Codex PermissionRequest tool_input)
+        // to describe the requested operation, e.g. "Bash(rm -rf ./dist) — approve?".
         let text = match (tool.as_deref(), tool_detail_for_tab(app, tab_id).as_deref()) {
             (Some(t), Some(d)) => format!("{t}({d}) — approve?"),
             (Some(t), None) => format!("{t} — approve?"),

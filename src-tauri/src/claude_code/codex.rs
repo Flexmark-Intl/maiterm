@@ -1,16 +1,16 @@
 //! Codex on-disk registration. Mirrors the Claude `lockfile.rs` machinery but for
 //! Codex's own config layout under `~/.codex/`:
-//!   - `~/.codex/config.toml` — `[mcp_servers.<name>]` with `url` + `bearer_token`
+//!   - `~/.codex/config.toml` — `[mcp_servers.<name>]` with `url` + `http_headers`
 //!     (format-preserving via toml_edit so the user's other keys/comments survive).
 //!   - `~/.codex/hooks/agent-hook.sh` — the bundled hook shim (executable).
-//!   - `~/.codex/hooks.json` — command hooks for the 7 lifecycle events, merged with
-//!     any existing user hooks (never clobbered).
+//!   - `~/.codex/hooks.json` — command hooks for 7 lifecycle events, merged with
+//!     valid existing JSON (malformed-file preservation remains outstanding).
 //!   - `~/.codex/prompts/maiterm.md` — a tiny prompt reinforcing the initSession call.
 //!
-//! Codex does NOT rewrite its own config, so `reassert_if_drifted` is a no-op.
+//! `reassert_if_drifted` is currently a no-op; another maiTerm can still replace
+//! the shared hooks. See docs/codex-integration-review.md for outstanding fixes.
 //!
-//! NOTE: This registrar is fully implemented but NOT yet wired into `all_registrars()`
-//! / `enabled_registrars()` — a later stage flips it live. Hence `#[allow(dead_code)]`.
+//! Wired into all_registrars(); enabled by prefs.codex_ide (default true).
 
 use std::fs;
 use std::path::Path;
@@ -133,7 +133,7 @@ impl Registrar for CodexRegistrar {
         );
     }
 
-    /// Codex never rewrites its own config, so there is nothing to re-assert.
+    /// No drift repair yet; shared-instance ownership must be resolved before adding it.
     fn reassert_if_drifted(&self, _port: u16, _auth: &str, _prefs: &Preferences) {}
 
     fn unregister(&self, _port: u16, _auth: &str) {
@@ -211,7 +211,7 @@ fn mcp_name() -> &'static str {
     crate::state::agent_runtime::mcp_server_name(AgentRuntime::Codex)
 }
 
-/// Set `[mcp_servers.<name>]` with `url` + `bearer_token`, preserving everything
+/// Set `[mcp_servers.<name>]` with `url`, auth headers, and the tab env header, preserving everything
 /// else in the document (format, comments, unrelated tables). Format-preserving via
 /// toml_edit: we mutate the existing `DocumentMut` in place.
 ///
@@ -400,7 +400,8 @@ fn is_maiterm_entry(entry: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-/// The minimal Codex prompt body. Short on purpose; reinforces the MCP `instructions`.
+/// Legacy startup prompt. Still requires initSession despite transport identity;
+/// replace alongside missing SessionStart priming (docs/codex-integration-review.md C2).
 #[allow(dead_code)]
 fn codex_prompt_body(mcp_name: &str) -> String {
     format!(

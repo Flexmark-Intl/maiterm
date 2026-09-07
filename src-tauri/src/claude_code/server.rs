@@ -32,7 +32,7 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// The file is co-owned by the `claude` CLI, which can clobber our entry; this
 /// heals any drift within one tick. Idempotent — only writes when it differs.
 const MCP_REASSERT_INTERVAL: Duration = Duration::from_secs(30);
-/// Dormancy reaper cadence. Codex/Gemini have no SessionEnd hook, so we poll each
+/// Dormancy reaper cadence. maiTerm does not register SessionEnd for Codex/Gemini, so we poll each
 /// non-Claude agent tab's PTY process tree this often and require this many
 /// consecutive "agent gone" observations before synthesizing a SessionEnd
 /// (debounces sysinfo refresh lag and the auto-resume exit→relaunch gap).
@@ -346,7 +346,7 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         log::debug!("MCP settings re-assert loop stopped");
     });
 
-    // Dormancy reaper — Codex/Gemini have no SessionEnd hook, so a session going
+    // Dormancy reaper — Codex/Gemini currently use process-based cleanup, so a session going
     // dormant is inferred from the agent process leaving the tab's PTY tree; we then
     // synthesize the SAME SessionEnd teardown Claude gets from its hook. Claude
     // sessions are never inspected (uses_pty_dormancy() == false), so this is a
@@ -2890,8 +2890,8 @@ enum HookPhase {
 
 /// Map a raw hook event name (+ body, for the Notification subtype) to a canonical
 /// `HookPhase`. `runtime` is accepted for future runtimes whose names diverge; the
-/// names handled here are shared by Claude and Codex (Codex-only events like
-/// PermissionRequest/PostCompact are added in a later stage). Unrecognized names
+/// names handled here include shared events and Codex's PermissionRequest/PostCompact.
+/// Interrupt remains unhandled (docs/codex-integration-review.md C5). Unrecognized names
 /// fall through to `Other` (logged, no state change) — matching the prior behavior.
 fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event: &Value) -> HookPhase {
     match name {
@@ -2909,17 +2909,16 @@ fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event:
                 .unwrap_or("")
                 .to_string(),
         },
-        // Codex expresses "the human is at an approval prompt" as a top-level
-        // PermissionRequest event (not a Notification subtype). Synthesize the
-        // permission_prompt subtype so it flows through the SAME Notification arm that
-        // sets WaitingPermission — the bridge then holds delivery identically.
+        // Currently treats Codex's approval request as human-waiting. Automatic review
+        // can resolve it without the human; correlated outcome handling is missing
+        // (docs/codex-integration-review.md C7). This maps into WaitingPermission.
         "PermissionRequest" => HookPhase::Notification {
             notification_type: "permission_prompt".to_string(),
         },
         // Codex emits PostCompact alongside PreCompact; both are compaction signals.
         "PostCompact" => HookPhase::Compact,
-        // NOTE: Codex has no SessionEnd hook — a Codex session going away is derived from
-        // dormancy (PTY exit / shell-prompt return), not a hook event.
+        // Codex's registrar does not yet install SessionEnd, although current Codex
+        // supports it. Its cleanup currently relies on PTY/process dormancy.
         _ => HookPhase::Other,
     }
 }
@@ -3407,7 +3406,10 @@ async fn hooks_handler(
                 .unwrap_or("")
                 .to_string();
 
-            // Clear current tool (back to thinking)
+            // Clear tool fields. Unlike the frontend, this does NOT return ordinary
+            // tools from WaitingPermission to Active; Codex auto-review exposes that
+            // mismatch in maiLink (review C7). Preserve parallel-approval ownership
+            // when fixing it rather than clearing every gate on any tool completion.
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();

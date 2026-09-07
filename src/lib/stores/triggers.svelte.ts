@@ -425,8 +425,9 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
  *  duplicate + branch) — but two tabs actually RUNNING one session is never intended: both
  *  agents would interleave into one transcript. Forking preserves the full conversation in
  *  both tabs and diverges them automatically; once the other claimant is closed (the reload
- *  flow), the sid is uncontested and plain resume is untouched. No-op when the runtime can't
- *  fork (codex/gemini), the command doesn't reference the session var, or it already forks. */
+ *  flow), the sid is uncontested and plain resume is untouched. No-op when maiTerm has no
+ *  fork flag for the runtime (codex/gemini), the command doesn't reference the session var,
+ *  or it already forks. Codex subcommand support remains outstanding; see the review doc. */
 async function forkResumeIfContested(tabId: string, runtime: AgentRuntime, cmd: string): Promise<string> {
   const varName = sessionIdVar(runtime);
   const flag = forkFlag(runtime);

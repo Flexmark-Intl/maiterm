@@ -25,8 +25,9 @@ baked_port="${2:-}"
 
 # tmux / sudo / su don't inherit the maiTerm env vars. Fall back to the ~/.aiterm file
 # the bridge wrote (export MAITERM_TAB_ID / MAITERM_PORT) so hooks still route correctly.
-# The file only exists when the account has a single bridged tab: on shared hosts every
-# tab shares one tunnel/port, so the fallback would misroute — those hooks fail closed.
+# Setup suppresses this file when this maiTerm sees multiple bridged tabs. Other
+# instances' tabs are invisible to that gate; cross-instance fallback remains unsafe
+# (docs/codex-integration-review.md C1).
 if [ -z "${MAITERM_TAB_ID:-}" ] || [ -z "${MAITERM_PORT:-}" ]; then
   [ -f "$HOME/.aiterm" ] && . "$HOME/.aiterm" 2>/dev/null || true
 fi
@@ -50,5 +51,6 @@ fi
 
 # A valid empty decision: don't continue (Stop), don't block (Pre*). maiTerm only
 # observes Codex; it never drives continuation via the hook return.
+# SessionStart still needs the server's prime=1 text forwarded as context (review C2).
 printf '%s' '{}'
 exit 0

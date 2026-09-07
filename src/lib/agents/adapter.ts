@@ -58,8 +58,8 @@ const codexAdapter: AgentAdapter = {
     // It has no AskUserQuestion-style active elicitation tool to guard against.
     return state.state === 'permission';
   },
-  // Codex has no launch-flag fork (its fork is an in-TUI /fork command), so the picker
-  // grays out "fork into new pane" for Codex; existing-tab bridging is the Codex path.
+  // Codex 0.153.4 has `codex fork SESSION_ID`, but maiTerm's fork/resume ownership
+  // flow is not wired for it yet. See docs/codex-integration-review.md C6.
   supportsFork: false,
   buildForkCommand() {
     return null;

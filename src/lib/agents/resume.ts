@@ -9,7 +9,7 @@ export function sessionIdVar(runtime: AgentRuntime): string {
   }
 }
 
-/** The launch flag that forks a session, or null if the runtime can't fork. */
+/** The implemented appendable fork flag. Codex uses a subcommand, not this flag model. */
 export function forkFlag(runtime: AgentRuntime): string | null {
   return runtime === 'claude' ? '--fork-session' : null;
 }

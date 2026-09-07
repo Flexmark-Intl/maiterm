@@ -1,9 +1,8 @@
-//! Agent-runtime abstraction (Stage 2 — core types).
+//! Shared agent-runtime identity and integration capabilities.
 //!
-//! The spine every multi-agent seam resolves through. Stage 2 is PURELY
-//! ADDITIVE: only Claude is wired in, and Claude must behave byte-identically.
-//! Codex/Gemini descriptor rows exist as inert-but-valid placeholders so later
-//! stages can fill them in without touching the type surface.
+//! Claude and Codex have on-disk registrars. These descriptors also drive runtime
+//! detection and process-based dormancy; capability fields describe maiTerm support,
+//! which may lag the CLI (see docs/codex-integration-review.md).
 
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +96,7 @@ pub struct RuntimeDescriptor {
     pub session_id_var: &'static str,
     /// Auth header used for the IDE/MCP connection.
     pub auth_header: &'static str,
-    /// Whether the runtime supports forking a session (Claude:true, Codex:false — LOCKED).
+    /// Whether maiTerm implements session forking for this runtime (currently Claude only).
     pub supports_fork: bool,
     /// Whether the runtime's CLI rewrites its own MCP config and so needs periodic
     /// re-assertion (Claude:true; Codex:false).
@@ -112,7 +111,7 @@ pub struct RuntimeDescriptor {
     pub tool_stale_timeout_ms: u64,
 }
 
-/// Claude Code — the only fully-wired runtime in Stage 2.
+/// Claude Code integration capabilities.
 pub static CLAUDE_DESC: RuntimeDescriptor = RuntimeDescriptor {
     runtime: AgentRuntime::Claude,
     display_name: "Claude Code",
@@ -129,7 +128,7 @@ pub static CLAUDE_DESC: RuntimeDescriptor = RuntimeDescriptor {
     tool_stale_timeout_ms: 15_000,
 };
 
-/// Codex — inert placeholder row. Valid but read by nothing yet.
+/// Codex integration capabilities; CLI fork support is not yet wired into maiTerm.
 #[allow(dead_code)]
 pub static CODEX_DESC: RuntimeDescriptor = RuntimeDescriptor {
     runtime: AgentRuntime::Codex,
@@ -147,7 +146,7 @@ pub static CODEX_DESC: RuntimeDescriptor = RuntimeDescriptor {
     tool_stale_timeout_ms: 15_000,
 };
 
-/// Gemini — inert placeholder row. Valid but read by nothing yet.
+/// Gemini runtime identity and dormancy; no on-disk registrar is installed yet.
 #[allow(dead_code)]
 pub static GEMINI_DESC: RuntimeDescriptor = RuntimeDescriptor {
     runtime: AgentRuntime::Gemini,

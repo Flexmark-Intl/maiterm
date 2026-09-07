@@ -6,15 +6,14 @@ use crate::state::{AgentRuntime, Preferences};
 use super::lockfile;
 
 pub trait Registrar: Send + Sync {
-    /// The runtime this registrar serves. Reserved for upcoming multi-runtime
-    /// dispatch (e.g. a CodexRegistrar); not yet consulted by the lifecycle.
+    /// The runtime this registrar serves, used by preference refresh dispatch.
     #[allow(dead_code)]
     fn runtime(&self) -> AgentRuntime;
     /// Whether this runtime's integration is enabled in preferences.
     fn enabled(&self, prefs: &Preferences) -> bool;
     /// Write all on-disk registration (config/MCP entry + hooks + skill) for the live server.
     fn install(&self, port: u16, auth: &str, workspace_folders: &[String], prefs: &Preferences);
-    /// Re-assert the MCP config + hooks if a co-owner rewrote them. No-op for runtimes that don't self-rewrite.
+    /// Re-assert config after drift. Currently implemented only by ClaudeRegistrar.
     fn reassert_if_drifted(&self, port: u16, auth: &str, prefs: &Preferences);
     /// Remove all on-disk registration (app exit).
     fn unregister(&self, port: u16, auth: &str);
@@ -48,8 +47,9 @@ impl Registrar for ClaudeRegistrar {
 }
 
 /// All known registrars (used for exit cleanup — unregister regardless of current pref).
-/// CodexRegistrar is listed but only installs when prefs.codex_ide is on (default off),
-/// so enabling it is fully opt-in; exit-cleanup unregisters both unconditionally.
+/// Codex installs when prefs.codex_ide is on (default true).
+/// Exit cleanup currently unregisters both unconditionally; Codex shared-hook ownership
+/// remains an open issue in docs/codex-integration-review.md.
 pub fn all_registrars() -> Vec<Box<dyn Registrar>> {
     vec![Box::new(ClaudeRegistrar), Box::new(super::codex::CodexRegistrar)]
 }
