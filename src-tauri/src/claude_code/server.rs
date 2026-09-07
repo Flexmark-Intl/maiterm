@@ -2434,6 +2434,18 @@ async fn process_message(
                                     // Preserved: /maiterm init on a session that already
                                     // finished a turn must not un-read that result.
                                     finished_a_turn: existing.as_ref().is_some_and(|e| e.finished_a_turn),
+                                    // Preserved for the same reason as finished_a_turn: a
+                                    // re-init mid-approval must not drop a live gate, or the
+                                    // tab reports Active while Codex still waits on a decision.
+                                    pending_approvals: existing
+                                        .as_ref()
+                                        .map(|e| e.pending_approvals.clone())
+                                        .unwrap_or_default(),
+                                    approval_seq: existing.as_ref().map_or(0, |e| e.approval_seq),
+                                    recent_tool_calls: existing
+                                        .as_ref()
+                                        .map(|e| e.recent_tool_calls.clone())
+                                        .unwrap_or_default(),
                                     model: existing.and_then(|e| e.model),
                                     connection_id: Some(connection_id.to_string()),
                                 },
@@ -2484,6 +2496,9 @@ async fn process_message(
                                     pending_question: None,
                                     pending_question_at: None,
                                     transcript_path: None,
+                                    pending_approvals: Vec::new(),
+                                    approval_seq: 0,
+                                    recent_tool_calls: Vec::new(),
                                     model: None,
                                     finished_a_turn: false,
                                     connection_id: Some(connection_id.to_string()),
@@ -2871,10 +2886,12 @@ async fn process_message(
 /// Canonical, runtime-neutral meaning of a raw hook event. Each runtime's wire
 /// event names normalize into one of these (see `normalize_hook_event`) so the
 /// handler logic is written once. Claude expresses "waiting for the human" as a
-/// `Notification` with a `notification_type` subfield; a non-Claude runtime that
-/// signals the same thing via a distinct top-level event (e.g. Codex's
-/// `PermissionRequest`) normalizes to the SAME `Notification` variant with the
-/// subtype synthesized, so it flows through the identical state/emit path.
+/// `Notification` with a `notification_type` subfield.
+///
+/// Codex's `PermissionRequest` deliberately does NOT fold into that variant. It looks like the
+/// same thing and isn't: Claude's Notification fires because the human is being asked, while
+/// Codex's hook fires before the approval flow has decided anything, so automatic review may
+/// settle it with nobody asked at all (review C7).
 #[derive(Debug, PartialEq)]
 enum HookPhase {
     SessionStart,
@@ -2884,6 +2901,9 @@ enum HookPhase {
     ToolPre,
     ToolPost,
     Notification { notification_type: String },
+    /// Codex only: an approval is being DECIDED. Deliberately not a `Notification` — see the
+    /// arm that handles it for why this is not "the human must act".
+    PermissionRequest,
     Compact,
     Other,
 }
@@ -2909,18 +2929,105 @@ fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event:
                 .unwrap_or("")
                 .to_string(),
         },
-        // Currently treats Codex's approval request as human-waiting. Automatic review
-        // can resolve it without the human; correlated outcome handling is missing
-        // (docs/codex-integration-review.md C7). This maps into WaitingPermission.
-        "PermissionRequest" => HookPhase::Notification {
-            notification_type: "permission_prompt".to_string(),
-        },
+        // NOT a permission Notification. Verified against codex-cli 0.153.4: this hook runs
+        // BEFORE the normal approval flow (the hook itself may allow/deny/decline), so automatic
+        // review can resolve it with no human involved. Squashing it into Claude's
+        // `permission_prompt` was what made maiLink offer an answerable card for an approval
+        // nobody was ever asked (review C7).
+        "PermissionRequest" => HookPhase::PermissionRequest,
         // Codex emits PostCompact alongside PreCompact; both are compaction signals.
         "PostCompact" => HookPhase::Compact,
         // Codex's registrar does not yet install SessionEnd, although current Codex
         // supports it. Its cleanup currently relies on PTY/process dormancy.
         _ => HookPhase::Other,
     }
+}
+
+/// Stable digest of a hook's `tool_input`, used to pair a `PermissionRequest` with the
+/// `PreToolUse` that ran just before it.
+///
+/// `description` is stripped because Codex attaches its human-readable approval reason to the
+/// `PermissionRequest` payload ONLY — leaving it in would make every pair mismatch and defeat
+/// the binding.
+fn tool_input_fingerprint(tool_input: Option<&Value>) -> String {
+    match tool_input {
+        Some(Value::Object(map)) => {
+            let mut m = map.clone();
+            m.remove("description");
+            Value::Object(m).to_string()
+        }
+        Some(v) => v.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Drop everything recorded for a turn that is no longer running.
+///
+/// A new `turn_id` is proof the previous turn finished, and an approval can't outlive its turn —
+/// which is how a DENIED request gets cleaned up, since Codex fires no hook at all on a denial.
+fn drop_other_turns(session: &mut crate::state::app_state::AgentSessionInfo, turn_id: &str) {
+    if turn_id.is_empty() {
+        return;
+    }
+    session.recent_tool_calls.retain(|c| c.turn_id == turn_id);
+    session.pending_approvals.retain(|a| a.turn_id == turn_id);
+}
+
+/// Forget every approval on the session and return whether any was held. Used where the turn is
+/// definitively over (Stop / SessionEnd / Interrupt / a new user prompt): nothing can still be
+/// awaiting a decision, whichever way each request went.
+fn clear_approvals(session: &mut crate::state::app_state::AgentSessionInfo) -> bool {
+    let had = !session.pending_approvals.is_empty();
+    session.pending_approvals.clear();
+    session.recent_tool_calls.clear();
+    had
+}
+
+/// Settle the session's state against its approval list: `WaitingPermission` exactly while an
+/// approval is outstanding.
+///
+/// Only ever moves a session OUT of `WaitingPermission`, and only for a runtime that files
+/// approvals here — Claude's permission Notification is a genuine "the human is being asked" and
+/// its path must keep its own state.
+fn settle_permission_state(session: &mut crate::state::app_state::AgentSessionInfo) {
+    use crate::state::app_state::AgentSessionState;
+    if session.pending_approvals.is_empty()
+        && matches!(session.state, AgentSessionState::WaitingPermission)
+        && session.runtime == crate::state::AgentRuntime::Codex
+    {
+        session.state = AgentSessionState::Active;
+    }
+}
+
+/// Resolve the approval that `PostToolUse` just reported completing, if any.
+///
+/// Exact `tool_use_id` first — that is the whole point of binding it at request time, and it is
+/// what keeps two parallel approvals independent. The fallback matches the OLDEST outstanding
+/// request for the same turn and tool, used only when the request arrived with no `PreToolUse` to
+/// bind against. A `PostToolUse` matching nothing clears nothing.
+fn resolve_approval(
+    session: &mut crate::state::app_state::AgentSessionInfo,
+    turn_id: &str,
+    tool_name: &str,
+    tool_use_id: Option<&str>,
+) -> bool {
+    if let Some(id) = tool_use_id.filter(|s| !s.is_empty()) {
+        if let Some(pos) = session
+            .pending_approvals
+            .iter()
+            .position(|a| a.tool_use_id.as_deref() == Some(id))
+        {
+            session.pending_approvals.remove(pos);
+            return true;
+        }
+    }
+    if let Some(pos) = session.pending_approvals.iter().position(|a| {
+        a.tool_use_id.is_none() && a.tool_name == tool_name && a.turn_id == turn_id
+    }) {
+        session.pending_approvals.remove(pos);
+        return true;
+    }
+    false
 }
 
 /// Handle POST /hooks — receives agent hook events (Claude today; other runtimes
@@ -3056,6 +3163,9 @@ async fn hooks_handler(
                         pending_question: None,
                         pending_question_at: None,
                         transcript_path: transcript_path.clone(),
+                        pending_approvals: Vec::new(),
+                        approval_seq: 0,
+                        recent_tool_calls: Vec::new(),
                         model: model.clone(),
                         finished_a_turn: had_result,
                         connection_id: None,
@@ -3252,10 +3362,9 @@ async fn hooks_handler(
                         "permission_prompt" => AgentSessionState::WaitingPermission,
                         _ => session.state,
                     };
-                    // Codex's PermissionRequest carries the gated tool's name + input on the
-                    // event itself (Claude's permission Notification does not — its tool context
-                    // came from the preceding PreToolUse). Refresh so the maiLink permission
-                    // card names the tool/command being approved even if hook ordering diverges.
+                    // Any runtime whose permission Notification carries the gated tool inline
+                    // (Claude's does not — its tool context came from the preceding PreToolUse).
+                    // Codex no longer reaches here; its PermissionRequest has its own arm.
                     if notification_type == "permission_prompt" {
                         if let Some(tn) = event
                             .get("tool_name")
@@ -3305,6 +3414,13 @@ async fn hooks_handler(
                     session.tool_detail = None;
                     session.pending_question = None;
                     session.pending_question_at = None;
+                    // The turn is over, so nothing is awaiting a decision — whichever way each
+                    // request went. This is also the backstop for a DENIED approval, which Codex
+                    // reports through no hook at all.
+                    if clear_approvals(session) {
+                        log::debug!("Codex hook: Stop dropped outstanding approvals for session={}",
+                            &session_id[..session_id.len().min(8)]);
+                    }
                 }
             }
 
@@ -3329,6 +3445,9 @@ async fn hooks_handler(
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.state = AgentSessionState::Active;
+                    // A new prompt means a new turn: anything still filed belongs to a turn that
+                    // has ended.
+                    clear_approvals(session);
                 }
             }
 
@@ -3337,6 +3456,97 @@ async fn hooks_handler(
                 "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
+            }));
+        }
+
+        // Codex's approval request. This says an approval is being DECIDED — by automatic review,
+        // by a hook, or by the human — NOT that the human was asked. The request is filed against
+        // the tool call it belongs to so a later PostToolUse can retire exactly that one; whether
+        // a human may ANSWER it is corroborated separately, against the live TUI.
+        HookPhase::PermissionRequest => {
+            let tab_id = {
+                let sessions = srv.state.agent_sessions.read();
+                sessions.get(&session_id).map(|s| s.tab_id.clone())
+            }
+            .or(tab_id_from_param);
+
+            let turn_id = event.get("turn_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let detail = event
+                .get("tool_input")
+                .and_then(crate::mailink::transcript::compact_tool_arg);
+            // Codex's own words for why it is asking, when it has them. Better card text than
+            // anything maiTerm can synthesize from the tool name.
+            let description = event
+                .get("tool_input")
+                .and_then(|v| v.get("description"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+
+            let mut seq = 0u64;
+            if !session_id.is_empty() {
+                use crate::state::app_state::{AgentSessionState, PendingApproval};
+                let mut sessions = srv.state.agent_sessions.write();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    drop_other_turns(session, &turn_id);
+                    let fp = tool_input_fingerprint(event.get("tool_input"));
+                    // Pair with the newest matching PreToolUse that no other outstanding approval
+                    // has already claimed, so two parallel calls to the same tool with the same
+                    // arguments still get one id each rather than both binding the same one.
+                    let taken: std::collections::HashSet<String> = session
+                        .pending_approvals
+                        .iter()
+                        .filter_map(|a| a.tool_use_id.clone())
+                        .collect();
+                    let bound = session
+                        .recent_tool_calls
+                        .iter()
+                        .rev()
+                        .find(|c| {
+                            c.turn_id == turn_id
+                                && c.tool_name == tool_name
+                                && c.fingerprint == fp
+                                && !taken.contains(&c.tool_use_id)
+                        })
+                        .map(|c| c.tool_use_id.clone());
+
+                    session.approval_seq += 1;
+                    seq = session.approval_seq;
+                    session.pending_approvals.push(PendingApproval {
+                        seq,
+                        turn_id: turn_id.clone(),
+                        tool_name: tool_name.clone(),
+                        tool_use_id: bound.clone(),
+                        detail: detail.clone(),
+                        description: description.clone(),
+                        requested_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0),
+                    });
+                    session.state = AgentSessionState::WaitingPermission;
+                    if !tool_name.is_empty() {
+                        session.tool_name = Some(tool_name.clone());
+                        session.tool_detail = detail.clone();
+                    }
+                    log::debug!(
+                        "Codex hook: PermissionRequest tool='{}' seq={} bound_tool_use_id={:?} turn={} session={}",
+                        tool_name, seq, bound, turn_id, &session_id[..session_id.len().min(8)]
+                    );
+                }
+            }
+
+            // Same wire event the previous Notification mapping produced, so desktop indicators
+            // and the frontend listeners are unchanged; `approval_seq` is additive.
+            emit_dual(&srv.app_handle, "agent-hook-notification", "claude-hook-notification", serde_json::json!({
+                "runtime": runtime_key,
+                "session_id": session_id,
+                "tab_id": tab_id,
+                "notification_type": "permission_prompt",
+                "tool_name": tool_name,
+                "approval_seq": seq,
+                "description": description,
             }));
         }
 
@@ -3358,7 +3568,31 @@ async fn hooks_handler(
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    session.state = AgentSessionState::Active;
+                    let turn_id = event.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
+                    drop_other_turns(session, turn_id);
+                    // A parallel tool starting must not report the session as unblocked while
+                    // another tool's approval is still outstanding.
+                    if session.pending_approvals.is_empty() {
+                        session.state = AgentSessionState::Active;
+                    }
+                    // Codex's PermissionRequest carries no tool_use_id; this is the record the
+                    // request that may follow gets bound to. Codex-only in practice (Claude's
+                    // payload has no turn_id, so nothing can pair against it).
+                    if let Some(id) = event.get("tool_use_id").and_then(|v| v.as_str()) {
+                        if !id.is_empty() && !turn_id.is_empty() {
+                            session.recent_tool_calls.push(crate::state::app_state::RecentToolCall {
+                                turn_id: turn_id.to_string(),
+                                tool_name: tool_name.clone(),
+                                tool_use_id: id.to_string(),
+                                fingerprint: tool_input_fingerprint(event.get("tool_input")),
+                            });
+                            let overflow = session
+                                .recent_tool_calls
+                                .len()
+                                .saturating_sub(crate::state::app_state::MAX_RECENT_TOOL_CALLS);
+                            session.recent_tool_calls.drain(..overflow);
+                        }
+                    }
                     session.tool_name = if tool_name.is_empty() { None } else { Some(tool_name.clone()) };
                     // Compact primary-arg label (e.g. the Bash command) so a permission prompt
                     // for this tool can show WHAT is being approved (maiLink card).
@@ -3406,14 +3640,22 @@ async fn hooks_handler(
                 .unwrap_or("")
                 .to_string();
 
-            // Clear tool fields. Unlike the frontend, this does NOT return ordinary
-            // tools from WaitingPermission to Active; Codex auto-review exposes that
-            // mismatch in maiLink (review C7). Preserve parallel-approval ownership
-            // when fixing it rather than clearing every gate on any tool completion.
+            // Clear tool fields, and retire the approval THIS tool call was gated on — matched by
+            // its own tool_use_id, so a gate held for a parallel tool survives untouched. The
+            // session leaves WaitingPermission only once nothing is outstanding.
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
+                    let turn_id = event.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_use_id = event.get("tool_use_id").and_then(|v| v.as_str());
+                    if resolve_approval(session, turn_id, &tool_name, tool_use_id) {
+                        log::debug!(
+                            "Codex hook: PostToolUse retired approval for tool='{}' tool_use_id={:?} ({} still open)",
+                            tool_name, tool_use_id, session.pending_approvals.len()
+                        );
+                    }
+                    settle_permission_state(session);
                     session.tool_name = None;
                     session.tool_detail = None;
                     // AskUserQuestion completing means the human answered → no open question.
@@ -3534,6 +3776,174 @@ mod tests {
         normalize_hook_event(AgentRuntime::Claude, name, &ev)
     }
 
+    // ─── Codex approval correlation (review C7) ──────────────────────────────
+    //
+    // Ground truth for these tests was captured from codex-cli 0.153.4 with logging hooks on an
+    // isolated CODEX_HOME. The observed order for one gated Bash call:
+    //   SessionStart → UserPromptSubmit → PreToolUse(tool_use_id=exec-9244…)
+    //                → PermissionRequest(NO tool_use_id) → PostToolUse(exec-9244…) → Stop
+    // The approval was settled by automatic review; no human was ever asked.
+
+    fn approval_session() -> crate::state::app_state::AgentSessionInfo {
+        use crate::state::app_state::{AgentSessionInfo, AgentSessionState};
+        AgentSessionInfo {
+            runtime: AgentRuntime::Codex,
+            tab_id: "tab-1".into(),
+            cwd: None,
+            state: AgentSessionState::Active,
+            tool_name: None,
+            tool_detail: None,
+            pending_question: None,
+            pending_question_at: None,
+            pending_approvals: Vec::new(),
+            approval_seq: 0,
+            recent_tool_calls: Vec::new(),
+            model: None,
+            transcript_path: None,
+            finished_a_turn: false,
+            connection_id: None,
+        }
+    }
+
+    fn pre_tool(turn: &str, tool: &str, id: &str, input: serde_json::Value) -> crate::state::app_state::RecentToolCall {
+        crate::state::app_state::RecentToolCall {
+            turn_id: turn.into(),
+            tool_name: tool.into(),
+            tool_use_id: id.into(),
+            fingerprint: super::tool_input_fingerprint(Some(&input)),
+        }
+    }
+
+    fn approval(seq: u64, turn: &str, tool: &str, id: Option<&str>) -> crate::state::app_state::PendingApproval {
+        crate::state::app_state::PendingApproval {
+            seq,
+            turn_id: turn.into(),
+            tool_name: tool.into(),
+            tool_use_id: id.map(String::from),
+            detail: None,
+            description: None,
+            requested_at: 0,
+        }
+    }
+
+    #[test]
+    fn codex_permission_request_is_not_claudes_permission_notification() {
+        // The two are NOT interchangeable: Claude's Notification means the human is being asked,
+        // Codex's hook fires before anything has decided. Folding them together is what made
+        // maiLink offer an answerable card for an auto-resolved approval.
+        assert_eq!(norm("PermissionRequest", serde_json::json!({})), HookPhase::PermissionRequest);
+        assert_eq!(
+            norm("Notification", serde_json::json!({ "notification_type": "permission_prompt" })),
+            HookPhase::Notification { notification_type: "permission_prompt".into() }
+        );
+    }
+
+    #[test]
+    fn fingerprint_ignores_the_description_codex_adds_to_the_request() {
+        // PreToolUse sends {command}; the PermissionRequest for the SAME call sends
+        // {command, description}. Without stripping it nothing would ever pair.
+        let pre = serde_json::json!({ "command": "printf 'hello\\n' > probe.txt" });
+        let req = serde_json::json!({
+            "command": "printf 'hello\\n' > probe.txt",
+            "description": "May I create the requested probe.txt file?"
+        });
+        assert_eq!(super::tool_input_fingerprint(Some(&pre)), super::tool_input_fingerprint(Some(&req)));
+        let other = serde_json::json!({ "command": "rm -rf ./dist" });
+        assert_ne!(super::tool_input_fingerprint(Some(&pre)), super::tool_input_fingerprint(Some(&other)));
+    }
+
+    #[test]
+    fn post_tool_use_retires_only_the_approval_it_belongs_to() {
+        // Two parallel gated calls. The one that completes must not clear the other's gate —
+        // the explicit warning in the review.
+        let mut s = approval_session();
+        s.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        s.pending_approvals.push(approval(2, "turn-1", "apply_patch", Some("exec-bbb")));
+
+        assert!(super::resolve_approval(&mut s, "turn-1", "Bash", Some("exec-aaa")));
+        assert_eq!(s.pending_approvals.len(), 1);
+        assert_eq!(s.pending_approvals[0].seq, 2);
+
+        // An unrelated completion clears nothing.
+        assert!(!super::resolve_approval(&mut s, "turn-1", "Read", Some("exec-zzz")));
+        assert_eq!(s.pending_approvals.len(), 1);
+    }
+
+    #[test]
+    fn unbound_approval_falls_back_to_turn_and_tool() {
+        // A PermissionRequest with no PreToolUse to bind against still has to be retirable.
+        let mut s = approval_session();
+        s.pending_approvals.push(approval(1, "turn-1", "Bash", None));
+        assert!(!super::resolve_approval(&mut s, "turn-2", "Bash", Some("exec-aaa")), "wrong turn");
+        assert!(!super::resolve_approval(&mut s, "turn-1", "Read", Some("exec-aaa")), "wrong tool");
+        assert!(super::resolve_approval(&mut s, "turn-1", "Bash", Some("exec-aaa")));
+        assert!(s.pending_approvals.is_empty());
+    }
+
+    #[test]
+    fn a_bound_approval_is_never_retired_by_the_fallback() {
+        // The fallback is only for approvals that never got an id. If it also matched bound ones,
+        // any same-tool completion would clear a parallel gate — the bug this design avoids.
+        let mut s = approval_session();
+        s.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        assert!(!super::resolve_approval(&mut s, "turn-1", "Bash", Some("exec-other")));
+        assert_eq!(s.pending_approvals.len(), 1);
+    }
+
+    #[test]
+    fn a_new_turn_drops_the_previous_turns_approvals() {
+        // Codex fires NO hook when a request is denied, so a turn boundary is the backstop.
+        let mut s = approval_session();
+        s.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        s.recent_tool_calls.push(pre_tool("turn-1", "Bash", "exec-aaa", serde_json::json!({ "command": "ls" })));
+        super::drop_other_turns(&mut s, "turn-2");
+        assert!(s.pending_approvals.is_empty());
+        assert!(s.recent_tool_calls.is_empty());
+
+        // An empty turn id is "unknown", not "a different turn" — it must drop nothing.
+        let mut s2 = approval_session();
+        s2.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        super::drop_other_turns(&mut s2, "");
+        assert_eq!(s2.pending_approvals.len(), 1);
+    }
+
+    #[test]
+    fn state_leaves_waiting_permission_only_when_nothing_is_outstanding() {
+        use crate::state::app_state::AgentSessionState;
+        let mut s = approval_session();
+        s.state = AgentSessionState::WaitingPermission;
+        s.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        super::settle_permission_state(&mut s);
+        assert!(matches!(s.state, AgentSessionState::WaitingPermission), "gate still held");
+
+        s.pending_approvals.clear();
+        super::settle_permission_state(&mut s);
+        assert!(matches!(s.state, AgentSessionState::Active));
+    }
+
+    #[test]
+    fn claudes_permission_state_is_never_settled_by_this_path() {
+        // Claude files no approvals here, and its Notification genuinely means the human is being
+        // asked. Draining an empty list must not silently clear that.
+        use crate::state::app_state::AgentSessionState;
+        let mut s = approval_session();
+        s.runtime = AgentRuntime::Claude;
+        s.state = AgentSessionState::WaitingPermission;
+        super::settle_permission_state(&mut s);
+        assert!(matches!(s.state, AgentSessionState::WaitingPermission));
+    }
+
+    #[test]
+    fn stop_clears_everything_outstanding() {
+        let mut s = approval_session();
+        s.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        s.recent_tool_calls.push(pre_tool("turn-1", "Bash", "exec-aaa", serde_json::json!({ "command": "ls" })));
+        assert!(super::clear_approvals(&mut s));
+        assert!(s.pending_approvals.is_empty());
+        assert!(s.recent_tool_calls.is_empty());
+        assert!(!super::clear_approvals(&mut s), "reports whether anything was actually held");
+    }
+
     #[test]
     fn pending_claim_matches_this_tabs_resume_sid_never_a_siblings() {
         use super::claim_pending_index;
@@ -3600,13 +4010,12 @@ mod tests {
     #[test]
     fn codex_events_map_to_canonical_phases() {
         let nil = serde_json::json!({});
-        // Codex's top-level PermissionRequest converges with Claude's permission_prompt:
-        // both become the Notification phase carrying "permission_prompt" (the only path
-        // that sets WaitingPermission), so the bridge holds delivery identically.
-        assert_eq!(
-            norm("PermissionRequest", nil.clone()),
-            HookPhase::Notification { notification_type: "permission_prompt".to_string() }
-        );
+        // Codex's PermissionRequest gets its OWN phase. It used to converge with Claude's
+        // permission_prompt Notification, which read the hook as "the human is being asked" when
+        // it actually fires before the approval flow decides anything (review C7). Its arm still
+        // sets WaitingPermission and emits the same wire event, so the bridge and the delivery
+        // holds are unchanged; what differs is that the request is now filed and retired.
+        assert_eq!(norm("PermissionRequest", nil.clone()), HookPhase::PermissionRequest);
         // Codex's PostCompact joins PreCompact as a compaction signal.
         assert_eq!(norm("PostCompact", nil.clone()), HookPhase::Compact);
         // Codex shares these names with Claude verbatim.

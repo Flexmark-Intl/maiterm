@@ -85,6 +85,43 @@ pub struct RemoteMirrorEntry {
 }
 
 /// Tracked Claude Code session (registered via hooks).
+/// One tool call seen on a `PreToolUse` hook, kept only long enough to bind the
+/// `PermissionRequest` that may follow it.
+///
+/// Codex's `PermissionRequest` payload carries NO `tool_use_id` (verified on the wire against
+/// codex-cli 0.153.4), but the `PreToolUse` immediately before it does, and `PostToolUse` repeats
+/// that exact id. Holding the pre-call lets an approval be bound to a real tool-call id, which is
+/// what makes resolution correlated instead of "clear everything on any tool completion".
+#[derive(Clone)]
+pub struct RecentToolCall {
+    pub turn_id: String,
+    pub tool_name: String,
+    pub tool_use_id: String,
+    /// Stable digest of `tool_input`, so two parallel calls to the same tool don't collide.
+    pub fingerprint: String,
+}
+
+/// An approval Codex is deciding on. NOT proof a human was asked: the `PermissionRequest` hook
+/// runs *before* the normal approval flow, so automatic review ("guardian") may resolve it with
+/// no human involvement at all. Respondability is corroborated separately.
+#[derive(Clone)]
+pub struct PendingApproval {
+    /// Per-session monotonic id. Forms maiLink's `p_<tab>_<seq>` prompt id, so a card for a
+    /// resolved approval can never answer a newer one.
+    pub seq: u64,
+    pub turn_id: String,
+    pub tool_name: String,
+    /// Bound from the matching `RecentToolCall` when one is found; `None` when the request
+    /// arrived with no preceding `PreToolUse` we could match (resolution then falls back to
+    /// the oldest same-turn, same-tool entry).
+    pub tool_use_id: Option<String>,
+    /// Compact primary argument of the gated call, e.g. `rm -rf ./dist`.
+    pub detail: Option<String>,
+    /// `tool_input.description` — Codex's own human-readable reason for the request, when present.
+    pub description: Option<String>,
+    pub requested_at: i64,
+}
+
 pub struct AgentSessionInfo {
     /// Which agent runtime owns this session; detected at initSession (Stage 3 sets Claude everywhere as a placeholder).
     #[allow(dead_code)]
@@ -132,7 +169,24 @@ pub struct AgentSessionInfo {
     /// Used to recover affinity after SSE reconnects: if a session's
     /// connection_id is no longer in connection_tabs, it's orphaned.
     pub connection_id: Option<String>,
+    /// Approvals Codex is currently deciding, oldest first. Empty for Claude, which has no
+    /// `PermissionRequest` hook — its permission Notification means the human really is being
+    /// asked, and that path is untouched.
+    ///
+    /// `WaitingPermission` is entered when this becomes non-empty and left when it drains, so a
+    /// gate held for one tool is never cleared by an unrelated tool finishing.
+    pub pending_approvals: Vec<PendingApproval>,
+    /// Mints `PendingApproval::seq`. Monotonic for the life of the session row.
+    pub approval_seq: u64,
+    /// `PreToolUse` calls seen in the active turn, newest last, bounded by
+    /// `MAX_RECENT_TOOL_CALLS`. Dropped wholesale when the turn changes.
+    pub recent_tool_calls: Vec<RecentToolCall>,
 }
+
+/// How many `PreToolUse` records to retain per session for approval binding. Codex runs tools in
+/// parallel, so this must exceed the realistic parallel fan-out; it is bounded only to stop a long
+/// turn growing the row without limit.
+pub const MAX_RECENT_TOOL_CALLS: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
