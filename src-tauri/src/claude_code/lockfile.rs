@@ -997,6 +997,41 @@ fn remove_aiterm_skill() {
     }
 }
 
+/// Is another maiTerm instance running right now?
+///
+/// Reads the same `~/.claude/ide/*.lock` registry as the Claude path, skipping our own port
+/// and anything not live. Codex's on-disk artifacts (the shim, the hooks.json entries) are
+/// SHARED — dev and prod deliberately write one identical definition — so quitting one instance
+/// must not strip the hooks out from under the other (review C1).
+///
+/// A `pid: 0` lockfile is a peer's reverse tunnel, not a local instance, and is excluded: the
+/// hooks it cares about are on ITS machine, not this one.
+///
+/// Reports false when no lockfile exists at all, which is also what a user with
+/// `claude_code_ide` off sees. That errs toward cleaning up, and the sibling's 30s
+/// `reassert_if_drifted` puts the shared hooks back.
+pub fn another_maiterm_is_live(own_port: u16) -> bool {
+    let Some(dir) = ide_lock_dir() else { return false };
+    let Ok(entries) = fs::read_dir(&dir) else { return false };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lock") {
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else { continue };
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&contents) else { continue };
+        let pid = data.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let port = data.get("serverPort").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        if pid == 0 || port == 0 || port == own_port {
+            continue;
+        }
+        if lockfile_is_live(pid, port) {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn cleanup_stale_lockfiles() {
     let Some(dir) = ide_lock_dir() else { return };
     let Ok(entries) = fs::read_dir(&dir) else { return };

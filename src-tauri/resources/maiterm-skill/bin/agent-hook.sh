@@ -7,13 +7,22 @@
 # event as JSON on stdin.
 #
 # Args / env (set by maiTerm at install + PTY spawn):
-#   $1            the MCP auth token (embedded in ~/.codex/hooks.json by CodexRegistrar)
-#   $2            (optional) the MCP server port baked at install time. Used for the
+#   $1            (optional) the MCP server port baked at install time. Used for the
 #                 SSH-remote install, where the reverse-tunnel port is fixed for the
 #                 bridge and the live shell may lack $MAITERM_PORT (tmux/sudo/su). Local
 #                 installs omit it and rely on the per-process $MAITERM_PORT env var.
 #   $MAITERM_PORT  the maiTerm MCP server port (live, per-process)
+#   $MAITERM_AUTH  the MCP auth token (live, per-process)
 #   $MAITERM_TAB_ID  the maiTerm tab this Codex session runs in
+#
+# NOTHING SECRET OR PER-LAUNCH IS ON THE COMMAND LINE, and that is the point. Codex records
+# hook trust against the exact command string, so the token that used to be baked here made a
+# NEW, untrusted definition on every maiTerm launch: the JSON merge kept succeeding while the
+# hooks silently stopped running until the user re-reviewed them in /hooks (review C1). The
+# command is now identical for every instance and every restart — which also means dev and
+# prod share one definition safely, since the port and token that distinguish them are read
+# per-process. A remote install still bakes the tunnel port: it is fixed for the life of the
+# install and carries no secret.
 #
 # The ?runtime=codex tag tells maiTerm's /hooks handler to normalize Codex's event
 # names/payload; ?tab_id routes the event to the right frontend tab. Output is a bare
@@ -27,21 +36,21 @@
 # instructions reach an agent that never calls initSession — including a resumed one,
 # which takes no turn until its human types.
 
-token="$1"
-baked_port="${2:-}"
+baked_port="${1:-}"
 
 # tmux / sudo / su don't inherit the maiTerm env vars. Fall back to the ~/.aiterm file
-# the bridge wrote (export MAITERM_TAB_ID / MAITERM_PORT) so hooks still route correctly.
-# Setup suppresses this file when this maiTerm sees multiple bridged tabs. Other
-# instances' tabs are invisible to that gate; cross-instance fallback remains unsafe
-# (docs/codex-integration-review.md C1).
-if [ -z "${MAITERM_TAB_ID:-}" ] || [ -z "${MAITERM_PORT:-}" ]; then
+# the bridge wrote (export MAITERM_TAB_ID / MAITERM_PORT / MAITERM_AUTH) so hooks still
+# route and authenticate correctly. Setup suppresses this file when this maiTerm sees
+# multiple bridged tabs. Other instances' tabs are invisible to that gate; cross-instance
+# fallback remains unsafe (docs/codex-integration-review.md C1).
+if [ -z "${MAITERM_TAB_ID:-}" ] || [ -z "${MAITERM_PORT:-}" ] || [ -z "${MAITERM_AUTH:-}" ]; then
   [ -f "$HOME/.aiterm" ] && . "$HOME/.aiterm" 2>/dev/null || true
 fi
 
 # Prefer the install-baked port when present (SSH-remote: the tunnel port is fixed and
 # authoritative regardless of the live shell's env); otherwise use the live env port.
 port="${baked_port:-${MAITERM_PORT:-}}"
+token="${MAITERM_AUTH:-}"
 tab="${MAITERM_TAB_ID:-}"
 
 # Read the event payload from stdin regardless, so the pipe never blocks Codex.
@@ -56,7 +65,9 @@ case "$payload" in
 esac
 
 reply=""
-if [ -n "$port" ]; then
+# No token means every request would 401. Skip the call rather than making a pointless
+# one, and still answer with a valid decision below.
+if [ -n "$port" ] && [ -n "$token" ]; then
   if [ "$want_reply" = 1 ]; then
     # -m 3 leaves headroom inside the 5s timeout SessionStart is registered with.
     reply="$(curl -fsS -m 3 \

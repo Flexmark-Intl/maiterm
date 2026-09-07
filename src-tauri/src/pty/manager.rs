@@ -174,6 +174,14 @@ pub fn spawn_pty(
         if let Some(port) = state.mcp_port.read().as_ref() {
             cmd.env("MAITERM_PORT", port.to_string());
         }
+        // And the auth token, so a hook COMMAND can authenticate without the token being
+        // written into its definition. Codex records trust against the exact hook command, so
+        // a token baked there meant a new definition on every launch and a fresh trust prompt
+        // the user never saw — hooks silently stopped running (review C1). SSH tabs already
+        // export all three via buildSshCommand / ~/.aiterm; this is the local equivalent.
+        if let Some(auth) = state.mcp_auth.read().as_ref() {
+            cmd.env("MAITERM_AUTH", auth);
+        }
 
         // Most shells use -l for login, fish uses --login
         match shell_name {

@@ -11,7 +11,46 @@ trace, which also settles facts C5 depends on. C1 and C2 remain the high-priorit
 
 ## Findings and acceptance criteria
 
-### C1. Shared configuration and hook trust (high priority)
+### C1. Shared configuration and hook trust — HOOKS FIXED 2026-09-07, MCP entry cannot be shared
+
+**Verified first, because the review said to.** Codex does **not** expand `${VAR}` in an MCP
+`url`. Probed with an isolated `CODEX_HOME` against a live maiTerm server: a literal correct
+port reports `Auth: Unsupported` (it connected; the column is about MCP auth negotiation, and a
+deliberately wrong token reports the same), while a literal dead port reports `Auth: Unknown` —
+and both `${MAITERM_PORT}` entries report `Unknown`, i.e. no connection. So the Claude solution,
+where every instance writes identical bytes because the URL names no port, **is not available
+for Codex**. `env_http_headers` working for `x-maiterm-tab` never implied URL expansion, exactly
+as the review warned.
+
+**Fixed: the hook definition.** This was the part that actually broke things. The auth token was
+baked into the hook command, so every maiTerm launch produced a new definition, Codex marked it
+untrusted, and the hooks silently stopped running while the JSON merge kept reporting success.
+The command is now `bash "<shim>"` — no token, and locally no port — with the shim reading
+`$MAITERM_AUTH` / `$MAITERM_PORT` / `$MAITERM_TAB_ID` from the process, falling back to
+`~/.aiterm`. `MAITERM_AUTH` is now exported into local PTYs alongside the other two. Because the
+definition is identical for every instance and every launch, dev and prod share one trusted
+entry rather than fighting over it, and trust survives restarts. The remote form still bakes the
+tunnel port as `$1`: fixed for the life of the install, and not a secret.
+
+`reassert_if_drifted` is implemented now that re-asserting cannot invalidate trust — the merge is
+idempotent, so an unchanged file is compared and not written. `unregister` finally uses its
+`port` argument: it leaves the shared hooks and shim alone while `another_maiterm_is_live(port)`,
+so quitting one instance no longer strips them from under the other.
+
+**Not fixed, and not fixable this way: the MCP entry.** The port must be baked, so
+`~/.codex/config.toml` stays per-instance. Dev and prod do not contend (distinct server names),
+but two machines bridging one remote account still overwrite each other's
+`[mcp_servers.maiterm]`. Options left: a per-instance `CODEX_HOME` (relocates the whole Codex
+home — the review says not to default to it), or upstream support for an env-var port.
+
+**Known regression, accepted:** on a remote where the Codex bridge is enabled but the Claude one
+is not, nothing writes `~/.aiterm`, so an env-less shell (tmux, `su`) has no `$MAITERM_AUTH` and
+its hooks no longer authenticate. They used to, via the baked token. A stable trusted definition
+is worth more than that case, and `claude_code_ide_ssh` is on by default.
+
+Original finding follows.
+
+### C1 (original text)
 
 `CodexRegistrar` uses distinct MCP names for dev/prod, but one `agent-hook.sh`, one
 prompt, and one matching hook group per event. Installation replaces the group's

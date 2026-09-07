@@ -7,8 +7,10 @@
 //!     with valid existing JSON (malformed-file preservation remains outstanding).
 //!   - `~/.codex/prompts/maiterm.md` — a tiny prompt reinforcing the initSession call.
 //!
-//! `reassert_if_drifted` is currently a no-op; another maiTerm can still replace
-//! the shared hooks. See docs/codex-integration-review.md for outstanding fixes.
+//! The hook COMMAND carries no token and no port locally, so every instance and every launch
+//! writes the identical definition — which is what lets Codex's hook trust survive a restart,
+//! and lets dev and prod share one entry. `reassert_if_drifted` repairs that definition every
+//! 30s; unregister leaves it alone while a sibling instance is still live.
 //!
 //! Wired into all_registrars(); enabled by prefs.codex_ide (default true).
 
@@ -116,7 +118,7 @@ impl Registrar for CodexRegistrar {
                 Ok(existing) => {
                     // Local install: no baked port — the shim uses the per-process
                     // $MAITERM_PORT (each tab spawned by the owning maiTerm instance).
-                    let merged = build_hooks_json(existing, &shim_str, auth, None);
+                    let merged = build_hooks_json(existing, &shim_str, None);
                     match serde_json::to_string_pretty(&merged) {
                         Ok(json) => {
                             if let Err(e) = atomic_write(&hooks_path, &json) {
@@ -155,10 +157,65 @@ impl Registrar for CodexRegistrar {
         );
     }
 
-    /// No drift repair yet; shared-instance ownership must be resolved before adding it.
-    fn reassert_if_drifted(&self, _port: u16, _auth: &str, _prefs: &Preferences) {}
+    /// Put the shared hooks back if anything moved them.
+    ///
+    /// Safe to run forever now that the definition carries no token: the merge is idempotent,
+    /// so an unchanged file compares equal and nothing is written, and a rewrite produces the
+    /// exact bytes Codex already trusts. It was a no-op while the command embedded a per-launch
+    /// token, because re-asserting would have invalidated trust on every pass (review C1).
+    ///
+    /// This is also what makes shared cleanup safe: an instance that quits and strips the
+    /// hooks is repaired here within one sweep.
+    fn reassert_if_drifted(&self, _port: u16, _auth: &str, prefs: &Preferences) {
+        if !prefs.codex_hooks {
+            return;
+        }
+        let Some(home) = dirs::home_dir() else { return };
+        let codex_dir = home.join(".codex");
+        let shim_path = codex_dir.join("hooks").join("agent-hook.sh");
+        let hooks_path = codex_dir.join("hooks.json");
 
-    fn unregister(&self, _port: u16, _auth: &str) {
+        // The shim itself can go missing (a user cleaning ~/.codex, an unregister from a
+        // sibling), and hooks pointing at an absent file fail on every event.
+        let shim_current = fs::read_to_string(&shim_path).is_ok_and(|s| s == AGENT_HOOK_SHIM);
+        if !shim_current {
+            if let Some(parent) = shim_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = write_executable(&shim_path, AGENT_HOOK_SHIM) {
+                log::warn!("Codex reassert: failed to restore shim {:?}: {}", shim_path, e);
+                return;
+            }
+            log::info!("Codex reassert: restored {:?}", shim_path);
+        }
+
+        let existing = match read_json(&hooks_path) {
+            Ok(v) => v,
+            // Unparseable: the same rule as install — never repair by clobbering.
+            Err(e) => {
+                log::error!("Codex reassert: not touching hooks — {}", e);
+                return;
+            }
+        };
+        let shim_str = shim_path.to_string_lossy().to_string();
+        let merged = build_hooks_json(existing.clone(), &shim_str, None);
+        // Idempotent merge ⇒ equal means nothing drifted. No write, no trust churn.
+        if existing.as_ref() == Some(&merged) {
+            return;
+        }
+        match serde_json::to_string_pretty(&merged) {
+            Ok(json) => {
+                if let Err(e) = atomic_write(&hooks_path, &json) {
+                    log::warn!("Codex reassert: failed to write {:?}: {}", hooks_path, e);
+                } else {
+                    log::info!("Codex reassert: repaired maiTerm hooks in {:?}", hooks_path);
+                }
+            }
+            Err(e) => log::warn!("Codex reassert: failed to serialize hooks.json: {}", e),
+        }
+    }
+
+    fn unregister(&self, port: u16, _auth: &str) {
         let Some(home) = dirs::home_dir() else {
             log::warn!("Codex unregister: could not determine home directory");
             return;
@@ -181,11 +238,19 @@ impl Registrar for CodexRegistrar {
             }
         }
 
-        // 2 + 3. Our hooks and the shim they point at.
-        remove_our_hooks(
-            &codex_dir.join("hooks.json"),
-            &codex_dir.join("hooks").join("agent-hook.sh"),
-        );
+        // 2 + 3. Our hooks and the shim they point at — but ONLY if no sibling maiTerm is
+        // still running. The hook definition is deliberately identical for every instance, so
+        // dev and prod share one trusted entry; tearing it out on quit would leave the survivor
+        // with hooks that point at a deleted shim and fail on every event (review C1). This is
+        // the `port` argument unregister used to ignore.
+        if super::lockfile::another_maiterm_is_live(port) {
+            log::info!("Codex unregister: another maiTerm is live — leaving the shared hooks and shim in place");
+        } else {
+            remove_our_hooks(
+                &codex_dir.join("hooks.json"),
+                &codex_dir.join("hooks").join("agent-hook.sh"),
+            );
+        }
 
         let prompt_path = codex_dir.join("prompts").join("maiterm.md");
         if prompt_path.exists() {
@@ -345,10 +410,10 @@ fn maiterm_hook_entry(command: &str, matcher: Option<&str>, timeout_secs: u64) -
 /// is fixed for the bridge and authoritative even when the live shell lacks $MAITERM_PORT.
 /// Local installs pass `None` so the shim uses the per-process env port (unchanged bytes).
 #[allow(dead_code)]
-fn hook_command(shim_path: &str, auth: &str, port: Option<u16>) -> String {
+fn hook_command(shim_path: &str, port: Option<u16>) -> String {
     match port {
-        Some(p) => format!("bash \"{}\" \"{}\" \"{}\"", shim_path, auth, p),
-        None => format!("bash \"{}\" \"{}\"", shim_path, auth),
+        Some(p) => format!("bash \"{}\" \"{}\"", shim_path, p),
+        None => format!("bash \"{}\"", shim_path),
     }
 }
 
@@ -368,7 +433,6 @@ fn hook_command(shim_path: &str, auth: &str, port: Option<u16>) -> String {
 fn build_hooks_json(
     existing: Option<serde_json::Value>,
     shim_path: &str,
-    auth: &str,
     port: Option<u16>,
 ) -> serde_json::Value {
     // Start from the existing doc (preserve other top-level keys) or a fresh object.
@@ -377,7 +441,7 @@ fn build_hooks_json(
         _ => serde_json::json!({}),
     };
 
-    let command = hook_command(shim_path, auth, port);
+    let command = hook_command(shim_path, port);
 
     // Ensure root.hooks is an object.
     let root_obj = root.as_object_mut().expect("root is an object");
@@ -505,7 +569,7 @@ pub fn render_codex_remote_artifacts(remote_port: u16, auth: &str) -> (String, S
 
     // Bake the tunnel port as the shim's $2 so the remote hook routes correctly even
     // when the live shell (tmux/sudo) lacks $MAITERM_PORT.
-    let hooks = build_hooks_json(None, REMOTE_SHIM_PLACEHOLDER, auth, Some(remote_port));
+    let hooks = build_hooks_json(None, REMOTE_SHIM_PLACEHOLDER, Some(remote_port));
     let hooks_json = serde_json::to_string(&hooks).unwrap_or_else(|_| "{}".to_string());
 
     let prompt = codex_prompt_body(name);
@@ -583,7 +647,7 @@ mod tests {
     fn build_hooks_json_from_empty_produces_every_registered_event() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
         let auth = "TOKEN_ABC";
-        let v = build_hooks_json(None, shim, auth, None);
+        let v = build_hooks_json(None, shim, None);
 
         let hooks = v.get("hooks").and_then(|h| h.as_object()).unwrap();
         assert_eq!(hooks.len(), CODEX_HOOK_EVENTS.len(), "every registered event present");
@@ -597,7 +661,9 @@ mod tests {
             let group = &arr[0];
             let cmd = group["hooks"][0]["command"].as_str().unwrap();
             assert!(cmd.contains("agent-hook.sh"), "{} command has shim", event);
-            assert!(cmd.contains(auth), "{} command has auth token", event);
+            // The token is deliberately NOT here: it is read from $MAITERM_AUTH at run time
+            // so the definition stays byte-identical across launches and stays trusted.
+            assert!(!cmd.contains(auth), "{} command must not carry the auth token", event);
             assert_eq!(group["hooks"][0]["type"].as_str(), Some("command"));
             // Codex caps SessionEnd and Interrupt at 3s (default 1); everything else takes
             // our general 5s. Registering those two at 5 would be rejected.
@@ -614,12 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn build_hooks_json_is_idempotent_and_updates_token() {
+    fn build_hooks_json_is_idempotent() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
-        let first = build_hooks_json(None, shim, "OLD_TOKEN", None);
+        let first = build_hooks_json(None, shim, None);
 
-        // Re-run feeding its own output back in, with a NEW token.
-        let second = build_hooks_json(Some(first.clone()), shim, "NEW_TOKEN", None);
+        // Re-run feeding its own output back in: the result must be unchanged, which is what
+        // lets the 30s reassert run forever without ever invalidating hook trust.
+        let second = build_hooks_json(Some(first.clone()), shim, None);
+        assert_eq!(first, second, "re-running changes nothing");
 
         let hooks = second.get("hooks").and_then(|h| h.as_object()).unwrap();
         assert_eq!(hooks.len(), CODEX_HOOK_EVENTS.len());
@@ -627,8 +695,7 @@ mod tests {
             let arr = hooks.get(event).unwrap();
             assert_eq!(count_maiterm_entries(arr), 1, "{}: still exactly one maiTerm entry", event);
             let cmd = arr.as_array().unwrap()[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(cmd.contains("NEW_TOKEN"), "{}: token updated", event);
-            assert!(!cmd.contains("OLD_TOKEN"), "{}: old token gone", event);
+            assert_eq!(cmd, format!("bash \"{}\"", shim), "{}: stable definition", event);
         }
     }
 
@@ -646,7 +713,7 @@ mod tests {
             "someOtherTopLevel": { "keep": true }
         });
 
-        let v = build_hooks_json(Some(existing), shim, "TOK", None);
+        let v = build_hooks_json(Some(existing), shim, None);
 
         // Top-level non-hooks key preserved.
         assert_eq!(v["someOtherTopLevel"]["keep"].as_bool(), Some(true));
@@ -667,7 +734,7 @@ mod tests {
     fn strip_maiterm_hooks_removes_only_ours_and_drops_empty_events() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
         // Build with ours, plus inject a user Stop hook.
-        let mut v = build_hooks_json(None, shim, "TOK", None);
+        let mut v = build_hooks_json(None, shim, None);
         v["hooks"]["Stop"].as_array_mut().unwrap().push(serde_json::json!({
             "hooks": [{ "type": "command", "command": "echo user-stop", "timeout": 10 }]
         }));
@@ -684,15 +751,31 @@ mod tests {
     }
 
     #[test]
-    fn hook_command_bakes_port_only_when_present() {
+    fn hook_command_is_stable_and_carries_no_secret() {
         let shim = "/h/.codex/hooks/agent-hook.sh";
-        // Local form (no baked port) is byte-identical to the original 2-arg command.
-        assert_eq!(hook_command(shim, "TOK", None), format!("bash \"{}\" \"{}\"", shim, "TOK"));
-        // Remote form bakes the port as $2.
-        assert_eq!(
-            hook_command(shim, "TOK", Some(40123)),
-            format!("bash \"{}\" \"{}\" \"{}\"", shim, "TOK", 40123)
-        );
+        // Local form: the shim path and nothing else. Codex records hook trust against the
+        // exact command string, so anything per-launch here (the auth token, formerly $1)
+        // produced a new untrusted definition every restart and the hooks silently stopped
+        // running (review C1). This also lets dev and prod share one trusted definition.
+        assert_eq!(hook_command(shim, None), format!("bash \"{}\"", shim));
+        // Remote form bakes the tunnel port as $1 — fixed for the life of the install, and
+        // not a secret. The token is read from the environment either way.
+        assert_eq!(hook_command(shim, Some(40123)), format!("bash \"{}\" \"{}\"", shim, 40123));
+
+        for cmd in [hook_command(shim, None), hook_command(shim, Some(40123))] {
+            assert!(!cmd.contains("TOK"), "no token in the definition: {cmd}");
+        }
+    }
+
+    #[test]
+    fn hook_definitions_are_identical_across_launches_with_different_tokens() {
+        // The property that makes hook trust survive a restart, stated directly.
+        let shim = "/h/.codex/hooks/agent-hook.sh";
+        let a = build_hooks_json(None, shim, None);
+        let b = build_hooks_json(None, shim, None);
+        assert_eq!(a, b);
+        let cmd = a["hooks"]["Stop"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(cmd, format!("bash \"{}\"", shim));
     }
 
     #[test]
@@ -715,7 +798,9 @@ mod tests {
         // hooks.json subtree: shim placeholder (expanded on the remote) + baked port $2.
         assert!(hooks_json.contains(REMOTE_SHIM_PLACEHOLDER), "carries the shim placeholder");
         assert!(hooks_json.contains("40123"), "bakes the tunnel port as the shim arg");
-        assert!(hooks_json.contains("REMOTE_TOK"), "carries the auth token");
+        // The remote definition carries no secret either — the tunnel port is fixed for the
+        // life of the install, so the remote hook command is stable too.
+        assert!(!hooks_json.contains("REMOTE_TOK"), "no auth token in the hook definition");
 
         assert!(prompt.contains("initSession"), "prompt reinforces initSession");
     }
