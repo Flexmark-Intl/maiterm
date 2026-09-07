@@ -2904,6 +2904,9 @@ enum HookPhase {
     /// Codex only: an approval is being DECIDED. Deliberately not a `Notification` — see the
     /// arm that handles it for why this is not "the human must act".
     PermissionRequest,
+    /// Codex only: the human interrupted the active turn (Esc). Not a `Stop` — no turn
+    /// completed, so nothing here is a result for a human to read.
+    Interrupt,
     Compact,
     Other,
 }
@@ -2937,8 +2940,7 @@ fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event:
         "PermissionRequest" => HookPhase::PermissionRequest,
         // Codex emits PostCompact alongside PreCompact; both are compaction signals.
         "PostCompact" => HookPhase::Compact,
-        // Codex's registrar does not yet install SessionEnd, although current Codex
-        // supports it. Its cleanup currently relies on PTY/process dormancy.
+        "Interrupt" => HookPhase::Interrupt,
         _ => HookPhase::Other,
     }
 }
@@ -3453,6 +3455,38 @@ async fn hooks_handler(
 
             log::debug!("Claude hook: UserPromptSubmit session={} (tab {:?})", &session_id[..session_id.len().min(8)], tab_id);
             emit_dual(&srv.app_handle, "agent-hook-user-prompt", "claude-hook-user-prompt", serde_json::json!({
+                "runtime": runtime_key,
+                "session_id": session_id,
+                "tab_id": tab_id,
+            }));
+        }
+
+        // The human hit Esc. Everything the turn was waiting on is cancelled: the tool gate, any
+        // open ask, the tool in flight. Distinct from Stop — no turn completed, so
+        // `finished_a_turn` is deliberately NOT set and the tab does not become unread.
+        HookPhase::Interrupt => {
+            let tab_id = {
+                let sessions = srv.state.agent_sessions.read();
+                sessions.get(&session_id).map(|s| s.tab_id.clone())
+            }
+            .or(tab_id_from_param);
+
+            if !session_id.is_empty() {
+                use crate::state::app_state::AgentSessionState;
+                let mut sessions = srv.state.agent_sessions.write();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    clear_approvals(session);
+                    session.state = AgentSessionState::WaitingInput;
+                    session.tool_name = None;
+                    session.tool_detail = None;
+                    session.pending_question = None;
+                    session.pending_question_at = None;
+                }
+            }
+
+            log::debug!("Codex hook: Interrupt session={} (tab {:?})",
+                &session_id[..session_id.len().min(8)], tab_id);
+            emit_dual(&srv.app_handle, "agent-hook-interrupt", "claude-hook-interrupt", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,

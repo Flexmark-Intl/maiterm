@@ -3,8 +3,8 @@
 //!   - `~/.codex/config.toml` — `[mcp_servers.<name>]` with `url` + `http_headers`
 //!     (format-preserving via toml_edit so the user's other keys/comments survive).
 //!   - `~/.codex/hooks/agent-hook.sh` — the bundled hook shim (executable).
-//!   - `~/.codex/hooks.json` — command hooks for 7 lifecycle events, merged with
-//!     valid existing JSON (malformed-file preservation remains outstanding).
+//!   - `~/.codex/hooks.json` — command hooks for every event in `CODEX_HOOK_EVENTS`, merged
+//!     with valid existing JSON (malformed-file preservation remains outstanding).
 //!   - `~/.codex/prompts/maiterm.md` — a tiny prompt reinforcing the initSession call.
 //!
 //! `reassert_if_drifted` is currently a no-op; another maiTerm can still replace
@@ -20,16 +20,28 @@ use crate::state::{AgentRuntime, Preferences};
 use super::lockfile::AGENT_HOOK_SHIM;
 use super::registrar::Registrar;
 
-/// The 7 Codex lifecycle events we register a forwarding command hook for.
+/// The Codex lifecycle events we register a forwarding command hook for.
 const CODEX_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
+    "SessionEnd",
     "Stop",
     "PreToolUse",
     "PostToolUse",
     "PermissionRequest",
     "UserPromptSubmit",
     "PreCompact",
+    "Interrupt",
 ];
+
+/// Codex caps `SessionEnd` and `Interrupt` at 3 seconds and defaults them to 1 (the general
+/// default is 600). Registering them with the 5s we use elsewhere would be rejected, so the
+/// timeout is per-event rather than one constant.
+fn hook_timeout_secs(event: &str) -> u64 {
+    match event {
+        "SessionEnd" | "Interrupt" => 3,
+        _ => 5,
+    }
+}
 
 /// Marker that identifies *our* hook entry inside a (possibly user-populated) event
 /// array. Any command-hook whose command contains this substring is maiTerm's.
@@ -288,12 +300,12 @@ fn remove_codex_mcp_entry(doc: &mut DocumentMut, name: &str) -> bool {
 /// Build one command-hook entry for a single event. Optionally tagged with a matcher
 /// group (SessionStart needs `"matcher": "startup|resume"`).
 #[allow(dead_code)]
-fn maiterm_hook_entry(command: &str, matcher: Option<&str>) -> serde_json::Value {
+fn maiterm_hook_entry(command: &str, matcher: Option<&str>, timeout_secs: u64) -> serde_json::Value {
     let mut group = serde_json::json!({
         "hooks": [{
             "type": "command",
             "command": command,
-            "timeout": 5
+            "timeout": timeout_secs
         }]
     });
     if let Some(m) = matcher {
@@ -357,7 +369,7 @@ fn build_hooks_json(
         } else {
             None
         };
-        let our_entry = maiterm_hook_entry(&command, matcher);
+        let our_entry = maiterm_hook_entry(&command, matcher, hook_timeout_secs(event));
 
         let arr = hooks_obj
             .entry(event)
@@ -531,13 +543,16 @@ mod tests {
     }
 
     #[test]
-    fn build_hooks_json_from_empty_produces_all_seven_events() {
+    fn build_hooks_json_from_empty_produces_every_registered_event() {
         let shim = "/home/u/.codex/hooks/agent-hook.sh";
         let auth = "TOKEN_ABC";
         let v = build_hooks_json(None, shim, auth, None);
 
         let hooks = v.get("hooks").and_then(|h| h.as_object()).unwrap();
-        assert_eq!(hooks.len(), CODEX_HOOK_EVENTS.len(), "all 7 events present");
+        assert_eq!(hooks.len(), CODEX_HOOK_EVENTS.len(), "every registered event present");
+        // Interrupt and SessionEnd were missing until review C5; both fire for real (the C7
+        // trace observed SessionEnd), and C7's approval clearing hangs off Interrupt.
+        assert!(hooks.contains_key("Interrupt") && hooks.contains_key("SessionEnd"));
 
         for &event in CODEX_HOOK_EVENTS {
             let arr = hooks.get(event).and_then(|e| e.as_array()).unwrap();
@@ -547,7 +562,10 @@ mod tests {
             assert!(cmd.contains("agent-hook.sh"), "{} command has shim", event);
             assert!(cmd.contains(auth), "{} command has auth token", event);
             assert_eq!(group["hooks"][0]["type"].as_str(), Some("command"));
-            assert_eq!(group["hooks"][0]["timeout"].as_i64(), Some(5));
+            // Codex caps SessionEnd and Interrupt at 3s (default 1); everything else takes
+            // our general 5s. Registering those two at 5 would be rejected.
+            let want = if matches!(event, "SessionEnd" | "Interrupt") { 3 } else { 5 };
+            assert_eq!(group["hooks"][0]["timeout"].as_i64(), Some(want), "{} timeout", event);
 
             // SessionStart carries the startup|resume matcher; others have none.
             if event == "SessionStart" {

@@ -414,6 +414,18 @@ function createAgentStateStore() {
       });
       unlisteners.push(u8);
 
+      // Interrupt (Codex): the human pressed Esc. The turn is cancelled, so the tool gate, the
+      // tool in flight and any open ask are all gone. Not a Stop — nothing completed, and the
+      // human is by definition looking at this tab, so it must not become an unread result.
+      const u10 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-interrupt', (e) => {
+        const { session_id, tab_id } = e.payload;
+        if (!tab_id) return;
+        setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
+        markReadInternal(tab_id);
+        setVariable(tab_id, 'claudeAction', '');
+      });
+      unlisteners.push(u10);
+
       // PreCompact: context compaction starting
       const u9 = await listen<{ session_id: string; tab_id: string | null; trigger: string; runtime?: string }>('agent-hook-pre-compact', (e) => {
         const { tab_id, trigger } = e.payload;
