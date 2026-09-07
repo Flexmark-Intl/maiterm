@@ -134,6 +134,13 @@ impl Registrar for CodexRegistrar {
                 // the rest of the session, and we deliberately will not repair it by clobbering.
                 Err(e) => log::error!("Codex install: not writing hooks — {}", e),
             }
+        } else if super::lockfile::another_maiterm_is_live(port) {
+            // The hook definition is SHARED — deliberately identical across instances so dev
+            // and prod hold one trusted entry. Stripping it here because THIS instance's
+            // preference is off would blind the sibling's live Codex sessions, and its 30s
+            // reassert would put the hooks straight back anyway, silently reverting the
+            // preference on disk. Same guard `unregister` uses, for the same reason.
+            log::info!("Codex install: codex_hooks is off, but another maiTerm is live — leaving the shared hooks alone");
         } else {
             remove_our_hooks(&hooks_path, &shim_path);
         }

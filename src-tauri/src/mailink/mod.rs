@@ -3213,13 +3213,27 @@ async fn drive_question_answers(
 /// `build_chat_detail` synthesizes, so `/respond`'s stale-guard agrees with what the client was
 /// shown; the runtime picks the keystroke dialect for the answer injection.
 /// Header lines Codex's TUI prints directly above an OPEN approval overlay (read from the
-/// shipped codex-cli 0.153.4 binary). The option rows underneath vary in count and wording
-/// with the kind of request; these four do not.
+/// shipped codex-cli 0.153.4 binary). The option rows underneath vary in count and wording with
+/// the kind of request; these do not.
+///
+/// Three of them are PARAMETERIZED — Codex interpolates a host, a terminal name or a tool name
+/// into the line — so only the invariant fragment is listed. Missing one is not cosmetic: the
+/// card ships `respondable: false` and `respond_to_prompt` refuses, telling the human a live,
+/// blocking approval has gone away. An over-match is far cheaper, and cannot fire on its own
+/// anyway: respondability is only consulted when an approval is actually outstanding.
 const CODEX_APPROVAL_HEADERS: &[&str] = &[
     "Would you like to run the following command?",
     "Would you like to make the following edits?",
     "Would you like to grant these permissions?",
     "Would you like to send input to the existing terminal?",
+    // `Would you like to send input to terminal {name}?` — the parameterized sibling of the
+    // line above. Matching one and not the other is what made this a regression rather than a
+    // gap: before the overlay gate, every approval was answerable.
+    "Would you like to send input to terminal",
+    // `Do you want to approve network access to "{host}"?`
+    "Do you want to approve network access to",
+    // `{tool} needs your approval.` — the tool name comes FIRST, so only the tail is stable.
+    "needs your approval.",
 ];
 
 /// Whether `tab_id`'s terminal is showing a Codex approval overlay RIGHT NOW.
@@ -5170,6 +5184,12 @@ mod tests {
         assert!(viewport_shows_codex_approval("Would you like to run the fol\nlowing command?"));
         assert!(viewport_shows_codex_approval("Would you like to make the following edits?"));
         assert!(viewport_shows_codex_approval("Would you like to grant these permissions?"));
+        // The parameterized overlays. Missing these made a live network-access or named-terminal
+        // approval unanswerable from the phone, which the hardcoded `respondable: true` before
+        // the overlay gate never did.
+        assert!(viewport_shows_codex_approval("Would you like to send input to terminal build-2?"));
+        assert!(viewport_shows_codex_approval("Do you want to approve network access to \"api.example.com\"?"));
+        assert!(viewport_shows_codex_approval("apply_patch needs your approval."));
         // Nothing open: an ordinary screen, and the agent merely TALKING about approvals.
         assert!(!viewport_shows_codex_approval("$ ls -la\ntotal 0\n"));
         assert!(!viewport_shows_codex_approval("I'll ask you to approve the following command."));

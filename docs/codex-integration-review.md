@@ -243,9 +243,16 @@ again inside `respond_to_prompt` before injecting; prompt ids became `p_<tab>_<s
 **Residual, deliberately not chased:** Codex reports a denial through no hook, and the
 overlay text lingers for a redraw, so for a moment after a denial the viewport check still
 reads true. The per-request prompt id stops that window answering a *later* approval, and the
-turn-boundary clear closes the window itself. Overlay detection is also text-based against
-0.153.4's four headers — a Codex TUI rewording breaks it toward "not respondable", never
-toward a stray keystroke.
+turn-boundary clear closes the window itself.
+
+**Overlay detection is a maintenance liability, and already bit once.** It matches seven header
+fragments read out of the 0.153.4 binary, three of them parameterized (`… send input to terminal
+{name}?`, `Do you want to approve network access to "{host}"?`, `{tool} needs your approval.`).
+The first pass listed only four and missed those three, which turned a live network-access or
+named-terminal approval into one the phone refuses to answer — a REGRESSION, since before the
+gate every approval was answerable. A Codex TUI rewording does the same thing silently. If this
+recurs, prefer over-matching: respondability is only consulted when an approval is actually
+outstanding, so a false positive cannot fire on its own.
 
 Original source-confirmed state mismatch, kept for the record:
 - `normalize_hook_event()` maps every Codex `PermissionRequest` to a human-facing

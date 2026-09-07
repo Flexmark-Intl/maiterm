@@ -2425,7 +2425,7 @@ async fn process_message(
                                     runtime,
                                     tab_id: tab_id.clone(),
                                     cwd: existing.as_ref().and_then(|e| e.cwd.clone()),
-                                    state: AgentSessionState::Active,
+                                    state: reinit_state(existing.as_ref()),
                                     tool_name: existing.as_ref().and_then(|e| e.tool_name.clone()),
                                     tool_detail: existing.as_ref().and_then(|e| e.tool_detail.clone()),
                                     pending_question: existing.as_ref().and_then(|e| e.pending_question.clone()),
@@ -2942,6 +2942,24 @@ fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event:
         "PostCompact" => HookPhase::Compact,
         "Interrupt" => HookPhase::Interrupt,
         _ => HookPhase::Other,
+    }
+}
+
+/// What state a session row should carry after a re-init (`initSession` / `/maiterm init`).
+///
+/// Active, UNLESS a gate is still held. Every consumer reads `state`, not `pending_approvals`,
+/// so preserving the list while forcing `Active` keeps the record and loses the only thing that
+/// acts on it: maiLink drops the permission card, and `comms::injection_blocked_by_prompt` —
+/// which tests exactly this state — stops holding, so the watcher pastes a chat reply whose
+/// trailing CR lands on the open approval selector and answers it for the operator.
+///
+/// Reachable in ordinary use: the MCP instructions tell an agent to re-init after an
+/// inferred-identity refusal, and the human can type `/maiterm init` at any moment.
+fn reinit_state(existing: Option<&crate::state::app_state::AgentSessionInfo>) -> crate::state::app_state::AgentSessionState {
+    use crate::state::app_state::AgentSessionState;
+    match existing {
+        Some(e) if !e.pending_approvals.is_empty() => AgentSessionState::WaitingPermission,
+        _ => AgentSessionState::Active,
     }
 }
 
@@ -3885,6 +3903,24 @@ mod tests {
             description: None,
             requested_at: 0,
         }
+    }
+
+    #[test]
+    fn a_re_init_keeps_a_held_approval_gate() {
+        use crate::state::app_state::AgentSessionState;
+        // /maiterm init while an approval overlay is open must not report the tab as unblocked.
+        // The list was already preserved; the state was not, and the state is what every
+        // consumer reads — including the comms guard that stops a chat reply's trailing CR
+        // from answering the open selector.
+        let mut held = approval_session();
+        held.state = AgentSessionState::WaitingPermission;
+        held.pending_approvals.push(approval(1, "turn-1", "Bash", Some("exec-aaa")));
+        assert!(matches!(super::reinit_state(Some(&held)), AgentSessionState::WaitingPermission));
+
+        // Nothing outstanding: a re-init means the agent is working again.
+        let idle = approval_session();
+        assert!(matches!(super::reinit_state(Some(&idle)), AgentSessionState::Active));
+        assert!(matches!(super::reinit_state(None), AgentSessionState::Active));
     }
 
     #[test]
