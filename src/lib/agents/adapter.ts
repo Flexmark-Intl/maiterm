@@ -1,5 +1,6 @@
 import type { AgentRuntime } from './types';
 import type { AgentTabSession } from '$lib/stores/agentState.svelte';
+import { buildForkCommand, supportsFork } from './resume';
 
 /**
  * Per-runtime behaviors the Agent Bridge needs that genuinely differ by agent
@@ -34,9 +35,9 @@ const claudeAdapter: AgentAdapter = {
     if (state.state === 'active' && state.toolName === 'AskUserQuestion') return true;
     return false;
   },
-  supportsFork: true,
+  supportsFork: supportsFork('claude'),
   buildForkCommand(sessionId) {
-    return `claude --resume ${sessionId} --fork-session`;
+    return buildForkCommand('claude', sessionId);
   },
   forkNeedsReinit: true,
   buildForkInitDirective(forkTabId, peerLabel) {
@@ -58,19 +59,38 @@ const codexAdapter: AgentAdapter = {
     // It has no AskUserQuestion-style active elicitation tool to guard against.
     return state.state === 'permission';
   },
-  // Codex 0.153.4 has `codex fork SESSION_ID`, but maiTerm's fork/resume ownership
-  // flow is not wired for it yet. See docs/codex-integration-review.md C6.
-  supportsFork: false,
-  buildForkCommand() {
-    return null;
+  supportsFork: supportsFork('codex'),
+  buildForkCommand(sessionId) {
+    return buildForkCommand('codex', sessionId);
   },
-  forkNeedsReinit: false,
+  // Codex identifies its tab per-process (the x-maiterm-tab header), so unlike Claude it does
+  // not inherit a stale identity from the resumed transcript. It is asked to init anyway,
+  // because the bridge handshake needs proof the fork is up, on THIS instance, and
+  // TOOL-capable — and only a real tool call gives all three. A hook cannot.
+  forkNeedsReinit: true,
   buildForkInitDirective(forkTabId, peerLabel) {
-    return `⟦AGENT-BRIDGE⟧ You are a bridged peer agent ("${peerLabel}") in maiTerm tab ${forkTabId}.`;
+    return (
+      `⟦AGENT-BRIDGE⟧ You are now a FORKED peer agent in a NEW maiTerm tab (id ${forkTabId}). ` +
+      `Call your maiterm initSession tool with tabId "${forkTabId}" right now — this is maiTerm asking, ` +
+      `and it is what completes the bridge handshake. ` +
+      `Disregard any tab id mentioned earlier in this conversation — you are "${forkTabId}" now.\n\n` +
+      `You have been bridged to a peer AI agent ("${peerLabel}") via maiTerm Agent Bridge. ` +
+      `After initializing, reply with a one-line readiness note, then wait — the peer's message will arrive as a new prompt.`
+    );
   },
 };
 
-const geminiAdapter: AgentAdapter = { ...codexAdapter, runtime: 'gemini' };
+// Gemini borrows Codex's prompt-state model but NOT its fork: spreading the whole adapter
+// would have handed it Codex's `codex fork` command the moment that was enabled.
+const geminiAdapter: AgentAdapter = {
+  ...codexAdapter,
+  runtime: 'gemini',
+  supportsFork: supportsFork('gemini'),
+  buildForkCommand(sessionId) {
+    return buildForkCommand('gemini', sessionId);
+  },
+  forkNeedsReinit: false,
+};
 
 /** Resolve the bridge adapter for a runtime (defaults to Claude). */
 export function getAdapter(runtime: AgentRuntime): AgentAdapter {

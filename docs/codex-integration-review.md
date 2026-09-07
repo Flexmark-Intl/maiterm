@@ -142,16 +142,29 @@ not the existing general 5s timeout blindly.
 Verify state and queued-delivery behavior after interrupt, normal exit, forced
 process exit, and restart. A tool-name expiry timer does not clear activity state.
 
-### C6. Fork and session ownership (follow-up capability work)
+### C6. Fork and session ownership — WIRED 2026-09-07, not exercised live
 
-Installed `codex fork --help` confirms `codex fork SESSION_ID`. maiTerm still disables
-the capability in its descriptors/adapter, and contested auto-resume returns early
-for Codex because it only models Claude's appendable fork flag.
+Installed `codex fork --help` confirms `codex fork SESSION_ID`. maiTerm disabled the
+capability in its descriptors/adapter, and contested auto-resume returned early for Codex
+because the whole model was Claude's appendable flag.
 
-This needs more than a picker toggle: preserve intentional session-ID copying on
-duplicate/reload; create a distinct session when two tabs run concurrently; resume
-the new fork's own session thereafter. Preserve tab/task/bridge remapping and the
-tool-capable handshake. Do not strip copied IDs or fork again on every restore.
+Fork is now a per-runtime spec (`resume.ts`) rather than a flag: Claude appends
+`--fork-session`, Codex swaps the `resume` verb for `fork`. `supportsFork` /
+`buildForkCommand` / `isForkCommand` / `toForkCommand` all read from it, and the three separate
+declarations (TS adapter, TS descriptor, Rust `CODEX_DESC`) agree.
+
+Against the review's requirements: session-ID copying on duplicate/reload is untouched;
+`forkResumeIfContested` now produces `codex fork <sid>` when a second tab claims the same
+session; `handleEnableAutoResume` recognises that as a fork command and drops it, so the tab
+resumes its OWN new id (set from the SessionStart hook) rather than re-forking the original on
+every restore. The bridge's tool-capable handshake is preserved by asking a Codex fork to call
+`initSession` once — the only signal that proves up + on this instance + tool-capable. A latent
+trap was fixed on the way: the Gemini adapter spread Codex's, so enabling Codex fork would have
+silently handed Gemini a `codex fork` command.
+
+**Not exercised live.** Unit-tested only (`src/lib/agents/resume.test.ts`). Nobody has run the
+picker against a real Codex session, so the fork spawn, the handshake and the first
+post-fork resume are unverified end to end.
 
 ### C7. Auto-resolved approvals remain answerable in maiLink — FIXED 2026-09-07
 

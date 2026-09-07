@@ -9,7 +9,7 @@ import { dispatch } from './notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { mergeAutoResumeContext } from '$lib/stores/autoResumeContext';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
-import { isForkCommand, sessionIdVar, forkFlag } from '$lib/agents/resume';
+import { isForkCommand, sessionIdVar, toForkCommand } from '$lib/agents/resume';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 
@@ -426,18 +426,19 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
  *  agents would interleave into one transcript. Forking preserves the full conversation in
  *  both tabs and diverges them automatically; once the other claimant is closed (the reload
  *  flow), the sid is uncontested and plain resume is untouched. No-op when maiTerm has no
- *  fork flag for the runtime (codex/gemini), the command doesn't reference the session var,
- *  or it already forks. Codex subcommand support remains outstanding; see the review doc. */
+ *  fork mechanism for the runtime (gemini), the command doesn't reference the session var,
+ *  or it already forks. Claude appends its flag; Codex swaps `resume` for `fork`. */
 async function forkResumeIfContested(tabId: string, runtime: AgentRuntime, cmd: string): Promise<string> {
   const varName = sessionIdVar(runtime);
-  const flag = forkFlag(runtime);
-  if (!flag || !cmd.includes('%' + varName) || cmd.includes(flag)) return cmd;
+  if (!cmd.includes('%' + varName)) return cmd;
+  const forked = toForkCommand(runtime, cmd);
+  if (!forked) return cmd;
   const sid = variableMap.get(tabId)?.get(varName);
   if (!sid) return cmd;
   try {
     if ((await countSessionIdClaimants(sid)) > 1) {
       logInfo(`auto-resume: session ${sid.slice(0, 8)} contested by another tab — forking instead of resuming`);
-      return `${cmd} ${flag}`;
+      return forked;
     }
   } catch {
     // Probe failure → plain resume (pre-existing behavior beats blocking the replay).

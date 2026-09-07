@@ -128,7 +128,8 @@ pub static CLAUDE_DESC: RuntimeDescriptor = RuntimeDescriptor {
     tool_stale_timeout_ms: 15_000,
 };
 
-/// Codex integration capabilities; CLI fork support is not yet wired into maiTerm.
+/// Codex integration capabilities. Forking goes through `codex fork SESSION_ID`, a
+/// subcommand rather than Claude's appendable `--fork-session` flag.
 #[allow(dead_code)]
 pub static CODEX_DESC: RuntimeDescriptor = RuntimeDescriptor {
     runtime: AgentRuntime::Codex,
@@ -137,7 +138,7 @@ pub static CODEX_DESC: RuntimeDescriptor = RuntimeDescriptor {
     client_info_name: "codex",
     session_id_var: "codexSessionId",
     auth_header: "Authorization",
-    supports_fork: false,
+    supports_fork: true,
     needs_mcp_reassert: false,
     hook_config: HookConfigKind::CodexHooksJson,
     dormancy: DormancySource::PtyExitOrPrompt,

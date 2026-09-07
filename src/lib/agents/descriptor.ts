@@ -74,7 +74,8 @@ const codex: RuntimeDescriptorTs = {
   launch: 'codex',
   displayName: 'Codex',
   sessionIdVar: 'codexSessionId',
-  supportsFork: false,
+  // `codex fork SESSION_ID` — a subcommand, not Claude's appendable flag. See resume.ts.
+  supportsFork: true,
   toolStaleTimeoutMs: 15_000,
   configHint: '~/.codex/config.toml',
   // Codex tools: shell/Bash (command), apply_patch/Edit/Write (file), plus MCP tools.
