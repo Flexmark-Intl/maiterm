@@ -48,7 +48,7 @@ impl Registrar for CodexRegistrar {
         prefs.codex_ide
     }
 
-    fn install(&self, port: u16, auth: &str, _workspace_folders: &[String], _prefs: &Preferences) {
+    fn install(&self, port: u16, auth: &str, _workspace_folders: &[String], prefs: &Preferences) {
         let Some(home) = dirs::home_dir() else {
             log::warn!("Codex install: could not determine home directory");
             return;
@@ -79,39 +79,44 @@ impl Registrar for CodexRegistrar {
             Err(e) => log::warn!("Codex install: failed to read {:?}: {}", config_path, e),
         }
 
-        // 2. Install the hook shim (executable).
+        // 2 + 3. Hooks: the shim and the hooks.json entries, gated on the preference. The OFF
+        // branch actively removes ours rather than skipping the write — a toggle the user turns
+        // off has to stop Codex reporting, not merely stop being refreshed.
         let shim_path = codex_dir.join("hooks").join("agent-hook.sh");
-        if let Some(parent) = shim_path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                log::warn!("Codex install: failed to create {:?}: {}", parent, e);
-            }
-        }
-        if let Err(e) = write_executable(&shim_path, AGENT_HOOK_SHIM) {
-            log::warn!("Codex install: failed to write shim {:?}: {}", shim_path, e);
-        } else {
-            wrote_shim = true;
-        }
-
-        // 3. Merge our hooks into ~/.codex/hooks.json (don't clobber user hooks).
         let hooks_path = codex_dir.join("hooks.json");
-        let shim_str = shim_path.to_string_lossy().to_string();
-        match read_json(&hooks_path) {
-            Ok(existing) => {
-                // Local install: no baked port — the shim uses the per-process
-                // $MAITERM_PORT (each tab spawned by the owning maiTerm instance).
-                let merged = build_hooks_json(existing, &shim_str, auth, None);
-                match serde_json::to_string_pretty(&merged) {
-                    Ok(json) => {
-                        if let Err(e) = atomic_write(&hooks_path, &json) {
-                            log::warn!("Codex install: failed to write {:?}: {}", hooks_path, e);
-                        } else {
-                            wrote_hooks = true;
-                        }
-                    }
-                    Err(e) => log::warn!("Codex install: failed to serialize hooks.json: {}", e),
+        if prefs.codex_hooks {
+            if let Some(parent) = shim_path.parent() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    log::warn!("Codex install: failed to create {:?}: {}", parent, e);
                 }
             }
-            Err(e) => log::warn!("Codex install: failed to read {:?}: {}", hooks_path, e),
+            if let Err(e) = write_executable(&shim_path, AGENT_HOOK_SHIM) {
+                log::warn!("Codex install: failed to write shim {:?}: {}", shim_path, e);
+            } else {
+                wrote_shim = true;
+            }
+
+            let shim_str = shim_path.to_string_lossy().to_string();
+            match read_json(&hooks_path) {
+                Ok(existing) => {
+                    // Local install: no baked port — the shim uses the per-process
+                    // $MAITERM_PORT (each tab spawned by the owning maiTerm instance).
+                    let merged = build_hooks_json(existing, &shim_str, auth, None);
+                    match serde_json::to_string_pretty(&merged) {
+                        Ok(json) => {
+                            if let Err(e) = atomic_write(&hooks_path, &json) {
+                                log::warn!("Codex install: failed to write {:?}: {}", hooks_path, e);
+                            } else {
+                                wrote_hooks = true;
+                            }
+                        }
+                        Err(e) => log::warn!("Codex install: failed to serialize hooks.json: {}", e),
+                    }
+                }
+                Err(e) => log::warn!("Codex install: failed to read {:?}: {}", hooks_path, e),
+            }
+        } else {
+            remove_our_hooks(&hooks_path, &shim_path);
         }
 
         // 4. Minimal prompt reinforcing the MCP initSession instruction. Non-critical.
@@ -159,37 +164,12 @@ impl Registrar for CodexRegistrar {
             }
         }
 
-        // 2. Strip ONLY our entries from hooks.json (command contains agent-hook.sh).
-        let hooks_path = codex_dir.join("hooks.json");
-        if hooks_path.exists() {
-            match read_json(&hooks_path) {
-                Ok(Some(existing)) => {
-                    let cleaned = strip_maiterm_hooks(existing.clone());
-                    // Only rewrite if we actually removed something of ours — never
-                    // reformat a user's hooks.json that maiTerm never wrote to.
-                    if cleaned != existing {
-                        match serde_json::to_string_pretty(&cleaned) {
-                            Ok(json) => {
-                                if let Err(e) = atomic_write(&hooks_path, &json) {
-                                    log::warn!("Codex unregister: failed to write {:?}: {}", hooks_path, e);
-                                }
-                            }
-                            Err(e) => log::warn!("Codex unregister: failed to serialize hooks.json: {}", e),
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => log::warn!("Codex unregister: failed to read {:?}: {}", hooks_path, e),
-            }
-        }
+        // 2 + 3. Our hooks and the shim they point at.
+        remove_our_hooks(
+            &codex_dir.join("hooks.json"),
+            &codex_dir.join("hooks").join("agent-hook.sh"),
+        );
 
-        // 3. Best-effort removal of the shim and prompt.
-        let shim_path = codex_dir.join("hooks").join("agent-hook.sh");
-        if shim_path.exists() {
-            if let Err(e) = fs::remove_file(&shim_path) {
-                log::warn!("Codex unregister: failed to remove {:?}: {}", shim_path, e);
-            }
-        }
         let prompt_path = codex_dir.join("prompts").join("maiterm.md");
         if prompt_path.exists() {
             if let Err(e) = fs::remove_file(&prompt_path) {
@@ -204,6 +184,41 @@ impl Registrar for CodexRegistrar {
 // ---------------------------------------------------------------------------
 // Pure, testable generation helpers (the real logic install()/unregister() call)
 // ---------------------------------------------------------------------------
+
+/// Take maiTerm's hook entries out of `hooks.json` and delete the shim they point at, leaving
+/// everything else in the file alone.
+///
+/// Shared by `unregister` and by an install that finds `codex_hooks` turned off: switching the
+/// preference off has to stop Codex reporting, not just stop refreshing the entries.
+#[allow(dead_code)]
+fn remove_our_hooks(hooks_path: &Path, shim_path: &Path) {
+    if hooks_path.exists() {
+        match read_json(hooks_path) {
+            Ok(Some(existing)) => {
+                let cleaned = strip_maiterm_hooks(existing.clone());
+                // Only rewrite if we actually removed something of ours — never reformat a
+                // user's hooks.json that maiTerm never wrote to.
+                if cleaned != existing {
+                    match serde_json::to_string_pretty(&cleaned) {
+                        Ok(json) => {
+                            if let Err(e) = atomic_write(hooks_path, &json) {
+                                log::warn!("Codex: failed to write {:?}: {}", hooks_path, e);
+                            }
+                        }
+                        Err(e) => log::warn!("Codex: failed to serialize hooks.json: {}", e),
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("Codex: failed to read {:?}: {}", hooks_path, e),
+        }
+    }
+    if shim_path.exists() {
+        if let Err(e) = fs::remove_file(shim_path) {
+            log::warn!("Codex: failed to remove {:?}: {}", shim_path, e);
+        }
+    }
+}
 
 /// The MCP server name for this build flavor (`maiterm` / `maiterm-dev`).
 #[allow(dead_code)]

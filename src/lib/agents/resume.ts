@@ -20,10 +20,23 @@ export function isForkCommand(runtime: AgentRuntime, cmd: string | null | undefi
   return !!flag && !!cmd && cmd.includes(flag);
 }
 
+/** Options that change the shape of a runtime's launch command. */
+export interface ResumeCommandOptions {
+  /** Codex only: add `--dangerously-bypass-hook-trust` (the `codex_hooks_bypass_trust`
+   *  preference). Codex refuses to run a hook definition it has not been shown and trusted, and
+   *  maiTerm's hook command changes whenever the auth token does, so a user who accepts that
+   *  risk can skip the prompt. Applied ONLY to a launch maiTerm builds itself — it can never
+   *  affect a codex the user starts by hand. */
+  bypassHookTrust?: boolean;
+}
+
 /** The default auto-resume command template for a runtime (uses the %<runtime>SessionId trigger var). */
-export function getResumeCommand(runtime: AgentRuntime): string {
+export function getResumeCommand(runtime: AgentRuntime, opts?: ResumeCommandOptions): string {
   switch (runtime) {
-    case 'codex': return 'codex resume %codexSessionId';
+    case 'codex':
+      return opts?.bypassHookTrust
+        ? 'codex resume --dangerously-bypass-hook-trust %codexSessionId'
+        : 'codex resume %codexSessionId';
     case 'gemini': return 'gemini --resume %geminiSessionId';
     default: return 'claude --resume %claudeSessionId';
   }

@@ -600,7 +600,8 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     if (codexOn) {
       // No-ops on a remote without the codex CLI. Reuses the local CodexRegistrar's
       // renderers (config.toml + hooks.json + shim + prompt), pointed at the tunnel port.
-      const codexScript = await commands.buildCodexSetupScript(tunnelInfo.remote_port, authToken, tabId);
+      const codexScript = await commands.buildCodexSetupScript(
+        tunnelInfo.remote_port, authToken, tabId, preferencesStore.codexHooks);
       setupPromises.push(commands.sshRunSetup(sshArgs, codexScript));
     }
 
@@ -715,7 +716,8 @@ export async function buildUserSetupScript(tabId: string): Promise<string | null
       bridge.remotePort, authToken, tabId, skillScripts, isSharedHost(bridge.hostKey, tabId)));
   }
   if (codexOn) {
-    parts.push(await commands.buildCodexSetupScript(bridge.remotePort, authToken, tabId));
+    parts.push(await commands.buildCodexSetupScript(
+      bridge.remotePort, authToken, tabId, preferencesStore.codexHooks));
   }
   return parts.length ? parts.join('\n') : null;
 }

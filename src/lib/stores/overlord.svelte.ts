@@ -16,14 +16,13 @@ import type { AgentState } from '$lib/agents/types';
 import { workspacesStore, tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { resumePane } from '$lib/stores/resumeGate.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { claudeStateStore } from '$lib/stores/agentState.svelte';
+import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
-import { getResumeCommand } from '$lib/agents/resume';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { findImportedDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
@@ -3184,7 +3183,7 @@ function createOverlordStore() {
         if (!runtime) return { sent: false, reason: 'unknown_runtime' };
         // Interpolates %<runtime>SessionId from the tab's trigger variables, the same way
         // auto-resume does — so this resumes the tab's own session, not a fresh one.
-        text = interpolateVariables(tabId, getResumeCommand(runtime));
+        text = interpolateVariables(tabId, resumeCommandFor(runtime));
         if (text.includes('%')) return { sent: false, reason: 'no_session_id' };
       }
 

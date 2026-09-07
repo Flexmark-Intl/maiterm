@@ -1159,8 +1159,8 @@ export async function getMaitermSkillScripts(): Promise<MaitermSkillScripts> {
 /** Render the remote-Codex setup shell script (config.toml + hooks.json + shim + prompt),
  *  pointed at the SSH reverse-tunnel port. Run it via sshRunSetup. No-ops on hosts
  *  without the codex CLI. */
-export async function buildCodexSetupScript(remotePort: number, auth: string, tabId: string): Promise<string> {
-  return invoke('build_codex_setup_script', { remotePort, auth, tabId });
+export async function buildCodexSetupScript(remotePort: number, auth: string, tabId: string, hooks: boolean): Promise<string> {
+  return invoke('build_codex_setup_script', { remotePort, auth, tabId, hooks });
 }
 
 export async function checkFullDiskAccess(): Promise<boolean> {

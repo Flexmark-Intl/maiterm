@@ -811,6 +811,31 @@ const CODEX_HOOKS_MERGE_PY: &str = concat!(
     "open(p,\"w\").write(json.dumps(cur,indent=2))\n",
 );
 
+/// python3 strip for `~/.codex/hooks.json`: remove ONLY maiTerm's entries (matched by
+/// `agent-hook.sh`), drop event keys we emptied, and leave user hooks and other top-level keys
+/// untouched. Runs when `codex_hooks` is off, so the toggle actually removes a bridged remote's
+/// hooks. Absent or unreadable file: exit without writing. NO single quotes (shell wraps in `''`).
+const CODEX_HOOKS_STRIP_PY: &str = concat!(
+    "import os,json,sys\n",
+    "p=os.path.expanduser(\"~/.codex/hooks.json\")\n",
+    // A file we cannot parse is a file we must not rewrite — the same rule the merge follows.
+    "try:\n cur=json.load(open(p))\nexcept Exception:\n sys.exit(0)\n",
+    "if not isinstance(cur,dict):\n sys.exit(0)\n",
+    "ch=cur.get(\"hooks\")\n",
+    "if not isinstance(ch,dict):\n sys.exit(0)\n",
+    "def isours(e):\n",
+    " for h in e.get(\"hooks\",[]):\n",
+    "  if \"agent-hook.sh\" in (h.get(\"command\") or \"\"):\n   return True\n",
+    " return False\n",
+    "changed=False\n",
+    "for ev in list(ch.keys()):\n",
+    " entries=ch.get(ev) or []\n",
+    " keep=[e for e in entries if not isours(e)]\n",
+    " if len(keep)!=len(entries):\n  changed=True\n",
+    " if keep:\n  ch[ev]=keep\n else:\n  del ch[ev]\n",
+    "if changed:\n open(p,\"w\").write(json.dumps(cur,indent=2))\n",
+);
+
 /// Build the shell script that installs maiTerm's Codex integration on a REMOTE host
 /// over the SSH reverse tunnel, mirroring the local `CodexRegistrar` by reusing the SAME
 /// Rust renderers (`render_codex_remote_artifacts`) so remote and local artifacts can't
@@ -821,7 +846,7 @@ const CODEX_HOOKS_MERGE_PY: &str = concat!(
 /// NOT the interactive PTY). `tab_id` reaches the shim through the env / `~/.aiterm` file
 /// the Claude setup block already writes — identical to how remote Claude resolves it.
 #[tauri::command]
-pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String) -> String {
+pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String, hooks: bool) -> String {
     let _ = tab_id; // resolved on the remote via env / ~/.aiterm, like Claude's hooks
 
     let (config_block, hooks_json, prompt) =
@@ -842,11 +867,13 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String) 
     lines.push("if command -v codex >/dev/null 2>&1; then".to_string());
     lines.push("mkdir -p ~/.codex/hooks ~/.codex/prompts".to_string());
     lines.push("shim_abs=\"$HOME/.codex/hooks/agent-hook.sh\"".to_string());
-    // Hook shim — literal bytes via a quoted heredoc (no expansion of $1/$HOME/etc).
-    lines.push("cat > \"$shim_abs\" <<'MAITERM_CODEX_SHIM_EOF'".to_string());
-    lines.push(shim.trim_end().to_string());
-    lines.push("MAITERM_CODEX_SHIM_EOF".to_string());
-    lines.push("chmod 755 \"$shim_abs\"".to_string());
+    if hooks {
+        // Hook shim — literal bytes via a quoted heredoc (no expansion of $1/$HOME/etc).
+        lines.push("cat > \"$shim_abs\" <<'MAITERM_CODEX_SHIM_EOF'".to_string());
+        lines.push(shim.trim_end().to_string());
+        lines.push("MAITERM_CODEX_SHIM_EOF".to_string());
+        lines.push("chmod 755 \"$shim_abs\"".to_string());
+    }
     // Prompt.
     lines.push("cat > ~/.codex/prompts/maiterm.md <<'MAITERM_CODEX_PROMPT_EOF'".to_string());
     lines.push(prompt.trim_end().to_string());
@@ -858,13 +885,21 @@ pub fn build_codex_setup_script(remote_port: u16, auth: String, tab_id: String) 
             + toml_py
             + "'",
     );
-    // hooks.json merge (ours on stdin, abs shim path via env).
-    lines.push(format!("__codex_hooks='{}'", q(&hooks_json)));
-    lines.push(
-        "printf '%s' \"$__codex_hooks\" | MAITERM_SHIM=\"$shim_abs\" python3 -c '".to_string()
-            + hooks_py
-            + "'",
-    );
+    // hooks.json merge (ours on stdin, abs shim path via env). Gated on the same
+    // `codex_hooks` preference as the local install — the remote path used to install hooks
+    // whatever the toggle said (review C3). With hooks off, ours are stripped instead, so
+    // turning the preference off actually stops a bridged remote reporting.
+    if hooks {
+        lines.push(format!("__codex_hooks='{}'", q(&hooks_json)));
+        lines.push(
+            "printf '%s' \"$__codex_hooks\" | MAITERM_SHIM=\"$shim_abs\" python3 -c '".to_string()
+                + hooks_py
+                + "'",
+        );
+    } else {
+        lines.push("rm -f \"$shim_abs\"".to_string());
+        lines.push("python3 -c '".to_string() + CODEX_HOOKS_STRIP_PY + "'");
+    }
     lines.push("fi".to_string());
 
     lines.join("\n")
@@ -1242,7 +1277,7 @@ mod tests {
 
     #[test]
     fn codex_setup_script_is_valid_bash() {
-        let script = build_codex_setup_script(40123, "TESTTOKEN123".to_string(), "tab-abc".to_string());
+        let script = build_codex_setup_script(40123, "TESTTOKEN123".to_string(), "tab-abc".to_string(), true);
         // bash -n parses (heredocs, pipes, if/fi, single-quoted python -c, multiline vars)
         // without executing — catches the quoting/heredoc hazards before the live test.
         let (ok, stderr) = pipe_ok("bash", &["-n"], &script);
@@ -1279,5 +1314,37 @@ mod tests {
         assert!(ok1, "config.toml merge python does not compile:\n{}", e1);
         let (ok2, e2) = pipe_ok("python3", &["-c", check], CODEX_HOOKS_MERGE_PY);
         assert!(ok2, "hooks.json merge python does not compile:\n{}", e2);
+        let (ok3, e3) = pipe_ok("python3", &["-c", check], CODEX_HOOKS_STRIP_PY);
+        assert!(ok3, "hooks.json strip python does not compile:\n{}", e3);
+    }
+
+    #[test]
+    fn embedded_python_never_contains_a_single_quote() {
+        // Every snippet is passed as `python3 -c '<body>'` inside a single-quoted shell word,
+        // so one apostrophe anywhere ends the string and the rest becomes shell.
+        for (name, src) in [
+            ("CODEX_TOML_MERGE_PY", CODEX_TOML_MERGE_PY),
+            ("CODEX_HOOKS_MERGE_PY", CODEX_HOOKS_MERGE_PY),
+            ("CODEX_HOOKS_STRIP_PY", CODEX_HOOKS_STRIP_PY),
+        ] {
+            assert!(!src.contains('\''), "{name} contains a single quote");
+        }
+    }
+
+    #[test]
+    fn codex_setup_script_installs_hooks_only_when_the_preference_is_on() {
+        let on = build_codex_setup_script(1234, "TOK".into(), "tab-1".into(), true);
+        assert!(on.contains("MAITERM_CODEX_SHIM_EOF"), "shim written when hooks are on");
+        assert!(on.contains("MAITERM_SHIM="), "hooks.json merged when hooks are on");
+
+        // Off: not merely skipped — ours are actively removed, so the toggle takes effect on a
+        // remote that was already set up (review C3).
+        let off = build_codex_setup_script(1234, "TOK".into(), "tab-1".into(), false);
+        assert!(!off.contains("MAITERM_CODEX_SHIM_EOF"), "no shim when hooks are off");
+        assert!(!off.contains("MAITERM_SHIM="), "no merge when hooks are off");
+        assert!(off.contains("rm -f \"$shim_abs\""), "strips the shim");
+        assert!(off.contains("agent-hook.sh"), "strips our hook entries");
+        // The MCP entry is independent of hooks and must survive either way.
+        assert!(off.contains("__codex_toml="), "config.toml is still written");
     }
 }

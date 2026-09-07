@@ -19,6 +19,18 @@ function autoResumeEnabledFor(runtime: AgentRuntime): boolean {
 }
 
 /**
+ * The launch command for a runtime with the user's preferences applied. Every maiTerm-built
+ * agent launch goes through here so `codex_hooks_bypass_trust` reaches an actual command line —
+ * it used to be persisted and read by nothing (docs/codex-integration-review.md C3). Bypassing
+ * hook trust is meaningless with hooks off, so it is gated on both.
+ */
+export function resumeCommandFor(runtime: AgentRuntime): string {
+  return getResumeCommand(runtime, {
+    bypassHookTrust: preferencesStore.codexHooks && preferencesStore.codexHooksBypassTrust,
+  });
+}
+
+/**
  * Claude Code session state per tab, driven by hook events.
  *
  * State machine:
@@ -364,7 +376,7 @@ function createAgentStateStore() {
           }
         }
 
-        handleEnableAutoResume(tab_id, getResumeCommand(runtime));
+        handleEnableAutoResume(tab_id, resumeCommandFor(runtime));
         logInfo(`Agent init: set ${sessionIdVar(runtime)} for tab ${tab_id.slice(0, 8)} = ${session_id.slice(0, 8)}`);
       });
       unlisteners.push(u6);

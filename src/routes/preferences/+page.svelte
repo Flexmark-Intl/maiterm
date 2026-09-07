@@ -1974,8 +1974,8 @@
           <div>
             <label for="codex-ide">Enable Codex IDE integration</label>
             <p class="setting-hint">
-              Starts the local server for OpenAI Codex to communicate with maiTerm. Codex is
-              opt-in and disabled by default. This writes Codex's MCP config to
+              Starts the local server for OpenAI Codex to communicate with maiTerm. On by
+              default; turn it off to leave Codex's config alone. This writes Codex's MCP config to
               <code>~/.codex/config.toml</code> (Claude uses <code>~/.claude.json</code>).
             </p>
           </div>
