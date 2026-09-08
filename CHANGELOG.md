@@ -2,41 +2,32 @@
 
 ## v2.2.0
 
-The phone can run the board now, not just watch it. Codex tabs work the way Claude tabs always have. And the terminal got much cheaper to draw.
+Your phone can run the board now, not just watch it. Codex tabs work the way Claude tabs do. And a window full of agents got a lot lighter.
 
-### maiLink — the phone writes
+### From your phone
 
-- **Add, retitle and reassign tasks from the phone.** Writes land in maiTerm while the Mac's screen is asleep, and the desktop board picks them up without a refresh.
-- **Overlord on the phone.** Approve or dismiss a proposal, clear an escalation, fire a rule, jump to a tab — from wherever you are. A new escalation rings the doorbell.
-- **A blocked task now shows as blocked.** The phone had been reading the stored lane instead of what the board actually renders.
-- **"Agent finished" no longer announces an open question.** Every kind that wasn't a permission prompt fell into that phrase — including a question waiting on you, which happens 11× more often.
+- **Edit the task list.** Add a task, retitle one, move it between lanes, or hand it to another tab — and it lands even while the Mac is asleep.
+- **Run Overlord.** Approve or dismiss a proposal, clear an escalation, fire a rule at a tab. A new escalation rings the doorbell.
+- **"Agent finished" now means the agent finished.** An open question was arriving under the one phrase that means the opposite.
 
-### Codex tabs catch up
+### Codex tabs
 
-Codex support shipped half-wired. This finishes it.
+Codex support was half-finished. It isn't now.
 
-- **Hooks stay trusted across restarts,** so a Codex tab keeps reporting to maiTerm instead of going quiet after a relaunch.
-- **A Codex agent gets told about tasks and Overlord** when its session starts or resumes, like a Claude one does.
-- **Fork a Codex session** from the picker — new, and worth a try before you lean on it. It used to split a pane and run a Claude command against a Codex id.
-- **An approval is answerable only while its prompt is on screen.** Codex settles most approvals automatically with nobody asked, so the phone was offering cards for approvals already gone.
-- **The Codex hooks and trust-bypass switches do something now.** Turning hooks off removes them rather than just stopping the refresh.
-- **Config merges can't damage your files.** A `config.toml` or `hooks.json` maiTerm can't parse is left alone instead of overwritten.
+- **A Codex tab keeps reporting to maiTerm after a restart,** instead of going quiet until you reload it.
+- **Codex sessions can be forked** from the bridge picker — new, so try it before you lean on it.
+- **An approval reaches your phone only while it's really on screen.** Codex settles most of them itself, so the cards were often for approvals long gone.
 
-### Terminal
+### Speed
 
-- **Only changed rows are redrawn, and hidden tabs aren't drawn at all.** With eight agents streaming: a window of hidden tabs went from 46% of the renderer to 6%, the window you're watching from 49% to 17%.
-- **Scrollback saves moved off the main thread.** With dozens of agent tabs they used to stall typing about once a second.
-- **Terminals no longer come back blank from screen sleep.** macOS reports zero monitors while the displays are off; maiTerm read that as every screen being unplugged and resized every window to fit a display that wasn't there.
-- **A TUI that hides its own cursor keeps it hidden,** instead of leaving one hopping down the right edge.
+- **A window of background agents costs a fraction of what it did.** Only changed rows are redrawn, tabs you can't see aren't drawn at all, and saving scrollback no longer stalls your typing.
 
 ### Fixes
 
-- **SSH tunnels rebuild themselves.** One display sleep took 27 tabs' connections down across four hosts and nothing tried to bring them back — retries were driven by terminal output, and an idle agent tab produces none. Tabs reconnect on their own now, staggered per host, and follow the shell if you `ssh` elsewhere mid-retry.
-- **The orphan tunnel sweep actually runs.** It shipped in v2.1.0 unable to parse the process table, so it never killed anything and remote ports kept drifting.
-- **A chat reply won't be typed into a bare shell.** Delivery treated a session record as proof an agent was there; an SSH drop kills the agent and the route its goodbye would have taken, so the record outlived it. It checks the process table now.
-- **Drag-to-split is off by default.** A few pixels of drift while clicking a tab split the pane. It's a preference (Tabs → Dragging); Cmd+D and the context menu still split.
-- **A drag that lands nowhere selects the tab it started from,** rather than swallowing the click.
-- **Only Send sits right of the composer input,** so there's nothing to hit by accident reaching for it.
+- **SSH tunnels come back on their own.** One display sleep used to take every remote tab down and leave them there.
+- **A chat reply can't land in a bare shell** when the agent behind the tab has quietly died.
+- **Terminals no longer come back blank after the screens sleep.**
+- **Dragging a tab won't split a pane by accident.** Drag-to-split is opt-in now, under Tabs → Dragging; `Cmd+D` still splits.
 
 ## v2.1.0
 
