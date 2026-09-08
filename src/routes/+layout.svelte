@@ -7,6 +7,7 @@
   import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { wakeTab, type WakeAction } from '$lib/agents/wake';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { retryDownBridgesNow } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import Toast from '$lib/components/Toast.svelte';
   import { seedDefaultTriggers } from '$lib/triggers/defaults';
@@ -270,6 +271,9 @@
         }
         const wasAsleep = displaysAsleep;
         displaysAsleep = false;
+        // Bridge tunnels reaped while the displays were dark were this machine stalling,
+        // not the peers dying — bring their rebuilds forward instead of waiting out backoff.
+        if (wasAsleep) retryDownBridgesNow('displays back');
         if (currentMonitorCount === null) {
           currentMonitorCount = count;
           return;

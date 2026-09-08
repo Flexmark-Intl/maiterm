@@ -1274,10 +1274,10 @@
         {#if !isEditor && preferencesStore.claudeCodeIde && preferencesStore.claudeCodeIdeSsh}
           {@const bridgeStatus = getBridgeStatus(tab.id)}
           {#if bridgeStatus}
-            <Tooltip text={bridgeStatus === 'connected' ? 'MCP bridge active' : bridgeStatus === 'pending' ? 'MCP bridge connecting\u2026' : 'MCP bridge failed'}><span
+            <Tooltip text={bridgeStatus === 'connected' ? 'MCP bridge active' : bridgeStatus === 'pending' ? 'MCP bridge connecting\u2026' : bridgeStatus === 'reconnecting' ? 'MCP bridge reconnecting\u2026' : 'MCP bridge failed'}><span
               class="bridge-indicator"
               class:bridge-connected={bridgeStatus === 'connected'}
-              class:bridge-pending={bridgeStatus === 'pending'}
+              class:bridge-pending={bridgeStatus === 'pending' || bridgeStatus === 'reconnecting'}
               class:bridge-failed={bridgeStatus === 'failed'}
             ><Icon name="bolt" size={12} /></span></Tooltip>
           {/if}

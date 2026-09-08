@@ -18,13 +18,20 @@ import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
-export type BridgeStatus = 'connected' | 'pending' | 'failed';
+/**
+ * 'reconnecting' is a tunnel that died underneath a bridged tab and is being rebuilt
+ * automatically (see queueReconnect). It short-circuits nothing: enableBridge treats it
+ * like 'failed' and proceeds, so the scheduler and the term-title loop can both act on it.
+ */
+export type BridgeStatus = 'connected' | 'pending' | 'reconnecting' | 'failed';
 
 interface BridgeState {
   hostKey: string;
   remotePort: number;
   status: BridgeStatus;
   error?: string;
+  /** The PTY the tab owned when bridged — what a later rebuild probes before spending a connection. */
+  ptyId?: string;
 }
 
 /** Reactive map of tabId → bridge state. Svelte 5 $state for reactivity in TerminalTabs. */
@@ -44,16 +51,35 @@ const tunnelListeners = new Map<string, UnlistenFn>();
 const injectedEnvPort = new Map<string, number>();
 
 /**
- * Remove bridge state for a tab (internal — no backend call).
- * Used when Rust notifies us the tunnel died.
+ * Tabs whose tunnel died, grouped by the host they were bridged to, waiting on an
+ * automatic rebuild. A tunnel-down used to just clear the tab's state and stop; the
+ * only thing that could bring the bridge back was the term-title retry loop, which is
+ * driven by terminal output — and an IDLE agent tab produces none. So the tabs most
+ * likely to be bridged were exactly the ones that could never recover on their own:
+ * on 2026-09-08 a display-sleep reap took 27 tabs down across four hosts, 3 came back
+ * (because their tabs happened to be reloaded), and nothing was attempted for the rest.
  */
-function clearBridgeState(tabId: string): void {
-  if (!bridgeStates.has(tabId)) return;
-  bridgeStates.delete(tabId);
-  bridgeStates = new Map(bridgeStates);
-  injectedEnvPort.delete(tabId);
-  logInfo(`SSH MCP bridge cleared for tab ${tabId} (tunnel down)`);
+interface DownHost {
+  /** tabId → the PTY it owned when the tunnel dropped; gates the rebuild (see prune). */
+  tabs: Map<string, string | undefined>;
+  attempt: number;
+  timer?: ReturnType<typeof setTimeout>;
+  running: boolean;
 }
+const downHosts = new Map<string, DownHost>();
+
+/**
+ * Backoff schedule, ~4.6 minutes end to end. The first wait is deliberately ≥5s rather
+ * than immediate: the far sshd still holds our old `-R` listener until it notices the
+ * client is gone, and asking for that port back too soon fails "taken" and walks us onto
+ * a different one — which a RUNNING agent, with MAITERM_PORT already fixed in its
+ * environment, can never follow (its MCP would stay dead for the session's whole life).
+ * A short pause is what lets the same port come back. Jittered per host so hosts that
+ * died together do not re-authenticate in lockstep.
+ */
+const RECONNECT_DELAYS_MS = [5_000, 10_000, 20_000, 40_000, 80_000, 120_000];
+/** Gap between tabs on one host during a pass — keeps N setup connections out of one second. */
+const RECONNECT_TAB_STAGGER_MS = 300;
 
 /**
  * Start listening for tunnel-down events from Rust for this tab.
@@ -63,10 +89,130 @@ async function listenForTunnelDown(tabId: string): Promise<void> {
   if (tunnelListeners.has(tabId)) return;
   const unlisten = await listen(`ssh-tunnel-down-${tabId}`, () => {
     logInfo(`Received ssh-tunnel-down for tab ${tabId}`);
-    clearBridgeState(tabId);
+    // Drop the listener now; a successful rebuild registers a fresh one.
     cleanupListener(tabId);
+    queueReconnect(tabId);
   });
   tunnelListeners.set(tabId, unlisten);
+}
+
+/** Park a tab whose tunnel died and make sure its host has a rebuild scheduled. */
+function queueReconnect(tabId: string): void {
+  const st = bridgeStates.get(tabId);
+  if (!st) return;
+  // The port may change on rebuild; a stale "already injected" record would then skip
+  // the correction on a tab that needs it.
+  injectedEnvPort.delete(tabId);
+  bridgeStates = new Map(bridgeStates.set(tabId, { ...st, remotePort: 0, status: 'reconnecting', error: undefined }));
+  let host = downHosts.get(st.hostKey);
+  if (!host) {
+    host = { tabs: new Map(), attempt: 0, running: false };
+    downHosts.set(st.hostKey, host);
+  }
+  host.tabs.set(tabId, st.ptyId);
+  // One timer per host: the tunnel-down events for its tabs arrive within milliseconds.
+  if (!host.timer && !host.running) scheduleHostReconnect(st.hostKey);
+}
+
+function scheduleHostReconnect(hostKey: string, overrideDelayMs?: number): void {
+  const host = downHosts.get(hostKey);
+  if (!host) return;
+  clearTimeout(host.timer);
+  const base = overrideDelayMs ?? RECONNECT_DELAYS_MS[Math.min(host.attempt, RECONNECT_DELAYS_MS.length - 1)];
+  const jittered = Math.round(base * (0.8 + Math.random() * 0.4));
+  host.timer = setTimeout(() => {
+    host.timer = undefined;
+    void attemptHostReconnect(hostKey);
+  }, jittered);
+}
+
+async function attemptHostReconnect(hostKey: string): Promise<void> {
+  const host = downHosts.get(hostKey);
+  if (!host || host.running) return;
+  host.running = true;
+  try {
+    // Prune before spending a connection: a tab healed by another path (the title loop
+    // got there first), torn down meanwhile (logout / close — disableBridge removed its
+    // state), or whose interactive ssh went with the tunnel. That last one matters most:
+    // bridging follows the shell, so with no remote shell there is nothing to bridge, and
+    // when the user reconnects, the title-driven path bridges the new session fresh.
+    for (const [tabId, ptyId] of [...host.tabs]) {
+      const st = bridgeStates.get(tabId);
+      if (!st || st.status === 'connected') { host.tabs.delete(tabId); continue; }
+      if (ptyId && !(await isRemoteShellForeground(ptyId))) {
+        bridgeStates.delete(tabId);
+        bridgeStates = new Map(bridgeStates);
+        host.tabs.delete(tabId);
+        logInfo(`SSH MCP bridge: not reconnecting tab ${tabId} — its ssh session is gone`);
+      }
+    }
+    if (host.tabs.size === 0) { downHosts.delete(hostKey); return; }
+
+    host.attempt += 1;
+    logInfo(`SSH MCP bridge: reconnect attempt ${host.attempt}/${RECONNECT_DELAYS_MS.length} to ${hostKey} for ${host.tabs.size} tab(s)`);
+    // Sequential, not parallel: the first tab re-establishes the tunnel (one ssh auth) and
+    // the rest join it through Rust's alive-pid fast path. Each still runs its own remote
+    // setup connection, so stagger them — sshd's MaxStartups counts unauthenticated
+    // connections per burst, and tripping it is how eca dropped us on Aug 25.
+    let first = true;
+    for (const [tabId, ptyId] of host.tabs) {
+      if (!first) await new Promise(r => setTimeout(r, RECONNECT_TAB_STAGGER_MS));
+      first = false;
+      if (!bridgeStates.has(tabId)) continue;
+      // freshSsh=false: we did not watch this shell connect, so nothing is typed into it —
+      // the remote already carries its env, and on an agent tab a write would land in chat.
+      try { await enableBridge(tabId, hostKey, ptyId); } catch { /* recorded as 'failed' */ }
+    }
+
+    for (const tabId of [...host.tabs.keys()]) {
+      const s = bridgeStates.get(tabId)?.status;
+      if (s === undefined || s === 'connected') host.tabs.delete(tabId);
+    }
+    if (host.tabs.size === 0) {
+      logInfo(`SSH MCP bridge: reconnected ${hostKey}`);
+      downHosts.delete(hostKey);
+      return;
+    }
+    if (host.attempt < RECONNECT_DELAYS_MS.length) {
+      // enableBridgeInner leaves a lost attempt as 'failed'; while we still mean to retry,
+      // show it as what it is rather than flashing red on every pass.
+      for (const tabId of host.tabs.keys()) {
+        const s = bridgeStates.get(tabId);
+        if (s) bridgeStates.set(tabId, { ...s, status: 'reconnecting' });
+      }
+      bridgeStates = new Map(bridgeStates);
+      scheduleHostReconnect(hostKey);
+      return;
+    }
+    // Out of attempts. Leave the tabs 'failed' — the honest state — and say so ONCE per
+    // host: enableBridgeInner suppresses its per-attempt toast for retries precisely so
+    // that this is the only notification a host that will not come back produces.
+    downHosts.delete(hostKey);
+    const [firstTab] = host.tabs.keys();
+    dispatch('MCP bridge down',
+      `Could not reconnect to ${hostKey} after ${host.attempt} attempts — ${host.tabs.size} tab(s) affected`,
+      'error', { tabId: firstTab });
+  } finally {
+    host.running = false;
+  }
+}
+
+/**
+ * Pull every host still waiting on a backoff timer forward to now. Called on the
+ * display-wake edge: a reap that landed while the displays were dark was almost
+ * certainly this machine stalling under App Nap, not the peer dying, so once we are
+ * back there is nothing left to wait out. Hosts are staggered a little so that four
+ * re-authentications do not land in the same second.
+ */
+export function retryDownBridgesNow(reason: string): void {
+  let i = 0;
+  for (const [hostKey, host] of downHosts) {
+    if (host.running) continue;
+    host.attempt = 0;
+    scheduleHostReconnect(hostKey, 1_000 + i * 1_500);
+    i += 1;
+  }
+  if (i > 0) logInfo(`SSH MCP bridge: ${reason} — retrying ${i} down host(s) now`);
 }
 
 function cleanupListener(tabId: string): void {
@@ -461,14 +607,16 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
 
   // Already bridged or in progress? A prior 'failed' attempt is NOT a dead end —
   // fall through and retry it (the remote may have been briefly down, e.g. a network
-  // blip during a reload). Only 'connected'/'pending' short-circuit.
+  // blip during a reload). Only 'connected'/'pending' short-circuit. A tab parked as
+  // 'reconnecting' (its tunnel died; see queueReconnect) is retried the same way — by
+  // the scheduler on its backoff, or sooner by the title loop if the remote speaks first.
   const existing = bridgeStates.get(tabId);
-  const retryingFailed = existing?.status === 'failed';
-  if (existing && !retryingFailed) return existing.status === 'connected';
+  const retrying = existing?.status === 'failed' || existing?.status === 'reconnecting';
+  if (existing && !retrying) return existing.status === 'connected';
 
   // Mark as pending immediately to prevent concurrent calls from racing
   const hostKey = extractHostKey(sshArgs);
-  bridgeStates = new Map(bridgeStates.set(tabId, { hostKey, remotePort: 0, status: 'pending' }));
+  bridgeStates = new Map(bridgeStates.set(tabId, { hostKey, remotePort: 0, status: 'pending', ptyId }));
 
   // Snapshot the tab's teardown epoch. A disableBridge() landing while we're still
   // setting up must win: without this, our completion would re-register 'connected'
@@ -619,6 +767,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       hostKey,
       remotePort: tunnelInfo.remote_port,
       status: 'connected',
+      ptyId,
     }));
 
     // Listen for tunnel process death from Rust — clears indicator in real-time
@@ -635,11 +784,13 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       remotePort: 0,
       status: 'failed',
       error: errMsg,
+      ptyId,
     }));
 
-    // Only surface the toast on the first failure of an episode. Retries (driven by
-    // term-title events once the host recovers) that fail again shouldn't re-nag.
-    if (!retryingFailed) {
+    // Only surface the toast on the first failure of an episode. Retries — the term-title
+    // loop once the host recovers, or the reconnect scheduler on its backoff — that fail
+    // again shouldn't re-nag; the scheduler speaks once, when it gives up.
+    if (!retrying) {
       dispatch('MCP Bridge Failed', `Could not connect to ${hostKey}: ${errMsg}`, 'error', { tabId });
     }
     return false;
