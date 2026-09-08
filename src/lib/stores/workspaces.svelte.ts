@@ -137,6 +137,9 @@ const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 function createWorkspacesStore() {
   let windowId = $state<string>('');
   let windowLabel = $state<string>('');
+  // Human-given name for this window. null = unnamed, and every surface that shows it falls
+  // back to something derived (the titlebar to the active workspace name).
+  let windowName = $state<string | null>(null);
   let workspaces = $state<Workspace[]>([]);
   let activeWorkspaceId = $state<string | null>(null);
   let sidebarWidth = $state(SIDEBAR_DEFAULT_WIDTH);
@@ -194,6 +197,7 @@ function createWorkspacesStore() {
   return {
     get windowId() { return windowId; },
     get windowLabel() { return windowLabel; },
+    get windowName() { return windowName; },
     get workspaces() { return workspaces; },
 
     /** Ids of task rows PARKED on archived tabs — off `Workspace.tasks`, but not deleted.
@@ -261,6 +265,7 @@ function createWorkspacesStore() {
       const data = await commands.getWindowData();
       windowId = data.id;
       windowLabel = data.label;
+      windowName = data.name ?? null;
       workspaces = data.workspaces;
       activeWorkspaceId = data.active_workspace_id;
       sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, data.sidebar_width || SIDEBAR_DEFAULT_WIDTH));
@@ -443,6 +448,15 @@ function createWorkspacesStore() {
     async toggleSidebar() {
       sidebarCollapsed = !sidebarCollapsed;
       await commands.setSidebarCollapsed(sidebarCollapsed);
+    },
+
+    /** Name this window, or clear the name with `null`/blank so the titlebar goes back to
+     *  showing the active workspace. The name is what maiTerm shows to maiLink and to agents
+     *  (`listWindows`), which otherwise have only the label — "main" or "window-<uuid>". */
+    async setWindowName(name: string | null) {
+      const next = name?.trim() ? name.trim() : null;
+      windowName = next;
+      await commands.setWindowName(next);
     },
 
     /** Switch to this window's Overlord workspace, creating it on first use

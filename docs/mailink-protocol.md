@@ -806,6 +806,8 @@ interface TaskBoard {
     workspaceId: string;
     workspace: string;
     windowLabel: string;    // Overlord is per WINDOW; this is the key the Overlord surface uses
+    windowName: string | null;  // what the human calls that window, null when unnamed — show
+                                // this rather than the label, which is "main" or a uuid
     overlord: boolean;      // this is the window's Overlord workspace (docs/overlord.md §11)
     suspended: boolean;
     workstreams: { id: string; name: string }[];
@@ -1672,6 +1674,9 @@ exactly when a phone is in use — desktop asleep. So:
 // GET /overlord → { windows: OverlordWindow[] }   ([] until a webview has published)
 interface OverlordWindow {
   windowLabel: string;        // Overlord is per WINDOW; the key every action route takes
+  windowName: string | null;  // what the HUMAN calls this window (titlebar), null when unnamed.
+                              // Show it in place of the label, which is "main" or a uuid.
+                              // Restamped on every publish, so a rename lands within a tick
   version: number;            // STRICTLY monotonic per window, across desktop restarts too (clock-
                               // seeded, ms-scale — not a small counter). A phone may guard on it
                               // and drop anything older than it holds; a restart never hands it

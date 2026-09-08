@@ -511,6 +511,8 @@ export interface MailinkDevice {
 export interface WindowData {
   id: string;
   label: string;
+  /** Human-given window name (absent when unnamed — serde skip). */
+  name?: string | null;
   workspaces: Workspace[];
   active_workspace_id: string | null;
   sidebar_width: number;

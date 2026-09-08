@@ -724,6 +724,9 @@ async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<App
                     serde_json::json!({
                         "windowId": w.id,
                         "windowLabel": w.label,
+                        // Absent when the window has no human-given name — the label is all
+                        // there is to call it by then.
+                        "windowName": w.name,
                         "workspaceCount": workspaces.len(),
                         "workspaces": workspaces,
                     })

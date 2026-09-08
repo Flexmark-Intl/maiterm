@@ -185,6 +185,26 @@ pub fn close_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
     Ok(())
 }
 
+/// Name this window (titlebar centre, maiLink, `listWindows`), or clear the name with `None`
+/// or a blank string so those surfaces fall back to their derived text again.
+#[tauri::command]
+pub fn set_window_name(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    name: Option<String>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        win.name = name;
+        app_data.clone()
+    };
+    save_state(&data_clone)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState>>, monitor_count: usize) -> Result<(), String> {
     let label = window.label().to_string();

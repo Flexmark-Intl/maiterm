@@ -834,6 +834,11 @@ export async function closeWindow(): Promise<void> {
   return invoke('close_window');
 }
 
+/** Name this window, or pass null/blank to clear the name and fall back to derived text. */
+export async function setWindowName(name: string | null): Promise<void> {
+  return invoke('set_window_name', { name });
+}
+
 export async function saveWindowGeometry(monitorCount: number): Promise<void> {
   return invoke('save_window_geometry', { monitorCount });
 }

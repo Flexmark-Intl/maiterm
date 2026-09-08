@@ -97,17 +97,18 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
     // the phone's to see at all: its engine still runs and publishes (every window's does),
     // but nothing in it can be opened from the phone, so it is dropped rather than served as
     // an empty board. (One read of app_data, dropped before our write below.)
-    let (live, this_window_exposed) = {
+    let (live, this_window_exposed, window_name) = {
         let data = app.app_data.read();
         let live: HashSet<String> = data.windows.iter().map(|w| w.label.clone()).collect();
-        let exposed = data.windows.iter().find(|w| w.label == label).is_some_and(|w| {
+        let this = data.windows.iter().find(|w| w.label == label);
+        let exposed = this.is_some_and(|w| {
             w.workspaces
                 .iter()
                 .flat_map(|ws| ws.panes.iter())
                 .flat_map(|p| p.tabs.iter())
                 .any(|t| designated.contains(t.id.as_str()))
         });
-        (live, exposed)
+        (live, exposed, this.and_then(|w| w.name.clone()))
     };
     // Rings only reach a phone while maiLink runs; queued while it is off they would burst
     // out, hours stale, on the next enable. The loop also discards leftovers when it starts.
@@ -152,6 +153,10 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
             .unwrap_or_default();
 
         snapshot["windowLabel"] = json!(label);
+        // What the human calls this window, `null` when unnamed. Restamped on every publish
+        // (~5 s), so a rename reaches the phone on the next tick without the engine knowing
+        // anything about it.
+        snapshot["windowName"] = json!(window_name);
         snapshot["version"] = json!(version);
         snapshot["receivedAt"] = json!(now_ms());
         // Stored EVEN WHEN UNEXPOSED, and never served then (see `served`). Dropping the entry

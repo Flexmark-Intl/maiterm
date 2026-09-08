@@ -625,6 +625,12 @@ pub struct WindowGeometry {
 pub struct WindowData {
     pub id: String,
     pub label: String,
+    /// Human-given name for this window, shown in the titlebar and carried to maiLink /
+    /// `listWindows`. `None` means unnamed: every surface falls back to something derived
+    /// (the active workspace name in the titlebar, the label on the wire), which is why this
+    /// stays an Option rather than being seeded with a default at creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub workspaces: Vec<Workspace>,
     pub active_workspace_id: Option<String>,
     #[serde(default = "default_sidebar_width")]
@@ -661,6 +667,7 @@ impl WindowData {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             label,
+            name: None,
             workspaces: Vec::new(),
             active_workspace_id: None,
             sidebar_width: default_sidebar_width(),

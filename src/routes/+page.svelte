@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
@@ -18,6 +18,7 @@
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { pendingResumePanes, resumePane } from '$lib/stores/resumeGate.svelte';
   import Resizer from '$lib/components/Resizer.svelte';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { modLabel, modSymbol, altLabel } from '$lib/utils/platform';
@@ -415,14 +416,76 @@
   function handleTitlebarMouseDown(e: MouseEvent) {
     if (e.button === 0) getCurrentWindow().startDragging();
   }
+
+  // ── Window name ───────────────────────────────────────────────────────────
+  // The titlebar shows the window's own name when it has one, and falls back to the active
+  // workspace otherwise. The name is also what maiLink and `listWindows` show — without it
+  // they have only the label ("main", or "window-<uuid>") to call a window by.
+  let editingWindowName = $state(false);
+  let windowNameDraft = $state('');
+  let windowNameInput = $state<HTMLInputElement | null>(null);
+
+  const titlebarText = $derived(
+    workspacesStore.windowName ?? workspacesStore.activeWorkspace?.name ?? ''
+  );
+
+  async function startWindowNameEdit() {
+    windowNameDraft = workspacesStore.windowName ?? '';
+    editingWindowName = true;
+    // Explicit focus, not `autofocus` — see the autofocus pitfall in CLAUDE.md. On `tick`
+    // rather than `requestAnimationFrame`: an occluded webview pauses rAF, and the input
+    // would then sit there taking no typing.
+    await tick();
+    windowNameInput?.focus();
+    windowNameInput?.select();
+  }
+
+  function commitWindowName() {
+    if (!editingWindowName) return;
+    editingWindowName = false;
+    // Blank clears the name, so the titlebar goes back to the active workspace.
+    workspacesStore.setWindowName(windowNameDraft);
+  }
+
+  function handleWindowNameKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      commitWindowName();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      editingWindowName = false; // discard; the blur that follows finds nothing to commit
+    }
+  }
 </script>
 
 <div class="app">
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="titlebar" onmousedown={handleTitlebarMouseDown}>
-    <span class="titlebar-text">
-      {#if workspacesStore.activeWorkspace}{workspacesStore.activeWorkspace.name}{/if}
-    </span>
+    {#if editingWindowName}
+      <input
+        class="titlebar-input"
+        type="text"
+        placeholder="Window name"
+        bind:value={windowNameDraft}
+        bind:this={windowNameInput}
+        onmousedown={(e) => e.stopPropagation()}
+        onblur={commitWindowName}
+        onkeydown={handleWindowNameKeydown}
+      />
+    {:else}
+      <Tooltip text="Double-click to name this window">
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- Not a drag handle: startDragging on the first mousedown of a double-click hands
+             the drag to the OS and the dblclick never arrives. The rest of the bar drags. -->
+        <span
+          class="titlebar-text"
+          onmousedown={(e) => e.stopPropagation()}
+          ondblclick={startWindowNameEdit}
+        >{titlebarText}</span>
+      </Tooltip>
+    {/if}
   </div>
   <div class="app-body">
     {#if loading}
@@ -597,7 +660,24 @@
   .titlebar-text {
     font-size: 0.923rem;
     color: var(--fg);
-    pointer-events: none;
+    cursor: default;
+    max-width: 60vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .titlebar-input {
+    font-family: inherit;
+    font-size: 0.923rem;
+    color: var(--fg);
+    background: var(--bg-dark);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    padding: 1px 6px;
+    width: min(320px, 50vw);
+    text-align: center;
+    outline: none;
   }
 
   .app-body {

@@ -605,6 +605,7 @@ pub fn run() {
             commands::window::create_window,
             commands::window::duplicate_window,
             commands::window::close_window,
+            commands::window::set_window_name,
             commands::window::save_window_geometry,
             commands::window::get_monitor_count,
             commands::window::restore_window_geometry,

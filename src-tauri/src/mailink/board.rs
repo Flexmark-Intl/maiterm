@@ -244,6 +244,9 @@ pub(crate) fn board(app: &AppState) -> Value {
                 "workspaceId": ws.id,
                 "workspace": ws.name,
                 "windowLabel": win.label,
+                // The window's human-given name, `null` when it has none — the phone has only
+                // the label ("main", "window-<uuid>") to show otherwise.
+                "windowName": win.name,
                 "overlord": ws.overlord,
                 "suspended": ws.suspended,
                 "workstreams": ws.workstreams.iter().map(|w| json!({ "id": w.id, "name": w.name })).collect::<Vec<_>>(),

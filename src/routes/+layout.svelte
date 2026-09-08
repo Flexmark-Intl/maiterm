@@ -91,12 +91,13 @@
     document.documentElement.style.setProperty('--ui-font-size', `${preferencesStore.uiFontSize}px`);
   });
 
-  // Update OS-level window title (Mission Control, Cmd+Tab, etc.)
+  // Update OS-level window title (Mission Control, Cmd+Tab, etc.) — the window's own name
+  // when it has one, else the active workspace, same fallback as the in-app titlebar.
   $effect(() => {
-    const ws = workspacesStore.activeWorkspace;
-    if (!ws) return;
+    const name = workspacesStore.windowName ?? workspacesStore.activeWorkspace?.name;
+    if (!name) return;
     const suffix = import.meta.env.DEV ? ' (Dev)' : '';
-    getCurrentWindow().setTitle(`maiTerm | ${ws.name}${suffix}`);
+    getCurrentWindow().setTitle(`maiTerm | ${name}${suffix}`);
   });
 
   // Scheduled backup timer lives in Rust now (commands/scheduler.rs) so it
