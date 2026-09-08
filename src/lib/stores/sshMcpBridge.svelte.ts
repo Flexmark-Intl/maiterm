@@ -110,6 +110,10 @@ function queueReconnect(tabId: string): void {
     downHosts.set(st.hostKey, host);
   }
   host.tabs.set(tabId, st.ptyId);
+  // An exhausted entry (see the give-up branch) getting a fresh tunnel-down means some
+  // other path brought a tunnel back up and it died again — the host is reachable, so
+  // it earns a fresh budget rather than one attempt and an immediate give-up.
+  if (host.attempt >= RECONNECT_DELAYS_MS.length) host.attempt = 0;
   // One timer per host: the tunnel-down events for its tabs arrive within milliseconds.
   if (!host.timer && !host.running) scheduleHostReconnect(st.hostKey);
 }
@@ -126,6 +130,24 @@ function scheduleHostReconnect(hostKey: string, overrideDelayMs?: number): void 
   }, jittered);
 }
 
+/**
+ * A torn-down tab (logout, close, hop to another host) must leave every host's retry
+ * set at once. Left in, it would be rebuilt against the host it was on when its tunnel
+ * died — the title loop re-creates its state under the NEW host within seconds, and a
+ * rebuild keyed on the old one then holds a tunnel to host1 for a shell sitting on
+ * host2, writes host1's ~/.aiterm with this tab's identity, and shows a green bolt over
+ * an agent that has no MCP at all.
+ */
+function forgetDownTab(tabId: string): void {
+  for (const [hostKey, host] of downHosts) {
+    if (!host.tabs.delete(tabId)) continue;
+    if (host.tabs.size === 0 && !host.running) {
+      clearTimeout(host.timer);
+      downHosts.delete(hostKey);
+    }
+  }
+}
+
 async function attemptHostReconnect(hostKey: string): Promise<void> {
   const host = downHosts.get(hostKey);
   if (!host || host.running) return;
@@ -138,7 +160,9 @@ async function attemptHostReconnect(hostKey: string): Promise<void> {
     // when the user reconnects, the title-driven path bridges the new session fresh.
     for (const [tabId, ptyId] of [...host.tabs]) {
       const st = bridgeStates.get(tabId);
-      if (!st || st.status === 'connected') { host.tabs.delete(tabId); continue; }
+      // A tab whose state now names a different host has moved on; whatever bridged it
+      // there owns it. Rebuilding it here would re-point it at the host it left.
+      if (!st || st.hostKey !== hostKey || st.status === 'connected') { host.tabs.delete(tabId); continue; }
       if (ptyId && !(await isRemoteShellForeground(ptyId))) {
         bridgeStates.delete(tabId);
         bridgeStates = new Map(bridgeStates);
@@ -158,15 +182,17 @@ async function attemptHostReconnect(hostKey: string): Promise<void> {
     for (const [tabId, ptyId] of host.tabs) {
       if (!first) await new Promise(r => setTimeout(r, RECONNECT_TAB_STAGGER_MS));
       first = false;
-      if (!bridgeStates.has(tabId)) continue;
+      // Re-check right before spending the connection: an earlier tab's await is a window
+      // in which this one can be torn down or re-bridged elsewhere.
+      if (bridgeStates.get(tabId)?.hostKey !== hostKey) continue;
       // freshSsh=false: we did not watch this shell connect, so nothing is typed into it —
       // the remote already carries its env, and on an agent tab a write would land in chat.
       try { await enableBridge(tabId, hostKey, ptyId); } catch { /* recorded as 'failed' */ }
     }
 
     for (const tabId of [...host.tabs.keys()]) {
-      const s = bridgeStates.get(tabId)?.status;
-      if (s === undefined || s === 'connected') host.tabs.delete(tabId);
+      const s = bridgeStates.get(tabId);
+      if (!s || s.hostKey !== hostKey || s.status === 'connected') host.tabs.delete(tabId);
     }
     if (host.tabs.size === 0) {
       logInfo(`SSH MCP bridge: reconnected ${hostKey}`);
@@ -178,7 +204,7 @@ async function attemptHostReconnect(hostKey: string): Promise<void> {
       // show it as what it is rather than flashing red on every pass.
       for (const tabId of host.tabs.keys()) {
         const s = bridgeStates.get(tabId);
-        if (s) bridgeStates.set(tabId, { ...s, status: 'reconnecting' });
+        if (s && s.hostKey === hostKey) bridgeStates.set(tabId, { ...s, status: 'reconnecting' });
       }
       bridgeStates = new Map(bridgeStates);
       scheduleHostReconnect(hostKey);
@@ -187,7 +213,12 @@ async function attemptHostReconnect(hostKey: string): Promise<void> {
     // Out of attempts. Leave the tabs 'failed' — the honest state — and say so ONCE per
     // host: enableBridgeInner suppresses its per-attempt toast for retries precisely so
     // that this is the only notification a host that will not come back produces.
-    downHosts.delete(hostKey);
+    //
+    // The entry itself STAYS, exhausted (no timer, attempt at the cap). It is the only
+    // registry the display-wake edge reads: deleting it here would mean six attempts
+    // burned during a long sleep leave the tabs exactly where they were before this
+    // scheduler existed, with nothing for the wake to pull forward. A wake resets the
+    // budget; so does a fresh tunnel-down (see queueReconnect).
     const [firstTab] = host.tabs.keys();
     dispatch('MCP bridge down',
       `Could not reconnect to ${hostKey} after ${host.attempt} attempts — ${host.tabs.size} tab(s) affected`,
@@ -809,6 +840,7 @@ export async function disableBridge(tabId: string): Promise<void> {
   if (!bridge) return;
 
   cleanupListener(tabId);
+  forgetDownTab(tabId);
   bridgeStates.delete(tabId);
   bridgeStates = new Map(bridgeStates);
   injectedEnvPort.delete(tabId);
