@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod comms;
+pub mod deshittify;
 pub mod editor;
 pub mod mailink;
 pub mod overlord;

@@ -8,8 +8,8 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import Icon from '$lib/components/Icon.svelte';
   import { modLabel, altLabel, isModKey, isMac } from '$lib/utils/platform';
-  import { getAllWorkspaces, getAllTabs, listSystemSounds, playSystemSound, detectWindowsShells, exportState, importState, pickBackupDirectory, backupFilename, previewImport, checkFullDiskAccess, openFullDiskAccessSettings, mailinkCreatePairing, mailinkListDevices, mailinkRemoveDevice, commsTestConnection } from '$lib/tauri/commands';
-  import type { ImportPreview } from '$lib/tauri/commands';
+  import { getAllWorkspaces, getAllTabs, listSystemSounds, playSystemSound, detectWindowsShells, exportState, importState, pickBackupDirectory, backupFilename, previewImport, checkFullDiskAccess, openFullDiskAccessSettings, mailinkCreatePairing, mailinkListDevices, mailinkRemoveDevice, commsTestConnection, deshittifyStatus, deshittifySetRule, deshittifySetRules } from '$lib/tauri/commands';
+  import type { ImportPreview, DeshittifyStatus } from '$lib/tauri/commands';
   import qrcode from 'qrcode-generator';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import OverlordRulesSection from '$lib/components/overlord/OverlordRulesSection.svelte';
@@ -81,7 +81,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -254,6 +254,126 @@
     try { return new Date(ms).toLocaleString(); } catch { return '—'; }
   }
 
+  // ─── Deshittification ──────────────────────────────────────────────────────
+  // Each rule owns state outside maiTerm's preferences (~/.claude/settings.json,
+  // the user's global git config), so the backend's on-disk reading IS the toggle
+  // position — nothing here is persisted as a preference.
+  const deshittifyGroups = [
+    {
+      id: 'claude_code',
+      label: 'Claude Code',
+      blurb: 'Writes to ~/.claude/settings.json and your global git config. Claude Code picks the settings up on its next session.',
+      rules: [
+        {
+          id: 'cc_disable_telemetry',
+          label: 'Disable telemetry',
+          hint: 'Sets DISABLE_TELEMETRY=1. Stops usage metrics being sent to Anthropic.',
+        },
+        {
+          id: 'cc_disable_error_reporting',
+          label: 'Disable error reporting',
+          hint: 'Sets DISABLE_ERROR_REPORTING=1. Stops crash and error reports being uploaded.',
+        },
+        {
+          id: 'cc_disable_bug_command',
+          label: 'Remove the /bug command',
+          hint: 'Sets DISABLE_BUG_COMMAND=1.',
+        },
+        {
+          id: 'cc_disable_feedback_command',
+          label: 'Remove the /feedback command',
+          hint: 'Sets DISABLE_FEEDBACK_COMMAND=1.',
+        },
+        {
+          id: 'cc_disable_feedback_survey',
+          label: 'Suppress feedback surveys',
+          hint: 'Sets CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1. Stops the in-session survey prompts.',
+        },
+        {
+          id: 'cc_include_co_authored_by',
+          label: 'No Co-Authored-By in commits',
+          hint: 'Sets includeCoAuthoredBy: false, so Claude Code never writes the trailer in the first place. Anthropic controls this switch, so pair it with the commit-msg hook below.',
+        },
+        {
+          id: 'cc_commit_msg_hook',
+          label: 'Strip agent credit at commit time',
+          hint: 'Installs a global commit-msg hook that deletes "Co-Authored-By: Claude" and "Generated with Claude Code" lines from every commit message — the backstop for when the setting above stops being honoured. Points your global core.hooksPath at ~/.maiterm/githooks; each repo\'s own hooks are chained through, so they keep running.',
+        },
+      ],
+    },
+  ];
+
+  let deshittifyRules = $state<Record<string, { applied: boolean; detail?: string }>>({});
+  let deshittifyLoaded = $state(false);
+  let deshittifyBusy = $state<string | null>(null);
+  let deshittifyErrors = $state<string[]>([]);
+  let expandedDeshittifyGroup = $state<string | null>(null);
+
+  function absorbDeshittify(status: DeshittifyStatus) {
+    const next: Record<string, { applied: boolean; detail?: string }> = {};
+    for (const r of status.rules) next[r.id] = { applied: r.applied, detail: r.detail };
+    deshittifyRules = next;
+    deshittifyLoaded = true;
+  }
+
+  async function refreshDeshittify() {
+    try {
+      absorbDeshittify(await deshittifyStatus());
+    } catch (e) {
+      deshittifyErrors = [String(e)];
+      deshittifyLoaded = true;
+    }
+  }
+
+  // Read on entry — and re-read on every entry, since a rule's state can change
+  // outside maiTerm (an agent editing settings.json, a `git config` by hand).
+  $effect(() => {
+    if (activeSection === 'deshittify') void refreshDeshittify();
+  });
+
+  function deshittifyApplied(id: string): boolean {
+    return deshittifyRules[id]?.applied ?? false;
+  }
+
+  /** All / some / none of a group's rules applied. */
+  function groupState(group: (typeof deshittifyGroups)[number]): 'on' | 'partial' | 'off' {
+    const on = group.rules.filter((r) => deshittifyApplied(r.id)).length;
+    if (on === 0) return 'off';
+    return on === group.rules.length ? 'on' : 'partial';
+  }
+
+  async function toggleDeshittifyRule(id: string) {
+    if (deshittifyBusy) return;
+    deshittifyBusy = id;
+    deshittifyErrors = [];
+    try {
+      absorbDeshittify(await deshittifySetRule(id, !deshittifyApplied(id)));
+    } catch (e) {
+      deshittifyErrors = [String(e)];
+      await refreshDeshittify();
+    } finally {
+      deshittifyBusy = null;
+    }
+  }
+
+  async function toggleDeshittifyGroup(group: (typeof deshittifyGroups)[number]) {
+    if (deshittifyBusy) return;
+    // Anything short of fully on turns the rest on; only a full group turns off.
+    const enable = groupState(group) !== 'on';
+    deshittifyBusy = group.id;
+    deshittifyErrors = [];
+    try {
+      const [status, errors] = await deshittifySetRules(group.rules.map((r) => r.id), enable);
+      absorbDeshittify(status);
+      deshittifyErrors = errors;
+    } catch (e) {
+      deshittifyErrors = [String(e)];
+      await refreshDeshittify();
+    } finally {
+      deshittifyBusy = null;
+    }
+  }
+
   const sections = [
     { id: 'appearance' as const, label: 'Appearance' },
     { id: 'terminal' as const, label: 'Terminal' },
@@ -265,6 +385,7 @@
     { id: 'triggers' as const, label: 'Triggers' },
     { id: 'overlord' as const, label: 'Overlord' },
     { id: 'claude_code' as const, label: 'AI Agents' },
+    { id: 'deshittify' as const, label: 'Deshittification' },
     { id: 'integrations' as const, label: 'Integrations' },
     { id: 'backup' as const, label: 'Backup' },
     { id: 'updates' as const, label: 'Updates' },
@@ -2275,6 +2396,85 @@
             <p class="setting-hint" style="color: var(--red, #f7768e);">{pairingError}</p>
           {/if}
         {/if}
+      {:else if activeSection === 'deshittify'}
+        <h3 class="section-heading">Deshittification</h3>
+        <p class="section-desc">
+          Switches off the parts of an AI coding agent that serve its vendor rather than you —
+          telemetry, feedback nags, self-promotion in your commit history. maiTerm edits the
+          agent's own config files, so these rules hold in every terminal, not just maiTerm's.
+          Each toggle reads its real state from disk: turn one off by hand elsewhere and it
+          shows as off here.
+        </p>
+
+        {#if deshittifyErrors.length > 0}
+          <div class="deshittify-errors">
+            {#each deshittifyErrors as err, i (i)}
+              <p>{err}</p>
+            {/each}
+          </div>
+        {/if}
+
+        {#each deshittifyGroups as group (group.id)}
+          {@const gState = groupState(group)}
+          <div class="trigger-card">
+            <div class="trigger-header" class:trigger-header-expanded={expandedDeshittifyGroup === group.id}>
+              <button
+                class="trigger-name-btn"
+                onclick={() => expandedDeshittifyGroup = expandedDeshittifyGroup === group.id ? null : group.id}
+                aria-expanded={expandedDeshittifyGroup === group.id}
+              >
+                <svg class="trigger-chevron" class:expanded={expandedDeshittifyGroup === group.id} width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6 3l5 5-5 5z"/></svg>
+                {group.label}
+                <span class="deshittify-count">
+                  {#if !deshittifyLoaded}
+                    checking…
+                  {:else}
+                    {group.rules.filter((r) => deshittifyApplied(r.id)).length} of {group.rules.length} applied
+                  {/if}
+                </span>
+              </button>
+              <button
+                class="toggle small"
+                class:active={gState === 'on'}
+                class:partial={gState === 'partial'}
+                disabled={!deshittifyLoaded || deshittifyBusy !== null}
+                onclick={() => toggleDeshittifyGroup(group)}
+                aria-pressed={gState === 'on'}
+                aria-label="Toggle every {group.label} deshittification rule"
+              >
+                <span class="toggle-knob"></span>
+              </button>
+            </div>
+
+            {#if expandedDeshittifyGroup === group.id}
+              <div class="trigger-body" transition:slide={{ duration: 150 }}>
+                <p class="setting-hint" style="margin: 0;">{group.blurb}</p>
+                {#each group.rules as rule (rule.id)}
+                  <div class="setting" style="align-items: flex-start; padding: 0;">
+                    <div>
+                      <span class="deshittify-rule-label">{rule.label}</span>
+                      <p class="setting-hint">{rule.hint}</p>
+                      {#if deshittifyRules[rule.id]?.detail}
+                        <p class="setting-hint deshittify-detail">{deshittifyRules[rule.id].detail}</p>
+                      {/if}
+                    </div>
+                    <button
+                      class="toggle small"
+                      class:active={deshittifyApplied(rule.id)}
+                      disabled={!deshittifyLoaded || deshittifyBusy !== null}
+                      onclick={() => toggleDeshittifyRule(rule.id)}
+                      aria-pressed={deshittifyApplied(rule.id)}
+                      aria-label="Toggle {rule.label}"
+                    >
+                      <span class="toggle-knob"></span>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/each}
+
       {:else if activeSection === 'integrations'}
         <h3 class="section-heading">Chat Integration</h3>
         <p class="section-desc">
@@ -3368,6 +3568,53 @@
   .toggle.small .toggle-knob {
     width: 14px;
     height: 14px;
+  }
+
+  /* Deshittification */
+  .toggle:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  /* Some-but-not-all: knob parks mid-track so a partly applied group can't be
+     mistaken for a fully applied one. */
+  .toggle.partial {
+    background: var(--bg-light);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  .toggle.small.partial .toggle-knob {
+    transform: translateX(7px);
+    background: var(--accent);
+  }
+
+  .deshittify-count {
+    font-size: 0.786rem;
+    color: var(--fg-dim);
+    font-weight: 400;
+  }
+
+  .deshittify-rule-label {
+    font-size: 1rem;
+    color: var(--fg);
+  }
+
+  .deshittify-detail {
+    color: var(--yellow, #e0af68);
+  }
+
+  .deshittify-errors {
+    border: 1px solid var(--red, #f7768e);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+  }
+
+  .deshittify-errors p {
+    margin: 0;
+    font-size: 0.846rem;
+    color: var(--red, #f7768e);
+    line-height: 1.4;
   }
 
   .toggle.small.active .toggle-knob {

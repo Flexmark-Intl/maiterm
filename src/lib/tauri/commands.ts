@@ -1170,3 +1170,32 @@ export async function checkFullDiskAccess(): Promise<boolean> {
 export async function openFullDiskAccessSettings(): Promise<void> {
   return invoke('open_full_disk_access_settings');
 }
+
+// ─── Deshittification ──────────────────────────────────────────────────────
+// Rule state lives outside maiTerm's preferences (~/.claude/settings.json, the
+// user's global git config), so every call answers with what is actually on
+// disk — that IS the toggle position.
+
+export interface DeshittifyRuleStatus {
+  id: string;
+  applied: boolean;
+  detail?: string;
+}
+
+export interface DeshittifyStatus {
+  rules: DeshittifyRuleStatus[];
+}
+
+export async function deshittifyStatus(): Promise<DeshittifyStatus> {
+  return invoke('deshittify_status');
+}
+
+export async function deshittifySetRule(id: string, enabled: boolean): Promise<DeshittifyStatus> {
+  return invoke('deshittify_set_rule', { id, enabled });
+}
+
+/** Section switch: applies/reverts a whole group of rules. Returns the resulting
+ *  status plus any per-rule failures (one refusing rule doesn't block the others). */
+export async function deshittifySetRules(ids: string[], enabled: boolean): Promise<[DeshittifyStatus, string[]]> {
+  return invoke('deshittify_set_rules', { ids, enabled });
+}
