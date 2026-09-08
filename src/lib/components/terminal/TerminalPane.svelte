@@ -76,6 +76,7 @@
   let unlistenClipboard: UnlistenFn;
   let unlistenBell: UnlistenFn;
   let unlistenDragDrop: UnlistenFn;
+  let unlistenTunnelDown: UnlistenFn;
   let resizeObserver: ResizeObserver;
   let filePathLinkDisposable: { dispose: () => void } | null = null;
   let initialized = $state(false);
@@ -661,8 +662,10 @@
             // the title and replay the connection if it drops unexpectedly.
             sshForeground = { cmd, host: parseSshHost(cmd) };
             lastRemoteTitle = title;
-            // ssh is back (e.g. user reconnected manually) — clear any stale badge.
+            // ssh is back (e.g. user reconnected manually) — clear any stale badge and
+            // stand the unattended retry down; the session no longer needs recovering.
             sshDisconnectStore.clear(tabId);
+            cancelAutoReconnect();
           }
           // Retry on 'failed' too, not just when there's no bridge — a failed
           // attempt (host briefly down) otherwise wedges forever since hasBridge()
@@ -779,6 +782,29 @@
 
     // Listen for PTY close — when the shell exits (exit/logout/Ctrl+D),
     // close the tab using the same logic as Cmd+W.
+    // Output-independent SSH-drop detection.
+    //
+    // Both existing paths need the terminal to SAY something: exit-255 needs the local
+    // shell's OSC 133 D, the fallback needs ssh's stderr. An idle agent tab produces
+    // neither, which is how 25 tabs dropped on 2026-09-08 with zero drops detected and
+    // no badge to click. Worse, an outage does not make ssh exit at all — it hangs until
+    // its own keepalives run out (10 minutes with the user's ~/.ssh/config), so there is
+    // nothing to detect for most of the outage.
+    //
+    // A dying bridge tunnel is a Rust process event (`child.wait()` on the `ssh -N` pid).
+    // It reaches idle tabs, carries no text to misparse in any locale, and fires ~20x
+    // sooner than the interactive session notices, because the tunnel runs a 30s budget.
+    unlistenTunnelDown = await listen(`ssh-tunnel-down-${tabId}`, () => {
+      if (destroyed || terminalsStore.shuttingDown) return;
+      if (workspacesStore.isTabSuspending(tabId) || workspacesStore.isWorkspaceSuspending(workspaceId)) return;
+      // The tunnel dying does NOT mean this tab's session did. Probe fresh: a session
+      // that is merely hung is still the foreground job, and must not be badged (nor,
+      // later, typed into — the write would land in the hung ssh).
+      isRemoteShellForeground(ptyId).then(stillSsh => {
+        if (!stillSsh) handleSshDrop('tunnel-down');
+      }).catch(() => {});
+    });
+
     unlistenClose = await listen(`pty-close-${ptyId}`, () => {
       if (destroyed || terminalsStore.shuttingDown) return;
       // Don't delete tabs when workspace is being suspended — PTYs are
@@ -1314,6 +1340,8 @@
     if (unlistenClipboard) unlistenClipboard();
     if (unlistenBell) unlistenBell();
     if (unlistenDragDrop) unlistenDragDrop();
+    if (unlistenTunnelDown) unlistenTunnelDown();
+    cancelAutoReconnect();
     clearTimeout(resizePtyTimeout);
     if (resizeObserver) resizeObserver.disconnect();
     if (filePathLinkDisposable) filePathLinkDisposable.dispose();
@@ -1613,6 +1641,76 @@
     dispatch('SSH disconnected', host ? `Connection to ${host} dropped` : 'SSH connection dropped', 'error', { tabId });
     logInfo(`SSH drop detected for tab ${tabId} (${reason}) host=${host ?? '?'}`);
     sshForeground = null;
+    scheduleAutoReconnect();
+  }
+
+  // --- Unattended SSH session recovery ---
+  //
+  // The badge alone only helps someone who is watching. A drop at 04:28 (the router's
+  // maintenance window) or during a display sleep leaves the session dead until a human
+  // clicks, which is what "all the tabs got dc'd, none of them resumed" was.
+  //
+  // Deliberately NOT a blanket auto-reconnect: it only runs for tabs the user already
+  // told maiTerm to bring back (auto_resume_enabled) and that have a stored ssh command.
+  // Everything else keeps the click-to-reconnect badge and nothing is typed at it.
+  const AUTO_RECONNECT_DELAYS_MS = [5_000, 15_000, 45_000, 120_000];
+  let autoReconnectAttempt = 0;
+  let autoReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let autoReconnectVerifyTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function cancelAutoReconnect() {
+    clearTimeout(autoReconnectTimer);
+    clearTimeout(autoReconnectVerifyTimer);
+    autoReconnectTimer = undefined;
+    autoReconnectVerifyTimer = undefined;
+    autoReconnectAttempt = 0;
+  }
+
+  function scheduleAutoReconnect() {
+    if (destroyed) return;
+    const tab = getCurrentTab();
+    if (!tab?.auto_resume_enabled) return;
+    if (!(tab.auto_resume_ssh_command || tab.restore_ssh_command)) return;
+    if (autoReconnectAttempt >= AUTO_RECONNECT_DELAYS_MS.length) {
+      logInfo(`SSH auto-reconnect: giving up on tab ${tabId} — badge left for manual retry`);
+      return;
+    }
+    const base = AUTO_RECONNECT_DELAYS_MS[autoReconnectAttempt];
+    autoReconnectAttempt += 1;
+    clearTimeout(autoReconnectTimer);
+    // Jitter: a mass drop schedules every affected tab in the same instant, and they all
+    // dial the same handful of hosts. Without it they arrive as one burst at sshd.
+    autoReconnectTimer = setTimeout(() => { void attemptAutoReconnect(); },
+      Math.round(base * (0.8 + Math.random() * 0.4)));
+  }
+
+  async function attemptAutoReconnect() {
+    if (destroyed || terminalsStore.shuttingDown) return;
+    if (workspacesStore.isTabSuspending(tabId) || workspacesStore.isWorkspaceSuspending(workspaceId)) return;
+    // Healed while we waited (the user reconnected, or a title event cleared it).
+    if (!sshDisconnectStore.isDisconnected(tabId)) { cancelAutoReconnect(); return; }
+    // The gate that makes this safe: never write while anything ssh-shaped still owns the
+    // PTY. A hung session is alive as far as the kernel is concerned, so the replayed
+    // command would be typed INTO it (and on an agent tab, into its chat). Re-arm instead —
+    // this is the normal path during an outage, where ssh sits there for minutes.
+    try {
+      if (await isRemoteShellForeground(ptyId)) { scheduleAutoReconnect(); return; }
+    } catch { scheduleAutoReconnect(); return; }
+
+    logInfo(`SSH auto-reconnect: attempt ${autoReconnectAttempt}/${AUTO_RECONNECT_DELAYS_MS.length} for tab ${tabId}`);
+    await reconnectSsh();
+
+    // reconnectSsh clears the badge optimistically, so a failed replay would otherwise
+    // look like success and end the schedule. Verify: past the dedup window, if nothing
+    // ssh-shaped is in the foreground, the attempt failed — re-mark (which re-enters
+    // scheduleAutoReconnect through handleSshDrop) and let the backoff carry on.
+    clearTimeout(autoReconnectVerifyTimer);
+    autoReconnectVerifyTimer = setTimeout(() => {
+      if (destroyed) return;
+      isRemoteShellForeground(ptyId).then(ok => {
+        if (!ok) handleSshDrop('auto-reconnect-failed');
+      }).catch(() => {});
+    }, 12_000);
   }
 
   /** Replay the ssh command (+ auto-resume) into the still-alive local shell. */

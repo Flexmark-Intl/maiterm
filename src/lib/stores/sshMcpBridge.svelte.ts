@@ -190,12 +190,21 @@ async function attemptHostReconnect(hostKey: string): Promise<void> {
       try { await enableBridge(tabId, hostKey, ptyId); } catch { /* recorded as 'failed' */ }
     }
 
+    // Count successes explicitly. Emptiness is NOT success: as each tab's ssh dies its
+    // prompt-return calls disableBridge, which pulls it out of this set — so a host whose
+    // every tab was torn down looks identical to one that fully recovered. On 2026-09-08
+    // that logged "reconnected root@tokenserver" one line after "failed … Timeout", with
+    // zero tabs actually re-bridged.
+    let connected = 0;
     for (const tabId of [...host.tabs.keys()]) {
       const s = bridgeStates.get(tabId);
-      if (!s || s.hostKey !== hostKey || s.status === 'connected') host.tabs.delete(tabId);
+      if (!s || s.hostKey !== hostKey) { host.tabs.delete(tabId); continue; }
+      if (s.status === 'connected') { host.tabs.delete(tabId); connected += 1; }
     }
     if (host.tabs.size === 0) {
-      logInfo(`SSH MCP bridge: reconnected ${hostKey}`);
+      logInfo(connected > 0
+        ? `SSH MCP bridge: reconnected ${hostKey} (${connected} tab(s))`
+        : `SSH MCP bridge: nothing left to reconnect on ${hostKey} — its tabs were torn down`);
       downHosts.delete(hostKey);
       return;
     }
