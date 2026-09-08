@@ -36,7 +36,9 @@ With [Overlord](/features/overlord/) switched on, an agent tab's dock also carri
 
 ## Rendering
 
-Because the screen buffer and scrollback live in the Rust backend, the frontend never holds more than a single screen of content — xterm.js runs with zero scrollback and simply paints the viewport the backend hands it. With nothing to scroll through on the frontend, GPU acceleration buys nothing, so maiTerm defaults to xterm.js's lightweight DOM renderer. That also sidesteps the glyph-ghosting artifacts the GPU renderers showed under maiTerm's full-frame streaming. A Canvas renderer is still available under **Terminal → Rendering** if you want to compare.
+Because the screen buffer and scrollback live in the Rust backend, the frontend never holds more than a single screen of content — xterm.js runs with zero scrollback and simply paints the viewport the backend hands it. With nothing to scroll through on the frontend, GPU acceleration buys nothing, so maiTerm defaults to xterm.js's lightweight DOM renderer. That also sidesteps the glyph-ghosting artifacts the GPU renderers showed under maiTerm's streamed frames. A Canvas renderer is still available under **Terminal → Rendering** if you want to compare.
+
+A frame carries only the rows that actually changed, and a tab you can't see isn't drawn at all — so a window of agents streaming in the background costs a fraction of what it used to, and the tab you *are* watching stays responsive while they do it. Scrollback is saved off the main thread, so a window with dozens of agent tabs no longer stutters while it writes.
 
 ## Shell Integration
 

@@ -156,6 +156,8 @@ If a reply arrives while the agent is showing you something to decide — a mult
 
 If someone `@mentions` the bot on a bound thread while its agent session isn't running, maiTerm doesn't silently swallow the message. It raises a notification — a toast or OS notification per your [notification mode](/features/agents/), deep-linking to the tab — so you know there's something waiting. The message isn't lost: the backlog is delivered as soon as you resume the session.
 
+Whether an agent is there is confirmed against your machine's process list, not against maiTerm's record of the session. An SSH drop kills the remote agent *and* the route its goodbye home would have taken, so the record can outlive it by hours — and a reply delivered to the bare local shell the tab fell back to would be run as a command. maiTerm holds the message instead and tells you the tab has no agent running.
+
 ## Handing work to the right agent in a mesh
 
 If the monitoring tab is part of a [Mesh Workspace](/features/mesh-workspace/), it doesn't have to work every thread itself. Before it digs in, it checks its peers: when an issue clearly belongs to another agent's repository — a peer whose purpose and working directory match the report — it hands that peer the investigation and fix, while **staying the dispatcher on the thread**.

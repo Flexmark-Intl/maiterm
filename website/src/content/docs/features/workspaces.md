@@ -33,6 +33,7 @@ Panes are the containers within a workspace. Each pane holds one or more tabs (t
 - **Drag to resize** — adjust split ratios by dragging the divider
 - **Recursive splits** — splits within splits for complex layouts
 - **Terminal persistence** — terminals survive split tree changes via the portal pattern
+- **Drag-to-split** *(off by default)* — dragging a tab onto another pane moves it there. Dropping it on a pane's *edge* to create a split is opt-in, under **Preferences → Tabs → Dragging**: a pane's top edge sits directly under its own tab bar, so a few pixels of drift while clicking a tab used to split the pane. `Cmd+D` and the tab's context menu split either way
 
 ### Per-Tab Notes
 

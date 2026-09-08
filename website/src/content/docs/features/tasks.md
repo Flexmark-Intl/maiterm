@@ -51,6 +51,8 @@ The `+` in the panel header adds a task; each workstream heading has its own `+`
 
 Every one of those edits is visible to the agent through the same tools it writes with. That's what makes the system two-way — until now, task state was something you could only watch.
 
+The same list is editable from your phone: [maiLink](/features/mailink/#what-you-can-do-from-the-phone) shows a tab's rows and lets you add, retitle, re-lane or reassign one, and the write lands in maiTerm even while the Mac's screen is asleep.
+
 ## What your agent gets
 
 Every agent tab — Claude Code, Codex, local or over SSH — gets three tools:

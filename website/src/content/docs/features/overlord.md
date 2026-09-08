@@ -76,6 +76,10 @@ Two buttons sit in the command bar: **Scan tabs**, which reads every running age
 
 The deck takes its colours from whichever [theme](/features/themes/) you're running, and goes still under reduced-motion.
 
+### From your phone
+
+Escalations and proposals mirror to [maiLink](/features/mailink/), so you can approve or dismiss a proposal, clear an escalation, fire a rule at a tab or drive one without being at your desk. A new escalation rings the doorbell. Because the engine lives in the window it supervises, an action sent to a sleeping desktop is reported as *sent, not confirmed* until the next snapshot shows it landed.
+
 ## Firing a rule by hand
 
 A rule's condition decides when it fires *on its own*. It doesn't decide when **you** may fire it — sometimes you can see that a tab needs checkpointing now, at 30% context rather than 55%.

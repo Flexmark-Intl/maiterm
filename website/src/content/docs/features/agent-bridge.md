@@ -25,8 +25,8 @@ From a terminal tab running an agent, press `Cmd+Shift+L` — or **right-click t
 
 The picker offers two modes:
 
-- **Fork into new pane** *(default for agents that support it)* — maiTerm forks the chosen session into a split pane right beside your current one. The fork inherits the target session's full context but runs as an isolated peer, so reaching out to it never disturbs the original. You end up with both sides of the bridge side by side, ready to interact with each. Forking is a Claude Code capability; when the target is a Codex session, the picker uses **Connect existing tab** instead.
-- **Connect existing tab** — link two already-running agent tabs directly, with no fork and no new pane. This works for any pairing, including across runtimes (Claude Code ↔ Codex), and is the path Codex always uses. It's idempotent: re-selecting your current partner repairs a broken link in place, and it won't hijack a tab that's already bridged to someone else.
+- **Fork into new pane** *(default for agents that support it)* — maiTerm forks the chosen session into a split pane right beside your current one. The fork inherits the target session's full context but runs as an isolated peer, so reaching out to it never disturbs the original. You end up with both sides of the bridge side by side, ready to interact with each. Claude Code and Codex sessions can both be forked, each through its own runtime's fork command; a runtime with no fork of its own isn't offered as a fork target.
+- **Connect existing tab** — link two already-running agent tabs directly, with no fork and no new pane. This works for any pairing, including across runtimes (Claude Code ↔ Codex). It's idempotent: re-selecting your current partner repairs a broken link in place, and it won't hijack a tab that's already bridged to someone else.
 
 There's also an optional **purpose** field. Describe the peer for your own agent — what it's an expert on, how it should be used — and that context is handed to your agent so it knows what the bridge is for instead of firing off questions blindly.
 

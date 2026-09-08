@@ -10,7 +10,7 @@ maiTerm integrates deeply with coding agents — **Claude Code** and **OpenAI Co
 | Agent | On by default | Integration |
 |-------|---------------|-------------|
 | **Claude Code** | Yes | MCP/IDE tools, hooks, auto-resume, Agent Bridge (fork or connect), SSH bridge, `/maiterm` skill + status line |
-| **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect existing tab), SSH bridge, `maiterm` prompt |
+| **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (fork or connect), SSH bridge, `maiterm` prompt |
 
 Both agents get the same core treatment: live state in the sidebar and footer, tab activity indicators, auto-resume after a crash or relaunch, and notifications — all driven through the same hooks pipeline. Integration is on by default for each; it only takes effect once you actually run that agent.
 
@@ -41,7 +41,7 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 **Codex**
 
 - **Enable Codex IDE integration** — the MCP/IDE server and tools for Codex
-- **Codex lifecycle hooks** — the 7 Codex hook events that drive state and auto-resume
+- **Codex lifecycle hooks** — the 9 Codex hook events that drive state and auto-resume. Turning this off removes the hooks rather than just leaving them unrefreshed, so Codex stops reporting to maiTerm
 - **Codex auto-resume** — capture session IDs and reconnect on restore
 - **Codex MCP bridge over SSH** — expose IDE tools to remote Codex
 - **Skip the one-time Codex hook-trust prompt** *(advanced)* — the only agent toggle off by default; Codex's one-time hook-trust approval is deliberately kept unless you opt out
@@ -49,6 +49,8 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 ### SSH MCP Bridge
 
 When you're SSH'd into a remote server, maiTerm bridges the MCP connection so an agent running remotely still has access to all IDE tools. A reverse SSH tunnel is set up automatically in the background — no manual port forwarding needed. For each enabled agent maiTerm writes the matching remote config (Claude Code's lock file and `~/.claude.json`, or Codex's `~/.codex/config.toml` and `hooks.json`), gracefully no-op'ing on a host that doesn't have that CLI installed. The bridge status is shown in the tab bar with a bolt icon (green = connected).
+
+If a tunnel goes down — a network blip, or your Mac putting its displays to sleep — maiTerm rebuilds it on its own, backing off between attempts and staggering the tabs that share a host so they rejoin one connection rather than all re-authenticating at once. A tab whose shell has since `ssh`'d somewhere else follows the shell instead of being reconnected to the host it left.
 
 #### Two computers, one remote account
 
