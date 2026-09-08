@@ -17,7 +17,7 @@ Codex support shipped half-wired. This finishes it.
 
 - **Hooks stay trusted across restarts,** so a Codex tab keeps reporting to maiTerm instead of going quiet after a relaunch.
 - **A Codex agent gets told about tasks and Overlord** when its session starts or resumes, like a Claude one does.
-- **Fork a Codex session** from the picker. It used to split a pane and run a Claude command against a Codex id.
+- **Fork a Codex session** from the picker — new, and worth a try before you lean on it. It used to split a pane and run a Claude command against a Codex id.
 - **An approval is answerable only while its prompt is on screen.** Codex settles most approvals automatically with nobody asked, so the phone was offering cards for approvals already gone.
 - **The Codex hooks and trust-bypass switches do something now.** Turning hooks off removes them rather than just stopping the refresh.
 - **Config merges can't damage your files.** A `config.toml` or `hooks.json` maiTerm can't parse is left alone instead of overwritten.

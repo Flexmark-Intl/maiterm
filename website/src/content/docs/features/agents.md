@@ -10,7 +10,7 @@ maiTerm integrates deeply with coding agents — **Claude Code** and **OpenAI Co
 | Agent | On by default | Integration |
 |-------|---------------|-------------|
 | **Claude Code** | Yes | MCP/IDE tools, hooks, auto-resume, Agent Bridge (fork or connect), SSH bridge, `/maiterm` skill + status line |
-| **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (fork or connect), SSH bridge, `maiterm` prompt |
+| **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect, or fork — new), SSH bridge, `maiterm` prompt |
 
 Both agents get the same core treatment: live state in the sidebar and footer, tab activity indicators, auto-resume after a crash or relaunch, and notifications — all driven through the same hooks pipeline. Integration is on by default for each; it only takes effect once you actually run that agent.
 
