@@ -34,6 +34,11 @@ pub struct DeshittifyRuleStatus {
     pub id: String,
     /// True when the rule's change is present on disk right now.
     pub applied: bool,
+    /// True when the rule *cannot* currently be applied — something outside
+    /// maiTerm owns the state it would write. The UI greys these out and leaves
+    /// them out of its "all applied?" arithmetic, so a group holding one can
+    /// still reach a fully-on state and be switched back off.
+    pub blocked: bool,
     /// Why the rule can't be applied (or a caveat about how it is applied).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -50,17 +55,31 @@ fn claude_user_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
 
-fn read_claude_settings() -> serde_json::Value {
-    let Some(path) = claude_user_settings_path() else {
-        return serde_json::json!({});
-    };
+/// Read `~/.claude/settings.json`, or `{}` when there isn't one yet.
+///
+/// Errors when the file exists but can't be read or parsed. That case MUST NOT
+/// degrade to `{}`: every writer here is read-modify-write, so treating an
+/// unparseable file as empty would rename two keys over the top of the user's
+/// hooks, permissions and model settings — one click, no error, no backup.
+fn read_claude_settings() -> Result<serde_json::Value, String> {
+    let path = claude_user_settings_path().ok_or("Could not determine home directory")?;
+    read_settings_at(&path)
+}
+
+fn read_settings_at(path: &std::path::Path) -> Result<serde_json::Value, String> {
     if !path.exists() {
-        return serde_json::json!({});
+        return Ok(serde_json::json!({}));
     }
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| serde_json::json!({}))
+    let raw = fs::read_to_string(path)
+        .map_err(|e| format!("Cannot read ~/.claude/settings.json: {e}"))?;
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "~/.claude/settings.json could not be parsed ({e}). maiTerm won't overwrite settings it can't read — fix the file (Claude Code is rejecting it too) and come back."
+        )
+    })
 }
 
 /// Write settings back atomically, preserving everything we didn't touch.
@@ -90,7 +109,7 @@ fn env_var_applied(settings: &serde_json::Value, key: &str) -> bool {
 }
 
 fn set_env_var(enabled: bool, key: &str) -> Result<(), String> {
-    let mut settings = read_claude_settings();
+    let mut settings = read_claude_settings()?;
     let obj = settings
         .as_object_mut()
         .ok_or("~/.claude/settings.json is not a JSON object")?;
@@ -119,7 +138,7 @@ fn co_authored_applied(settings: &serde_json::Value) -> bool {
 }
 
 fn set_co_authored(enabled: bool) -> Result<(), String> {
-    let mut settings = read_claude_settings();
+    let mut settings = read_claude_settings()?;
     let obj = settings
         .as_object_mut()
         .ok_or("~/.claude/settings.json is not a JSON object")?;
@@ -155,7 +174,12 @@ fn commit_msg_script() -> String {
 msg="$1"
 [ -f "$msg" ] || exit 0
 
-cleaned="$(grep -v -i -E '^Co-authored-by:[[:space:]]*(Claude|Anthropic)' "$msg" \
+# Matched narrowly on purpose: "Claude" and "Claudette" are ordinary given names,
+# and this rewrites the message before git records it, so a false positive deletes
+# a human's credit with no copy left anywhere. The address carries the signal —
+# the name pattern only backstops a future trailer that stops using @anthropic.com.
+cleaned="$(grep -v -i -E '^Co-authored-by:.*@anthropic\.com' "$msg" \
+  | grep -v -i -E '^Co-authored-by:[[:space:]]*(Claude|Anthropic)([[:space:]]+(Code|Opus|Sonnet|Haiku|Fable)[^<]*)?[[:space:]]*<' \
   | grep -v -i -E '^[[:space:]]*(🤖[[:space:]]*)?Generated with \[?Claude Code')"
 printf '%s\n' "$cleaned" > "$msg"
 
@@ -180,11 +204,24 @@ exit 0
     )
 }
 
-/// Every client-side hook that gets a passthrough shim. `fsmonitor-watchman` and
-/// `reference-transaction` are left out on purpose: the first has semantics a shim
-/// can't fake, the second fires per ref update and the shell spawn shows up on
-/// large fetches.
+/// Every hook that gets a passthrough shim.
+///
+/// `core.hooksPath` is global and applies to receive-pack too, so the server-side
+/// hooks are here as well: without shims, pushing to any local bare/deploy repo
+/// silently skips its `pre-receive`/`update` gate and the push is accepted.
+///
+/// A shim is only safe for hooks whose ABSENCE is a no-op, because ours exits 0
+/// when the repo has none. Deliberately excluded, all three for that reason:
+/// - `push-to-checkout` — git runs its built-in push-to-deploy checkout only when
+///   the hook does NOT exist, so a shim leaves the worktree stale after a push.
+/// - `proc-receive` — git speaks a version handshake to it; exiting 0 is not a
+///   valid no-op.
+/// - `fsmonitor-watchman` — has semantics a shim can't fake.
+/// `reference-transaction` is excluded on cost: it fires per ref update and the
+/// shell spawn is measurable on large fetches. A repo using one loses it while
+/// this rule is on.
 const PASSTHROUGH_HOOKS: &[&str] = &[
+    // Client-side
     "applypatch-msg",
     "pre-applypatch",
     "post-applypatch",
@@ -198,9 +235,13 @@ const PASSTHROUGH_HOOKS: &[&str] = &[
     "pre-push",
     "post-rewrite",
     "pre-auto-gc",
-    "push-to-checkout",
     "sendemail-validate",
     "post-index-change",
+    // Server-side (a local push to a bare or deploy repo runs these)
+    "pre-receive",
+    "update",
+    "post-receive",
+    "post-update",
 ];
 
 fn write_hook_file(path: &PathBuf, body: &str) -> Result<(), String> {
@@ -248,6 +289,7 @@ fn commit_hook_status() -> DeshittifyRuleStatus {
         return DeshittifyRuleStatus {
             id: RULE_COMMIT_HOOK.into(),
             applied: false,
+            blocked: true,
             detail: Some("Could not determine home directory.".into()),
         };
     };
@@ -259,6 +301,7 @@ fn commit_hook_status() -> DeshittifyRuleStatus {
             DeshittifyRuleStatus {
                 id: RULE_COMMIT_HOOK.into(),
                 applied: present,
+                blocked: false,
                 detail: (!present).then(|| {
                     "core.hooksPath points at maiTerm but the hook file is missing — toggle this on to rewrite it.".to_string()
                 }),
@@ -267,13 +310,15 @@ fn commit_hook_status() -> DeshittifyRuleStatus {
         Some(other) => DeshittifyRuleStatus {
             id: RULE_COMMIT_HOOK.into(),
             applied: false,
+            blocked: true,
             detail: Some(format!(
-                "Your global core.hooksPath is already set to {other} — maiTerm won't overwrite it. Clear it first, or install the hook into that directory yourself."
+                "Your global core.hooksPath is already set to {other} — maiTerm won't overwrite it. Clear it with `git config --global --unset core.hooksPath`, or install the hook into that directory yourself."
             )),
         },
         None => DeshittifyRuleStatus {
             id: RULE_COMMIT_HOOK.into(),
             applied: false,
+            blocked: false,
             detail: None,
         },
     }
@@ -338,20 +383,28 @@ fn set_commit_hook(enabled: bool) -> Result<(), String> {
 // ─── Status / apply ────────────────────────────────────────────────────────
 
 fn build_status() -> DeshittifyStatus {
-    let settings = read_claude_settings();
+    // An unreadable settings file blocks every rule backed by it, rather than
+    // reading as "nothing applied" and inviting a click that would overwrite it.
+    let (settings, settings_err) = match read_claude_settings() {
+        Ok(v) => (v, None),
+        Err(e) => (serde_json::json!({}), Some(e)),
+    };
+
     let mut rules: Vec<DeshittifyRuleStatus> = ENV_RULES
         .iter()
         .map(|(id, key)| DeshittifyRuleStatus {
             id: (*id).into(),
-            applied: env_var_applied(&settings, key),
-            detail: None,
+            applied: settings_err.is_none() && env_var_applied(&settings, key),
+            blocked: settings_err.is_some(),
+            detail: settings_err.clone(),
         })
         .collect();
 
     rules.push(DeshittifyRuleStatus {
         id: RULE_CO_AUTHORED.into(),
-        applied: co_authored_applied(&settings),
-        detail: None,
+        applied: settings_err.is_none() && co_authored_applied(&settings),
+        blocked: settings_err.is_some(),
+        detail: settings_err.clone(),
     });
     rules.push(commit_hook_status());
 
@@ -401,15 +454,14 @@ pub async fn deshittify_set_rules(
         let mut errors = Vec::new();
         let before = build_status();
         for id in &ids {
+            let Some(rule) = before.rules.iter().find(|r| &r.id == id) else {
+                continue;
+            };
             // Skip rules already in the requested state so "turn everything on"
-            // can't trip over a rule that is on but would now refuse to re-apply.
-            let already = before
-                .rules
-                .iter()
-                .find(|r| &r.id == id)
-                .map(|r| r.applied)
-                .unwrap_or(false);
-            if already == enabled {
+            // can't trip over a rule that is on but would now refuse to re-apply,
+            // and skip blocked ones — the UI already shows why they can't move,
+            // and an error here would be noise the user can't act on differently.
+            if rule.applied == enabled || rule.blocked {
                 continue;
             }
             if let Err(e) = apply_rule(id, enabled) {
@@ -509,6 +561,79 @@ mod tests {
         assert!(!body.contains("Claude"), "agent credit survived the hook: {body:?}");
         assert!(body.contains("local-commit-msg-ran"), "repo commit-msg was skipped: {body:?}");
         assert!(dir.join("pre-commit-ran").exists(), "repo pre-commit was skipped");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// "Claude" is an ordinary given name and the hook rewrites the message before
+    /// git records it — a false positive deletes a person's credit irrecoverably.
+    #[test]
+    fn commit_msg_hook_spares_humans_named_claude() {
+        let dir = scratch("humans");
+        let hook = dir.join("commit-msg");
+        write_exec(&hook, &commit_msg_script());
+
+        let msg = dir.join("COMMIT_EDITMSG");
+        fs::write(
+            &msg,
+            "Fix it\n\n\
+             Co-authored-by: Claude Dubois <claude.dubois@example.fr>\n\
+             Co-authored-by: Claudia Rossi <claudia@example.com>\n\
+             Co-authored-by: Claude <noreply@anthropic.com>\n\
+             Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>\n\
+             Co-authored-by: Claude Code <someone@example.com>\n",
+        )
+        .unwrap();
+
+        assert!(Command::new("sh").arg(&hook).arg(&msg).current_dir(&dir).status().unwrap().success());
+        let out = fs::read_to_string(&msg).unwrap();
+
+        assert!(out.contains("Claude Dubois"), "a human co-author was deleted: {out:?}");
+        assert!(out.contains("Claudia Rossi"), "a human co-author was deleted: {out:?}");
+        assert!(!out.contains("anthropic.com"), "agent trailer survived: {out:?}");
+        // Backstop for a future trailer that stops using an @anthropic.com address.
+        assert!(!out.contains("Claude Code <"), "agent trailer survived: {out:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A shim is only safe where the hook's ABSENCE is a no-op. `push-to-checkout`
+    /// and `proc-receive` fail that test; the server-side gates need shims or a
+    /// push to a local bare repo silently bypasses them.
+    #[test]
+    fn passthrough_list_covers_server_hooks_and_omits_the_unsafe_ones() {
+        for unsafe_hook in ["push-to-checkout", "proc-receive", "fsmonitor-watchman"] {
+            assert!(
+                !PASSTHROUGH_HOOKS.contains(&unsafe_hook),
+                "{unsafe_hook} cannot be shimmed — its absence is not a no-op"
+            );
+        }
+        for gate in ["pre-receive", "update", "post-receive", "post-update"] {
+            assert!(
+                PASSTHROUGH_HOOKS.contains(&gate),
+                "{gate} needs a shim or core.hooksPath silently disables it"
+            );
+        }
+    }
+
+    /// Every writer here is read-modify-write, so a settings file we can't parse
+    /// must stop the write rather than degrade to `{}` and rename over the user's
+    /// hooks, permissions and model settings.
+    #[test]
+    fn unparseable_settings_block_rather_than_overwrite() {
+        let dir = scratch("badjson");
+        let path = dir.join("settings.json");
+
+        // Trailing comma — what a hand-edit typically leaves behind.
+        fs::write(&path, "{\n  \"model\": \"opus\",\n}\n").unwrap();
+        let err = read_settings_at(&path).unwrap_err();
+        assert!(err.contains("could not be parsed"), "unexpected error: {err}");
+        // set_env_var / set_co_authored propagate this with `?` before writing.
+
+        // A missing or empty file is genuinely empty settings, not a failure.
+        assert_eq!(read_settings_at(&dir.join("nope.json")).unwrap(), serde_json::json!({}));
+        fs::write(&path, "  \n").unwrap();
+        assert_eq!(read_settings_at(&path).unwrap(), serde_json::json!({}));
 
         let _ = fs::remove_dir_all(&dir);
     }

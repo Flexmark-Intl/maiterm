@@ -1179,6 +1179,9 @@ export async function openFullDiskAccessSettings(): Promise<void> {
 export interface DeshittifyRuleStatus {
   id: string;
   applied: boolean;
+  /** Something outside maiTerm owns this rule's state, so it can't be applied.
+   *  Left out of the group's "all applied?" arithmetic — see groupState(). */
+  blocked: boolean;
   detail?: string;
 }
 

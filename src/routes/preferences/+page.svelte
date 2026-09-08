@@ -297,21 +297,21 @@
         {
           id: 'cc_commit_msg_hook',
           label: 'Strip agent credit at commit time',
-          hint: 'Installs a global commit-msg hook that deletes "Co-Authored-By: Claude" and "Generated with Claude Code" lines from every commit message — the backstop for when the setting above stops being honoured. Points your global core.hooksPath at ~/.maiterm/githooks; each repo\'s own hooks are chained through, so they keep running.',
+          hint: 'Installs a commit-msg hook that deletes "Co-Authored-By: Claude" and "Generated with Claude Code" lines from your commit messages — the backstop for when the setting above stops being honoured. Points your global core.hooksPath at ~/.maiterm/githooks and chains each repo\'s own hooks through it, so they keep running. Does not reach repos that set their own core.hooksPath — husky, lefthook and simple-git-hooks all do.',
         },
       ],
     },
   ];
 
-  let deshittifyRules = $state<Record<string, { applied: boolean; detail?: string }>>({});
+  let deshittifyRules = $state<Record<string, { applied: boolean; blocked: boolean; detail?: string }>>({});
   let deshittifyLoaded = $state(false);
   let deshittifyBusy = $state<string | null>(null);
   let deshittifyErrors = $state<string[]>([]);
   let expandedDeshittifyGroup = $state<string | null>(null);
 
   function absorbDeshittify(status: DeshittifyStatus) {
-    const next: Record<string, { applied: boolean; detail?: string }> = {};
-    for (const r of status.rules) next[r.id] = { applied: r.applied, detail: r.detail };
+    const next: Record<string, { applied: boolean; blocked: boolean; detail?: string }> = {};
+    for (const r of status.rules) next[r.id] = { applied: r.applied, blocked: r.blocked, detail: r.detail };
     deshittifyRules = next;
     deshittifyLoaded = true;
   }
@@ -319,6 +319,10 @@
   async function refreshDeshittify() {
     try {
       absorbDeshittify(await deshittifyStatus());
+      // Clear here, not only on the next toggle: the banner names a condition the
+      // user may have gone off and fixed, and re-entering the section is exactly
+      // how they come back to check.
+      deshittifyErrors = [];
     } catch (e) {
       deshittifyErrors = [String(e)];
       deshittifyLoaded = true;
@@ -335,15 +339,28 @@
     return deshittifyRules[id]?.applied ?? false;
   }
 
-  /** All / some / none of a group's rules applied. */
+  function deshittifyBlocked(id: string): boolean {
+    return deshittifyRules[id]?.blocked ?? false;
+  }
+
+  /** A group's rules that maiTerm can actually move right now. */
+  function groupActionable(group: (typeof deshittifyGroups)[number]) {
+    return group.rules.filter((r) => !deshittifyBlocked(r.id));
+  }
+
+  /** All / some / none applied — counted over the actionable rules only. A rule
+   *  maiTerm is refusing to apply must not hold the group at 'partial' forever:
+   *  the master switch only reverses direction once the group reads 'on'. */
   function groupState(group: (typeof deshittifyGroups)[number]): 'on' | 'partial' | 'off' {
-    const on = group.rules.filter((r) => deshittifyApplied(r.id)).length;
+    const actionable = groupActionable(group);
+    if (actionable.length === 0) return 'off';
+    const on = actionable.filter((r) => deshittifyApplied(r.id)).length;
     if (on === 0) return 'off';
-    return on === group.rules.length ? 'on' : 'partial';
+    return on === actionable.length ? 'on' : 'partial';
   }
 
   async function toggleDeshittifyRule(id: string) {
-    if (deshittifyBusy) return;
+    if (deshittifyBusy || deshittifyBlocked(id)) return;
     deshittifyBusy = id;
     deshittifyErrors = [];
     try {
@@ -2429,7 +2446,8 @@
                   {#if !deshittifyLoaded}
                     checking…
                   {:else}
-                    {group.rules.filter((r) => deshittifyApplied(r.id)).length} of {group.rules.length} applied
+                    {@const actionable = groupActionable(group)}
+                    {actionable.filter((r) => deshittifyApplied(r.id)).length} of {actionable.length} applied{#if actionable.length < group.rules.length}, {group.rules.length - actionable.length} unavailable{/if}
                   {/if}
                 </span>
               </button>
@@ -2461,7 +2479,7 @@
                     <button
                       class="toggle small"
                       class:active={deshittifyApplied(rule.id)}
-                      disabled={!deshittifyLoaded || deshittifyBusy !== null}
+                      disabled={!deshittifyLoaded || deshittifyBusy !== null || deshittifyBlocked(rule.id)}
                       onclick={() => toggleDeshittifyRule(rule.id)}
                       aria-pressed={deshittifyApplied(rule.id)}
                       aria-label="Toggle {rule.label}"
