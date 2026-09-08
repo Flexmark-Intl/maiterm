@@ -543,6 +543,10 @@ interface Chat {
                             //   until the agent works again.
   lastActivityTs: number;
   preview: string;          // last line(s) of distilled context
+  windowLabel: string;      // the window that owns this tab. Overlord is per WINDOW and every
+                            // action is addressed POST /overlord/{windowLabel}/…, so this is
+                            // what lets an ordinary thread — no escalation naming it, no tasks —
+                            // still offer `recover` and `fireRule`. Also on ChatDetail.
 }
 interface ChatDetail extends Chat {
   transcript: Message[];    // distilled turns, newest last
@@ -1694,6 +1698,22 @@ interface OverlordWindow {
   spentTabs: { tabId: string; name: string; done: number; parked: number; lastActivity?: number }[];
   pendingRuleChanges: { id: string; tabId: string; rationale: string; changes: unknown[] } | null;
   lastScan: unknown | null;   // ScanSummary — render if you know it, ignore if not
+  rules: { id: string; name: string; enabled: boolean; appliesTo: string[] }[];
+                              // what the desktop's "Run an Overlord rule on this tab" menu
+                              // offers, RESOLVED to tab ids. The desktop predicate is three
+                              // things at once (the tab is an agent tab — terminal, has a
+                              // runtime, not exempt; the rule has a runnable sequence; its
+                              // scope is global or contains the tab's workspace), so it is
+                              // resolved here rather than sent as a scope you would re-match
+                              // and drift from. Disabled rules ARE included, sorted last, as on
+                              // the desktop — `enabled` says which. A rule that applies to no
+                              // tab you can see is omitted entirely. Fire with
+                              // POST /overlord/{windowLabel}/rules/{id}/fire {tabId}.
+  agentTabIds: string[];      // terminal tabs in this window's Overlord WORKSPACE — the
+                              // supervisor's own conversation. EMPTY IS MEANINGFUL: the window
+                              // has no Overlord workspace, or its tabs are not available to the
+                              // phone (see below). Say so on screen; do not render an empty
+                              // section as if there were nothing happening.
 }
 interface Escalation {
   id: string; ts: number; tabId: string; workspaceId: string; ruleId: string | null;
@@ -1746,6 +1766,15 @@ interface OutstandingDirective {
   tab (`tabId: ""`) are about the window and stay. `needsAttention` for a chat is derived from
   this snapshot by `tabId`; there is deliberately no per-chat flag on `/chats`, because an
   escalation can name a tab that is not a chat, and those belong in the Overlord view.
+  `rules[].appliesTo` and `agentTabIds` are gated the same way, and a rule left applying to
+  nothing visible is dropped rather than offered as a menu entry that would fail.
+- **The Overlord agent's own tab is usually, but not always, reachable.** It lives in the
+  workspace flagged `overlord: true` (which `GET /tasks` also flags), alongside a `board` tab
+  that is never a chat — only terminal tabs are. With the default `mailink_expose_all`, the
+  agent's tab becomes available as soon as it has a detected runtime, so normally it IS there.
+  It is NOT when expose-all is off and nobody marked it maiLink-native, when the human excluded
+  it, or before the agent has started. `agentTabIds` is the answer for a given window; don't
+  infer availability from the workspace flag alone.
 - **The doorbell rings for a new escalation.** Each publish diffs escalation ids against the
   previous snapshot; a new one, with no phone holding the WS, rings `kind: "escalation"` with the
   tab's title (or "Overlord" for a window-level one). The relay's copy table did not know that

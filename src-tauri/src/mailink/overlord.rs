@@ -90,6 +90,22 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
         if let Some(silent) = obj.get_mut("lastScan").and_then(|s| s.get_mut("silent")).and_then(Value::as_array_mut) {
             silent.retain(|id| id.as_str().is_some_and(|t| designated.contains(t)));
         }
+        // `rules[].appliesTo` and `agentTabIds` are tab-id lists nested one level down — the
+        // same shape `lastScan.silent` turned out to be, so they get the same treatment. A rule
+        // left applying to nothing the phone can see is dropped rather than offered as a menu
+        // entry that would fail; a rule's NAME is not itself gated (it is the human's own text,
+        // scoped by workspace, not agent output about a tab).
+        if let Some(rules) = obj.get_mut("rules").and_then(Value::as_array_mut) {
+            for rule in rules.iter_mut() {
+                if let Some(applies) = rule.get_mut("appliesTo").and_then(Value::as_array_mut) {
+                    applies.retain(|id| id.as_str().is_some_and(|t| designated.contains(t)));
+                }
+            }
+            rules.retain(|r| r["appliesTo"].as_array().is_some_and(|a| !a.is_empty()));
+        }
+        if let Some(tabs) = obj.get_mut("agentTabIds").and_then(Value::as_array_mut) {
+            tabs.retain(|id| id.as_str().is_some_and(|t| designated.contains(t)));
+        }
     }
 
     // A closed window's snapshot would otherwise linger with an ever-older `asOf` — honest,
@@ -377,6 +393,26 @@ mod tests {
         let labels: Vec<String> = snapshots(&app)["windows"].as_array().unwrap().iter().map(|w| w["windowLabel"].as_str().unwrap().to_string()).collect();
         assert_eq!(labels, vec!["main"], "a window with no designated tab is absent, not empty");
         assert!(take_pending_rings(&app).is_empty(), "and it rings nothing");
+    }
+
+    #[test]
+    fn rule_menus_and_the_agent_tab_list_are_gated_to_what_the_phone_can_see() {
+        let (app, shown, hidden) = fixture();
+        publish(&app, "main", json!({
+            "escalations": [],
+            "rules": [
+                { "id": "r1", "name": "Checkpoint", "enabled": true, "appliesTo": [shown, hidden] },
+                { "id": "r2", "name": "Payroll only", "enabled": true, "appliesTo": [hidden] },
+            ],
+            "agentTabIds": [shown, hidden],
+        }));
+        let w = snapshots(&app)["windows"][0].clone();
+        let rules = w["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1, "a rule that applies only to a hidden tab is not offered at all");
+        assert_eq!(rules[0]["id"], "r1");
+        assert_eq!(rules[0]["appliesTo"], json!([shown]), "the hidden tab is filtered out of the menu");
+        assert!(!w.to_string().contains("Payroll only"));
+        assert_eq!(w["agentTabIds"], json!([shown]));
     }
 
     #[test]

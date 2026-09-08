@@ -3516,6 +3516,11 @@ struct TabMeta {
     /// Owning workspace id — lets the phone resolve tab → workspace for the resume flow without
     /// having to model workspace ids itself (it resumes by tabId; the server does the lookup).
     workspace_id: String,
+    /// Owning WINDOW label. Overlord is per window and every Overlord action is addressed
+    /// `POST /overlord/{windowLabel}/…`, so without this a phone looking at an ordinary thread —
+    /// no escalation naming it, no tasks — could not name the window and could not call
+    /// `recover` or `fireRule` at all. Free here: `designated_tabs` already walks windows.
+    window_label: String,
     /// Whether the owning workspace is suspended (PTYs killed, tabs restore-on-demand). A tab in a
     /// suspended workspace can't be Initialized per-tab — the workspace must be resumed first — so
     /// the phone shows a "Resume workspace" affordance instead of a dead-end Initialize button.
@@ -3558,6 +3563,7 @@ fn designated_tabs(app: &AppState) -> Vec<TabMeta> {
                         title: tab.name.clone(),
                         workspace: ws.name.clone(),
                         workspace_id: ws.id.clone(),
+                        window_label: win.label.clone(),
                         workspace_suspended: ws.suspended,
                         mesh: ws.bridge_all,
                         runtime: tab.runtime.unwrap_or_default(),
@@ -4413,6 +4419,9 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "title": t.title,
                 "workspace": t.workspace,
                 "workspaceId": t.workspace_id,
+                // Which window's Overlord governs this tab — the address of every
+                // `POST /overlord/{windowLabel}/…` the phone might make from this thread.
+                "windowLabel": t.window_label,
                 // Surfaced so the phone shows "Resume workspace" instead of a dead-end Initialize.
                 "workspaceSuspended": t.workspace_suspended,
                 // Mesh Workspace flag — the phone badges the group and offers Initialize-all.
@@ -4516,6 +4525,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "title": meta.title,
         "workspace": meta.workspace,
         "workspaceId": meta.workspace_id,
+        "windowLabel": meta.window_label,
         "workspaceSuspended": meta.workspace_suspended,
         "mesh": meta.mesh,
         "runtime": runtime,

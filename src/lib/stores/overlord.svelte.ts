@@ -958,6 +958,39 @@ function createOverlordStore() {
    *  how old what it is looking at is. Only human-addressed escalations cross: an agent-only
    *  row would light a badge nothing on the phone can clear. Debounced, so the mutation paths
    *  can call `scheduleMirror()` freely. */
+  /** Every rule the phone could fire, with the tabs it would be offered on. One entry per rule;
+   *  a rule nothing can run is omitted rather than sent with an empty list.
+   *
+   *  Grouped by WORKSPACE, and `rulesForTab` is called once per workspace rather than once per
+   *  tab: the scope it filters on is the tab's workspace, and it scans `agentTabs()` internally
+   *  to find it — per tab that is O(tabs²) every publish, which at fleet size (hundreds of tabs)
+   *  is real main-thread work every 5 s. Calling it through a representative tab keeps ONE
+   *  implementation of the predicate, which is the thing worth protecting here. */
+  function rulesForPhone(): { id: string; name: string; enabled: boolean; appliesTo: string[] }[] {
+    const byWorkspace = new Map<string, string[]>();
+    for (const { tab, ws } of agentTabs()) {
+      const tabs = byWorkspace.get(ws.id);
+      if (tabs) tabs.push(tab.id);
+      else byWorkspace.set(ws.id, [tab.id]);
+    }
+    const byRule = new Map<string, { id: string; name: string; enabled: boolean; appliesTo: string[] }>();
+    for (const tabIds of byWorkspace.values()) {
+      for (const r of overlordStore.rulesForTab(tabIds[0])) {
+        const row = byRule.get(r.id) ?? { id: r.id, name: r.name, enabled: r.enabled, appliesTo: [] };
+        row.appliesTo.push(...tabIds);
+        byRule.set(r.id, row);
+      }
+    }
+    return [...byRule.values()];
+  }
+
+  /** Terminal tabs in this window's Overlord workspace, if it has one. */
+  function overlordWorkspaceTabIds(): string[] {
+    const ws = workspacesStore.workspaces.find((w) => w.overlord);
+    if (!ws) return [];
+    return ws.panes.flatMap((p) => p.tabs.filter((t) => (t.tab_type ?? 'terminal') === 'terminal').map((t) => t.id));
+  }
+
   let mirrorTimer: ReturnType<typeof setTimeout> | null = null;
   function publishMirror() {
     mirrorTimer = null;
@@ -978,6 +1011,18 @@ function createOverlordStore() {
       spentTabs: s.spentTabs,
       pendingRuleChanges: s.pendingRuleChanges,
       lastScan: s.lastScan,
+      // What the composer dock's "Run an Overlord rule on this tab" menu offers, RESOLVED to
+      // tab ids rather than sent as a scope the phone would have to re-match. The predicate is
+      // three things at once — the tab is an agent tab (terminal, has a runtime, not exempt),
+      // the rule has a runnable sequence, and its `workspaces` is empty or contains the tab's
+      // workspace — and a second implementation of that would drift from this one. Disabled
+      // rules are included, as on the desktop, sorted last; `enabled` says which.
+      rules: rulesForPhone(),
+      // The tabs in this window's Overlord WORKSPACE. Empty means the supervisor's own
+      // conversation is not reachable from the phone (it is a `board` tab, or the human turned
+      // its availability off, or expose-all is off and it was never marked native) — which the
+      // phone should SAY, rather than render an empty section as if there were nothing to show.
+      agentTabIds: overlordWorkspaceTabIds(),
     }) as Record<string, unknown>;
     commands
       .publishOverlordSnapshot({ ...snapshot, asOf: Date.now() })
