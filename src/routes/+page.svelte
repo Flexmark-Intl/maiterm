@@ -445,6 +445,15 @@
     editingWindowName = false;
     // Blank clears the name, so the titlebar goes back to the active workspace.
     workspacesStore.setWindowName(windowNameDraft);
+    endWindowNameEdit();
+  }
+
+  /** Hand the keyboard back to the terminal, as every other transient input here does.
+   *  Removing the focused input does NOT fire blur in WebKit, so without this the next
+   *  keystroke goes to <body> and the terminal silently stops taking typing. */
+  function endWindowNameEdit() {
+    const tab = workspacesStore.activeTab;
+    if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
   }
 
   function handleWindowNameKeydown(e: KeyboardEvent) {
@@ -456,7 +465,31 @@
       e.preventDefault();
       e.stopPropagation();
       editingWindowName = false; // discard; the blur that follows finds nothing to commit
+      endWindowNameEdit();
     }
+  }
+
+  /** Dragging the window by its name.
+   *
+   *  The name can't just be part of the parent's drag region: `startDragging()` on the first
+   *  mousedown of a double-click hands the gesture to the OS, which swallows the `dblclick`
+   *  that opens the editor. So this region waits for actual movement before it starts the
+   *  drag — a stationary press stays in the webview and becomes a double-click. */
+  function handleWindowNameMouseDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    e.stopPropagation(); // the parent would start dragging immediately
+    const from = { x: e.screenX, y: e.screenY };
+    const onMove = (m: MouseEvent) => {
+      if (Math.hypot(m.screenX - from.x, m.screenY - from.y) < 4) return;
+      cleanup();
+      getCurrentWindow().startDragging();
+    };
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', cleanup);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', cleanup);
   }
 </script>
 
@@ -477,11 +510,9 @@
     {:else}
       <Tooltip text="Double-click to name this window">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <!-- Not a drag handle: startDragging on the first mousedown of a double-click hands
-             the drag to the OS and the dblclick never arrives. The rest of the bar drags. -->
         <span
           class="titlebar-text"
-          onmousedown={(e) => e.stopPropagation()}
+          onmousedown={handleWindowNameMouseDown}
           ondblclick={startWindowNameEdit}
         >{titlebarText}</span>
       </Tooltip>
