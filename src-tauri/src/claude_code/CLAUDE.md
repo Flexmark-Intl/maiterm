@@ -241,6 +241,22 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
   monitored channel, so bind/read/start results carry `can_be_resummoned` + `release_guidance`
   (`channel_is_monitored`); on a non-monitored channel (bound by permalink) unbinding is a one-way
   door and the skill tells the agent to stay bound.
+- **A session row is not proof an agent is there.** Both watcher phases required
+  `agent_sessions` to hold a row for the tab — membership only. Rows are removed by the
+  SessionEnd hook, which travels over the same transport whose death is the most common way an
+  agent disappears: an SSH drop kills the remote agent AND the route its goodbye would take, so
+  the row survives until the app restarts. 2026-09-08: nova's ssh closed at 08:34 ("Shared
+  connection to nova closed."), the row from 09-06 stayed, and at 10:45 a summon pickup was
+  pasted — trailing CR and all — into the LOCAL `dMac[~]#` prompt the tab had fallen back to,
+  where the shell tried to run it. Delivery now also demands positive evidence from the process
+  table: `agent_owns_terminal` → `pty::get_agent_liveness` (the mesh readiness predicate, via
+  `spawn_blocking` per the pinwheel rule) and holds unless `agent_running || ssh_foreground`.
+  The asymmetry is the point — a wrong "no" costs a 5s hold with the cursor unadvanced, a wrong
+  "yes" types a bug report into a shell. Residual gap: an agent that exits while its ssh stays
+  up still reads as live (the remote tree is invisible locally). Known false negative: an agent
+  under a LOCAL tmux is outside the tab shell's descendant tree. New queue reason `no_agent`,
+  which — like `at_capacity` and unlike the rest — needs the OPERATOR to act, so its toast says
+  it stays queued until an agent is running rather than promising it will free up on its own.
 - **Never inject over an open prompt**: `injection_blocked_by_prompt` holds BOTH watcher phases
   (reply delivery and summon pickup) while the tab's session has an open `pending_question`
   (AskUserQuestion) or is `WaitingPermission`. Those are modal selection UIs — an injected paste's

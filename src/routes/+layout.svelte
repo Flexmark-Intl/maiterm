@@ -513,14 +513,27 @@
       if (p.kind === 'picked_up') {
         dispatch('Thread picked up', `${p.from} summoned the bot in ${p.channel}: "${p.preview}"`, 'info', { tabId: p.tab_id });
       } else if (p.kind === 'queued') {
-        // At-capacity needs the operator to close a thread; waiting won't help. The
-        // other reasons do resolve on their own once the session is back.
+        // Two reasons need the OPERATOR to act — waiting achieves nothing: a full tab
+        // needs a thread closed, and a tab whose agent is gone needs one started. The
+        // rest do resolve on their own once the session is back, so promising "it will
+        // be picked up when the tab frees up" is only true for those.
         const atCapacity = p.reason === 'at_capacity';
+        const noAgent = p.reason === 'no_agent';
+        const title = atCapacity
+          ? 'Summon waiting — tab is full'
+          : noAgent
+            ? 'Summon waiting — no agent in that tab'
+            : 'Summon queued';
+        const outcome = atCapacity
+          ? 'It stays queued until a thread is closed out.'
+          : noAgent
+            ? 'It stays queued — nothing is delivered into a bare shell — and lands as soon as an agent is running there.'
+            : 'It will be picked up when the tab frees up.';
         dispatch(
-          atCapacity ? 'Summon waiting — tab is full' : 'Summon queued',
+          title,
           `${p.from} summoned the bot in ${p.channel}: "${p.preview}". ${
             p.reason_detail ? `${p.reason_detail[0].toUpperCase()}${p.reason_detail.slice(1)}.` : 'The monitoring tab is busy or offline.'
-          } ${atCapacity ? 'It stays queued until a thread is closed out.' : 'It will be picked up when the tab frees up.'}`,
+          } ${outcome}`,
           'info',
           { tabId: p.tab_id },
         );

@@ -512,6 +512,52 @@ fn injection_blocked_by_prompt(app: &Arc<AppState>, tab_id: &str) -> Option<&'st
     None
 }
 
+/// Positive evidence that an AGENT — not a bare shell — owns this tab's terminal.
+///
+/// A row in `agent_sessions` is not that evidence, and treating it as such is how chat text
+/// ends up executed in a shell. Rows are removed by the SessionEnd hook, which travels over
+/// the same transport whose death is the most common way an agent disappears: when an SSH
+/// session drops, the remote agent dies with it and its goodbye can never arrive, so the row
+/// survives until the app restarts. Observed 2026-09-08 — nova's ssh closed ("Shared
+/// connection to nova closed."), the session row from two days earlier stayed, and at 10:45
+/// a Mattermost pickup was pasted, trailing CR and all, into the LOCAL `dMac[~]#` prompt the
+/// tab had fallen back to.
+///
+/// So membership stays necessary but stops being sufficient: delivery also asks the process
+/// table. The asymmetry is what makes strictness right here — a wrong "no" costs a 5s hold
+/// and a retry (the cursor never advances), while a wrong "yes" types a bug report into a
+/// shell that will run it.
+///
+/// Reuses the mesh readiness predicate rather than inventing a second one:
+/// - `agent_running` — an agent CLI is alive in the tab's local process tree.
+/// - `ssh_foreground` — the tab is inside ssh/mosh; the remote agent is invisible from here,
+///   so a live remote session stands in for it. This is the residual gap: an agent that
+///   exited while its ssh stayed up still reads as live. The incident above is not that case.
+///
+/// Known false negative: an agent under a LOCAL tmux lives outside the tab shell's descendant
+/// tree, so it reads as gone and its summons hold. Visible (the operator is notified with a
+/// `no_agent` reason) and recoverable, unlike the failure this replaces.
+async fn agent_owns_terminal(app: &Arc<AppState>, pty_id: &str) -> bool {
+    let app = app.clone();
+    let pty = pty_id.to_string();
+    // The sweep is blocking; every other async caller of get_agent_liveness hops to
+    // spawn_blocking for the same reason (the mesh "liveness pinwheel").
+    match tauri::async_runtime::spawn_blocking(move || crate::pty::get_agent_liveness(&app, &pty))
+        .await
+    {
+        Ok(Ok(liveness)) => liveness_is_agent(&liveness),
+        // Sweep failed, or the PTY vanished mid-tick. Hold: nothing is lost by waiting a
+        // tick, and this is precisely where guessing "yes" was the bug.
+        _ => false,
+    }
+}
+
+/// The rule itself, kept pure so a test pins it rather than a reader having to trace the
+/// watcher loop. Either signal is enough; NEITHER means a shell is in front.
+fn liveness_is_agent(liveness: &crate::pty::AgentLiveness) -> bool {
+    liveness.agent_running || liveness.ssh_foreground
+}
+
 /// Tell the frontend a tab's binding SET changed (bound / unbound — not cursor bumps).
 ///
 /// The tab strip's `@` badge and its count read `Tab.comms_bindings`, but the Svelte store
@@ -788,6 +834,12 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 .values()
                 .any(|s| s.tab_id == tab_id);
             let pty_id = crate::mailink::pty_for_tab(&app, &tab_id);
+            // ...and the session row is only half the answer: it outlives an agent whose
+            // transport died before it could say goodbye. Ask the process table too.
+            let agent_present = match &pty_id {
+                Some(p) => agent_owns_terminal(&app, p).await,
+                None => false,
+            };
             // A modal ask/permission prompt eats injected text AND its trailing CR picks
             // an option — the human loses their answer and the message is gone. Hold.
             let prompt_block = injection_blocked_by_prompt(&app, &tab_id);
@@ -798,6 +850,11 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 (Some("no agent session is running in that tab"), false)
             } else if pty_id.is_none() {
                 (Some("that tab has no live terminal"), false)
+            } else if !agent_present {
+                (
+                    Some("that tab's agent is gone — its terminal is at a shell prompt"),
+                    false,
+                )
             } else if injected_tabs.contains(&tab_id) {
                 // Another thread on this tab already got this tick's injection.
                 (Some("another message is already being delivered to that tab"), true)
@@ -1032,6 +1089,13 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         .values()
                         .any(|s| s.tab_id == tab_id);
                     let pty_id = crate::mailink::pty_for_tab(&app, &tab_id);
+                    // A session row can outlive its agent (see agent_owns_terminal) — a
+                    // pickup is the biggest payload the watcher types, so it is the worst
+                    // one to hand to a shell.
+                    let agent_present = match &pty_id {
+                        Some(p) => agent_owns_terminal(&app, p).await,
+                        None => false,
+                    };
                     let bound_count = bindings_count_for_tab(&app, &tab_id);
                     let at_capacity = bound_count >= MAX_TAB_BINDINGS;
                     let prompt_block = injection_blocked_by_prompt(&app, &tab_id);
@@ -1046,7 +1110,12 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         );
                         break; // cursor holds before this post; retried next tick
                     }
-                    if !session_live || pty_id.is_none() || at_capacity || prompt_block.is_some() {
+                    if !session_live
+                        || pty_id.is_none()
+                        || !agent_present
+                        || at_capacity
+                        || prompt_block.is_some()
+                    {
                         // Can't take it now. Hold the cursor HERE so this summon is
                         // retried when the tab frees up / comes back. Say so once.
                         //
@@ -1065,6 +1134,13 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                             ("no_session", "no agent session is running in that tab".to_string())
                         } else if pty_id.is_none() {
                             ("no_pty", "that tab has no live terminal".to_string())
+                        } else if !agent_present {
+                            (
+                                "no_agent",
+                                "that tab's agent is gone (its SSH session dropped, or it exited) \
+                                 and its terminal is at a shell prompt — start an agent there"
+                                    .to_string(),
+                            )
                         } else {
                             ("prompt_open", prompt_block.unwrap_or("a prompt is open").to_string())
                         };
@@ -1717,6 +1793,28 @@ mod tests {
         let r = receipt("root", 1000);
         assert!(r.session_id.as_deref() == Some("sess"));
         assert_ne!(r.session_id.as_deref(), Some("other-session"));
+    }
+
+    #[test]
+    fn a_dead_tab_is_not_an_agent_however_the_registry_looks() {
+        use crate::pty::AgentLiveness;
+        let l = |agent_running, ssh_foreground| AgentLiveness { agent_running, ssh_foreground };
+
+        // The 2026-09-08 incident, exactly: nova's ssh had closed, no agent was left in the
+        // local tree, and the tab sat at `dMac[~]#` — while agent_sessions still held a row
+        // from two days earlier, because the SessionEnd hook died with the transport that
+        // was supposed to carry it. Delivering on the strength of that row typed a
+        // Mattermost pickup, trailing CR included, into a shell that ran it.
+        assert!(!liveness_is_agent(&l(false, false)));
+
+        // Either signal alone is enough to deliver.
+        assert!(liveness_is_agent(&l(true, false)), "local agent process");
+        assert!(
+            liveness_is_agent(&l(false, true)),
+            "inside ssh — the remote agent is invisible locally, so a live remote session \
+             stands in for it (same stand-in the mesh readiness check makes)"
+        );
+        assert!(liveness_is_agent(&l(true, true)));
     }
 
     #[test]
