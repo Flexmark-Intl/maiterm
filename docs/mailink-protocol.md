@@ -1707,8 +1707,14 @@ interface OverlordWindow {
                               // resolved here rather than sent as a scope you would re-match
                               // and drift from. Disabled rules ARE included, sorted last, as on
                               // the desktop — `enabled` says which. A rule that applies to no
-                              // tab you can see is omitted entirely. Fire with
-                              // POST /overlord/{windowLabel}/rules/{id}/fire {tabId}.
+                              // tab you can see is omitted entirely, and the whole list is `[]`
+                              // when `running` is false: Overlord is off by default, and the menu
+                              // does not exist on that desktop either. Fire with
+                              // POST /overlord/{windowLabel}/rules/{id}/fire {tabId} — and only
+                              // for a tabId in that rule's own `appliesTo`. The desktop enforces
+                              // it (a pair outside scope is refused `no_rule`, `accepted:false`),
+                              // because typing a workspace-pinned rule into another workspace's
+                              // tab is what the scope field exists to prevent.
   agentTabIds: string[];      // terminal tabs in this window's Overlord WORKSPACE — the
                               // supervisor's own conversation. EMPTY IS MEANINGFUL: the window
                               // has no Overlord workspace, or its tabs are not available to the

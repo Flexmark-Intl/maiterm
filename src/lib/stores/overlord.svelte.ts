@@ -981,7 +981,12 @@ function createOverlordStore() {
         byRule.set(r.id, row);
       }
     }
-    return [...byRule.values()];
+    // Re-sort: `rulesForTab` sorts per workspace, but the union comes out in Map INSERTION
+    // order, so a disabled rule first seen in workspace A landed above an enabled one from
+    // workspace B — the inverse of the desktop menu, and the opposite of what §13.2 promises.
+    return [...byRule.values()].sort(
+      (a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name),
+    );
   }
 
   /** Terminal tabs in this window's Overlord workspace, if it has one. */
@@ -1017,7 +1022,13 @@ function createOverlordStore() {
       // the rule has a runnable sequence, and its `workspaces` is empty or contains the tab's
       // workspace — and a second implementation of that would drift from this one. Disabled
       // rules are included, as on the desktop, sorted last; `enabled` says which.
-      rules: rulesForPhone(),
+      //
+      // Gated on the preference, like every desktop surface that offers this menu (ComposerDock,
+      // the tab context menu, the board behind its sidebar accessor). Overlord is OFF by default
+      // and the engine seeds default rules and ticks regardless, so publishing unconditionally
+      // offered the phone a menu that exists nowhere on that desktop — and firing from it would
+      // have pasted rule text into an agent whose human never turned the supervisor on.
+      rules: preferencesStore.overlordEnabled ? rulesForPhone() : [],
       // The tabs in this window's Overlord WORKSPACE. Empty means the supervisor's own
       // conversation is not reachable from the phone (it is a `board` tab, or the human turned
       // its availability off, or expose-all is off and it was never marked native) — which the
@@ -3362,10 +3373,17 @@ function createOverlordStore() {
         .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name));
     },
 
-    /** Run any rule's sequence on a tab now, whatever its `when` clause says. See `fireRuleNow`. */
+    /** Run a rule's sequence on a tab now, whatever its `when` clause says. See `fireRuleNow`.
+     *
+     *  The rule is looked up THROUGH `rulesForTab`, not in the raw list, so the pair has to be
+     *  one that tab is actually offered: an agent tab, a runnable sequence, and — the part that
+     *  matters — scope. `rulesForTab`'s doc calls typing a workspace-pinned rule into another
+     *  workspace's tab "the one thing the scope field exists to prevent", but that check lived
+     *  only in the menu. Safe while every caller built its buttons from the menu; not safe once
+     *  maiLink could name any (ruleId, tabId) pair over the network. One predicate, one place. */
     async fireRule(tabId: string, ruleId: string): Promise<{ started: boolean; reason?: string }> {
-      const rule = preferencesStore.overlordRules.find((r) => r.id === ruleId);
-      if (!rule || !hasRunnableSequence(rule)) return { started: false, reason: 'no_rule' };
+      const rule = this.rulesForTab(tabId).find((r) => r.id === ruleId);
+      if (!rule) return { started: false, reason: 'no_rule' };
       return fireRuleNow(rule, tabId);
     },
 
