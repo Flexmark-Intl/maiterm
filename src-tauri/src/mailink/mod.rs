@@ -2827,13 +2827,15 @@ async fn stream_subagents_if_changed(
     // legitimately, and treating that as cold forever would burn the budget every tick.
     //
     // Once a tab is cached it is refreshed unconditionally, and the live-PTY condition must NOT
-    // extend to that. A dead parent is precisely when `pty_for_tab` goes None, and it is also the
-    // one case `SIDECAR_STALE_MS` exists for — an agent killed mid-delegation is the only way to
-    // strand a `running` entry. Gating the whole call removed the settle exactly there: a thread
-    // open on the phone reading "running 4m" whose desktop agent then died would never receive
-    // another frame, and its timer would climb forever. The settle is a transition the parent
-    // transcript by definition never announces, so an already-open thread has no other source
-    // for it — `GET /chats/{id}` computes it correctly but only when the thread is OPENED.
+    // extend to that. The settle is a transition the parent transcript by definition never
+    // announces, so a thread already open on the phone has no other source for it — and gating
+    // the whole call left one reading "running 4m" with a timer climbing forever. `GET
+    // /chats/{id}` computes it correctly but only when the thread is OPENED.
+    //
+    // Note `pty_for_tab` reads `tab_pty_map`, which is the TERMINAL's PTY: it survives the agent
+    // process exiting and goes None on suspend/archive/unload. So it is not the "dead agent"
+    // signal it might read as — which is the whole reason it can only be allowed to decide
+    // whether an unseen tab is worth a first parse, never whether a known one keeps updating.
     if !st.rosters.contains_key(tab_id) {
         if !has_live_pty || *cold_budget == 0 {
             return Ok(());

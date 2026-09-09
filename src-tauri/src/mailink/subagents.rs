@@ -163,6 +163,12 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                             agents[i].status = SubagentStatus::Running;
                             agents[i].ended_at = None;
                             agents[i].started_at = ts;
+                            // The previous run's `<result>` opening is not this run's progress.
+                            // `attach_sidecar` only ever OVERWRITES this on a successful read, so
+                            // leaving it would pin the old conclusion — dated before the run it
+                            // now sits on — until the resumed agent happens to emit plain text.
+                            agents[i].last_line = None;
+                            agents[i].last_line_ts = None;
                         }
                     }
                 }
@@ -438,8 +444,9 @@ enum SidecarVerdict {
     Live,
     /// Nothing can be concluded yet. Touch nothing.
     NoEvidence,
-    /// Silent long enough to call it ended. `Some(ms)` when we know when — an mtime is a real
-    /// upper bound; `None` when there is nothing to date it by, and it is never guessed.
+    /// Silent long enough to call it ended. `Some(ms)` is the sidecar's last write — a real
+    /// LOWER bound on when it stopped, and the closest thing to an end time that exists;
+    /// `None` when there is nothing to date it by, and it is never guessed.
     Ended(Option<u64>),
 }
 
@@ -477,6 +484,13 @@ fn sidecar_verdict(started_at: u64, mtime: Option<u64>, now: u64) -> SidecarVerd
 /// host and is never mirrored. Those settle by elapsed time since launch instead, and the
 /// transcript's own notification still retires them normally — it rides the mirrored parent JSONL
 /// — so only a parent killed mid-delegation ever reaches the timeout.
+/// Whether a verdict's sidecar is worth reading for a progress line: it must be THIS run's file.
+/// Named and tested on its own because the one time it was inlined it silently narrowed to `Live`
+/// and cost every stale-settled entry its last sentence.
+fn reads_progress(v: &SidecarVerdict) -> bool {
+    matches!(v, SidecarVerdict::Live | SidecarVerdict::Ended(Some(_)))
+}
+
 fn attach_sidecar(agent: &mut Subagent, dir: &PathBuf, now: u64) {
     // A finished agent already carries its `<result>` opening as `last_line`, which is a better
     // answer than its last in-flight remark — nothing here can improve on it, so not even the
@@ -491,34 +505,53 @@ fn attach_sidecar(agent: &mut Subagent, dir: &PathBuf, now: u64) {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
     });
-    match sidecar_verdict(agent.started_at, mtime, now) {
-        SidecarVerdict::NoEvidence => {}
-        SidecarVerdict::Live => {
-            if let Some((line, ts)) = last_assistant_line(&path) {
-                agent.last_line = Some(line);
-                agent.last_line_ts = Some(ts);
-            }
+    let verdict = sidecar_verdict(agent.started_at, mtime, now);
+    // Read the progress line whenever the file is THIS run's, settled or not. Restricting it to
+    // `Live` cost 132 of 134 stale-settled entries their last sentence across the real corpus:
+    // the case the settle exists for is a parent killed mid-delegation, which writes no
+    // task-notification and therefore no `<result>`, so the sidecar holds the subagent's only
+    // surviving words — and once settled the entry is skipped forever by the guard above, so
+    // there is no later pass to recover them. `Ended(None)` is excluded because it means the
+    // file is missing or belongs to an earlier run.
+    if reads_progress(&verdict) {
+        if let Some((line, ts)) = last_assistant_line(&path, agent.started_at) {
+            agent.last_line = Some(line);
+            agent.last_line_ts = Some(ts);
         }
-        SidecarVerdict::Ended(at) => {
-            // Ended while nobody was watching. `done` with no observed outcome — the same
-            // convention `shells.rs` uses for a shell that vanished without a final poll: render
-            // "ended", never "succeeded".
-            agent.status = SubagentStatus::Done;
-            agent.ended_at = at;
-        }
+    }
+    if let SidecarVerdict::Ended(at) = verdict {
+        // Ended while nobody was watching. `done` with no observed outcome — the same convention
+        // `shells.rs` uses for a shell that vanished without a final poll: render "ended", never
+        // "succeeded".
+        agent.status = SubagentStatus::Done;
+        agent.ended_at = at;
     }
 }
 
-/// The subagent's most recent assistant TEXT, with the timestamp of the line that carried it.
+/// The subagent's most recent assistant TEXT since `started_at`, with the timestamp of the line
+/// that carried it.
 ///
 /// `thinking` blocks are skipped: they are the model reasoning to itself, not a progress report,
 /// and are the wrong thing to put on a phone as a status line.
-fn last_assistant_line(path: &PathBuf) -> Option<(String, u64)> {
+///
+/// The `started_at` floor is what keeps a RESUMED run honest. A resumed subagent appends to the
+/// same file, and its first minutes are usually `thinking`/`tool_use` only — so an unbounded
+/// backward walk sails past them into the previous run and presents that run's closing
+/// conclusion as this one's progress. Measured on the corpus resume: 9m21s and then 5m23s
+/// showing a sentence dated 54 minutes before the run it was attached to. Nothing beats no line
+/// here; the chip still has its label and its elapsed.
+fn last_assistant_line(path: &PathBuf, started_at: u64) -> Option<(String, u64)> {
     let body = super::transcript::read_tail(path, SIDECAR_TAIL_BYTES)?;
     for line in body.lines().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
             continue;
+        }
+        if line_ts(&v) < started_at {
+            // Walked back past the start of this run — everything older belongs to a previous
+            // one. Stop rather than continue: the file is chronological, so nothing further back
+            // can qualify.
+            return None;
         }
         let Some(blocks) = v.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array())
         else {
@@ -779,6 +812,74 @@ mod tests {
     }
 
     #[test]
+    fn a_settled_entry_still_gets_its_last_words() {
+        // The case the settle exists for — a parent killed mid-delegation — writes no
+        // task-notification, so the sidecar holds the subagent's ONLY surviving words. Reading
+        // them on `Live` alone cost 132 of 134 stale-settled entries their last sentence across
+        // the real corpus, and a settled entry is skipped forever afterwards, so nothing recovers
+        // them. `Ended(None)` is excluded: no file, or a file belonging to an earlier run.
+        assert!(reads_progress(&SidecarVerdict::Live));
+        assert!(reads_progress(&SidecarVerdict::Ended(Some(HOUR))), "its own file, just old");
+        assert!(!reads_progress(&SidecarVerdict::Ended(None)));
+        assert!(!reads_progress(&SidecarVerdict::NoEvidence));
+    }
+
+    #[test]
+    fn a_progress_line_must_belong_to_the_run_it_is_attached_to() {
+        // A resumed subagent appends to the SAME file and opens with thinking/tool_use only, so
+        // an unbounded backward walk sails past them into the previous run and presents that
+        // run's conclusion as this one's progress — measured at 9m21s on the corpus resume,
+        // dated 54 minutes before the run carrying it.
+        let dir = std::env::temp_dir().join("maiterm-subagent-line-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent-r1.jsonl");
+        let turn = |ts: &str, text: &str| {
+            json!({ "type": "assistant", "timestamp": ts, "message": { "content": [
+                { "type": "text", "text": text } ] } })
+            .to_string()
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                turn("2026-09-08T10:05:00Z", "First pass done."),
+                // The resumed run so far: reasoning only, nothing worth reporting.
+                json!({ "type": "assistant", "timestamp": "2026-09-08T11:00:30Z", "message": {
+                    "content": [ { "type": "thinking", "thinking": "hmm" } ] } })
+            ),
+        )
+        .unwrap();
+
+        let resumed_at = crate::mailink::transcript::rfc3339_to_ms("2026-09-08T11:00:00Z") as u64;
+        assert!(
+            last_assistant_line(&path, resumed_at).is_none(),
+            "no line beats the previous run's sign-off wearing this run's timestamp"
+        );
+        // The same file, read for the run that DID say it, still yields it.
+        let launched = crate::mailink::transcript::rfc3339_to_ms("2026-09-08T10:00:00Z") as u64;
+        assert_eq!(
+            last_assistant_line(&path, launched).map(|(l, _)| l),
+            Some("First pass done.".to_string()),
+        );
+    }
+
+    #[test]
+    fn resuming_drops_the_previous_runs_progress_line() {
+        // `attach_sidecar` only ever OVERWRITES `last_line` on a successful read, so a stale one
+        // left in place survives until the resumed agent happens to emit plain text.
+        let lines = vec![
+            launch("u1", "Review", "code-reviewer", "2026-09-08T10:00:00Z"),
+            ack("u1", "kkk222", "2026-09-08T10:00:02Z"),
+            notify("kkk222", "completed", "First pass done.", "2026-09-08T10:05:00Z"),
+            send_message("kkk222", "2026-09-08T11:00:00Z"),
+        ];
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].last_line.is_none());
+        assert!(agents[0].last_line_ts.is_none());
+        assert!(agents[0].to_json().get("lastLine").is_none());
+    }
+
+    #[test]
     fn an_unreadable_launch_time_is_not_read_as_ancient() {
         // `line_ts` yields 0 for a timestamp it could not parse — "I don't know when", which the
         // no-sidecar settle would otherwise read as "launched at the epoch, therefore ancient".
@@ -848,5 +949,6 @@ mod tests {
         );
     }
 }
+
 
 
