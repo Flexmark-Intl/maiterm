@@ -1846,7 +1846,23 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.5" }`. The second breaking change in a week
-found there was no version anywhere on the wire. The phone gates compatibility shims (the
-`subject`→`title` adapter, `effectiveStatus ?? status`) on this, not on a calendar; absent means
-pre-0.5.
+`{ ok, now, server_name, fp, protocolVersion: "0.6" }`. The second breaking change in a week
+found there was no version anywhere on the wire. A client gates its compatibility shims on this,
+not on a calendar; absent means pre-0.5.
+
+**Every wire change bumps it, additive ones included.** A field that appears without a bump makes
+two desktops answer the same version while serving different shapes, which is the one question the
+field exists to answer. Learned the expensive way: `windowLabel`, `rules` and `agentTabIds` were
+added under an unchanged `"0.5"`, a client reasonably typed them as required, and its Overlord
+screen threw against a desktop that predated them — on a phone, a route that dies inside a pushed
+layer leaves no way back, so "the Overlord button does nothing and now its neighbours don't either".
+
+| Version | What a desktop reporting it guarantees |
+|---|---|
+| absent | pre-0.5: `tasks` is Claude's session board (`AgentTask`), no `/tasks`, no Overlord |
+| `0.5` | §4.3 `MaitermTask` + `effectiveStatus`, `GET/POST /tasks`, `GET /overlord`, WS `overlord`, the action routes |
+| `0.6` | adds `Chat.windowLabel` / `ChatDetail.windowLabel`, and `rules` + `agentTabIds` on the snapshot |
+
+**Treat any field newer than the version you require as optional anyway.** The table is a floor,
+not a promise that nothing else is missing — and on a client where a render throw is unrecoverable,
+optional-with-a-fallback costs less than being right.

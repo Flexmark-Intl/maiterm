@@ -460,7 +460,13 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 }
 
 /// Bump with the changelog at the top of docs/mailink-protocol.md.
-const PROTOCOL_VERSION: &str = "0.5";
+/// Bump with the changelog at the top of docs/mailink-protocol.md — and bump it for an ADDITIVE
+/// field too, not only a breaking one. A client gates its compatibility shims on this string; if
+/// two desktops both answer "0.5" and one of them has a field the other doesn't, the version has
+/// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
+/// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
+/// present crashed its Overlord screen against a desktop that predated them.
+const PROTOCOL_VERSION: &str = "0.6";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
