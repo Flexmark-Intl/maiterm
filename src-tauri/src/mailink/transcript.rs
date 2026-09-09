@@ -406,6 +406,14 @@ fn read_goal(tail: &str, last_turn_ts: u64) -> Option<GoalStatus> {
 /// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
 /// For consumers that need the raw entries rather than distilled turns (the background-shell
 /// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
+/// Where a Claude session's transcript is, for consumers that need the PATH rather than its
+/// contents — the delegation roster derives its per-subagent sidecar dir from it (subagents.rs).
+/// Same cached lookup every other consumer resolves through, so a mirrored SSH tab answers with
+/// its shadow file exactly as it does everywhere else.
+pub(crate) fn claude_transcript_path(session_id: &str) -> Option<PathBuf> {
+    locate_jsonl(session_id)
+}
+
 pub(crate) fn claude_lines(session_id: &str, max_bytes: u64) -> Option<Vec<Value>> {
     let path = locate_jsonl(session_id)?;
     let body = read_tail(&path, max_bytes)?;
@@ -1150,7 +1158,7 @@ fn real_turn_ts(v: &Value) -> Option<i64> {
 }
 
 /// Read at most the last `max` bytes of a file as lossy UTF-8 (for tail scans).
-fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
+pub(super) fn read_tail(path: &std::path::Path, max: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
@@ -1951,8 +1959,10 @@ pub(crate) fn compact_tool_arg(input: &Value) -> Option<String> {
             _ => None,
         })
         // AskUserQuestion: the first question's text — so the transcript chip reads
-        // `AskUserQuestion(Which migration strategy?)` instead of a bare tool name (with the
-        // 60s auto-resolve, that chip is often all that remains of an unanswered ask).
+        // `AskUserQuestion(Which migration strategy?)` instead of a bare tool name. On a build
+        // that expires asks (a narrow Claude Code range did; current ones do not — `ask_deadline_ms`
+        // on the prompt is the authority, never a rule restated here), that chip is all that
+        // remains of one nobody answered.
         .or_else(|| {
             input
                 .get("questions")

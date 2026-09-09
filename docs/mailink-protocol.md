@@ -4,6 +4,17 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.7 changelog** (2026-09-08). Additive: `ChatDetail.subagents` + the WS `subagents` event
+> (§4.3 `Subagent`). Delegations were invisible — one static tool chip at launch and nothing after
+> — so a thread whose agent was five minutes into a code review said only "working…", and the only
+> way to see why was to open the desktop and read the terminal. Modelled on `shells` because that
+> shape works, with two differences that matter. It covers SSH tabs: a subagent isn't a process
+> needing the local process table, its lifecycle is written to the parent transcript, and the
+> mirror shadows that — such a tab loses only `lastLine`. And **the lifecycle is not
+> tool_use→tool_result**: the `Agent` tool acks in ~2s with an agentId, and the real outcome lands
+> later as a `<task-notification>` turn, so pairing use with result would mark every delegation
+> done two seconds after it started. Keyed by agentId, never the tool_use id.
+>
 > **v0.5 changelog** (2026-09-06, built with the maiLink agent). **One BREAKING change**, in one
 > go, by the product owner's decision: `tasks` — on `ChatDetail` and the WS event — is now
 > maiTerm's own task board (`MaitermTask`), not Claude Code's session board (`AgentTask`, gone).
@@ -465,6 +476,13 @@ Bidirectional, opened while the app is foreground. Server→client events:
                                                      // array. Same baseline-on-connect discipline as `tasks`; [] clears.
                                                      // Fires on a shell EXITING too, which appends nothing to the
                                                      // transcript. Claude + local tabs only.
+{ "type": "subagents", "tabId": "...", "subagents": [/* Subagent[] */], "ts": 0 }
+                                                     // the tab's delegation roster changed — REPLACE the whole array.
+                                                     // Same baseline/[] discipline. The change key folds in `lastLine`,
+                                                     // so a RUNNING delegation re-emits as its progress moves: a
+                                                     // status-only key would send one frame at launch and one at
+                                                     // completion, leaving a five-minute-old sentence on screen in
+                                                     // between — which is the gap this event exists to close.
 ```
 
 Client→server frames are optional conveniences mirroring the REST actions (`message`,
@@ -582,6 +600,11 @@ interface ChatDetail extends Chat {
                             // SSH tab's shells are the REMOTE host's processes, so their liveness
                             // can't be confirmed and Stop couldn't signal them — those tabs report
                             // nothing rather than a roster that can't be stood behind.
+  subagents?: Subagent[];   // delegations (the `Agent` tool), present only when non-empty. Claude
+                            // tabs, LOCAL AND SSH — unlike `shells`: a subagent is not a process
+                            // whose liveness needs the local process table, its whole lifecycle is
+                            // written to the parent transcript, and the mirror shadows that. An
+                            // SSH tab loses only `lastLine`. There is no Stop verb to be wrong about.
   pendingPrompt?: {         // present iff state==='permission' or a question is open
     prompt_id: string;      // opaque, minted when the agent opens this prompt; echoed in /respond
     kind: 'permission' | 'question';
@@ -718,6 +741,42 @@ interface AgentShell {
   startedAt: number;        // unix ms
   endedAt?: number;         // absent while running, and when the end went unobserved
   tail?: string;            // last captured output line — a progress hint, not the log
+}
+
+// A DELEGATION — Claude Code's `Agent` tool. Rendered like `shells`: a strip with elapsed time.
+//
+// Why it needed its own surface: Overlord asks for a review on nearly every change, so this is
+// the most frequent minutes-long thing an agent does, and it reached the phone as ONE tool chip
+// at launch and nothing after. A five-minute review was one line that never changed, so a thread
+// deep in a code review said only "working…".
+//
+// **The lifecycle is not use→result.** The `Agent` tool returns in ~2s with an acknowledgement
+// ("Async agent launched successfully. … agentId: …"), not an answer; the outcome arrives later
+// as a separate `<task-notification>` turn. A client (or a desktop) that pairs tool_use with
+// tool_result marks every delegation done two seconds after it started. The roster is keyed by
+// the **agentId** from the ack — not the tool_use id, which the notification does not use.
+interface Subagent {
+  id: string;               // the agentId, e.g. "ad45d0719f4187070"
+  description: string;      // the agent's own 3-5 word label ("Review the start-verb wiring").
+                            //   Always present: "a subagent is running" without saying WHICH is
+                            //   barely better than "working".
+  agentType?: string;       // 'code-reviewer', 'Explore', 'general-purpose', … when declared
+  status: 'running' | 'done' | 'failed';
+                            // 'failed' covers every non-success outcome (cancelled, errored) —
+                            //   the desktop never guesses which. A `done` that carries no
+                            //   `lastLine` means it ended unobserved, the same convention
+                            //   `AgentShell.exitCode` uses: render "ended", not "succeeded".
+  startedAt: number;        // unix ms
+  endedAt?: number;         // absent while running
+  lastLine?: string;        // the subagent's most recent words about its OWN progress — its last
+                            //   assistant text while running, the opening of its result once done.
+                            //   This is the "why" behind "working…": not "an agent is running"
+                            //   but "reviewing the start-verb wiring — checking the busy map".
+  lastLineTs?: number;      // unix ms the line was written. SENT AS A PAIR WITH `lastLine` or not
+                            //   at all, and it is not decoration: this is the subagent's claim
+                            //   about itself at a moment, it will sometimes be wrong or stale, and
+                            //   a real one sat 9 minutes inside a single tool call. Show the age;
+                            //   do not imply it is current. Same reason the Overlord card carries one.
 }
 
 // The `/goal <condition>` an agent is being held to. The goal installs a session-scoped Stop hook:
@@ -1880,7 +1939,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.6" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.7" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -1896,6 +1955,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | absent | pre-0.5: `tasks` is Claude's session board (`AgentTask`), no `/tasks`, no Overlord |
 | `0.5` | §4.3 `MaitermTask` + `effectiveStatus`, `GET/POST /tasks`, `GET /overlord`, WS `overlord`, the action routes |
 | `0.6` | adds `Chat.windowLabel` / `ChatDetail.windowLabel`, and `rules` + `agentTabIds` on the snapshot |
+| `0.7` | adds `ChatDetail.subagents` and the WS `subagents` event (§4.3 `Subagent`) |
 
 **Treat any field newer than the version you require as optional anyway.** The table is a floor,
 not a promise that nothing else is missing — and on a client where a render throw is unrecoverable,

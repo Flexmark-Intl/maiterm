@@ -37,6 +37,7 @@ pub(crate) mod assets;
 pub(crate) mod mirror;
 pub(crate) mod models;
 pub(crate) mod shells;
+pub(crate) mod subagents;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod overlord;
@@ -468,7 +469,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.6";
+const PROTOCOL_VERSION: &str = "0.7";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1710,6 +1711,20 @@ fn shell_roster(app: &AppState, tab_id: &str) -> Vec<shells::AgentShell> {
     shells::roster(&sid, crate::pty::manager::pty_child_pid_of(app, &pty)).unwrap_or_default()
 }
 
+/// A tab's delegation roster (mailink/subagents.rs), or empty when it has none.
+///
+/// Claude-only, but — unlike `shell_roster` — NOT local-only. A background shell is a remote
+/// PROCESS whose liveness the local process table can't see, so an SSH tab reports none; a
+/// subagent's whole lifecycle is written into the parent transcript, which the mirror shadows
+/// (mirror.rs). So an SSH tab gets correct start/finish here and merely loses `lastLine`, whose
+/// sidecar stays on the remote host. There is no Stop button to be wrong about.
+fn subagent_roster(app: &AppState, tab_id: &str) -> Vec<subagents::Subagent> {
+    let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) else {
+        return Vec::new();
+    };
+    subagents::roster(&sid).unwrap_or_default()
+}
+
 /// Whether the tab rides a live SSH/mosh session (its agent runs on another host).
 fn tab_is_ssh(app: &AppState, tab_id: &str) -> bool {
     let tunnels = app.ssh_tunnels.read();
@@ -2279,6 +2294,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     let mut overlord_versions: HashMap<String, u64> = HashMap::new();
     // Same discipline for the background-shell roster.
     let mut shell_keys: HashMap<String, u64> = HashMap::new();
+    let mut subagent_stream = SubagentStream::default();
     // Asset batches already streamed, per tab, plus the manifest mtime that gates the whole pass.
     // Seeded with everything already sent, right here at connect: the snapshot the phone is about
     // to GET carries that history, and the streamer cannot baseline for itself (see
@@ -2363,7 +2379,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 awaiting_pong = true;
             }
             _ = msg_ticker.tick() => {
-                if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys).await.is_err() {
+                if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys, &mut subagent_stream).await.is_err() {
                     return;
                 }
                 if stream_new_assets(&mut socket, &s.app, &mut asset_seen, &mut asset_rev).await.is_err() {
@@ -2642,6 +2658,7 @@ async fn stream_new_messages(
     mtimes: &mut HashMap<String, u64>,
     task_keys: &mut HashMap<String, u64>,
     shell_keys: &mut HashMap<String, u64>,
+    subagent_stream: &mut SubagentStream,
 ) -> Result<(), ()> {
     // maiTerm task change keys for the whole roster, ONE pass under one read lock per tick
     // (per-tab it was O(tabs × tasks); see board::tab_change_keys). In-memory, no I/O.
@@ -2657,6 +2674,10 @@ async fn stream_new_messages(
             // Background shells: also outside the transcript-mtime gate — a shell EXITING appends
             // nothing to the transcript, and that transition is exactly what the strip must show.
             stream_shells_if_changed(socket, app, &t.tab_id, shell_keys).await?;
+            // Delegations: outside the mtime gate for the same reason, but only HALF of it is —
+            // the roster's transcript parse is gated internally, while its progress lines come
+            // from per-subagent sidecars the parent transcript never sees move.
+            stream_subagents_if_changed(socket, &t.tab_id, &sid, subagent_stream).await?;
         }
         // mtime gate: an unchanged transcript means no new turns, so skip the tail re-parse.
         if let Some(mt) = transcript::mtime_for(rt, &sid) {
@@ -2696,6 +2717,74 @@ async fn stream_new_messages(
         *entry = window;
     }
     Ok(())
+}
+
+/// Per-connection state for the `subagents` stream.
+///
+/// Two maps because the two halves of the roster refresh on different clocks: `rosters` caches
+/// the transcript parse against the parent's mtime (the expensive half), while `keys` is the
+/// usual emitted-frame diff. Bundled so the message ticker's signature doesn't grow a sixth and
+/// seventh loose `HashMap`.
+#[derive(Default)]
+struct SubagentStream {
+    rosters: HashMap<String, (u64, Vec<subagents::Subagent>)>,
+    keys: HashMap<String, u64>,
+}
+
+/// Emit a `subagents` WS frame when the tab's delegation roster changed. Same full-array replace
+/// + baseline-on-connect discipline as `shells`; `[]` clears the strip.
+///
+/// The change key folds in `lastLine` as well as status, so a running delegation re-emits as its
+/// progress line moves — that IS the frame's job, and a status-only key would send one frame at
+/// launch and one at completion, leaving the phone showing a five-minute-old sentence in between.
+async fn stream_subagents_if_changed(
+    socket: &mut WebSocket,
+    tab_id: &str,
+    session_id: &str,
+    st: &mut SubagentStream,
+) -> Result<(), ()> {
+    use std::hash::{Hash, Hasher};
+    let subagent_keys = &mut st.keys;
+    // Re-parse the transcript only when it moved — see `roster_from_transcript`. The cached
+    // roster is then refreshed from the sidecars every tick, which is what keeps a running
+    // delegation's progress line live while the parent transcript sits still.
+    let mtime = transcript::mtime_for(AgentRuntime::Claude, session_id).unwrap_or(0);
+    let entry = st.rosters.entry(tab_id.to_string()).or_insert((0, Vec::new()));
+    if entry.0 != mtime {
+        entry.0 = mtime;
+        entry.1 = subagents::roster_from_transcript(session_id).unwrap_or_default();
+    }
+    subagents::refresh_progress(&mut entry.1, session_id);
+    let roster = &entry.1;
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for a in roster {
+            a.id.hash(&mut h);
+            a.status.as_str().hash(&mut h);
+            a.last_line.hash(&mut h);
+            a.ended_at.hash(&mut h);
+        }
+        roster.len().hash(&mut h);
+        h.finish()
+    };
+    if roster.is_empty() {
+        if subagent_keys.remove(tab_id).is_none() {
+            return Ok(());
+        }
+        let ev = json!({ "type": "subagents", "tabId": tab_id, "subagents": [], "ts": now_ms() });
+        return socket.send(Message::Text(ev.to_string().into())).await.map_err(|_| ());
+    }
+    if subagent_keys.get(tab_id) == Some(&key) {
+        return Ok(());
+    }
+    subagent_keys.insert(tab_id.to_string(), key);
+    let ev = json!({
+        "type": "subagents",
+        "tabId": tab_id,
+        "subagents": roster.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
+        "ts": now_ms(),
+    });
+    socket.send(Message::Text(ev.to_string().into())).await.map_err(|_| ())
 }
 
 /// Emit a `shells` WS frame when the tab's background-shell roster changed. Same full-array
@@ -4643,6 +4732,16 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     }
     let ms_shells = ph.elapsed().as_millis(); // transcript scan + cached ps sweep
 
+    // Delegations (the `Agent` tool). Overlord asks for a review on nearly every change, so this
+    // is the most frequent minutes-long thing an agent does — and it reached the phone as one
+    // static chip at launch, which is why a thread that was reviewing code said only "working…".
+    let pa = std::time::Instant::now();
+    let subs = subagent_roster(app, tab_id);
+    if !subs.is_empty() {
+        detail["subagents"] = json!(subs.iter().map(|s| s.to_json()).collect::<Vec<_>>());
+    }
+    let ms_subagents = pa.elapsed().as_millis(); // transcript scan + one sidecar tail per entry
+
     // pendingPrompt: the agent's native human ask (mailink-protocol §12). thread_id == tab_id
     // for a solo thread.
     //
@@ -4731,7 +4830,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         // A slow open is near-always lock-wait, not CPU: whichever phase dominates names the
         // contended lock (tabs=app_data, scrollback=scrollback_db) vs real work (transcript/meta).
         log::warn!(
-            "mailink slow chat_detail tab={} total={}ms [tabs(app_data)={} states(sessions)={} scrollback(db)={} activity={} transcript={} meta={} shells={}]",
+            "mailink slow chat_detail tab={} total={}ms [tabs(app_data)={} states(sessions)={} scrollback(db)={} activity={} transcript={} meta={} shells={} subagents={}]",
             &tab_id[..tab_id.len().min(8)],
             ms_total,
             ms_tabs,
@@ -4741,6 +4840,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             ms_transcript,
             ms_meta,
             ms_shells,
+            ms_subagents,
         );
     }
 
