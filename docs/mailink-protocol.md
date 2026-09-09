@@ -1793,7 +1793,7 @@ interface OutstandingDirective {
 |---|---|---|
 | `POST /tasks` | `{ tabId, workstream?: string, tasks: [{ title, detail?, status?: TaskLane, assign?: boolean }] }` | `{ tasks: MaitermTask[] }` — one row per spec |
 | `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
-| `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told } }` — see below |
+| `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
 
 **Setting a lane and telling an agent are different acts, and only a human may do the second.**
 `POST /tasks/{id} {status:"active"}` is silent, permanently — that is the path an agent uses to
@@ -1810,9 +1810,18 @@ doing. The board's "Do it" is therefore its own verb:
   unassigned, or there is no supervisor to relay through. Say which; "Active on the board" and
   "the agent has been told" are different facts, and a button implying the second while doing only
   the first is how a task sits Active for an hour with nobody working on it.
-- An unassigned task answering `told: "nobody"` is correct, not a failure — claim it to a tab and
-  the call means something.
-- `404` for a task the phone cannot see, same rule as the patch.
+- **`told: "nobody"` has two causes and they need different words:** the task is unassigned (claim
+  it to a tab and the call means something), or the owning tab was unreachable AND there was no
+  supervisor able to relay — which includes an **Overlord-exempt** tab, where a handoff would be
+  consumed by an agent whose own tools refuse to act on it. Both are honest: the task is Active
+  and nobody was told. Neither is a failure to retry.
+- **`result.task` is the row after the call** — the same `MaitermTask` the other writes return,
+  so patch your model from it rather than assuming. It is load-bearing for an unassigned row: the
+  WS `tasks` event is keyed by tab, so a backlog task's move to Active reaches you through no
+  other channel and would otherwise sit in its old lane until a manual full `GET /tasks`.
+- `404` for a task the phone cannot see, same rule as the patch. A task that vanishes between the
+  route resolving it and the desktop handling it answers `accepted: false` with a reason — never
+  `told: "nobody"`, which would be indistinguishable from a real start.
 
 - **Synchronous.** Rust writes `Workspace.tasks`, saves, then answers. Plain HTTP status — no
   `accepted/confirmed` here, because nothing crossed into the webview. Works while the desktop

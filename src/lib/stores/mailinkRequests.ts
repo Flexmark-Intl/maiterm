@@ -33,7 +33,14 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         // status patch — an agent marking its own row Active must never type a "please pick
         // this up" notice at itself. `told` says what actually reached the agent.
         if (typeof a.id !== 'string') result = { error: 'id is required' };
-        else result = await overlordStore.startTask(a.id);
+        else {
+          const r = await overlordStore.startTask(a.id);
+          // `started: false` means the row was gone by the time this window handled the
+          // request — the route resolved it moments earlier. Reported as a REFUSAL rather
+          // than a result, because `told: 'nobody'` is otherwise identical to a genuine
+          // start of an unassigned row and a client reading `told` would show success.
+          result = r.started ? r : { error: 'that task no longer exists' };
+        }
         break;
       }
       case 'overlord.dismissEscalation': {

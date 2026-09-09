@@ -652,7 +652,19 @@ async fn post_task_start(
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(overlord_act(&s, &window, "tasks.start", json!({ "id": task_id })).await)
+    let mut out = overlord_act(&s, &window, "tasks.start", json!({ "id": task_id })).await;
+    // Answer with the row, like every other task write, so the client can patch its model.
+    // Load-bearing for an UNASSIGNED row: the WS `tasks` event is keyed by tab, so a backlog
+    // task's move to Active reaches the phone through no other channel and it would sit in its
+    // old lane until a manual full GET. The frontend's persist has landed by now — both
+    // `set_workspace_tasks` and `claude_code_respond` are sync commands on the main thread, so
+    // the write is in Rust state before the oneshot this awaited could resolve.
+    if out.0["accepted"] == Value::Bool(true) {
+        if let Some(row) = board::task_row(&s.app, &task_id) {
+            out.0["result"]["task"] = row;
+        }
+    }
+    Ok(out)
 }
 
 // ─── Overlord actions (rpc.rs) ─────────────────────────────────────────────────────────────

@@ -511,6 +511,36 @@ pub(crate) fn update_task(app: &AppState, id: &str, patch: UpdatePatch) -> Resul
     Ok(written)
 }
 
+/// One task's row, by id, gated like everything else. For answering a write with the row the
+/// client should patch its model with — the WS `tasks` event cannot carry an UNASSIGNED row
+/// (it is keyed by tab), so without this a phone starting a backlog task would have no signal
+/// at all and would render it in its old lane until a manual full `GET /tasks`.
+pub(crate) fn task_row(app: &AppState, task_id: &str) -> Option<Value> {
+    let designated = designated_set(app);
+    let data = app.app_data.read();
+    let titles = tab_titles(&data, &designated);
+    for win in &data.windows {
+        let parked = parked_ids(win);
+        for ws in &win.workspaces {
+            let Some(t) = ws.tasks.iter().find(|t| t.id == task_id) else { continue };
+            let exposed = ws.panes.iter().flat_map(|p| p.tabs.iter()).any(|t| designated.contains(&t.id));
+            let visible = match t.tab_id.as_deref() {
+                None => exposed,
+                Some(tab) => designated.contains(tab),
+            };
+            return visible.then(|| {
+                task_view(
+                    t,
+                    effective_status(t, ws, &parked),
+                    t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
+                    workstream_name(ws, t.workstream_id.as_deref()),
+                )
+            });
+        }
+    }
+    None
+}
+
 /// Which window's webview owns this task — the address `POST /tasks/{id}/start` needs, since
 /// starting a task is done by the frontend store (it types a notice at the tab, and only that
 /// window's engine can). `None` when the task does not exist OR the phone may not see it, which
@@ -936,6 +966,37 @@ mod tests {
         // A row on a tab that no longer exists is not startable either — nothing to tell.
         assert_eq!(window_for_task(&app, "t4"), None);
         let _ = (tab, hidden);
+    }
+
+    #[test]
+    fn a_started_task_answers_with_its_row_including_an_unassigned_one() {
+        // The row is how an UNASSIGNED task's move to Active reaches the phone at all: the WS
+        // `tasks` event is keyed by tab, so a backlog row has no other channel.
+        let (app, tab) = fixture();
+        assert!(tab_change_keys(&app).get("").is_none(), "a backlog row is in no tab's change key");
+        let row = task_row(&app, "t3").expect("the unassigned backlog row is visible");
+        assert_eq!(row["id"], "t3");
+        assert!(row["tabId"].is_null());
+        assert_eq!(row["status"], "todo");
+        {
+            let mut data = app.app_data.write();
+            data.windows[0].workspaces[0].tasks.iter_mut().find(|t| t.id == "t3").unwrap().status = "active".into();
+        }
+        assert_eq!(task_row(&app, "t3").unwrap()["status"], "active", "the row is read AFTER the write");
+        // Gated exactly like every other read: an excluded tab's row is not found.
+        {
+            let mut data = app.app_data.write();
+            let ws = &mut data.windows[0].workspaces[0];
+            let mut secret = agent_tab("client-secrets");
+            secret.mailink_excluded = true;
+            let hidden = secret.id.clone();
+            ws.panes[0].tabs.push(secret);
+            ws.tasks.push(task("s1", "Rotate the prod DB password", Some(&hidden), None));
+        }
+        assert!(task_row(&app, "s1").is_none());
+        assert!(task_row(&app, "nope").is_none());
+        assert_eq!(task_row(&app, "t1").unwrap()["tabTitle"], "worker");
+        let _ = tab;
     }
 
     #[test]

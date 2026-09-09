@@ -2887,7 +2887,14 @@ function createOverlordStore() {
       // Busy, at a prompt, or unmounted. The supervisor relays it when the tab is reachable
       // — the same act-or-escalate shape every other board action uses. With no supervisor
       // to relay it, say so rather than reporting a delivery that did not happen.
-      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab()) {
+      //
+      // An EXEMPT tab has no supervisor either, whatever the preference says: the handoff is
+      // agent-only, so it is consumed off the board by `listEscalations` and never seen by a
+      // human — and the one tool that could act on it, `driveTab`, refuses an exempt tab. So
+      // escalating here would delete the card into an agent that is forbidden to use it, and
+      // report a relay that cannot happen. It would also hand the exempt tab's name and the
+      // task's detail to the supervisor, which is the exact thing exemption promises not to do.
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
         return { started: true, told: 'nobody' };
       }
       escalate(
