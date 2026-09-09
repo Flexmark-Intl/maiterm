@@ -4,6 +4,18 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.8 changelog** (2026-09-08). Additive: `tool` and `detail` on `Chat`, `ChatDetail` and every
+> `chat_state` frame — the agent's currently-running tool and its primary argument. maiTerm has
+> tracked both on every PreToolUse since the hooks went in, and cleared both on Stop, but only ever
+> emitted them nested inside a *permission* prompt view; a client reading them at top level was
+> reading a field with no producer (measured: 354 frames, including a tab actively running tools,
+> not one carried either). Both are explicitly `null` when nothing is running, per the merge rule
+> below — a turn ending has to CLEAR the status line, and an omitted field would leave the last
+> tool of the last turn pinned under an idle agent. The live half needed its own diff: these move
+> within a turn while `state` sits at `active`, so the attention key structurally cannot see them,
+> and a tool-only change deliberately skips frame enrichment (a tab that just started a tool is
+> active this instant, so the frame's own `now` is honest and two transcript tail reads are not).
+>
 > **v0.7 changelog** (2026-09-08). Additive: `ChatDetail.subagents` + the WS `subagents` event
 > (§4.3 `Subagent`). Delegations were invisible — one static tool chip at launch and nothing after
 > — so a thread whose agent was five minutes into a code review said only "working…", and the only
@@ -561,6 +573,22 @@ interface Chat {
                             //   until the agent works again.
   lastActivityTs: number;
   preview: string;          // last line(s) of distilled context
+  tool: string | null;      // the tool the agent is running RIGHT NOW, and its primary argument
+  detail: string | null;    //   ("Bash" / "npm test", "Edit" / "src/lib.rs"). From the PreToolUse
+                            //   hook; both cleared on Stop, so an idle agent reports null for
+                            //   both — never the last tool of the last turn. `preview` above is
+                            //   maiTerm's own phrasing of the same facts ("Working… (Bash)");
+                            //   these are the raw pair, so a client renders its own wording
+                            //   rather than parsing ours. Also on ChatDetail and every
+                            //   `chat_state` frame — the live half is where the value is, and it
+                            //   needed its own diff (§4.2): these move within a turn while
+                            //   `state` sits at `active`.
+                            //
+                            //   SHIPPED IN 0.8. Documented on the `chat_state` example since
+                            //   v0.4 and never actually sent by any desktop — a client reading
+                            //   them before 0.8 was reading a field with no producer, which is
+                            //   why a phone showed "working…" while an agent ran tools for
+                            //   minutes. The doc was right; the code was the half that was wrong.
   windowLabel: string;      // the window that owns this tab. Overlord is per WINDOW and every
                             // action is addressed POST /overlord/{windowLabel}/…, so this is
                             // what lets an ordinary thread — no escalation naming it, no tasks —
@@ -1939,7 +1967,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.7" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.8" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -1956,6 +1984,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.5` | §4.3 `MaitermTask` + `effectiveStatus`, `GET/POST /tasks`, `GET /overlord`, WS `overlord`, the action routes |
 | `0.6` | adds `Chat.windowLabel` / `ChatDetail.windowLabel`, and `rules` + `agentTabIds` on the snapshot |
 | `0.7` | adds `ChatDetail.subagents` and the WS `subagents` event (§4.3 `Subagent`) |
+| `0.8` | adds `tool` + `detail` on `Chat`, `ChatDetail` and every `chat_state` frame |
 
 **Treat any field newer than the version you require as optional anyway.** The table is a floor,
 not a promise that nothing else is missing — and on a client where a render throw is unrecoverable,

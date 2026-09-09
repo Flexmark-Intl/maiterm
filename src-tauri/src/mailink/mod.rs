@@ -133,6 +133,17 @@ fn ws_covered(live: bool, last_drop_ms: u64, now_ms: u64) -> bool {
 /// PREVIOUS key to be outside attention, and `permission|` is already inside it. Both keys are
 /// attention, so the key changing is not an edge. That is the wanted behaviour — it is one ask
 /// changing shape, and the human was already rung for it (see the `attn_key` test).
+/// The diff key for a tab's live status line — the running tool and its argument, from a
+/// `build_chats`/`build_chat_summaries` row. Both halves, because two consecutive `Bash` calls are
+/// a change the phone must see and only `detail` distinguishes them.
+fn tool_key(c: &Value) -> String {
+    format!(
+        "{}\u{1}{}",
+        c.get("tool").and_then(|v| v.as_str()).unwrap_or(""),
+        c.get("detail").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+}
+
 fn attn_key(state: &str, prompt: Option<&str>) -> String {
     format!("{state}|{}", prompt.unwrap_or(""))
 }
@@ -469,7 +480,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.7";
+const PROTOCOL_VERSION: &str = "0.8";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -2280,6 +2291,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // Per-tab last-seen registration flag. A tab registering (or losing its registration) changes
     // the re-initialize affordance without moving state/prompt, so it needs its own diff.
     let mut registered: HashMap<String, bool> = HashMap::new();
+    // Per-tab last-seen running tool + its argument. This moves WITHIN a turn while `state` sits
+    // at "active", so it is the one diff the attention key structurally cannot cover — see
+    // `state_frame_needed`.
+    let mut tools: HashMap<String, String> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -2325,6 +2340,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
         suspended.insert(tab.clone(), c["workspaceSuspended"].as_bool().unwrap_or(false));
         mesh.insert(tab.clone(), c["mesh"].as_bool().unwrap_or(false));
         registered.insert(tab.clone(), c["registered"].as_bool().unwrap_or(true));
+        tools.insert(tab.clone(), tool_key(&c));
         last.insert(tab, key);
     }
 
@@ -2444,6 +2460,11 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         roster_changed = true;
                     }
                     registered.insert(tab.clone(), reg);
+                    // A first sighting is NOT a tool change: `prev.is_none()` already emits a
+                    // frame, and treating an unseen tab as "changed" would only double it.
+                    let tk = tool_key(c);
+                    let tool_changed = prev.is_some() && tools.get(&tab) != Some(&tk);
+                    tools.insert(tab.clone(), tk);
                     // `chats_changed` alone is a ROSTER signal — it says "re-GET /chats", which
                     // refreshes the inbox but not an already-open thread. Registration usually
                     // flips with the attention key UNCHANGED (the live-agent fallback already
@@ -2451,8 +2472,23 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     // without the `|| reg_changed` arm an open thread got no frame at all and
                     // the "Running but not registered" banner survived the very init that fixed
                     // it, until the user backed out and re-opened the thread.
-                    if state_frame_needed(prev.as_deref(), &key, reg_changed) {
-                        if socket.send(Message::Text(enriched_chat_state_event(&s.app, c).to_string().into())).await.is_err() {
+                    if state_frame_needed(prev.as_deref(), &key, reg_changed, tool_changed) {
+                        // Enrichment (lastActivityTs + meta) costs two transcript tail reads, and
+                        // `build_chat_summaries` omits them precisely so they are paid only on real
+                        // transitions. A tool change fires MANY times per turn, so paying it there
+                        // would reintroduce the per-tab-per-tick load that was the chat-list storm.
+                        //
+                        // It is also unnecessary there: enrichment exists because a tab can
+                        // transition after a long quiet spell, where stamping `now` would be a
+                        // lie. A tab that just STARTED a tool is active this instant, so the
+                        // frame's own `now` is the honest answer — and `meta` is the contract's
+                        // one merge-only-when-present field, so omitting it strands nothing.
+                        let ev = if prev.as_deref() != Some(key.as_str()) || reg_changed {
+                            enriched_chat_state_event(&s.app, c)
+                        } else {
+                            chat_state_event(c)
+                        };
+                        if socket.send(Message::Text(ev.to_string().into())).await.is_err() {
                             return;
                         }
                         // Same edge rule the push doorbell uses — see `rings_attention`. A tab
@@ -2471,7 +2507,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); registered.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); registered.remove(&k); tools.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -2516,11 +2552,18 @@ fn enriched_chat_state_event(app: &AppState, c: &Value) -> Value {
 /// Whether the roster ticker owes a tab a `chat_state` frame this tick (unit-tested; the ticker
 /// wires the real diffs).
 ///
-/// The attention key is the usual trigger, but registration flips independently of it: the
-/// live-agent fallback already reports "active", and a tab that registers reports "active" too,
-/// so a key-only test emitted nothing on the one transition the phone's banner is bound to.
-fn state_frame_needed(prev: Option<&str>, key: &str, reg_changed: bool) -> bool {
-    prev != Some(key) || reg_changed
+/// The attention key is the usual trigger, but two things flip independently of it. Registration:
+/// the live-agent fallback already reports "active", and a tab that registers reports "active"
+/// too, so a key-only test emitted nothing on the one transition the phone's banner is bound to.
+/// And the running tool, which moves WITHIN a turn — an agent grinding through Read/Bash/Edit
+/// never leaves `active`, so a key-only test would emit one frame when the turn began and freeze
+/// the status line on whichever tool happened to be running then, for the whole turn.
+///
+/// `attn_key` deliberately does NOT grow to cover either. It is also the doorbell's edge rule
+/// (`is_attn` splits it on `|` and matches the halves), so widening it would both change what
+/// counts as an attention transition and break that positional parse.
+fn state_frame_needed(prev: Option<&str>, key: &str, reg_changed: bool, tool_changed: bool) -> bool {
+    prev != Some(key) || reg_changed || tool_changed
 }
 
 /// A `chat_state` frame.
@@ -2562,6 +2605,14 @@ fn chat_state_event(c: &Value) -> Value {
         // diff doesn't watch prompt), so nothing made the phone re-GET: the row kept its stale
         // prompt and the answered ask stayed pinned at the top of the inbox.
         "prompt": c.get("prompt").cloned().unwrap_or(Value::Null),
+        // The live status line: the tool the agent is running and its primary argument. Explicit
+        // `null` when nothing is running, for the same merge reason as `prompt` — a turn ENDING
+        // has to clear the line, and an omitted field would leave the last tool of the last turn
+        // pinned under an idle agent. maiTerm has tracked these on every PreToolUse since the
+        // hooks went in; until now they were only ever emitted nested inside a permission card,
+        // so a client reading them at top level was reading a field with no producer.
+        "tool": c.get("tool").cloned().unwrap_or(Value::Null),
+        "detail": c.get("detail").cloned().unwrap_or(Value::Null),
         "ts": ts.clone(),
         "lastActivityTs": ts,
     });
@@ -3449,13 +3500,13 @@ fn permission_prompt_id(app: &AppState, tab_id: &str) -> String {
 
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
     let states = session_states(app);
-    let (st, rt, tool, _) = states.get(tab_id)?;
+    let s = states.get(tab_id)?;
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
-    if tool.as_deref() == Some("AskUserQuestion") {
-        Some(("question", question_prompt_id(app, tab_id), *rt))
-    } else if map_state(*st) == "permission" {
-        Some(("permission", permission_prompt_id(app, tab_id), *rt))
+    if s.tool.as_deref() == Some("AskUserQuestion") {
+        Some(("question", question_prompt_id(app, tab_id), s.runtime))
+    } else if map_state(s.state) == "permission" {
+        Some(("permission", permission_prompt_id(app, tab_id), s.runtime))
     } else {
         None
     }
@@ -3781,22 +3832,106 @@ pub(crate) fn is_designated(app: &AppState, tab_id: &str) -> bool {
 /// The last field is what `unread` keys on. `state` can't answer it: `"idle"` covers both
 /// "finished, go read it" and "alive at an empty prompt", and the second is the resting state of
 /// every tab after a restart. See `AgentSessionInfo::finished_a_turn`.
-type SessionState = (AgentSessionState, AgentRuntime, Option<String>, bool);
+/// The tracked session a tab is showing, when it has one.
+///
+/// A struct rather than a tuple because `tool` and `detail` are adjacent `Option<String>`s and
+/// positional destructuring would let them swap silently — the detail is the argument, the tool
+/// is the verb, and a card reading `src/lib.rs(Bash)` would look merely odd rather than wrong.
+struct SessionState {
+    state: AgentSessionState,
+    runtime: AgentRuntime,
+    /// The tool the agent is running right now, from the PreToolUse hook; cleared on Stop.
+    tool: Option<String>,
+    /// That tool's compact primary argument (`compact_tool_arg`) — the half that says WHICH file
+    /// or command, without which "Bash" is barely more than "working".
+    detail: Option<String>,
+    finished: bool,
+}
 
 fn session_states(app: &AppState) -> HashMap<String, SessionState> {
     let sessions = app.agent_sessions.read();
     let mut map: HashMap<String, SessionState> = HashMap::new();
     for sess in sessions.values() {
-        let candidate = (sess.state, sess.runtime, sess.tool_name.clone(), sess.finished_a_turn);
+        let candidate = || SessionState {
+            state: sess.state,
+            runtime: sess.runtime,
+            tool: sess.tool_name.clone(),
+            detail: sess.tool_detail.clone(),
+            finished: sess.finished_a_turn,
+        };
         map.entry(sess.tab_id.clone())
             .and_modify(|cur| {
-                if rank(sess.state) > rank(cur.0) {
-                    *cur = (sess.state, sess.runtime, sess.tool_name.clone(), sess.finished_a_turn);
+                if rank(sess.state) > rank(cur.state) {
+                    *cur = candidate();
                 }
             })
-            .or_insert(candidate);
+            .or_insert_with(candidate);
     }
     map
+}
+
+/// What the roster shows for one tab: its tracked session when it has one, else the liveness
+/// fallback. The three build paths (summaries, list, detail) resolved this identically three
+/// times over; the shape is fiddly enough (an unregistered tab has no session, so it can have
+/// neither a tool nor a finished turn) that one copy is worth more than three.
+struct TabView {
+    state: &'static str,
+    runtime: &'static str,
+    tool: Option<String>,
+    detail: Option<String>,
+    registered: bool,
+    finished: bool,
+}
+
+impl TabView {
+    /// An open AskUserQuestion outranks the (usually coincident) permission state — the ask IS
+    /// the structured question, so every surface must agree on that ordering.
+    fn ask_open(&self) -> bool {
+        self.tool.as_deref() == Some("AskUserQuestion")
+    }
+
+    fn prompt_kind(&self) -> Option<&'static str> {
+        if self.ask_open() {
+            Some("question")
+        } else if self.state == "permission" {
+            Some("permission")
+        } else {
+            None
+        }
+    }
+}
+
+fn tab_view(
+    app: &AppState,
+    states: &HashMap<String, SessionState>,
+    tab_id: &str,
+    tab_runtime: AgentRuntime,
+    now: u64,
+) -> TabView {
+    match states.get(tab_id) {
+        Some(s) => TabView {
+            state: map_state(s.state),
+            runtime: runtime_key(s.runtime),
+            tool: s.tool.clone(),
+            detail: s.detail.clone(),
+            registered: true,
+            finished: s.finished,
+        },
+        None => TabView {
+            state: if tab_looks_live_despite_no_session(app, tab_id, now) {
+                "active"
+            } else {
+                "dormant"
+            },
+            runtime: runtime_key(tab_runtime),
+            // An unregistered tab has no session that could be running a tool or have finished
+            // a turn — the fallback knows a tab is alive and nothing more than that.
+            tool: None,
+            detail: None,
+            registered: false,
+            finished: false,
+        },
+    }
 }
 
 /// How recently a tab's transcript must have produced a REAL turn for the live-agent fallback to
@@ -4485,37 +4620,22 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
     designated_tabs(app)
         .into_iter()
         .map(|t| {
-            let (state, runtime, tool, registered, _finished) = match states.get(&t.tab_id) {
-                Some((st, rt, tool, fin)) => (map_state(*st), runtime_key(*rt), tool.clone(), true, *fin),
-                None => {
-                    let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
-                        "active"
-                    } else {
-                        "dormant"
-                    };
-                    // An unregistered tab has no session that could have finished anything.
-                    (st, runtime_key(t.runtime), None, false, false)
-                }
-            };
-            // Same prompt-kind rule as build_chats: an open AskUserQuestion outranks permission.
-            let prompt_kind = if tool.as_deref() == Some("AskUserQuestion") {
-                Some("question")
-            } else if state == "permission" {
-                Some("permission")
-            } else {
-                None
-            };
+            let v = tab_view(app, &states, &t.tab_id, t.runtime, now);
             json!({
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspaceSuspended": t.workspace_suspended,
                 "mesh": t.mesh,
-                "runtime": runtime,
-                "state": state,
+                "runtime": v.runtime,
+                "state": v.state,
                 // Diffed by the WS ticker like the other flags, so a tab that registers (or
                 // loses its registration) re-renders the re-initialize affordance promptly.
-                "registered": registered,
-                "prompt": prompt_kind,
+                "registered": v.registered,
+                "prompt": v.prompt_kind(),
+                // Diffed too — the live status line moves tool-by-tool WITHIN a turn, so it
+                // changes far more often than `state` does. See `state_frame_needed`.
+                "tool": v.tool,
+                "detail": v.detail,
             })
         })
         .collect()
@@ -4538,28 +4658,13 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let chats: Vec<Value> = tabs
         .into_iter()
         .map(|t| {
-            let (state, runtime, tool, registered, finished) = match states.get(&t.tab_id) {
-                Some((st, rt, tool, fin)) => (map_state(*st), runtime_key(*rt), tool.clone(), true, *fin),
-                None => {
-                    let st = if tab_looks_live_despite_no_session(app, &t.tab_id, now) {
-                        "active"
-                    } else {
-                        "dormant"
-                    };
-                    // An unregistered tab has no session that could have finished anything.
-                    (st, runtime_key(t.runtime), None, false, false)
-                }
-            };
-            let ask_open = tool.as_deref() == Some("AskUserQuestion");
+            let v = tab_view(app, &states, &t.tab_id, t.runtime, now);
+            let (state, runtime, tool, registered, finished) =
+                (v.state, v.runtime, v.tool.clone(), v.registered, v.finished);
+            let ask_open = v.ask_open();
             // The kind of prompt currently open, if any. An open AskUserQuestion outranks the
             // (usually coincident) permission state — mirrors build_chat_detail/attention_event.
-            let prompt_kind = if ask_open {
-                Some("question")
-            } else if state == "permission" {
-                Some("permission")
-            } else {
-                None
-            };
+            let prompt_kind = v.prompt_kind();
             let mut chat = json!({
                 "tabId": t.tab_id,
                 "title": t.title,
@@ -4594,6 +4699,11 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 "registered": registered,
                 "lastActivityTs": last_activity_ts(app, &t.tab_id, scrollback.get(&t.tab_id).copied(), now),
                 "preview": preview_for(state, tool.as_deref()),
+                // The live status line's two halves — the verb and its argument. `preview` above
+                // is maiTerm's own phrasing of the same facts ("Working… (Bash)"); these are the
+                // raw pair, so the phone can render its own and doesn't have to parse ours.
+                "tool": v.tool,
+                "detail": v.detail,
             });
             if let Some(meta) = build_meta(app, &t.tab_id) {
                 chat["meta"] = meta;
@@ -4639,18 +4749,9 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let ph = std::time::Instant::now();
     let last_activity = last_activity_ts(app, tab_id, scrollback_ts, now);
     let ms_activity = ph.elapsed().as_millis(); // locate_jsonl + last-turn tail read
-    let (state, runtime, tool, registered, finished) = match states.get(tab_id) {
-        Some((st, rt, tool, fin)) => (map_state(*st), runtime_key(*rt), tool.clone(), true, *fin),
-        None => {
-            let st = if tab_looks_live_despite_no_session(app, tab_id, now) {
-                "active"
-            } else {
-                "dormant"
-            };
-            // An unregistered tab has no session that could have finished anything.
-            (st, runtime_key(meta.runtime), None, false, false)
-        }
-    };
+    let v = tab_view(app, &states, tab_id, meta.runtime, now);
+    let (state, runtime, tool, registered, finished) =
+        (v.state, v.runtime, v.tool.clone(), v.registered, v.finished);
 
     // Per-turn source markdown from the session transcript (Claude) so the phone's GFM renderer
     // lights up; falls back to the distilled terminal scrape for other runtimes / when no
@@ -4684,6 +4785,10 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "registered": registered,
         "lastActivityTs": last_activity,
         "transcript": transcript,
+        // Same live status-line pair the list and the WS frame carry, so an open thread and the
+        // inbox row it came from can't disagree about what the agent is doing.
+        "tool": v.tool,
+        "detail": v.detail,
     });
 
     // Per-agent telemetry strip (model + context gauge). See build_meta.
@@ -5734,14 +5839,57 @@ mod tests {
         // key-only test emitted no frame, `chats_changed` only refreshes the ROSTER, and the
         // "Running but not registered" banner outlived the init the operator asked for.
         assert!(
-            state_frame_needed(Some("active"), "active", true),
+            state_frame_needed(Some("active"), "active", true, false),
             "a registration flip must reach the open thread on its own"
         );
         // And the flip must be the only extra reason — a settled tab still stays quiet.
-        assert!(!state_frame_needed(Some("active"), "active", false));
+        assert!(!state_frame_needed(Some("active"), "active", false, false));
         // The ordinary trigger is untouched.
-        assert!(state_frame_needed(Some("active"), "idle_done", false));
-        assert!(state_frame_needed(None, "active", false), "a tab we've never seen");
+        assert!(state_frame_needed(Some("active"), "idle_done", false, false));
+        assert!(state_frame_needed(None, "active", false, false), "a tab we've never seen");
+    }
+
+    #[test]
+    fn the_running_tool_moving_reaches_an_open_thread_too() {
+        // An agent grinding through Read → Bash → Edit never leaves "active", so the attention
+        // key is identical across the whole turn. Without its own diff the status line would
+        // freeze on whichever tool happened to be running when the turn began — the same
+        // "one line that never changes" the delegation strip exists to fix, one level down.
+        assert!(
+            state_frame_needed(Some("active"), "active", false, true),
+            "a tool change must reach the open thread on its own"
+        );
+    }
+
+    #[test]
+    fn tool_key_separates_the_verb_from_its_argument() {
+        // Two consecutive Bash calls are a change the phone must see, and only `detail`
+        // distinguishes them — a tool-name-only key would show the first command all turn.
+        let row = |t: &str, d: &str| json!({ "tool": t, "detail": d });
+        assert_ne!(tool_key(&row("Bash", "npm test")), tool_key(&row("Bash", "npm run build")));
+        assert_ne!(tool_key(&row("Read", "a.rs")), tool_key(&row("Edit", "a.rs")));
+        assert_eq!(tool_key(&row("Bash", "npm test")), tool_key(&row("Bash", "npm test")));
+        // A tab with no tool running is one stable key, however the nulls arrive: an idle agent
+        // must not re-emit a frame every tick.
+        assert_eq!(tool_key(&json!({})), tool_key(&json!({ "tool": null, "detail": null })));
+        // And it must not collide with a real tool whose argument is empty.
+        assert_ne!(tool_key(&json!({})), tool_key(&row("Bash", "")));
+    }
+
+    #[test]
+    fn chat_state_clears_the_status_line_rather_than_omitting_it() {
+        // Frames are MERGED over build_chats rows, so an omitted field is indistinguishable from
+        // one claimed empty — a turn ENDING has to clear the line, or the last tool of the last
+        // turn stays pinned under an idle agent. Same rule as `prompt`.
+        let ev = chat_state_event(&json!({ "tabId": "t1", "state": "idle", "runtime": "claude" }));
+        assert_eq!(ev.get("tool"), Some(&Value::Null));
+        assert_eq!(ev.get("detail"), Some(&Value::Null));
+        let ev = chat_state_event(&json!({
+            "tabId": "t1", "state": "active", "runtime": "claude",
+            "tool": "Bash", "detail": "npm test",
+        }));
+        assert_eq!(ev["tool"], json!("Bash"));
+        assert_eq!(ev["detail"], json!("npm test"));
     }
 
     #[test]
