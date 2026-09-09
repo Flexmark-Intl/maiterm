@@ -336,6 +336,8 @@ fn build_router(api: ApiState) -> Router {
         // rows, and it works while the desktop's screen is asleep (board.rs "Writes").
         .route("/mailink/v1/tasks", get(tasks_board).post(post_tasks_create))
         .route("/mailink/v1/tasks/{task_id}", post(post_task_update))
+        // START is a separate verb from "set the lane to active", deliberately — see the handler.
+        .route("/mailink/v1/tasks/{task_id}/start", post(post_task_start))
         // The Overlord engine mirror, every window (mailink/overlord.rs). Baseline on connect;
         // the WS `overlord` frame carries changes inline.
         .route("/mailink/v1/overlord", get(overlord_windows))
@@ -622,6 +624,35 @@ async fn post_task_update(
     let w = board::update_task(&s.app, &task_id, patch).map_err(write_status)?;
     announce_tasks(&s, &w);
     Ok(Json(json!({ "tasks": w.rows })))
+}
+
+/// `POST /tasks/{id}/start` — the board's "Do it": move the task to Active AND TELL the agent.
+///
+/// **A separate verb, not a flag on the patch, and the distinction is the safety property.**
+/// Setting a lane and telling an agent are different acts: `POST /tasks/{id} {status:"active"}`
+/// stays exactly as silent as it is, because that is the path an AGENT uses to mark its own row
+/// as it picks work up. If telling were inferred from the transition instead, every agent that
+/// set its own row Active would type "please pick up this task now" at itself, mid-turn, about
+/// the thing it is already doing. A distinct endpoint carries the human's intent in its name and
+/// cannot be reached by an agent updating its own status.
+///
+/// Crosses into the webview (rpc.rs) rather than writing state here: the notice is TYPED into the
+/// tab, and only the owning window's engine can do that — so this answers `{accepted, confirmed}`
+/// like the Overlord actions, not a row like the other task writes.
+///
+/// `result.told` is the point of the call — `"tab"` the agent was told directly, `"agent"` the tab
+/// could not be typed into so Overlord will relay it, `"nobody"` it is Active and no one was told
+/// (unassigned, or nothing available to relay). "Active on the board" and "the agent has been
+/// told" are different facts, and a button implying the second while doing only the first is how
+/// a task sits Active for an hour with nobody working on it.
+async fn post_task_start(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(overlord_act(&s, &window, "tasks.start", json!({ "id": task_id })).await)
 }
 
 // ─── Overlord actions (rpc.rs) ─────────────────────────────────────────────────────────────

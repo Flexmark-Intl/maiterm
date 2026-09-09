@@ -1793,6 +1793,26 @@ interface OutstandingDirective {
 |---|---|---|
 | `POST /tasks` | `{ tabId, workstream?: string, tasks: [{ title, detail?, status?: TaskLane, assign?: boolean }] }` | `{ tasks: MaitermTask[] }` — one row per spec |
 | `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
+| `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told } }` — see below |
+
+**Setting a lane and telling an agent are different acts, and only a human may do the second.**
+`POST /tasks/{id} {status:"active"}` is silent, permanently — that is the path an agent uses to
+mark its own row as it picks work up, and a notice inferred from the transition would have every
+agent type "please pick up this task now" at itself, mid-turn, about the thing it is already
+doing. The board's "Do it" is therefore its own verb:
+
+- `POST /tasks/{id}/start` moves the task to Active **and tells the agent**, exactly as the
+  desktop board's button does. It crosses into the webview (the notice is TYPED into the tab), so
+  it answers the §13.4 `{accepted, confirmed}` shape, not a row.
+- **`result.told` is the point of the call.** `"tab"` — typed into the owning tab, it knows.
+  `"agent"` — the tab could not be typed into (mid-turn, at a prompt, not mounted), so Overlord
+  holds a handoff and will relay it. `"nobody"` — it is Active and *no one was told*: the task is
+  unassigned, or there is no supervisor to relay through. Say which; "Active on the board" and
+  "the agent has been told" are different facts, and a button implying the second while doing only
+  the first is how a task sits Active for an hour with nobody working on it.
+- An unassigned task answering `told: "nobody"` is correct, not a failure — claim it to a tab and
+  the call means something.
+- `404` for a task the phone cannot see, same rule as the patch.
 
 - **Synchronous.** Rust writes `Workspace.tasks`, saves, then answers. Plain HTTP status — no
   `accepted/confirmed` here, because nothing crossed into the webview. Works while the desktop

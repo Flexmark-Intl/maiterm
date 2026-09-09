@@ -511,6 +511,27 @@ pub(crate) fn update_task(app: &AppState, id: &str, patch: UpdatePatch) -> Resul
     Ok(written)
 }
 
+/// Which window's webview owns this task — the address `POST /tasks/{id}/start` needs, since
+/// starting a task is done by the frontend store (it types a notice at the tab, and only that
+/// window's engine can). `None` when the task does not exist OR the phone may not see it, which
+/// are one answer on purpose (same rule as `update_in`: an excluded tab's row is not found).
+pub(crate) fn window_for_task(app: &AppState, task_id: &str) -> Option<String> {
+    let designated = designated_set(app);
+    let data = app.app_data.read();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            let Some(t) = ws.tasks.iter().find(|t| t.id == task_id) else { continue };
+            let exposed = ws.panes.iter().flat_map(|p| p.tabs.iter()).any(|t| designated.contains(&t.id));
+            let visible = match t.tab_id.as_deref() {
+                None => exposed,
+                Some(tab) => designated.contains(tab),
+            };
+            return visible.then(|| win.label.clone());
+        }
+    }
+    None
+}
+
 /// The pure half of `update_task` (see `create_in` for why it is split).
 fn update_in(
     data: &mut AppData,
@@ -890,6 +911,31 @@ mod tests {
         assert_eq!(update_in(&mut data, &designated, now, "t1", UpdatePatch { status: Some("later".into()), ..Default::default() }).err(), Some(WriteError::BadStatus));
         assert_eq!(update_in(&mut data, &designated, now, "nope", UpdatePatch::default()).err(), Some(WriteError::NotFound));
         let _ = tab;
+    }
+
+    #[test]
+    fn starting_a_task_resolves_the_owning_window_and_stops_at_the_gate() {
+        let (app, tab) = fixture();
+        let hidden = {
+            let mut data = app.app_data.write();
+            let ws = &mut data.windows[0].workspaces[0];
+            let mut secret = agent_tab("client-secrets");
+            secret.mailink_excluded = true;
+            let hidden = secret.id.clone();
+            ws.panes[0].tabs.push(secret);
+            ws.tasks.push(task("s1", "Rotate the prod DB password", Some(&hidden), None));
+            hidden
+        };
+        // A row on a designated tab, and the unassigned backlog row, both resolve to the window
+        // whose webview must type the notice.
+        assert_eq!(window_for_task(&app, "t1").as_deref(), Some("main"));
+        assert_eq!(window_for_task(&app, "t3").as_deref(), Some("main"), "an unassigned row is startable — it just tells nobody");
+        // The gate: a row on an excluded tab is not found, exactly as the patch path answers.
+        assert_eq!(window_for_task(&app, "s1"), None);
+        assert_eq!(window_for_task(&app, "nope"), None);
+        // A row on a tab that no longer exists is not startable either — nothing to tell.
+        assert_eq!(window_for_task(&app, "t4"), None);
+        let _ = (tab, hidden);
     }
 
     #[test]

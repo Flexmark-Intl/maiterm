@@ -28,6 +28,14 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
   let result: unknown;
   try {
     switch (verb) {
+      case 'tasks.start': {
+        // The board's "Do it": lane AND notice. Deliberately NOT reachable from the plain
+        // status patch — an agent marking its own row Active must never type a "please pick
+        // this up" notice at itself. `told` says what actually reached the agent.
+        if (typeof a.id !== 'string') result = { error: 'id is required' };
+        else result = await overlordStore.startTask(a.id);
+        break;
+      }
       case 'overlord.dismissEscalation': {
         if (typeof a.id !== 'string') result = { error: 'id is required' };
         else { overlordStore.dismissEscalation(a.id); result = { ok: true }; }
