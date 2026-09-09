@@ -232,6 +232,7 @@ pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState
         // Migrate legacy flat fields if present
         win.migrate_legacy_geometry(monitor_count);
         win.window_geometry.insert(monitor_count.to_string(), geom);
+        win.last_geometry_monitors = Some(monitor_count);
         app_data.clone()
     };
     save_state(&data_clone)?;
@@ -456,7 +457,8 @@ fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
     // Read saved geometry for the current monitor count. With no count — displays asleep
     // or locked — there is no layout to restore: come up at the default and let the
     // frontend place the window when the displays return.
-    let geometry = monitor_count(app).and_then(|count| {
+    let count = monitor_count(app);
+    let geometry = count.and_then(|count| {
         app.try_state::<Arc<AppState>>().and_then(|state| {
             let data = state.app_data.read();
             let win = data.window(label)?;
@@ -464,8 +466,19 @@ fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
         })
     });
 
+    // With no count the size is still known even though the position isn't — see
+    // `WindowData::last_geometry`.
+    let last_size = count.is_none().then(|| {
+        app.try_state::<Arc<AppState>>().and_then(|state| {
+            let data = state.app_data.read();
+            let win = data.window(label)?;
+            win.last_geometry().map(|g| (g.width, g.height))
+        })
+    }).flatten();
+
     let (w, h) = geometry.as_ref()
         .map(|g| (g.width, g.height))
+        .or(last_size)
         .unwrap_or((1200.0, 800.0));
 
     let mut builder = WebviewWindowBuilder::new(app, label, url)

@@ -192,7 +192,10 @@ function createUpdaterStore() {
    */
   async function restart() {
     try {
-      const monitorCount = await commands.getMonitorCount().catch(() => 1);
+      // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
+      // refuses it — never fabricate a count here, or the update plants a layout the
+      // user never arranged under a real monitor-count key.
+      const monitorCount = await commands.getMonitorCount().catch(() => 0);
       await commands.saveWindowGeometry(monitorCount).catch(() => {});
       // This window's own terminals (also sets the shutting-down flag that
       // suppresses per-tab autosave races).

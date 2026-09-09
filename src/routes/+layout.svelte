@@ -250,13 +250,13 @@
     // by macOS can't overwrite the layout we want back on wake.
     let currentMonitorCount: number | null = null;
     let displaysAsleep = false;
-    // Set when this window comes up with no displays to read. Rust places every window at
-    // launch, but only when it can read a count: a relaunch in the dark (a deploy while
-    // the screens were off) leaves them wherever macOS put them, and simply adopting the
-    // first real count would leave that standing — and then persist it under that count on
-    // the next move. So the first count we learn is a cue to place the window, not just to
-    // record.
-    let awaitingInitialGeometry = false;
+    // The monitor count this window's current rect actually describes — set when we place
+    // the window for a count, and when the user's own move/resize is persisted under one.
+    // A count we merely READ is not that: the displays can come back one at a time, and
+    // between those ticks the window is still sitting wherever a dark launch or macOS left
+    // it. Saving that rect under the count we happened to read would file a layout the
+    // user never arranged.
+    let placedFor: number | null = null;
     let geometryTimer: ReturnType<typeof setTimeout> | undefined;
     let monitorPollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -264,12 +264,23 @@
     const readMonitorCount = () => commands.getMonitorCount().catch(() => 0);
 
     // Initialize monitor count (0 → leave it unknown until the displays are back)
-    readMonitorCount().then(count => {
+    readMonitorCount().then(async count => {
       if (count > 0) {
         currentMonitorCount = count;
+        // Place the window from our own per-monitor-count map on EVERY start, not just
+        // one we can tell was dark. Rust places windows in setup(), but only when it
+        // could read a count, and the displays can come back during webview boot — so
+        // "did Rust place this window?" is not something a second reading of the monitor
+        // count can answer. Asking unconditionally makes it moot: it re-applies what Rust
+        // just applied on a lit start, and repairs a dark one. It is also the only thing
+        // that ever gives "main" its per-monitor-count geometry — its launch position
+        // comes from tauri-plugin-window-state, which is monitor-blind.
+        // `false` means this monitor count has no saved layout yet (a first run, a new
+        // display setup) — the window is wherever the OS put it, which is nothing we
+        // placed, so leave `placedFor` unset until the user arranges it.
+        if (await commands.restoreWindowGeometry(count).catch(() => false)) placedFor = count;
       } else {
         displaysAsleep = true;
-        awaitingInitialGeometry = true;
         logInfo('Started with no monitors (displays asleep or locked) — window geometry deferred until they return');
       }
 
@@ -290,20 +301,19 @@
         if (wasAsleep) retryDownBridgesNow('displays back');
         if (currentMonitorCount === null) {
           currentMonitorCount = count;
-          // First displays this window has ever seen. If it launched into the dark,
-          // nothing has placed it yet — do it now, before the debounced save can write
-          // the position macOS chose back under this (real) monitor count.
-          if (awaitingInitialGeometry) {
-            awaitingInitialGeometry = false;
-            logInfo(`Displays back (${count}) after starting in the dark — restoring saved geometry`);
-            await commands.restoreWindowGeometry(count).catch(() => {});
-          }
+          // First displays this window has ever seen: it launched into the dark, so
+          // nothing has placed it yet. Do it now, before the debounced save can write the
+          // position macOS chose back under this (real) monitor count.
+          logInfo(`Displays back (${count}) after starting in the dark — restoring saved geometry`);
+          if (await commands.restoreWindowGeometry(count).catch(() => false)) placedFor = count;
           return;
         }
         if (count === currentMonitorCount) {
           // Same displays as before the sleep — but macOS may have shuffled the window
           // around while they were gone, so put it back where this layout had it.
-          if (wasAsleep) await commands.restoreWindowGeometry(count).catch(() => {});
+          if (wasAsleep && await commands.restoreWindowGeometry(count).catch(() => false)) {
+            placedFor = count;
+          }
           return;
         }
         const oldCount = currentMonitorCount;
@@ -315,9 +325,14 @@
         // relocated this window onto what's left, so its position now describes the
         // NEW configuration; saving it under the old count would overwrite the
         // arrangement we want back when those displays return.
-        if (!wasAsleep) await commands.saveWindowGeometry(oldCount).catch(() => {});
+        // The same applies to a count we only read: macOS brings the displays back one at
+        // a time, so an intermediate tick can adopt a count while the window still sits
+        // where a dark launch left it. `placedFor` is what makes the difference visible —
+        // only a rect we placed, or one the user arranged and we saved, describes a layout
+        // worth keeping.
+        if (!wasAsleep && placedFor === oldCount) await commands.saveWindowGeometry(oldCount).catch(() => {});
         // Restore saved geometry for the new monitor count (if any)
-        await commands.restoreWindowGeometry(count).catch(() => {});
+        if (await commands.restoreWindowGeometry(count).catch(() => false)) placedFor = count;
       }, 2000);
     });
 
@@ -334,6 +349,9 @@
           displaysAsleep = true;
           return;
         }
+        // A rect the user arranged under a real count describes that layout, whatever put
+        // the window there originally.
+        placedFor = currentMonitorCount;
         commands.saveWindowGeometry(currentMonitorCount).catch(() => {});
       }, 500);
     }

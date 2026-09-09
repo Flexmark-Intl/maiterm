@@ -244,8 +244,19 @@ pub fn run() {
                     data.window(&label).and_then(|w| w.geometry_for(count)).cloned()
                 });
 
+                // No count means no answer about WHERE the window goes — but its size is
+                // not in question, and defaulting it would hand the placement that follows
+                // the displays returning a width change to deliver to a live agent.
+                let last_size = if monitor_count.is_none() {
+                    let data = app_state.app_data.read();
+                    data.window(&label).and_then(|w| w.last_geometry()).map(|g| (g.width, g.height))
+                } else {
+                    None
+                };
+
                 let (w, h) = geometry.as_ref()
                     .map(|g| (g.width, g.height))
+                    .or(last_size)
                     .unwrap_or((1200.0, 800.0));
 
                 let mut builder = WebviewWindowBuilder::new(app, &label, url)

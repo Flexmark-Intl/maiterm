@@ -641,6 +641,11 @@ pub struct WindowData {
     /// When monitors change, the window repositions to the saved geometry for that count.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub window_geometry: std::collections::HashMap<String, WindowGeometry>,
+    /// Which `window_geometry` entry was written most recently — i.e. which one describes
+    /// where this window actually was. Read only when the monitor count is unknowable
+    /// (a launch while the displays sleep), and then only for the SIZE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_geometry_monitors: Option<usize>,
     /// Overlord injection ledger (docs/overlord.md §3): verbatim record of everything the
     /// engine/agent typed into supervised tabs. Frontend-owned format (Rust never
     /// interprets entries); ring-buffered at append time.
@@ -673,6 +678,7 @@ impl WindowData {
             sidebar_width: default_sidebar_width(),
             sidebar_collapsed: false,
             window_geometry: std::collections::HashMap::new(),
+            last_geometry_monitors: None,
             overlord_ledger: Vec::new(),
             overlord_tasks: Vec::new(),
             window_x: None,
@@ -685,6 +691,23 @@ impl WindowData {
     /// Get geometry for a given monitor count, falling back to legacy fields.
     pub fn geometry_for(&self, monitor_count: usize) -> Option<&WindowGeometry> {
         self.window_geometry.get(&monitor_count.to_string())
+    }
+
+    /// The last geometry this window was known to have, whatever the display setup was
+    /// at the time. For a launch with no readable monitor count: we can't say WHERE the
+    /// window belongs, but we do know how big it was, and coming up at that size keeps
+    /// the placement that follows the displays returning from changing the width — a
+    /// width change at a live agent re-renders its retained transcript into permanent
+    /// duplicate scrollback.
+    pub fn last_geometry(&self) -> Option<&WindowGeometry> {
+        self.last_geometry_monitors
+            .and_then(|count| self.geometry_for(count))
+            // Windows saved before that was recorded still have entries. With exactly one
+            // configuration on file there is no ambiguity about which describes them.
+            .or_else(|| match self.window_geometry.len() {
+                1 => self.window_geometry.values().next(),
+                _ => None,
+            })
     }
 
     /// Migrate legacy flat fields into the geometry map (called on first save).
