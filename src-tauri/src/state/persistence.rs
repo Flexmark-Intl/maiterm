@@ -420,6 +420,17 @@ pub fn migrate_app_data(data: &mut AppData) {
         }
     }
 
+    // A "0 monitors" geometry key is a phantom layout, never a configuration: macOS
+    // reports every screen gone while the displays sleep, and runs that predate that rule
+    // saved the sleep-time rect under "0". Launch would then restore it whenever the app
+    // came up in the dark. Nothing writes one any more (commands::window), so drop the
+    // ones already on disk rather than leaving a trap for the next dark start.
+    for win in data.windows.iter_mut() {
+        if win.window_geometry.remove("0").is_some() {
+            log::info!("Migration: dropped phantom 0-monitor geometry for window '{}'", win.label);
+        }
+    }
+
     // Drain the legacy single comms_binding into the comms_bindings list (a tab can
     // now work several threads at once — chat-monitor pickups). Deserialize-only field;
     // the next save writes only the list.

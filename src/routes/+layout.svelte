@@ -250,6 +250,13 @@
     // by macOS can't overwrite the layout we want back on wake.
     let currentMonitorCount: number | null = null;
     let displaysAsleep = false;
+    // Set when this window comes up with no displays to read. Rust places every window at
+    // launch, but only when it can read a count: a relaunch in the dark (a deploy while
+    // the screens were off) leaves them wherever macOS put them, and simply adopting the
+    // first real count would leave that standing — and then persist it under that count on
+    // the next move. So the first count we learn is a cue to place the window, not just to
+    // record.
+    let awaitingInitialGeometry = false;
     let geometryTimer: ReturnType<typeof setTimeout> | undefined;
     let monitorPollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -258,7 +265,13 @@
 
     // Initialize monitor count (0 → leave it unknown until the displays are back)
     readMonitorCount().then(count => {
-      if (count > 0) currentMonitorCount = count;
+      if (count > 0) {
+        currentMonitorCount = count;
+      } else {
+        displaysAsleep = true;
+        awaitingInitialGeometry = true;
+        logInfo('Started with no monitors (displays asleep or locked) — window geometry deferred until they return');
+      }
 
       // Poll for monitor changes (handles dock/undock)
       monitorPollTimer = setInterval(async () => {
@@ -277,6 +290,14 @@
         if (wasAsleep) retryDownBridgesNow('displays back');
         if (currentMonitorCount === null) {
           currentMonitorCount = count;
+          // First displays this window has ever seen. If it launched into the dark,
+          // nothing has placed it yet — do it now, before the debounced save can write
+          // the position macOS chose back under this (real) monitor count.
+          if (awaitingInitialGeometry) {
+            awaitingInitialGeometry = false;
+            logInfo(`Displays back (${count}) after starting in the dark — restoring saved geometry`);
+            await commands.restoreWindowGeometry(count).catch(() => {});
+          }
           return;
         }
         if (count === currentMonitorCount) {

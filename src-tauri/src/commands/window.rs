@@ -207,6 +207,12 @@ pub fn set_window_name(
 
 #[tauri::command]
 pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState>>, monitor_count: usize) -> Result<(), String> {
+    // Never key a layout to an absence (see `monitor_count`). The frontend already holds
+    // while the displays are dark; this is the backstop that keeps a "0" entry — which
+    // launch would then restore — out of the state file for good.
+    if monitor_count == 0 {
+        return Ok(());
+    }
     let label = window.label().to_string();
     let scale = window.scale_factor().unwrap_or(1.0);
 
@@ -232,18 +238,35 @@ pub fn save_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState
     Ok(())
 }
 
-/// Get the number of connected monitors.
+/// The number of connected monitors, or None while that is unknowable.
+///
+/// Zero monitors is an absence, not a display configuration: macOS reports every screen
+/// gone while the displays sleep or the lock screen is up. Anything keyed on a monitor
+/// count must hold rather than invent one — a "0" key is a phantom layout, and restoring
+/// it at launch is what moved every window after a deploy done in the dark.
+pub fn monitor_count(app: &tauri::AppHandle) -> Option<usize> {
+    match app.available_monitors() {
+        Ok(m) if !m.is_empty() => Some(m.len()),
+        _ => None,
+    }
+}
+
+/// Get the number of connected monitors. 0 means "no answer" — displays asleep, locked,
+/// or the list unreadable — and the caller is expected to hold, not to act on it.
 #[tauri::command]
 pub fn get_monitor_count(window: tauri::Window) -> usize {
     window.available_monitors()
         .map(|m| m.len())
-        .unwrap_or(1)
+        .unwrap_or(0)
 }
 
 /// Restore window geometry for the given monitor count.
 /// Returns true if geometry was found and applied, false otherwise.
 #[tauri::command]
 pub fn restore_window_geometry(window: tauri::Window, state: State<'_, Arc<AppState>>, monitor_count: usize) -> bool {
+    if monitor_count == 0 {
+        return false;
+    }
     let label = window.label().to_string();
     let geometry = {
         let data = state.app_data.read();
@@ -430,18 +453,15 @@ fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
 
     let title = if cfg!(debug_assertions) { "maiTerm (Dev)" } else { "maiTerm" };
 
-    // Read saved geometry for current monitor count
-    let monitor_count = app.primary_monitor()
-        .ok()
-        .flatten()
-        .and_then(|_| app.available_monitors().ok())
-        .map(|m| m.len())
-        .unwrap_or(1);
-
-    let geometry = app.try_state::<Arc<AppState>>().and_then(|state| {
-        let data = state.app_data.read();
-        let win = data.window(label)?;
-        win.geometry_for(monitor_count).cloned()
+    // Read saved geometry for the current monitor count. With no count — displays asleep
+    // or locked — there is no layout to restore: come up at the default and let the
+    // frontend place the window when the displays return.
+    let geometry = monitor_count(app).and_then(|count| {
+        app.try_state::<Arc<AppState>>().and_then(|state| {
+            let data = state.app_data.read();
+            let win = data.window(label)?;
+            win.geometry_for(count).cloned()
+        })
     });
 
     let (w, h) = geometry.as_ref()

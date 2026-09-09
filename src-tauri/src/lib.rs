@@ -199,20 +199,30 @@ pub fn run() {
 
             // Window title is set dynamically from the frontend (workspace name)
 
-            // Restore additional windows beyond "main"
-            // Determine current monitor count for geometry lookup
-            let monitor_count = app.primary_monitor()
-                .ok()
-                .flatten()
-                .and_then(|_| app.available_monitors().ok())
-                .map(|m| m.len())
-                .unwrap_or(1);
+            // Restore additional windows beyond "main".
+            //
+            // The monitor count can be unknowable at launch — a deploy or a relaunch while
+            // the displays are asleep or the lock screen is up reports no screens at all.
+            // That is an absence, not a display configuration (see
+            // commands::window::monitor_count): restoring geometry under a "0" key put
+            // every window at a phantom rect, and because the frontend poller then adopted
+            // the real count without re-placing anything, the next move saved that rect
+            // back under the real key. With no count we restore nothing and let the
+            // windows come up at their default size; the frontend places them the moment
+            // the displays return.
+            let monitor_count = commands::window::monitor_count(app.handle());
+            if monitor_count.is_none() {
+                log::info!("No monitors at startup (displays asleep or locked) — deferring window geometry until they return");
+            }
 
             let extra_windows: Vec<String> = {
                 let mut data = app_state.app_data.write();
-                // Migrate legacy flat fields into geometry map
-                for w in &mut data.windows {
-                    w.migrate_legacy_geometry(monitor_count);
+                // Migrate legacy flat fields into geometry map — only under a real count,
+                // so an old arrangement is never filed under a phantom layout.
+                if let Some(count) = monitor_count {
+                    for w in &mut data.windows {
+                        w.migrate_legacy_geometry(count);
+                    }
                 }
                 data.windows.iter()
                     .skip(1) // skip "main" — already created by Tauri
@@ -229,10 +239,10 @@ pub fn run() {
                 // Title is set dynamically from the frontend (workspace name)
                 let title = if cfg!(debug_assertions) { "maiTerm (Dev)" } else { "maiTerm" };
 
-                let geometry = {
+                let geometry = monitor_count.and_then(|count| {
                     let data = app_state.app_data.read();
-                    data.window(&label).and_then(|w| w.geometry_for(monitor_count)).cloned()
-                };
+                    data.window(&label).and_then(|w| w.geometry_for(count)).cloned()
+                });
 
                 let (w, h) = geometry.as_ref()
                     .map(|g| (g.width, g.height))
@@ -257,7 +267,7 @@ pub fn run() {
                     Ok(win) => {
                         if let Some(ref geom) = geometry {
                             log::info!("Restoring window '{}' at ({}, {}) size {}x{} (monitors={})",
-                                label, geom.x, geom.y, w, h, monitor_count);
+                                label, geom.x, geom.y, w, h, monitor_count.unwrap_or(0));
                             let scale = win.scale_factor().unwrap_or(1.0);
                             let phys_x = (geom.x * scale) as i32;
                             let phys_y = (geom.y * scale) as i32;
