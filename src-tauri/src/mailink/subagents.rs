@@ -154,9 +154,16 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                 {
                     let to = b.get("input").and_then(|i| i.get("to")).and_then(|t| t.as_str());
                     if let Some(&i) = to.and_then(|t| index.get(t)) {
-                        agents[i].status = SubagentStatus::Running;
-                        agents[i].ended_at = None;
-                        agents[i].started_at = ts;
+                        // Only a TERMINAL entry is being restarted. The ack advertises
+                        // SendMessage as the way to "continue this agent" and does not restrict
+                        // it to finished ones, so a message to one still working is ordinary —
+                        // and resetting its clock would rewind the phone's elapsed timer to zero
+                        // for a delegation that never stopped.
+                        if agents[i].status != SubagentStatus::Running {
+                            agents[i].status = SubagentStatus::Running;
+                            agents[i].ended_at = None;
+                            agents[i].started_at = ts;
+                        }
                     }
                 }
                 Some("tool_use") if b.get("name").and_then(|n| n.as_str()) == Some("Agent") => {
@@ -428,6 +435,46 @@ fn sidecar_dir(transcript: &PathBuf, session_id: &str) -> PathBuf {
 /// and is never mirrored, so a missing file must leave the transcript's verdict alone. The
 /// transcript's own notification still settles those correctly — it rides the mirrored parent
 /// JSONL — so only a parent killed mid-delegation can strand one.
+/// What a sidecar's mtime says about a RUNNING entry. Pure decision (unit-tested; `attach_sidecar`
+/// wires the real file reads), because every interesting case here is a clock relationship and
+/// none of them are worth a temp file with a forged mtime to express.
+#[derive(Debug, PartialEq)]
+enum SidecarVerdict {
+    /// It is this run's, and recent: read the progress line, leave the status alone.
+    Live,
+    /// It says nothing about this run — absent but not yet old enough to judge, or written
+    /// BEFORE this run began (a resumed agent inherits its predecessor's file). Touch nothing.
+    NoEvidence,
+    /// Silent long enough to call it ended. `Some(ms)` when we know when — an mtime is a real
+    /// upper bound; `None` when there is no file to date it by, and it is never guessed.
+    Ended(Option<u64>),
+}
+
+fn sidecar_verdict(started_at: u64, mtime: Option<u64>, now: u64) -> SidecarVerdict {
+    let Some(mtime) = mtime.filter(|&m| m > 0) else {
+        // `started_at > 0` is not a formality. `line_ts` yields 0 for a timestamp it could not
+        // read, which means "I don't know when", and without the guard this reads it as "launched
+        // at the epoch, therefore ancient" and retires the entry hardest of all. That is this
+        // codebase's most repeated defect — a default read as a positive claim — and a missing
+        // launch time is LESS evidence than a missing sidecar, not more.
+        let old = started_at > 0 && now.saturating_sub(started_at) > NO_SIDECAR_STALE_MS;
+        return if old { SidecarVerdict::Ended(None) } else { SidecarVerdict::NoEvidence };
+    };
+    // A file last written BEFORE this run began belongs to the previous one. It must not settle
+    // the entry — that stamped an `ended_at` EARLIER than `started_at` and then latched,
+    // re-creating on the resume path the exact "reports finished while it works" bug the resume
+    // fix exists to remove — and it must not supply a progress line, which would present the last
+    // run's closing words as this run's status.
+    if mtime < started_at {
+        return SidecarVerdict::NoEvidence;
+    }
+    if now.saturating_sub(mtime) > SIDECAR_STALE_MS {
+        SidecarVerdict::Ended(Some(mtime))
+    } else {
+        SidecarVerdict::Live
+    }
+}
+
 fn attach_sidecar(agent: &mut Subagent, dir: &PathBuf, now: u64) {
     // A finished agent already carries its `<result>` opening as `last_line`, which is a better
     // answer than its last in-flight remark — nothing here can improve on it, so not even the
@@ -436,32 +483,27 @@ fn attach_sidecar(agent: &mut Subagent, dir: &PathBuf, now: u64) {
         return;
     }
     let path = dir.join(format!("agent-{}.jsonl", agent.id));
-    let Ok(meta) = std::fs::metadata(&path) else {
-        // No sidecar: no progress line, and no liveness evidence beyond elapsed time. `ended_at`
-        // stays ABSENT rather than being guessed — the `done`-with-no-`lastLine` convention from
-        // `shells.rs`, meaning "ended, outcome unobserved". Render "ended", never "succeeded".
-        if now.saturating_sub(agent.started_at) > NO_SIDECAR_STALE_MS {
-            agent.status = SubagentStatus::Done;
+    let mtime = std::fs::metadata(&path).ok().and_then(|m| {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+    });
+    match sidecar_verdict(agent.started_at, mtime, now) {
+        SidecarVerdict::NoEvidence => {}
+        SidecarVerdict::Live => {
+            if let Some((line, ts)) = last_assistant_line(&path) {
+                agent.last_line = Some(line);
+                agent.last_line_ts = Some(ts);
+            }
         }
-        return;
-    };
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    if let Some((line, ts)) = last_assistant_line(&path) {
-        agent.last_line = Some(line);
-        agent.last_line_ts = Some(ts);
-    }
-    if mtime > 0 && now.saturating_sub(mtime) > SIDECAR_STALE_MS {
-        // Ended while nobody was watching. `done` with no observed outcome — the same convention
-        // `shells.rs` uses for a shell that vanished without a final poll. The sidecar's mtime is
-        // a real upper bound on when it stopped, so it beats reporting no end time at all.
-        agent.status = SubagentStatus::Done;
-        agent.ended_at = Some(mtime);
+        SidecarVerdict::Ended(at) => {
+            // Ended while nobody was watching. `done` with no observed outcome — the same
+            // convention `shells.rs` uses for a shell that vanished without a final poll: render
+            // "ended", never "succeeded".
+            agent.status = SubagentStatus::Done;
+            agent.ended_at = at;
+        }
     }
 }
 
@@ -675,6 +717,63 @@ mod tests {
         // "is something happening, and for how long".
         let resumed_at = crate::mailink::transcript::rfc3339_to_ms("2026-09-08T11:00:00Z") as u64;
         assert_eq!(agents[0].started_at, resumed_at);
+    }
+
+    #[test]
+    fn a_send_message_to_a_still_running_agent_does_not_rewind_its_clock() {
+        // The ack advertises SendMessage as the way to "continue this agent" without restricting
+        // it to finished ones, so this is ordinary traffic — and resetting `started_at` here
+        // would send the phone's elapsed timer back to zero for a run that never stopped.
+        let lines = vec![
+            launch("u1", "Review", "code-reviewer", "2026-09-08T10:00:00Z"),
+            ack("u1", "jjj111", "2026-09-08T10:00:02Z"),
+            send_message("jjj111", "2026-09-08T10:04:00Z"),
+        ];
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].status == SubagentStatus::Running);
+        let launched = crate::mailink::transcript::rfc3339_to_ms("2026-09-08T10:00:00Z") as u64;
+        assert_eq!(agents[0].started_at, launched, "still the same run");
+    }
+
+    const HOUR: u64 = 60 * 60 * 1000;
+
+    #[test]
+    fn a_resumed_run_is_not_judged_by_the_previous_runs_sidecar() {
+        // Demonstrated by review: the sidecar's last write belongs to the run that already
+        // finished, so judging liveness by it settled the NEW run on the same pass — stamping an
+        // `endedAt` five hours BEFORE its `startedAt`, and then latching there, because a settled
+        // entry is skipped on every later tick. The resume fix's own defect, on the path it added.
+        assert_eq!(
+            sidecar_verdict(12 * HOUR, Some(7 * HOUR), 12 * HOUR + 1000),
+            SidecarVerdict::NoEvidence,
+        );
+    }
+
+    #[test]
+    fn a_sidecar_silent_since_this_run_began_still_settles() {
+        // The guard above must not disarm the settle in the case it exists for — a parent killed
+        // mid-delegation, where the sidecar IS this run's and simply stopped.
+        assert_eq!(
+            sidecar_verdict(HOUR, Some(2 * HOUR), 24 * HOUR),
+            SidecarVerdict::Ended(Some(2 * HOUR)),
+            "the mtime is a real upper bound on when it stopped",
+        );
+        // …and a sidecar written since, within the window, is just a working agent.
+        assert_eq!(sidecar_verdict(HOUR, Some(2 * HOUR), 2 * HOUR + 1000), SidecarVerdict::Live);
+    }
+
+    #[test]
+    fn an_unreadable_launch_time_is_not_read_as_ancient() {
+        // `line_ts` yields 0 for a timestamp it could not parse — "I don't know when", which the
+        // no-sidecar settle would otherwise read as "launched at the epoch, therefore ancient".
+        // A missing launch time is LESS evidence than a missing sidecar, not more.
+        assert_eq!(sidecar_verdict(0, None, 99 * NO_SIDECAR_STALE_MS), SidecarVerdict::NoEvidence);
+        // A real launch time with no sidecar still settles, with no end time invented for it.
+        assert_eq!(
+            sidecar_verdict(HOUR, None, HOUR + NO_SIDECAR_STALE_MS + 1),
+            SidecarVerdict::Ended(None),
+        );
+        assert_eq!(sidecar_verdict(HOUR, None, HOUR + 1000), SidecarVerdict::NoEvidence);
     }
 
     #[test]

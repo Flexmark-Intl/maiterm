@@ -2736,16 +2736,13 @@ async fn stream_new_messages(
             // the roster's transcript parse is gated internally, while its progress lines come
             // from per-subagent sidecars the parent transcript never sees move.
             //
-            // Requires a live PTY, as the shell roster does — but for a different reason, so it
-            // is a separate check rather than a shared helper. Shells need one because Stop must
-            // be able to signal a real process; delegations need one because a tab with no live
-            // agent cannot START one, so its roster is frozen and streaming it is pure cost.
-            // (An SSH tab keeps its local ssh PTY, so it is not excluded here — unlike shells,
-            // which genuinely cannot see the remote processes.) An opened thread still gets the
-            // full roster from `GET /chats/{id}`, which is what actually renders it.
-            if pty_for_tab(app, &t.tab_id).is_some() {
-                stream_subagents_if_changed(socket, &t.tab_id, &sid, subagent_stream, &mut cold_budget).await?;
-            }
+            // A live PTY decides only whether an UNSEEN tab is worth the first 32 MB parse: a tab
+            // with no agent cannot start a delegation, so its roster holds nothing new, and an
+            // opened thread gets it from `GET /chats/{id}` anyway. It deliberately does not gate
+            // a tab already being streamed — see `stream_subagents_if_changed`, where losing that
+            // distinction removed the stale settle from the one case it exists for.
+            let has_pty = pty_for_tab(app, &t.tab_id).is_some();
+            stream_subagents_if_changed(socket, &t.tab_id, &sid, has_pty, subagent_stream, &mut cold_budget).await?;
         }
         // mtime gate: an unchanged transcript means no new turns, so skip the tail re-parse.
         if let Some(mt) = transcript::mtime_for(rt, &sid) {
@@ -2820,15 +2817,25 @@ async fn stream_subagents_if_changed(
     socket: &mut WebSocket,
     tab_id: &str,
     session_id: &str,
+    has_live_pty: bool,
     st: &mut SubagentStream,
     cold_budget: &mut usize,
 ) -> Result<(), ()> {
     use std::hash::{Hash, Hasher};
-    // A tab this connection has never parsed. Tested by KEY PRESENCE, not by a zero mtime: a tab
-    // whose transcript can't be resolved caches `(0, [])` legitimately, and treating that as cold
-    // forever would burn the budget every tick on tabs that can never produce a roster.
+    // Both deferrals apply ONLY to a tab this connection has never parsed. Tested by key
+    // presence, not by a zero mtime: a tab whose transcript can't be resolved caches `(0, [])`
+    // legitimately, and treating that as cold forever would burn the budget every tick.
+    //
+    // Once a tab is cached it is refreshed unconditionally, and the live-PTY condition must NOT
+    // extend to that. A dead parent is precisely when `pty_for_tab` goes None, and it is also the
+    // one case `SIDECAR_STALE_MS` exists for — an agent killed mid-delegation is the only way to
+    // strand a `running` entry. Gating the whole call removed the settle exactly there: a thread
+    // open on the phone reading "running 4m" whose desktop agent then died would never receive
+    // another frame, and its timer would climb forever. The settle is a transition the parent
+    // transcript by definition never announces, so an already-open thread has no other source
+    // for it — `GET /chats/{id}` computes it correctly but only when the thread is OPENED.
     if !st.rosters.contains_key(tab_id) {
-        if *cold_budget == 0 {
+        if !has_live_pty || *cold_budget == 0 {
             return Ok(());
         }
         *cold_budget -= 1;
