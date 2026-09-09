@@ -429,12 +429,6 @@ fn sidecar_dir(transcript: &PathBuf, session_id: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(session_id))
 }
 
-/// Read one entry's sidecar for its latest progress line, and settle a stale `running`.
-///
-/// No sidecar means no evidence, not "it stopped": an SSH tab's sidecar lives on the remote host
-/// and is never mirrored, so a missing file must leave the transcript's verdict alone. The
-/// transcript's own notification still settles those correctly — it rides the mirrored parent
-/// JSONL — so only a parent killed mid-delegation can strand one.
 /// What a sidecar's mtime says about a RUNNING entry. Pure decision (unit-tested; `attach_sidecar`
 /// wires the real file reads), because every interesting case here is a clock relationship and
 /// none of them are worth a temp file with a forged mtime to express.
@@ -442,16 +436,26 @@ fn sidecar_dir(transcript: &PathBuf, session_id: &str) -> PathBuf {
 enum SidecarVerdict {
     /// It is this run's, and recent: read the progress line, leave the status alone.
     Live,
-    /// It says nothing about this run — absent but not yet old enough to judge, or written
-    /// BEFORE this run began (a resumed agent inherits its predecessor's file). Touch nothing.
+    /// Nothing can be concluded yet. Touch nothing.
     NoEvidence,
     /// Silent long enough to call it ended. `Some(ms)` when we know when — an mtime is a real
-    /// upper bound; `None` when there is no file to date it by, and it is never guessed.
+    /// upper bound; `None` when there is nothing to date it by, and it is never guessed.
     Ended(Option<u64>),
 }
 
 fn sidecar_verdict(started_at: u64, mtime: Option<u64>, now: u64) -> SidecarVerdict {
-    let Some(mtime) = mtime.filter(|&m| m > 0) else {
+    // A file last written BEFORE this run began belongs to the PREVIOUS one — a resumed agent
+    // inherits its predecessor's file at the same path. Judging this run by it settled the entry
+    // instantly with an `ended_at` earlier than its `started_at`, and it must not supply a
+    // progress line either, which would show the last run's sign-off as this run's status.
+    //
+    // So such a file is treated as ABSENT rather than as its own case. That is not tidiness: a
+    // dedicated no-evidence branch here would never settle at all, and a resume whose subagent
+    // then never writes — the parent dies right after handing off — would strand `running`
+    // forever, since the elapsed-since-launch rule below only applies when there is no file.
+    // Which is the same class of permanent-`running` bug that the six-month entries were.
+    let usable = mtime.filter(|&m| m > 0 && m >= started_at);
+    let Some(mtime) = usable else {
         // `started_at > 0` is not a formality. `line_ts` yields 0 for a timestamp it could not
         // read, which means "I don't know when", and without the guard this reads it as "launched
         // at the epoch, therefore ancient" and retires the entry hardest of all. That is this
@@ -460,14 +464,6 @@ fn sidecar_verdict(started_at: u64, mtime: Option<u64>, now: u64) -> SidecarVerd
         let old = started_at > 0 && now.saturating_sub(started_at) > NO_SIDECAR_STALE_MS;
         return if old { SidecarVerdict::Ended(None) } else { SidecarVerdict::NoEvidence };
     };
-    // A file last written BEFORE this run began belongs to the previous one. It must not settle
-    // the entry — that stamped an `ended_at` EARLIER than `started_at` and then latched,
-    // re-creating on the resume path the exact "reports finished while it works" bug the resume
-    // fix exists to remove — and it must not supply a progress line, which would present the last
-    // run's closing words as this run's status.
-    if mtime < started_at {
-        return SidecarVerdict::NoEvidence;
-    }
     if now.saturating_sub(mtime) > SIDECAR_STALE_MS {
         SidecarVerdict::Ended(Some(mtime))
     } else {
@@ -475,6 +471,12 @@ fn sidecar_verdict(started_at: u64, mtime: Option<u64>, now: u64) -> SidecarVerd
     }
 }
 
+/// Read one entry's sidecar for its latest progress line, and settle a stale `running`.
+///
+/// A missing sidecar means no evidence, not "it stopped": an SSH tab's sidecar lives on the remote
+/// host and is never mirrored. Those settle by elapsed time since launch instead, and the
+/// transcript's own notification still retires them normally — it rides the mirrored parent JSONL
+/// — so only a parent killed mid-delegation ever reaches the timeout.
 fn attach_sidecar(agent: &mut Subagent, dir: &PathBuf, now: u64) {
     // A finished agent already carries its `<result>` opening as `last_line`, which is a better
     // answer than its last in-flight remark — nothing here can improve on it, so not even the
@@ -746,6 +748,20 @@ mod tests {
         assert_eq!(
             sidecar_verdict(12 * HOUR, Some(7 * HOUR), 12 * HOUR + 1000),
             SidecarVerdict::NoEvidence,
+        );
+    }
+
+    #[test]
+    fn a_resume_whose_subagent_never_writes_still_settles_eventually() {
+        // The trap in the fix above: treating "sidecar predates this run" as its own no-evidence
+        // case never settles, so a resume whose parent dies before the subagent writes anything
+        // would strand `running` forever — the same permanent-running bug as the six-month
+        // entries, reached by a different road. A stale file is treated as ABSENT, so the
+        // elapsed-since-launch rule still applies to it.
+        assert_eq!(
+            sidecar_verdict(12 * HOUR, Some(7 * HOUR), 12 * HOUR + NO_SIDECAR_STALE_MS + 1),
+            SidecarVerdict::Ended(None),
+            "no end time is invented — the old mtime is not this run's",
         );
     }
 
