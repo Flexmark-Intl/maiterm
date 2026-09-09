@@ -166,6 +166,19 @@ pub fn shells_from_lines(lines: &[Value]) -> Vec<AgentShell> {
                         if let (false, Some((cmd, desc, started))) =
                             (id.is_empty(), pending.remove(use_id))
                         {
+                            // A resumed session REPLAYS earlier lines, so the same start pair can
+                            // appear twice in one transcript — proven for the `Agent` launch ack
+                            // in real files here (subagents.rs), and this is the same scrape. A
+                            // second entry would ship two rows under one id, and re-point `index`
+                            // so later polls updated the copy while the original kept stale
+                            // state. The first entry is the one that has accumulated them.
+                            //
+                            // Not cosmetic on the client: the phone renders these strips as a
+                            // KEYED `{#each}`, and Svelte THROWS on a duplicate key — it takes
+                            // the whole thread screen down rather than drawing a row twice.
+                            if index.contains_key(&id) {
+                                continue;
+                            }
                             index.insert(id.clone(), shells.len());
                             shells.push(AgentShell {
                                 id,
@@ -378,6 +391,23 @@ mod tests {
         ];
         let shells = shells_from_lines(&lines);
         assert!(shells[0].status == ShellStatus::Killed, "an explicit kill is more specific");
+    }
+
+    #[test]
+    fn a_replayed_start_does_not_duplicate_the_shell() {
+        // Same replay the delegation roster hit (subagents.rs): a resumed session repeats
+        // earlier lines. Two rows under one id crash the phone's keyed each, and the later
+        // poll must still reach the entry that owns the id.
+        let lines = vec![
+            start("u1", "npm run dev", "Dev server", "2026-07-26T10:00:00Z"),
+            started_result("u1", "bkbod6zxj", "2026-07-26T10:00:01Z"),
+            start("u1", "npm run dev", "Dev server", "2026-07-26T10:00:00Z"),
+            started_result("u1", "bkbod6zxj", "2026-07-26T10:00:01Z"),
+            poll("bkbod6zxj", "completed", "0", "bye\n", "2026-07-26T10:02:00Z"),
+        ];
+        let shells = shells_from_lines(&lines);
+        assert_eq!(shells.len(), 1, "the replay is the same shell");
+        assert!(shells[0].status == ShellStatus::Completed, "the poll still lands on it");
     }
 
     #[test]
