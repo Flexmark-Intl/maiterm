@@ -794,8 +794,23 @@ interface Subagent {
                             //   the desktop never guesses which. A `done` that carries no
                             //   `lastLine` means it ended unobserved, the same convention
                             //   `AgentShell.exitCode` uses: render "ended", not "succeeded".
-  startedAt: number;        // unix ms
-  endedAt?: number;         // absent while running
+                            //
+                            // **`done` IS NOT A ONE-WAY EDGE — do not fire a completion haptic,
+                            //   badge or toast off the running→done transition.** Two ways an
+                            //   entry legitimately goes back to `running`. A finished subagent can
+                            //   be sent back to work (`SendMessage to: <agentId>`), and the CLI
+                            //   emits the next notification only when that re-run stops. And when
+                            //   nothing has been heard for a long time the desktop INFERS an end
+                            //   (below); that inference is re-derived each poll, so it reverses as
+                            //   soon as the agent proves otherwise. Render `done` as a state, not
+                            //   as an event.
+  startedAt: number;        // unix ms — when the CURRENT run started. RESET when a finished agent
+                            //   is resumed, because elapsed exists to answer "how long has this
+                            //   been going", and an hour-old launch time answers a question nobody
+                            //   is asking about a run that began two minutes ago.
+  endedAt?: number;         // absent while running, and absent on an INFERRED end (the desktop
+                            //   knows it stopped but not when — same "never guessed" rule as
+                            //   `AgentShell.exitCode`). Present ⇒ observed.
   lastLine?: string;        // the subagent's most recent words about its OWN progress — its last
                             //   assistant text while running, the opening of its result once done.
                             //   This is the "why" behind "working…": not "an agent is running"

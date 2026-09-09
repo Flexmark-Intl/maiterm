@@ -133,19 +133,24 @@ fn ws_covered(live: bool, last_drop_ms: u64, now_ms: u64) -> bool {
 /// PREVIOUS key to be outside attention, and `permission|` is already inside it. Both keys are
 /// attention, so the key changing is not an edge. That is the wanted behaviour — it is one ask
 /// changing shape, and the human was already rung for it (see the `attn_key` test).
+fn attn_key(state: &str, prompt: Option<&str>) -> String {
+    format!("{state}|{}", prompt.unwrap_or(""))
+}
+
 /// The diff key for a tab's live status line — the running tool and its argument, from a
 /// `build_chats`/`build_chat_summaries` row. Both halves, because two consecutive `Bash` calls are
 /// a change the phone must see and only `detail` distinguishes them.
+///
+/// Deliberately SEPARATE from `attn_key` above, and not folded into it. This key changes many
+/// times inside one turn without the agent ever leaving `active`, whereas `attn_key` is also the
+/// doorbell's edge rule — `is_attn` splits it on `|` positionally, so a third field would both
+/// break that parse and make every tool call look like an attention transition.
 fn tool_key(c: &Value) -> String {
     format!(
         "{}\u{1}{}",
         c.get("tool").and_then(|v| v.as_str()).unwrap_or(""),
         c.get("detail").and_then(|v| v.as_str()).unwrap_or(""),
     )
-}
-
-fn attn_key(state: &str, prompt: Option<&str>) -> String {
-    format!("{state}|{}", prompt.unwrap_or(""))
 }
 
 /// Whether an `attn_key` means "the agent wants a human": an open permission/question prompt, or
@@ -2714,6 +2719,8 @@ async fn stream_new_messages(
     // maiTerm task change keys for the whole roster, ONE pass under one read lock per tick
     // (per-tab it was O(tabs × tasks); see board::tab_change_keys). In-memory, no I/O.
     let keys = board::tab_change_keys(app);
+    // Spent by tabs this connection has not parsed yet — see SUBAGENT_COLD_PARSES_PER_TICK.
+    let mut cold_budget = SUBAGENT_COLD_PARSES_PER_TICK;
     for t in designated_tabs(app) {
         // maiTerm tasks — BEFORE the session gate and the transcript-mtime gate: a task is
         // edited on the board, by an agent over MCP, or from the phone, none of which touches
@@ -2728,7 +2735,17 @@ async fn stream_new_messages(
             // Delegations: outside the mtime gate for the same reason, but only HALF of it is —
             // the roster's transcript parse is gated internally, while its progress lines come
             // from per-subagent sidecars the parent transcript never sees move.
-            stream_subagents_if_changed(socket, &t.tab_id, &sid, subagent_stream).await?;
+            //
+            // Requires a live PTY, as the shell roster does — but for a different reason, so it
+            // is a separate check rather than a shared helper. Shells need one because Stop must
+            // be able to signal a real process; delegations need one because a tab with no live
+            // agent cannot START one, so its roster is frozen and streaming it is pure cost.
+            // (An SSH tab keeps its local ssh PTY, so it is not excluded here — unlike shells,
+            // which genuinely cannot see the remote processes.) An opened thread still gets the
+            // full roster from `GET /chats/{id}`, which is what actually renders it.
+            if pty_for_tab(app, &t.tab_id).is_some() {
+                stream_subagents_if_changed(socket, &t.tab_id, &sid, subagent_stream, &mut cold_budget).await?;
+            }
         }
         // mtime gate: an unchanged transcript means no new turns, so skip the tail re-parse.
         if let Some(mt) = transcript::mtime_for(rt, &sid) {
@@ -2782,6 +2799,17 @@ struct SubagentStream {
     keys: HashMap<String, u64>,
 }
 
+/// How many tabs may pay a COLD transcript parse in one tick.
+///
+/// `SubagentStream` is per-connection, so on the first tick after every WS connect — and the
+/// phone reconnects on each foreground — every tab is uncached and would parse in one go, inline
+/// in the socket's `select!` arm, stalling pings and message frames behind it. Measured on this
+/// machine's real transcripts: 0.10 s for 48 MB, 0.35 s for 220 MB (the commit that introduced
+/// this assumed 26-48 MB; the largest here is 220 MB). Warming a few tabs per 400 ms tick keeps
+/// any one tick short and still has a busy desktop fully warm within seconds — and the roster is
+/// served complete by `GET /chats/{id}` meanwhile, which is what an opened thread actually reads.
+const SUBAGENT_COLD_PARSES_PER_TICK: usize = 3;
+
 /// Emit a `subagents` WS frame when the tab's delegation roster changed. Same full-array replace
 /// + baseline-on-connect discipline as `shells`; `[]` clears the strip.
 ///
@@ -2793,8 +2821,18 @@ async fn stream_subagents_if_changed(
     tab_id: &str,
     session_id: &str,
     st: &mut SubagentStream,
+    cold_budget: &mut usize,
 ) -> Result<(), ()> {
     use std::hash::{Hash, Hasher};
+    // A tab this connection has never parsed. Tested by KEY PRESENCE, not by a zero mtime: a tab
+    // whose transcript can't be resolved caches `(0, [])` legitimately, and treating that as cold
+    // forever would burn the budget every tick on tabs that can never produce a roster.
+    if !st.rosters.contains_key(tab_id) {
+        if *cold_budget == 0 {
+            return Ok(());
+        }
+        *cold_budget -= 1;
+    }
     let subagent_keys = &mut st.keys;
     // Re-parse the transcript only when it moved — see `roster_from_transcript`. The cached
     // roster is then refreshed from the sidecars every tick, which is what keeps a running
@@ -3826,12 +3864,6 @@ pub(crate) fn is_designated(app: &AppState, tab_id: &str) -> bool {
     designated_tabs(app).iter().any(|t| t.tab_id == tab_id)
 }
 
-/// tab_id → (state, runtime, current tool, has this session ever finished a turn), choosing the
-/// most attention-worthy session if a tab somehow has more than one tracked session.
-///
-/// The last field is what `unread` keys on. `state` can't answer it: `"idle"` covers both
-/// "finished, go read it" and "alive at an empty prompt", and the second is the resting state of
-/// every tab after a restart. See `AgentSessionInfo::finished_a_turn`.
 /// The tracked session a tab is showing, when it has one.
 ///
 /// A struct rather than a tuple because `tool` and `detail` are adjacent `Option<String>`s and
@@ -3845,9 +3877,14 @@ struct SessionState {
     /// That tool's compact primary argument (`compact_tool_arg`) — the half that says WHICH file
     /// or command, without which "Bash" is barely more than "working".
     detail: Option<String>,
+    /// What `unread` keys on. `state` can't answer it: `"idle"` covers both "finished, go read it"
+    /// and "alive at an empty prompt", and the second is the resting state of every tab after a
+    /// restart. See `AgentSessionInfo::finished_a_turn`.
     finished: bool,
 }
 
+/// tab_id → its `SessionState`, choosing the most attention-worthy session if a tab somehow has
+/// more than one tracked session.
 fn session_states(app: &AppState) -> HashMap<String, SessionState> {
     let sessions = app.agent_sessions.read();
     let mut map: HashMap<String, SessionState> = HashMap::new();

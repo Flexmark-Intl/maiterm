@@ -403,9 +403,6 @@ fn read_goal(tail: &str, last_turn_ts: u64) -> Option<GoalStatus> {
     })
 }
 
-/// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
-/// For consumers that need the raw entries rather than distilled turns (the background-shell
-/// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
 /// Where a Claude session's transcript is, for consumers that need the PATH rather than its
 /// contents — the delegation roster derives its per-subagent sidecar dir from it (subagents.rs).
 /// Same cached lookup every other consumer resolves through, so a mirrored SSH tab answers with
@@ -414,6 +411,9 @@ pub(crate) fn claude_transcript_path(session_id: &str) -> Option<PathBuf> {
     locate_jsonl(session_id)
 }
 
+/// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
+/// For consumers that need the raw entries rather than distilled turns (the background-shell
+/// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.
 pub(crate) fn claude_lines(session_id: &str, max_bytes: u64) -> Option<Vec<Value>> {
     let path = locate_jsonl(session_id)?;
     let body = read_tail(&path, max_bytes)?;

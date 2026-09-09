@@ -142,6 +142,23 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
         let Some(blocks) = content.and_then(|c| c.as_array()) else { continue };
         for b in blocks {
             match b.get("type").and_then(|t| t.as_str()) {
+                // A finished agent can be sent BACK to work: the launch ack advertises
+                // `SendMessage with to: '<agentId>'`, and the CLI then emits a fresh
+                // task-notification only when the resumed run STOPS. Without this the roster
+                // reports the earlier outcome for the whole re-run — observed on real data as
+                // 9 minutes of "finished 54 minutes ago" while it was demonstrably working, with
+                // a frozen `lastLine` to match, because `attach_sidecar` skips non-running
+                // entries. The same shape `shells.rs` handles by watching for `KillShell`.
+                Some("tool_use")
+                    if b.get("name").and_then(|n| n.as_str()) == Some("SendMessage") =>
+                {
+                    let to = b.get("input").and_then(|i| i.get("to")).and_then(|t| t.as_str());
+                    if let Some(&i) = to.and_then(|t| index.get(t)) {
+                        agents[i].status = SubagentStatus::Running;
+                        agents[i].ended_at = None;
+                        agents[i].started_at = ts;
+                    }
+                }
                 Some("tool_use") if b.get("name").and_then(|n| n.as_str()) == Some("Agent") => {
                     let input = b.get("input");
                     let field = |k: &str| input.and_then(|i| i.get(k)).and_then(|x| x.as_str());
@@ -170,6 +187,16 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                         continue;
                     };
                     if id.is_empty() {
+                        continue;
+                    }
+                    // A resumed session REPLAYS earlier lines, so the same launch and ack can
+                    // appear twice in one transcript — verified on disk: four agentIds, each
+                    // acked twice under a duplicated tool_use id. Pushing again would emit two
+                    // roster rows sharing one `id` into a keyed list on the phone, and would also
+                    // resurrect an entry the later notification had already completed, since the
+                    // replay re-registers it as Running. The replay is the same delegation, so
+                    // the first entry stands.
+                    if index.contains_key(&id) {
                         continue;
                     }
                     index.insert(id.clone(), agents.len());
@@ -323,12 +350,30 @@ const SIDECAR_TAIL_BYTES: u64 = 64 * 1024;
 
 /// How long a running entry's sidecar may go untouched before it is treated as ended.
 ///
-/// Generous on purpose. A subagent is silent for as long as its current tool call takes, and a
-/// real review here sat 9 minutes inside one `Bash` call — a tight threshold would retire agents
-/// that are working. The case this exists for is not a slow agent but a dead parent: the CLI
-/// fires a notification whenever a subagent stops, so the only way to strand a `running` entry is
-/// for the session to be killed mid-delegation.
-const SIDECAR_STALE_MS: u64 = 30 * 60 * 1000;
+/// Very generous on purpose, and the asymmetry is the whole design. The case this exists for is
+/// not a slow agent but a DEAD PARENT: the CLI fires a notification whenever a subagent stops, so
+/// the only way to strand a `running` entry is for the session to be killed mid-delegation. A
+/// stale entry lingering costs one wrong chip on a screen nobody is watching; retiring an agent
+/// that is still working reproduces the exact "it says finished but it isn't" defect this module
+/// exists to end — and it self-corrects noisily, because the settle is an inference re-derived
+/// each tick, so the entry flips back to `running` the moment the parent transcript next moves.
+///
+/// A subagent is silent for as long as its current tool call takes, and a real review here sat
+/// 9 minutes inside a single `Bash`. 30 minutes was the first value and it is not enough headroom
+/// over that: one long build or test run crosses it.
+const SIDECAR_STALE_MS: u64 = 2 * 60 * 60 * 1000;
+
+/// How long since LAUNCH before a running entry with no readable sidecar is treated as ended.
+///
+/// Without a sidecar there is no liveness evidence at all, so elapsed time is the only bound
+/// available — hence a much larger one than the sidecar rule. It is not an edge case: an SSH
+/// tab's sidecar lives on the remote host and is never mirrored, and a session RESUME moves new
+/// sidecars under the new session id while a tab may still resolve to the old one. Both leave
+/// entries that only a task-notification on the parent transcript can retire, and if the mirror
+/// stops (a dropped tunnel) or the notification landed in the resumed transcript, nothing ever
+/// does. Real instance on this machine before the rule: two delegations reading `running` with a
+/// growing elapsed timer for six months.
+const NO_SIDECAR_STALE_MS: u64 = 12 * 60 * 60 * 1000;
 
 /// The roster for a Claude session id: transcript reconstruction plus each entry's progress line.
 /// `None` for a session with no locatable transcript. The REST path, which pays both halves.
@@ -391,7 +436,15 @@ fn attach_sidecar(agent: &mut Subagent, dir: &PathBuf, now: u64) {
         return;
     }
     let path = dir.join(format!("agent-{}.jsonl", agent.id));
-    let Ok(meta) = std::fs::metadata(&path) else { return };
+    let Ok(meta) = std::fs::metadata(&path) else {
+        // No sidecar: no progress line, and no liveness evidence beyond elapsed time. `ended_at`
+        // stays ABSENT rather than being guessed — the `done`-with-no-`lastLine` convention from
+        // `shells.rs`, meaning "ended, outcome unobserved". Render "ended", never "succeeded".
+        if now.saturating_sub(agent.started_at) > NO_SIDECAR_STALE_MS {
+            agent.status = SubagentStatus::Done;
+        }
+        return;
+    };
     let mtime = meta
         .modified()
         .ok()
@@ -598,6 +651,63 @@ mod tests {
         assert!(agents[0].to_json().get("lastLine").is_none(), "no progress read yet");
     }
 
+    fn send_message(to: &str, ts: &str) -> Value {
+        json!({ "type": "assistant", "timestamp": ts, "message": { "content": [
+            { "type": "tool_use", "id": "u9", "name": "SendMessage",
+              "input": { "to": to, "message": "Also check the 404 path." } } ] } })
+    }
+
+    #[test]
+    fn resuming_a_finished_agent_puts_it_back_to_running() {
+        // Observed on real data: a completed agent was resumed twice via SendMessage and the
+        // roster reported "finished 54 minutes ago" for the whole 9-minute re-run, because
+        // nothing ever moved an entry back out of a terminal status.
+        let lines = vec![
+            launch("u1", "Review", "code-reviewer", "2026-09-08T10:00:00Z"),
+            ack("u1", "ggg777", "2026-09-08T10:00:02Z"),
+            notify("ggg777", "completed", "First pass done.", "2026-09-08T10:05:00Z"),
+            send_message("ggg777", "2026-09-08T11:00:00Z"),
+        ];
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].status == SubagentStatus::Running, "a resumed agent is working again");
+        assert!(agents[0].ended_at.is_none(), "it has not ended — the old end time is a lie");
+        // Elapsed must count THIS run, not the original launch an hour ago: the strip's job is
+        // "is something happening, and for how long".
+        let resumed_at = crate::mailink::transcript::rfc3339_to_ms("2026-09-08T11:00:00Z") as u64;
+        assert_eq!(agents[0].started_at, resumed_at);
+    }
+
+    #[test]
+    fn a_send_message_to_something_that_is_not_a_subagent_changes_nothing() {
+        // SendMessage also addresses bridged peers and other sessions by name; only ids that are
+        // actually in the roster may re-open an entry.
+        let lines = vec![
+            launch("u1", "Review", "code-reviewer", "2026-09-08T10:00:00Z"),
+            ack("u1", "hhh888", "2026-09-08T10:00:02Z"),
+            notify("hhh888", "completed", "Done.", "2026-09-08T10:05:00Z"),
+            send_message("maiLink App", "2026-09-08T11:00:00Z"),
+        ];
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].status == SubagentStatus::Done);
+    }
+
+    #[test]
+    fn a_replayed_launch_does_not_duplicate_or_resurrect_the_entry() {
+        // A resumed session replays earlier lines. Real transcript on disk: four agentIds each
+        // acked twice under a duplicated tool_use id. Two rows with one id break a keyed list,
+        // and a replay landing after the completion would report a finished agent as running.
+        let lines = vec![
+            launch("u1", "Review", "code-reviewer", "2026-09-08T10:00:00Z"),
+            ack("u1", "iii999", "2026-09-08T10:00:02Z"),
+            notify("iii999", "completed", "All clear.", "2026-09-08T10:05:00Z"),
+            launch("u1", "Review", "code-reviewer", "2026-09-08T10:00:00Z"),
+            ack("u1", "iii999", "2026-09-08T10:00:02Z"),
+        ];
+        let agents = subagents_from_lines(&lines);
+        assert_eq!(agents.len(), 1, "the replay is the same delegation, not a second one");
+        assert!(agents[0].status == SubagentStatus::Done, "and it is still finished");
+    }
+
     #[test]
     fn a_notification_for_an_unknown_agent_is_ignored() {
         // The tail window can start after a launch; its completion must not mint a phantom row.
@@ -623,4 +733,5 @@ mod tests {
         );
     }
 }
+
 
