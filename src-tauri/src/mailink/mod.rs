@@ -663,6 +663,14 @@ async fn post_task_start(
         if let Some(row) = board::task_row(&s.app, &task_id) {
             out.0["result"]["task"] = row;
         }
+        // `told: "nobody"` has three causes with three different remedies (unassigned, exempt,
+        // no relay available). The desktop knows which and says it in words; lift that to the
+        // envelope's `reason`, where §13.4 already puts explanations, rather than growing the
+        // enum — a fourth value would cost every client a branch and an exhaustiveness check
+        // forever, for something a sentence covers.
+        if let Some(reason) = out.0["result"]["reason"].as_str().map(str::to_string) {
+            out.0["reason"] = json!(reason);
+        }
     }
     Ok(out)
 }

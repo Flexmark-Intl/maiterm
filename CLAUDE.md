@@ -49,6 +49,13 @@ src-tauri/src/                # Backend (Rust)
 ├── commands/                 # Tauri command handlers
 ├── claude_code/              # Claude Code IDE integration (MCP server)
 ├── comms/                    # Comms integration (/maiterm resolve): Mattermost client + thread-reply watcher
+├── mailink/                  # maiLink phone companion: LAN API + WS (docs/mailink-protocol.md)
+│   ├── mod.rs                # axum router, chat/task/Overlord routes, WS ticker, doorbell loop
+│   ├── board.rs              # maiTerm tasks as the phone sees them (reads + phone writes)
+│   ├── overlord.rs           # Overlord engine MIRROR — the frontend publishes, this serves
+│   ├── rpc.rs                # Ask a window's webview to act ({accepted, confirmed})
+│   ├── transcript.rs         # Claude JSONL / Codex rollout tail → turns + meta
+│   └── mirror.rs             # SSH transcript + task-board shadow for remote sessions
 ├── terminal/                 # Terminal backend (alacritty_terminal)
 │   ├── handle.rs             # TerminalHandle, TermDimensions, create_terminal()
 │   ├── event_proxy.rs        # AitermEventProxy (EventListener → Tauri events)
@@ -66,7 +73,8 @@ src-tauri/src/                # Backend (Rust)
 - `src-tauri/src/claude_code/CLAUDE.md` — Claude Code IDE integration, SSH MCP bridge
 - `docs/codex-integration-review.md` — Codex integration findings, project constraints, and verification gaps (2026-09-07; C7 fixed, C1–C6 outstanding). Holds the captured codex-cli 0.153.4 hook trace — read it before touching Codex hook handling
 - `src/lib/triggers/CLAUDE.md` — Trigger engine, defaults, variables, dedup
-- `docs/tasks.md` — maiTerm Tasks: maiTerm owns agent task state for every runtime; `Workspace.tasks`, workstreams, the six lanes (`backlog` is a parking lot, `todo` is where work starts), the MCP tools, the side panel, and the Claude-store importer
+- `docs/tasks.md` — maiTerm Tasks: maiTerm owns agent task state for every runtime; `Workspace.tasks`, workstreams, the six lanes (`backlog` is a parking lot, `todo` is where work starts), the MCP tools, the side panel, the phone, and the Claude-store importer
+- `docs/mailink-protocol.md` — the maiLink wire contract, shared with the phone app's own repo. §4 REST/WS, §5 replies and prompts, §6 the doorbell relay, §13 Overlord + task writes. **Read §13.1 before touching the mirror**: the Overlord engine is a frontend store, so the phone is served a published snapshot rather than a webview round trip. Every wire change bumps `protocolVersion` (§13.5), additive ones included
 - `docs/overlord.md` — Overlord per-window supervisor: engine/agent split, rule schema, checkpoint ritual, MCP tools (replyToOverlord/driveTab/listEscalations/proposeRuleChanges)
 
 ## Commands

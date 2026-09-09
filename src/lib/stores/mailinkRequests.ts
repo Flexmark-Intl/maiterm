@@ -14,6 +14,7 @@
  */
 import * as commands from '$lib/tauri/commands';
 import { overlordStore } from '$lib/stores/overlord.svelte';
+import { tasksStore } from '$lib/stores/tasks.svelte';
 import { error as logError } from '@tauri-apps/plugin-log';
 
 export interface MailinkRequest {
@@ -39,7 +40,23 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
           // request — the route resolved it moments earlier. Reported as a REFUSAL rather
           // than a result, because `told: 'nobody'` is otherwise identical to a genuine
           // start of an unassigned row and a client reading `told` would show success.
-          result = r.started ? r : { error: 'that task no longer exists' };
+          if (!r.started) result = { error: 'that task no longer exists' };
+          else if (r.told !== 'nobody') result = r;
+          else {
+            // `nobody` has three causes with three different remedies, and a client that
+            // renders one sentence for all of them tells someone to retry a thing that will
+            // never work. Said in words rather than as a fourth enum value: the distinction is
+            // known here, `reason` already exists in the envelope, and a client that ignores it
+            // still behaves correctly — where a new enum member costs every client a branch
+            // and an exhaustiveness check forever. (The maiLink agent's argument.)
+            const tab = tasksStore.findAnywhere(a.id)?.task.tab_id ?? null;
+            const reason = !tab
+              ? 'nobody is carrying this task — claim it to a tab and the button means something'
+              : overlordStore.isExemptTab(tab)
+                ? 'that tab is exempt from the supervisor, so nothing will ever relay this — send it a message yourself'
+                : 'the tab could not be reached just then, and there is no supervisor available to relay it';
+            result = { ...r, reason };
+          }
         }
         break;
       }

@@ -1810,11 +1810,16 @@ doing. The board's "Do it" is therefore its own verb:
   unassigned, or there is no supervisor to relay through. Say which; "Active on the board" and
   "the agent has been told" are different facts, and a button implying the second while doing only
   the first is how a task sits Active for an hour with nobody working on it.
-- **`told: "nobody"` has two causes and they need different words:** the task is unassigned (claim
-  it to a tab and the call means something), or the owning tab was unreachable AND there was no
-  supervisor able to relay — which includes an **Overlord-exempt** tab, where a handoff would be
-  consumed by an agent whose own tools refuse to act on it. Both are honest: the task is Active
-  and nobody was told. Neither is a failure to retry.
+- **`told: "nobody"` has THREE causes with three different remedies, and `reason` says which** —
+  in words, deliberately not as a fourth enum value: the distinction is known at the point of the
+  answer, `reason` already exists in this envelope, a client that ignores it still behaves
+  correctly, and a new enum member would cost every client a branch and an exhaustiveness check
+  forever for something a sentence covers. The three: the task is **unassigned** (claim it to a
+  tab and the call means something); the owning tab is **Overlord-exempt**, so nothing will ever
+  relay it and the remedy is to message the tab directly; or the tab was **unreachable just then
+  with no supervisor available**, where trying again later may work. Render `reason` verbatim
+  after your own fixed sentence. All three are honest — the task is Active and nobody was told —
+  and only the third is worth retrying.
 - **`result.task` is the row after the call** — the same `MaitermTask` the other writes return,
   so patch your model from it rather than assuming. It is load-bearing for an unassigned row: the
   WS `tasks` event is keyed by tab, so a backlog task's move to Active reaches you through no

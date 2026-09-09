@@ -37,10 +37,28 @@ Overlord can't seed a task. That is a hard ceiling.
 
 ## 2. Shape
 
+> **The phone is a writer too** (2026-09-08, `docs/mailink-protocol.md` §13.3). maiLink reads the
+> board over `GET /tasks` and per-tab rows on `chat_detail.tasks` + the WS `tasks` event, and
+> writes with `POST /tasks` and `POST /tasks/{id}`. Two things about it are load-bearing here:
+>
+> - **Those writes go into Rust state directly, then EMIT `mailink-tasks-changed`** so the
+>   frontend store replaces its copy. It persists WHOLE lists, so a row it never saw would be
+>   clobbered by its next edit. Routing the write through the webview instead was the first
+>   design and was wrong: the phone's whole use case is a sleeping desktop, and a webview whose
+>   screen is off throttles its timers.
+> - **Setting a lane and telling an agent are different acts, and only a human may do the
+>   second.** `POST /tasks/{id} {status:"active"}` is silent, permanently — that is what an agent
+>   uses to mark its own row as it picks work up. The board's "Do it" is a separate verb,
+>   `POST /tasks/{id}/start`, which also types the notice. If the notice were inferred from the
+>   transition, every agent that marked its own row Active would type "please pick up this task
+>   now" at itself, mid-turn, about the work it is already doing. A distinct endpoint carries the
+>   human's intent in its name and is unreachable by an agent updating its status.
+
 ```
 Workspace.tasks[]          ← source of truth (a workspace IS a project)
   ├─ MCP: listTasks / createTasks / updateTasks   ← agents, every runtime, incl. SSH
   ├─ Side panel (per tab + workspace backlog)     ← humans
+  ├─ maiLink (the phone)                          ← the human, remotely — see below
   ├─ Overlord board                               ← one consumer, not the owner
   └─ Claude task store                            ← importer only, never written back
 ```

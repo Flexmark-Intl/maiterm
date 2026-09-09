@@ -2850,11 +2850,20 @@ function createOverlordStore() {
     /**
      * "Do it" — tell the tab carrying this task to start on it now, and move it to `active`.
      *
-     * This is the HUMAN typing, not the supervisor: they clicked the button, and the text
-     * goes to the tab they were already looking at. So unlike `deleteTask`'s notice it is
-     * NOT gated on `overlordEnabled` — refusing here would mean the button silently does
-     * nothing for everyone with the supervisor switched off, which is most people. Only the
-     * escalation FALLBACK belongs to Overlord, and that is skipped when there is no agent.
+     * This is the HUMAN typing, not the supervisor: they clicked the button — or tapped it on
+     * the phone, `POST /tasks/{id}/start` (docs/mailink-protocol.md §13.3) — and the text goes
+     * to the tab they were already looking at. So unlike `deleteTask`'s notice it is NOT gated
+     * on `overlordEnabled`: refusing here would mean the button silently does nothing for
+     * everyone with the supervisor switched off, which is most people. Only the escalation
+     * FALLBACK belongs to Overlord, and it is skipped when there is no agent to relay through
+     * AND when the tab is EXEMPT — an exempt tab's handoff would be consumed off the board by
+     * `listEscalations` and then refused by `driveTab`, so it is a promise nothing can keep.
+     *
+     * **Only a human may reach this.** An agent moving its own row to `active` goes through
+     * `tasksStore.update` and sends nothing — otherwise every agent picking up work would type
+     * "please pick up this task now" at itself, mid-turn, about the thing it is already doing.
+     * That is why the phone has a separate `/start` verb rather than a flag on its status
+     * patch: a distinct endpoint cannot be reached by an agent updating its own status.
      *
      * The status moves either way. The human has said what they want done, and that is true
      * whether or not the tab happened to be typeable at that instant — leaving the row in

@@ -937,6 +937,30 @@ on.** Widening them should require opening Preferences by hand.
 
 ## 11. Board & GUI
 
+### The board is on the phone too (2026-09-08)
+
+maiLink carries the board and the four things a human does to it — dismiss an escalation, approve
+or dismiss a proposal, resolve a rule-change batch, drive a tab, fire a rule, recover a tab. The
+contract is `docs/mailink-protocol.md` §13; the desktop side is `src-tauri/src/mailink/overlord.rs`
+plus `publishMirror` in the store. Three facts change how you edit this engine:
+
+- **The phone reads a MIRROR, never this store.** The engine is a per-window *frontend* store, so
+  Rust cannot read it — and asking the webview would stall exactly when a phone is in use, since
+  an occluded WKWebView throttles its timers. `publishMirror` pushes a snapshot on change and
+  every tick; Rust gates, stamps and serves the last one. **Anything you add to the engine's state
+  that a human would act on needs a line in that snapshot, or it exists only on the desktop.**
+- **`asOf` is the phone's only liveness signal**, so the mirror publishes every tick whether or not
+  anything changed. Don't reintroduce a skip-if-unchanged: it froze an idle board's timestamp at
+  launch and made a quiet awake desktop indistinguishable from a sleeping one.
+- **Designation gates the mirror.** Every row naming a tab is dropped when that tab is not
+  maiLink-available, and so are `pendingRuleChanges` and `lastScan.silent`. A window with no
+  designated tab is absent entirely rather than served as an empty board. If you add a field
+  carrying tab-scoped content — an id, a name, agent prose about a tab — gate it in `publish`.
+
+Note that **Overlord-exemption and maiLink-designation are independent flags**: an exempt tab can
+be perfectly visible to the phone. `startTask` learned this the hard way — it escalated a handoff
+for an exempt tab, which `listEscalations` then consumed off the board and `driveTab` refused.
+
 ### The Overlord workspace
 
 Overlord is **its own workspace** (decided 2026-08-22) — not a tab type, drawer,
