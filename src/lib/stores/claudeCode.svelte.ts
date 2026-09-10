@@ -11,7 +11,7 @@ import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { blocking, coerceStatus, effectiveStatus, normalizeTitle, resolveBlockers } from '$lib/tasks/model';
+import { appendNote, blocking, coerceStatus, effectiveStatus, normalizeTitle, resolveBlockers, TASK_NOTE_CAP } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1359,11 +1359,13 @@ function createClaudeCodeStore() {
     /** A tab id, the literal "me", or null to release. Absent means leave the assignee
      *  alone — `null` and absent are different answers and must stay so. */
     assign_to?: string | null;
+    /** One line appended to the task's log. Never replaces `detail`. */
+    note?: string;
   }
 
   /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
    *  internal dedup key and would only invite an agent to try to set it. */
-  function taskForAgent(t: Task, all: Task[], selfTabId: string, workstream?: string) {
+  function taskForAgent(t: Task, all: Task[], selfTabId: string, workstream?: string, noteTail = 3) {
     const parked = workspacesStore.parkedTaskIds;
     // Blockers RESOLVED, not raw ids. An agent handed `["a3f8…"]` had to scan the whole
     // list to learn what it was waiting on — and on a `scope: 'tab'` list the prerequisite
@@ -1386,6 +1388,12 @@ function createClaudeCodeStore() {
       assignee: t.tab_id === selfTabId ? 'you' : (t.tab_id ?? 'unassigned'),
       ...(blockers.length ? { blocked_by: blockers } : {}),
       ...(waiters.length ? { blocking: waiters.map((w) => ({ id: w.id, title: w.title })) } : {}),
+      // The tail of the log, not all of it. A workspace-scope list carries every row, and
+      // the newest few notes are what says why a task is where it is — the older ones are
+      // history the agent can ask for by narrowing to `scope: 'tab'`.
+      ...(t.notes?.length
+        ? { notes: t.notes.slice(-noteTail).map((n) => ({ at: n.at, by: n.by, text: n.text })) }
+        : {}),
       origin: t.origin,
       updated_at: t.updated_at,
     };
@@ -1395,7 +1403,12 @@ function createClaudeCodeStore() {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
     const all = tasksStore.forWorkspace(loc.workspace.id);
-    const scoped = args.scope === 'tab' ? all.filter((t) => t.tab_id === loc.tab.id) : all;
+    const tabScope = args.scope === 'tab';
+    const scoped = tabScope ? all.filter((t) => t.tab_id === loc.tab.id) : all;
+    // A workspace list carries every row in the project, so it gets the tail of each log —
+    // enough to say why a task sits where it does. Narrowing to your own tab is the way to
+    // ask for the whole log, and it costs nothing there.
+    const noteTail = tabScope ? TASK_NOTE_CAP : 3;
     const nameOf = (id: string | null | undefined) =>
       tasksStore.workstream(loc.workspace.id, id)?.name;
     // Grouped by workstream, because that is the structure the agent is meant to work in:
@@ -1404,11 +1417,11 @@ function createClaudeCodeStore() {
     for (const t of scoped) {
       const key = t.workstream_id ?? '';
       if (!groups.has(key)) groups.set(key, { workstream: nameOf(t.workstream_id) ?? null, tasks: [] });
-      groups.get(key)!.tasks.push(taskForAgent(t, all, loc.tab.id, nameOf(t.workstream_id)));
+      groups.get(key)!.tasks.push(taskForAgent(t, all, loc.tab.id, nameOf(t.workstream_id), noteTail));
     }
     return {
       workspace: loc.workspace.name,
-      scope: args.scope === 'tab' ? 'tab' : 'workspace',
+      scope: tabScope ? 'tab' : 'workspace',
       workstreams: [...groups.values()],
     };
   }
@@ -1511,6 +1524,10 @@ function createClaudeCodeStore() {
           patch.normalized_title = normalizeTitle(u.title);
         }
         if (u.detail !== undefined) patch.detail = u.detail;
+        // Appended, never replacing `detail`. That separation is the whole point: `detail`
+        // is the spec, and recording why a task is blocked by rewriting the spec destroys
+        // the spec. Trimmed here and again by Rust before disk.
+        if (u.note?.trim()) patch.notes = appendNote(list[idx], u.note, 'agent');
         if (u.workstream !== undefined) {
           patch.workstream_id = u.workstream.trim()
             ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)

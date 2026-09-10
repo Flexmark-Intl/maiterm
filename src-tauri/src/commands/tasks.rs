@@ -6,6 +6,7 @@
 //! `updated_at`) and durability.
 
 use crate::state::persistence::save_state;
+use crate::state::workspace::TASK_NOTE_CAP;
 use crate::state::{AppState, Task, Workstream};
 use std::sync::Arc;
 use tauri::State;
@@ -40,6 +41,14 @@ pub fn set_workspace_tasks(
             // lot, and silently filing live work there would hide it (docs/tasks.md §3).
             log::warn!("task {}: unknown status {:?} coerced to todo", t.id, t.status);
             t.status = "todo".to_string();
+        }
+        // Same last-gate-before-disk contract. The frontend trims on append, but the whole
+        // list is rewritten by several writers (panel, MCP, importer, the phone), and one
+        // that carries a stale over-long vector would persist it — after which every future
+        // write pays for it, since the store persists whole workspace lists.
+        if t.notes.len() > TASK_NOTE_CAP {
+            let drop = t.notes.len() - TASK_NOTE_CAP;
+            t.notes.drain(..drop);
         }
     }
     for w in workstreams.iter_mut() {

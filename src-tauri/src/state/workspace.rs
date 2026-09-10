@@ -520,7 +520,32 @@ pub struct Task {
     /// Mesh topic that is this task's conversation vehicle, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
+    /// Append-only progress log, oldest first (docs/tasks.md §5). Capped — see
+    /// `TASK_NOTE_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<TaskNote>,
 }
+
+/// One line in a task's progress log.
+///
+/// `detail` is the SPEC — acceptance criteria, links, what "done" means — and it is a
+/// whole-field replace, so an agent recording why something is blocked had to read it,
+/// rewrite it, and destroy whatever reasoning was there before. There was no other place
+/// for it: `replyToOverlord` carries `blockers[]` but that is a window-level escalation
+/// which does not attach to the task, so the board showed rows sitting in Blocked with
+/// nothing on them saying why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskNote {
+    pub at: String,
+    pub text: String,
+    /// Who wrote it — same vocabulary as `Task::origin` ("human" | "agent" | "overlord").
+    pub by: String,
+}
+
+/// Newest notes kept per task. A log is for the last few things that happened, and an agent
+/// in a retry loop will append forever; the whole list is persisted on every task write, so
+/// an unbounded field costs every unrelated write too.
+pub const TASK_NOTE_CAP: usize = 20;
 
 impl Workstream {
     /// Same normalization as `Task::normalize_title` — one rule for every human-typed name

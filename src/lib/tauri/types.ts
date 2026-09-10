@@ -201,13 +201,27 @@ export interface Workstream {
   updated_at: string;
 }
 
+/** One line in a task's progress log. Mirrors the Rust `TaskNote`.
+ *
+ *  `detail` says what the task IS; this says what happened to it. They are separate
+ *  because `detail` is a whole-field replace — recording why something is blocked by
+ *  rewriting the spec destroys the spec. */
+export interface TaskNote {
+  at: string;
+  text: string;
+  /** Same vocabulary as `TaskOrigin`, minus 'imported' — a note is always written by
+   *  someone present, never mirrored in. */
+  by: 'human' | 'agent' | 'overlord';
+}
+
 export interface Task {
   id: string;
   title: string;
   /** Case/whitespace-normalized title — the dedup key within a tab. Recomputed by Rust
    *  on persist, so never hand-set it expecting it to survive. */
   normalized_title: string;
-  /** Markdown body: acceptance criteria, links, notes. */
+  /** Markdown body: acceptance criteria, links, what "done" means. The SPEC — the log
+   *  lives in `notes`. */
   detail?: string | null;
   status: TaskStatus;
   /** Assignee tab; null = workspace backlog, unassigned. */
@@ -221,6 +235,9 @@ export interface Task {
   workstream_id?: string | null;
   /** Mesh topic that is this task's conversation vehicle, if any. */
   topic_id?: string | null;
+  /** Append-only progress log, oldest first. Capped at `TASK_NOTE_CAP` on append and
+   *  again by Rust before disk. */
+  notes?: TaskNote[];
 }
 
 export interface Workspace {

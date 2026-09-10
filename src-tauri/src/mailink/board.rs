@@ -123,6 +123,9 @@ fn task_view(t: &Task, effective: &str, tab_title: Option<&str>, workstream: Opt
         "workstreamId": t.workstream_id,
         "workstream": workstream,
         "topicId": t.topic_id,
+        // Progress log, oldest first. `detail` is the spec; this is what happened. Always
+        // an array — `[]` rather than absent — per the v0.4 stated-absence rule.
+        "notes": t.notes.iter().map(|n| json!({ "at": n.at, "text": n.text, "by": n.by })).collect::<Vec<_>>(),
     })
 }
 
@@ -493,6 +496,7 @@ fn create_in(
             updated_at: now.to_string(),
             workstream_id: stream_id.clone(),
             topic_id: None,
+            notes: Vec::new(),
         });
         ids.push(id);
     }
@@ -669,6 +673,7 @@ mod tests {
             updated_at: "2026-09-06T00:00:00Z".into(),
             workstream_id: stream.map(Into::into),
             topic_id: None,
+            notes: Vec::new(),
         }
     }
 

@@ -19,6 +19,7 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked } from '$lib/tasks/model';
+  import { fmtAge } from '$lib/overlord/format';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -559,6 +560,21 @@
               {:else if t.detail}
                 <button class="detail-preview" onclick={() => toggleDetail(t)}>{t.detail}</button>
               {/if}
+
+              <!-- The log, below the spec, because that is the relationship between them:
+                   `detail` says what the task is, these say what happened to it. Newest
+                   last so it reads as a transcript, and only while the row is expanded —
+                   a collapsed list is for scanning titles. -->
+              {#if detailFor === t.id && t.notes?.length}
+                <ol class="notes">
+                  {#each t.notes as n, i (`${n.at}-${i}`)}
+                    <li class="note" class:by-agent={n.by !== 'human'}>
+                      <span class="note-when">{fmtAge(n.at)}</span>
+                      <span class="note-text">{n.text}</span>
+                    </li>
+                  {/each}
+                </ol>
+              {/if}
               {#if startedNote?.id === t.id}
                 <p class="started-note">{startedNote.text}</p>
               {/if}
@@ -878,6 +894,34 @@
     border-color: var(--accent);
     outline: none;
   }
+
+  /* The progress log. Indented under the spec and rendered as a transcript, so it reads as
+     a sequence of things that happened rather than more description. */
+  .notes {
+    border-left: 1px solid var(--bg-light);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0 0 0 7px;
+  }
+  .note {
+    color: var(--fg-dim);
+    display: flex;
+    font-size: 11px;
+    gap: 6px;
+    line-height: 1.4;
+  }
+  /* Every note is stamped with who wrote it, because "the agent says it is blocked on the
+     migration" and "I wrote that down" are different claims about the same row. */
+  .note.by-agent .note-when { color: var(--accent); opacity: 0.75; }
+  .note-when {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+  }
+  .note-text { overflow-wrap: anywhere; }
 
   .detail-preview {
     background: none;

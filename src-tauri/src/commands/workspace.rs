@@ -3147,6 +3147,7 @@ mod reload_carry_tests {
                 updated_at: "2026-08-01T00:00:00Z".to_string(),
                 workstream_id: None,
                 topic_id: None,
+                notes: Vec::new(),
             }],
             wake_on_resume: true,
             tab_type: TabType::Terminal,

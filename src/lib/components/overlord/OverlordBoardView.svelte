@@ -659,18 +659,27 @@
                     </Tooltip>
                   </div>
 
-                  <Tooltip text={t.detail ? 'Click to read the description' : 'No description'} block>
+                  <Tooltip text={t.detail || t.notes?.length ? 'Click to read the description and progress log' : 'No description'} block>
                     <button
                       class="card-title"
                       onclick={() => (openCard = openCard === t.id ? null : t.id)}
                     >
                       {t.title}
-                      {#if t.detail}<span class="has-detail" class:open={openCard === t.id}>▾</span>{/if}
+                      {#if t.detail || t.notes?.length}<span class="has-detail" class:open={openCard === t.id}>▾</span>{/if}
                     </button>
                   </Tooltip>
 
                   {#if openCard === t.id}
                     <p class="card-detail">{t.detail || 'No description was recorded for this task.'}</p>
+                    <!-- The log. This is the answer to "why has this been in Blocked for two
+                         days" — before it existed the board could only show that it was. -->
+                    {#if t.notes?.length}
+                      <ol class="card-notes">
+                        {#each t.notes.slice(-4) as n, i (`${n.at}-${i}`)}
+                          <li><span class="ov-mono note-when">{fmtAge(n.at)}</span> {n.text}</li>
+                        {/each}
+                      </ol>
+                    {/if}
                   {/if}
 
                   {#if (isEverything && streamOf(t)) || depBlocked.has(t.id)}
@@ -1080,6 +1089,22 @@
     transition: transform 0.14s ease;
   }
   .has-detail.open { transform: rotate(180deg); }
+
+  /* Newest four only. The card is a glance surface — the full log is in the tab's panel,
+     which is where someone who wants the history already is. */
+  .card-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    list-style: none;
+    margin: 5px 0 0;
+    padding: 0 0 0 7px;
+    border-left: 1px solid var(--ov-hair);
+    color: var(--ov-ink-dim);
+  }
+  .card-notes .note-when { opacity: 0.65; margin-right: 4px; }
 
   .card-detail {
     border-top: 1px solid var(--ov-hair);

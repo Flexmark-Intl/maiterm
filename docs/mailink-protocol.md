@@ -904,6 +904,11 @@ interface MaitermTask {
   workstreamId: string | null;  // the named job within the workspace this row belongs to
   workstream: string | null;    // its display name, resolved now
   topicId: string | null;   // mesh topic that is this task's conversation vehicle, if any
+  // 0.9. The progress log, oldest first, always an array (`[]`, never absent). `detail` is
+  // the SPEC — what the task is; these are what HAPPENED to it. A row in `blocked` says why
+  // here and nowhere else, so render at least the last one wherever you show a blocked
+  // task. Capped at 20 by the desktop; `by` is stamped there, not claimed by the writer.
+  notes: { at: string; text: string; by: 'human' | 'agent' | 'overlord' }[];
 }
 
 // GET /tasks — the whole board. Only workspaces with at least one DESIGNATED tab appear, and
@@ -2003,7 +2008,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.6` | adds `Chat.windowLabel` / `ChatDetail.windowLabel`, and `rules` + `agentTabIds` on the snapshot |
 | `0.7` | adds `ChatDetail.subagents` and the WS `subagents` event (§4.3 `Subagent`) |
 | `0.8` | adds `tool` + `detail` on `Chat`, `ChatDetail` and every `chat_state` frame |
-| `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted |
+| `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted, and `MaitermTask.notes` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

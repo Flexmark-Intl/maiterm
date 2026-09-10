@@ -344,10 +344,34 @@ createTasks({ workstream?: string,           // a NAME; created if new, reused i
               tasks: [{ title, detail?, status?, blocked_by?, assign_to_me? }] })
   → { created: string[], workstream?, already_tracked?: string[] }
 
-updateTasks({ updates: [{ id, status?, title?, detail?, workstream?,
-                          blocked_by?, assign_to? }] })   // tab id | "me" | null
+updateTasks({ updates: [{ id, status?, title?, detail?, note?, workstream?,
+                          blocked_by?, block_on?, unblock_from?,
+                          assign_to? }] })                 // tab id | "me" | null
   → { updated: string[], missing: string[], refused?: [{ id, reason, detail }] }
 ```
+
+### `detail` is the spec; `notes` is the log (2026-09-10)
+
+`detail` is a whole-field replace, so an agent recording why something was blocked had to
+read it, rewrite it, and destroy whatever reasoning was there. There was no other place for
+it — `replyToOverlord` carries `blockers[]`, but that is a window-level escalation which
+does not attach to the task, so **the board showed rows sitting in Blocked with nothing on
+them saying why**. That is now the first thing a card's expansion shows.
+
+`Task.notes: Vec<TaskNote{at, text, by}>`, appended via `updateTasks`'s `note`. Four
+decisions:
+
+- **A separate field, not a `detail` convention.** The two answer different questions and
+  have different lifetimes: the spec is edited, the log is only ever added to.
+- **Capped at `TASK_NOTE_CAP` (20), newest kept.** An agent in a retry loop appends forever,
+  and the store persists a WHOLE workspace list on every task write — so an unbounded field
+  is paid for by every unrelated write in the project too. Trimmed on append and again by
+  Rust before disk, the same defense-in-depth as `normalized_title` and the status clamp.
+- **`by` is stamped, never taken from the caller.** "The agent says it is blocked on the
+  migration" and "I wrote that down" are different claims about the same row.
+- **`listTasks` returns the TAIL, not the log.** Three notes at `scope: 'workspace'`, which
+  carries every row in the project; the whole log at `scope: 'tab'`, where narrowing is
+  already the ask and it costs nothing.
 
 **`assign_to` (2026-09-10) — an agent could not assign anything, including to itself.**
 The phone wrote `tab_id` through `board::UpdatePatch` and the side panel claimed and

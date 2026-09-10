@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendNote,
   blocking,
   coerceStatus,
+  TASK_NOTE_CAP,
   effectiveStatus,
   FLOW_STATUSES,
   isDropped,
@@ -238,6 +240,36 @@ describe('blockers are legible, not raw ids', () => {
   it('never reports a task as blocking itself', () => {
     const self = task({ id: 'a', blocked_by: ['a'] });
     expect(blocking(self, [self])).toEqual([]);
+  });
+});
+
+describe('the progress log is append-only and bounded', () => {
+  it('appends oldest-first without touching the spec', () => {
+    const t = task({ title: 'migrate schema', detail: 'the spec' });
+    const notes = appendNote(t, 'waiting on the staging dump', 'agent', '2026-09-10T10:00:00Z');
+    expect(notes).toEqual([{ at: '2026-09-10T10:00:00Z', text: 'waiting on the staging dump', by: 'agent' }]);
+    // The whole reason this is not a `detail` rewrite.
+    expect(t.detail).toBe('the spec');
+  });
+
+  it('never mutates the row it appends to', () => {
+    // Every writer here commits WHOLE lists; a vector mutated in place on a $state row
+    // persists from one surface while another still holds the pre-append copy.
+    const t = task({ notes: [{ at: 'a', text: 'one', by: 'human' }] });
+    appendNote(t, 'two', 'agent');
+    expect(t.notes).toHaveLength(1);
+  });
+
+  it('keeps the newest CAP entries, dropping from the front', () => {
+    let t = task();
+    for (let i = 0; i < TASK_NOTE_CAP + 5; i++) t = { ...t, notes: appendNote(t, `note ${i}`, 'agent') };
+    expect(t.notes).toHaveLength(TASK_NOTE_CAP);
+    expect(t.notes![0].text).toBe('note 5');
+    expect(t.notes![TASK_NOTE_CAP - 1].text).toBe(`note ${TASK_NOTE_CAP + 4}`);
+  });
+
+  it('starts every task with an empty log rather than an absent one', () => {
+    expect(makeTask({ title: 'x' }).notes).toEqual([]);
   });
 });
 

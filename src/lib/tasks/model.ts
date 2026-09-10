@@ -1,7 +1,7 @@
 /** Pure task helpers (docs/tasks.md). No runes here — the reactive surface lives in
  *  `stores/tasks.svelte.ts`, so this stays unit-testable and importable from anywhere. */
 
-import type { Task, TaskStatus, TaskOrigin, Workstream } from '$lib/tauri/types';
+import type { Task, TaskNote, TaskStatus, TaskOrigin, Workstream } from '$lib/tauri/types';
 
 /** A task tagged with the workspace it came from. A *view* type only — `workspace_id` is
  *  never persisted, since the workspace already owns the list it is nested in. Used where
@@ -171,6 +171,22 @@ export function blocking(task: Task, all: Task[]): Task[] {
   return all.filter((t) => t.id !== task.id && t.blocked_by?.includes(task.id));
 }
 
+/** Newest notes kept per task. MUST match `TASK_NOTE_CAP` in state/workspace.rs, which
+ *  re-trims before disk — a log is for the last few things that happened, an agent in a
+ *  retry loop appends forever, and the store persists a WHOLE workspace list on every task
+ *  write, so an unbounded field is paid for by every unrelated write too. */
+export const TASK_NOTE_CAP = 20;
+
+/** Append one line to a task's log, oldest first, trimmed to the cap.
+ *
+ *  Returns a new array rather than mutating: every writer here commits whole lists, and a
+ *  mutated-in-place vector on a `$state` row is exactly the shape that persists from one
+ *  surface while another still holds the pre-append copy. */
+export function appendNote(task: Task, text: string, by: TaskNote['by'], now = new Date().toISOString()): TaskNote[] {
+  const next = [...(task.notes ?? []), { at: now, text: text.trim(), by }];
+  return next.length > TASK_NOTE_CAP ? next.slice(next.length - TASK_NOTE_CAP) : next;
+}
+
 /** Map a runtime's own vocabulary onto ours (importer + MCP callers, which speak
  *  Claude's pending/in_progress/completed). Anything unrecognized lands in backlog. */
 export function statusFromAgent(status: string | undefined, blocked?: boolean): TaskStatus {
@@ -256,6 +272,7 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
     created_at: now,
     updated_at: now,
     topic_id: input.topic_id ?? null,
+    notes: [],
   };
 }
 
