@@ -152,7 +152,7 @@ It travels over **your LAN only**, on an encrypted, authenticated channel — TL
 
 <CardGrid>
   <Card title="Live transcripts" icon="comment-alt">
-    Each agent streams per turn as a distilled chat — with its model, reasoning effort, a live context-window gauge, and compaction shown as a divider in the thread. Its tasks and background shells stream alongside it. Fast even on hundred-tab windows and sessions hundreds of megabytes long.
+    Each agent streams per turn as a distilled chat — with its model, reasoning effort, a live context-window gauge, and compaction shown as a divider in the thread. "Working…" says what on: the tool it's running right now, and a row per subagent it has handed work to, with that subagent's own latest line of progress. Its tasks and background shells stream alongside it. Fast even on hundred-tab windows and sessions hundreds of megabytes long.
   </Card>
   <Card title="Answer from anywhere" icon="approve-check-circle">
     AskUserQuestion prompts arrive as interactive cards — single-select, multi-select, and "Other" free-text — plus reply to or interrupt a running agent, and send images to a Claude Code session, local or over SSH.
@@ -230,6 +230,9 @@ Other terminals give you tabs and splits. maiTerm gives you a system for managin
   </Card>
   <Card title="Reach agents from your phone" icon="phone">
     maiLink, the companion app, connects directly to maiTerm over your LAN — encrypted, authenticated, no cloud in the data path. Watch live transcripts, follow background shells (with a Stop button each), answer agent questions, approve permissions, and interrupt runaway turns from anywhere in the house. It writes, too: edit the shared task list, approve an Overlord proposal or fire a rule, and manage the tabs themselves — rename, archive, restore, close, start a fresh conversation, wake a suspended workspace, or ready a whole mesh in one tap. QR pairing with revocable per-device tokens.
+  </Card>
+  <Card title="Deshittify your agent" icon="warning">
+    One Preferences section switches off the parts of a coding agent that serve its vendor rather than you: telemetry, error uploads, feedback nags, and the `Co-Authored-By: Claude` trailer in your commit history — with a git hook that strips the trailer anyway should the setting stop being honoured, while your repo's own hooks keep running. maiTerm edits the agent's own config, so it holds in every terminal, and the rules travel to the hosts you bridge to.
   </Card>
   <Card title="Compose prompts like a human" icon="pen">
     A multi-line composer dock under every terminal: Enter makes newlines, `Cmd+Enter` sends, and drafts survive tab switches and restarts. Paste screenshots or drop files and they become attachment chips — over SSH they're uploaded automatically. No more crafting a five-paragraph prompt on a single shell line.

@@ -45,6 +45,7 @@ export default defineConfig({
             { label: 'Workspaces & Panes', slug: 'features/workspaces' },
             { label: 'Code Editor', slug: 'features/editor' },
             { label: 'Agent Integration', slug: 'features/agents' },
+            { label: 'Deshittification', slug: 'features/deshittification' },
             { label: 'Tasks', slug: 'features/tasks' },
             { label: 'Overlord', slug: 'features/overlord' },
             { label: 'Agent Bridge', slug: 'features/agent-bridge' },

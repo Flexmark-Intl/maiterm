@@ -22,6 +22,13 @@ Group your terminals by project. Each workspace has its own pane layout, tabs, a
 - **Suspend & resume** — suspend inactive workspaces to free resources (PTYs are killed, memory released). Resuming brings back exactly the tabs that had a live terminal when you suspended — maiTerm respawns and auto-resumes just those (with a progress modal for larger resumes), so a 20-tab workspace that had 3 agents running comes back with those 3 live, without waking tabs you never started. Auto-suspend after configurable timeout (15/30/60 min). A suspended workspace can also be woken from your phone with **Resume workspace** in [maiLink](/features/mailink/#managing-tabs-and-workspaces-from-the-phone)
 - **Full-session restore on relaunch** — on launch, maiTerm respawns and auto-resumes every tab that was live at last shutdown, across *every* workspace — one at a time, with a cancellable progress modal — so an agent in another workspace is already picking up where it left off when you switch to it. A window *reload* reattaches to terminals that are still running instead of respawning them
 - **Multi-window** — open additional windows with independent workspace layouts; window positions remembered per monitor configuration
+- **Named windows** — give a window a name of its own instead of letting the titlebar follow whichever workspace is active — see [Naming a window](#naming-a-window)
+
+### Naming a window
+
+The middle of the titlebar shows the active workspace, which changes under you and says nothing about the window as a whole. **Double-click it** to give the window its own name; press `Enter` to keep it or `Escape` to discard. Clear the name and the titlebar goes back to following the active workspace.
+
+The name is the window's everywhere it's referred to: macOS uses it in Mission Control and `Cmd+Tab`, agents see it through `listWindows`, and it's what [maiLink](/features/mailink/) calls the window on your phone — all of which otherwise have only an internal label like `main` to go by. A duplicated window keeps the name of the one it was copied from.
 
 ## Panes
 

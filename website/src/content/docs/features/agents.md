@@ -46,6 +46,8 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 - **Codex MCP bridge over SSH** — expose IDE tools to remote Codex
 - **Skip the one-time Codex hook-trust prompt** *(advanced)* — the only agent toggle off by default; Codex's one-time hook-trust approval is deliberately kept unless you opt out
 
+A separate **Deshittification** section switches off the vendor-serving parts of an agent — telemetry, feedback nags, and the `Co-Authored-By` trailer in your commits. Those rules edit the agent's own config rather than maiTerm's, so they hold in every terminal. See [Deshittification](/features/deshittification/).
+
 ### SSH MCP Bridge
 
 When you're SSH'd into a remote server, maiTerm bridges the MCP connection so an agent running remotely still has access to all IDE tools. A reverse SSH tunnel is set up automatically in the background — no manual port forwarding needed. For each enabled agent maiTerm writes the matching remote config (Claude Code's lock file and `~/.claude.json`, or Codex's `~/.codex/config.toml` and `hooks.json`), gracefully no-op'ing on a host that doesn't have that CLI installed. The bridge status is shown in the tab bar with a bolt icon (green = connected).
