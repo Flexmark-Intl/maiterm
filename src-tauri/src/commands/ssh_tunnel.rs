@@ -599,6 +599,15 @@ pub fn get_ssh_tunnel(
 /// "no other instance of my flavour is running", which nothing enforces — there is no
 /// single-instance guard, and on Linux a second launch is simply a second process. It would
 /// then SIGTERM the live instance's tunnels and take its remote agents offline.
+///
+/// KNOWN GAP, and the paragraph above is the reason it is easy to miss: that argument shows
+/// why the guard is SAFE on Linux, not that Linux is served by it. `ppid == 1` assumes an
+/// orphan is reparented to init, which holds on macOS. Under a systemd user session the user
+/// manager sets itself as a child subreaper and adopts orphaned descendants instead, so an
+/// abandoned tunnel there keeps a ppid that is not 1 and this returns false for every one of
+/// them — the sweep no-ops on Linux and the ports it exists to reclaim stay held. UNVERIFIED:
+/// no Linux host was available to observe the reparent target. Fixing it needs a different
+/// orphan test (e.g. "the parent is not a live maiTerm"), not a different parse.
 fn is_orphaned_tunnel(cmd: &str, ppid: u32, needle: &str) -> bool {
     ppid == 1 && cmd.contains(needle) && cmd.contains(" -R ")
 }

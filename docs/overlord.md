@@ -1574,8 +1574,10 @@ Two scope decisions:
 
 **The same menu at the bottom of every agent tab.** When Overlord is enabled
 and `rulesForTab` is non-empty, `ComposerDock` shows a bolt button — next to
-the collapsed handle, and in the actions row when the composer is open —
-opening the same rule menu. Feedback there is a toast, since the tab is what
+the collapsed handle, and LEFT of the input when the composer is open —
+opening the same rule menu. Left, because the right-hand button is only ever
+Send: reaching past a rule-runner to send a message is how a stray click
+types a whole ritual into a tab. Collapse sits outermost, then the bolt. Feedback there is a toast, since the tab is what
 the human is looking at and the deck's note slot isn't on screen.
 `rulesForTab` is empty for a tab that has never hosted an agent, so a plain
 shell never gets a button that types into bash. The supervisor's own tab is
