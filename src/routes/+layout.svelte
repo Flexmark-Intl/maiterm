@@ -379,7 +379,7 @@
       if (ws && pane && tab) {
         workspacesStore.reloadTab(ws.id, pane.id, tab.id);
       }
-    }).then(unlisten => { unlistenReloadTab = unlisten; });
+    }, { target: appWindow.label }).then(unlisten => { unlistenReloadTab = unlisten; });
 
     // A maiLink phone renamed a tab — the backend already persisted it; sync the store so the
     // live tab strip reflects the new title without a reload.
@@ -455,11 +455,14 @@
       }
     }, UPDATE_CHECK_INTERVAL_MS);
 
-    // Window > Clear Back/Forward History menu event
+    // Window > Clear Back/Forward History menu event. Every menu-driven listener
+    // below names its own label as the target: without one it registers as
+    // EventTarget::Any, which matches every emit_to filter, and the menu click
+    // lands in all windows at once.
     let unlistenClearNavHistory: (() => void) | undefined;
     listen('clear-nav-history', () => {
       navHistoryStore.clear();
-    }).then(unlisten => { unlistenClearNavHistory = unlisten; });
+    }, { target: appWindow.label }).then(unlisten => { unlistenClearNavHistory = unlisten; });
 
     // State backup menu events
     let unlistenExportState: (() => void) | undefined;
@@ -476,7 +479,7 @@
       } catch (e) {
         logError(`Export state failed: ${e}`);
       }
-    }).then(unlisten => { unlistenExportState = unlisten; });
+    }, { target: appWindow.label }).then(unlisten => { unlistenExportState = unlisten; });
 
     let unlistenImportState: (() => void) | undefined;
     listen('import_state', async () => {
@@ -494,7 +497,7 @@
       } catch (e) {
         logError(`Import state failed: ${e}`);
       }
-    }).then(unlisten => { unlistenImportState = unlisten; });
+    }, { target: appWindow.label }).then(unlisten => { unlistenImportState = unlisten; });
 
     let unlistenStateImported: (() => void) | undefined;
     listen('state-imported', () => {

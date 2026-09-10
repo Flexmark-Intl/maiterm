@@ -95,6 +95,41 @@ fn raise_fd_limit() -> Option<(u64, u64)> {
     None
 }
 
+/// Deliver a menu-item event to the ONE window the click was meant for.
+///
+/// A menu click carries no window, so every one of these arms has to pick one,
+/// and there are two silent traps in doing it. First, `WebviewWindow::emit`
+/// reads as window-scoped and isn't: `impl Emitter for WebviewWindow` is empty,
+/// so it takes the trait default, which hands off to the app manager and
+/// reaches every webview — Reload Current Tab was reloading a tab in every
+/// open window. Second, `emit_to` only closes half of that: a JS `listen()`
+/// with no target registers as `EventTarget::Any`, and Any short-circuits every
+/// `emit_to` filter, so each listener in +layout.svelte has to name its own
+/// label as well. Both halves are required; either one alone still broadcasts.
+///
+/// Nothing is key when every window is minimized. A lone window is unambiguous
+/// enough to use anyway; with several, say so rather than act on a guess.
+fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str) {
+    let windows: Vec<_> = app_handle
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| label != "preferences" && label != "help")
+        .collect();
+    let target = windows
+        .iter()
+        .find(|(_, win)| win.is_focused().unwrap_or(false))
+        .or_else(|| windows.first().filter(|_| windows.len() == 1));
+    match target {
+        Some((label, _)) => {
+            let _ = app_handle.emit_to(label.as_str(), event, ());
+        }
+        None => log::warn!(
+            "Menu event '{event}': no focused window among {} candidates",
+            windows.len()
+        ),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Arm crash marker BEFORE any other init. arm_running_marker() captures
@@ -430,12 +465,7 @@ pub fn run() {
                     }
                     "reload_tab" => {
                         // Emit event so the focused window can reload the active tab's PTY
-                        for (_, win) in app_handle.webview_windows() {
-                            if win.is_focused().unwrap_or(false) {
-                                let _ = win.emit("reload-tab", ());
-                                break;
-                            }
-                        }
+                        emit_to_focused_window(app_handle, "reload-tab");
                     }
                     "reload_all" => {
                         for (_, win) in app_handle.webview_windows() {
@@ -454,22 +484,12 @@ pub fn run() {
                     "clear_nav_history" => {
                         // Each window has its own navHistoryStore; emit only to
                         // the focused window so we don't wipe history elsewhere.
-                        for (_, win) in app_handle.webview_windows() {
-                            if win.is_focused().unwrap_or(false) {
-                                let _ = win.emit("clear-nav-history", ());
-                                break;
-                            }
-                        }
+                        emit_to_focused_window(app_handle, "clear-nav-history");
                     }
                     "export_state" | "import_state" => {
-                        // Emit to the focused window so the frontend can show a file dialog
-                        let event_name = event.id().as_ref();
-                        for (_, win) in app_handle.webview_windows() {
-                            if win.is_focused().unwrap_or(false) {
-                                let _ = win.emit(event_name, ());
-                                break;
-                            }
-                        }
+                        // Emit to the focused window so the frontend can show a file
+                        // dialog — one dialog, not one per open window.
+                        emit_to_focused_window(app_handle, event.id().as_ref());
                     }
                     // The accelerator and the menu item are two different events, and
                     // only one of them reaches the webview. macOS offers a Cmd-key to
@@ -486,34 +506,8 @@ pub fn run() {
                     }
                     "duplicate_window" => {
                         // Duplication needs every tab's live scrollback and cwd, which
-                        // only the webview holds — ask ONE window to do it. `emit` on a
-                        // WebviewWindow is not window-scoped (Emitter's default impl
-                        // hands off to the app manager, which reaches every webview), so
-                        // this has to be emit_to, and the listener side has to register
-                        // with its own label as the target: a bare `listen()` in JS is
-                        // EventTarget::Any, which every filter matches. Get either half
-                        // wrong and one click duplicates every open window.
-                        let terminal_windows: Vec<_> = app_handle
-                            .webview_windows()
-                            .into_iter()
-                            .filter(|(label, _)| label != "preferences" && label != "help")
-                            .collect();
-                        let target = terminal_windows
-                            .iter()
-                            .find(|(_, win)| win.is_focused().unwrap_or(false))
-                            // Nothing is key when every window is minimized. With one
-                            // window there's no ambiguity about which one they meant;
-                            // with several there is, so say so rather than guess.
-                            .or_else(|| terminal_windows.first().filter(|_| terminal_windows.len() == 1));
-                        match target {
-                            Some((label, _)) => {
-                                let _ = app_handle.emit_to(label.as_str(), "duplicate-window", ());
-                            }
-                            None => log::warn!(
-                                "Menu 'Duplicate Window': no focused window among {} candidates",
-                                terminal_windows.len()
-                            ),
-                        }
+                        // only the webview holds — so one window has to do it for us.
+                        emit_to_focused_window(app_handle, "duplicate-window");
                     }
                     "help" => {
                         if let Some(win) = app_handle.get_webview_window("main") {
