@@ -166,20 +166,38 @@ const RESOLVE_OWN_HOOK: &str = r#"common="$(git rev-parse --git-common-dir 2>/de
 case "$common" in /*) ;; *) common="$(pwd)/$common" ;; esac
 own="$common/hooks/$(basename "$0")""#;
 
+/// Bumped whenever a generated script changes, so an already-installed directory
+/// can be recognised as stale and rewritten. Without it, every future fix to
+/// these scripts would land only for users who DON'T have the rule switched on.
+const MANAGED_HOOKS_VERSION: u32 = 2;
+
+/// Marks a file in the managed directory as ours to rewrite or remove.
+const MANAGED_MARKER: &str = "maiterm-managed-hook";
+
+fn version_stamp() -> String {
+    format!("# {MANAGED_MARKER} v{MANAGED_HOOKS_VERSION} — do not edit; maiTerm rewrites this file.")
+}
+
 fn commit_msg_script() -> String {
+    let stamp = version_stamp();
     format!(
         r#"#!/bin/sh
 # maiTerm Deshittification — strip agent co-authorship trailers from commit messages.
-# Managed by maiTerm (Preferences → Deshittification). Rewritten when the rule is re-applied.
+{stamp}
 msg="$1"
 [ -f "$msg" ] || exit 0
 
-# Matched narrowly on purpose: "Claude" and "Claudette" are ordinary given names,
-# and this rewrites the message before git records it, so a false positive deletes
-# a human's credit with no copy left anywhere. The address carries the signal —
-# the name pattern only backstops a future trailer that stops using @anthropic.com.
+# Two independent matches, both deliberately narrow. This rewrites the message
+# before git records it, so a false positive deletes a person's credit with no
+# copy left anywhere and no error.
+#  1. The address. Every trailer Claude Code actually emits carries one
+#     @anthropic.com, whatever the display name says.
+#  2. A product name, REQUIRED — not optional. This exists only to backstop a
+#     future trailer that stops using an @anthropic.com address, and "Claude" on
+#     its own is an ordinary given name: git builds the trailer from user.name,
+#     and a first-name-only user.name is the commonest setup there is.
 cleaned="$(grep -v -i -E '^Co-authored-by:.*@anthropic\.com' "$msg" \
-  | grep -v -i -E '^Co-authored-by:[[:space:]]*(Claude|Anthropic)([[:space:]]+(Code|Opus|Sonnet|Haiku|Fable)[^<]*)?[[:space:]]*<' \
+  | grep -v -i -E '^Co-authored-by:[[:space:]]*(Claude|Anthropic)[[:space:]]+(Code|Opus|Sonnet|Haiku|Fable)([[:space:]]|<|$)' \
   | grep -v -i -E '^[[:space:]]*(🤖[[:space:]]*)?Generated with \[?Claude Code')"
 printf '%s\n' "$cleaned" > "$msg"
 
@@ -192,11 +210,12 @@ exit 0
 }
 
 fn passthrough_script() -> String {
+    let stamp = version_stamp();
     format!(
         r#"#!/bin/sh
 # maiTerm passthrough. core.hooksPath points git at maiTerm's managed hooks, which
 # would otherwise silently disable this repository's own hook of the same name.
-# Managed by maiTerm (Preferences → Deshittification).
+{stamp}
 {RESOLVE_OWN_HOOK}
 [ -x "$own" ] && exec "$own" "$@"
 exit 0
@@ -242,6 +261,13 @@ const PASSTHROUGH_HOOKS: &[&str] = &[
     "update",
     "post-receive",
     "post-update",
+    // git-p4, which dispatches through `git hook run --ignore-missing` and so
+    // honours core.hooksPath too. Absence exits 0 there, so a shim is equivalent —
+    // without one, `git p4 submit` reads a skipped p4-pre-submit gate as a pass.
+    "p4-changelist",
+    "p4-prepare-changelist",
+    "p4-post-changelist",
+    "p4-pre-submit",
 ];
 
 fn write_hook_file(path: &PathBuf, body: &str) -> Result<(), String> {
@@ -253,6 +279,53 @@ fn write_hook_file(path: &PathBuf, body: &str) -> Result<(), String> {
             .map_err(|e| format!("Cannot chmod {}: {}", path.display(), e))?;
     }
     Ok(())
+}
+
+/// Write the current hook set into `dir`, clearing out any of OUR files that the
+/// current set no longer includes. Files we didn't write (no marker) are left
+/// alone; a stale shim of ours is removed, which is how a hook that turns out to
+/// be unsafe to shim — `push-to-checkout` was one — gets withdrawn from a machine
+/// that already has it.
+fn install_managed_hooks(dir: &PathBuf) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+
+    let keep: Vec<&str> = std::iter::once("commit-msg")
+        .chain(PASSTHROUGH_HOOKS.iter().copied())
+        .collect();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if keep.contains(&name.as_str()) {
+                continue;
+            }
+            let ours = fs::read_to_string(entry.path())
+                .map(|c| c.contains(MANAGED_MARKER))
+                .unwrap_or(false);
+            if ours {
+                let _ = fs::remove_file(entry.path());
+                log::info!("Deshittify: removed stale managed hook {name}");
+            }
+        }
+    }
+
+    write_hook_file(&dir.join("commit-msg"), &commit_msg_script())?;
+    let passthrough = passthrough_script();
+    for name in PASSTHROUGH_HOOKS {
+        write_hook_file(&dir.join(name), &passthrough)?;
+    }
+    Ok(())
+}
+
+/// True when the installed set matches what this build would write. Compares the
+/// version stamp rather than existence alone: a directory installed by an older
+/// build is present but wrong, and nothing else in the app would ever notice.
+fn managed_hooks_are_current(dir: &PathBuf) -> bool {
+    let stamp = version_stamp();
+    match fs::read_to_string(dir.join("commit-msg")) {
+        Ok(body) if body.contains(&stamp) => {}
+        _ => return false,
+    }
+    PASSTHROUGH_HOOKS.iter().all(|n| dir.join(n).exists())
 }
 
 /// `git config --global --get core.hooksPath`, or None when unset.
@@ -297,6 +370,18 @@ fn commit_hook_status() -> DeshittifyRuleStatus {
     let hook_file = ours.join("commit-msg");
     match global_hooks_path() {
         Some(configured) if hooks_path_is_ours(&configured, &ours) => {
+            // core.hooksPath names this directory, so it is unambiguously ours to
+            // maintain — self-heal it rather than reporting a stale install as
+            // applied. Nothing else re-applies an enabled rule, so without this a
+            // fix to the hook scripts never reaches the users who have them on.
+            if hook_file.exists() && !managed_hooks_are_current(&ours) {
+                match install_managed_hooks(&ours) {
+                    Ok(()) => log::info!(
+                        "Deshittify: refreshed managed hooks to v{MANAGED_HOOKS_VERSION}"
+                    ),
+                    Err(e) => log::warn!("Deshittify: could not refresh managed hooks: {e}"),
+                }
+            }
             let present = hook_file.exists();
             DeshittifyRuleStatus {
                 id: RULE_COMMIT_HOOK.into(),
@@ -337,12 +422,7 @@ fn set_commit_hook(enabled: bool) -> Result<(), String> {
             }
         }
 
-        fs::create_dir_all(&ours).map_err(|e| format!("Cannot create {ours_str}: {e}"))?;
-        write_hook_file(&ours.join("commit-msg"), &commit_msg_script())?;
-        let passthrough = passthrough_script();
-        for name in PASSTHROUGH_HOOKS {
-            write_hook_file(&ours.join(name), &passthrough)?;
-        }
+        install_managed_hooks(&ours)?;
 
         let out = Command::new("git")
             .args(["config", "--global", "core.hooksPath", &ours_str])
@@ -579,8 +659,11 @@ mod tests {
             "Fix it\n\n\
              Co-authored-by: Claude Dubois <claude.dubois@example.fr>\n\
              Co-authored-by: Claudia Rossi <claudia@example.com>\n\
+             Co-authored-by: Claudette Dupont <claudette@example.fr>\n\
+             Co-authored-by: Claude <claude.martin@example.fr>\n\
              Co-authored-by: Claude <noreply@anthropic.com>\n\
              Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>\n\
+             Co-authored-by: Claude Sonnet 4.5 <noreply@anthropic.com>\n\
              Co-authored-by: Claude Code <someone@example.com>\n",
         )
         .unwrap();
@@ -590,9 +673,48 @@ mod tests {
 
         assert!(out.contains("Claude Dubois"), "a human co-author was deleted: {out:?}");
         assert!(out.contains("Claudia Rossi"), "a human co-author was deleted: {out:?}");
+        assert!(out.contains("Claudette Dupont"), "a human co-author was deleted: {out:?}");
+        // git builds the trailer from user.name, and a first-name-only user.name is
+        // the commonest setup there is — so this is the likeliest form a real human
+        // named Claude produces, and the one the first fix still ate.
+        assert!(
+            out.contains("Claude <claude.martin@example.fr>"),
+            "a human whose git name is just \"Claude\" was deleted: {out:?}"
+        );
         assert!(!out.contains("anthropic.com"), "agent trailer survived: {out:?}");
         // Backstop for a future trailer that stops using an @anthropic.com address.
         assert!(!out.contains("Claude Code <"), "agent trailer survived: {out:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory installed by an older build must be recognised as stale and
+    /// rewritten — otherwise every fix to these scripts lands only for the users
+    /// who DON'T have the rule switched on.
+    #[test]
+    fn a_stale_managed_directory_is_detected_and_rewritten() {
+        let dir = scratch("stale");
+        fs::create_dir_all(&dir).unwrap();
+
+        // What the previous version left behind: an unstamped commit-msg and a
+        // push-to-checkout shim that is no longer safe to ship.
+        write_exec(&dir.join("commit-msg"), "#!/bin/sh\n# maiterm-managed-hook v1\nexit 0\n");
+        write_exec(&dir.join("push-to-checkout"), "#!/bin/sh\n# maiterm-managed-hook v1\nexit 0\n");
+        // Something the user put there themselves — not ours, must survive.
+        write_exec(&dir.join("their-own-script"), "#!/bin/sh\necho mine\n");
+
+        assert!(!managed_hooks_are_current(&dir), "a v1 install should read as stale");
+
+        install_managed_hooks(&dir).unwrap();
+
+        assert!(managed_hooks_are_current(&dir));
+        assert!(
+            !dir.join("push-to-checkout").exists(),
+            "the withdrawn shim must be removed, not just left in place"
+        );
+        assert!(dir.join("their-own-script").exists(), "a file we didn't write was deleted");
+        assert!(dir.join("pre-receive").exists(), "the newly added shims were not written");
+        assert!(fs::read_to_string(dir.join("commit-msg")).unwrap().contains("@anthropic"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -608,7 +730,18 @@ mod tests {
                 "{unsafe_hook} cannot be shimmed — its absence is not a no-op"
             );
         }
-        for gate in ["pre-receive", "update", "post-receive", "post-update"] {
+        for gate in [
+            "pre-receive",
+            "update",
+            "post-receive",
+            "post-update",
+            // git-p4 runs these through `git hook run --ignore-missing`, which
+            // honours core.hooksPath — a missing shim reads as "gate passed".
+            "p4-changelist",
+            "p4-prepare-changelist",
+            "p4-post-changelist",
+            "p4-pre-submit",
+        ] {
             assert!(
                 PASSTHROUGH_HOOKS.contains(&gate),
                 "{gate} needs a shim or core.hooksPath silently disables it"

@@ -348,6 +348,14 @@
     return group.rules.filter((r) => !deshittifyBlocked(r.id));
   }
 
+  /** A detail carried by more than one rule has a single cause (an unreadable
+   *  settings.json blocks six at once) — hoist it so it's stated once. */
+  function sharedDetail(group: (typeof deshittifyGroups)[number]): string | null {
+    const details = group.rules.map((r) => deshittifyRules[r.id]?.detail).filter(Boolean);
+    if (details.length < 2) return null;
+    return details.every((d) => d === details[0]) ? (details[0] as string) : null;
+  }
+
   /** All / some / none applied — counted over the actionable rules only. A rule
    *  maiTerm is refusing to apply must not hold the group at 'partial' forever:
    *  the master switch only reverses direction once the group reads 'on'. */
@@ -2433,6 +2441,7 @@
 
         {#each deshittifyGroups as group (group.id)}
           {@const gState = groupState(group)}
+          {@const shared = sharedDetail(group)}
           <div class="trigger-card">
             <div class="trigger-header" class:trigger-header-expanded={expandedDeshittifyGroup === group.id}>
               <button
@@ -2455,7 +2464,7 @@
                 class="toggle small"
                 class:active={gState === 'on'}
                 class:partial={gState === 'partial'}
-                disabled={!deshittifyLoaded || deshittifyBusy !== null}
+                disabled={!deshittifyLoaded || deshittifyBusy !== null || groupActionable(group).length === 0}
                 onclick={() => toggleDeshittifyGroup(group)}
                 aria-pressed={gState === 'on'}
                 aria-label="Toggle every {group.label} deshittification rule"
@@ -2467,12 +2476,17 @@
             {#if expandedDeshittifyGroup === group.id}
               <div class="trigger-body" transition:slide={{ duration: 150 }}>
                 <p class="setting-hint" style="margin: 0;">{group.blurb}</p>
+                {#if shared}
+                  <!-- One cause (an unreadable settings.json) blocks several rules at
+                       once; say it once rather than repeating the paragraph per rule. -->
+                  <p class="setting-hint deshittify-detail" style="margin: 0;">{shared}</p>
+                {/if}
                 {#each group.rules as rule (rule.id)}
                   <div class="setting" style="align-items: flex-start; padding: 0;">
                     <div>
                       <span class="deshittify-rule-label">{rule.label}</span>
                       <p class="setting-hint">{rule.hint}</p>
-                      {#if deshittifyRules[rule.id]?.detail}
+                      {#if deshittifyRules[rule.id]?.detail && deshittifyRules[rule.id].detail !== shared}
                         <p class="setting-hint deshittify-detail">{deshittifyRules[rule.id].detail}</p>
                       {/if}
                     </div>
