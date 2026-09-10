@@ -181,7 +181,7 @@ export interface MeshTopic {
  *  It is deliberately exempt from staleness signals — a parked item is *supposed* to sit
  *  untouched, and nagging about it would make the backlog a source of interruptions
  *  instead of the thing that protects focus. `todo` is the not-started-yet lane. */
-export type TaskStatus = 'backlog' | 'todo' | 'active' | 'blocked' | 'review' | 'done';
+export type TaskStatus = 'backlog' | 'todo' | 'active' | 'blocked' | 'review' | 'done' | 'dropped';
 
 export type TaskOrigin = 'human' | 'agent' | 'overlord' | 'imported';
 

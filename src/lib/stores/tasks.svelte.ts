@@ -13,7 +13,7 @@
 import { error as logError } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
 import type { Task, TaskStatus, Workstream } from '$lib/tauri/types';
-import { findDuplicate, findWorkstream, makeTask, makeWorkstream, normalizeTitle, type TaskInput } from '$lib/tasks/model';
+import { findDuplicate, findWorkstream, isRetired, makeTask, makeWorkstream, normalizeTitle, type TaskInput } from '$lib/tasks/model';
 
 function createTasksStore() {
   let byWorkspace = $state<Map<string, Task[]>>(new Map());
@@ -314,10 +314,10 @@ function createTasksStore() {
         // `archive_tab`, not moved — mirror that here too, or the next whole-list write to
         // that workspace re-attributes them to a tab it no longer has, where the panel shows
         // them as neither `mine` nor `unclaimed` and `findDuplicate` will not reclaim them.
-        if (!list.some((t) => t.tab_id === tabId && t.status !== 'done')) continue;
+        if (!list.some((t) => t.tab_id === tabId && !isRetired(t.status))) continue;
         byWorkspace.set(
           wsId,
-          list.map((t) => (t.tab_id === tabId && t.status !== 'done' ? { ...t, tab_id: null } : t)),
+          list.map((t) => (t.tab_id === tabId && !isRetired(t.status) ? { ...t, tab_id: null } : t)),
         );
       }
       byWorkspace = new Map(byWorkspace);
@@ -336,10 +336,10 @@ function createTasksStore() {
     releaseTab(tabId: string) {
       // Snapshot the entries: commit() reassigns the Map underneath the iteration.
       for (const [workspaceId, list] of [...byWorkspace]) {
-        if (!list.some((t) => t.tab_id === tabId && t.status !== 'done')) continue;
+        if (!list.some((t) => t.tab_id === tabId && !isRetired(t.status))) continue;
         commit(
           workspaceId,
-          list.map((t) => (t.tab_id === tabId && t.status !== 'done' ? { ...t, tab_id: null } : t)),
+          list.map((t) => (t.tab_id === tabId && !isRetired(t.status) ? { ...t, tab_id: null } : t)),
         );
       }
     },

@@ -226,12 +226,13 @@ the first was given the parked set they disagreed: the card rendered in Blocked 
 steppers live, and four clicks walked the *stored* status to `done`, where `effectiveStatus`
 short-circuits — a card jumping to Done for work that never started.
 
-### The six lanes, and what `backlog` actually means
+### The lanes, and what `backlog` and `dropped` actually mean
 
 ```
-BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE
-   ^         ^
- parked    new work starts here
+BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE  │  DROPPED
+   ^         ^                                      │     ^
+ parked    new work starts here                     │  retracted
+           └────────── the flow ──────────┘         │  (off it)
 ```
 
 `backlog` is a **parking lot**, not a to-do list: next month, future ideas, low-priority.
@@ -254,6 +255,48 @@ That distinction has teeth, and getting it wrong is what the first version did:
 - **Backlog is LEFTMOST** even though nothing starts there, because parking something is a
   move *backwards* out of the flow. That is also what makes dragging a card left to shelve
   it read correctly.
+
+#### `dropped` — retracted, not finished (2026-09-10)
+
+Six lanes gave an agent that had filed work it misread exactly two exits, and both lie.
+`done` says it finished — and, worse, **satisfies every dependent**, so a task legitimately
+waiting on the retracted one silently became ready work. `backlog` says it was deliberately
+deferred, and parked rows are exempt from every staleness check, which makes it a quiet
+place to hide a mistake. Deletion is human-only and stays that way (§9): an agent tidying
+away work it didn't understand is unrecoverable. So the missing verb was never *delete*, it
+was **retract**.
+
+Four properties, each of which is a place the six-lane code was wrong:
+
+- **It does not satisfy a dependent.** `hasUnmetDeps` counts only `done` as met, so this
+  falls out — and it is the property that stops `dropped` becoming a back door: an agent
+  cannot unblock its own task by dropping the one it was waiting on. The dependent stays
+  blocked and `resolveBlockers` names the row and its lane, so the human sees a real
+  question rather than work quietly starting.
+- **It is retired, so it is swept.** `isRetired` = `done || dropped`, and the retention
+  sweep (48h, machine-authored rows only) reads it. A retracted row has less reason to
+  linger than a finished one.
+- **It is not parked.** A parked idea is still coming; this is not. The panel and board
+  count them separately — folding `dropped` into `done` would let "12 done" include four
+  tasks nobody did, which is the one number on the board that must not lie.
+- **It is reversible.** A lane, not a delete, so the card stays reachable and a human can
+  drag it back out (or press ↑ in the panel). That is what keeps "an agent may retract"
+  from meaning "an agent may disappear work".
+
+**It is a lane but NOT a step in the flow.** `FLOW_STATUSES` is the six; `TASK_STATUSES` is
+all seven. The steppers and the panel's status chip walk the flow only — putting `dropped`
+in the cycle would make one click past DONE mean "this should never have existed", the worst
+adjacency in the vocabulary. Reaching it is a decision: an agent's `updateTasks`, or a human
+drag. Its own steppers are off, and they say why.
+
+**The importer had to learn it too.** `syncMirrorTasks` drove any row it owned toward
+whatever the runtime's private store still said, so the 5s tick dragged a dropped row back
+to `todo` — forever. It now skips retired rows outright. Same defect existed for `done`,
+where it re-opened rows somebody had just closed; the origin rule answers "who may drive
+this row", and that is a different question from "is this row still running".
+
+`createTasks` deliberately does not advertise `dropped` in its schema — you retract
+something that exists. The clamp accepts it, so nothing breaks if an agent sends it.
 
 Old rows migrate `backlog` → `todo` behind `tasks_backlog_vocabulary_migrated`. The flag is
 required: re-running that remap would drag genuinely parked tasks back onto the board.

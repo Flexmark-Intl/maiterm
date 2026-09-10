@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  blocking,
   coerceStatus,
   effectiveStatus,
+  FLOW_STATUSES,
+  isDropped,
   isInFlight,
   isParked,
+  isRetired,
+  resolveBlockers,
   normalizeWorkstreamName,
   findDuplicate,
   findImportedDuplicate,
@@ -134,8 +139,105 @@ describe('the backlog is a parking lot, not a to-do list', () => {
     expect(isInFlight(task({ status: 'todo' }))).toBe(true);
   });
 
-  it('orders the lanes with backlog leftmost, so parking is a move backwards', () => {
-    expect(TASK_STATUSES).toEqual(['backlog', 'todo', 'active', 'blocked', 'review', 'done']);
+  it('orders the flow with backlog leftmost, so parking is a move backwards', () => {
+    expect(FLOW_STATUSES).toEqual(['backlog', 'todo', 'active', 'blocked', 'review', 'done']);
+    // Every lane is the flow plus the retraction lane, in that order — the board renders
+    // TASK_STATUSES, the steppers walk FLOW_STATUSES, and Dropped sits past Done.
+    expect(TASK_STATUSES).toEqual([...FLOW_STATUSES, 'dropped']);
+  });
+});
+
+describe('dropped is retracted work, not a seventh flavour of done', () => {
+  it('does NOT satisfy a dependent — retracting a prerequisite is not doing it', () => {
+    const blocker = task({ id: 'b', title: 'migrate schema', status: 'dropped' });
+    const dependent = task({ id: 'd', title: 'backfill rows', blocked_by: ['b'] });
+    const all = [blocker, dependent];
+    expect(hasUnmetDeps(dependent, all)).toBe(true);
+    expect(effectiveStatus(dependent, all)).toBe('blocked');
+  });
+
+  it('is the difference between retracting a blocker and closing it out', () => {
+    const dependent = task({ id: 'd', title: 'backfill rows', blocked_by: ['b'] });
+    const done = [task({ id: 'b', title: 'migrate schema', status: 'done' }), dependent];
+    // The same edge, the same dependent — only the blocker's lane differs.
+    expect(hasUnmetDeps(dependent, done)).toBe(false);
+  });
+
+  it('counts as retired but never as in flight or parked', () => {
+    expect(isRetired('dropped')).toBe(true);
+    expect(isRetired('done')).toBe(true);
+    expect(isParked('dropped')).toBe(false);
+    expect(isInFlight(task({ status: 'dropped' }))).toBe(false);
+  });
+
+  it('short-circuits effectiveStatus, so a retracted row never renders as blocked', () => {
+    // Without the short-circuit a dropped task holding an unfinished prerequisite lands in
+    // BLOCKED — the one lane that means the opposite of retired.
+    const t = task({ id: 'd', status: 'dropped', blocked_by: ['missing'] });
+    const all = [t, task({ id: 'missing', status: 'active' })];
+    expect(effectiveStatus(all[0], all)).toBe('dropped');
+  });
+
+  it('is a lane but not a step in the flow', () => {
+    expect(TASK_STATUSES).toContain('dropped');
+    expect(FLOW_STATUSES).not.toContain('dropped');
+    // One click past DONE must not mean "this should never have existed".
+    expect(FLOW_STATUSES[FLOW_STATUSES.length - 1]).toBe('done');
+  });
+
+  it('maps the spellings runtimes actually use for a retraction', () => {
+    for (const s of ['dropped', 'cancelled', 'canceled', 'abandoned']) {
+      expect(statusFromAgent(s)).toBe('dropped');
+      expect(coerceStatus(s)).toBe('dropped');
+    }
+  });
+
+  it('will not be resurrected by a tab restating its title', () => {
+    // Same guard `done` has, and it matters more here: reclaiming a dropped row puts back
+    // exactly the work somebody decided against.
+    const list = [task({ id: 'x', title: 'add auth guard', tab_id: null, status: 'dropped' })];
+    expect(findDuplicate(list, 'add auth guard', 'tab-1')).toBeUndefined();
+    expect(findImportedDuplicate(list, 'add auth guard', 'tab-1')).toBeUndefined();
+  });
+
+  it('is not swept up by the parked exemptions', () => {
+    expect(isDropped('backlog')).toBe(false);
+    expect(isDropped('dropped')).toBe(true);
+  });
+});
+
+describe('blockers are legible, not raw ids', () => {
+  it('names each blocker and says whether it is actually holding things up', () => {
+    const all = [
+      task({ id: 'a', title: 'migrate schema', status: 'done' }),
+      task({ id: 'b', title: 'ship the API', status: 'active' }),
+      task({ id: 'c', title: 'backfill', blocked_by: ['a', 'b'] }),
+    ];
+    expect(resolveBlockers(all[2], all)).toEqual([
+      { id: 'a', title: 'migrate schema', status: 'done', state: 'met' },
+      { id: 'b', title: 'ship the API', status: 'active', state: 'waiting' },
+    ]);
+  });
+
+  it('tells a deleted prerequisite from one parked with an archived tab', () => {
+    const t = task({ id: 'c', blocked_by: ['gone', 'parked'] });
+    const resolved = resolveBlockers(t, [t], new Set(['parked']));
+    expect(resolved.map((r) => r.state)).toEqual(['gone', 'parked']);
+    // Same line hasUnmetDeps draws: gone does not block, parked does.
+    expect(hasUnmetDeps(t, [t], new Set(['parked']))).toBe(true);
+    expect(hasUnmetDeps(task({ id: 'c', blocked_by: ['gone'] }), [t])).toBe(false);
+  });
+
+  it('reports the reverse edge — who was waiting on this one', () => {
+    const done = task({ id: 'a', title: 'migrate schema' });
+    const all = [done, task({ id: 'b', blocked_by: ['a'] }), task({ id: 'c', blocked_by: ['a', 'b'] }), task({ id: 'd' })];
+    expect(blocking(done, all).map((t) => t.id)).toEqual(['b', 'c']);
+    expect(blocking(all[3], all)).toEqual([]);
+  });
+
+  it('never reports a task as blocking itself', () => {
+    const self = task({ id: 'a', blocked_by: ['a'] });
+    expect(blocking(self, [self])).toEqual([]);
   });
 });
 

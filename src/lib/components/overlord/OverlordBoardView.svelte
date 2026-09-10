@@ -2,7 +2,7 @@
   import { workspacesStore, navigateToTab, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { effectiveStatus, hasUnmetDeps, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
+  import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
   import type { TaskStatus } from '$lib/tauri/types';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -80,7 +80,7 @@
   type Lanes = Record<TaskStatus, TaskRow[]>;
 
   const emptyLanes = (): Lanes => ({
-    backlog: [], todo: [], active: [], blocked: [], review: [], done: [],
+    backlog: [], todo: [], active: [], blocked: [], review: [], done: [], dropped: [],
   });
 
   interface StreamEntry {
@@ -95,6 +95,7 @@
     open: number;
     parked: number;
     done: number;
+    dropped: number;
     blocked: number;
     active: number;
     stale: number;
@@ -131,7 +132,7 @@
             streamId,
             name: streamId ? (tasksStore.workstream(ws.id, streamId)?.name ?? 'Unnamed') : null,
             lanes: emptyLanes(),
-            open: 0, parked: 0, done: 0, blocked: 0, active: 0, stale: 0, total: 0,
+            open: 0, parked: 0, done: 0, dropped: 0, blocked: 0, active: 0, stale: 0, total: 0,
           };
           buckets.set(bucketKey, e);
         }
@@ -140,6 +141,10 @@
         e.total++;
         if (t.status === 'done') {
           e.done++;
+        } else if (isDropped(t.status)) {
+          // Its own tally, not folded into `done`: "12 done" that silently includes four
+          // tasks nobody did is the one number on this board that must not lie.
+          e.dropped++;
         } else if (isParked(t.status)) {
           e.parked++;
         } else {
@@ -168,13 +173,14 @@
       key: EVERYTHING,
       wsId: '', wsName: '', suspended: false, streamId: null, name: null,
       lanes: emptyLanes(),
-      open: 0, parked: 0, done: 0, blocked: 0, active: 0, stale: 0, total: 0,
+      open: 0, parked: 0, done: 0, dropped: 0, blocked: 0, active: 0, stale: 0, total: 0,
     };
     for (const s of index) {
       for (const lane of LANES) e.lanes[lane].push(...s.lanes[lane]);
       e.open += s.open;
       e.parked += s.parked;
       e.done += s.done;
+      e.dropped += s.dropped;
       e.blocked += s.blocked;
       e.active += s.active;
       e.stale += s.stale;
@@ -296,8 +302,12 @@
    *  and say why instead; a drag still works, because that names a destination explicitly. */
   function moveTask(t: TaskRow, dir: 1 | -1) {
     if (depBlocked.has(t.id)) return;
-    const at = LANES.indexOf(t.status);
-    const next = LANES[Math.min(LANES.length - 1, Math.max(0, at + dir))];
+    // FLOW_STATUSES, not LANES: `dropped` is a lane you can drag to but not a step in the
+    // sequence. Stepping through it would make one click past DONE mean "this should never
+    // have existed", and it has no index here at all, so a dropped card's steppers are off.
+    const at = FLOW_STATUSES.indexOf(t.status);
+    if (at < 0) return;
+    const next = FLOW_STATUSES[Math.min(FLOW_STATUSES.length - 1, Math.max(0, at + dir))];
     if (next !== t.status) tasksStore.setStatus(t.workspace_id, t.id, next);
   }
 
@@ -373,6 +383,11 @@
   const PINNED_WHY =
     'Held here by an unfinished prerequisite — finish that task, or drag this one to choose where it lands.';
 
+  /** Dropped cards have no position in the flow, so ‹ › have nowhere to step them. Drag is
+   *  the way back, which is the same rule the pinned cards follow: a control that names its
+   *  destination explicitly, rather than one that guesses where retracted work resumes. */
+  const DROPPED_WHY = 'Retracted — drag it back into a lane to put it in play again.';
+
   function laneTone(l: TaskStatus): string {
     switch (l) {
       case 'backlog': return 'var(--ov-ink-dim)';
@@ -381,6 +396,9 @@
       case 'blocked': return 'var(--ov-critical)';
       case 'review': return 'var(--ov-cool)';
       case 'done': return 'var(--ov-ok)';
+      // Retracted work is the one lane that should never draw the eye — dimmer than
+      // backlog, because a parked idea is still going to happen and this is not.
+      case 'dropped': return 'var(--ov-ink-dim)';
     }
   }
 
@@ -597,7 +615,7 @@
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="lane ov-in"
-            class:parked={lane === 'backlog'}
+            class:parked={lane === 'backlog' || lane === 'dropped'}
             class:drop={dragLane === lane}
             style:--i={li}
             style:--lane={laneTone(lane)}
@@ -673,9 +691,9 @@
                   <!-- Steppers pin to the edges they move toward; the two acts that leave the
                        board sit centred between them. -->
                   <div class="card-foot">
-                    <Tooltip text={depBlocked.has(t.id) ? PINNED_WHY : 'Back'}>
+                    <Tooltip text={depBlocked.has(t.id) ? PINNED_WHY : isDropped(t.status) ? DROPPED_WHY : 'Back'}>
                       <button class="tick"
-                              disabled={depBlocked.has(t.id) || t.status === 'backlog'}
+                              disabled={depBlocked.has(t.id) || isDropped(t.status) || t.status === 'backlog'}
                               onclick={() => moveTask(t, -1)}>‹</button>
                     </Tooltip>
                     <span class="card-acts">
@@ -699,9 +717,9 @@
                         </button>
                       </Tooltip>
                     </span>
-                    <Tooltip text={depBlocked.has(t.id) ? PINNED_WHY : 'Forward'}>
+                    <Tooltip text={depBlocked.has(t.id) ? PINNED_WHY : isDropped(t.status) ? DROPPED_WHY : 'Forward'}>
                       <button class="tick"
-                              disabled={depBlocked.has(t.id) || t.status === 'done'}
+                              disabled={depBlocked.has(t.id) || isDropped(t.status) || t.status === 'done'}
                               onclick={() => moveTask(t, 1)}>›</button>
                     </Tooltip>
                   </div>

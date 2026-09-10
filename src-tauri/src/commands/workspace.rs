@@ -2232,7 +2232,7 @@ pub fn archive_tab(
                 continue;
             }
             for t in ws.tasks.iter_mut() {
-                if t.tab_id.as_deref() == Some(tab_id.as_str()) && t.status != "done" {
+                if t.tab_id.as_deref() == Some(tab_id.as_str()) && !t.is_retired() {
                     t.tab_id = None;
                 }
             }

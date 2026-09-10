@@ -33,7 +33,7 @@
 > docs/tasks.md had already demoted that board to an importer INPUT: maiTerm's `Workspace.tasks`
 > is the source of truth and the importer folds the Claude board into it, so for a Claude tab both
 > pipes carried the same work — serving both would have shown it twice and left the phone to pick.
-> Rows are richer (six lanes, workstreams, assignee, origin, dependencies) and now come from any
+> Rows are richer (seven lanes, workstreams, assignee, origin, dependencies) and now come from any
 > runtime and from tabs with no live session. New `GET /tasks` serves the whole board. Two rules
 > came out of the peer's first implementation and are stated once under `MaitermTask`: render from
 > `effectiveStatus`, count from `status`; derive nothing from `blockedBy`. `effectiveStatus` exists
@@ -871,7 +871,10 @@ interface AgentGoal {
 
 // One maiTerm task (docs/tasks.md; Rust `Task` in state/workspace.rs, camelCased). Every field
 // is ALWAYS present; absence is a stated `null`, never a missing key (the v0.4 rule).
-type TaskLane = 'backlog' | 'todo' | 'active' | 'blocked' | 'review' | 'done';
+// `dropped` was added in 0.9 and is not a seventh flavour of done: it is RETRACTED work, and it
+// does not satisfy anything that was blocked on it. Count it separately or not at all — never
+// inside a completion figure.
+type TaskLane = 'backlog' | 'todo' | 'active' | 'blocked' | 'review' | 'done' | 'dropped';
 interface MaitermTask {
   id: string;               // uuid. NOT a number and NOT an ordering — there is no short row
                             // number anywhere in maiTerm; agents refer to tasks by title. Don't
@@ -1950,7 +1953,7 @@ doing. The board's "Do it" is therefore its own verb:
   designated tab in the same workspace; `workstreamId` must exist there.
 - Errors: `404` a row the phone cannot see (unknown, on an excluded tab, or a backlog row in a
   workspace with nothing designated — one answer for all three, on purpose); `400` a lane outside
-  the six, an empty title, or a target outside the workspace or the gate.
+  the seven, an empty title, or a target outside the workspace or the gate.
 - The desktop's tasks store is told by event (`mailink-tasks-changed`) to replace its copy —
   without that, its next whole-list persist would clobber the phone's row. Implementation detail,
   but it is why this path is safe.
@@ -1982,7 +1985,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.8" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.9" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -2000,6 +2003,17 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.6` | adds `Chat.windowLabel` / `ChatDetail.windowLabel`, and `rules` + `agentTabIds` on the snapshot |
 | `0.7` | adds `ChatDetail.subagents` and the WS `subagents` event (§4.3 `Subagent`) |
 | `0.8` | adds `tool` + `detail` on `Chat`, `ChatDetail` and every `chat_state` frame |
+| `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted |
+
+**0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
+filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,
+so a board that switches exhaustively over six lanes gets an unhandled value rather than a missing
+field. Three properties matter for rendering it: it is NOT a finish (folding it into Done makes a
+completion count include work nobody did), it does NOT satisfy a dependent (a task blocked on a
+dropped one stays blocked and says so), and it is reversible (`POST /tasks/{id} {status:"todo"}`
+puts it back in play, which is the phone's undo for an agent that retracted the wrong row).
+A pre-0.9 desktop never sends it and rejects it with 400, so a client may offer the write
+unconditionally and let the status code decide.
 
 **Treat any field newer than the version you require as optional anyway.** The table is a floor,
 not a promise that nothing else is missing — and on a client where a render throw is unrecoverable,

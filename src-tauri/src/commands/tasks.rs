@@ -28,13 +28,13 @@ pub fn set_workspace_tasks(
     let label = window.label().to_string();
     for t in tasks.iter_mut() {
         t.normalized_title = Task::normalize_title(&t.title);
-        // Last gate before disk. A status outside the five lanes is invisible on the board
+        // Last gate before disk. A status outside the lanes is invisible on the board
         // (lanes match by equality) and permanently unfinished to the dependency check, so
         // one bad write wedges every task blocked on it — persisted. The frontend coerces
         // too; this is the same defense-in-depth as recomputing normalized_title.
         if !matches!(
             t.status.as_str(),
-            "backlog" | "todo" | "active" | "blocked" | "review" | "done"
+            "backlog" | "todo" | "active" | "blocked" | "review" | "done" | "dropped"
         ) {
             // Unknown lands in `todo`, not `backlog`: backlog is the deliberate parking
             // lot, and silently filing live work there would hide it (docs/tasks.md §3).

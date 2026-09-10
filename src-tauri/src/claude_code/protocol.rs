@@ -673,7 +673,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "updateTasks",
-            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job. There is no delete: mark a task 'done' when it is finished, or 'backlog' to park it for later; only a human removes one.",
+            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job. There is no delete, and the three ways a task leaves the board are NOT interchangeable: 'done' means you finished it, 'backlog' means you are deliberately deferring it, and 'dropped' means it should not have been on the list at all — you misread the work, it was superseded, or it was decided against. Use 'dropped' for those rather than closing them as done: a dropped task does not satisfy anything waiting on it, so nothing you were blocking gets falsely released. Only a human deletes a row outright.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -684,7 +684,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                             "type": "object",
                             "properties": {
                                 "id": { "type": "string", "description": "Task id from listTasks/createTasks" },
-                                "status": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done"] },
+                                "status": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done", "dropped"], "description": "'dropped' retracts a task that should not have been on the list — it is not a finish, and nothing blocked on it comes free" },
                                 "title": { "type": "string" },
                                 "detail": { "type": "string" },
                                 "workstream": { "type": "string", "description": "Move this task into the named job (created if new)" },

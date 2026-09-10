@@ -502,7 +502,7 @@ pub struct Task {
     /// Longer body: acceptance criteria, links, notes. Markdown; human- and agent-editable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// "backlog" | "active" | "blocked" | "review" | "done".
+    /// "backlog" | "todo" | "active" | "blocked" | "review" | "done" | "dropped".
     pub status: String,
     /// Assignee tab; None = workspace backlog, unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -543,6 +543,18 @@ impl Task {
     /// NEL but not U+FEFF, and JS `\s` is the mirror image — so the class is spelled out
     /// on both sides as the union. A pasted BOM is not hypothetical here: titles come from
     /// terminals and transcripts.
+    /// Off the board for good, whichever way it left: finished (`done`) or retracted
+    /// (`dropped`). Mirrors `isRetired` in src/lib/tasks/model.ts.
+    ///
+    /// Every "is this row still live" test has to ask THIS, not `status != "done"`. The
+    /// release-and-reclaim machinery is the reason: a closing tab releases its live rows to
+    /// the project backlog and a restating tab reclaims them by title, so a `dropped` row
+    /// treated as live gets released, then reclaimed, then worked — putting back exactly
+    /// the task somebody decided against.
+    pub fn is_retired(&self) -> bool {
+        self.status == "done" || self.status == "dropped"
+    }
+
     pub fn normalize_title(title: &str) -> String {
         fn is_title_ws(c: char) -> bool {
             c.is_whitespace() || c == '\u{feff}'

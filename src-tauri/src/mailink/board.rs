@@ -28,7 +28,13 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-const LANES: [&str; 6] = ["backlog", "todo", "active", "blocked", "review", "done"];
+/// The lanes a task may be in. `dropped` is retracted work — filed by mistake, superseded,
+/// or decided against (docs/tasks.md §3). It is a lane and not a delete so the row stays
+/// reachable and a human can drag it back out; it does NOT satisfy a dependent, so nothing
+/// unblocks by being dropped.
+const LANES: [&str; 7] = [
+    "backlog", "todo", "active", "blocked", "review", "done", "dropped",
+];
 
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ` from the wall clock — the same shape `new Date().toISOString()`
 /// stamps on rows the frontend writes, so `createdAt`/`updatedAt` sort together whoever wrote
@@ -80,8 +86,11 @@ fn parked_ids(win: &WindowData) -> HashSet<&str> {
 /// the workspace's whole list AND the parked set, and it receives neither with a tab's rows.
 /// Serving only the stored status made a task the desktop shows as blocked arrive as `todo`.
 fn effective_status<'a>(t: &'a Task, ws: &Workspace, parked: &HashSet<&str>) -> &'a str {
-    if t.status == "done" {
-        return "done";
+    // Retired rows short-circuit, `dropped` as well as `done`: a lane is derived for work
+    // that is still going to happen. Without this, a retracted task holding an unfinished
+    // prerequisite rendered as BLOCKED — the one lane meaning the opposite of retired.
+    if t.status == "done" || t.status == "dropped" {
+        return &t.status;
     }
     let unmet = t.blocked_by.iter().any(|id| match ws.tasks.iter().find(|d| &d.id == id) {
         Some(dep) => dep.status != "done",
@@ -344,11 +353,12 @@ fn find_duplicate<'a>(
     if drifted.is_some() {
         return drifted;
     }
-    // 3. Reclaim work released to the backlog when its tab closed — UNFINISHED only: a
-    //    closed-out task is not resurrected because a new tab restated it.
+    // 3. Reclaim work released to the backlog when its tab closed — LIVE rows only: a
+    //    closed-out task, finished or retracted, is not resurrected because a new tab
+    //    restated it.
     tab_id?;
     list.iter()
-        .find(|t| t.tab_id.is_none() && t.status != "done" && in_stream(t) && same_title(t))
+        .find(|t| t.tab_id.is_none() && !t.is_retired() && in_stream(t) && same_title(t))
 }
 
 /// Build the phone views for a workspace's rows after a write. Titles/parked recomputed from

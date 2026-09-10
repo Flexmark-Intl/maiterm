@@ -18,7 +18,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { effectiveStatus, hasUnmetDeps, isInFlight, isParked, TASK_STATUSES } from '$lib/tasks/model';
+  import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked } from '$lib/tasks/model';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
@@ -45,6 +45,7 @@
   let startedNote = $state<{ id: string; text: string } | null>(null);
   let showDone = $state(false);
   let showParked = $state(false);
+  let showDropped = $state(false);
   let showUnclaimed = $state(false);
 
   /** The whole workspace list — needed ONLY as the dependency universe for
@@ -52,13 +53,20 @@
   const all = $derived(tasksStore.forWorkspace(workspaceId));
   const mine = $derived(all.filter((t) => t.tab_id === tabId));
 
-  /** Finished and parked work both collapse behind a count — the panel is for what's in
-   *  flight. Parked is separate from done because they mean different things: one is
-   *  finished, the other is deliberately not started. */
+  /** Finished, parked and dropped work each collapse behind their own count — the panel is
+   *  for what's in flight. They stay three separate toggles because they mean three
+   *  different things: finished, deliberately not started, and decided against. Folding
+   *  dropped into done in particular would let "4 done" include work nobody did. */
   const visible = (list: Task[]) =>
-    list.filter((t) => (showDone || t.status !== 'done') && (showParked || !isParked(t.status)));
+    list.filter(
+      (t) =>
+        (showDone || t.status !== 'done') &&
+        (showParked || !isParked(t.status)) &&
+        (showDropped || !isDropped(t.status)),
+    );
   const doneCount = $derived(mine.filter((t) => t.status === 'done').length);
   const parkedCount = $derived(mine.filter((t) => isParked(t.status)).length);
+  const droppedCount = $derived(mine.filter((t) => isDropped(t.status)).length);
 
   /** Work nobody owns: released when a tab closed (`releaseTab`), or created unassigned.
    *
@@ -118,6 +126,7 @@
     blocked: 'Blocked',
     review: 'Review',
     done: 'Done',
+    dropped: 'Dropped',
   };
 
   /** Where the HEADER's add button files a task, with no picker to answer.
@@ -153,8 +162,12 @@
    *  vocabulary while the label stayed "BLOCKED", then jump to "DONE" on the fourth. */
   function cycleStatus(t: Task, back: boolean) {
     const shown = effectiveStatus(t, all, workspacesStore.parkedTaskIds);
-    const i = TASK_STATUSES.indexOf(shown);
-    const next = TASK_STATUSES[(i + (back ? -1 : 1) + TASK_STATUSES.length) % TASK_STATUSES.length];
+    // FLOW_STATUSES, not every lane: `dropped` is reachable by decision, never by clicking
+    // one past DONE. A dropped row has no index in the flow, so the chip lands it back at
+    // the start of the cycle — which is the restore the ↑ control names in words.
+    const i = FLOW_STATUSES.indexOf(shown);
+    if (i < 0) return;
+    const next = FLOW_STATUSES[(i + (back ? -1 : 1) + FLOW_STATUSES.length) % FLOW_STATUSES.length];
     tasksStore.setStatus(workspaceId, t.id, next);
   }
 
@@ -257,6 +270,7 @@
     // unchanged panel, and a count that is itself hidden.
     if (isParked(v.status)) showParked = true;
     if (v.status === 'done') showDone = true;
+    if (isDropped(v.status)) showDropped = true;
     addingTo = null;
   }
 
@@ -359,6 +373,11 @@
         {doneCount} done
       </button>
     {/if}
+    {#if droppedCount > 0}
+      <button class="done-toggle" class:on={showDropped} onclick={() => (showDropped = !showDropped)}>
+        {droppedCount} dropped
+      </button>
+    {/if}
     <!-- The always-available way in. The per-heading buttons only exist once there are two
          groups to tell apart, so on a fresh tab, or one doing a single job, they render
          nothing at all — this is the case they cannot cover. -->
@@ -414,11 +433,14 @@
           {#each group.list as t (t.id)}
             {@const eff = effectiveStatus(t, all, workspacesStore.parkedTaskIds)}
             {@const depBlocked = hasUnmetDeps(t, all, workspacesStore.parkedTaskIds)}
-            <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)}>
+            <li class="task" class:done={t.status === 'done'} class:parked={isParked(t.status)} class:dropped={isDropped(t.status)}>
               <div class="task-main">
-                <Tooltip text="{STATUS_LABEL[eff]} — click to advance, shift-click to go back">
+                <Tooltip text={isDropped(t.status)
+                  ? 'Dropped — retracted, not finished. Nothing waiting on it counts it as done. Use ↑ to put it back in play.'
+                  : `${STATUS_LABEL[eff]} — click to advance, shift-click to go back`}>
                   <button
                     class="status s-{eff}"
+                    disabled={isDropped(t.status)}
                     onclick={(e) => cycleStatus(t, e.shiftKey)}
                   >
                     {STATUS_LABEL[eff]}
@@ -458,7 +480,14 @@
                        would not move — "Unpark — back to To-do" would leave it reading
                        BLOCKED, and Do it would tell the agent to start work whose
                        prerequisite has not landed. The "waiting on" line below says which. -->
-                  {#if !group.unclaimed && t.status !== 'done'}
+                  {#if !group.unclaimed && isDropped(t.status)}
+                    <!-- The one control a retracted row needs: put it back in play. Park and
+                         Do it are meaningless here, and the status chip is disabled, so
+                         without this the human could only rescue it from the board. -->
+                    <Tooltip text="Restore — back to To-do. Anything waiting on this starts counting it again.">
+                      <button class="mini" onclick={() => tasksStore.update(workspaceId, t.id, { status: 'todo' })}>↑</button>
+                    </Tooltip>
+                  {:else if !group.unclaimed && t.status !== 'done'}
                     {#if depBlocked}
                       <Tooltip text="Waiting on an unfinished prerequisite. Parking and starting are held until it lands — the lane would change underneath a row that stayed put.">
                         <button class="mini" disabled aria-disabled="true">▶</button>
@@ -722,6 +751,9 @@
   }
   .task.done { opacity: 0.5; }
   .task.parked { opacity: 0.62; }
+  /* Dimmer than either: parked work is still coming, finished work happened, this is
+     neither. The strike-through below is what tells it apart from `done` at a glance. */
+  .task.dropped { opacity: 0.42; }
 
   .task-main {
     align-items: center;
@@ -750,6 +782,7 @@
   .s-blocked { color: var(--red, #f7768e); }
   .s-review { color: var(--yellow, #e0af68); }
   .s-done { color: var(--green, #9ece6a); }
+  .s-dropped { color: var(--fg-dim); opacity: 0.75; text-decoration: line-through; }
 
   .task-title {
     background: none;
@@ -765,6 +798,9 @@
     text-align: left;
   }
   .task.done .task-title { text-decoration: line-through; }
+  /* Same strike as done, but dotted — retracted reads as "crossed out", finished as
+     "ruled off". Two states that both mean "not in flight" still have to be told apart. */
+  .task.dropped .task-title { text-decoration: line-through dotted; }
 
   .edit-input {
     background: var(--bg-dark);

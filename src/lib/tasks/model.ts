@@ -10,10 +10,25 @@ export interface TaskRow extends Task {
   workspace_id: string;
 }
 
-/** Board order. `backlog` sits LEFTMOST even though new tasks start in `todo`, because
- *  parking something is a move backwards out of the active flow — which is also what makes
- *  dragging a card left to shelve it read correctly. */
-export const TASK_STATUSES: TaskStatus[] = ['backlog', 'todo', 'active', 'blocked', 'review', 'done'];
+/** The lanes work FLOWS through, in board order. `backlog` sits LEFTMOST even though new
+ *  tasks start in `todo`, because parking something is a move backwards out of the active
+ *  flow — which is also what makes dragging a card left to shelve it read correctly.
+ *
+ *  This is the sequence the panel's ‹ › steppers walk. `dropped` is deliberately NOT in it:
+ *  see `TASK_STATUSES`. */
+export const FLOW_STATUSES: TaskStatus[] = ['backlog', 'todo', 'active', 'blocked', 'review', 'done'];
+
+/** Every lane, flow plus `dropped`. Board columns and validation read this one.
+ *
+ *  `dropped` is a lane rather than a stepper stop on purpose. It has to be REACHABLE — an
+ *  agent that filed work it had misread previously had only `done` (a lie that also
+ *  satisfies dependents legitimately waiting on it) or `backlog` (a lie that hides the row
+ *  from every staleness check). And it has to be REVERSIBLE — a card the human can drag
+ *  back out, which is what keeps "an agent may retract" from becoming "an agent may
+ *  disappear work". But it is not a step in the flow: putting it in the cycle would make
+ *  one click past DONE mean "this never should have existed", which is the single worst
+ *  adjacency in the vocabulary. */
+export const TASK_STATUSES: TaskStatus[] = [...FLOW_STATUSES, 'dropped'];
 
 /** The parking lot (docs/tasks.md §3): next month, future ideas, low-priority.
  *
@@ -25,9 +40,26 @@ export function isParked(status: TaskStatus): boolean {
   return status === 'backlog';
 }
 
-/** Work that is neither finished nor deliberately shelved — what "in flight" means. */
+/** Retracted (docs/tasks.md §3): filed by mistake, superseded, or decided against.
+ *
+ *  NOT a synonym for done, and the difference is load-bearing in two places. It does not
+ *  satisfy a dependent — dropping "migrate the schema" does not migrate the schema, so
+ *  anything waiting on it stays blocked and says so, rather than quietly becoming ready
+ *  work. And it is not parked — a dropped row is not coming back on its own, so it ages
+ *  out of the board like a finished one instead of living in the parking lot forever. */
+export function isDropped(status: TaskStatus): boolean {
+  return status === 'dropped';
+}
+
+/** Off the board for good, whichever way it left: finished or retracted. What the
+ *  retention sweep ages out, and where `effectiveStatus` stops deriving a lane. */
+export function isRetired(status: TaskStatus): boolean {
+  return status === 'done' || isDropped(status);
+}
+
+/** Work that is neither retired nor deliberately shelved — what "in flight" means. */
 export function isInFlight(task: Task): boolean {
-  return task.status !== 'done' && !isParked(task.status);
+  return !isRetired(task.status) && !isParked(task.status);
 }
 
 /** Case/whitespace-normalized title — the dedup key within a tab.
@@ -54,11 +86,6 @@ export function normalizeTitle(title: string): string {
     .toLowerCase();
 }
 
-/** Statuses that mean "this is not work in flight". */
-export function isFinished(status: TaskStatus): boolean {
-  return status === 'done';
-}
-
 /** Does this task have an unmet dependency?
  *
  *  A `blocked_by` id that no longer resolves is treated as met — a deleted prerequisite must
@@ -68,7 +95,15 @@ export function isFinished(status: TaskStatus): boolean {
  *  because their tab was archived. Those are NOT deleted, so treating them as met silently
  *  unblocked every dependent — a task waiting on "migrate schema" jumped into To-do, and
  *  `listTasks` reported it to agents as ready work, the moment the tab holding the migration
- *  was archived. Unresolvable-and-unknown means gone; unresolvable-but-parked means waiting. */
+ *  was archived. Unresolvable-and-unknown means gone; unresolvable-but-parked means waiting.
+ *
+ *  A `dropped` prerequisite is UNMET — it falls out of "only done is met", and that is the
+ *  behaviour we want. Retracting a prerequisite is not doing it, so the dependent stays
+ *  blocked and the human is shown a real question ("this waits on something nobody intends
+ *  to do") rather than the work quietly becoming ready. It is also what stops `dropped`
+ *  from being a back door: an agent cannot unblock its own task by dropping the one it is
+ *  waiting on. `resolveBlockers` names the offending row and its lane so the reason is on
+ *  screen instead of inferred from an id. */
 export function hasUnmetDeps(task: Task, all: Task[], parked?: ReadonlySet<string>): boolean {
   if (!task.blocked_by?.length) return false;
   return task.blocked_by.some((id) => {
@@ -80,16 +115,73 @@ export function hasUnmetDeps(task: Task, all: Task[], parked?: ReadonlySet<strin
 
 /** Status as the UI should render it: an unfinished task with unmet dependencies shows as
  *  blocked regardless of its stored status, so a dependency chain is visible without
- *  anyone having to restate it. The stored value is left alone — this is a view concern. */
+ *  anyone having to restate it. The stored value is left alone — this is a view concern.
+ *
+ *  Retired rows short-circuit, `dropped` as well as `done`: a lane is derived for work that
+ *  is still going to happen, and a retracted task with a half-finished prerequisite is not.
+ *  Without that, dropping a task moved its card into BLOCKED — the one lane that means the
+ *  opposite of retired — and it would sit there being counted as waiting on something. */
 export function effectiveStatus(task: Task, all: Task[], parked?: ReadonlySet<string>): TaskStatus {
-  if (task.status !== 'done' && hasUnmetDeps(task, all, parked)) return 'blocked';
+  if (!isRetired(task.status) && hasUnmetDeps(task, all, parked)) return 'blocked';
   return task.status;
+}
+
+/** A `blocked_by` id resolved for display: what it is, where it is, and whether it is
+ *  actually holding this task up.
+ *
+ *  Agents were handed raw ids, which meant scanning the whole list to learn what they were
+ *  waiting on — and on a `scope: 'tab'` list the prerequisite frequently wasn't in the
+ *  payload at all. `parked` distinguishes the two ways an id fails to resolve: gone
+ *  (deleted, no longer blocking) from off-list (parked with an archived tab, still
+ *  blocking). */
+export interface ResolvedBlocker {
+  id: string;
+  title: string | null;
+  status: TaskStatus | null;
+  /** Why this one is or isn't holding the dependent up. */
+  state: 'met' | 'waiting' | 'parked' | 'gone';
+}
+
+export function resolveBlockers(
+  task: Task,
+  all: Task[],
+  parked?: ReadonlySet<string>,
+): ResolvedBlocker[] {
+  return (task.blocked_by ?? []).map((id) => {
+    const dep = all.find((t) => t.id === id);
+    if (dep) {
+      return {
+        id,
+        title: dep.title,
+        status: dep.status,
+        state: dep.status === 'done' ? ('met' as const) : ('waiting' as const),
+      };
+    }
+    // Unresolvable: parked with an archived tab (still blocks) or genuinely deleted (does
+    // not). `hasUnmetDeps` draws the same line — keep the two in step.
+    return parked?.has(id)
+      ? { id, title: null, status: null, state: 'parked' as const }
+      : { id, title: null, status: null, state: 'gone' as const };
+  });
+}
+
+/** The reverse edge: tasks that are waiting on this one. Nothing answered it, and it is
+ *  what an agent finishing a task needs before it goes idle — "who did I just unblock". */
+export function blocking(task: Task, all: Task[]): Task[] {
+  return all.filter((t) => t.id !== task.id && t.blocked_by?.includes(task.id));
 }
 
 /** Map a runtime's own vocabulary onto ours (importer + MCP callers, which speak
  *  Claude's pending/in_progress/completed). Anything unrecognized lands in backlog. */
 export function statusFromAgent(status: string | undefined, blocked?: boolean): TaskStatus {
   if (status === 'completed' || status === 'done') return 'done';
+  // Retraction has more spellings than any other lane because no runtime agrees on one.
+  // Mapping them is the difference between a retracted row landing in `dropped` and it
+  // falling through to `todo`, where it reappears as live work the agent already decided
+  // against — and would then be asked about by the staleness rules.
+  if (status === 'dropped' || status === 'cancelled' || status === 'canceled' || status === 'abandoned') {
+    return 'dropped';
+  }
   if (blocked) return 'blocked';
   if (status === 'in_progress' || status === 'active') return 'active';
   if (status === 'review') return 'review';
@@ -105,9 +197,9 @@ export function statusFromAgent(status: string | undefined, blocked?: boolean): 
  *  The MCP layer is a hand-rolled JSON-RPC server: `TaskStatus` is a compile-time union
  *  and the declared enum is never enforced at runtime, so an agent carrying its own
  *  vocabulary across (which the migration priming explicitly asks it to do) would
- *  otherwise persist "in_progress"/"completed" verbatim. A status outside the five lanes
- *  is invisible on the board — `tasksFor` matches lane by equality — and permanently
- *  unfinished to `hasUnmetDeps`, which wedges everything blocked on it. */
+ *  otherwise persist "in_progress"/"completed" verbatim. A status outside the lanes is
+ *  invisible on the board — lanes match by equality — and permanently unfinished to
+ *  `hasUnmetDeps`, which wedges everything blocked on it. */
 export function coerceStatus(status: string | undefined): TaskStatus {
   if (!status) return 'todo';
   return (TASK_STATUSES as string[]).includes(status)
@@ -212,10 +304,12 @@ export function findDuplicate(
   if (drifted) return drifted;
 
   // 3. Reclaim work released to the backlog when its previous tab closed (docs/tasks.md
-  //    §3). Unfinished only: a closed-out task shouldn't be resurrected and re-owned
-  //    because a new tab restated it.
+  //    §3). Live rows only: a task that was closed out — finished OR retracted — shouldn't
+  //    be resurrected and re-owned because a new tab restated its title. Reclaiming a
+  //    dropped row would be the worse of the two, since it puts back exactly the work
+  //    somebody decided against.
   if (tab === null) return undefined;
-  return list.find((t) => !t.tab_id && t.status !== 'done' && inStream(t) && sameTitle(t));
+  return list.find((t) => !t.tab_id && !isRetired(t.status) && inStream(t) && sameTitle(t));
 }
 
 /** Dedup for the Claude-store importer, which must ignore grouping entirely.
@@ -232,6 +326,6 @@ export function findImportedDuplicate(
   const sameTitle = (t: Task) => (t.normalized_title || normalizeTitle(t.title)) === key;
   return (
     list.find((t) => t.tab_id === tabId && sameTitle(t)) ??
-    list.find((t) => !t.tab_id && t.status !== 'done' && sameTitle(t))
+    list.find((t) => !t.tab_id && !isRetired(t.status) && sameTitle(t))
   );
 }

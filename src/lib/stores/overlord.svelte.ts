@@ -24,7 +24,7 @@ import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { findImportedDuplicate, isInFlight, isParked, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
+import { findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
 /**
@@ -1903,6 +1903,15 @@ function createOverlordStore() {
           // re-reading it every 5s would drag a task the agent just marked done — or the
           // human just dragged to review — straight back to whatever the file still says.
           if (next[idx].origin !== 'imported') continue;
+          // A RETIRED row is closed out and stays closed out, even though the importer owns
+          // it. The origin rule asks "who may drive this row"; this asks "is this row still
+          // running at all", and the runtime's private store cannot answer that — it is a
+          // stale file the agent was told to stop maintaining, so it still lists the item
+          // as pending. Without this the 5s tick drags a `dropped` row straight back to
+          // `todo`, which defeats the entire point of retracting one: the agent drops work
+          // it decided against and the board re-files it as live, forever. Same defect for
+          // `done`, where it re-opened a row somebody had just closed.
+          if (isRetired(next[idx].status)) continue;
           // Reclaim a row this session left in the backlog when its previous tab closed.
           // Without taking ownership back, every completion path stays out of reach —
           // closeOutMirrorRows, the present-set sweep and tasksForTab are all tab-scoped —
@@ -1940,21 +1949,24 @@ function createOverlordStore() {
     });
   }
 
-  /** Age out finished rows so the board doesn't accumulate history. Human-authored tasks
-   *  are exempt: someone typed those, and silently deleting them two days later is a
-   *  surprise. Everything machine-authored is swept — imported mirrors, agent-created
-   *  tasks, and Overlord's own placeholders alike. */
-  function sweepDoneTasks(now: number): boolean {
+  /** Age out RETIRED rows so the board doesn't accumulate history — finished (`done`) and
+   *  retracted (`dropped`) alike. Both are off the board for good, and a retracted row has
+   *  even less reason to linger than a finished one: it records work that never happened.
+   *
+   *  Human-authored tasks are exempt: someone typed those, and silently deleting them two
+   *  days later is a surprise. Everything machine-authored is swept — imported mirrors,
+   *  agent-created tasks, and Overlord's own placeholders alike. */
+  function sweepRetiredTasks(now: number): boolean {
     let changed = false;
     for (const ws of workspacesStore.workspaces) {
       const swept = tasksStore.mutate(ws.id, (list) => {
         const next = list.filter(
           (t) =>
-            t.status !== 'done' ||
+            !isRetired(t.status) ||
             t.origin === 'human' ||
             now - Date.parse(t.updated_at) < TASK_DONE_RETENTION_MS,
         );
-        // (Parked rows are never 'done', so the sweep cannot reach them — a shelved idea
+        // (Parked rows are never retired, so the sweep cannot reach them — a shelved idea
         // must survive indefinitely or the backlog stops being a place to put things.)
         return next.length === list.length ? null : next;
       });
@@ -2067,8 +2079,9 @@ function createOverlordStore() {
     if (!ws) return 'skipped';
     const existing = overlordRowFor(tabId);
     if (existing) {
-      // A finished row stays finished; a scan must not resurrect it.
-      if (existing.status === 'done') return 'skipped';
+      // A closed-out row stays closed out — finished or retracted alike; a scan is an
+      // observation and must not resurrect either.
+      if (isRetired(existing.status)) return 'skipped';
       // The placeholder's title is a COPY of the tab name taken at first scan, so renaming
       // the tab left the board showing a name that exists nowhere else in the app — every
       // other surface (ledger, triage chips, task tab-chips) resolves live through
@@ -2107,7 +2120,7 @@ function createOverlordStore() {
     if (!ws) return false;
     const existing = overlordRowFor(tabId);
     if (existing) {
-      if (existing.status === 'done' || existing.title === title) return false;
+      if (isRetired(existing.status) || existing.title === title) return false;
       return tasksStore.update(ws.id, existing.id, { title });
     }
     tasksStore.add(ws.id, {
@@ -2126,7 +2139,7 @@ function createOverlordStore() {
     if (!hasMirrorRows(tabId)) return false;
     const ws = workspaceForTab(tabId);
     const existing = overlordRowFor(tabId);
-    if (!ws || !existing || existing.status === 'done') return false;
+    if (!ws || !existing || isRetired(existing.status)) return false;
     return tasksStore.remove(ws.id, existing.id);
   }
 
@@ -2634,7 +2647,7 @@ function createOverlordStore() {
       sweepClosedTabs();
       sweepResolvedPermissionHandoffs();
       sweepStaleProposals(now);
-      sweepDoneTasks(now);
+      sweepRetiredTasks(now);
     } finally {
       ticking = false;
     }
@@ -3027,7 +3040,7 @@ function createOverlordStore() {
           const tracked = tasksForTab(tab.id).filter((t) => t.origin !== 'overlord' && !isParked(t.status));
           if (tracked.length) {
             retirePlaceholderIfMirrored(tab.id);
-            if (tracked.every((t) => t.status === 'done')) finished++;
+            if (tracked.every((t) => isRetired(t.status))) finished++;
             else mirrored++;
             changed = true;
             continue;
