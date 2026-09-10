@@ -229,6 +229,13 @@
       await invoke('exit_app');
     }).then(unlisten => { unlistenQuit = unlisten; });
 
+    // File ▸ Duplicate Window. Clicking the menu item produces no keydown, so the
+    // Cmd+Shift+N handler below never sees it — Rust emits this to us instead.
+    let unlistenDuplicateWindow: (() => void) | undefined;
+    listen('duplicate-window', () => {
+      workspacesStore.duplicateWindow();
+    }).then(unlisten => { unlistenDuplicateWindow = unlisten; });
+
     // Pause toast timers when window loses focus, resume on focus
     let unlistenFocus: (() => void) | undefined;
     appWindow.onFocusChanged(({ payload: focused }) => {
@@ -1149,6 +1156,7 @@
       window.removeEventListener('keyup', handleKeyupAlt, true);
       unlistenClose?.();
       unlistenQuit?.();
+      unlistenDuplicateWindow?.();
       unlistenReloadTab?.();
       unlistenTabRenamed?.();
       unlistenResumeWorkspace?.();

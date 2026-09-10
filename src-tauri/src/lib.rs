@@ -471,10 +471,28 @@ pub fn run() {
                             }
                         }
                     }
-                    "new_window" | "duplicate_window" => {
-                        // These are handled by frontend keyboard shortcuts.
-                        // The menu accelerators trigger the keydown event which
-                        // the frontend handles.
+                    // The accelerator and the menu item are two different events, and
+                    // only one of them reaches the webview. macOS offers a Cmd-key to
+                    // the key window's view hierarchy BEFORE the main menu, so the
+                    // frontend keydown handler in +layout.svelte swallows Cmd+N /
+                    // Cmd+Shift+N and this arm never runs for the shortcut. A CLICK on
+                    // File ▸ New Window has no keydown at all, so if this arm does
+                    // nothing the menu item is dead — which is what it was.
+                    "new_window" => {
+                        let state = app_handle.state::<Arc<AppState>>();
+                        if let Err(e) = commands::window::create_window(app_handle.clone(), state) {
+                            log::error!("Menu 'New Window' failed: {e}");
+                        }
+                    }
+                    "duplicate_window" => {
+                        // Duplication needs every tab's live scrollback and cwd, which
+                        // only the webview holds — ask the focused window to do it.
+                        for (_, win) in app_handle.webview_windows() {
+                            if win.is_focused().unwrap_or(false) {
+                                let _ = win.emit("duplicate-window", ());
+                                break;
+                            }
+                        }
                     }
                     "help" => {
                         if let Some(win) = app_handle.get_webview_window("main") {
