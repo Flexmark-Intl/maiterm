@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.3.0
+
+A new Preferences section that switches off the parts of an AI agent that work for its vendor rather than for you. Windows you can name. And your phone can finally tell you what an agent is actually doing.
+
+### Deshittification
+
+A new Preferences tab that strips the vendor-serving bits out of your coding agent — Claude Code for now, one toggle each or the whole group at once.
+
+- Telemetry, error reporting, `/bug`, `/feedback` and feedback surveys — off.
+- `Co-Authored-By: Claude` and `Generated with Claude Code` out of your commit messages: through the setting, and through a git hook that strips them anyway should that setting stop being honoured. Your repo's own hooks still run.
+- The rules travel to the hosts you bridge to, so an agent on a remote server gets the same treatment.
+
+These write to the agent's own config rather than maiTerm's, so what's on disk *is* the toggle — undo one by hand elsewhere and it reads back as off.
+
+### Name a window
+
+Double-click the middle of the titlebar. The name belongs to the window instead of following whichever workspace is active, and it shows up in Mission Control, `Cmd+Tab` and on your phone. Clear it and the workspace name comes back.
+
+### From your phone
+
+- **"working…" now says what on.** When an agent hands work to a subagent, that shows up as its own row — what it was asked to do, how long it's been at it, and its latest line of progress.
+- **A live status line**: the tool an agent is running, and what it's running it on.
+- **The play button tells the agent.** It used to move a task to Active and stop there — Active on the board, with nobody working on it.
+
+### Fixes
+
+- **Menu items act on one window again.** Reload Current Tab was restarting the active tab in *every* open window; Clear Back/Forward History wiped every window's; Export and Import State opened a file dialog per window.
+- **File ▸ New Window and Duplicate Window work when you click them** — they had only ever worked as keyboard shortcuts. ([#4](https://github.com/Flexmark-Intl/maiterm/issues/4))
+- **A duplicated window keeps its name.**
+- **Windows stay where you put them when the screens are off.** Launching with the displays asleep used to move every window, for good.
+- **A dropped SSH session raises its badge again,** so there's something to click to reconnect.
+- **A chat reply can't land in your shell** when the tab's agent is suspended rather than running.
+
 ## v2.2.0
 
 Your phone can run the board now, not just watch it. Codex tabs work the way Claude tabs do. And a window full of agents got a lot lighter.
