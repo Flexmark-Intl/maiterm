@@ -635,7 +635,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "listTasks",
-            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to), grouped by workstream. Returns each task's id, title, detail, status, workstream, assignee tab and blockers. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and unassigned tasks.",
+            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to), grouped by workstream. Returns each task's id, title, detail, status, workstream and assignee tab. Dependencies come back resolved, not as bare ids: `blocked_by` gives each prerequisite's title and a `state` — 'met' finished, 'waiting' still live, 'parked' off the list with an archived tab (still blocks), 'gone' deleted (does not block). `blocking` is the reverse edge, the tasks waiting on this one — check it before you go idle, so you know what you just released. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and unassigned tasks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -688,7 +688,9 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                                 "title": { "type": "string" },
                                 "detail": { "type": "string" },
                                 "workstream": { "type": "string", "description": "Move this task into the named job (created if new)" },
-                                "blocked_by": { "type": "array", "items": { "type": "string" } },
+                                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Replace the whole dependency set. Prefer block_on/unblock_from unless you know the complete list — a replace clobbers any edge added concurrently." },
+                                "block_on": { "type": "array", "items": { "type": "string" }, "description": "Add these task ids as prerequisites, leaving existing ones alone" },
+                                "unblock_from": { "type": "array", "items": { "type": "string" }, "description": "Remove these task ids from this task's prerequisites" },
                                 "assign_to": { "description": "Who owns this task: a tab id from listWorkspaces, the literal \"me\" to claim it for yourself, or null to release it so any tab can pick it up. The tab must be in this project. Omit to leave the assignee alone — omitted and null mean different things.", "type": ["string", "null"] }
                             },
                             "required": ["id"]

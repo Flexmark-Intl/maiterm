@@ -11,7 +11,7 @@ import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { coerceStatus, effectiveStatus, normalizeTitle } from '$lib/tasks/model';
+import { blocking, coerceStatus, effectiveStatus, normalizeTitle, resolveBlockers } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1351,6 +1351,11 @@ function createClaudeCodeStore() {
     detail?: string;
     workstream?: string;
     blocked_by?: string[];
+    /** Incremental dependency edits. `blocked_by` replaces the whole array, which is
+     *  last-write-wins against any concurrent edit (docs/tasks.md §8.2 — the store persists
+     *  a WHOLE workspace list per write); these two add and remove single edges instead. */
+    block_on?: string[];
+    unblock_from?: string[];
     /** A tab id, the literal "me", or null to release. Absent means leave the assignee
      *  alone — `null` and absent are different answers and must stay so. */
     assign_to?: string | null;
@@ -1359,14 +1364,28 @@ function createClaudeCodeStore() {
   /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
    *  internal dedup key and would only invite an agent to try to set it. */
   function taskForAgent(t: Task, all: Task[], selfTabId: string, workstream?: string) {
+    const parked = workspacesStore.parkedTaskIds;
+    // Blockers RESOLVED, not raw ids. An agent handed `["a3f8…"]` had to scan the whole
+    // list to learn what it was waiting on — and on a `scope: 'tab'` list the prerequisite
+    // is frequently on another tab and not in the payload at all, so the id resolved to
+    // nothing it could see. `state` is the part that decides anything: `met` is finished,
+    // `waiting` is live, `parked` is off-list with an archived tab (still blocks), `gone`
+    // is deleted (does not). A `waiting` blocker sitting in `dropped` is the case worth
+    // reading — nobody intends to do it, and this task is waiting anyway.
+    const blockers = resolveBlockers(t, all, parked);
+    // The reverse edge: who is waiting on THIS. Nothing answered it before, and it is what
+    // an agent needs before it goes idle — "who did I just unblock". Empty for almost every
+    // row, so it costs nothing on the rows that don't block anything.
+    const waiters = blocking(t, all);
     return {
       id: t.id,
       title: t.title,
       ...(workstream ? { workstream } : {}),
       ...(t.detail ? { detail: t.detail } : {}),
-      status: effectiveStatus(t, all, workspacesStore.parkedTaskIds),
+      status: effectiveStatus(t, all, parked),
       assignee: t.tab_id === selfTabId ? 'you' : (t.tab_id ?? 'unassigned'),
-      ...(t.blocked_by?.length ? { blocked_by: t.blocked_by } : {}),
+      ...(blockers.length ? { blocked_by: blockers } : {}),
+      ...(waiters.length ? { blocking: waiters.map((w) => ({ id: w.id, title: w.title })) } : {}),
       origin: t.origin,
       updated_at: t.updated_at,
     };
@@ -1497,7 +1516,35 @@ function createClaudeCodeStore() {
             ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)
             : null;
         }
-        if (u.blocked_by) patch.blocked_by = u.blocked_by;
+        if (u.blocked_by || u.block_on || u.unblock_from) {
+          // `blocked_by` is the base (whole-array replace, kept for the caller that knows
+          // the full set), then the incremental edits apply on top. Well-defined when all
+          // three arrive together, rather than one silently winning.
+          const edges = new Set(u.blocked_by ?? list[idx].blocked_by ?? []);
+          const added = u.block_on ?? [];
+          // An id that resolves to nothing is treated as MET by hasUnmetDeps — a deleted
+          // prerequisite must not wedge its dependents forever — so accepting a bad id here
+          // would record an edge that silently does nothing and read back as a real
+          // dependency. Parked ids are legitimate: off the list with an archived tab, and
+          // still blocking.
+          const bad = added.filter(
+            (b) => b !== u.id && !list.some((t) => t.id === b) && !workspacesStore.parkedTaskIds.has(b),
+          );
+          const selfEdge = added.includes(u.id!);
+          if (bad.length || selfEdge) {
+            refused.push({
+              id: u.id!,
+              reason: selfEdge ? 'self_dependency' : 'unknown_blocker',
+              detail: selfEdge
+                ? 'A task cannot block itself — that edge is never met, so the row would sit in Blocked forever.'
+                : `No task ${bad.join(', ')} in this project. A blocker id that resolves to nothing counts as MET, so recording it would look like a dependency and do nothing. Get ids from listTasks.`,
+            });
+            continue;
+          }
+          for (const b of added) edges.add(b);
+          for (const b of u.unblock_from ?? []) edges.delete(b);
+          patch.blocked_by = [...edges];
+        }
         list[idx] = { ...list[idx], ...patch };
         updated.push(u.id!);
         changed = true;

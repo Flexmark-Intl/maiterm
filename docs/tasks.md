@@ -375,6 +375,33 @@ telling an agent are separate acts, and that is deliberate.
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.
 
+### Dependencies are legible, and edited one edge at a time (2026-09-10)
+
+`blocked_by` was three defects wearing one field:
+
+- **Raw ids.** `blocked_by: ["a3f8…"]` meant scanning the whole list to learn what the task
+  waited on — and on a `scope: 'tab'` list the prerequisite is usually on another tab and
+  not in the payload at all, so the id resolved to nothing the agent could see. It now comes
+  back as `[{id, title, status, state}]`, where `state` is the part that decides anything:
+  `met` finished, `waiting` live, `parked` off-list with an archived tab (still blocks),
+  `gone` deleted (does not). `resolveBlockers` draws the parked/gone line in exactly the
+  same place `hasUnmetDeps` does — if those two ever disagree, a task renders as blocked by
+  something the dependency check has already released, or the reverse.
+- **Whole-array replace only.** Two agents editing dependencies clobbered each other, since
+  the store persists a whole workspace list per write (§8.2). `block_on` and `unblock_from`
+  add and remove single edges. When all three arrive together `blocked_by` is the base and
+  the incremental edits apply on top, rather than one silently winning.
+- **No reverse edge.** Nothing answered "what is waiting on me", which is what an agent
+  needs before it goes idle. `blocking` carries it, and is absent on the rows — almost all
+  of them — that block nothing.
+
+Two refusals, both because the alternative is an edge that lies:
+
+- **An unknown blocker id.** `hasUnmetDeps` treats an unresolvable id as met, so a typo'd id
+  would record a dependency that does nothing while reading back as a real one. Parked ids
+  are accepted: off the list, still blocking.
+- **A self-edge.** Never met, so the row would sit in Blocked forever.
+
 - All calls are scoped to the **calling tab's workspace** — a tab cannot read or write
   another project's tasks. Identity comes from the connection→tab affinity that
   `initSession` establishes, same as every other tab-scoped tool.
