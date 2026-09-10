@@ -337,8 +337,10 @@ Three tools, batched to keep both token cost and round trips down. Registered fo
 runtime; they ride the SSH bridge like every other maiterm tool.
 
 ```ts
-listTasks({ scope?: 'tab' | 'workspace' })   // default 'workspace'
-  → { workspace, scope, workstreams: [{ workstream: string|null, tasks: [...] }] }
+listTasks({ scope?: 'tab' | 'workspace',     // default 'workspace'
+            ready?: boolean, status?: TaskStatus[], limit?: number })
+  → { workspace, scope, workstreams: [{ workstream: string|null, tasks: [...] }],
+      truncated?: { shown, matched, detail }, all_workstreams?: string[] }
 
 createTasks({ workstream?: string,           // a NAME; created if new, reused if not
               tasks: [{ title, detail?, status?, blocked_by?, assign_to_me? }] })
@@ -398,6 +400,32 @@ telling an agent are separate acts, and that is deliberate.
 
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.
+
+### Filters, and why the list is now bounded (2026-09-10)
+
+`scope` was the only lever, so every call returned the whole project — and the project grows
+without limit, since human-origin `done` rows are never swept.
+
+- **`ready`** is the query the tool was always being asked for and could not answer: not
+  retired, not parked, no unmet dependency, and yours or unassigned. The dependency part is
+  the reason it belongs here rather than in the agent's head — an agent cannot tell whether
+  a prerequisite on another tab has landed.
+- **`status`** matches the **effective** lane, the one the board and this tool both show.
+  Filtering the stored value would omit a task the same call reports as `blocked`.
+- **`limit`** defaults to 100 (max 500), and **rows are ranked before they are cut**:
+  active → blocked → review → todo → backlog → done → dropped. Cutting in stored order
+  drops whatever happens to be last, routinely the task in flight, while a year of finished
+  rows survives above it. `truncated: {shown, matched, detail}` appears only when something
+  was left out and always carries the way to reach it — a silently short list is
+  indistinguishable from a project with fewer tasks in it.
+- **`all_workstreams`** rides along on any narrowed call. Grouping only names the jobs with
+  rows in the answer, so an agent that filtered would mint a near-duplicate spelling of a
+  workstream it could not see.
+
+**Renaming a workstream needs no tool.** Move its tasks with `updateTasks`'s `workstream` in
+one call; empty workstreams are dropped on persist (§4), so the old name disappears. A
+dedicated tool would cost a schema in every agent's context for something one existing call
+already does.
 
 ### Dependencies are legible, and edited one edge at a time (2026-09-10)
 

@@ -11,7 +11,7 @@ import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { appendNote, blocking, coerceStatus, effectiveStatus, normalizeTitle, resolveBlockers, TASK_NOTE_CAP } from '$lib/tasks/model';
+import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isInFlight, normalizeTitle, resolveBlockers, TASK_NOTE_CAP } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -198,7 +198,7 @@ function createClaudeCodeStore() {
           result = handleCompleteTopic(args as { tabId?: string; topicId: string });
           break;
         case 'listTasks':
-          result = handleListTasks(args as { tabId?: string; scope?: 'tab' | 'workspace' });
+          result = handleListTasks(args as { tabId?: string; scope?: 'tab' | 'workspace'; status?: string[]; ready?: boolean; limit?: number });
           break;
         case 'createTasks':
           result = handleCreateTasks(args as { tabId?: string; workstream?: string; tasks?: TaskToolInput[] });
@@ -1399,18 +1399,62 @@ function createClaudeCodeStore() {
     };
   }
 
-  function handleListTasks(args: { tabId?: string; scope?: 'tab' | 'workspace' }) {
+  /** Truncation order: what a caller can least afford to lose comes first.
+   *
+   *  A list that grows without bound has to be cut somewhere, and cutting in stored order
+   *  drops whatever happens to be last — routinely the task the agent is working on, while
+   *  a year of finished rows survives above it. Ranked instead, so `limit` eats history. */
+  const LANE_RANK: Record<TaskStatus, number> = {
+    active: 0, blocked: 1, review: 2, todo: 3, backlog: 4, done: 5, dropped: 6,
+  };
+
+  function handleListTasks(args: {
+    tabId?: string;
+    scope?: 'tab' | 'workspace';
+    status?: string[];
+    ready?: boolean;
+    limit?: number;
+  }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
     const all = tasksStore.forWorkspace(loc.workspace.id);
+    const parked = workspacesStore.parkedTaskIds;
     const tabScope = args.scope === 'tab';
-    const scoped = tabScope ? all.filter((t) => t.tab_id === loc.tab.id) : all;
+    let scoped = tabScope ? all.filter((t) => t.tab_id === loc.tab.id) : all;
+    const total = scoped.length;
+
+    // Lane is matched on the EFFECTIVE status, the one the board and this tool both show —
+    // filtering on the stored value would omit a task the same call reports as `blocked`.
+    const laneOf = (t: Task) => effectiveStatus(t, all, parked);
+    if (args.status?.length) {
+      const want = new Set(args.status.map((s) => coerceStatus(s)));
+      scoped = scoped.filter((t) => want.has(laneOf(t)));
+    }
+    // "What can I pick up right now", which is the question `listTasks` was always being
+    // asked and could only answer by returning everything. Unmet dependencies are the part
+    // an agent cannot work out for itself when the prerequisite is on another tab.
+    if (args.ready) {
+      scoped = scoped.filter(
+        (t) =>
+          isInFlight(t) &&
+          !hasUnmetDeps(t, all, parked) &&
+          (t.tab_id === loc.tab.id || !t.tab_id),
+      );
+    }
+
     // A workspace list carries every row in the project, so it gets the tail of each log —
     // enough to say why a task sits where it does. Narrowing to your own tab is the way to
     // ask for the whole log, and it costs nothing there.
     const noteTail = tabScope ? TASK_NOTE_CAP : 3;
     const nameOf = (id: string | null | undefined) =>
       tasksStore.workstream(loc.workspace.id, id)?.name;
+
+    const matched = scoped.length;
+    const limit = Math.min(Math.max(1, args.limit ?? 100), 500);
+    if (matched > limit) {
+      scoped = [...scoped].sort((a, b) => LANE_RANK[laneOf(a)] - LANE_RANK[laneOf(b)]).slice(0, limit);
+    }
+
     // Grouped by workstream, because that is the structure the agent is meant to work in:
     // a flat list would invite it to treat two separate jobs as one.
     const groups = new Map<string, { workstream: string | null; tasks: unknown[] }>();
@@ -1423,6 +1467,24 @@ function createClaudeCodeStore() {
       workspace: loc.workspace.name,
       scope: tabScope ? 'tab' : 'workspace',
       workstreams: [...groups.values()],
+      // Only when something was left out, and always with the way to get at it. A silently
+      // short list is indistinguishable from a project with fewer tasks in it.
+      ...(matched > scoped.length
+        ? {
+            truncated: {
+              shown: scoped.length,
+              matched,
+              detail: `${matched - scoped.length} more match. Rows are ordered active → blocked → review → todo → backlog → done → dropped, so what is missing is the tail of that. Narrow with status, ready, or scope 'tab', or raise limit (max 500).`,
+            },
+          }
+        : {}),
+      // Every job in this project, including ones whose tasks are all outside the filter or
+      // on another tab — so an agent naming a workstream on createTasks can reuse a spelling
+      // that exists rather than minting a near-duplicate it cannot see.
+      ...(tabScope || args.status?.length || args.ready
+        ? { all_workstreams: tasksStore.workstreams(loc.workspace.id).map((w) => w.name) }
+        : {}),
+      ...(matched !== total ? { filtered_from: total } : {}),
     };
   }
 

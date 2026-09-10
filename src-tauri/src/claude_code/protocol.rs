@@ -640,7 +640,10 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
-                    "scope": { "type": "string", "enum": ["tab", "workspace"], "description": "Default 'workspace'" }
+                    "scope": { "type": "string", "enum": ["tab", "workspace"], "description": "Default 'workspace'" },
+                    "ready": { "type": "boolean", "description": "Only work you could START NOW: not finished, not parked, not dropped, no unfinished prerequisite, and either yours or unassigned. This is the 'what should I pick up' query — use it instead of listing everything and judging for yourself, since you cannot see whether a prerequisite on another tab has landed." },
+                    "status": { "type": "array", "items": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done", "dropped"] }, "description": "Only these lanes. Matched on the lane a task is actually IN, so a task held by an unfinished prerequisite counts as 'blocked' whatever its stored status." },
+                    "limit": { "type": "integer", "description": "Max rows (default 100, max 500). Rows are ordered active → blocked → review → todo → backlog → done → dropped before cutting, so a limit drops history rather than live work, and `truncated` tells you what was left out." }
                 },
                 "required": []
             }
