@@ -541,11 +541,17 @@ async fn agent_owns_terminal(app: &Arc<AppState>, pty_id: &str) -> bool {
     let app = app.clone();
     let pty = pty_id.to_string();
     // The sweep is blocking; every other async caller of get_agent_liveness hops to
-    // spawn_blocking for the same reason (the mesh "liveness pinwheel").
-    match tauri::async_runtime::spawn_blocking(move || crate::pty::get_agent_liveness(&app, &pty))
-        .await
-    {
-        Ok(Ok(liveness)) => liveness_is_agent(&liveness),
+    // spawn_blocking for the same reason (the mesh "liveness pinwheel"). Both readings come
+    // from the SAME cached ps snapshot inside one hop, so they cannot disagree about a
+    // process that exited between them.
+    let probe = tauri::async_runtime::spawn_blocking(move || {
+        let liveness = crate::pty::get_agent_liveness(&app, &pty)?;
+        let at_prompt = crate::pty::pty_child_pid_of(&app, &pty).and_then(crate::pty::shell_holds_tty);
+        Ok::<_, String>((liveness, at_prompt))
+    })
+    .await;
+    match probe {
+        Ok(Ok((liveness, at_prompt))) => agent_has_the_terminal(&liveness, at_prompt),
         // Sweep failed, or the PTY vanished mid-tick. Hold: nothing is lost by waiting a
         // tick, and this is precisely where guessing "yes" was the bug.
         _ => false,
@@ -553,8 +559,24 @@ async fn agent_owns_terminal(app: &Arc<AppState>, pty_id: &str) -> bool {
 }
 
 /// The rule itself, kept pure so a test pins it rather than a reader having to trace the
-/// watcher loop. Either signal is enough; NEITHER means a shell is in front.
-fn liveness_is_agent(liveness: &crate::pty::AgentLiveness) -> bool {
+/// watcher loop.
+///
+/// The veto comes first and outranks everything. `agent_running` walks the tab shell's
+/// DESCENDANT tree, which by design still reports an agent that is backgrounded or
+/// Ctrl+Z-suspended — correct for "is the CLI alive?", wrong for "is an agent reading this
+/// terminal?". Suspend Claude Code on a chat-handler tab and the shell takes the tty back
+/// while the process stays in the tree, so the tree alone would paste a Mattermost thread —
+/// message bodies and all — onto a live prompt, exactly the 2026-09-08 failure by another
+/// route. If the shell holds the tty, nothing else can be reading it.
+///
+/// Past the veto, either signal is enough; NEITHER means a shell is in front.
+fn agent_has_the_terminal(
+    liveness: &crate::pty::AgentLiveness,
+    shell_at_prompt: Option<bool>,
+) -> bool {
+    if shell_at_prompt == Some(true) {
+        return false;
+    }
     liveness.agent_running || liveness.ssh_foreground
 }
 
@@ -1123,14 +1145,17 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         // collapse them into one "busy/offline": at capacity means close
                         // a thread (waiting achieves nothing — the agent is not going to
                         // free a slot by itself), offline means resume the session.
-                        let (reason, reason_detail) = if at_capacity {
-                            (
-                                "at_capacity",
-                                format!(
-                                    "the tab is holding all {MAX_TAB_BINDINGS} thread slots — close one out to free a slot"
-                                ),
-                            )
-                        } else if !session_live {
+                        //
+                        // ORDER IS LOAD-BEARING. Everything below `no_agent` presumes an
+                        // agent is there to be busy, and both of those reasons are read as
+                        // promises — `at_capacity` posts a public "I'll pick this up as soon
+                        // as one closes out", and `prompt_open` is treated as self-clearing
+                        // and stays silent. On a tab whose agent has died those promises are
+                        // false and unfalsifiable: its bindings can only be released by the
+                        // agent that is gone, and its `pending_question` flag was frozen by
+                        // the same dead transport that stranded the session row. So the
+                        // liveness reasons are asked FIRST and the busy ones only afterwards.
+                        let (reason, reason_detail) = if !session_live {
                             ("no_session", "no agent session is running in that tab".to_string())
                         } else if pty_id.is_none() {
                             ("no_pty", "that tab has no live terminal".to_string())
@@ -1141,12 +1166,24 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                                  and its terminal is at a shell prompt — start an agent there"
                                     .to_string(),
                             )
+                        } else if at_capacity {
+                            (
+                                "at_capacity",
+                                format!(
+                                    "the tab is holding all {MAX_TAB_BINDINGS} thread slots — close one out to free a slot"
+                                ),
+                            )
                         } else {
                             ("prompt_open", prompt_block.unwrap_or("a prompt is open").to_string())
                         };
                         // A prompt-open hold clears itself in seconds — don't burn the
                         // once-per-thread in-channel notice or the operator toast on it.
-                        if prompt_block.is_some() {
+                        // Keyed on the CHOSEN reason, not on `prompt_block` being set: a
+                        // stale prompt flag left on a dead session would otherwise silence
+                        // a `no_agent` hold, and silence here is not a small cost — the
+                        // channel cursor holds at this post, so every later message in the
+                        // channel stops being looked at too, with nothing anywhere saying so.
+                        if reason == "prompt_open" {
                             log::info!(
                                 "[comms] summon held for tab {tab_id} ({reason}: {reason_detail}) in {}",
                                 ch.name
@@ -1154,7 +1191,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                             break;
                         }
                         if busy_replied.insert(root.clone()) {
-                            if session_live && at_capacity {
+                            if reason == "at_capacity" {
                                 let _ = client
                                     .create_post(&ch.id, &root, BUSY_REPLY_MSG, &[])
                                     .await;
@@ -1799,22 +1836,49 @@ mod tests {
     fn a_dead_tab_is_not_an_agent_however_the_registry_looks() {
         use crate::pty::AgentLiveness;
         let l = |agent_running, ssh_foreground| AgentLiveness { agent_running, ssh_foreground };
+        // `None` = we could not tell who holds the tty, which must not be read as either
+        // answer; it leaves the decision to the two liveness signals.
+        let unknown = None;
 
         // The 2026-09-08 incident, exactly: nova's ssh had closed, no agent was left in the
         // local tree, and the tab sat at `dMac[~]#` — while agent_sessions still held a row
         // from two days earlier, because the SessionEnd hook died with the transport that
         // was supposed to carry it. Delivering on the strength of that row typed a
         // Mattermost pickup, trailing CR included, into a shell that ran it.
-        assert!(!liveness_is_agent(&l(false, false)));
+        assert!(!agent_has_the_terminal(&l(false, false), unknown));
 
         // Either signal alone is enough to deliver.
-        assert!(liveness_is_agent(&l(true, false)), "local agent process");
+        assert!(agent_has_the_terminal(&l(true, false), unknown), "local agent process");
         assert!(
-            liveness_is_agent(&l(false, true)),
+            agent_has_the_terminal(&l(false, true), unknown),
             "inside ssh — the remote agent is invisible locally, so a live remote session \
              stands in for it (same stand-in the mesh readiness check makes)"
         );
-        assert!(liveness_is_agent(&l(true, true)));
+        assert!(agent_has_the_terminal(&l(true, true), unknown));
+    }
+
+    #[test]
+    fn a_suspended_agent_leaves_the_shell_in_front_and_must_not_be_typed_into() {
+        use crate::pty::AgentLiveness;
+        let l = |agent_running, ssh_foreground| AgentLiveness { agent_running, ssh_foreground };
+
+        // Ctrl+Z on a chat-handler tab: the shell takes the tty back, but the agent process
+        // is still in the tab's descendant tree, so `agent_running` stays true. Trusting the
+        // tree alone here pastes a Mattermost thread onto a live prompt — the same failure
+        // as a dead session row, reached from the opposite direction.
+        assert!(
+            !agent_has_the_terminal(&l(true, false), Some(true)),
+            "the shell owning the tty vetoes delivery no matter what the process tree says"
+        );
+        // ...and the veto outranks the ssh stand-in too.
+        assert!(!agent_has_the_terminal(&l(true, true), Some(true)));
+
+        // A shell that does NOT hold the tty is the ordinary working case: some other job
+        // (the agent, or ssh) is in front.
+        assert!(agent_has_the_terminal(&l(true, false), Some(false)));
+        assert!(agent_has_the_terminal(&l(false, true), Some(false)));
+        // Still nothing alive → still no delivery, whoever holds the tty.
+        assert!(!agent_has_the_terminal(&l(false, false), Some(false)));
     }
 
     #[test]

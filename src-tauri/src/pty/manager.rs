@@ -1285,6 +1285,35 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
 /// whole descendant tree (not just the tty foreground leader) keeps a backgrounded
 /// (Ctrl-Z) or tool-spawning agent from being mistaken for gone. Cross-platform —
 /// reuses the same `sysinfo` parent→children idiom as `get_foreground_command`.
+/// Does the tab's own SHELL hold the terminal — i.e. would an injected paste land on a
+/// shell prompt?
+///
+/// `Some(true)` = the shell is the tty's foreground process group, so it is sitting at its
+/// prompt and anything typed is a command. `Some(false)` = some other job owns the
+/// terminal. `None` = unknown (no snapshot row, no controlling tty, or a platform where we
+/// don't have this signal) — callers must not read that as either answer.
+///
+/// This is the complement of `agent_process_alive`, which walks the whole DESCENDANT tree
+/// and deliberately still says "alive" for a backgrounded or Ctrl+Z-suspended agent. That
+/// is the right answer to "is the CLI still running?" and the wrong one to "is an agent
+/// reading this terminal?" — a suspended agent leaves the shell in front, and an automatic
+/// injector that trusts the tree alone pastes into it.
+#[cfg(unix)]
+pub fn shell_holds_tty(shell_pid: u32) -> Option<bool> {
+    let rows = ps_rows_snapshot()?;
+    let shell_row = rows.iter().find(|r| r.pid == shell_pid)?;
+    // tpgid <= 0 → no controlling-tty foreground pgid; we cannot tell.
+    if shell_row.tpgid <= 0 {
+        return None;
+    }
+    Some((shell_row.tpgid as u32) == shell_row.pgid)
+}
+
+#[cfg(not(unix))]
+pub fn shell_holds_tty(_shell_pid: u32) -> Option<bool> {
+    None
+}
+
 pub fn agent_process_alive(shell_pid: u32, proc_names: &[&str]) -> bool {
     if proc_names.is_empty() {
         return false;
