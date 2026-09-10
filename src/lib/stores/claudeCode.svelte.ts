@@ -1351,6 +1351,9 @@ function createClaudeCodeStore() {
     detail?: string;
     workstream?: string;
     blocked_by?: string[];
+    /** A tab id, the literal "me", or null to release. Absent means leave the assignee
+     *  alone — `null` and absent are different answers and must stay so. */
+    assign_to?: string | null;
   }
 
   /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
@@ -1432,6 +1435,17 @@ function createClaudeCodeStore() {
     };
   }
 
+  /** Tab ids in the calling tab's workspace, which is the only place an assignee may point.
+   *
+   *  Reaching outside it would put a row on a tab whose own panel cannot show it (the panel
+   *  reads one workspace's list) and whose close would never release it, since `releaseTab`
+   *  walks lists looking for the tab that closed — the row would be attributed to a tab that
+   *  is not there and reachable from nowhere. Exactly the state `archive_tab`'s
+   *  cross-workspace release exists to prevent. */
+  function tabIdsInWorkspace(ws: Workspace): Set<string> {
+    return new Set(ws.panes.flatMap((p) => p.tabs.map((t) => t.id)));
+  }
+
   function handleUpdateTasks(args: { tabId?: string; updates?: TaskToolUpdate[] }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
@@ -1439,6 +1453,11 @@ function createClaudeCodeStore() {
     if (!updates.length) return { error: 'updates must be a non-empty array of { id, ... }.' };
     const updated: string[] = [];
     const missing: string[] = [];
+    /** Updates that named a real row but asked for something we would not do. Reported
+     *  rather than silently dropped: an agent that hands work to a tab and is told nothing
+     *  believes the hand-off happened and stops tracking the task. */
+    const refused: { id: string; reason: string; detail: string }[] = [];
+    const known = tabIdsInWorkspace(loc.workspace);
     tasksStore.mutate(loc.workspace.id, (list) => {
       let changed = false;
       for (const u of updates) {
@@ -1449,7 +1468,24 @@ function createClaudeCodeStore() {
           missing.push(u.id!);
           continue;
         }
+        // Resolve the assignee BEFORE touching anything, so a refused hand-off doesn't half
+        // apply the rest of the same update — the agent would then be told the row was
+        // refused while its title had already changed.
+        let assignTo: string | null | undefined;
+        if (u.assign_to !== undefined) {
+          const want = u.assign_to === 'me' ? loc.tab.id : u.assign_to;
+          if (want !== null && !known.has(want)) {
+            refused.push({
+              id: u.id!,
+              reason: 'unknown_tab',
+              detail: `No tab ${want} in this project. Assignees must be a tab in this workspace — use listWorkspaces to find one, "me" for your own tab, or null to release the task to whoever picks it up.`,
+            });
+            continue;
+          }
+          assignTo = want;
+        }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
+        if (assignTo !== undefined) patch.tab_id = assignTo;
         if (u.status) patch.status = coerceStatus(u.status);
         if (u.title?.trim()) {
           patch.title = u.title.trim();
@@ -1468,7 +1504,11 @@ function createClaudeCodeStore() {
       }
       return changed ? list : null;
     });
-    return { updated, ...(missing.length ? { missing } : {}) };
+    return {
+      updated,
+      ...(missing.length ? { missing } : {}),
+      ...(refused.length ? { refused } : {}),
+    };
   }
 
   // --- Trigger variable tools ---

@@ -344,9 +344,33 @@ createTasks({ workstream?: string,           // a NAME; created if new, reused i
               tasks: [{ title, detail?, status?, blocked_by?, assign_to_me? }] })
   → { created: string[], workstream?, already_tracked?: string[] }
 
-updateTasks({ updates: [{ id, status?, title?, detail?, workstream?, blocked_by? }] })
-  → { updated: string[], missing: string[] }
+updateTasks({ updates: [{ id, status?, title?, detail?, workstream?,
+                          blocked_by?, assign_to? }] })   // tab id | "me" | null
+  → { updated: string[], missing: string[], refused?: [{ id, reason, detail }] }
 ```
+
+**`assign_to` (2026-09-10) — an agent could not assign anything, including to itself.**
+The phone wrote `tab_id` through `board::UpdatePatch` and the side panel claimed and
+unassigned, but MCP had no assignee field at all: no hand-off, no claiming an unassigned
+row, no releasing one. The only route was a side effect — `createTasks` restating a title
+so `findDuplicate` reclaimed the row — which is invisible in the tool description, works
+only when `tab_id` is already null, and reads as "create" while doing "claim".
+
+Three constraints:
+
+- **The target must be a tab in the caller's workspace.** Reaching outside would put a row
+  on a tab whose panel cannot show it (the panel reads one workspace's list) and whose
+  close would never release it, since `releaseTab` looks for the tab that closed. Exactly
+  the unreachable state `archive_tab`'s cross-workspace release exists to prevent.
+- **Absent and `null` are different answers.** Absent leaves the assignee alone; `null`
+  releases the row. Same rule the phone's patch already follows.
+- **A refusal is reported, never swallowed.** `refused: [{id, reason, detail}]` — an agent
+  that hands work to a tab and is told nothing believes the hand-off happened and stops
+  tracking the task. The assignee is resolved before anything else in the update is
+  applied, so a refused hand-off cannot half-write the rest of the same row.
+
+Assigning does not TELL the tab anything — see §5's delegation note. Setting a lane and
+telling an agent are separate acts, and that is deliberate.
 
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.
@@ -504,11 +528,13 @@ whose prerequisite had not landed, with nothing on screen changing. This is verb
 board already guards with `PINNED_WHY` — and unlike the board's steppers, Do it also emits a
 terminal injection.
 
-**`N unclaimed` is not a scope violation, it is the only way to reach that work.** The
-panel is the sole writer of `Task.tab_id` in the whole frontend — the board reassigns
-workstream and status, and `updateTasks` over MCP has no assignee field. So without a
-claim control, a row released by `releaseTab` when its tab closed would be unreadable,
-uneditable and undeletable from every surface, forever, while still inflating counts.
+**`N unclaimed` is not a scope violation, it is the only way a HUMAN reaches that work.**
+The panel is the only surface a person has that writes `Task.tab_id` — the board reassigns
+workstream and status and never the assignee. So without a claim control, a row released by
+`releaseTab` when its tab closed would be unreadable, uneditable and undeletable from every
+human surface, forever, while still inflating counts. (Since 2026-09-10 agents write it too,
+via `updateTasks`'s `assign_to`. That does not retire this control: the row that strands here
+is precisely the one no agent restates.)
 Unclaimed work is also genuinely this panel's business: it is the pile you can pick up
 *here*, not another tab's work. Collapsed by default; ↧ claims, ↥ unassigns. There is
 deliberately no way to add **into** the unclaimed pile: every add claims for this tab, and a

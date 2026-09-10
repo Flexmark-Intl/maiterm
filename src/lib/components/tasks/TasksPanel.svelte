@@ -71,9 +71,12 @@
   /** Work nobody owns: released when a tab closed (`releaseTab`), or created unassigned.
    *
    *  This IS the per-tab panel's business — it is the pile you can pick up here, not
-   *  another tab's work. Surfacing it is also the only way to reach it: nothing else in the
-   *  app writes `Task.tab_id`, so without a claim control released rows are unreadable,
-   *  uneditable and undeletable from every surface, forever. */
+   *  another tab's work. It is also the only place a HUMAN can reach it: the board
+   *  reassigns workstream and status but never the assignee, so without this control a
+   *  released row would be uneditable and undeletable from every surface a person has.
+   *  (Agents can now claim and hand off through `updateTasks`'s `assign_to`, which is a
+   *  second writer of `Task.tab_id` — it does not replace this one, since the row an agent
+   *  never restates is exactly the row that ends up stranded here.) */
   const unclaimed = $derived(all.filter((t) => !t.tab_id && isInFlight(t)));
 
   /** Work in flight on OTHER tabs. One line, not a list — enough to say the board has more,

@@ -673,7 +673,7 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
         },
         {
             "name": "updateTasks",
-            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job. There is no delete, and the three ways a task leaves the board are NOT interchangeable: 'done' means you finished it, 'backlog' means you are deliberately deferring it, and 'dropped' means it should not have been on the list at all — you misread the work, it was superseded, or it was decided against. Use 'dropped' for those rather than closing them as done: a dropped task does not satisfy anything waiting on it, so nothing you were blocking gets falsely released. Only a human deletes a row outright.",
+            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job, and `assign_to` to change who owns one — claim an unassigned task with \"me\", hand one to another tab by its id, or release yours with null. There is no delete, and the three ways a task leaves the board are NOT interchangeable: 'done' means you finished it, 'backlog' means you are deliberately deferring it, and 'dropped' means it should not have been on the list at all — you misread the work, it was superseded, or it was decided against. Use 'dropped' for those rather than closing them as done: a dropped task does not satisfy anything waiting on it, so nothing you were blocking gets falsely released. Only a human deletes a row outright.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -688,7 +688,8 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                                 "title": { "type": "string" },
                                 "detail": { "type": "string" },
                                 "workstream": { "type": "string", "description": "Move this task into the named job (created if new)" },
-                                "blocked_by": { "type": "array", "items": { "type": "string" } }
+                                "blocked_by": { "type": "array", "items": { "type": "string" } },
+                                "assign_to": { "description": "Who owns this task: a tab id from listWorkspaces, the literal \"me\" to claim it for yourself, or null to release it so any tab can pick it up. The tab must be in this project. Omit to leave the assignee alone — omitted and null mean different things.", "type": ["string", "null"] }
                             },
                             "required": ["id"]
                         }
