@@ -115,9 +115,26 @@ pub fn duplicate_window(
             .ok_or_else(|| format!("Source window '{}' not found", source_label))?
             .clone();
 
-        let mut new_win = WindowData::new(new_label.clone());
-        new_win.sidebar_width = source.sidebar_width;
-        new_win.sidebar_collapsed = source.sidebar_collapsed;
+        // Start from the source and name the EXCEPTIONS. Building the copy up
+        // field by field from WindowData::new() is an allowlist, and an allowlist
+        // makes every new WindowData field a silent regression: that is exactly
+        // how `name` came to be dropped, so a duplicate of a window you had named
+        // arrived unnamed and fell back to its active workspace's name. Same
+        // lesson as `carry_tab_state_on_reload` — see CLAUDE.md.
+        let mut new_win = source.clone();
+        new_win.id = uuid::Uuid::new_v4().to_string();
+        new_win.label = new_label.clone();
+        // Rebuilt below, with fresh ids throughout.
+        new_win.workspaces = Vec::new();
+        new_win.active_workspace_id = None;
+        // Geometry describes where the SOURCE was put; inheriting it would open
+        // the duplicate exactly on top of the window it came from.
+        new_win.window_geometry = std::collections::HashMap::new();
+        new_win.last_geometry_monitors = None;
+        // The ledger is a verbatim record of what was typed into the source's
+        // tabs. The copy's tabs are new ids with no such history.
+        new_win.overlord_ledger = Vec::new();
+        new_win.overlord_tasks = Vec::new();
 
         for ws in &source.workspaces {
             let cloned = clone_workspace_with_new_ids(ws, &tab_contexts);
