@@ -231,10 +231,13 @@
 
     // File ▸ Duplicate Window. Clicking the menu item produces no keydown, so the
     // Cmd+Shift+N handler below never sees it — Rust emits this to us instead.
+    // The target is load-bearing, not decoration: a listener registered without one
+    // is EventTarget::Any, which matches every emit_to filter — so leaving it off
+    // makes one Duplicate Window click duplicate every open window.
     let unlistenDuplicateWindow: (() => void) | undefined;
     listen('duplicate-window', () => {
       workspacesStore.duplicateWindow();
-    }).then(unlisten => { unlistenDuplicateWindow = unlisten; });
+    }, { target: appWindow.label }).then(unlisten => { unlistenDuplicateWindow = unlisten; });
 
     // Pause toast timers when window loses focus, resume on focus
     let unlistenFocus: (() => void) | undefined;

@@ -486,12 +486,33 @@ pub fn run() {
                     }
                     "duplicate_window" => {
                         // Duplication needs every tab's live scrollback and cwd, which
-                        // only the webview holds — ask the focused window to do it.
-                        for (_, win) in app_handle.webview_windows() {
-                            if win.is_focused().unwrap_or(false) {
-                                let _ = win.emit("duplicate-window", ());
-                                break;
+                        // only the webview holds — ask ONE window to do it. `emit` on a
+                        // WebviewWindow is not window-scoped (Emitter's default impl
+                        // hands off to the app manager, which reaches every webview), so
+                        // this has to be emit_to, and the listener side has to register
+                        // with its own label as the target: a bare `listen()` in JS is
+                        // EventTarget::Any, which every filter matches. Get either half
+                        // wrong and one click duplicates every open window.
+                        let terminal_windows: Vec<_> = app_handle
+                            .webview_windows()
+                            .into_iter()
+                            .filter(|(label, _)| label != "preferences" && label != "help")
+                            .collect();
+                        let target = terminal_windows
+                            .iter()
+                            .find(|(_, win)| win.is_focused().unwrap_or(false))
+                            // Nothing is key when every window is minimized. With one
+                            // window there's no ambiguity about which one they meant;
+                            // with several there is, so say so rather than guess.
+                            .or_else(|| terminal_windows.first().filter(|_| terminal_windows.len() == 1));
+                        match target {
+                            Some((label, _)) => {
+                                let _ = app_handle.emit_to(label.as_str(), "duplicate-window", ());
                             }
+                            None => log::warn!(
+                                "Menu 'Duplicate Window': no focused window among {} candidates",
+                                terminal_windows.len()
+                            ),
                         }
                     }
                     "help" => {
