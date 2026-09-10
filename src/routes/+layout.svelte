@@ -443,7 +443,7 @@
     let unlistenCheckUpdates: (() => void) | undefined;
     listen('check-for-updates', () => {
       updaterStore.checkForUpdates(false);
-    }).then(unlisten => { unlistenCheckUpdates = unlisten; });
+    }, { target: appWindow.label }).then(unlisten => { unlistenCheckUpdates = unlisten; });
 
     // Periodic silent update check — the startup check only runs once, so a
     // long-running window would otherwise never notice a new release. Re-reads

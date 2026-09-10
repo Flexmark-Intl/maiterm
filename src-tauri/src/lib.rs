@@ -95,6 +95,12 @@ fn raise_fd_limit() -> Option<(u64, u64)> {
     None
 }
 
+/// The terminal window that held focus most recently, which outlives the focus
+/// itself — see `emit_to_focused_window`. Preferences and Help never claim it:
+/// they are where the user goes to *leave* a terminal window, not a window a
+/// menu item like Reload Current Tab could ever have meant.
+static LAST_FOCUSED_WINDOW: parking_lot::RwLock<Option<String>> = parking_lot::RwLock::new(None);
+
 /// Deliver a menu-item event to the ONE window the click was meant for.
 ///
 /// A menu click carries no window, so every one of these arms has to pick one,
@@ -107,17 +113,25 @@ fn raise_fd_limit() -> Option<(u64, u64)> {
 /// `emit_to` filter, so each listener in +layout.svelte has to name its own
 /// label as well. Both halves are required; either one alone still broadcasts.
 ///
-/// Nothing is key when every window is minimized. A lone window is unambiguous
-/// enough to use anyway; with several, say so rather than act on a guess.
+/// "Focused" is not always available to answer with. The menu bar stays live
+/// while Preferences or Help is key and while every window is minimized, and in
+/// both cases no terminal window reports focus — so fall back to the one they
+/// were last in, then to a lone window, and only then admit we don't know.
 fn emit_to_focused_window(app_handle: &tauri::AppHandle, event: &str) {
     let windows: Vec<_> = app_handle
         .webview_windows()
         .into_iter()
         .filter(|(label, _)| label != "preferences" && label != "help")
         .collect();
+    let last_focused = LAST_FOCUSED_WINDOW.read().clone();
     let target = windows
         .iter()
         .find(|(_, win)| win.is_focused().unwrap_or(false))
+        .or_else(|| {
+            last_focused
+                .as_ref()
+                .and_then(|label| windows.iter().find(|(l, _)| l == label))
+        })
         .or_else(|| windows.first().filter(|_| windows.len() == 1));
     match target {
         Some((label, _)) => {
@@ -217,6 +231,17 @@ pub fn run() {
 
     builder
         .manage(app_state.clone())
+        .on_window_event(|window, event| {
+            // Remember which terminal window was last key, so a menu click made
+            // while Preferences is focused (or while everything is minimized)
+            // still has a window to act on.
+            if let tauri::WindowEvent::Focused(true) = event {
+                let label = window.label();
+                if label != "preferences" && label != "help" {
+                    *LAST_FOCUSED_WINDOW.write() = Some(label.to_string());
+                }
+            }
+        })
         .setup(move |app| {
             // tauri-plugin-log is active by now — surface the warning that
             // arm_running_marker() captured before the logger was ready.
@@ -520,8 +545,10 @@ pub fn run() {
                             .open("https://github.com/Flexmark-Intl/maiterm/issues/new?labels=bug&type=bug", None);
                     }
                     "check_updates" => {
-                        // Emit to all windows so the focused one can handle it
-                        let _ = app_handle.emit("check-for-updates", ());
+                        // The old comment here said "emit to all windows so the focused
+                        // one can handle it" — but all of them handled it, so one click
+                        // ran N update checks and popped N toasts.
+                        emit_to_focused_window(app_handle, "check-for-updates");
                     }
                     "feature_request" => {
                         #[allow(deprecated)]
