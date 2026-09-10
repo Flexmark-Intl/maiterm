@@ -1786,9 +1786,11 @@ both are named in the doctrine, so `DOCTRINE_VERSION` went to **5**.
 ### Task model — minimum viable
 
 `id`, `title`, `workspace_id`, `tab_id` (assignee, nullable = backlog), `state`
-(`backlog` / `active` / `blocked` / `review` / `done`), `origin`
-(`human` / `overlord` / `agent`), `created_at`, `updated_at`, optional `topic_id`
-linking the mesh conversation that is its vehicle.
+(`backlog` / `todo` / `active` / `blocked` / `review` / `done` / `dropped`), `origin`
+(`human` / `overlord` / `agent`), `created_at`, `updated_at`, and `notes` (the append-only
+progress log). The as-shipped model is `docs/tasks.md` §3, which this predates — a
+`topic_id` linking a mesh conversation was sketched here and never implemented, so it was
+pruned 2026-09-10 rather than left describing a field that only ever held null.
 
 Persistence: board rows live in the state file alongside workspaces, keyed by
 `workspace_id` (per-window derivation free). The human can CRUD tasks directly

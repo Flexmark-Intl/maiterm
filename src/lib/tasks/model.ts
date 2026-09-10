@@ -253,7 +253,6 @@ export interface TaskInput {
   blocked_by?: string[];
   origin?: TaskOrigin;
   workstream_id?: string | null;
-  topic_id?: string | null;
 }
 
 /** Build a persistable Task. `normalized_title` is filled in locally so in-memory dedup
@@ -271,7 +270,6 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
     workstream_id: input.workstream_id ?? null,
     created_at: now,
     updated_at: now,
-    topic_id: input.topic_id ?? null,
     notes: [],
   };
 }

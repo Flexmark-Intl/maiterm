@@ -109,10 +109,19 @@ pub struct Task {
     pub origin: String,
     pub created_at: String,
     pub updated_at: String,
-    /// Mesh topic that is this task's conversation vehicle, if any.
-    pub topic_id: Option<String>,
+    /// Append-only progress log, oldest first. Capped at TASK_NOTE_CAP (20).
+    pub notes: Vec<TaskNote>,   // { at, text, by }
 }
 ```
+
+> **`topic_id` was pruned 2026-09-10.** It was declared here, documented as "the mesh topic
+> that is this task's conversation vehicle", carried through the migration, and served to
+> the phone as `topicId` — and **nothing ever set it**. Every construction site in the
+> codebase wrote `None`, and `startTopic`/`completeTopic` never took a task id. Wiring it
+> would have meant building a writer *and* a reader for a workflow nobody had asked for, on
+> a field two docs already described as if it worked. Same class as the inert sweep: a
+> declaration is not an implementation, and one that survives long enough starts getting
+> quoted back as though it were.
 
 **`origin` is load-bearing, not decoration.** The importer only ever *retires* rows it owns
 (`imported`); it will not close out or restate work an agent created over MCP (`agent`) or

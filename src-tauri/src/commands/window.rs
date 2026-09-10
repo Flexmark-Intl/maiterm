@@ -634,8 +634,7 @@ pub(crate) fn clone_workspace_with_id_mapping(
     // Tasks travel with the workspace — a duplicated workspace is a duplicated project,
     // and its work list is the point. Ids can't travel, though: task ids are minted fresh
     // (a `blocked_by` edge in the copy must point at the copy, not the original), tab
-    // assignees are remapped through the same id_map the panes used, and topic_id is
-    // dropped because mesh topics are not carried over.
+    // assignees are remapped through the same id_map the panes used.
     let task_id_map: std::collections::HashMap<String, String> = ws
         .tasks
         .iter()
@@ -679,7 +678,6 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 .as_ref()
                 .and_then(|id| workstream_id_map.get(id))
                 .cloned(),
-            topic_id: None,
             ..t.clone()
         })
         .collect();

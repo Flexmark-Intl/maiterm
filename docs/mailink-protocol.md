@@ -903,7 +903,9 @@ interface MaitermTask {
   updatedAt: string;
   workstreamId: string | null;  // the named job within the workspace this row belongs to
   workstream: string | null;    // its display name, resolved now
-  topicId: string | null;   // mesh topic that is this task's conversation vehicle, if any
+  // `topicId` was REMOVED in 0.9. It was served for four versions and was `null` in every
+  // one of them — no desktop ever set it, because nothing in maiTerm ever wrote the field.
+  // A client that read it has lost nothing; one that typed it as required should drop it.
   // 0.9. The progress log, oldest first, always an array (`[]`, never absent). `detail` is
   // the SPEC — what the task is; these are what HAPPENED to it. A row in `blocked` says why
   // here and nowhere else, so render at least the last one wherever you show a blocked
@@ -2008,7 +2010,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.6` | adds `Chat.windowLabel` / `ChatDetail.windowLabel`, and `rules` + `agentTabIds` on the snapshot |
 | `0.7` | adds `ChatDetail.subagents` and the WS `subagents` event (§4.3 `Subagent`) |
 | `0.8` | adds `tool` + `detail` on `Chat`, `ChatDetail` and every `chat_state` frame |
-| `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted, and `MaitermTask.notes` |
+| `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted; adds `MaitermTask.notes`; **removes `MaitermTask.topicId`** |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

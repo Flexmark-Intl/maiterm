@@ -233,8 +233,6 @@ export interface Task {
   updated_at: string;
   /** The named job this task belongs to; null = a loose task on the workspace. */
   workstream_id?: string | null;
-  /** Mesh topic that is this task's conversation vehicle, if any. */
-  topic_id?: string | null;
   /** Append-only progress log, oldest first. Capped at `TASK_NOTE_CAP` on append and
    *  again by Rust before disk. */
   notes?: TaskNote[];

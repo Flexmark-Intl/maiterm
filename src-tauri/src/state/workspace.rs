@@ -517,9 +517,6 @@ pub struct Task {
     /// The named job this task belongs to; None = a loose task on the workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workstream_id: Option<String>,
-    /// Mesh topic that is this task's conversation vehicle, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic_id: Option<String>,
     /// Append-only progress log, oldest first (docs/tasks.md §5). Capped — see
     /// `TASK_NOTE_CAP`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -509,7 +509,6 @@ pub fn migrate_app_data(data: &mut AppData) {
                 },
                 created_at,
                 updated_at,
-                topic_id: str_at("topic_id"),
                 notes: Vec::new(),
             });
             moved += 1;
