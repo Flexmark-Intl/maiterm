@@ -169,7 +169,7 @@ own="$common/hooks/$(basename "$0")""#;
 /// Bumped whenever a generated script changes, so an already-installed directory
 /// can be recognised as stale and rewritten. Without it, every future fix to
 /// these scripts would land only for users who DON'T have the rule switched on.
-const MANAGED_HOOKS_VERSION: u32 = 2;
+const MANAGED_HOOKS_VERSION: u32 = 3;
 
 /// Marks a file in the managed directory as ours to rewrite or remove.
 const MANAGED_MARKER: &str = "maiterm-managed-hook";
@@ -196,9 +196,11 @@ msg="$1"
 #     future trailer that stops using an @anthropic.com address, and "Claude" on
 #     its own is an ordinary given name: git builds the trailer from user.name,
 #     and a first-name-only user.name is the commonest setup there is.
+# The third match leads with [^A-Za-z]* rather than naming the robot emoji, so
+# this whole script stays ASCII and survives whatever locale a remote shell has.
 cleaned="$(grep -v -i -E '^Co-authored-by:.*@anthropic\.com' "$msg" \
   | grep -v -i -E '^Co-authored-by:[[:space:]]*(Claude|Anthropic)[[:space:]]+(Code|Opus|Sonnet|Haiku|Fable)([[:space:]]|<|$)' \
-  | grep -v -i -E '^[[:space:]]*(🤖[[:space:]]*)?Generated with \[?Claude Code')"
+  | grep -v -i -E '^[^A-Za-z]*Generated with \[?Claude Code')"
 printf '%s\n' "$cleaned" > "$msg"
 
 # core.hooksPath makes git skip the repository's own hooks — run it ourselves.
@@ -502,6 +504,157 @@ fn apply_rule(id: &str, enabled: bool) -> Result<(), String> {
     }
 }
 
+// ─── Remote (SSH) parity ───────────────────────────────────────────────────
+
+/// Merges this machine's env/`includeCoAuthoredBy` decisions into a remote
+/// `~/.claude/settings.json`. No single quotes (the shell wraps it in them) and
+/// pure ASCII (the remote python3 decodes it under whatever locale ssh gives it).
+///
+/// Rewrites the file only when something actually changed, so a user who has
+/// never touched these rules gets reads and nothing else on every bridge connect.
+/// Bails out rather than overwriting a file it can't parse — the same rule the
+/// local writer follows, and for the same reason.
+const PY_REMOTE_SETTINGS: &str = r#"import json,os,sys
+d=json.load(sys.stdin)
+p=os.path.expanduser("~/.claude/settings.json")
+try:
+    s=json.load(open(p)) if os.path.exists(p) else {}
+except Exception:
+    sys.exit(0)
+if not isinstance(s,dict):
+    sys.exit(0)
+before=json.dumps(s,sort_keys=True)
+e=s.get("env")
+if not isinstance(e,dict):
+    e={}
+for k,v in d["envSet"].items():
+    e[k]=v
+for k in d["envUnset"]:
+    e.pop(k,None)
+if e:
+    s["env"]=e
+else:
+    s.pop("env",None)
+if d["coAuthored"]=="set":
+    s["includeCoAuthoredBy"]=False
+else:
+    s.pop("includeCoAuthoredBy",None)
+if json.dumps(s,sort_keys=True)!=before:
+    open(p,"w").write(json.dumps(s,indent=2))"#;
+
+/// Render a shell script that makes a remote account match this machine's rules.
+///
+/// This machine is the source of truth in both directions: a rule that is off
+/// here is REMOVED there, which is what makes switching one off actually reach
+/// the hosts you use. The cost is the contention the rest of the remote-config
+/// code works hard to avoid — a second maiTerm with different rules will flip
+/// the same keys back on its own next connect. That is a deliberate trade, not
+/// an oversight: an undo that doesn't travel is worse than one that can be
+/// argued with, and both instances belong to the same person.
+///
+/// With every rule off the script still runs, because that IS the undo — but it
+/// then performs reads only and writes nothing, so a user who has never opened
+/// the section never has a remote file altered on their behalf.
+fn render_remote_setup_script() -> String {
+    // A settings file we can't read locally tells us nothing about what the
+    // remote should look like — leave the remote's alone rather than reading our
+    // own failure as "the user wants all of this removed".
+    render_remote_setup_script_from(&build_status(), read_claude_settings().is_ok())
+}
+
+fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable: bool) -> String {
+    let applied = |id: &str| {
+        status
+            .rules
+            .iter()
+            .any(|r| r.id == id && r.applied)
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+
+    if settings_readable {
+        let mut env_set = serde_json::Map::new();
+        let mut env_unset: Vec<&str> = Vec::new();
+        for (id, key) in ENV_RULES {
+            if applied(id) {
+                env_set.insert((*key).to_string(), serde_json::Value::String(ENV_VALUE.into()));
+            } else {
+                env_unset.push(key);
+            }
+        }
+        let payload = serde_json::json!({
+            "envSet": env_set,
+            "envUnset": env_unset,
+            "coAuthored": if applied(RULE_CO_AUTHORED) { "set" } else { "unset" },
+        });
+        let escaped = payload.to_string().replace('\'', r"'\''");
+        lines.push(format!("__desh='{escaped}'"));
+        lines.push("if command -v python3 >/dev/null 2>&1; then".into());
+        lines.push(format!("printf '%s' \"$__desh\" | python3 -c '{PY_REMOTE_SETTINGS}'"));
+        lines.push("fi".into());
+    }
+
+    lines.push("__gh=\"$HOME/.maiterm/githooks\"".into());
+    lines.push("__cur=$(git config --global --get core.hooksPath 2>/dev/null)".into());
+
+    if applied(RULE_COMMIT_HOOK) {
+        let keep = std::iter::once("commit-msg")
+            .chain(PASSTHROUGH_HOOKS.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Same refusal as local: a hooksPath somebody else set is theirs.
+        lines.push("if [ -z \"$__cur\" ] || [ \"$__cur\" = \"$__gh\" ]; then".into());
+        lines.push("mkdir -p \"$__gh\"".into());
+        // Withdraw shims from an older install that this build no longer ships —
+        // ours carry the marker, anything else in there is the user's.
+        lines.push(format!("__keep=\" {keep} \""));
+        lines.push("for __f in \"$__gh\"/*; do".into());
+        lines.push("[ -f \"$__f\" ] || continue".into());
+        lines.push(format!("grep -q {MANAGED_MARKER} \"$__f\" 2>/dev/null || continue"));
+        lines.push("case \"$__keep\" in *\" ${__f##*/} \"*) ;; *) rm -f \"$__f\";; esac".into());
+        lines.push("done".into());
+        lines.push(format!(
+            "cat > \"$__gh/commit-msg\" << 'MAITERMHOOKEOF'\n{}MAITERMHOOKEOF",
+            commit_msg_script()
+        ));
+        lines.push(format!(
+            "cat > \"$__gh/.passthrough\" << 'MAITERMPASSEOF'\n{}MAITERMPASSEOF",
+            passthrough_script()
+        ));
+        lines.push(format!("for __h in {}; do", PASSTHROUGH_HOOKS.join(" ")));
+        lines.push("cp \"$__gh/.passthrough\" \"$__gh/$__h\"".into());
+        lines.push("done".into());
+        lines.push("rm -f \"$__gh/.passthrough\"".into());
+        lines.push("chmod +x \"$__gh\"/*".into());
+        lines.push("git config --global core.hooksPath \"$__gh\"".into());
+        lines.push("fi".into());
+    } else {
+        // Only ever unset a hooksPath that is ours, and skip the whole thing on a
+        // host we never touched.
+        lines.push("if [ \"$__cur\" = \"$__gh\" ]; then".into());
+        lines.push("git config --global --unset core.hooksPath".into());
+        lines.push("fi".into());
+        lines.push("if [ -d \"$__gh\" ]; then".into());
+        lines.push("rm -rf \"$__gh\"".into());
+        lines.push("fi".into());
+    }
+
+    // `:` and not `exit 0` — buildUserSetupScript concatenates this into a script
+    // the user pastes into their own interactive shell, and an `exit` there closes
+    // it. It also keeps the script's status 0 after a guard that tested false.
+    lines.push(":".into());
+    lines.join("\n")
+}
+
+/// The script that carries these rules to a bridged SSH host. Empty string when
+/// there is nothing to do.
+#[tauri::command]
+pub async fn build_deshittify_setup_script() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(render_remote_setup_script)
+        .await
+        .map_err(|e| format!("Render task failed: {e}"))
+}
+
 #[tauri::command]
 pub async fn deshittify_status() -> Result<DeshittifyStatus, String> {
     tauri::async_runtime::spawn_blocking(build_status)
@@ -771,6 +924,186 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn status_with(all_on: bool) -> DeshittifyStatus {
+        let mut rules: Vec<DeshittifyRuleStatus> = ENV_RULES
+            .iter()
+            .map(|(id, _)| DeshittifyRuleStatus {
+                id: (*id).into(),
+                applied: all_on,
+                blocked: false,
+                detail: None,
+            })
+            .collect();
+        for id in [RULE_CO_AUTHORED, RULE_COMMIT_HOOK] {
+            rules.push(DeshittifyRuleStatus {
+                id: id.into(),
+                applied: all_on,
+                blocked: false,
+                detail: None,
+            });
+        }
+        DeshittifyStatus { rules }
+    }
+
+    /// Run a rendered remote script against a throwaway HOME, exactly as the
+    /// bridge would over ssh, and report what the "remote" account looks like.
+    fn run_remote_script(script: &str, home: &PathBuf) -> std::process::Output {
+        Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", home)
+            .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .current_dir(home)
+            .output()
+            .unwrap()
+    }
+
+    fn git_global(home: &PathBuf, key: &str) -> String {
+        let out = Command::new("git")
+            .args(["config", "--global", "--get", key])
+            .env("HOME", home)
+            .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The remote script is assembled as one ssh argument out of heredocs, a
+    /// python program and a case statement — the kind of thing that is either
+    /// exactly right or silently truncated. Run it for real.
+    #[test]
+    fn remote_script_applies_every_rule_to_a_fresh_account() {
+        let home = scratch("remote-on");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/settings.json"), r#"{"model":"opus"}"#).unwrap();
+
+        let script = render_remote_setup_script_from(&status_with(true), true);
+        assert!(
+            Command::new("sh").args(["-n", "-c", &script]).status().unwrap().success(),
+            "rendered script is not valid sh"
+        );
+
+        let out = run_remote_script(&script, &home);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+        // Settings merged, the user's own key untouched.
+        let s: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(s["model"], "opus", "the remote's own settings were clobbered");
+        assert_eq!(s["env"]["DISABLE_TELEMETRY"], "1");
+        assert_eq!(s["env"]["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"], "1");
+        assert_eq!(s["includeCoAuthoredBy"], serde_json::Value::Bool(false));
+
+        // Hooks installed and pointed at.
+        let gh = home.join(".maiterm/githooks");
+        assert!(gh.join("commit-msg").exists());
+        assert!(gh.join("pre-receive").exists(), "server-side shim missing");
+        assert!(gh.join("p4-pre-submit").exists(), "p4 shim missing");
+        assert!(!gh.join(".passthrough").exists(), "the shim template was left behind");
+        assert_eq!(git_global(&home, "core.hooksPath"), gh.to_string_lossy());
+
+        // And the installed hook actually works on that "remote".
+        let msg = home.join("MSG");
+        fs::write(&msg, "Fix\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n").unwrap();
+        assert!(Command::new("sh").arg(gh.join("commit-msg")).arg(&msg).current_dir(&home).status().unwrap().success());
+        assert!(!fs::read_to_string(&msg).unwrap().contains("Claude"));
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Switching the rules off has to reach the hosts already carrying them —
+    /// that is the whole point of re-running this on every connect.
+    #[test]
+    fn remote_script_undoes_every_rule_on_next_connect() {
+        let home = scratch("remote-off");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/settings.json"), r#"{"model":"opus"}"#).unwrap();
+
+        // First bring the account fully up...
+        run_remote_script(&render_remote_setup_script_from(&status_with(true), true), &home);
+        assert!(home.join(".maiterm/githooks/commit-msg").exists());
+
+        // ...then run the script this machine emits once the rules are switched off.
+        let out = run_remote_script(&render_remote_setup_script_from(&status_with(false), true), &home);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+        let s: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(s["model"], "opus");
+        assert!(s.get("env").is_none(), "env keys survived the undo: {s}");
+        assert!(s.get("includeCoAuthoredBy").is_none(), "includeCoAuthoredBy survived the undo");
+        assert!(!home.join(".maiterm/githooks").exists(), "managed hooks survived the undo");
+        assert_eq!(git_global(&home, "core.hooksPath"), "", "core.hooksPath survived the undo");
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A host whose owner set their own core.hooksPath, and a user who never
+    /// opened the section, must both come through untouched.
+    #[test]
+    fn remote_script_refuses_a_foreign_hookspath_and_writes_nothing_when_idle() {
+        let home = scratch("remote-foreign");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        // Deliberately compact, so any rewrite at all shows up as a diff.
+        fs::write(&settings, "{\"model\":\"opus\"}").unwrap();
+        let theirs = home.join(".their-hooks");
+        fs::create_dir_all(&theirs).unwrap();
+        Command::new("git")
+            .args(["config", "--global", "core.hooksPath", &theirs.to_string_lossy()])
+            .env("HOME", &home)
+            .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+            .status()
+            .unwrap();
+
+        let out = run_remote_script(&render_remote_setup_script_from(&status_with(true), true), &home);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            git_global(&home, "core.hooksPath"),
+            theirs.to_string_lossy(),
+            "maiTerm overwrote a core.hooksPath it did not set"
+        );
+        assert!(!home.join(".maiterm/githooks/commit-msg").exists());
+
+        // Every rule off, nothing ever installed: reads only, file untouched.
+        let home2 = scratch("remote-idle");
+        fs::create_dir_all(home2.join(".claude")).unwrap();
+        let settings2 = home2.join(".claude/settings.json");
+        fs::write(&settings2, "{\"model\":\"opus\"}").unwrap();
+        let out2 = run_remote_script(&render_remote_setup_script_from(&status_with(false), true), &home2);
+        assert!(out2.status.success(), "stderr: {}", String::from_utf8_lossy(&out2.stderr));
+        assert_eq!(
+            fs::read_to_string(&settings2).unwrap(),
+            "{\"model\":\"opus\"}",
+            "an idle run rewrote a remote settings file it had no business touching"
+        );
+        assert!(!home2.join(".maiterm").exists());
+
+        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&home2);
+    }
+
+    /// An unparseable remote settings.json must stop the merge, not be replaced —
+    /// the same rule the local writer follows.
+    #[test]
+    fn remote_script_leaves_an_unparseable_settings_file_alone() {
+        let home = scratch("remote-badjson");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        let broken = "{\n  \"model\": \"opus\",\n}\n";
+        fs::write(&settings, broken).unwrap();
+
+        let out = run_remote_script(&render_remote_setup_script_from(&status_with(true), true), &home);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(fs::read_to_string(&settings).unwrap(), broken, "the broken file was overwritten");
+        // The git half is independent and should still have applied.
+        assert!(home.join(".maiterm/githooks/commit-msg").exists());
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn hooks_path_comparison_expands_tilde() {
         let ours = dirs::home_dir().unwrap().join(".maiterm").join("githooks");
@@ -779,3 +1112,4 @@ mod tests {
         assert!(!hooks_path_is_ours("~/.husky", &ours));
     }
 }
+

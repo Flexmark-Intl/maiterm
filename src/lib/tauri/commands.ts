@@ -1207,3 +1207,10 @@ export async function deshittifySetRule(id: string, enabled: boolean): Promise<D
 export async function deshittifySetRules(ids: string[], enabled: boolean): Promise<[DeshittifyStatus, string[]]> {
   return invoke('deshittify_set_rules', { ids, enabled });
 }
+
+/** Shell script that makes a bridged SSH host's Claude Code settings and git
+ *  hooks match this machine's deshittification rules — including removing them
+ *  again when a rule is switched off here. Reads only when nothing is enabled. */
+export async function buildDeshittifySetupScript(): Promise<string> {
+  return invoke('build_deshittify_setup_script');
+}

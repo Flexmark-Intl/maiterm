@@ -793,6 +793,19 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       setupPromises.push(commands.sshRunSetup(sshArgs, codexScript));
     }
 
+    // Deshittification rides along on every connect, in both directions: rules on
+    // here are applied there, rules off here are removed there. It is deliberately
+    // NOT in setupPromises — it is a preference, not a dependency, so it must never
+    // gate 'connected' or fail a bridge. Idle when the user has enabled nothing.
+    void (async () => {
+      try {
+        const script = await commands.buildDeshittifySetupScript();
+        if (script.trim()) await commands.sshRunSetup(sshArgs, script);
+      } catch (e) {
+        logError("SSH MCP bridge: deshittification setup failed: " + e);
+      }
+    })();
+
     // Wait for remote setup(s) to finish before flipping to 'connected'.
     // If any setup failed, this throws and the outer catch marks the bridge as failed.
     await Promise.all(setupPromises);
@@ -910,6 +923,12 @@ export async function buildUserSetupScript(tabId: string): Promise<string | null
   if (codexOn) {
     parts.push(await commands.buildCodexSetupScript(
       bridge.remotePort, authToken, tabId, preferencesStore.codexHooks));
+  }
+  // Runtime-independent, and safe in an interactive shell: it ends in `:`, not
+  // `exit`, and every branch is guarded.
+  if (parts.length) {
+    const desh = await commands.buildDeshittifySetupScript();
+    if (desh.trim()) parts.push(desh);
   }
   return parts.length ? parts.join('\n') : null;
 }

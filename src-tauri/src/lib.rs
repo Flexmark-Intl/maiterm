@@ -725,6 +725,7 @@ pub fn run() {
             commands::deshittify::deshittify_status,
             commands::deshittify::deshittify_set_rule,
             commands::deshittify::deshittify_set_rules,
+            commands::deshittify::build_deshittify_setup_script,
             commands::ssh_tunnel::start_ssh_tunnel,
             commands::ssh_tunnel::detach_ssh_tunnel,
             commands::ssh_tunnel::get_ssh_tunnel,

@@ -262,7 +262,7 @@
     {
       id: 'claude_code',
       label: 'Claude Code',
-      blurb: 'Writes to ~/.claude/settings.json and your global git config. Claude Code picks the settings up on its next session.',
+      blurb: 'Writes to ~/.claude/settings.json and your global git config. Claude Code picks the settings up on its next session. These also travel to SSH hosts you bridge to — applied on connect, and removed again on the next connect after you switch a rule off. A host you only ever `ssh` into by hand is never touched.',
       rules: [
         {
           id: 'cc_disable_telemetry',
