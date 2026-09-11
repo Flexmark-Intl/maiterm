@@ -1084,6 +1084,34 @@ pub fn get_pty_foreground_job(
     Ok(foreground_job(pid))
 }
 
+/// Kill a PTY's foreground job — but only if it is still the job the caller thinks it is.
+/// `pid` is what `get_pty_foreground_job` reported when the stack store started the
+/// service; a fresh sweep must still name it as the tty's foreground leader, or the
+/// process the user replaced it with would be the one to die. `force` escalates from
+/// TERM to KILL. Returns whether a signal was sent.
+pub fn kill_pty_foreground_job(
+    state: &Arc<AppState>,
+    pty_id: &str,
+    pid: u32,
+    force: bool,
+) -> Result<bool, String> {
+    let current = get_pty_foreground_job(state, pty_id, true)?;
+    if current.pid != Some(pid) {
+        return Ok(false);
+    }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let target = Pid::from_u32(pid);
+    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+    let Some(process) = sys.process(target) else { return Ok(false) };
+    let sent = if force {
+        process.kill()
+    } else {
+        process.kill_with(sysinfo::Signal::Term).unwrap_or_else(|| process.kill())
+    };
+    Ok(sent)
+}
+
 /// Which agent CLIs to look for in a tab's process tree. Union of every runtime's
 /// `agent_process_names` (see `state/agent_runtime.rs`) — kept as a small literal so
 /// the readiness probe needn't know a tab's runtime up front.

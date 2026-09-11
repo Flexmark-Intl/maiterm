@@ -234,6 +234,11 @@ export interface PtyForeground {
 export async function getPtyForegroundJob(ptyId: string, fresh = true): Promise<PtyForeground> {
   return invoke('get_pty_foreground_job', { ptyId, fresh });
 }
+/** Signal a PTY's foreground job — only if `pid` is still that job (re-checked with a
+ *  fresh sweep). TERM by default, KILL with `force`. Resolves to whether anything was sent. */
+export async function killPtyForegroundJob(ptyId: string, pid: number, force = false): Promise<boolean> {
+  return invoke('kill_pty_foreground_job', { ptyId, pid, force });
+}
 
 /** Liveness for many PTYs in one pass — PTYs that no longer exist are simply absent. */
 export async function getAgentLivenessBatch(ptyIds: string[]): Promise<Record<string, AgentLiveness>> {

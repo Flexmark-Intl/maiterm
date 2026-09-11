@@ -1,4 +1,4 @@
-import type { SplitDirection, SplitNode, Tab, Pane, Task, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding } from '$lib/tauri/types';
+import type { SplitDirection, SplitNode, Tab, Pane, Task, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding, Service } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
 import { getAdapter } from '$lib/agents/adapter';
@@ -1017,11 +1017,16 @@ function createWorkspacesStore() {
       }
     },
 
-    async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean }) {
-      const afterTabId = options?.append
-        ? undefined
-        : workspaces.flatMap(w => w.panes).find(p => p.id === paneId)?.active_tab_id ?? undefined;
+    async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean; background?: boolean }) {
+      const previousActiveTabId = workspaces.flatMap(w => w.panes).find(p => p.id === paneId)?.active_tab_id ?? undefined;
+      const afterTabId = options?.append ? undefined : previousActiveTabId;
       const tab = await commands.createTab(workspaceId, paneId, name, afterTabId);
+      // `background`: the tab exists but the pane keeps showing what it showed (a stack
+      // service starting behind the user's work — docs/stack.md §4). Rust's create_tab
+      // made the new tab active, so put the previous one back before the mirror sees it.
+      if (options?.background && previousActiveTabId) {
+        await commands.setActiveTab(workspaceId, paneId, previousActiveTabId).catch(() => {});
+      }
 
       // Open the new tab at the host/cwd of the previous (active) tab — the
       // tab the user was on when they opened the new one. We no longer survey
@@ -1128,10 +1133,12 @@ function createWorkspacesStore() {
           ? paneForTab.tabs.findIndex(t => t.id === afterTabId) + 1
           : paneForTab.tabs.length;
         paneForTab.tabs.splice(insertIdx >= 0 ? insertIdx : paneForTab.tabs.length, 0, tab);
-        const { navHistoryStore } = await import('$lib/stores/navHistory.svelte');
-        paneForTab.active_tab_id = tab.id;
         terminalsStore.markSpawning(tab.id);
-        navHistoryStore.push({ workspaceId, paneId, tabId: tab.id });
+        if (!options?.background) {
+          const { navHistoryStore } = await import('$lib/stores/navHistory.svelte');
+          paneForTab.active_tab_id = tab.id;
+          navHistoryStore.push({ workspaceId, paneId, tabId: tab.id });
+        }
       }
       return tab;
     },
@@ -1605,6 +1612,34 @@ function createWorkspacesStore() {
       if (!tab || (tab.overlord_exempt ?? false) === exempt) return;
       tab.overlord_exempt = exempt;
       await commands.setTabOverlordExempt(workspaceId, paneId, tabId, exempt);
+    },
+
+    /** Bind a tab to a stack service, or clear it (docs/stack.md §3). One tab per service:
+     *  Rust clears the same service from any other tab in the workspace in the same write,
+     *  and the mirror does the same here so the sidebar never shows two. */
+    async setTabServiceId(workspaceId: string, paneId: string, tabId: string, serviceId: string | null) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      const pane = ws?.panes.find(p => p.id === paneId);
+      const tab = pane?.tabs.find(t => t.id === tabId);
+      if (!ws || !tab || (tab.service_id ?? null) === serviceId) return;
+      if (serviceId) {
+        for (const p of ws.panes) {
+          for (const t of p.tabs) {
+            if (t.id !== tabId && t.service_id === serviceId) t.service_id = null;
+          }
+        }
+      }
+      tab.service_id = serviceId;
+      await commands.setTabServiceId(workspaceId, paneId, tabId, serviceId);
+    },
+
+    /** Replace a workspace's stack definitions (docs/stack.md §3). The stack store owns
+     *  the list; this keeps the mirror and disk in step. */
+    async setWorkspaceStack(workspaceId: string, stack: Service[]) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (!ws) return;
+      ws.stack = stack;
+      await commands.setWorkspaceStack(workspaceId, $state.snapshot(stack) as Service[]);
     },
 
     /** Operator kill switch: end a tab's comms thread binding(s). Omit rootId = all. */

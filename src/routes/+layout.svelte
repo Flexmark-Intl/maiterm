@@ -21,6 +21,7 @@
   import type { ImportPreview } from '$lib/tauri/commands';
   import { claudeCodeStore } from '$lib/stores/claudeCode.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
+  import { stackStore } from '$lib/stores/stack.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
@@ -597,6 +598,9 @@
 
     // Claude Code state tracking (hook events → per-tab Claude state)
     claudeStateStore.init();
+
+    // Workspace stack (docs/stack.md): exit hooks, binding reconciliation, auto-start.
+    stackStore.init();
 
     // Agent Bridge (hook events → cross-agent message delivery)
     agentBridgeStore.init();
@@ -1185,6 +1189,7 @@
       unlistenMailinkTasks?.();
       unlistenMailinkRequests?.();
       claudeStateStore.destroy();
+      stackStore.destroy();
       agentBridgeStore.destroy();
       agentMeshStore.destroy();
       unlistenNotificationAction?.unregister();

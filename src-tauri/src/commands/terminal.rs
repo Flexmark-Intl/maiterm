@@ -120,6 +120,22 @@ pub async fn get_pty_foreground_job(
         .map_err(|e| format!("foreground probe failed to run: {}", e))?
 }
 
+/// Stop a stack service the polite way having failed (docs/stack.md §4): signal the
+/// foreground job, but only if `pid` is still that job. Same sweep, same thread rule.
+#[tauri::command]
+pub async fn kill_pty_foreground_job(
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+    pid: u32,
+    force: Option<bool>,
+) -> Result<bool, String> {
+    let app_state = state.inner().clone();
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || pty::kill_pty_foreground_job(&app_state, &pty_id, pid, force))
+        .await
+        .map_err(|e| format!("kill failed to run: {}", e))?
+}
+
 #[tauri::command]
 pub fn list_live_ptys(state: State<'_, Arc<AppState>>) -> Vec<String> {
     pty::list_live_ptys(&*state)
