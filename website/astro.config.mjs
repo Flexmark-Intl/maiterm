@@ -26,15 +26,12 @@ export default defineConfig({
       expressiveCode: {
         themes: ['tokyo-night'],
       },
-      head: [
-        {
-          tag: 'script',
-          // Default first-time visitors to dark. Only act when no choice is
-          // stored yet — Starlight stores "auto" as an empty string, so a
-          // falsy check would clobber it back to dark on every navigation.
-          content: `if (localStorage.getItem('starlight-theme') === null) { localStorage.setItem('starlight-theme', 'dark'); document.documentElement.dataset.theme = 'dark'; }`,
-        },
-      ],
+      // No theme head script. Starlight's own ThemeProvider already resolves
+      // `storedTheme || prefers-color-scheme`, so a first-time visitor follows
+      // their system. We used to override that to force dark and, worse, WRITE
+      // 'dark' into localStorage — which pinned the visitor to dark forever as
+      // if they had chosen it, on a machine set to light. 37449f4 (2026-06-08)
+      // was a deliberate decision at the time; the new site drops it.
       customCss: ['./src/styles/custom.css'],
       sidebar: [
         { label: 'Download', slug: 'download' },

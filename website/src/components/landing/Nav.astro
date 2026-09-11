@@ -162,8 +162,27 @@ const LINKS = [
     border-color: var(--ln-border-strong);
   }
 
-  /* One button, two glyphs — show whichever the *next* click produces. */
+  /* One button, two glyphs — show whichever the *next* click produces.
+     Keyed off the OS first and the attribute second, so it is still right when
+     no script has run and there is no `data-theme` to read. */
   .icon-sun {
+    display: none;
+  }
+  .icon-moon {
+    display: block;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(html:not([data-theme='light'])) .icon-sun {
+      display: block;
+    }
+    :global(html:not([data-theme='light'])) .icon-moon {
+      display: none;
+    }
+  }
+  :global(html[data-theme='dark']) .icon-sun {
+    display: block;
+  }
+  :global(html[data-theme='dark']) .icon-moon {
     display: none;
   }
   :global(html[data-theme='light']) .icon-sun {
@@ -171,12 +190,6 @@ const LINKS = [
   }
   :global(html[data-theme='light']) .icon-moon {
     display: block;
-  }
-  :global(html[data-theme='dark']) .icon-sun {
-    display: block;
-  }
-  :global(html[data-theme='dark']) .icon-moon {
-    display: none;
   }
 
   .nav-download {

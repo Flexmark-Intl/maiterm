@@ -24,7 +24,10 @@ const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
 ---
 
 <!doctype html>
-<html lang="en" data-theme="dark">
+{/* No `data-theme` here on purpose: an attribute would be an explicit choice,
+    and the CSS resolves the system preference on its own. The inline script in
+    <head> stamps one before first paint for the rules that need it. */}
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -49,10 +52,15 @@ const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
       crossorigin
     />
 
-    {/* Theme, before first paint, or the page flashes dark→light for anyone who
-        chose light in the docs. `data-theme="dark"` is already on <html> above,
-        so with JS off the site stays unconditionally dark — same as Starlight's
-        behaviour, which has no prefers-color-scheme fallback either. */}
+    {/* Theme, before first paint. Matches Starlight's own ThemeProvider:
+        `storedTheme || prefers-color-scheme`, and NOTHING is written to storage
+        for a visitor who has not chosen — writing 'dark' there is what used to
+        pin a light-system visitor to dark forever as if they had picked it.
+
+        The stylesheet already resolves the OS on its own via `color-scheme:
+        light dark`, so this is not what makes the page correct — it exists to
+        set `data-theme` for the rules that key off it (the nav's sun/moon) and
+        to honour an explicit choice. With JS off the CSS still gets it right. */}
     <script is:inline>
       (() => {
         const mq = window.matchMedia('(prefers-color-scheme: light)');
@@ -64,31 +72,24 @@ const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
             return null;
           }
         };
-        const isAuto = (v) => v === 'auto' || v === '';
+        /* Absent and Starlight's "auto" (stored as an empty string) both mean
+           "no choice made" — follow the system, and keep following it. */
+        const unset = (v) => v === null || v === 'auto' || v === '';
+        const apply = (v) =>
+          (document.documentElement.dataset.theme = unset(v)
+            ? mq.matches
+              ? 'light'
+              : 'dark'
+            : v);
 
-        try {
-          const stored = read();
-          if (stored === 'light' || stored === 'dark') {
-            document.documentElement.dataset.theme = stored;
-          } else if (stored === null) {
-            // First-time visitor: match the docs, which default to dark and
-            // write that choice through so both halves of the site agree.
-            localStorage.setItem('starlight-theme', 'dark');
-          } else if (isAuto(stored)) {
-            // Starlight stores "auto" as an empty string. Follow the OS.
-            document.documentElement.dataset.theme = mq.matches ? 'light' : 'dark';
-          }
-        } catch {
-          /* Blocked storage — the dark default on <html> stands. */
-        }
+        apply(read());
 
         // Keep following the OS while the tab stays open, the way Starlight's
-        // ThemeSelect does. Without this a tab left open on "auto" stays light
-        // through sunset while every docs tab repaints dark.
-        mq.addEventListener('change', (e) => {
-          if (isAuto(read())) {
-            document.documentElement.dataset.theme = e.matches ? 'light' : 'dark';
-          }
+        // ThemeSelect does. Without this a tab left open stays light through
+        // sunset while every other window repaints dark.
+        mq.addEventListener('change', () => {
+          const stored = read();
+          if (unset(stored)) apply(stored);
         });
       })();
     </script>
