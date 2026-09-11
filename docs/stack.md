@@ -39,10 +39,12 @@ Workspace.stack[]                  ← source of truth (a workspace IS a project
 
 ### Why the definition is not a yaml file in the repo
 
-- **A workspace has no root folder.** `Workspace` carries no path; `collect_workspace_folders`
-  derives folders from tab cwds, and a workspace legitimately spans two repos or an SSH
-  host. A `maiterm.yml` needs a root to be found from, which would mean inventing that
-  concept to serve the file.
+- **A workspace has no root folder.** `Workspace` carries no path; the folders an agent is
+  told about are derived from tab cwds at call time (`handleGetWorkspaceFolders`,
+  `claudeCode.svelte.ts` — the Rust `collect_workspace_folders` is the SSH-install path and
+  returns `$HOME`), and a workspace legitimately spans two repos or an SSH host. A
+  `maiterm.yml` needs a root to be found from, which would mean inventing that concept to
+  serve the file.
 - **maiTerm owns state; repos and agents are consumers.** Same argument as tasks §2: one
   writer, validated payloads, instant UI, no file watcher, and it works on SSH tabs where a
   file would be on the wrong host.
@@ -104,8 +106,15 @@ stopped   no service tab, or the tab's shell is at a prompt with exit 0 / SIGINT
 starting  command sent, no ready match yet (and no exit)
 running   process alive, no ready_pattern defined → this is as good as it gets
 ready     ready_pattern matched, or an agent set ready over MCP
-crashed   command exited non-zero (OSC 133 D), or the tab's PTY died (pty-close)
+crashed   command exited non-zero (OSC 133 D), or the tab's shell itself died
 ```
+
+A dead shell is the rare case and it is **already handled by deletion**: `pty-close-${ptyId}`
+carries no payload and its one listener (`TerminalPane.svelte`) deletes the tab unless a
+suspend is in flight. The stack store does not fight that — it observes the close of a
+bound tab, records `crashed` (unless a stop was in flight), and the next start mints a fresh
+tab. Because the binding lives on the tab, "no bound tab" is a perfectly good `stopped` /
+`crashed` representation; nothing has to be respawned in place.
 
 `stopped` and `crashed` are different lanes for the same reason `done` and `dropped` are:
 a suspend, a Ctrl-C, and a human `stopService` all land on `stopped`, and none of them may
@@ -121,37 +130,46 @@ does not**. That single fact makes the lifecycle cheap:
 | Verb | Mechanism | Nothing new needed |
 |---|---|---|
 | start | `send_command`-style PTY write: `cd`, exports, command, CR | trigger action already exists |
-| stop | write `^C`; if still foreground after 3s, `^C` again; then `kill` the child | `PtyInfo` foreground check exists |
+| stop | write `^C`; if still foreground after 3s, `^C` again; then `kill` the child | needs the foreground query below |
 | restart | stop, then start, same tab, same shell | — |
-| exit detection | OSC 133 `D;<code>` on the service tab | `term-osc133-${ptyId}` |
-| PTY death | `pty-close-${ptyId}` → `crashed`, and the tab needs a respawn | existing event |
-| logs | `getTabContext` on the bound tab | existing tool |
-| readiness | system trigger scoped to the tab | trigger engine |
+| exit detection | OSC 133 `D;<code>` on the service tab | `term-osc133-${ptyId}` carries the code |
+| shell death | `pty-close-${ptyId}` — the tab is deleted; store records `crashed` | existing event + listener |
+| logs | `getTabContext` on the bound tab — reads the Rust grid while the pane is registered | existing tool |
+| readiness | system trigger scoped to the tab via `Trigger.tabs` | trigger engine, per-tab scope exists |
 
 The human can click into the tab, Ctrl-C it, poke at the process, and run the command
 again by hand — the tab reads the OSC 133 result either way and the status follows. A
 service tab is never a black box the way a managed process is.
 
 **Never type into a foreground that isn't ours.** Every write is gated on the foreground
-executable matching the service (or the shell sitting at a prompt). The comms watcher
+executable matching the service, or the shell sitting at its prompt. The comms watcher
 learned this the hard way (`agent_owns_terminal`): a wrong "yes" types a command into
 whatever the human left running there. A wrong "no" costs a retry.
+
+> **This guard needs one new primitive.** `PtyInfo.foreground_command` is *not* the
+> foreground executable — on every platform it reports `Some` only for `ssh`/`mosh`/`autossh`
+> and `None` otherwise, and `AgentLiveness` is `{agent_running, ssh_foreground}`. Neither can
+> say "the foreground is `node`" or "the shell is at its prompt". The unix code already finds
+> the foreground job leader and then filters it to ssh names (`pty/manager.rs` ~1263); a
+> `foreground_executable(pty_id) -> Option<String>` that skips the filter is the whole
+> change, plus the Windows equivalent. `spawn_blocking`, per the pinwheel rule. v1 item.
 
 ### The four tab states, applied
 
 | State (docs/overlord.md §11) | A service tab there means |
 |---|---|
-| live, loaded | running normally, visible |
-| live, **not loaded** | running in a background workspace — the normal case; Rust-side hidden-tab frame gating means it costs nothing to watch |
+| live, visible | running normally |
+| live, in a background workspace | the normal case. Its `TerminalPane` is mounted but hidden — that is how every running tab in a non-active workspace already works (restore mounts them and they stay mounted; unmount kills the PTY). Rust-side hidden-tab frame gating makes it cost nothing to watch |
 | suspended tab / suspended workspace | `stopped`; definition intact; `resumeWorkspace` re-runs `auto_start` services |
 | archived | not allowed — archiving a service tab **stops** it and unbinds; the definition stays (§5) |
 
-> **Open constraint (verify before v1):** PTY spawn is mount-driven today — `resumeTab`
-> navigates to the tab so its `TerminalPane` mounts and respawns. A service in a *background*
-> workspace needs a headless spawn. Session restore's serial respawn is the closest existing
-> path; establish whether it mounts or spawns directly before designing `startService`.
-> Fallback that is always correct: `auto_start` fires when the workspace becomes active, and
-> `startService` on a background workspace navigates first.
+**Spawn is mount-driven, and the headless primitive already exists.** `spawnTerminal` runs
+in `TerminalPane`'s `onMount`, and session restore does not spawn any other way — it adds
+each tab to the activated sets and awaits the pane's registration (`driveRestore`,
+`+page.svelte`). The same file has an `activate-tab` window event whose stated purpose is to
+mount a tab "so its TerminalPane spawns a PTY … without switching what the desktop is
+showing". `startService` on a background workspace is that event followed by the PTY write
+once the pane registers. No navigation, no fallback.
 
 ## 5. Lifecycle rules
 
@@ -162,10 +180,16 @@ whatever the human left running there. A wrong "no" costs a retry.
   Overlord card asks a human. Without the ceiling a hidden tab loops at line rate.
 - **Cmd+W on a service tab** → stop + unbind, keep the definition. Removing a service is a
   sidebar action, never a tab close. (The two-press confirm still applies.)
-- **Duplicate** → the copy gets `service_id: None`. A duplicate of the api tab is a plain
-  terminal in the api's cwd — genuinely useful — but two tabs claiming `api` is the
-  comms-binding bug again. `duplicate_tab` must clear it; any path that builds a copy from
-  `Tab::new()` and forgets this field is the same bug (see `reload-mints-a-new-tab-id`).
+- **Duplicate** → the copy has no binding. A duplicate of the api tab is a plain terminal in
+  the api's cwd — genuinely useful — and two tabs claiming `api` would be the comms-binding
+  bug again. This falls out for free: there is no Rust `duplicate_tab`; the TS `duplicateTab`
+  (and the Cmd+D split path) call `createTab` → `Tab::new()` and copy fields one at a time,
+  so an uncopied field stays `None`. **The path that forces a decision is
+  `clone_workspace_with_id_mapping`** (`commands/window.rs`, behind `duplicate_workspace` and
+  `duplicate_window`): it builds an exhaustive `Tab { … }` literal, so adding `service_id` is
+  a compile error until someone writes `service_id: None` there. That is the right answer —
+  a duplicated workspace copies the *stack definition* (it is on `Workspace`) but none of its
+  services are running in the copy, so no tab in it may claim one.
 - **Reload** → `carry_tab_record` copies the whole record, so `service_id` rides
   automatically and the derived binding moves to the new tab when the original is deleted.
   No remap. Reload of a running service is a restart (the new tab's shell is fresh).
@@ -236,12 +260,16 @@ values, which is why agents are pointed at MCP instead. v2.
 Readiness detection *is* a trigger: `ready_pattern` becomes a **system-owned trigger**
 scoped to the service tab — `set_tab_state(ready)`, `%port` captured if the pattern names
 it. The engine already does regex over stripped output with capture groups into
-`trigger_variables`, dedup, and cooldown. What it needs: a `system: true` flag so these
-never appear in the trigger editor and are never swept into `hidden_default_triggers`, and
-a scope of *one tab id* rather than the global list. `processOutput` already runs per tab.
+`trigger_variables`, dedup, cooldown, **and per-tab scope** — `Trigger.tabs: string[]` is
+filtered in `processOutput` beside the workspace filter. The only thing missing is a
+`system: true` flag so these never appear in the trigger editor and are never swept into
+`hidden_default_triggers`.
 
-The 15s auto-resume suppression window does **not** apply to service tabs — a dev server
-that prints "ready" in 900ms would be missed. Service tabs get the plain 2s window.
+The 15s auto-resume suppression window is decided per pane mount from the tab's
+`autoResumeCommand`, and a service tab has none (its command is typed by the store, not
+replayed by auto-resume), so it already gets the plain 2s window. Keep it that way: a dev
+server that prints "ready" in 900ms would be missed under the long window — which is also
+the reason **not** to implement `start` through the auto-resume path.
 
 ### 6.5 Overlord
 
@@ -327,11 +355,13 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 
 1. [ ] Model: `Service` on `Workspace`, `Tab.service_id`; `set_workspace_stack` (coarse
        replace, like `set_workspace_mesh_topics`, normalizing `normalized_name` server-side);
-       TS mirrors; `duplicate_tab` clears the binding; `cargo check --tests`.
-2. [ ] Store: `stack.svelte.ts` — runtime status, start/stop/restart via PTY writes with the
-       foreground guard, OSC 133 exit → status, `pty-close` → crashed, restart backoff +
-       ceiling, `auto_start` on workspace activate/resume.
-3. [ ] Headless-spawn question (§4) answered and the chosen path wired.
+       TS mirrors; `service_id: None` in `clone_workspace_with_id_mapping`; `cargo check --tests`.
+2. [ ] Rust: `foreground_executable(pty_id)` — the ssh-filtered foreground-job query without
+       the filter, unix + Windows, `spawn_blocking` (§4). This is the write guard.
+3. [ ] Store: `stack.svelte.ts` — runtime status, start/stop/restart via PTY writes behind
+       the guard, `activate-tab` to mount a background tab before the first write, OSC 133
+       exit → status, bound-tab close → crashed, restart backoff + ceiling, `auto_start` on
+       workspace activate/resume.
 4. [ ] Sidebar section + rollup dot + shared context menu + edit modal + workspace submenu.
 5. [ ] MCP: the nine tools, workspace-scoped, `stack_enabled` gate, write verbs on the
        inferred-identity refusal list; priming line rendered from state.
@@ -348,9 +378,11 @@ file, socket-based port discovery if anything ever needs it.
 
 ## 12. Open questions
 
-1. **Headless spawn** (§4). The one thing to verify before writing code.
-2. **Does `getTabContext` serve an unmounted tab?** Rust owns the grid, so it should; if it
-   reads the xterm buffer instead, `getServiceOutput` on a background service is empty.
+1. ~~Headless spawn~~ — resolved (§4): `activate-tab` mounts a hidden pane; restore already
+   keeps background panes mounted.
+2. ~~Does `getTabContext` serve a background tab?~~ — resolved: `getTerminalText` reads the
+   Rust grid whenever the pane is registered (mount → destroy), and falls back to the SQLite
+   scrollback snapshot otherwise. Given 1, a running service always reads the live grid.
 3. **Shell integration on the service tab.** Exit detection is OSC 133; a shell where
    integration failed to inject reports nothing. Fallback: `PtyInfo` foreground polling on
    a slow tick (5s) for service tabs only — acceptable, since a crash is not sub-second work.
