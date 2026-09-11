@@ -2985,6 +2985,58 @@ function createOverlordStore() {
       return true;
     },
 
+    /**
+     * An AGENT handed a task to another tab (`updateTasks`'s `assign_to`). Raise it; do not
+     * type it.
+     *
+     * **An ordinary agent may not put text into another agent's terminal, and this does not
+     * change that.** `driveTab` is Overlord-only and `startTask` is human-only, both because
+     * cross-tab injection carries the human's authority — a tab cannot tell an injected line
+     * from something its human typed. An agent that could notify a peer directly would have
+     * that authority by writing one field of a task update, which is the cheapest possible
+     * route to the most privileged act in the app.
+     *
+     * So the assignment lands on the board (that part is silent and always works) and the
+     * NOTICE goes to whoever is entitled to act on it — the supervisor if there is one, and
+     * otherwise nobody, reported as such. `told: 'nobody'` is not a failure: the row is
+     * assigned and visible on the board and in the target's own panel, where the human can
+     * press "Do it". What must never happen is the caller believing a hand-off was delivered
+     * when it was not — the `sent ≠ done` rule this file keeps relearning.
+     */
+    announceHandoff(taskId: string, fromTabId: string): 'agent' | 'nobody' {
+      const hit = tasksStore.findAnywhere(taskId);
+      if (!hit) return 'nobody';
+      const { task } = hit;
+      const toTabId = task.tab_id;
+      if (!toTabId || toTabId === fromTabId) return 'nobody';
+      // Same three conditions startTask's fallback uses. An exempt tab in particular: the
+      // escalation is agent-only, so it would be consumed off the board by listEscalations
+      // and then refused by driveTab — a promise nothing can keep — while handing the exempt
+      // tab's name and the task's detail to the supervisor, which is what exemption exists
+      // to prevent.
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(toTabId)) {
+        return 'nobody';
+      }
+      const stream = tasksStore.workstream(hit.workspaceId, task.workstream_id)?.name;
+      escalate(
+        toTabId,
+        null,
+        'task_handoff',
+        `${tabDisplayName(fromTabId)} assigned the task "${task.title}"` +
+          (stream ? ` (workstream: ${stream})` : '') +
+          ` to ${tabDisplayName(toTabId)} (tab ${toTabId}), currently in ${task.status}. ` +
+          `That was an AGENT's decision, not the human's, and the target has NOT been told — ` +
+          `nothing types into a tab on an agent's say-so.` +
+          (task.detail ? `\n\nWhat it says: ${task.detail}` : '') +
+          `\n\nDecide whether it should proceed: drive the target tab if the hand-off makes ` +
+          `sense, reassign it, or ask the human if it does not. Task id ${task.id}.`,
+        task.id,
+      );
+      handedOff.set(taskId, Date.now());
+      bumpLive();
+      return 'agent';
+    },
+
     /** When a task was last handed to the agent, for the card's receipt. */
     taskHandoffAt(id: string): number | null {
       void liveVersion;

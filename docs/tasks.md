@@ -404,8 +404,29 @@ Three constraints:
   tracking the task. The assignee is resolved before anything else in the update is
   applied, so a refused hand-off cannot half-write the rest of the same row.
 
-Assigning does not TELL the tab anything — see §5's delegation note. Setting a lane and
-telling an agent are separate acts, and that is deliberate.
+#### Handing a task to another tab announces; it does not type
+
+**An ordinary agent may not put text into another agent's terminal, and `assign_to` does not
+change that.** `driveTab` is Overlord-only and `startTask` is human-only, both because
+cross-tab injection carries the human's authority — a tab cannot tell an injected line from
+something its human typed. An agent that could notify a peer directly would hold that
+authority by writing one field of a task update, which is the cheapest imaginable route to
+the most privileged act in the app.
+
+So the assignment lands on the board (silent, always works) and the NOTICE goes to whoever
+may act on it. `overlordStore.announceHandoff` raises a `task_handoff` escalation when there
+is a supervisor — gated on the same three conditions `startTask`'s fallback uses (enabled,
+an agent tab exists, target not exempt) — and the reply carries `handoffs: [{id, to, told,
+detail}]` either way:
+
+- `told: 'agent'` — the supervisor has it and will decide whether to drive the target.
+- `told: 'nobody'` — **not a failure.** The row is assigned and visible on the board and in
+  the target's own panel; nobody has been notified. The caller is told so in words, because
+  the alternative is an agent that believes it delegated the work and stops tracking it.
+  Same `sent ≠ done` rule as `recoverTab` and the phone's `accepted`/`confirmed`.
+
+Claiming a row for yourself or releasing one raises nothing — announcing those would fire a
+card every time an agent picked up its own work.
 
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.

@@ -1564,6 +1564,10 @@ function createClaudeCodeStore() {
      *  rather than silently dropped: an agent that hands work to a tab and is told nothing
      *  believes the hand-off happened and stops tracking the task. */
     const refused: { id: string; reason: string; detail: string }[] = [];
+    /** Rows this call moved to a DIFFERENT tab, and whether anyone was told. Collected
+     *  during the mutate and announced after it, since announcing escalates and that must
+     *  not run inside the store's synchronous whole-list commit. */
+    const handedOff: { id: string; to: string }[] = [];
     const known = tabIdsInWorkspace(loc.workspace);
     tasksStore.mutate(loc.workspace.id, (list) => {
       let changed = false;
@@ -1592,7 +1596,15 @@ function createClaudeCodeStore() {
           assignTo = want;
         }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
-        if (assignTo !== undefined) patch.tab_id = assignTo;
+        if (assignTo !== undefined) {
+          patch.tab_id = assignTo;
+          // Handing work to ANOTHER tab is a delegation and has to be announced; claiming
+          // one for yourself or releasing it is not, and announcing those would raise a
+          // card every time an agent picked up its own work.
+          if (assignTo && assignTo !== loc.tab.id && assignTo !== list[idx].tab_id) {
+            handedOff.push({ id: u.id!, to: assignTo });
+          }
+        }
         if (u.status) patch.status = coerceStatus(u.status);
         if (u.title?.trim()) {
           patch.title = u.title.trim();
@@ -1643,10 +1655,29 @@ function createClaudeCodeStore() {
       }
       return changed ? list : null;
     });
+    // Announced AFTER the commit, so the escalation describes the stored assignment rather
+    // than one that could still be rolled back.
+    const nameOfTab = (id: string) => {
+      const tab = loc.workspace.panes.flatMap((p) => p.tabs).find((t) => t.id === id);
+      return tab ? tabDisplayName(tab) : id;
+    };
+    const handoffs = handedOff.map(({ id, to }) => {
+      const told = overlordStore.announceHandoff(id, loc.tab.id);
+      return {
+        id,
+        to,
+        told,
+        detail:
+          told === 'agent'
+            ? `${nameOfTab(to)} has NOT been typed into — nothing types into a tab on an agent's say-so. This window's Overlord has been told and will decide whether to drive it.`
+            : `The task is assigned to ${nameOfTab(to)} and shows on its task panel and the board, but that tab has NOT been told: nothing types into a tab on an agent's say-so, and there is no supervisor here to relay it. If it needs starting now, say so to your human — they can press "Do it" on the row.`,
+      };
+    });
     return {
       updated,
       ...(missing.length ? { missing } : {}),
       ...(refused.length ? { refused } : {}),
+      ...(handoffs.length ? { handoffs } : {}),
     };
   }
 
