@@ -293,6 +293,70 @@ to get right, three of which it got wrong first:
   the sweep returned early and the handoff outlived it. `deadTabs` is now seeded from every
   per-tab map, which is what its docstring always claimed.
 
+**The `blocked` card was the second instance, found from the phone (2026-09-10.)** Reported
+by the maiLink agent: conversations stuck with an "Escalation" tag and nothing pending. Same
+shape as the handoff exactly — a card derived from a condition that changes on its own,
+stored as a queue only a human could empty.
+
+`handleAgentReply` escalates on a bare `state: 'blocked'`, which is precisely the call
+`replyToOverlord`'s own description instructs ("'status' for a state change worth recording
+(e.g. blocked)" beside "Set needs_human ONLY for things a human must decide") — so an agent
+following the documented contract raised a human card it was told it wasn't raising. `blocked`
+is not in `AGENT_ONLY_ESCALATIONS`, so the agent's pull marks it read rather than deleting it,
+and the only exits were a human dismissing it or the tab dying. A later report overwrote
+`agentReports` and never touched the escalation list, so unblocking was invisible. On the
+phone, whose inbox badges rows off `escalations[].tabId`, each one is a permanently flagged
+conversation.
+
+Not a deliberate call: `17462b7` set out to give the declared-but-unproduced `blocked` kind a
+producer, and is silent on audience and lifetime. The same commit fixes an `AGENT_ONLY` leak
+in the *other* direction, so the split was on the author's mind and this was simply not
+checked against it.
+
+`withdrawBlocked` drops a tab's open `blocked` cards the moment it reports any non-blocked
+state, mirroring the permission withdrawal. Two boundaries:
+
+- **Only the bare-blocked path.** `needs_human` / `kind: 'escalate'` files `agent_report`,
+  which stays queued — an agent can raise a question and go do other work, and the question
+  does not stop needing an answer because the asker got unblocked. Withdrawing there would
+  clear a card the human never saw, on the strength of the agent's own later activity.
+- **Withdrawal, not deriving the lane from `agentReports`.** Deriving is the cleaner end
+  state and is what §3.1 argues for, but it stops `blocked` being an escalation at all,
+  changing what the mirror publishes — and maiLink anchors its Recover button to
+  `kind === 'blocked' || kind === 'step_timeout'`, deliberately, so recover sits where the
+  symptom is. Deriving without coordinating would remove `recoverTab` for exactly the case it
+  exists to serve. Parked on the board with that constraint written down.
+
+**Two more from the same report, not yet fixed.** `step_timeout` is *not* the same bug — it
+records an event (the escalate is followed by `return`; the ritual aborted), so there is
+nothing to withdraw. But it is produced by the step behaviour literally named
+`escalate_to_overlord`, which sits beside a separate `notify_human` option, and it is not in
+`AGENT_ONLY_ESCALATIONS` — so a rule author who explicitly chose the supervisor gets a human
+card anyway. Same family: **the kind silently decides the audience, and nobody checked a
+kind's audience against its producer's intent.** Worth sweeping every kind against its
+producers rather than fixing one.
+
+### 3.1.1 `escalate` dedupes one kind, and the exclusions are the point
+
+`escalate` was a bare append, so a chatty agent stacked a card per report and nothing
+disposed of them. It now refreshes the open card for `DEDUPED_ESCALATIONS` kinds in place —
+updating `detail` and `ts`, preserving `read` — so the board carries the agent's latest
+reason. A stale card is a subtler lie than a duplicated one; preserving `read` keeps the
+dedupe from restoring the noise it removes by re-ringing the doorbell.
+
+The set is **`blocked` alone**. A wider net was proposed ("the un-self-clearing kinds") and
+would have been worse than the bug:
+
+- `agent_report` is a distinct ASK each time. Two questions from one tab collapse into one,
+  the human answers the second, and never sees the first.
+- `step_timeout` is a distinct EVENT — this rule, this step. Two rules timing out are two
+  facts.
+- `directive_unacked` cannot stack; its producer latches on `od.unackedNotified` and a tab
+  holds one directive at a time.
+- `AGENT_ONLY_ESCALATIONS` kinds are deleted on delivery, so they never accumulate on the
+  board. `permission_stuck` in particular **must** keep stacking, for the list-per-tab reason
+  above; `task_handoff`/`task_dropped` are per-task, so `(tabId, kind)` is the wrong key.
+
 ### 3.2 A proposal is a snapshot, so it has to be re-read
 
 A proposal records what was true when the rule matched, then waits for a human. Nothing

@@ -304,6 +304,32 @@ const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
  *  judgement. They outlive exemption of the tab they name (see `sweepClosedTabs`). */
 const HUMAN_BOARD_ESCALATIONS = new Set<OverlordEscalation['kind']>(['task_handoff', 'task_dropped']);
 
+/**
+ * Kinds where a second card for the same tab is the SAME fact restated, so `escalate`
+ * refreshes the open one instead of appending. One chatty agent otherwise stacks a card per
+ * report, and they linger: a human-addressed escalation is marked read by the agent's pull,
+ * never deleted, so nothing disposes of the duplicates.
+ *
+ * **Deliberately just `blocked`, and the reasoning for every exclusion matters more than
+ * the inclusion** — a wider net was proposed and would have been a worse bug than the one it
+ * fixed:
+ *
+ * - `agent_report` is a distinct ASK each time. "A or B?" and "may I delete this?" are two
+ *   questions from one tab, and collapsing them means the human answers the second and never
+ *   sees the first.
+ * - `step_timeout` is a distinct EVENT — this rule, this step, this moment. Two rules
+ *   timing out on one tab are two facts, and the ritual has already aborted for each.
+ * - `directive_unacked` cannot stack: its producer latches on `od.unackedNotified`, so it
+ *   fires once per directive and a tab holds one directive at a time.
+ * - Everything in AGENT_ONLY_ESCALATIONS is DELETED on delivery rather than marked read, so
+ *   it does not accumulate on the board at all. `permission_stuck` in particular must keep
+ *   stacking — `permissionHandoff` is a list per tab precisely because one open gate is
+ *   escalated again each time a `permission_pending` rule re-fires, and withdrawal has to
+ *   retract all of them. `task_handoff`/`task_dropped` are per-TASK, so (tabId, kind) is the
+ *   wrong key for them entirely.
+ */
+const DEDUPED_ESCALATIONS = new Set<OverlordEscalation['kind']>(['blocked']);
+
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
  *  guards are human-only, unreachable from the MCP surface. Exported so the approval modal
  *  can warn about the rule the human would ACTUALLY get, not the one the agent asked for. */
@@ -1051,6 +1077,23 @@ function createOverlordStore() {
     detail: string,
     taskId?: string,
   ): string {
+    // The same fact restated (see DEDUPED_ESCALATIONS). Refresh the open card in place so
+    // the board carries the agent's LATEST reason rather than its first — a stale card is a
+    // subtler lie than a duplicated one, and the duplicate at least tells you it is old.
+    //
+    // `read` is preserved, so this does not re-ring the doorbell or re-deliver to the agent.
+    // Deduping exists to cut noise; resetting it would restore the noise by another route.
+    // Accepted cost: an agent that already pulled the card never sees the updated wording.
+    const open = DEDUPED_ESCALATIONS.has(kind)
+      ? escalations.find((e) => e.tabId === tabId && e.kind === kind)
+      : undefined;
+    if (open) {
+      escalations = escalations.map((e) =>
+        e.id === open.id ? { ...e, detail, ts: Date.now(), ruleId, taskId: taskId ?? e.taskId } : e,
+      );
+      scheduleMirror();
+      return open.id;
+    }
     const id = crypto.randomUUID();
     escalations = [
       ...escalations,
@@ -1129,6 +1172,42 @@ function createOverlordStore() {
       );
     }
     return { delivered: h.escalationIds.length - queued.size, ruleId: h.ruleId };
+  }
+
+  /**
+   * Drop a tab's open `blocked` cards, because the tab just said it isn't.
+   *
+   * The queue-vs-derived split again (§3.1), and the same shape `permissionHandoff` names:
+   * a `blocked` card is DERIVED from a condition that changes on its own, but it was stored
+   * as a queue only a human could empty. `blocked` is not in AGENT_ONLY_ESCALATIONS, so the
+   * agent's pull marks it read rather than deleting it, and the only exits were a human
+   * dismissing it or the tab dying. A later report overwrites `agentReports` and never
+   * touched this list — so an agent that hit a wall, said so, and then carried on left a
+   * card asserting it needed a human, for the life of the window. On the phone, where the
+   * inbox badges rows off `escalations[].tabId`, that is a permanently flagged conversation.
+   *
+   * Withdrawal rather than deriving the lane from `agentReports`: deriving is the cleaner
+   * end state but stops `blocked` being an escalation at all, which changes what the mirror
+   * publishes — and the maiLink client anchors its Recover button to
+   * `kind === 'blocked' || kind === 'step_timeout'`, so it would lose recoverTab for exactly
+   * the case it exists to serve. See the board task before attempting it.
+   *
+   * **Only the bare-blocked path.** `needs_human` / `kind: 'escalate'` files `agent_report`,
+   * which stays a queue: an agent can raise a question and go do other work, and the
+   * question does not stop needing an answer because the asker got unblocked. Withdrawing
+   * there would clear a card the human never saw, on the strength of the agent's own
+   * subsequent activity.
+   */
+  function withdrawBlocked(tabId: string) {
+    const gone = escalations.filter((e) => e.kind === 'blocked' && e.tabId === tabId);
+    if (!gone.length) return;
+    const ids = new Set(gone.map((e) => e.id));
+    escalations = escalations.filter((e) => !ids.has(e.id));
+    for (const id of ids) unNudged.delete(id);
+    scheduleMirror();
+    logInfo(
+      `overlord: withdrew ${ids.size} blocked card(s) for ${tabDisplayName(tabId)} — it reported a non-blocked state`,
+    );
   }
 
   /** Does this window still have an Overlord agent tab that could ever pull the queue? */
@@ -3923,6 +4002,11 @@ function createOverlordStore() {
         if (d.ruleId === null) clearOutstanding(tabId);
         else bumpLive();
       }
+      // Recovery withdraws the condition card. Before the escalate below, so a report that
+      // is both a recovery AND a fresh ask ("unblocked, but now I need a decision") clears
+      // the old `blocked` and raises the new `agent_report`, rather than the withdrawal
+      // eating a card raised microseconds earlier.
+      if (args.state !== 'blocked') withdrawBlocked(tabId);
       if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
         const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';
         // "I am stuck" and "I need you" are different cards. Filing both as `agent_report`
