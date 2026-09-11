@@ -1,6 +1,6 @@
 ---
 title: Tasks
-description: One task list per project, owned by maiTerm and shared between you and your agents — six lanes, named workstreams, a per-tab panel, and MCP tools every runtime can use.
+description: One kanban board per project, owned by maiTerm and shared between you and your agents — seven lanes, named workstreams, real dependencies, a per-tab panel, and MCP tools every runtime can use.
 ---
 
 Agents keep private to-do lists. You watch one scroll past in a terminal, and that's the whole relationship — no way to add an item, correct one, or see across a window what's actually in flight. And every runtime does it differently: Claude Code writes to an undocumented store, Codex buries a plan inside its session log, Gemini has nothing at all.
@@ -13,15 +13,19 @@ A task hangs off the **workspace**, because a workspace is a project. That means
 
 A tab is the **assignee**, never the owner. Close a tab and its unfinished tasks are released to the project rather than deleted, where any tab can claim them back.
 
-## Six lanes
+## Seven lanes
 
 ```
-BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE
-   ^         ^
- parked    new work starts here
+BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE      DROPPED
+   ^         ^                                 ^           ^
+ parked    new work starts here            the flow   retracted, off the flow
 ```
 
 **Backlog is a parking lot, not an inbox.** It's for next month, for future ideas, for the thing you don't want to lose but don't want to think about — and it's exempt from every "is this still in flight?" check, so a deliberately shelved item never ages into a nag. Work you actually intend to start goes in **To-do**, which is where everything new lands. The side panel labels the backlog lane **Parked** for exactly that reason.
+
+**Dropped is retraction, not completion.** An agent that filed work it had misread used to have exactly two exits, and both lie: *Done* claims it finished — and satisfies every dependent, so a task legitimately waiting on the retracted one silently became ready work — while *Backlog* claims it was deliberately deferred, and parked rows are exempt from every staleness check, which makes it a quiet place to hide a mistake. Deletion stays human-only, because an agent tidying away work it didn't understand is unrecoverable. The missing verb was never *delete*, it was **retract**.
+
+So a dropped row **does not satisfy a dependent** — an agent cannot unblock its own task by dropping the one it was waiting on; the dependent stays blocked and the board names the row and its lane, so you get a real question instead of work quietly starting. It is counted separately from *Done*, because "12 done" must never include four tasks nobody did. And it is reversible: a lane, not a delete, so the card stays reachable and you can drag it back out. It sits off the flow for that reason — the steppers walk the six, and reaching *Dropped* is always a deliberate act rather than one click past *Done*.
 
 A task can also declare that it's waiting on another one. A row with an unfinished prerequisite renders as **Blocked** whatever its stored lane says, and its controls are held while the prerequisite is outstanding — a chip that couldn't move would otherwise report a change that never happened.
 

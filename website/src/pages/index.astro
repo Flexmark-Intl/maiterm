@@ -16,7 +16,7 @@ import Faq from '../components/landing/Faq.astro';
 
 const title = 'maiTerm — keep a window full of coding agents on track';
 const description =
-  'A terminal for running Claude Code, Codex and your shells side by side: one task list shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
+  'A terminal for running Claude Code, Codex and your shells side by side: a kanban board shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
 
 const EVERYTHING = [
   {
@@ -65,9 +65,9 @@ const EVERYTHING = [
       <p class="ln-eyebrow">A terminal for multi-agent work</p>
       <h1 class="hero-title">Keep a window full of agents on track</h1>
       <p class="hero-sub">
-        maiTerm runs Claude Code, Codex and your shells side by side — then shares one task
-        list with them, supervises them against rules you write, and brings every tab back
-        exactly as it was. No LLM inside, no chat sidebar.
+        maiTerm runs Claude Code, Codex and your shells side by side — then shares a real
+        kanban board with them, supervises them against rules you write, and brings every tab
+        back exactly as it was. No LLM inside, no chat sidebar.
       </p>
 
       <div class="hero-actions">
@@ -124,7 +124,7 @@ const EVERYTHING = [
           <span class="steps-when">When you are ready</span>
           <h3>Your agents get a shared desk</h3>
           <p>
-            One task list both sides write to, a supervisor watching the whole window, agents
+            One kanban board both sides work, a supervisor watching the whole window, agents
             that can talk to each other, and your phone as a way in.
           </p>
         </li>
@@ -136,24 +136,43 @@ const EVERYTHING = [
   <section class="ln-band">
     <div class="ln-inner ln-stack">
       <div>
-        <p class="ln-eyebrow">Tasks</p>
-        <h2 class="ln-h2">One task list, shared with your agents</h2>
+        <p class="ln-eyebrow">Task board</p>
+        <h2 class="ln-h2 ln-h2--wide">A real kanban board, shared with your agents</h2>
         <p class="ln-lead">
           Agents keep private to-do lists. You watch one scroll past in a terminal, and that is
           the whole relationship — no way to add an item, correct one, or see across a window
           what is actually in flight.
         </p>
         <p class="ln-lead">
-          <strong>maiTerm owns that state now</strong>, and both sides read and write the same
-          list. It hangs off the workspace, so it outlives a tab reload, a window move, and the
-          agent that wrote it.
+          <strong>maiTerm owns that state now.</strong> Seven lanes, with
+          <strong>workstreams</strong> keeping the unrelated jobs inside one project apart.
+          <strong>Dependencies that genuinely hold</strong>: a prerequisite parked in the
+          backlog still blocks what is waiting on it, and a task an agent
+          <em>retracts</em> pointedly does not satisfy its dependents the way finishing one
+          does. Assign a row to a tab, or leave it unassigned for whoever picks it up.
         </p>
         <p class="ln-lead">
-          Open the panel with <code>Cmd+Shift+E</code>: add, retitle, park, reassign, or hand a
-          row to the agent with <strong>Do it</strong>. It sees every one of those edits through
-          the same tools it writes with.
+          Every row carries a spec and an <strong>append-only log</strong> beneath it, where
+          each entry is stamped with who actually wrote it rather than who claims to have.
         </p>
-        <a class="ln-cta-link" href="/features/tasks/">How tasks work</a>
+
+        <ol class="lanes" aria-label="The seven lanes">
+          <li data-lane="backlog">Backlog</li>
+          <li data-lane="todo">To-do</li>
+          <li data-lane="active">Active</li>
+          <li data-lane="blocked">Blocked</li>
+          <li data-lane="review">Review</li>
+          <li data-lane="done">Done</li>
+          <li data-lane="dropped">Dropped</li>
+        </ol>
+
+        <p class="ln-lead">
+          Open it with <code>Cmd+Shift+E</code>: add, retitle, annotate, park, reassign, or hand
+          a row over with <strong>Do it</strong>. The agent sees every one of those edits
+          through the same tools it writes with — and there is deliberately no delete tool on
+          its side, because an agent tidying away work it misread is unrecoverable.
+        </p>
+        <a class="ln-cta-link" href="/features/tasks/">How the board works</a>
       </div>
       <div class="ln-shot">
         <img
@@ -258,8 +277,9 @@ const EVERYTHING = [
           runaway turn — from the couch, the garden, anywhere in the house.
         </p>
         <p class="ln-lead">
-          It writes, too: edit the shared task list, approve an Overlord proposal, rename or
-          archive a tab, wake a suspended workspace.
+          It writes, too: work the shared board — move a card between lanes, retitle or
+          reassign one — approve an Overlord proposal, rename or archive a tab, wake a
+          suspended workspace.
         </p>
         <p class="ln-lead">
           It travels over <strong>your LAN only</strong>, on an encrypted, authenticated
@@ -451,6 +471,46 @@ const EVERYTHING = [
     color: var(--ln-fg-dim);
     font-size: 0.975rem;
     line-height: 1.58;
+  }
+
+  /* --- Lane strip ---------------------------------------------------------
+     The seven lanes, shown rather than described. Scrolls on a phone instead
+     of wrapping: the order IS the flow, and a strip that wraps mid-sequence
+     reads as two groups. `Dropped` is dimmed because it is a lane but not a
+     step in the flow — it is where retracted work goes.
+  ------------------------------------------------------------------------- */
+
+  .lanes {
+    list-style: none;
+    padding: 0;
+    margin-top: 2rem;
+    display: flex;
+    gap: 0.4rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 0.25rem;
+  }
+  .lanes::-webkit-scrollbar {
+    display: none;
+  }
+  .lanes li {
+    flex-shrink: 0;
+    padding: 0.35rem 0.75rem;
+    border: 1px solid var(--ln-border-strong);
+    border-radius: 0.4rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--ln-fg-dim);
+    background: var(--ln-bg);
+  }
+  .lanes li[data-lane='active'] {
+    border-color: color-mix(in srgb, var(--ln-accent) 60%, transparent);
+    color: var(--ln-accent-soft);
+  }
+  .lanes li[data-lane='dropped'] {
+    border-style: dashed;
+    color: var(--ln-fg-faint);
   }
 
   /* --- Mesh --------------------------------------------------------------- */

@@ -75,7 +75,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Many agents at once',
         maiterm:
-          'The design centre: a shared task list, a rules-driven supervisor per window, and agent-to-agent messaging across repositories.',
+          'The design centre: a shared kanban board, a rules-driven supervisor per window, and agent-to-agent messaging across repositories.',
         theirs: 'Supported, with its own multi-agent features; oriented around Warp’s own agent.',
       },
       {
@@ -86,7 +86,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Remote work',
         maiterm:
-          'SSH is first class — remote agents get the same tab identity, task list, notes and MCP tools over a reverse tunnel.',
+          'SSH is first class — remote agents get the same tab identity, task board, notes and MCP tools over a reverse tunnel.',
         theirs: 'SSH works, with Warp’s own remote features layered on.',
       },
       {
@@ -116,7 +116,8 @@ export const COMPARISONS: Comparison[] = [
       },
       {
         dimension: 'Shared task state',
-        maiterm: 'One task list the agent and you both read and write, scoped to the project.',
+        maiterm:
+          'A kanban board the agent and you both work — seven lanes, workstreams, real dependencies, assignment — scoped to the project.',
         theirs: 'Not applicable.',
       },
       {
@@ -179,14 +180,14 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Remote hosts',
         maiterm:
-          'First class. Remote agents over SSH get the same tab identity, task list, notes and MCP tools through a reverse tunnel.',
+          'First class. Remote agents over SSH get the same tab identity, task board, notes and MCP tools through a reverse tunnel.',
         theirs:
           'Not offered — their docs point you at SSH and tmux for work that must live on another machine. WSL is supported on Windows.',
       },
       {
         dimension: 'Phone',
         maiterm:
-          'maiLink connects a phone directly to your machine over your LAN — watch, answer, approve, and edit the task list. No cloud in the data path.',
+          'maiLink connects a phone directly to your machine over your LAN — watch, answer, approve, and work the board. No cloud in the data path.',
         theirs: 'None.',
       },
       {

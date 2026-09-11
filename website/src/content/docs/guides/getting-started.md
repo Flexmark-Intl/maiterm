@@ -62,4 +62,4 @@ No configuration needed, and **no registration step**: the tab identifies itself
 
 To choose which agents maiTerm wires up — locally and over SSH — open **Preferences → AI Agents**. See [Agent Integration](/features/agents/) for the full picture.
 
-Your agent also shares a [task list](/features/tasks/) with you out of the box: it records what it's working on, you edit the same rows in a panel on `Cmd+Shift+E`, and each side sees the other's changes.
+Your agent also shares a [kanban board](/features/tasks/) with you out of the box: it records what it's working on, you edit the same rows in a panel on `Cmd+Shift+E`, and each side sees the other's changes.
