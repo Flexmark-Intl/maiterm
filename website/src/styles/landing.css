@@ -51,6 +51,7 @@
 }
 
 :root[data-theme='light'] {
+  color-scheme: light;
   --ln-bg: #ffffff;
   --ln-bg-raised: #f6f7fb;
   --ln-bg-sunken: #eef0f7;
@@ -79,6 +80,11 @@
 html {
   -webkit-text-size-adjust: 100%;
   scroll-behavior: smooth;
+  /* Starlight declares this on its own half of the site. Without it the UA
+     paints scrollbars and focus rings in its light default on a dark page —
+     visible as a light scrollbar on the landing page that turns dark the
+     moment you click through to the docs. */
+  color-scheme: dark;
 }
 
 @media (prefers-reduced-motion: reduce) {

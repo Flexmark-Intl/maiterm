@@ -92,12 +92,17 @@ const LINKS = [
     background: color-mix(in srgb, var(--ln-bg) 86%, transparent);
     backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--ln-border);
+    /* The gutter belongs on the OUTER element, as it does on .ln-band and
+       .foot. Putting it on .nav-inner as well ate it out of the max-width, so
+       past 1180px the wordmark sat a full gutter inboard of the headline
+       directly beneath it. */
+    padding-inline: var(--ln-gutter);
   }
 
   .nav-inner {
     max-width: var(--ln-max);
     margin-inline: auto;
-    padding: 0.75rem var(--ln-gutter);
+    padding-block: 0.75rem;
     display: flex;
     align-items: center;
     gap: 1.5rem;

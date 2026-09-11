@@ -55,28 +55,41 @@ const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
         behaviour, which has no prefers-color-scheme fallback either. */}
     <script is:inline>
       (() => {
+        const mq = window.matchMedia('(prefers-color-scheme: light)');
+        const read = () => {
+          try {
+            return localStorage.getItem('starlight-theme');
+          } catch {
+            /* Private mode or blocked storage. */
+            return null;
+          }
+        };
+        const isAuto = (v) => v === 'auto' || v === '';
+
         try {
-          const stored = localStorage.getItem('starlight-theme');
+          const stored = read();
           if (stored === 'light' || stored === 'dark') {
             document.documentElement.dataset.theme = stored;
           } else if (stored === null) {
             // First-time visitor: match the docs, which default to dark and
             // write that choice through so both halves of the site agree.
             localStorage.setItem('starlight-theme', 'dark');
-          } else if (
-            stored === 'auto' ||
-            stored === ''
-          ) {
+          } else if (isAuto(stored)) {
             // Starlight stores "auto" as an empty string. Follow the OS.
-            document.documentElement.dataset.theme = window.matchMedia(
-              '(prefers-color-scheme: light)'
-            ).matches
-              ? 'light'
-              : 'dark';
+            document.documentElement.dataset.theme = mq.matches ? 'light' : 'dark';
           }
         } catch {
-          /* Private mode or blocked storage — the dark default stands. */
+          /* Blocked storage — the dark default on <html> stands. */
         }
+
+        // Keep following the OS while the tab stays open, the way Starlight's
+        // ThemeSelect does. Without this a tab left open on "auto" stays light
+        // through sunset while every docs tab repaints dark.
+        mq.addEventListener('change', (e) => {
+          if (isAuto(read())) {
+            document.documentElement.dataset.theme = e.matches ? 'light' : 'dark';
+          }
+        });
       })();
     </script>
   </head>

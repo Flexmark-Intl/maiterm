@@ -401,10 +401,12 @@ const EVERYTHING = [
 
   /* The shot is cropped by the fold on purpose: it reads as a running app you
      are looking into, not a framed picture sitting in a slot. */
+  /* No padding-inline here: .hero is a .ln-band and already applies the
+     gutter, so adding it again inset the shot 16px INSIDE the content column
+     it is supposed to overhang by 3rem. */
   .hero-shot {
     max-width: calc(var(--ln-max) + 6rem);
     margin: clamp(2.25rem, 4vw, 3.25rem) auto 0;
-    padding-inline: var(--ln-gutter);
   }
   .hero-shot .ln-shot {
     max-height: 62vh;
