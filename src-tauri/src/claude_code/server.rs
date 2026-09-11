@@ -532,7 +532,55 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
         );
     }
 
+    // Workspace stack priming (docs/stack.md §6.2) — rendered from LIVE state, not static
+    // text: the point is that an agent resuming mid-project knows what is up right now.
+    // Status comes from the mirror the frontend store publishes (`publish_stack_runtime`);
+    // a service it has never reported is `stopped`.
+    if let Some(list) = stack_priming_list(state, tab_id) {
+        out.push_str(&format!(
+            "\n\nThis workspace runs a stack maiTerm manages: {}. Use listStack / \
+             getServiceOutput / restartService rather than starting these yourself. If you \
+             start a server maiTerm does not know about, register it with createService, and \
+             when you read a port in a service's output, report it with updateService.",
+            list
+        ));
+    }
+
     out
+}
+
+/// "web (ready, http://localhost:5173), api (crashed), db (running, :5432)" for the
+/// workspace holding `tab_id`, or None when the feature is off or the stack is empty.
+fn stack_priming_list(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
+    let app_data = state.app_data.read();
+    if !app_data.preferences.stack_enabled {
+        return None;
+    }
+    let ws = app_data
+        .windows
+        .iter()
+        .flat_map(|w| w.workspaces.iter())
+        .find(|ws| ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id)))?;
+    if ws.stack.is_empty() {
+        return None;
+    }
+    let runtime = state.stack_runtime.read();
+    let parts: Vec<String> = ws
+        .stack
+        .iter()
+        .map(|s| {
+            let status = runtime.get(&s.id).map(|r| r.status.as_str()).unwrap_or("stopped");
+            let mut d = format!("{} ({}", s.name, status);
+            if let Some(url) = &s.url {
+                d.push_str(&format!(", {}", url));
+            } else if let Some(port) = s.port {
+                d.push_str(&format!(", :{}", port));
+            }
+            d.push(')');
+            d
+        })
+        .collect();
+    Some(parts.join(", "))
 }
 
 /// Pure selection rule for the empty-sessionId path of `initSession` (unit-tested): which
@@ -2191,7 +2239,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 21] = [
+const PEER_ADDRESSING_TOOLS: [&str; 29] = [
     // Files leave the machine for the human's phone and land in a named tab's chat. An
     // inferred identity would put one agent's files in a stranger's conversation, which is
     // the "speak as it" side of this line, not the "act on it" side.
@@ -2224,6 +2272,17 @@ const PEER_ADDRESSING_TOOLS: [&str; 21] = [
     "listTasks",
     "createTasks",
     "updateTasks",
+    // Stack write verbs (docs/stack.md §6.1): a deduced identity must never stop another
+    // project's database or type a start command into a stranger's shell. Reads keep the
+    // reconnect convenience.
+    "startService",
+    "stopService",
+    "restartService",
+    "startStack",
+    "stopStack",
+    "updateService",
+    "createService",
+    "removeService",
 ];
 
 /// Whether to refuse a call because the tab it would act as was DEDUCED rather than stated.
@@ -2312,8 +2371,11 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let tasks_enabled = state.app_data.read().preferences.tasks_enabled;
-            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled));
+            let (tasks_enabled, stack_enabled) = {
+                let prefs = &state.app_data.read().preferences;
+                (prefs.tasks_enabled, prefs.stack_enabled)
+            };
+            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "tools/call" => {

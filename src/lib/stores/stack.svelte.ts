@@ -487,6 +487,17 @@ function createStackStore() {
           const id = workspacesStore.activeWorkspaceId;
           if (id) untrack(() => { void self.autoStart(id).catch((e) => logError(`stack: auto-start ${id}: ${e}`)); });
         });
+        // Mirror the runtime snapshot into Rust so the SessionStart priming can say what is
+        // up without a webview round trip (docs/stack.md §6.2). Whole map each time — it is
+        // a handful of rows, and a diff would be the fourth place status is bookkept.
+        let published = new Set<string>();
+        $effect(() => {
+          const rows = [...runtime.entries()].map(([service_id, r]) => ({ service_id, status: r.status, note: r.note, since_ms: r.since }));
+          const ids = new Set(rows.map((r) => r.service_id));
+          const removed = [...published].filter((id) => !ids.has(id));
+          published = ids;
+          commands.publishStackRuntime(rows, removed).catch((e) => logError(`stack: publish runtime: ${e}`));
+        });
       }));
     },
 

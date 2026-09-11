@@ -47,7 +47,7 @@ impl JsonRpcResponse {
 /// `tasks_enabled` gates the three task tools (docs/tasks.md §4). An agent that is never
 /// primed to use them shouldn't be carrying their schemas in context either, so the
 /// preference removes the surface rather than just the instruction.
-pub fn tool_list_response(tasks_enabled: bool) -> Value {
+pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -703,6 +703,89 @@ pub fn tool_list_response(tasks_enabled: bool) -> Value {
                 },
                 "required": ["updates"]
             }
+        }
+    ]).as_array().unwrap().clone());
+    }
+
+    if stack_enabled {
+    // ── Workspace stack (docs/stack.md §6.1) ──
+    // Frontend-handled; all scoped to the CALLING TAB'S WORKSPACE. Agents are writers:
+    // they register services they start and report the ports they observe, so maiTerm
+    // never has to sniff sockets. `service` accepts a name or an id everywhere.
+    tools.extend(serde_json::json!([
+        {
+            "name": "listStack",
+            "description": "The services this project runs, as maiTerm manages them (the workspace this tab belongs to): name, status (stopped | starting | running | ready | crashed), uptime, port/url with `endpoint_source` ('observed' from the ready pattern, 'reported' by an agent, 'stale' from a previous run — do not trust a stale port), cwd, command, last exit code, the tab running it, and a `note` saying why a service is held or crashed. Check this before starting a dev server or database yourself: it is probably already running, or maiTerm can start it for you.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" } }, "required": [] }
+        },
+        {
+            "name": "getServiceOutput",
+            "description": "Recent terminal output of a service — its log. Use it when a request fails, a build breaks, or a service reads as crashed, instead of restarting blind.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id from listStack" }, "lines": { "type": "integer", "description": "Trailing lines (default 100, max 1000)" } }, "required": ["service"] }
+        },
+        {
+            "name": "startService",
+            "description": "Start a service in its own tab (maiTerm types the command into a shell it owns and watches the exit code). Returns the resulting status. Refused when the tab's shell is busy with something else — nothing is typed over a running program.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+        },
+        {
+            "name": "stopService",
+            "description": "Stop a running service: ^C, then a signal if it ignores that. Only the process maiTerm started is ever signalled. Returns the resulting status.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+        },
+        {
+            "name": "restartService",
+            "description": "Stop then start a service in the same tab, and wait up to 10s for it to come back before replying — so your next step sees a live server, not a starting one. Use this after changing config the service only reads at boot.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+        },
+        {
+            "name": "startStack",
+            "description": "Start every auto-start service in this project, in order. Returns each service's status.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" } }, "required": [] }
+        },
+        {
+            "name": "stopStack",
+            "description": "Stop every running service in this project. Your human sees this in the sidebar — say why in your reply to them.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" } }, "required": [] }
+        },
+        {
+            "name": "waitForService",
+            "description": "Block until a service is ready (or running, when it has no ready pattern), up to `timeout` seconds; returns its status and, if it is not up, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 120)" } }, "required": ["service"] }
+        },
+        {
+            "name": "updateService",
+            "description": "Report what you observed, or edit a service. You are the port discovery: when you read ':5173' in a service's output, report it here as `port` (and `url` if you know it) so every other tab and your human see it. `ready: true` marks a service up when it has no ready pattern. `note` is one line shown in the sidebar (why it is held, what you changed). `command`/`cwd`/`env`/`auto_start`/`restart`/`ready_pattern` edit the definition and take effect on the next start.",
+            "inputSchema": { "type": "object", "properties": {
+                "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                "service": { "type": "string", "description": "Service name or id" },
+                "port": { "type": ["integer", "null"] }, "url": { "type": ["string", "null"] },
+                "ready": { "type": "boolean" }, "note": { "type": ["string", "null"] },
+                "name": { "type": "string" }, "command": { "type": "string" }, "cwd": { "type": "string" },
+                "env": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }, "description": "[[KEY, value], …] — replaces the whole set" },
+                "auto_start": { "type": "boolean" }, "restart": { "type": "string", "enum": ["never", "on_crash"] },
+                "ready_pattern": { "type": ["string", "null"], "description": "Regex over output; first match → ready. A (?<port>\\d+) group captures the port" }
+            }, "required": ["service"] }
+        },
+        {
+            "name": "createService",
+            "description": "Register a service this project runs — a dev server, API, database, worker — so maiTerm can start, watch and restart it and every tab can see it. Idempotent by name (returns the existing one). Does NOT start it: call startService when you want it up, so your human sees two deliberate acts. If you found the command in package.json scripts, a Procfile or docker-compose, say so in `note`. cwd defaults to your tab's directory.",
+            "inputSchema": { "type": "object", "properties": {
+                "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                "name": { "type": "string", "description": "Short handle — 'web', 'api', 'db'" },
+                "command": { "type": "string", "description": "Exactly what a human would type — 'npm run dev'" },
+                "cwd": { "type": "string", "description": "Absolute path; defaults to this tab's directory" },
+                "env": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }, "description": "[[KEY, value], …]" },
+                "auto_start": { "type": "boolean", "description": "Start with the workspace (default true)" },
+                "restart": { "type": "string", "enum": ["never", "on_crash"], "description": "Default on_crash" },
+                "ready_pattern": { "type": "string", "description": "Regex over output; first match → ready. A (?<port>\\d+) group captures the port" },
+                "note": { "type": "string" }
+            }, "required": ["name", "command"] }
+        },
+        {
+            "name": "removeService",
+            "description": "Remove a service definition. Refused while it is running (stop it first) and refused for a service a human created — you may only retract ones registered by an agent or the importer.",
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
         }
     ]).as_array().unwrap().clone());
     }

@@ -1,4 +1,5 @@
-import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskStatus } from '$lib/tauri/types';
+import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
+import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -205,6 +206,34 @@ function createClaudeCodeStore() {
           break;
         case 'updateTasks':
           result = handleUpdateTasks(args as { tabId?: string; updates?: TaskToolUpdate[] });
+          break;
+        // Workspace stack (docs/stack.md §6.1) — all resolve "this project" from the calling tab.
+        case 'listStack':
+          result = handleListStack(args as { tabId?: string });
+          break;
+        case 'getServiceOutput':
+          result = await handleGetServiceOutput(args as { tabId?: string; service?: string; lines?: number });
+          break;
+        case 'startService':
+        case 'stopService':
+        case 'restartService':
+          result = await handleServiceVerb(tool as 'startService' | 'stopService' | 'restartService', args as { tabId?: string; service?: string });
+          break;
+        case 'startStack':
+        case 'stopStack':
+          result = await handleStackVerb(tool as 'startStack' | 'stopStack', args as { tabId?: string });
+          break;
+        case 'waitForService':
+          result = await handleWaitForService(args as { tabId?: string; service?: string; timeout?: number });
+          break;
+        case 'updateService':
+          result = await handleUpdateService(args as UpdateServiceArgs);
+          break;
+        case 'createService':
+          result = await handleCreateService(args as CreateServiceArgs);
+          break;
+        case 'removeService':
+          result = await handleRemoveService(args as { tabId?: string; service?: string });
           break;
         // getPreferences, setPreference, createBackup, listWindows handled directly on backend
         case 'replyToOverlord': {
@@ -862,6 +891,195 @@ function createClaudeCodeStore() {
   }
 
   // --- Tab notes tools ---
+
+  // ── Workspace stack tools (docs/stack.md §6.1) ──────────────────────────────────
+  // Every tool resolves the project from the calling tab (connection→tab affinity, like
+  // the task tools); a tab cannot see or touch another project's stack. Write verbs are
+  // additionally on the server's inferred-identity refusal list.
+
+  type UpdateServiceArgs = {
+    tabId?: string; service?: string;
+    port?: number | null; url?: string | null; ready?: boolean; note?: string | null;
+    name?: string; command?: string; cwd?: string; env?: [string, string][];
+    auto_start?: boolean; restart?: ServiceRestart; ready_pattern?: string | null;
+  };
+  type CreateServiceArgs = {
+    tabId?: string; name?: string; command?: string; cwd?: string; env?: [string, string][];
+    auto_start?: boolean; restart?: ServiceRestart; ready_pattern?: string; note?: string;
+  };
+
+  function resolveStackScope(tabId?: string): { workspace: Workspace; tab: Tab } | { error: string } {
+    if (!preferencesStore.stackEnabled) return { error: 'The workspace stack is disabled in Preferences.' };
+    const loc = resolveActiveTab(tabId);
+    if ('error' in loc) return loc;
+    if (loc.workspace.overlord_exempt) return { error: 'This workspace is exempt from agent tooling.' };
+    return { workspace: loc.workspace, tab: loc.tab };
+  }
+
+  /** `service` is a name or an id; names match the same way the store dedups them. */
+  function resolveService(ws: Workspace, ref?: string): Service | { error: string } {
+    const stack = ws.stack ?? [];
+    if (!ref?.trim()) return { error: 'service is required — a name or id from listStack' };
+    const byId = stack.find((s) => s.id === ref);
+    if (byId) return byId;
+    const key = normalizeTitle(ref);
+    const byName = stack.find((s) => s.normalized_name === key || normalizeTitle(s.name) === key);
+    if (byName) return byName;
+    return { error: `No service "${ref}" in this project. listStack names ${stack.length ? stack.map((s) => s.name).join(', ') : 'none'}.` };
+  }
+
+  function endpointSource(s: Service, r: ServiceRuntime): 'observed' | 'reported' | 'stale' | null {
+    if (s.port == null && !s.url) return null;
+    if (r.status === 'ready') return s.ready_pattern ? 'observed' : 'reported';
+    if (r.status === 'running' || r.status === 'starting') return 'reported';
+    return 'stale';
+  }
+
+  function serviceView(ws: Workspace, s: Service) {
+    const r = stackStore.runtime(s.id);
+    const bound = stackStore.boundTab(ws.id, s.id);
+    return {
+      id: s.id,
+      name: s.name,
+      status: r.status,
+      uptime_seconds: r.since ? Math.floor((Date.now() - r.since) / 1000) : null,
+      port: s.port ?? null,
+      url: s.url ?? null,
+      endpoint_source: endpointSource(s, r),
+      cwd: s.cwd,
+      command: s.command,
+      auto_start: s.auto_start ?? true,
+      restart: s.restart ?? 'on_crash',
+      ready_pattern: s.ready_pattern ?? null,
+      last_exit_code: r.lastExitCode,
+      tab_id: bound?.tab.id ?? null,
+      note: r.note,
+      origin: s.origin,
+    };
+  }
+
+  function handleListStack(args: { tabId?: string }) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    const services = (scope.workspace.stack ?? []).map((s) => serviceView(scope.workspace, s));
+    return { workspace: scope.workspace.name, services, count: services.length };
+  }
+
+  async function handleGetServiceOutput(args: { tabId?: string; service?: string; lines?: number }) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    const s = resolveService(scope.workspace, args.service);
+    if ('error' in s) return s;
+    const bound = stackStore.boundTab(scope.workspace.id, s.id);
+    if (!bound) return { service: s.name, status: stackStore.status(s.id), output: null, note: 'no tab is running this service' };
+    const lines = Math.min(Math.max(1, args.lines ?? 100), 1000);
+    const output = await getTerminalText(bound.tab.id, lines);
+    return { service: s.name, status: stackStore.status(s.id), tab_id: bound.tab.id, output };
+  }
+
+  async function handleServiceVerb(verb: 'startService' | 'stopService' | 'restartService', args: { tabId?: string; service?: string }) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    const s = resolveService(scope.workspace, args.service);
+    if ('error' in s) return s;
+    try {
+      if (verb === 'startService') await stackStore.start(scope.workspace.id, s.id);
+      else if (verb === 'stopService') await stackStore.stop(scope.workspace.id, s.id);
+      else {
+        await stackStore.restart(scope.workspace.id, s.id);
+        await stackStore.waitFor(scope.workspace.id, s.id, 10_000);
+      }
+    } catch (e) {
+      return { error: String(e) };
+    }
+    logInfo(`stack: agent ${verb} ${s.name} (tab ${scope.tab.id})`);
+    return { service: serviceView(scope.workspace, s) };
+  }
+
+  async function handleStackVerb(verb: 'startStack' | 'stopStack', args: { tabId?: string }) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    if (verb === 'startStack') await stackStore.startStack(scope.workspace.id);
+    else await stackStore.stopStack(scope.workspace.id);
+    logInfo(`stack: agent ${verb} in ${scope.workspace.name} (tab ${scope.tab.id})`);
+    return handleListStack(args);
+  }
+
+  async function handleWaitForService(args: { tabId?: string; service?: string; timeout?: number }) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    const s = resolveService(scope.workspace, args.service);
+    if ('error' in s) return s;
+    const timeout = Math.min(Math.max(1, args.timeout ?? 30), 120) * 1000;
+    const status = await stackStore.waitFor(scope.workspace.id, s.id, timeout);
+    const view = serviceView(scope.workspace, s);
+    const up = status === 'ready' || status === 'running';
+    if (up) return { service: view, up: true };
+    const bound = stackStore.boundTab(scope.workspace.id, s.id);
+    const output = bound ? await getTerminalText(bound.tab.id, 20) : null;
+    return { service: view, up: false, output };
+  }
+
+  async function handleUpdateService(args: UpdateServiceArgs) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    const s = resolveService(scope.workspace, args.service);
+    if ('error' in s) return s;
+    const patch: Partial<Service> = {};
+    if (args.name !== undefined) patch.name = args.name;
+    if (args.command !== undefined) patch.command = args.command;
+    if (args.cwd !== undefined) patch.cwd = args.cwd;
+    if (args.env !== undefined) patch.env = args.env;
+    if (args.auto_start !== undefined) patch.auto_start = args.auto_start;
+    if (args.restart !== undefined) patch.restart = args.restart;
+    if (args.ready_pattern !== undefined) patch.ready_pattern = args.ready_pattern;
+    try {
+      if (Object.keys(patch).length) await stackStore.updateService(scope.workspace.id, s.id, patch);
+      await stackStore.reportEndpoint(scope.workspace.id, s.id, { port: args.port, url: args.url, ready: args.ready, note: args.note });
+    } catch (e) {
+      return { error: String(e) };
+    }
+    const fresh = resolveService(scope.workspace, s.id);
+    return { service: 'error' in fresh ? serviceView(scope.workspace, s) : serviceView(scope.workspace, fresh) };
+  }
+
+  async function handleCreateService(args: CreateServiceArgs) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    if (!args.name?.trim()) return { error: 'name is required' };
+    if (!args.command?.trim()) return { error: 'command is required' };
+    const cwd = args.cwd?.trim() || scope.tab.last_cwd || scope.tab.restore_cwd || '';
+    if (!cwd) return { error: 'cwd is required — this tab has not reported a directory yet' };
+    const before = (scope.workspace.stack ?? []).length;
+    try {
+      const service = await stackStore.createService(scope.workspace.id, {
+        name: args.name, command: args.command, cwd, env: args.env,
+        auto_start: args.auto_start, restart: args.restart, ready_pattern: args.ready_pattern ?? null,
+        origin: 'agent',
+      });
+      if (args.note) await stackStore.reportEndpoint(scope.workspace.id, service.id, { note: args.note });
+      const created = (scope.workspace.stack ?? []).length > before;
+      logInfo(`stack: agent ${created ? 'created' : 'reused'} service ${service.name} (tab ${scope.tab.id})`);
+      return { service: serviceView(scope.workspace, service), created };
+    } catch (e) {
+      return { error: String(e) };
+    }
+  }
+
+  async function handleRemoveService(args: { tabId?: string; service?: string }) {
+    const scope = resolveStackScope(args.tabId);
+    if ('error' in scope) return scope;
+    const s = resolveService(scope.workspace, args.service);
+    if ('error' in s) return s;
+    if (s.origin === 'human') return { error: `"${s.name}" was added by your human — only they can remove it.` };
+    try {
+      await stackStore.removeService(scope.workspace.id, s.id);
+    } catch (e) {
+      return { error: String(e) };
+    }
+    logInfo(`stack: agent removed service ${s.name} (tab ${scope.tab.id})`);
+    return { removed: s.name };
+  }
 
   function handleGetTabNotes(args: { tabId?: string }) {
     if (!args.tabId) {

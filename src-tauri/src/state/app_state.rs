@@ -197,8 +197,25 @@ pub enum AgentSessionState {
     Stopped,
 }
 
+/// One service's live status as the frontend stack store last published it (docs/stack.md
+/// §3: status is runtime state owned by the webview, never persisted). Rust holds a mirror
+/// only so `session_priming_text` can tell an agent what is up without a webview round
+/// trip — the same reason the Overlord board is mirrored for the phone.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackRuntimeRow {
+    pub service_id: String,
+    /// "stopped" | "starting" | "running" | "ready" | "crashed"
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
+}
+
 pub struct AppState {
     pub scrollback_db: ScrollbackDb,
+    /// Stack service status mirror, keyed by service id. See `StackRuntimeRow`.
+    pub stack_runtime: RwLock<HashMap<String, StackRuntimeRow>>,
     pub pty_registry: RwLock<HashMap<String, PtyHandle>>,
     /// alacritty_terminal instances keyed by pty_id
     pub terminal_registry: RwLock<HashMap<String, TerminalHandle>>,
@@ -298,6 +315,7 @@ impl AppState {
             remote_mirrors: RwLock::new(HashMap::new()),
             remote_watcher_running: std::sync::atomic::AtomicBool::new(false),
             pending_resizes: RwLock::new(HashMap::new()),
+            stack_runtime: RwLock::new(HashMap::new()),
             pty_stats: RwLock::new(HashMap::new()),
             memory_samples: RwLock::new(Vec::new()),
             agent_sessions: RwLock::new(HashMap::new()),

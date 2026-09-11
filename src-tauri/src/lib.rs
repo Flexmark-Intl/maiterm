@@ -660,6 +660,7 @@ pub fn run() {
             commands::workspace::set_workspace_mesh_topics,
             commands::workspace::set_workspace_stack,
             commands::workspace::set_tab_service_id,
+            commands::workspace::publish_stack_runtime,
             commands::workspace::set_tab_mailink_native,
             commands::workspace::set_tab_mailink_excluded,
             commands::workspace::clear_tab_comms_binding,

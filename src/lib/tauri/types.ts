@@ -486,6 +486,8 @@ export interface Preferences {
   /** Overlord master switch (per-window engine only ticks when enabled). */
   /** maiTerm task tracking (docs/tasks.md) — gates the MCP tools and the priming. */
   tasks_enabled: boolean;
+  /** Workspace stack (docs/stack.md) — gates the stack MCP tools and the priming line. */
+  stack_enabled: boolean;
   tasks_backlog_vocabulary_migrated: boolean;
   overlord_enabled: boolean;
   /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */

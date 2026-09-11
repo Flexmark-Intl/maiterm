@@ -824,6 +824,18 @@ export async function setWorkspaceStack(workspaceId: string, stack: Service[]): 
   return invoke('set_workspace_stack', { workspaceId, stack });
 }
 
+/** One service's live status, as published to Rust for the SessionStart priming. */
+export interface StackRuntimeRow {
+  service_id: string;
+  status: string;
+  note?: string | null;
+  since_ms?: number | null;
+}
+/** Upsert the stack store's runtime snapshot in Rust; `removed` drops ids that no longer exist. */
+export async function publishStackRuntime(rows: StackRuntimeRow[], removed: string[] = []): Promise<void> {
+  return invoke('publish_stack_runtime', { rows, removed });
+}
+
 /** Bind a tab to a stack service (or clear with null). Rust clears the same service from
  *  any other tab in the workspace in the same write — one tab per service. */
 export async function setTabServiceId(

@@ -1034,6 +1034,26 @@ pub fn set_tab_overlord_exempt(
     save_state(&data_clone)
 }
 
+/// The frontend stack store publishes its runtime snapshot here on every change, so the
+/// SessionStart priming can name what is up without asking the webview. Whole-map replace
+/// per window's worth of rows is overkill; rows are keyed by service id, so a publish just
+/// upserts the ones it carries and drops the ids it names as gone.
+#[tauri::command]
+pub fn publish_stack_runtime(
+    state: State<'_, Arc<AppState>>,
+    rows: Vec<crate::state::app_state::StackRuntimeRow>,
+    removed: Option<Vec<String>>,
+) -> Result<(), String> {
+    let mut map = state.stack_runtime.write();
+    for id in removed.unwrap_or_default() {
+        map.remove(&id);
+    }
+    for row in rows {
+        map.insert(row.service_id.clone(), row);
+    }
+    Ok(())
+}
+
 /// Bind a tab to a stack service, or clear the binding (docs/stack.md §3–§5). At most one
 /// tab in a workspace may name a given service: binding one clears the same service from
 /// any other tab in the workspace inside the same write, so no reader ever sees two tabs

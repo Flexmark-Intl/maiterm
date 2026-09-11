@@ -53,6 +53,7 @@ function createPreferencesStore() {
   let hiddenDefaultTriggers = $state<string[]>([]);
   let claudeTriggersPrompted = $state(false);
   let tasksEnabled = $state(true);
+  let stackEnabled = $state(true);
   let tasksBacklogVocabularyMigrated = $state(false);
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
@@ -142,6 +143,7 @@ function createPreferencesStore() {
     get hiddenDefaultTriggers() { return hiddenDefaultTriggers; },
     get claudeTriggersPrompted() { return claudeTriggersPrompted; },
     get tasksEnabled() { return tasksEnabled; },
+    get stackEnabled() { return stackEnabled; },
     get overlordEnabled() { return overlordEnabled; },
     get overlordProposeMode() { return overlordProposeMode; },
     get overlordRules() { return overlordRules; },
@@ -240,6 +242,7 @@ function createPreferencesStore() {
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
       tasksEnabled = prefs.tasks_enabled ?? true;
+      stackEnabled = prefs.stack_enabled ?? true;
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
@@ -772,6 +775,7 @@ function createPreferencesStore() {
       hiddenDefaultTriggers = prefs.hidden_default_triggers ?? [];
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
       tasksEnabled = prefs.tasks_enabled ?? true;
+      stackEnabled = prefs.stack_enabled ?? true;
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
@@ -862,6 +866,7 @@ function createPreferencesStore() {
         hidden_default_triggers: hiddenDefaultTriggers,
         claude_triggers_prompted: claudeTriggersPrompted,
         tasks_enabled: tasksEnabled,
+        stack_enabled: stackEnabled,
         // Round-tripped, never set here: Rust owns this one-time flip.
         tasks_backlog_vocabulary_migrated: tasksBacklogVocabularyMigrated,
         overlord_enabled: overlordEnabled,

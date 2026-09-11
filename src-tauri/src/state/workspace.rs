@@ -1377,6 +1377,11 @@ pub struct Preferences {
     /// never told to use them shouldn't be carrying their schemas either.
     #[serde(default = "default_true")]
     pub tasks_enabled: bool,
+    /// Workspace stack (docs/stack.md). On by default. Gates the stack MCP tools and the
+    /// priming line, same contract as `tasks_enabled`: an agent never told about the stack
+    /// shouldn't carry eleven tool schemas for it.
+    #[serde(default = "default_true")]
+    pub stack_enabled: bool,
     /// Overlord master switch (docs/overlord.md). Off by default — the per-window engine
     /// only ticks when enabled.
     #[serde(default)]
@@ -1695,6 +1700,7 @@ impl Default for Preferences {
             claude_triggers_prompted: false,
             tasks_backlog_vocabulary_migrated: false,
             tasks_enabled: true,
+            stack_enabled: true,
             overlord_enabled: false,
             overlord_propose_mode: true,
             overlord_rules: Vec::new(),
