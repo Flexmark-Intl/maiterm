@@ -25,7 +25,7 @@ Conditions fire on **semantic state**, not on terminal output (that's what [trig
 | A commit lands | A `git commit` in that tab actually succeeded — a denied prompt, a refusing pre-commit hook and "nothing to commit" don't count |
 | Every turn ends | The agent goes from working to idle |
 | Tab goes idle for *N* min | Nothing has happened in the tab for a while |
-| Work is not on the board | The tab is doing sustained work with nothing recorded |
+| Work is not on the task list | The tab is doing sustained work with nothing recorded |
 | Board task stale for *N* days | A task hasn't moved (parked tasks are exempt) |
 | Agent running but unbound | An agent process is alive but isn't connected to maiTerm |
 | Permission waits for *N* min | The tab is stopped at a permission prompt |
@@ -51,7 +51,7 @@ Guards are **human-only**. The supervisor agent can propose changes to a rule's 
 | **Checkpoint before compaction** | At ~55% context, have the agent update its docs, memory, code comments and [task board](/features/tasks/), prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought |
 | **Review after commit** | After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on |
 | **Re-bind a running agent** | A tab whose agent is running but not connected to maiTerm gets a `/maiterm init`, restoring its tools and hooks. Only fires when the agent process is confirmed alive — a tab sitting at a shell is left alone |
-| **Keep the board current** | A tab doing sustained work with nothing on the [maiTerm board](/features/tasks/) gets nudged to record it |
+| **Keep a task list** | A tab doing sustained work with nothing on the [maiTerm board](/features/tasks/) gets nudged to record it |
 
 They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone.
 

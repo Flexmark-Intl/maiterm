@@ -25,9 +25,9 @@ BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE      DROPPED
 
 **Dropped is retraction, not completion.** An agent that filed work it had misread used to have exactly two exits, and both lie: *Done* claims it finished — and satisfies every dependent, so a task legitimately waiting on the retracted one silently became ready work — while *Backlog* claims it was deliberately deferred, and parked rows are exempt from every staleness check, which makes it a quiet place to hide a mistake. Deletion stays human-only, because an agent tidying away work it didn't understand is unrecoverable. The missing verb was never *delete*, it was **retract**.
 
-So a dropped row **does not satisfy a dependent** — an agent cannot unblock its own task by dropping the one it was waiting on; the dependent stays blocked and the board names the row and its lane, so you get a real question instead of work quietly starting. It is counted separately from *Done*, because "12 done" must never include four tasks nobody did. And it is reversible: a lane, not a delete, so the card stays reachable and you can drag it back out. It sits off the flow for that reason — the steppers walk the six, and reaching *Dropped* is always a deliberate act rather than one click past *Done*.
+So a dropped row **does not satisfy a dependent** — an agent cannot unblock its own task by dropping the one it was waiting on. The dependent stays blocked, and when an agent reads the board it is told which row it is waiting on and the lane that row is in, so a retraction surfaces as a real question rather than work quietly starting. It is counted separately from *Done*, because "12 done" must never include four tasks nobody did. And it is reversible: a lane, not a delete, so the card stays reachable and you can drag it back out. It sits off the flow for that reason — the steppers walk the six, and reaching *Dropped* is always a deliberate act rather than one click past *Done*.
 
-A task can also declare that it's waiting on another one. A row with an unfinished prerequisite renders as **Blocked** whatever its stored lane says, and its controls are held while the prerequisite is outstanding — a chip that couldn't move would otherwise report a change that never happened.
+A task can also declare that it's waiting on another one. A row with an unfinished prerequisite renders as **Blocked** whatever its stored lane says — unless it has already been retired to *Done* or *Dropped*, which keep their own lane. On the board its controls are held while the prerequisite is outstanding, and in the panel parking and starting are held: a control that couldn't move would otherwise report a change that never happened.
 
 ## Workstreams
 
@@ -39,7 +39,7 @@ Agents name their workstream as they go, by name rather than by id, so a job is 
 
 Press `Cmd+Shift+E` — or click the lanes icon in the tab bar — to open the task panel beside the terminal. It's the same dock as [notes](/features/workspaces/#per-tab-notes) (`Cmd+E`), per tab, and you can drag its left edge to resize it; the width is remembered.
 
-The panel answers one question — *what am I doing here* — so it shows **this tab's work**, grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked` and `N done`, and a closing line says how many tasks are in flight on other tabs.
+The panel answers one question — *what am I doing here* — so it shows **this tab's work**, grouped by workstream with a count on each heading. Everything else is a pointer: the header carries collapsed counts for `N unclaimed`, `N parked`, `N done` and `N dropped`, and a closing line says how many tasks are in flight on other tabs.
 
 ![The task panel beside a terminal, showing one workstream's rows with review, active and blocked lanes and a count of finished work in the header](/screenshots/tasks-panel.webp)
 
@@ -69,7 +69,7 @@ Every agent tab — Claude Code, Codex, local or over SSH — gets three tools:
 
 They're batched to keep both round trips and token cost down, and every call is scoped to the **calling tab's workspace**, so an agent can never read or write another project's list.
 
-**There is deliberately no delete tool.** An agent may mark a task done; only a human removes one. An agent tidying away work it didn't understand is unrecoverable, and `done` is enough. When you *do* delete a row, the owning agent is told — otherwise it would restate the task on its next list re-send and the deletion would quietly undo itself.
+**There is deliberately no delete tool.** An agent may mark a task done, or *retract* one to **Dropped** when it filed work it had misread; only a human removes a row. An agent tidying away work it didn't understand is unrecoverable, and between those two it has an honest exit either way — which is why the tool description tells it to drop such a task rather than close it as done. When you *do* delete a row, the owning agent is told — otherwise it would restate the task on its next list re-send and the deletion would quietly undo itself.
 
 ### Agents pick it up on their own
 
