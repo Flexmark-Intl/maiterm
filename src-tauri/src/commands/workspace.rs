@@ -1034,6 +1034,53 @@ pub fn set_tab_overlord_exempt(
     save_state(&data_clone)
 }
 
+/// Bind a tab to a stack service, or clear the binding (docs/stack.md §3–§5). At most one
+/// tab in a workspace may name a given service: binding one clears the same service from
+/// any other tab in the workspace inside the same write, so no reader ever sees two tabs
+/// claiming it — the same shape as the comms-binding hand-over in
+/// `carry_tab_state_on_reload`.
+#[tauri::command]
+pub fn set_tab_service_id(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    pane_id: String,
+    tab_id: String,
+    service_id: Option<String>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    let workspace = win.workspaces.iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+
+    if let Some(sid) = &service_id {
+        if !workspace.stack.iter().any(|s| &s.id == sid) {
+            return Err("Service not found in this workspace".to_string());
+        }
+        for pane in workspace.panes.iter_mut() {
+            for t in pane.tabs.iter_mut() {
+                if t.id != tab_id && t.service_id.as_deref() == Some(sid.as_str()) {
+                    t.service_id = None;
+                }
+            }
+        }
+    }
+
+    let pane = workspace.panes.iter_mut()
+        .find(|p| p.id == pane_id)
+        .ok_or("Pane not found")?;
+    let tab = pane.tabs.iter_mut()
+        .find(|t| t.id == tab_id)
+        .ok_or("Tab not found")?;
+    tab.service_id = service_id;
+
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
 #[tauri::command]
 pub fn set_tab_notes_mode(
     window: tauri::Window,
@@ -2121,6 +2168,40 @@ pub fn set_workspace_mesh_topics(
     Ok(())
 }
 
+/// Replace a workspace's stack definitions wholesale (docs/stack.md §3). The frontend
+/// `stack` store is authoritative for the definitions (it mints ids + timestamps and
+/// dedups by normalized name), so persistence is a coarse replace, same as mesh topics.
+/// Rust re-canonicalizes `normalized_name` on the way in as an integrity guard.
+///
+/// Bindings are NOT touched here — they live on `Tab::service_id`. A definition removed
+/// from the list leaves a dangling binding on its tab, which readers treat as unbound;
+/// `set_tab_service_id(None)` is the caller's job when it removes a running service.
+#[tauri::command]
+pub fn set_workspace_stack(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    mut stack: Vec<crate::state::Service>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    for s in stack.iter_mut() {
+        s.normalized_name = crate::state::Service::normalize_name(&s.name);
+    }
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        workspace.stack = stack;
+        app_data.clone()
+    };
+    save_state(&data_clone)?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn create_diff_tab(
     window: tauri::Window,
@@ -3149,6 +3230,10 @@ mod reload_carry_tests {
                 notes: Vec::new(),
             }],
             wake_on_resume: true,
+            // A reload carries the service binding: the replacement is the same tab to the
+            // stack store, and the original is deleted in the same operation, so the
+            // one-tab-per-service rule holds (docs/stack.md §5).
+            service_id: Some("svc-web".to_string()),
             tab_type: TabType::Terminal,
             editor_file: None,
             diff_context: None,

@@ -50,6 +50,9 @@ export interface Tab {
   notes_open: boolean;
   /** Whether this tab's task panel is open (docs/tasks.md §6). */
   tasks_open?: boolean;
+  /** The stack service this tab runs (docs/stack.md §3–§5); absent for an ordinary tab.
+   *  The binding lives here and nowhere else. */
+  service_id?: string | null;
   /** Exempt from Overlord (docs/overlord.md §11): no rules, probes, proposals, cards or
    *  agent tools touch this tab. `Workspace.overlord_exempt` covers a whole workspace. */
   overlord_exempt?: boolean;
@@ -201,6 +204,44 @@ export interface Workstream {
   updated_at: string;
 }
 
+/** Restart policy for a stack service. `on_change` needs a file watcher — v3. */
+export type ServiceRestart = 'never' | 'on_crash';
+
+/** Who declared a service. */
+export type ServiceOrigin = 'human' | 'agent' | 'suggested';
+
+/** One service in a workspace's stack (docs/stack.md §3). Mirrors the Rust `Service`.
+ *
+ *  No `tab_id`: which tab runs it is derived from `Tab.service_id`. No status: that is
+ *  runtime state in the stack store, never persisted. */
+export interface Service {
+  id: string;
+  /** The handle agents use — "web", "api". */
+  name: string;
+  /** Case/whitespace-normalized name — the dedup key within a workspace. Recomputed by
+   *  Rust on persist. */
+  normalized_name: string;
+  /** Typed into the tab's shell verbatim. */
+  command: string;
+  /** Absolute path. */
+  cwd: string;
+  /** Exported before the command. */
+  env?: [string, string][];
+  /** Mirrors `Tab.auto_resume_ssh_command`; always null in v1. */
+  ssh_command?: string | null;
+  auto_start?: boolean;
+  restart?: ServiceRestart;
+  /** Regex over stripped output; first match → ready. Optional named group `port`. */
+  ready_pattern?: string | null;
+  /** Last known endpoint — observed by the ready trigger or reported by an agent. Stale
+   *  until the service is next ready (docs/stack.md §9). */
+  port?: number | null;
+  url?: string | null;
+  origin: ServiceOrigin;
+  created_at: string;
+  updated_at: string;
+}
+
 /** One line in a task's progress log. Mirrors the Rust `TaskNote`.
  *
  *  `detail` says what the task IS; this says what happened to it. They are separate
@@ -255,6 +296,8 @@ export interface Workspace {
   tasks?: Task[];
   /** Named task groups — one per distinct job in this workspace. */
   workstreams?: Workstream[];
+  /** The services this project runs (docs/stack.md). Definitions only. */
+  stack?: Service[];
   /** Overlord workspace flag — hosts the board + agent tab; at most one per window. */
   overlord?: boolean;
   /** Every tab in this workspace is exempt from Overlord (docs/overlord.md §11). */

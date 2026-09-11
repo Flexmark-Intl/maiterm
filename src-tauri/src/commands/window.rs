@@ -588,6 +588,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 archived_at: None,
                 suspended_at: None,
                 wake_on_resume: false,
+                // The stack definition travels with the workspace (below), but none of
+                // its services are running in the copy, so no tab in it may claim one.
+                service_id: None,
                 tab_type: tab.tab_type.clone(),
                 editor_file: tab.editor_file.clone(),
                 last_cwd: tab.last_cwd.clone(),
@@ -696,6 +699,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
         mesh_topics: Vec::new(),
         tasks: new_tasks,
         workstreams: new_workstreams,
+        // A copy of the project runs the same services; the definitions carry no tab ids.
+        stack: ws.stack.clone(),
         // Never duplicate an Overlord workspace — at most one per window.
         overlord: false,
         // An exemption is a property of the work, not the window: it travels.

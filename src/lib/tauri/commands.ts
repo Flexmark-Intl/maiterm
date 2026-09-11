@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -794,6 +794,24 @@ export async function commsTestConnection(
 
 export async function setWorkspaceMeshTopics(workspaceId: string, topics: MeshTopic[]): Promise<void> {
   return invoke('set_workspace_mesh_topics', { workspaceId, topics });
+}
+
+/** Coarse whole-list replace of a workspace's stack definitions (docs/stack.md §3);
+ *  Rust recomputes `normalized_name` on the way in. Bindings are separate — see
+ *  `setTabServiceId`. */
+export async function setWorkspaceStack(workspaceId: string, stack: Service[]): Promise<void> {
+  return invoke('set_workspace_stack', { workspaceId, stack });
+}
+
+/** Bind a tab to a stack service (or clear with null). Rust clears the same service from
+ *  any other tab in the workspace in the same write — one tab per service. */
+export async function setTabServiceId(
+  workspaceId: string,
+  paneId: string,
+  tabId: string,
+  serviceId: string | null
+): Promise<void> {
+  return invoke('set_tab_service_id', { workspaceId, paneId, tabId, serviceId });
 }
 
 // Sound commands

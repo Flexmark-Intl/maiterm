@@ -343,6 +343,13 @@ pub struct Tab {
     /// session restore); cleared on resume or when the tab goes live again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wake_on_resume: bool,
+    /// The stack service this tab runs (docs/stack.md §3–§5), or None for an ordinary
+    /// tab. The binding lives HERE and nowhere else: a reload carries it (whole-record
+    /// copy), a duplicate never gets it (`Tab::new`), and a duplicated workspace clears
+    /// it because none of its services are running in the copy. At most one tab per
+    /// workspace may name a given service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
     #[serde(default)]
     pub tab_type: TabType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,6 +488,70 @@ pub struct Workstream {
     pub normalized_name: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// One service in a workspace's stack (docs/stack.md §3): a dev server, an API, a db —
+/// something the project runs, declared once and started as a tab maiTerm owns.
+///
+/// Deliberately carries NO `tab_id`. "Which tab runs `api`" is derived from the one tab
+/// in the workspace whose `Tab::service_id` names this service, so reload (whole-record
+/// carry), duplicate (fresh `Tab::new`) and restore need no remap — the tasks system
+/// stores `tab_id` on the row and pays a `remapTab` call on every lifecycle path for it.
+/// Runtime status is never persisted either: a parked workspace would wake up "crashed".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Service {
+    pub id: String,
+    /// The handle agents use ("web", "api").
+    pub name: String,
+    /// Case/whitespace-normalized name — the dedup key within a workspace. Recomputed on
+    /// persist, same contract as `Workstream::normalized_name`.
+    #[serde(default)]
+    pub normalized_name: String,
+    /// Typed into the tab's shell verbatim.
+    pub command: String,
+    /// Absolute path; defaults to the creating tab's `last_cwd`.
+    pub cwd: String,
+    /// Exported before the command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
+    /// Mirrors `Tab::auto_resume_ssh_command`. Always `None` in v1 (local only); the field
+    /// exists so a remote service is a flag flip rather than a schema change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_command: Option<String>,
+    /// Start with the workspace.
+    #[serde(default)]
+    pub auto_start: bool,
+    /// "never" | "on_crash". ("on_change" needs a file watcher — v3.)
+    #[serde(default = "default_restart_policy")]
+    pub restart: String,
+    /// Regex over the tab's stripped output; first match → `ready`. An optional named
+    /// group `port` captures the port. Becomes a system trigger scoped to the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_pattern: Option<String>,
+    /// Last known endpoint — written by the ready trigger or by an agent over MCP
+    /// (`updateService`), never by socket sniffing. Persisted because the next start
+    /// usually lands on the same port; consumers label it stale until the service is
+    /// next `ready` (docs/stack.md §9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// "human" | "agent" | "suggested".
+    pub origin: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn default_restart_policy() -> String {
+    "on_crash".to_string()
+}
+
+impl Service {
+    /// Same rule as `Workstream::normalize_name`: one normalizer for every human-typed
+    /// name in a workspace, so "Web", "web " and "web." are one service.
+    pub fn normalize_name(name: &str) -> String {
+        Task::normalize_title(name)
+    }
 }
 
 /// A unit of work owned by a workspace (docs/tasks.md). A workspace IS a project, so
@@ -623,6 +694,11 @@ pub struct Workspace {
     /// Named task groups (docs/tasks.md §4) — one per distinct job in this workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workstreams: Vec<Workstream>,
+    /// The services this project runs (docs/stack.md §3). Definitions only — which tab
+    /// runs each one is derived from `Tab::service_id`, and status lives in the frontend
+    /// store. Travels with a duplicated/exported workspace like `tasks` does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<Service>,
     /// Overlord workspace flag (docs/overlord.md §11): this workspace hosts the Overlord
     /// board + agent tab. At most one per window; excluded from the ordinary workspace
     /// list and reordering. Suspending it stops the agent, never the engine.
@@ -1709,6 +1785,7 @@ impl Tab {
             comms_bindings: Vec::new(),
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
+            service_id: None,
         }
     }
 
@@ -1757,6 +1834,7 @@ impl Tab {
             comms_bindings: Vec::new(),
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
+            service_id: None,
         }
     }
 
@@ -1805,6 +1883,7 @@ impl Tab {
             comms_bindings: Vec::new(),
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
+            service_id: None,
         }
     }
 }
@@ -1838,6 +1917,7 @@ impl Workspace {
             mesh_topics: Vec::new(),
             tasks: Vec::new(),
             workstreams: Vec::new(),
+            stack: Vec::new(),
             overlord: false,
             overlord_exempt: false,
             archived_tabs: Vec::new(),
