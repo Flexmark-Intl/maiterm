@@ -59,6 +59,26 @@ const GATE_POLL_MS = 1_000;
 /** A directive nobody acknowledged for this long is reported (§8's TTL sweep). Longer than
  *  a working turn, shorter than the drive watch that covers driveTab's own directives. */
 const DIRECTIVE_UNACKED_MS = 10 * 60_000;
+/**
+ * Hard ceiling on a non-ritual directive, whatever the tab is doing.
+ *
+ * The idle clock (`lastActiveAt`) is what stops a working agent being reported — but it can
+ * be pinned at zero indefinitely, and the tabs where that happens are the ones most likely
+ * to be genuinely stuck. Two ways, both real:
+ *
+ * - The track-request's only practical clearing path is `f.last_turn_ts > od.sentAt`, and
+ *   `overlord_tab_facts` returns no facts at all for a Codex/Gemini SSH tab or one whose
+ *   bridge is down — while `scanWorkspaces` will still ask such a tab to start tracking.
+ *   The directive can then never clear, and a working agent resets the idle clock forever.
+ * - A tab whose `Stop` hook is lost (agent killed mid-turn, bridge dropped mid-turn) stays
+ *   `active` permanently: the stale timer in `agentState` re-sets the same state rather than
+ *   timing it out.
+ *
+ * Either way the outstanding slot is held for the life of the tab, blocking every
+ * `only_if_no_outstanding` rule and refusing every `driveTab`. Suppressing on idleness alone
+ * removed the only notice the operator ever got that this had happened.
+ */
+const DIRECTIVE_MAX_OUTSTANDING_MS = 30 * 60_000;
 /** How long an agent-only escalation waits for an agent that no longer exists. */
 const AGENT_ESCALATION_TTL_MS = 30 * 60_000;
 /** turn_end fallback (see awaitGate): how long after injection, and how long the PTY must
@@ -2464,6 +2484,16 @@ function createOverlordStore() {
 
       if (now - w.sentAt > DRIVE_WATCH_MS) {
         driveWatch.delete(tabId);
+        // Release the slot HERE, not a second later. `driveTab` arms a `setTimeout` for
+        // `DRIVE_WATCH_MS + 1000` to do this, which leaves a window — about one tick in five
+        // — where the watch is gone but the directive is not: the tick's unacked check three
+        // lines down then sees no drive watch, no ritual, and a directive 15 min old, and
+        // raises `directive_unacked` as a SECOND card about the directive `drive_reply` has
+        // just reported. Same text-equality guard the timeout uses, so a directive sent
+        // since this watch began is left alone. The timeout stays as the backstop for paths
+        // where this loop does not run (Overlord switched off mid-flight).
+        const od = outstanding.get(tabId);
+        if (od && od.text === w.text) clearOutstanding(tabId);
         // Never expire silently. The doctrine promises "you WILL get the answer back", so a
         // watch that gives up owes the supervisor a word — otherwise it waits forever on a
         // reply that is never coming.
@@ -2715,7 +2745,8 @@ function createOverlordStore() {
           !od.unackedNotified &&
           !driveWatch.has(tab.id) &&
           !rituals.has(tab.id) &&
-          unackedFor >= DIRECTIVE_UNACKED_MS
+          (unackedFor >= DIRECTIVE_UNACKED_MS ||
+            now - od.sentAt >= DIRECTIVE_MAX_OUTSTANDING_MS)
         ) {
           // The TTL sweep the design called for on day one. A directive Overlord typed and
           // nobody answered is the supervisor's blind spot: it holds the tab's outstanding
@@ -2734,26 +2765,44 @@ function createOverlordStore() {
           //   mid-ritual directive is not a directive with no feedback channel: `awaitGate`
           //   is watching it and the rule author chose its `on_timeout`. Every `ruleId !==
           //   null` directive comes from a ritual, so this is the guard that matters.
-          // - **The clock only runs while the tab isn't working** (`lastActiveAt` above).
-          //   Not "never while active": a directive swallowed by a mid-turn paste leaves a
-          //   tab active on something else entirely, and that is a live failure class here
+          // - **The clock only runs while the tab isn't working** (`lastActiveAt` above),
+          //   OR the directive has been outstanding past the absolute ceiling. Not "never
+          //   while active": a directive swallowed by a mid-turn paste leaves a tab active
+          //   on something else entirely, and that is a live failure class here
           //   (`reinit_unbound_agent` is instrumented, not cured). Measuring idle time still
           //   surfaces it once the tab goes quiet, instead of never.
           //
-          // What is left after all three is what the card was always for: a directive with
-          // no ritual and no drive watch — the census track-request — sitting unanswered at
-          // a tab that has stopped working. There the advice below is sound.
+          //   The ceiling is not belt-and-braces, it is the other half. Review found that
+          //   the idle clock alone can be pinned at zero for the life of a tab — see
+          //   DIRECTIVE_MAX_OUTSTANDING_MS — and that those are precisely the tabs whose
+          //   directive can never clear. Suppressing on idleness alone took away the only
+          //   notice the operator got that a tab had jammed.
+          //
+          // What is left after all this is what the card was always for: a directive with no
+          // ritual and no drive watch — the census track-request — that is not going to be
+          // answered, either because the tab stopped working or because it has sat far too
+          // long.
           od.unackedNotified = true;
           escalate(
             tab.id,
             od.ruleId,
             'directive_unacked',
             `${tabDisplayName(tab.id)} has not acknowledged a directive sent ` +
-              `${Math.round((now - od.sentAt) / 60_000)} min ago, and has not been working ` +
-              `for the last ${Math.round(unackedFor / 60_000)} min of that: ` +
-              `${JSON.stringify(od.text.slice(0, 160))}. Nothing else can be sent to that tab ` +
-              `until it clears. Check whether the agent is still running there — driveTab it, ` +
-              `or recover the tab — then clear this.`,
+              `${Math.round((now - od.sentAt) / 60_000)} min ago` +
+              (unackedFor >= DIRECTIVE_UNACKED_MS
+                ? `, and has not been working for the last ${Math.round(unackedFor / 60_000)} min of that`
+                : ` and is still working, which is why this waited`) +
+              `: ${JSON.stringify(od.text.slice(0, 160))}. That tab's outstanding slot is ` +
+              // Says what actually works. The old text sent the reader to driveTab, which is
+              // the one thing that CANNOT work here: it refuses a tab that already owes an
+              // answer (`outstanding_directive`). Nothing clears this slot but the tab
+              // answering or the tab going away — `ackOutstanding` exists but is wired to no
+              // control, so there is no manual release. Better to say so than to send
+              // someone round a loop that returns a refusal.
+              `held until it answers, so no rule and no driveTab can reach it. If the agent ` +
+              `is gone or wedged, reload or close the tab — that is the only thing that ` +
+              `releases the slot. If it is alive and simply never acknowledges, it can clear ` +
+              `this itself with replyToOverlord kind:'ack'.`,
           );
         }
         // Claude task-store importer — one-way, into maiTerm's own store.

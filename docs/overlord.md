@@ -377,6 +377,35 @@ time still surfaces a swallowed directive once the tab goes quiet; suppressing o
 would lose it permanently. The message reports both durations, since "sent 40 min ago" and
 "not working for the last 11 of them" are different facts and only the second fired it.
 
+**The idle clock alone was a regression, caught in review.** It can be pinned at zero for the
+life of a tab, and the tabs where that happens are exactly the ones whose directive can never
+clear — so suppressing on idleness removed the only notice an operator ever got that a tab had
+jammed. Two reachable ways:
+
+- The census track-request's only practical clearing path is `f.last_turn_ts > od.sentAt`, and
+  `overlord_tab_facts` returns no facts *at all* for a Codex/Gemini SSH tab or one whose bridge
+  is down — while `scanWorkspaces`, which decides who to ask, keys off `claudeStateStore` and
+  will happily ask such a tab. A working agent then resets the idle clock forever.
+- A tab whose `Stop` hook is lost stays `active` permanently: `agentState`'s stale timer
+  re-sets the same state rather than timing it out.
+
+`DIRECTIVE_MAX_OUTSTANDING_MS` (30 min) is the other half — an absolute ceiling, whatever the
+tab is doing. The three original false positives are ritual directives, so the ritual guard
+still suppresses them and the ceiling never sees them.
+
+**The card now says what actually works.** It used to send the reader to `driveTab`, which is
+the one thing that cannot work on a jammed tab — it refuses a tab that already owes an answer
+(`outstanding_directive`). Nothing releases that slot except the tab answering or the tab going
+away: **`ackOutstanding` exists but is wired to no control**, so there is no manual release.
+
+**`drive_reply` and `directive_unacked` used to double-fire on one directive.**
+`harvestDriveReplies` dropped the watch on expiry but left `outstanding` to a `setTimeout`
+armed for `DRIVE_WATCH_MS + 1000` — leaving roughly one tick in five where the watch was gone
+and the directive was not, so the unacked check raised a second card about the directive
+`drive_reply` had just reported. The slot is released at expiry now, under the same
+text-equality guard the timeout uses; the timeout stays as the backstop for paths where the
+loop does not run.
+
 **What this does NOT fix, and the cost attribution that was wrong.** The tab being blocked —
 "nothing else can be sent" — comes from the outstanding directive itself via the
 `only_if_no_outstanding` guard, not from the escalation. The tab stays blocked for those ten
