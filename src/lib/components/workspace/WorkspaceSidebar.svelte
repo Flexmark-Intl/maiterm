@@ -505,6 +505,11 @@
         expandedStacks = new Set(expandedStacks).add(workspaceId);
         requestAnimationFrame(() => stackSections[workspaceId]?.openAdd());
       } },
+      { label: 'Import from project…', action: () => {
+        addingStackFor = workspaceId;
+        expandedStacks = new Set(expandedStacks).add(workspaceId);
+        requestAnimationFrame(() => stackSections[workspaceId]?.openImport());
+      } },
     ];
   }
 

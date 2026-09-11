@@ -10,6 +10,8 @@
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
   import ServiceModal from './ServiceModal.svelte';
+  import ImportServicesModal from './ImportServicesModal.svelte';
+  import type { StackSuggestion } from '$lib/tauri/commands';
   import { untrack } from 'svelte';
 
   interface Props {
@@ -25,6 +27,7 @@
   let menu = $state<{ x: number; y: number; service: Service } | null>(null);
   let editing = $state<Service | null>(null);
   let adding = $state(false);
+  let importing = $state(false);
 
   /** Re-render uptime once a second while anything is running. */
   let now = $state(Date.now());
@@ -103,6 +106,18 @@
   }
 
   export function openAdd() { adding = true; }
+  export function openImport() { importing = true; }
+
+  async function importRows(rows: StackSuggestion[]) {
+    importing = false;
+    for (const r of rows) {
+      try {
+        await stackStore.createService(workspace.id, { name: r.name, command: r.command, cwd: r.cwd, auto_start: r.recommended, origin: 'suggested' });
+      } catch (e) {
+        logError(`stack: import ${r.name}: ${e}`);
+      }
+    }
+  }
 </script>
 
 <div class="stack-section">
@@ -136,9 +151,18 @@
       <button type="button" class="svc add" onclick={(e) => { e.stopPropagation(); adding = true; }}>
         <span class="plus">+</span><span class="svc-name">Add service…</span>
       </button>
+      {#if services.length === 0}
+        <button type="button" class="svc add" onclick={(e) => { e.stopPropagation(); importing = true; }}>
+          <span class="plus">↓</span><span class="svc-name">Import from project…</span>
+        </button>
+      {/if}
     </div>
   {/if}
 </div>
+
+{#if importing}
+  <ImportServicesModal cwd={defaultCwd()} existingNames={services.map((s) => s.name)} onsubmit={importRows} oncancel={() => (importing = false)} />
+{/if}
 
 {#if menu}
   <ContextMenu items={menuItems(menu.service)} x={menu.x} y={menu.y} onclose={() => (menu = null)} />

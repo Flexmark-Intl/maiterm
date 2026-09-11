@@ -1046,9 +1046,26 @@ function createClaudeCodeStore() {
   async function handleCreateService(args: CreateServiceArgs) {
     const scope = resolveStackScope(args.tabId);
     if ('error' in scope) return scope;
+    const cwd = args.cwd?.trim() || scope.tab.last_cwd || scope.tab.restore_cwd || '';
+    // No name and no command: the agent is asking what this project runs (docs/stack.md
+    // §8) — the same list the human's Import checklist shows, from the same scanner.
+    if (!args.name?.trim() && !args.command?.trim()) {
+      if (!cwd) return { error: 'cwd is required — this tab has not reported a directory yet' };
+      try {
+        const suggestions = await commands.suggestStack(cwd);
+        const existing = new Set((scope.workspace.stack ?? []).map((s) => normalizeTitle(s.name)));
+        return {
+          suggestions: suggestions.map((s) => ({ ...s, already_in_stack: existing.has(normalizeTitle(s.name)) })),
+          note: suggestions.length
+            ? 'Call createService with name + command for each one you want registered, then startService.'
+            : `Nothing declared in ${cwd} (looked for package.json scripts, Procfile, compose, justfile, Makefile).`,
+        };
+      } catch (e) {
+        return { error: String(e) };
+      }
+    }
     if (!args.name?.trim()) return { error: 'name is required' };
     if (!args.command?.trim()) return { error: 'command is required' };
-    const cwd = args.cwd?.trim() || scope.tab.last_cwd || scope.tab.restore_cwd || '';
     if (!cwd) return { error: 'cwd is required — this tab has not reported a directory yet' };
     const before = (scope.workspace.stack ?? []).length;
     try {

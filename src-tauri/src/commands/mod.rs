@@ -6,6 +6,7 @@ pub mod mailink;
 pub mod overlord;
 pub mod scheduler;
 pub mod ssh_tunnel;
+pub mod stack;
 pub mod system;
 pub mod tasks;
 pub mod terminal;

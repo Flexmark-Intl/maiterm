@@ -824,6 +824,19 @@ export async function setWorkspaceStack(workspaceId: string, stack: Service[]): 
   return invoke('set_workspace_stack', { workspaceId, stack });
 }
 
+/** A service the project's own files say it runs (docs/stack.md §8). */
+export interface StackSuggestion {
+  name: string;
+  command: string;
+  cwd: string;
+  source: 'package.json' | 'Procfile' | 'compose' | 'justfile' | 'Makefile' | string;
+  recommended: boolean;
+}
+/** Scan a directory for services to import: package.json scripts, Procfile, compose, justfile, Makefile. */
+export async function suggestStack(cwd: string): Promise<StackSuggestion[]> {
+  return invoke('suggest_stack', { cwd });
+}
+
 /** One service's live status, as published to Rust for the SessionStart priming. */
 export interface StackRuntimeRow {
   service_id: string;

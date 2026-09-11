@@ -769,7 +769,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "createService",
-            "description": "Register a service this project runs — a dev server, API, database, worker — so maiTerm can start, watch and restart it and every tab can see it. Idempotent by name (returns the existing one). Does NOT start it: call startService when you want it up, so your human sees two deliberate acts. If you found the command in package.json scripts, a Procfile or docker-compose, say so in `note`. cwd defaults to your tab's directory.",
+            "description": "Register a service this project runs — a dev server, API, database, worker — so maiTerm can start, watch and restart it and every tab can see it. Idempotent by name (returns the existing one). Does NOT start it: call startService when you want it up, so your human sees two deliberate acts. Called with NO name and NO command it instead returns `suggestions`: what this directory already declares in package.json scripts, a Procfile, a compose file, a justfile or a Makefile — the fastest way to set a project up. cwd defaults to your tab's directory.",
             "inputSchema": { "type": "object", "properties": {
                 "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
                 "name": { "type": "string", "description": "Short handle — 'web', 'api', 'db'" },
