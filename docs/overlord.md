@@ -313,8 +313,17 @@ producer, and is silent on audience and lifetime. The same commit fixes an `AGEN
 in the *other* direction, so the split was on the author's mind and this was simply not
 checked against it.
 
-`withdrawBlocked` drops a tab's open `blocked` cards the moment it reports any non-blocked
-state, mirroring the permission withdrawal. Two boundaries:
+`withdrawBlocked` drops a tab's open `blocked` cards when it reports a recovered state,
+mirroring the permission withdrawal. Three boundaries:
+
+- **An ALLOWLIST of recovered states (`working` / `done` / `idle`), not `!== 'blocked'`.**
+  `state` is declared required with a four-value enum, but this is the hand-rolled JSON-RPC
+  server and nothing enforces it at runtime — the gap `coerceStatus` exists to cover on the
+  task side, whose docstring says agents do drift from a declared vocabulary. `!== 'blocked'`
+  handed a malformed report retraction power it never had: a tab reporting `blocked`, then
+  `state: 'stuck'` while still stuck, had its card deleted with nothing to re-raise it, and
+  the deck and the phone both cleared while the tab sat blocked. Before the withdrawal
+  existed an off-vocabulary state was inert in *both* directions; it stays that way.
 
 - **Only the bare-blocked path.** `needs_human` / `kind: 'escalate'` files `agent_report`,
   which stays queued — an agent can raise a question and go do other work, and the question
@@ -339,10 +348,24 @@ producers rather than fixing one.
 ### 3.1.1 `escalate` dedupes one kind, and the exclusions are the point
 
 `escalate` was a bare append, so a chatty agent stacked a card per report and nothing
-disposed of them. It now refreshes the open card for `DEDUPED_ESCALATIONS` kinds in place —
-updating `detail` and `ts`, preserving `read` — so the board carries the agent's latest
-reason. A stale card is a subtler lie than a duplicated one; preserving `read` keeps the
-dedupe from restoring the noise it removes by re-ringing the doorbell.
+disposed of them. It now refreshes the open card for `DEDUPED_ESCALATIONS` kinds in place, so
+the board carries the agent's latest reason — a stale card is a subtler lie than a duplicated
+one. Three fields behave deliberately:
+
+- **`ts` is NOT refreshed.** It means "raised at", and that is the more useful reading here:
+  a tab restating `blocked` every 30s for two hours would otherwise read as "30s" forever on
+  both the deck and the phone. Stacked duplicates used to convey the duration, loudly — losing
+  it while fixing the noise trades one bad reading for another. The card reads "raised 2h ago,
+  latest reason: …".
+- **`read` is preserved**, so a refresh does not re-ring the doorbell. The human loses nothing
+  by it: `publishMirror` sends `humanEscalations`, which filters on kind and *not* on `read`,
+  and the deck renders read cards until dismissed — both human surfaces show the update. Only
+  the Overlord agent misses it, and only after it has already been told the tab is blocked.
+  Do **not** "fix" that with `unNudged.add()` on the refresh path: `wakeOverlordAgent` prunes
+  every id that is not `!read` before doing anything, so the line is silently inert.
+- **`workspaceId` is re-resolved**, falling back to the stored value rather than `''`. A tab
+  can be dragged between workspaces and a deduped card is never re-created, so without this
+  the row keeps the workspace it was first raised in permanently.
 
 The set is **`blocked` alone**. A wider net was proposed ("the un-self-clearing kinds") and
 would have been worse than the bug:
@@ -351,11 +374,14 @@ would have been worse than the bug:
   the human answers the second, and never sees the first.
 - `step_timeout` is a distinct EVENT — this rule, this step. Two rules timing out are two
   facts.
-- `directive_unacked` cannot stack; its producer latches on `od.unackedNotified` and a tab
-  holds one directive at a time.
+- `directive_unacked` fires once per DIRECTIVE — `unackedNotified` is latched on the
+  `OutstandingDirective`, not the tab, so a cleared-then-reissued directive can raise a second
+  card while the first is up. Correct: two directives are two facts with different text.
 - `AGENT_ONLY_ESCALATIONS` kinds are deleted on delivery, so they never accumulate on the
   board. `permission_stuck` in particular **must** keep stacking, for the list-per-tab reason
-  above; `task_handoff`/`task_dropped` are per-task, so `(tabId, kind)` is the wrong key.
+  above; `task_handoff`/`task_dropped` are per-task, and `sendTaskToOverlord` raises the
+  former with `tabId: ''` for an unassigned task, so `(tabId, kind)` would collapse every
+  unassigned handoff in the window onto one card.
 
 ### 3.2 A proposal is a snapshot, so it has to be re-read
 

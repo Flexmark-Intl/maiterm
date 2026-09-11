@@ -319,16 +319,24 @@ const HUMAN_BOARD_ESCALATIONS = new Set<OverlordEscalation['kind']>(['task_hando
  *   sees the first.
  * - `step_timeout` is a distinct EVENT — this rule, this step, this moment. Two rules
  *   timing out on one tab are two facts, and the ritual has already aborted for each.
- * - `directive_unacked` cannot stack: its producer latches on `od.unackedNotified`, so it
- *   fires once per directive and a tab holds one directive at a time.
+ * - `directive_unacked` fires once PER DIRECTIVE — `unackedNotified` is latched on the
+ *   `OutstandingDirective`, not on the tab, so `clearOutstanding` followed by a new directive
+ *   can raise a second card while the first is still up. That is correct: two directives are
+ *   two facts with different text, and collapsing them would hide one.
  * - Everything in AGENT_ONLY_ESCALATIONS is DELETED on delivery rather than marked read, so
  *   it does not accumulate on the board at all. `permission_stuck` in particular must keep
  *   stacking — `permissionHandoff` is a list per tab precisely because one open gate is
  *   escalated again each time a `permission_pending` rule re-fires, and withdrawal has to
- *   retract all of them. `task_handoff`/`task_dropped` are per-TASK, so (tabId, kind) is the
- *   wrong key for them entirely.
+ *   retract all of them. `task_handoff`/`task_dropped` are per-TASK, and `sendTaskToOverlord`
+ *   raises the former with `tabId: ''` for an unassigned task — so (tabId, kind) would
+ *   collapse every unassigned handoff in the window onto one card.
  */
 const DEDUPED_ESCALATIONS = new Set<OverlordEscalation['kind']>(['blocked']);
+
+/** `replyToOverlord` states that mean a tab is no longer blocked, so its `blocked` card can
+ *  be withdrawn. The other side of the declared enum, spelled out rather than inferred with
+ *  `!== 'blocked'` — see the call site for why the difference is load-bearing. */
+const RECOVERED_STATES = new Set(['working', 'done', 'idle']);
 
 /** Guards an agent-created rule gets, whatever it asked for — the field-tier rule (§10):
  *  guards are human-only, unreachable from the MCP surface. Exported so the approval modal
@@ -1081,15 +1089,41 @@ function createOverlordStore() {
     // the board carries the agent's LATEST reason rather than its first — a stale card is a
     // subtler lie than a duplicated one, and the duplicate at least tells you it is old.
     //
+    // **`ts` is NOT refreshed.** It means "raised at", and on a deduped card that is the
+    // more useful of the two readings: a tab restating `blocked` every 30s for two hours
+    // would otherwise render as "30s" forever on both the deck and the phone, and how long
+    // this has been true is most of what the human wants from the card. Stacked duplicates
+    // used to convey that, loudly — losing the duration while fixing the noise would trade
+    // one bad reading for another. The card reads "raised 2h ago, latest reason: …".
+    //
     // `read` is preserved, so this does not re-ring the doorbell or re-deliver to the agent.
     // Deduping exists to cut noise; resetting it would restore the noise by another route.
-    // Accepted cost: an agent that already pulled the card never sees the updated wording.
+    // The human is NOT the party that loses out: `publishMirror` sends `humanEscalations`,
+    // which filters on kind and not on `read`, and the deck renders read cards until they
+    // are dismissed — so both human surfaces show the updated detail. Only the Overlord
+    // agent misses it, and only after it has already been told this tab is blocked.
+    //
+    // DO NOT "fix" that by adding `unNudged.add(open.id)` here. It is silently INERT for a
+    // read card: `wakeOverlordAgent` prunes every id that is not `!read` before it does
+    // anything, so the line would look like a fix and do nothing.
     const open = DEDUPED_ESCALATIONS.has(kind)
       ? escalations.find((e) => e.tabId === tabId && e.kind === kind)
       : undefined;
     if (open) {
       escalations = escalations.map((e) =>
-        e.id === open.id ? { ...e, detail, ts: Date.now(), ruleId, taskId: taskId ?? e.taskId } : e,
+        e.id === open.id
+          ? {
+              ...e,
+              detail,
+              ruleId,
+              taskId: taskId ?? e.taskId,
+              // Re-resolved because a tab can be dragged between workspaces, and a deduped
+              // card is never re-created — so without this the row keeps the workspace it
+              // was first raised in, for good. Falls back to the stored value rather than
+              // `''`, since a lookup miss must not blank a field that was right.
+              workspaceId: workspaceForTab(tabId)?.id ?? e.workspaceId,
+            }
+          : e,
       );
       scheduleMirror();
       return open.id;
@@ -4006,7 +4040,17 @@ function createOverlordStore() {
       // is both a recovery AND a fresh ask ("unblocked, but now I need a decision") clears
       // the old `blocked` and raises the new `agent_report`, rather than the withdrawal
       // eating a card raised microseconds earlier.
-      if (args.state !== 'blocked') withdrawBlocked(tabId);
+      //
+      // **An ALLOWLIST, not `!== 'blocked'`.** `state` is declared required with a
+      // four-value enum, but this is the hand-rolled JSON-RPC server and nothing enforces it
+      // at runtime — the same gap `coerceStatus` exists to cover on the task side, and its
+      // docstring says agents do drift from a declared vocabulary. `!== 'blocked'` handed a
+      // malformed report retraction power it never had: a tab that reported `blocked`, then
+      // reported `state: 'stuck'` while still stuck, had its card deleted and nothing
+      // re-raised it — the deck and the phone both cleared while the tab sat blocked. Before
+      // this withdrawal existed an off-vocabulary state was inert in BOTH directions; it
+      // stays that way.
+      if (RECOVERED_STATES.has(args.state)) withdrawBlocked(tabId);
       if (args.needs_human || args.kind === 'escalate' || args.state === 'blocked') {
         const blockers = args.blockers?.length ? ` — blockers: ${args.blockers.join('; ')}` : '';
         // "I am stuck" and "I need you" are different cards. Filing both as `agent_report`
