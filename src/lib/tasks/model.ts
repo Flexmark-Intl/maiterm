@@ -185,6 +185,24 @@ export function blocking(task: Task, all: Task[]): Task[] {
   return all.filter((t) => t.id !== task.id && t.blocked_by?.includes(task.id));
 }
 
+/**
+ * Did a call hand this row to someone else? Compares the owner the row had when the call
+ * BEGAN against the owner it has now.
+ *
+ * Stated over the net effect rather than per-write on purpose. A batch may assign a row
+ * twice, assign then release it, or assign it away and back again, and only the net result
+ * is true of the stored board — so announcing per-write raised cards for delegations that
+ * had been undone, and made the batch and single-update paths disagree about identical
+ * final state.
+ *
+ * Three things are not a delegation: no change of owner, a release (`to` is null — the row
+ * goes to the unclaimed pile, which is nobody to notify), and claiming it for yourself,
+ * which would raise a card every time an agent picked up its own work.
+ */
+export function isDelegation(from: string | null, to: string | null, callerTabId: string): to is string {
+  return !!to && to !== callerTabId && to !== from;
+}
+
 /** One update's dependency edits (`updateTasks`). `blocked_by` replaces the whole set;
  *  `block_on` and `unblock_from` add and remove single edges on top of it. */
 export interface EdgeEdit {

@@ -428,14 +428,28 @@ detail}]` either way:
 Claiming a row for yourself or releasing one raises nothing — announcing those would fire a
 card every time an agent picked up its own work.
 
-**The hand-off is recorded only once the row is written**, keyed by task id so two updates
-to the same row in one batch collapse onto the committed assignment. Recording it alongside
-the patch was wrong twice over: a later refusal in the same iteration `continue`s past the
-write, so a rejected update still announced a hand-off — and because `announceHandoff`
-re-read the stored assignee, the escalation named whichever tab already owned the row while
-the reply's `handoffs` named the refused one. A delivery receipt for a write that did not
-happen is the precise thing the field exists to prevent. `announceHandoff` now takes the
-target it is describing and refuses to announce if the stored row disagrees.
+**A hand-off is the NET change of owner across the call, derived after the commit** — for
+each row the call touched, the owner it had on entry against the owner it has now
+(`isDelegation`). It is deliberately *not* accumulated per write, and that took three
+rounds of review to get right, each finding the same class: a record written under one
+condition and read under another.
+
+- Recorded alongside the patch, a later refusal in the same iteration `continue`d past the
+  write — so a **rejected** update still announced a hand-off. And because `announceHandoff`
+  re-read the stored assignee, the escalation named whichever tab already owned the row
+  while the reply's `handoffs` named the refused one.
+- Moved after the write and keyed by task id, the entry was set but never cleared — so
+  `[{T→B}, {T→null}]` in one batch announced a hand-off the same call had **undone**, with
+  a receipt reading "the task is assigned to B and shows on its task panel" for a row
+  sitting unclaimed. And `[{T→B}, {T→original owner}]` raised a card asking the supervisor
+  to consider driving a tab about work it already held — where the single update
+  `{T→original owner}` announces nothing, so batch and non-batch disagreed about identical
+  final state.
+
+A diff of before against after has nothing to go stale, so all three fall out as "the owner
+did not change" without a case each. `announceHandoff` still takes the target it is
+describing and refuses if the stored row disagrees — now a pure invariant check, since the
+target is read from the committed list.
 
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.

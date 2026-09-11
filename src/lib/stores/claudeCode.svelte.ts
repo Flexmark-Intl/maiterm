@@ -11,7 +11,7 @@ import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isInFlight, normalizeTitle, resolveBlockers, resolveEdges, TASK_NOTE_CAP } from '$lib/tasks/model';
+import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isDelegation, isInFlight, normalizeTitle, resolveBlockers, resolveEdges, TASK_NOTE_CAP } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1564,11 +1564,16 @@ function createClaudeCodeStore() {
      *  rather than silently dropped: an agent that hands work to a tab and is told nothing
      *  believes the hand-off happened and stops tracking the task. */
     const refused: { id: string; reason: string; detail: string }[] = [];
-    /** Rows this call moved to a DIFFERENT tab, task id → new assignee. Collected during
-     *  the mutate and announced after it, since announcing escalates and that must not run
-     *  inside the store's synchronous whole-list commit. A Map, not a list: two updates to
-     *  the same row in one batch must announce the committed assignment once, not both. */
-    const handedOff = new Map<string, string>();
+    /** Every row this call touched, task id → the tab that owned it when the call began.
+     *
+     *  Hand-offs are DERIVED from this against the committed list after the batch, never
+     *  accumulated during it. Two rounds of review found bugs in the accumulating version
+     *  and they were both the same class — a record written under one condition and read
+     *  under another: a refused update left a stale entry, then a later `assign_to: null`
+     *  in the same batch left one the write had undone, because the recording branch had
+     *  no `else` that cleared it. There is nothing to go stale in a diff of before against
+     *  after, so the class is gone rather than the instances. */
+    const entryOwner = new Map<string, string | null>();
     const known = tabIdsInWorkspace(loc.workspace);
     tasksStore.mutate(loc.workspace.id, (list) => {
       let changed = false;
@@ -1580,6 +1585,10 @@ function createClaudeCodeStore() {
           missing.push(u.id!);
           continue;
         }
+        // Who owned this row when the CALL began. Recorded once per id, before anything is
+        // written, and diffed against the committed owner after the whole batch — see the
+        // hand-off block below the loop.
+        if (!entryOwner.has(u.id!)) entryOwner.set(u.id!, list[idx].tab_id ?? null);
         // Resolve the assignee BEFORE touching anything, so a refused hand-off doesn't half
         // apply the rest of the same update — the agent would then be told the row was
         // refused while its title had already changed.
@@ -1596,9 +1605,6 @@ function createClaudeCodeStore() {
           }
           assignTo = want;
         }
-        // Captured before the patch, since the hand-off test needs the PREVIOUS owner and
-        // is deliberately made after the row is written (see below).
-        const prevTabId = list[idx].tab_id ?? null;
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
         if (assignTo !== undefined) patch.tab_id = assignTo;
         if (u.status) patch.status = coerceStatus(u.status);
@@ -1640,44 +1646,36 @@ function createClaudeCodeStore() {
         }
         list[idx] = { ...list[idx], ...patch };
         updated.push(u.id!);
-        // Recorded only once the row is actually WRITTEN, and keyed by task id so a second
-        // update to the same row in one batch collapses onto the committed assignment.
-        //
-        // Recording it up with the patch instead was wrong twice over: a later refusal in
-        // the same iteration `continue`s past the write, so a rejected update still
-        // announced a hand-off — and since `announceHandoff` re-read the STORED assignee,
-        // the escalation named whichever tab already owned the row while the reply's
-        // `handoffs` named the one that was refused. A delivery receipt for a write that
-        // did not happen is the precise thing this field exists to prevent.
-        //
-        // Handing work to ANOTHER tab is a delegation and has to be announced; claiming one
-        // for yourself or releasing it is not, and announcing those would raise a card every
-        // time an agent picked up its own work.
-        if (assignTo && assignTo !== loc.tab.id && assignTo !== prevTabId) {
-          handedOff.set(u.id!, assignTo);
-        }
         changed = true;
       }
       return changed ? list : null;
     });
-    // Announced AFTER the commit, so the escalation describes the stored assignment rather
-    // than one that could still be rolled back.
+    // Announced AFTER the commit, and computed from it: for each row the call touched, the
+    // owner it had on entry against the owner it has now. A refused update, an assignment
+    // undone later in the same batch, and a batch that nets back to the original owner all
+    // fall out as "no delegation" without needing a case each — they are simply rows whose
+    // owner did not change, or changed to the caller.
     const nameOfTab = (id: string) => {
       const tab = loc.workspace.panes.flatMap((p) => p.tabs).find((t) => t.id === id);
       return tab ? tabDisplayName(tab) : id;
     };
-    const handoffs = [...handedOff].map(([id, to]) => {
-      const told = overlordStore.announceHandoff(id, loc.tab.id, to);
-      return {
-        id,
-        to,
-        told,
-        detail:
-          told === 'agent'
-            ? `${nameOfTab(to)} has NOT been typed into — nothing types into a tab on an agent's say-so. This window's Overlord has been told and will decide whether to drive it.`
-            : `The task is assigned to ${nameOfTab(to)} and shows on its task panel and the board, but that tab has NOT been told: nothing types into a tab on an agent's say-so, and there is no supervisor here to relay it. If it needs starting now, say so to your human — they can press "Do it" on the row.`,
-      };
-    });
+    const handoffs = [...entryOwner]
+      .map(([id, from]) => ({ id, from, to: tasksStore.find(loc.workspace.id, id)?.tab_id ?? null }))
+      .filter((h): h is { id: string; from: string | null; to: string } =>
+        isDelegation(h.from, h.to, loc.tab.id),
+      )
+      .map(({ id, to }) => {
+        const told = overlordStore.announceHandoff(id, loc.tab.id, to);
+        return {
+          id,
+          to,
+          told,
+          detail:
+            told === 'agent'
+              ? `${nameOfTab(to)} has NOT been typed into — nothing types into a tab on an agent's say-so. This window's Overlord has been told and will decide whether to drive it.`
+              : `The task is assigned to ${nameOfTab(to)} and shows on its task panel and the board, but that tab has NOT been told: nothing types into a tab on an agent's say-so, and there is no supervisor here to relay it. If it needs starting now, say so to your human — they can press "Do it" on the row.`,
+        };
+      });
     return {
       updated,
       ...(missing.length ? { missing } : {}),

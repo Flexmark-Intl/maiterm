@@ -9,6 +9,7 @@ import {
   isDropped,
   isInFlight,
   isParked,
+  isDelegation,
   isRetired,
   resolveBlockers,
   resolveEdges,
@@ -261,6 +262,34 @@ describe('blockers are legible, not raw ids', () => {
   it('never reports a task as blocking itself', () => {
     const self = task({ id: 'a', blocked_by: ['a'] });
     expect(blocking(self, [self])).toEqual([]);
+  });
+});
+
+describe('a hand-off is the NET change of owner, not each write', () => {
+  const ME = 'tab-me';
+
+  it('is a delegation when the row ends on a different tab', () => {
+    expect(isDelegation('tab-a', 'tab-b', ME)).toBe(true);
+    expect(isDelegation(null, 'tab-b', ME)).toBe(true);
+  });
+
+  it('is not a delegation when the owner did not change', () => {
+    // The batch `[{T→B}, {T→original}]` nets to this. Announcing it raised a card asking
+    // the supervisor to consider driving a tab about work it already held — and made the
+    // batch path disagree with the single update `{T→original}`, which announces nothing.
+    expect(isDelegation('tab-a', 'tab-a', ME)).toBe(false);
+  });
+
+  it('is not a delegation when the row was released', () => {
+    // `[{T→B}, {T→null}]`. The row is in the unclaimed pile; there is nobody to notify,
+    // and a receipt naming B would say it "shows on its task panel" when it shows nowhere.
+    expect(isDelegation('tab-a', null, ME)).toBe(false);
+    expect(isDelegation(null, null, ME)).toBe(false);
+  });
+
+  it('is not a delegation when you claim it for yourself', () => {
+    expect(isDelegation('tab-a', ME, ME)).toBe(false);
+    expect(isDelegation(null, ME, ME)).toBe(false);
   });
 });
 
