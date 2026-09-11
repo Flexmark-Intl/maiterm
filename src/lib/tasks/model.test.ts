@@ -11,6 +11,7 @@ import {
   isParked,
   isRetired,
   resolveBlockers,
+  resolveEdges,
   normalizeWorkstreamName,
   findDuplicate,
   findImportedDuplicate,
@@ -260,6 +261,46 @@ describe('blockers are legible, not raw ids', () => {
   it('never reports a task as blocking itself', () => {
     const self = task({ id: 'a', blocked_by: ['a'] });
     expect(blocking(self, [self])).toEqual([]);
+  });
+});
+
+describe('dependency edits refuse the edges that would lie', () => {
+  const known = (ids: string[]) => (id: string) => ids.includes(id);
+
+  it('applies blocked_by as the base with block_on/unblock_from on top', () => {
+    const r = resolveEdges('t', ['a'], { blocked_by: ['a', 'b'], block_on: ['c'], unblock_from: ['a'] }, known(['a', 'b', 'c']));
+    expect(r).toEqual({ ok: true, edges: ['b', 'c'] });
+  });
+
+  it('carries the current set when blocked_by is absent', () => {
+    const r = resolveEdges('t', ['a'], { block_on: ['b'] }, known(['a', 'b']));
+    expect(r.ok && r.edges).toEqual(['a', 'b']);
+  });
+
+  it('refuses a self-edge through blocked_by, not only block_on', () => {
+    // The sibling field was the bypass: checking only block_on let `blocked_by: [self]`
+    // record the exact edge the refusal exists to stop — and that one cannot be undone
+    // from any human surface, since every control on a dependency-blocked row is disabled.
+    expect(resolveEdges('t', [], { block_on: ['t'] }, known(['t']))).toMatchObject({ ok: false, reason: 'self_dependency' });
+    expect(resolveEdges('t', [], { blocked_by: ['t'] }, known(['t']))).toMatchObject({ ok: false, reason: 'self_dependency' });
+  });
+
+  it('refuses an id that resolves to nothing, through either field', () => {
+    // An unresolvable id counts as MET, so accepting it records a dependency that silently
+    // does nothing while reading back as real.
+    expect(resolveEdges('t', [], { block_on: ['ghost'] }, known([]))).toEqual({ ok: false, reason: 'unknown_blocker', bad: ['ghost'] });
+    expect(resolveEdges('t', [], { blocked_by: ['ghost'] }, known([]))).toEqual({ ok: false, reason: 'unknown_blocker', bad: ['ghost'] });
+  });
+
+  it('does NOT re-validate an edge merely carried over, so unblock_from can repair a row', () => {
+    // The escape hatch for a row that already holds a bad edge. Validating carried edges
+    // would refuse the repair and wedge the row permanently.
+    expect(resolveEdges('t', ['ghost'], { unblock_from: ['ghost'] }, known([]))).toEqual({ ok: true, edges: [] });
+    expect(resolveEdges('t', ['t'], { unblock_from: ['t'] }, known([]))).toEqual({ ok: true, edges: [] });
+  });
+
+  it('accepts a parked prerequisite, which exists but is off the list', () => {
+    expect(resolveEdges('t', [], { block_on: ['parked'] }, known(['parked']))).toEqual({ ok: true, edges: ['parked'] });
   });
 });
 

@@ -185,6 +185,54 @@ export function blocking(task: Task, all: Task[]): Task[] {
   return all.filter((t) => t.id !== task.id && t.blocked_by?.includes(task.id));
 }
 
+/** One update's dependency edits (`updateTasks`). `blocked_by` replaces the whole set;
+ *  `block_on` and `unblock_from` add and remove single edges on top of it. */
+export interface EdgeEdit {
+  blocked_by?: string[];
+  block_on?: string[];
+  unblock_from?: string[];
+}
+
+export type EdgeResult =
+  | { ok: true; edges: string[] }
+  | { ok: false; reason: 'self_dependency' | 'unknown_blocker'; bad: string[] };
+
+/**
+ * Apply one update's dependency edits, refusing the two edges that would lie.
+ *
+ * **Validation covers every id the update ASSERTS** — `block_on`, and `blocked_by` too,
+ * since a whole-array replace asserts each of its members. Checking only `block_on` left
+ * the refusal bypassable through its sibling field: `blocked_by: [self]` recorded the exact
+ * edge the refusal exists to stop, and that one cannot be undone from any human surface —
+ * both steppers, park and "Do it" are disabled on a dependency-blocked row, and a drag
+ * writes the stored status while the effective one stays `blocked`.
+ *
+ * **Edges merely CARRIED OVER are not re-validated**, and must not be. A row that already
+ * holds a bad edge is repaired with `unblock_from`; refusing on the pre-existing edge would
+ * refuse the repair too and wedge the row permanently.
+ */
+export function resolveEdges(
+  taskId: string,
+  current: readonly string[],
+  edit: EdgeEdit,
+  exists: (id: string) => boolean,
+): EdgeResult {
+  const asserted = [...new Set([...(edit.blocked_by ?? []), ...(edit.block_on ?? [])])];
+  if (asserted.includes(taskId)) {
+    return { ok: false, reason: 'self_dependency', bad: [taskId] };
+  }
+  // An id resolving to nothing counts as MET (`hasUnmetDeps`) — a deleted prerequisite must
+  // not wedge its dependents forever — so accepting one would record an edge that silently
+  // does nothing while reading back as a real dependency.
+  const bad = asserted.filter((b) => !exists(b));
+  if (bad.length) return { ok: false, reason: 'unknown_blocker', bad };
+
+  const edges = new Set(edit.blocked_by ?? current);
+  for (const b of edit.block_on ?? []) edges.add(b);
+  for (const b of edit.unblock_from ?? []) edges.delete(b);
+  return { ok: true, edges: [...edges] };
+}
+
 /** Newest notes kept per task. MUST match `TASK_NOTE_CAP` in state/workspace.rs, which
  *  re-trims before disk — a log is for the last few things that happened, an agent in a
  *  retry loop appends forever, and the store persists a WHOLE workspace list on every task

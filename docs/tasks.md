@@ -428,6 +428,15 @@ detail}]` either way:
 Claiming a row for yourself or releasing one raises nothing — announcing those would fire a
 card every time an agent picked up its own work.
 
+**The hand-off is recorded only once the row is written**, keyed by task id so two updates
+to the same row in one batch collapse onto the committed assignment. Recording it alongside
+the patch was wrong twice over: a later refusal in the same iteration `continue`s past the
+write, so a rejected update still announced a hand-off — and because `announceHandoff`
+re-read the stored assignee, the escalation named whichever tab already owned the row while
+the reply's `handoffs` named the refused one. A delivery receipt for a write that did not
+happen is the precise thing the field exists to prevent. `announceHandoff` now takes the
+target it is describing and refuses to announce if the stored row disagrees.
+
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.
 
@@ -477,12 +486,26 @@ already does.
   needs before it goes idle. `blocking` carries it, and is absent on the rows — almost all
   of them — that block nothing.
 
-Two refusals, both because the alternative is an edge that lies:
+Two refusals, both because the alternative is an edge that lies. The rule lives in
+`resolveEdges` (`src/lib/tasks/model.ts`), pure and unit-tested:
 
 - **An unknown blocker id.** `hasUnmetDeps` treats an unresolvable id as met, so a typo'd id
   would record a dependency that does nothing while reading back as a real one. Parked ids
   are accepted: off the list, still blocking.
-- **A self-edge.** Never met, so the row would sit in Blocked forever.
+- **A self-edge.** Never met, so the row would sit in Blocked forever — and *no human
+  control can free it*: both steppers, park and "Do it" are all disabled on a
+  dependency-blocked row, and a drag writes the stored status while the effective one stays
+  `blocked`. The human's only exits are deleting the task or getting the agent to send
+  `unblock_from`.
+
+Which ids get checked is the subtle part, and it was wrong in both directions at first:
+
+- **Every id the update ASSERTS is validated** — `block_on`, and `blocked_by` too, since a
+  whole-array replace asserts each of its members. Checking only `block_on` left the
+  refusal bypassable through the sibling field three lines away.
+- **Edges merely CARRIED OVER are not re-validated**, and must not be. `unblock_from` is
+  how a row holding a bad edge gets repaired; refusing on the pre-existing edge would
+  refuse the repair too and wedge the row permanently.
 
 **A parked prerequisite is named, and the tab holding it comes with it.** `Tab.archived_tasks`
 is off every list the tools read, so a blocker parked with an archived tab resolved to nothing

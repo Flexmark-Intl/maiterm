@@ -11,7 +11,7 @@ import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isInFlight, normalizeTitle, resolveBlockers, TASK_NOTE_CAP } from '$lib/tasks/model';
+import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isInFlight, normalizeTitle, resolveBlockers, resolveEdges, TASK_NOTE_CAP } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1564,10 +1564,11 @@ function createClaudeCodeStore() {
      *  rather than silently dropped: an agent that hands work to a tab and is told nothing
      *  believes the hand-off happened and stops tracking the task. */
     const refused: { id: string; reason: string; detail: string }[] = [];
-    /** Rows this call moved to a DIFFERENT tab, and whether anyone was told. Collected
-     *  during the mutate and announced after it, since announcing escalates and that must
-     *  not run inside the store's synchronous whole-list commit. */
-    const handedOff: { id: string; to: string }[] = [];
+    /** Rows this call moved to a DIFFERENT tab, task id → new assignee. Collected during
+     *  the mutate and announced after it, since announcing escalates and that must not run
+     *  inside the store's synchronous whole-list commit. A Map, not a list: two updates to
+     *  the same row in one batch must announce the committed assignment once, not both. */
+    const handedOff = new Map<string, string>();
     const known = tabIdsInWorkspace(loc.workspace);
     tasksStore.mutate(loc.workspace.id, (list) => {
       let changed = false;
@@ -1595,16 +1596,11 @@ function createClaudeCodeStore() {
           }
           assignTo = want;
         }
+        // Captured before the patch, since the hand-off test needs the PREVIOUS owner and
+        // is deliberately made after the row is written (see below).
+        const prevTabId = list[idx].tab_id ?? null;
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
-        if (assignTo !== undefined) {
-          patch.tab_id = assignTo;
-          // Handing work to ANOTHER tab is a delegation and has to be announced; claiming
-          // one for yourself or releasing it is not, and announcing those would raise a
-          // card every time an agent picked up its own work.
-          if (assignTo && assignTo !== loc.tab.id && assignTo !== list[idx].tab_id) {
-            handedOff.push({ id: u.id!, to: assignTo });
-          }
-        }
+        if (assignTo !== undefined) patch.tab_id = assignTo;
         if (u.status) patch.status = coerceStatus(u.status);
         if (u.title?.trim()) {
           patch.title = u.title.trim();
@@ -1622,35 +1618,44 @@ function createClaudeCodeStore() {
         }
         if (u.blocked_by || u.block_on || u.unblock_from) {
           // `blocked_by` is the base (whole-array replace, kept for the caller that knows
-          // the full set), then the incremental edits apply on top. Well-defined when all
-          // three arrive together, rather than one silently winning.
-          const edges = new Set(u.blocked_by ?? list[idx].blocked_by ?? []);
-          const added = u.block_on ?? [];
-          // An id that resolves to nothing is treated as MET by hasUnmetDeps — a deleted
-          // prerequisite must not wedge its dependents forever — so accepting a bad id here
-          // would record an edge that silently does nothing and read back as a real
-          // dependency. Parked ids are legitimate: off the list with an archived tab, and
-          // still blocking.
-          const bad = added.filter(
-            (b) => b !== u.id && !list.some((t) => t.id === b) && !workspacesStore.parkedTaskIds.has(b),
+          // the full set), then the incremental edits apply on top. Which ids get validated
+          // and why is `resolveEdges`, where it is unit-testable.
+          //
+          // Parked ids count as existing: off the list with an archived tab, still blocking.
+          const edges = resolveEdges(u.id!, list[idx].blocked_by ?? [], u, (b) =>
+            list.some((t) => t.id === b) || workspacesStore.parkedTaskIds.has(b),
           );
-          const selfEdge = added.includes(u.id!);
-          if (bad.length || selfEdge) {
+          if (!edges.ok) {
             refused.push({
               id: u.id!,
-              reason: selfEdge ? 'self_dependency' : 'unknown_blocker',
-              detail: selfEdge
-                ? 'A task cannot block itself — that edge is never met, so the row would sit in Blocked forever.'
-                : `No task ${bad.join(', ')} in this project. A blocker id that resolves to nothing counts as MET, so recording it would look like a dependency and do nothing. Get ids from listTasks.`,
+              reason: edges.reason,
+              detail:
+                edges.reason === 'self_dependency'
+                  ? 'A task cannot block itself — that edge is never met, so the row would sit in Blocked forever, and no human control can free it. Applies through blocked_by as well as block_on.'
+                  : `No task ${edges.bad.join(', ')} in this project. A blocker id that resolves to nothing counts as MET, so recording it would look like a dependency and do nothing. Get ids from listTasks. To drop an edge you already have, use unblock_from.`,
             });
             continue;
           }
-          for (const b of added) edges.add(b);
-          for (const b of u.unblock_from ?? []) edges.delete(b);
-          patch.blocked_by = [...edges];
+          patch.blocked_by = edges.edges;
         }
         list[idx] = { ...list[idx], ...patch };
         updated.push(u.id!);
+        // Recorded only once the row is actually WRITTEN, and keyed by task id so a second
+        // update to the same row in one batch collapses onto the committed assignment.
+        //
+        // Recording it up with the patch instead was wrong twice over: a later refusal in
+        // the same iteration `continue`s past the write, so a rejected update still
+        // announced a hand-off — and since `announceHandoff` re-read the STORED assignee,
+        // the escalation named whichever tab already owned the row while the reply's
+        // `handoffs` named the one that was refused. A delivery receipt for a write that
+        // did not happen is the precise thing this field exists to prevent.
+        //
+        // Handing work to ANOTHER tab is a delegation and has to be announced; claiming one
+        // for yourself or releasing it is not, and announcing those would raise a card every
+        // time an agent picked up its own work.
+        if (assignTo && assignTo !== loc.tab.id && assignTo !== prevTabId) {
+          handedOff.set(u.id!, assignTo);
+        }
         changed = true;
       }
       return changed ? list : null;
@@ -1661,8 +1666,8 @@ function createClaudeCodeStore() {
       const tab = loc.workspace.panes.flatMap((p) => p.tabs).find((t) => t.id === id);
       return tab ? tabDisplayName(tab) : id;
     };
-    const handoffs = handedOff.map(({ id, to }) => {
-      const told = overlordStore.announceHandoff(id, loc.tab.id);
+    const handoffs = [...handedOff].map(([id, to]) => {
+      const told = overlordStore.announceHandoff(id, loc.tab.id, to);
       return {
         id,
         to,

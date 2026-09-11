@@ -3003,12 +3003,18 @@ function createOverlordStore() {
      * press "Do it". What must never happen is the caller believing a hand-off was delivered
      * when it was not — the `sent ≠ done` rule this file keeps relearning.
      */
-    announceHandoff(taskId: string, fromTabId: string): 'agent' | 'nobody' {
+    announceHandoff(taskId: string, fromTabId: string, toTabId: string): 'agent' | 'nobody' {
       const hit = tasksStore.findAnywhere(taskId);
       if (!hit) return 'nobody';
       const { task } = hit;
-      const toTabId = task.tab_id;
       if (!toTabId || toTabId === fromTabId) return 'nobody';
+      // The target is the one the CALLER was told about, and the stored row must agree.
+      // Re-deriving it from `task.tab_id` instead let a caller be handed a receipt naming
+      // one tab while the escalation named another — the supervisor was then asked to drive
+      // whichever tab already owned the row, about a delegation that never happened. Within
+      // one call these cannot diverge (the recording happens after the synchronous commit),
+      // so a mismatch means another writer moved the row and there is nothing to announce.
+      if (task.tab_id !== toTabId) return 'nobody';
       // Same three conditions startTask's fallback uses. An exempt tab in particular: the
       // escalation is agent-only, so it would be consumed off the board by listEscalations
       // and then refused by driveTab — a promise nothing can keep — while handing the exempt
