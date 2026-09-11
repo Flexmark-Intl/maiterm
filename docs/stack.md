@@ -373,7 +373,7 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Sidebar section, rollup dot, workspace row menu, service modal | `656892b` |
 | Eleven MCP tools (frontend-handled, workspace-scoped, `stack_enabled` gate, write verbs on `PEER_ADDRESSING_TOOLS`), live priming line from the Rust mirror | `1e60fab` |
 | Suggester (`commands/stack.rs`, tests) + import checklist + `createService` with no args | `c4401df` |
-| Review fixes (seven defects): unfiltered `onCommandExit` + post-start settle for fast exits; in-flight guard on start/stop; move clears the binding and reconciliation is workspace-scoped; a stop that gives up keeps `stopping`; stop refuses without a recorded pid; `waitForService` capped at 100s under the 120s MCP response timeout; rollup is batch-true with `partial`; reload of a service tab reads as stopped | *(next commit)* |
+| Review fixes (seven defects): unfiltered `onCommandExit` + post-start settle for fast exits; in-flight guard on start/stop; move clears the binding and reconciliation is workspace-scoped; a stop that gives up keeps `stopping`; stop refuses without a recorded pid; `waitForService` capped at 100s under the 120s MCP response timeout; rollup is batch-true with `partial`; reload of a service tab reads as stopped | `982711f` |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path
