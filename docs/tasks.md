@@ -451,6 +451,24 @@ did not change" without a case each. `announceHandoff` still takes the target it
 describing and refuses if the stored row disagrees — now a pure invariant check, since the
 target is read from the committed list.
 
+**`entryOwner` is built in one pass before the mutate, not inside the loop.** Same answer
+either way, but inside the loop it needed an `if (!entryOwner.has(id))` guard, and that one
+line was all that stood between it and the *intermediate* owner — which is precisely how
+the previous revision announced a hand-off for a batch that netted back to where it
+started. Outside the loop there is no intermediate state to read by accident.
+
+Worth knowing if you touch this: `isDelegation` is unit-tested but `handleUpdateTasks`
+is not, and the part that broke twice was the wiring, not the predicate. Rewiring `from` to
+the intermediate owner would pass every existing test. Hence the structural fix above rather
+than another test case — but a handler-level test over two or three batch shapes is what
+this area actually wants if it is reopened.
+
+**`from` and `to` are both normalized with `?? null`, and that is load-bearing.** `tab_id`
+carries `skip_serializing_if = "Option::is_none"` in Rust, so a freshly hydrated row has
+`tab_id === undefined`. Without matching normalization on both sides of the diff, every
+touched unassigned row would compare `undefined !== null` and announce a hand-off to nobody
+— the serde round-trip trap from the top-level CLAUDE.md, in a new place.
+
 `listTasks` returns tasks **grouped by workstream** rather than flat — a flat list invites
 an agent to treat two separate jobs as one, which is the thing workstreams exist to stop.
 

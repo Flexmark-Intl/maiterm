@@ -1564,16 +1564,25 @@ function createClaudeCodeStore() {
      *  rather than silently dropped: an agent that hands work to a tab and is told nothing
      *  believes the hand-off happened and stops tracking the task. */
     const refused: { id: string; reason: string; detail: string }[] = [];
-    /** Every row this call touched, task id → the tab that owned it when the call began.
+    /** Task id → the tab that owned it when this call began.
      *
      *  Hand-offs are DERIVED from this against the committed list after the batch, never
-     *  accumulated during it. Two rounds of review found bugs in the accumulating version
-     *  and they were both the same class — a record written under one condition and read
-     *  under another: a refused update left a stale entry, then a later `assign_to: null`
-     *  in the same batch left one the write had undone, because the recording branch had
-     *  no `else` that cleared it. There is nothing to go stale in a diff of before against
-     *  after, so the class is gone rather than the instances. */
+     *  accumulated during it. Two rounds of review found bugs in the accumulating version,
+     *  both the same class — a record written under one condition and read under another:
+     *  a refused update left a stale entry, then a later `assign_to: null` in the same
+     *  batch left one the write had undone, because the recording branch had no `else`
+     *  clearing it. A diff of before against after has nothing to go stale.
+     *
+     *  Built HERE, in one pass before the mutate, rather than inside the loop behind an
+     *  `if (!has)` guard. Same answer, but the guard was the one line standing between this
+     *  and the intermediate owner — and reading the intermediate owner is exactly how the
+     *  previous revision announced a hand-off for a batch that netted back to where it
+     *  started. Outside the loop there is no intermediate state to read by accident. */
     const entryOwner = new Map<string, string | null>();
+    for (const u of updates) {
+      const row = tasksStore.find(loc.workspace.id, u.id!);
+      if (row) entryOwner.set(u.id!, row.tab_id ?? null);
+    }
     const known = tabIdsInWorkspace(loc.workspace);
     tasksStore.mutate(loc.workspace.id, (list) => {
       let changed = false;
@@ -1585,10 +1594,6 @@ function createClaudeCodeStore() {
           missing.push(u.id!);
           continue;
         }
-        // Who owned this row when the CALL began. Recorded once per id, before anything is
-        // written, and diffed against the committed owner after the whole batch — see the
-        // hand-off block below the loop.
-        if (!entryOwner.has(u.id!)) entryOwner.set(u.id!, list[idx].tab_id ?? null);
         // Resolve the assignee BEFORE touching anything, so a refused hand-off doesn't half
         // apply the rest of the same update — the agent would then be told the row was
         // refused while its title had already changed.
