@@ -21,6 +21,10 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import '$lib/overlord/deck.css';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
+  import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import StackSection from '$lib/components/stack/StackSection.svelte';
+  import { stackStore } from '$lib/stores/stack.svelte';
+  import { error as logError } from '@tauri-apps/plugin-log';
   import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
   import type { Update } from '@tauri-apps/plugin-updater';
 
@@ -466,6 +470,44 @@
   // a permission gate routed to the Overlord agent) are filtered off the deck, so counting
   // them here lit "1 item waiting on you" over a board with nothing on it and no way to
   // clear the badge — it only cleared when the AGENT next pulled its queue.
+  // ── Stack (docs/stack.md §7) ──
+  // Which workspaces have their Stack section open. The active workspace opens by default
+  // the first time it is seen; everything else stays folded until clicked.
+  let expandedStacks = $state<Set<string>>(new Set());
+  let stackDefaulted = new Set<string>();
+  $effect(() => {
+    const id = workspacesStore.activeWorkspaceId;
+    if (!id || stackDefaulted.has(id)) return;
+    stackDefaulted.add(id);
+    untrack(() => { expandedStacks = new Set(expandedStacks).add(id); });
+  });
+  function toggleStack(workspaceId: string) {
+    const next = new Set(expandedStacks);
+    if (next.has(workspaceId)) next.delete(workspaceId); else next.add(workspaceId);
+    expandedStacks = next;
+  }
+  let stackSections = $state<Record<string, StackSection>>({});
+  /** A workspace with an empty stack has no section to add from; the row's menu asks for
+   *  one here so the section mounts and can open its modal. */
+  let addingStackFor = $state<string | null>(null);
+  let workspaceMenu = $state<{ x: number; y: number; workspaceId: string } | null>(null);
+  function workspaceMenuItems(workspaceId: string) {
+    const services = stackStore.services(workspaceId);
+    const anyLive = services.some((s) => { const st = stackStore.status(s.id); return st === 'running' || st === 'ready' || st === 'starting'; });
+    const run = (label: string, p: Promise<unknown>) => p.catch((e) => logError(`stack: ${label}: ${e}`));
+    return [
+      { label: 'Start stack', disabled: services.length === 0, action: () => run('start stack', stackStore.startStack(workspaceId)) },
+      { label: 'Stop stack', disabled: !anyLive, action: () => run('stop stack', stackStore.stopStack(workspaceId)) },
+      { label: 'Restart stack', disabled: !anyLive, action: () => run('restart stack', stackStore.stopStack(workspaceId).then(() => stackStore.startStack(workspaceId))) },
+      { label: '', separator: true, action: () => {} },
+      { label: 'Add service…', action: () => {
+        addingStackFor = workspaceId;
+        expandedStacks = new Set(expandedStacks).add(workspaceId);
+        requestAnimationFrame(() => stackSections[workspaceId]?.openAdd());
+      } },
+    ];
+  }
+
   const overlordAttention = $derived(
     overlordStore.proposals.length + overlordStore.humanEscalations.filter(e => !e.read).length
   );
@@ -589,6 +631,7 @@
         class:drop-after={dropTargetIndex === index && dropSide === 'after' && dragWorkspaceId !== workspace.id}
         data-workspace-id={workspace.id}
         onclick={() => handleItemClick(workspace.id)}
+        oncontextmenu={(e) => { e.preventDefault(); workspaceMenu = { x: e.clientX, y: e.clientY, workspaceId: workspace.id }; }}
         ondblclick={() => { if (!confirmingDeleteId) startEditing(workspace.id, workspace.name); }}
         onpointerdown={(e) => { if (!confirmingDeleteId) handlePointerDown(e, workspace.id); }}
         onpointermove={handlePointerMove}
@@ -638,6 +681,16 @@
             <button class="confirm-cancel" onclick={(e) => { e.stopPropagation(); confirmingDeleteId = null; }}>Cancel</button>
           {:else}
             <span class="workspace-name">{workspace.name}</span>
+            {#if stackStore.rollup(workspace.id)}
+              {@const roll = stackStore.rollup(workspace.id)}
+              <!-- Stack rollup (docs/stack.md §7): batch semantics like the Claude dot —
+                   green only when every service is up, amber while any starts, red if any crashed. -->
+              <StatusDot
+                color={roll === 'crashed' ? 'red' : roll === 'starting' ? 'yellow' : 'green'}
+                pulse={roll === 'starting'}
+                tooltip={roll === 'crashed' ? 'A service crashed' : roll === 'starting' ? 'Stack starting' : 'Stack up'}
+              />
+            {/if}
             {#if workspace.bridge_all}
               <button
                 class="mesh-badge"
@@ -682,8 +735,20 @@
           {/if}
         {/if}
       </div>
+      {#if (workspace.stack?.length ?? 0) > 0 || addingStackFor === workspace.id}
+        <StackSection
+          bind:this={stackSections[workspace.id]}
+          {workspace}
+          expanded={expandedStacks.has(workspace.id)}
+          ontoggle={() => toggleStack(workspace.id)}
+        />
+      {/if}
     {/each}
   </div>
+
+  {#if workspaceMenu}
+    <ContextMenu items={workspaceMenuItems(workspaceMenu.workspaceId)} x={workspaceMenu.x} y={workspaceMenu.y} onclose={() => (workspaceMenu = null)} />
+  {/if}
 
   {#if updaterStore.showBanner}
     <div class="update-banner">
