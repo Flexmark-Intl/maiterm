@@ -74,9 +74,15 @@ const EVERYTHING = [
         <a class="ln-btn ln-btn--primary ln-btn--lg" href="/download/">Download maiTerm</a>
         <a class="ln-btn ln-btn--ghost ln-btn--lg" href="/guides/getting-started/">Get started</a>
       </div>
-      <p class="ln-note hero-note">
-        Free, source available. macOS, Windows and Linux.
-      </p>
+      {/* The strongest honest thing we can say to someone who has never heard of us, and
+          it was a grey footnote: Warp wants an account, Solo wants $99/yr past four
+          projects. Give it the weight it earns. */}
+      <ul class="hero-facts">
+        <li><strong>Free</strong> — every feature, no paid tier</li>
+        <li><strong>No account</strong> — nothing to sign up for</li>
+        <li><strong>Source published</strong></li>
+      </ul>
+      <p class="ln-note hero-note">macOS, Windows and Linux.</p>
     </div>
 
     <div class="hero-shot">
@@ -348,6 +354,43 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ---------------------------------------------------------------- Price */}
+  <section class="ln-band ln-band--raised">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">What it costs</p>
+      <h2 class="ln-h2 ln-h2--wide">Free. All of it. There is no tier above this one.</h2>
+      <p class="ln-lead">
+        Not free-for-four-projects, not free-until-you-need-the-good-part. Overlord, mesh,
+        the shared board, the phone companion, SSH — every feature on this page is in the
+        build you download, and there is nothing to buy later.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>No account</h3>
+          <p>
+            No sign-in, no licence key, no activation limit, no seat count. Download it and it
+            works. It does not know who you are.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Works offline</h3>
+          <p>
+            There is no licence check to phone home to. The only request maiTerm makes on its
+            own behalf is looking for a new version.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>The source is published</h3>
+          <p>
+            Read it, build it, change it. Source available rather than OSI open source: the
+            one restriction is that you may not use it to build a competing terminal.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
   {/* ----------------------------------------------------------------- FAQ */}
   <Faq />
 
@@ -416,8 +459,45 @@ const EVERYTHING = [
     margin-top: 2.25rem;
   }
 
+  .hero-facts {
+    list-style: none;
+    padding: 0;
+    margin: 1.6rem auto 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem 1.5rem;
+    font-size: 0.975rem;
+    color: var(--ln-fg-dim);
+  }
+  .hero-facts strong {
+    color: var(--ln-fg);
+    font-weight: 640;
+  }
+  /* Separators only while the row genuinely fits on one line. `li + li::before` fires on
+     every item regardless of where the flex line breaks, so on a phone the dots ended up
+     dangling at the START of the wrapped lines. Below the breakpoint the facts stack and
+     the separators go away entirely. */
+  @media (max-width: 47.9rem) {
+    .hero-facts {
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+  }
+  @media (min-width: 48rem) {
+    .hero-facts li {
+      position: relative;
+    }
+    .hero-facts li + li::before {
+      content: '·';
+      position: absolute;
+      left: -0.8rem;
+      color: var(--ln-fg-faint);
+    }
+  }
+
   .hero-note {
-    margin-top: 1rem;
+    margin-top: 0.85rem;
   }
 
   /* The shot is cropped by the fold on purpose: it reads as a running app you
