@@ -955,6 +955,135 @@ pub fn get_pty_foreground(
     Ok(get_foreground_command(pid))
 }
 
+/// What holds a PTY's terminal right now — the pre-write guard for the stack store
+/// (docs/stack.md §4). `get_foreground_command` answers only "is it ssh?"; a service
+/// tab needs "is the shell at its prompt?" (safe to type a start) and "is the job I
+/// started still the one in front?" (safe to send it ^C), and neither can be read off
+/// `Some`/`None` there.
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct PtyForeground {
+    /// `Some(true)`: the shell is the tty's foreground process group — anything typed is
+    /// a command. `Some(false)`: another job owns the terminal. `None`: cannot tell (no
+    /// controlling tty, no snapshot row, or a platform without the signal) — callers must
+    /// not read that as either answer.
+    pub shell_at_prompt: Option<bool>,
+    /// Basename of the foreground job leader's executable ("node", "npm", "ssh"). `None`
+    /// at the prompt or when unknown.
+    pub executable: Option<String>,
+    /// That leader's full command line.
+    pub command: Option<String>,
+    /// That leader's pid. The stack store records it right after a start and compares
+    /// before a stop — pid equality is the guard, not the executable name, since `npm
+    /// run dev` may front as `npm`, `node`, or `sh` depending on the script.
+    pub pid: Option<u32>,
+}
+
+impl PtyForeground {
+    fn unknown() -> Self {
+        Self { shell_at_prompt: None, executable: None, command: None, pid: None }
+    }
+    fn at_prompt() -> Self {
+        Self { shell_at_prompt: Some(true), executable: None, command: None, pid: None }
+    }
+}
+
+/// First token of a `ps` command line reduced to its basename, with the login-shell
+/// dash stripped ("-zsh" → "zsh").
+fn exe_basename(cmd: &str) -> Option<String> {
+    let first = cmd.split_whitespace().next()?;
+    let base = std::path::Path::new(first)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(first);
+    Some(base.trim_start_matches('-').to_string())
+}
+
+/// Same tty-foreground-pgid rule as `get_foreground_command`, minus the ssh filter.
+#[cfg(unix)]
+fn foreground_job(shell_pid: u32) -> PtyForeground {
+    let Some(rows) = ps_rows_snapshot() else { return PtyForeground::unknown() };
+    let Some(shell_row) = rows.iter().find(|r| r.pid == shell_pid) else {
+        return PtyForeground::unknown();
+    };
+    if shell_row.tpgid <= 0 {
+        return PtyForeground::unknown();
+    }
+    let tpgid = shell_row.tpgid as u32;
+    if tpgid == shell_row.pgid {
+        return PtyForeground::at_prompt();
+    }
+    match rows.iter().find(|r| r.pid == tpgid) {
+        Some(leader) => PtyForeground {
+            shell_at_prompt: Some(false),
+            executable: exe_basename(&leader.cmd),
+            command: Some(leader.cmd.clone()),
+            pid: Some(leader.pid),
+        },
+        // The pgid leader already exited but the group still holds the tty (a pipeline
+        // whose first stage finished). Not at the prompt; nothing to name.
+        None => PtyForeground { shell_at_prompt: Some(false), executable: None, command: None, pid: Some(tpgid) },
+    }
+}
+
+/// No tty process groups to read on Windows: approximate with the deepest first-child
+/// chain under the shell, the same walk `get_foreground_command` uses there. "No
+/// children" is the best available reading of "at the prompt".
+#[cfg(not(unix))]
+fn foreground_job(shell_pid: u32) -> PtyForeground {
+    let rows = proc_tree_snapshot();
+    let mut children: std::collections::HashMap<u32, Vec<&ProcTreeRow>> = std::collections::HashMap::new();
+    for row in rows.iter() {
+        if let Some(ppid) = row.ppid {
+            children.entry(ppid).or_default().push(row);
+        }
+    }
+    if !rows.iter().any(|r| r.pid == shell_pid) {
+        return PtyForeground::unknown();
+    }
+    let mut current = shell_pid;
+    let mut deepest: Option<&ProcTreeRow> = None;
+    while let Some(kid) = children.get(&current).and_then(|k| k.first()) {
+        deepest = Some(kid);
+        current = kid.pid;
+    }
+    match deepest {
+        None => PtyForeground::at_prompt(),
+        Some(p) => PtyForeground {
+            shell_at_prompt: Some(false),
+            executable: Some(if p.argv0.is_empty() { p.name.clone() } else { p.argv0.clone() }),
+            command: None,
+            pid: Some(p.pid),
+        },
+    }
+}
+
+/// The foreground job of a PTY's shell. `fresh` has the same meaning as on
+/// `get_pty_foreground`: every stack write is an EDGE (the store is about to type into
+/// the terminal because of something that just happened), so callers pass `true` and
+/// the 50ms `FRESH_SNAPSHOT_MAX_AGE` floor keeps a burst of checks to one sweep.
+pub fn get_pty_foreground_job(
+    state: &Arc<AppState>,
+    pty_id: &str,
+    fresh: bool,
+) -> Result<PtyForeground, String> {
+    let pid = {
+        let registry = state.pty_registry.read();
+        let handle = registry.get(pty_id).ok_or("PTY not found")?;
+        handle.child_pid.ok_or("No child PID")?
+    };
+    #[cfg(unix)]
+    {
+        if fresh {
+            invalidate_stale_ps_snapshot();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fresh;
+    }
+    Ok(foreground_job(pid))
+}
+
 /// Which agent CLIs to look for in a tab's process tree. Union of every runtime's
 /// `agent_process_names` (see `state/agent_runtime.rs`) — kept as a small literal so
 /// the readiness probe needn't know a tab's runtime up front.
@@ -1711,6 +1840,15 @@ fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exe_basename_reduces_a_ps_command_line_to_its_program() {
+        assert_eq!(exe_basename("/usr/local/bin/node /x/npm run dev").as_deref(), Some("node"));
+        assert_eq!(exe_basename("npm run dev").as_deref(), Some("npm"));
+        // Login shells show a leading dash in ps.
+        assert_eq!(exe_basename("-zsh").as_deref(), Some("zsh"));
+        assert_eq!(exe_basename("   "), None);
+    }
 
     #[test]
     fn agent_process_alive_empty_names_is_false() {

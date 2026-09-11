@@ -104,6 +104,22 @@ pub async fn get_pty_foreground(
         .map_err(|e| format!("foreground probe failed to run: {}", e))?
 }
 
+/// The stack store's pre-write guard (docs/stack.md §4): is the shell at its prompt, and
+/// if not, which job holds the terminal. Same sweep, same off-the-event-loop rule as
+/// `get_pty_foreground`.
+#[tauri::command]
+pub async fn get_pty_foreground_job(
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+    fresh: Option<bool>,
+) -> Result<pty::PtyForeground, String> {
+    let app_state = state.inner().clone();
+    let fresh = fresh.unwrap_or(true);
+    tauri::async_runtime::spawn_blocking(move || pty::get_pty_foreground_job(&app_state, &pty_id, fresh))
+        .await
+        .map_err(|e| format!("foreground probe failed to run: {}", e))?
+}
+
 #[tauri::command]
 pub fn list_live_ptys(state: State<'_, Arc<AppState>>) -> Vec<String> {
     pty::list_live_ptys(&*state)

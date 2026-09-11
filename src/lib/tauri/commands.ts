@@ -219,6 +219,22 @@ export async function getAgentLiveness(ptyId: string): Promise<AgentLiveness> {
   return invoke('get_agent_liveness', { ptyId });
 }
 
+/** What holds a PTY's terminal right now — the stack store's pre-write guard
+ *  (docs/stack.md §4). `shell_at_prompt` null means "cannot tell" and must not be read
+ *  as either answer. `pid` is the foreground job leader; the store records it after a
+ *  start and compares before a stop, since the executable name of `npm run dev` varies. */
+export interface PtyForeground {
+  shell_at_prompt: boolean | null;
+  executable: string | null;
+  command: string | null;
+  pid: number | null;
+}
+/** Every stack write is an edge, so this defaults to a fresh process sweep (the backend's
+ *  50ms floor collapses a burst of checks into one). */
+export async function getPtyForegroundJob(ptyId: string, fresh = true): Promise<PtyForeground> {
+  return invoke('get_pty_foreground_job', { ptyId, fresh });
+}
+
 /** Liveness for many PTYs in one pass — PTYs that no longer exist are simply absent. */
 export async function getAgentLivenessBatch(ptyIds: string[]): Promise<Record<string, AgentLiveness>> {
   return invoke('get_agent_liveness_batch', { ptyIds });

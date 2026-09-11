@@ -568,6 +568,7 @@ pub fn run() {
             commands::terminal::kill_terminal,
             commands::terminal::get_pty_info,
             commands::terminal::get_pty_foreground,
+            commands::terminal::get_pty_foreground_job,
             commands::terminal::list_live_ptys,
             commands::terminal::read_clipboard_file_paths,
             commands::terminal::detect_windows_shells,
