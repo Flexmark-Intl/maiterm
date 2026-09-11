@@ -1,6 +1,6 @@
 # maiTerm Stack — a workspace's services, known to every tab in it
 
-> Status: **proposed** 2026-09-11. Owner: Darryl.
+> Status: **v1 implemented** 2026-09-11 (§11 has the commits). Owner: Darryl.
 > Scope: a workspace can declare the services its project runs (dev server, API, db,
 > worker…), start them as tabs it owns, and expose them — status, ports, logs, control —
 > to every human and agent tab in that workspace. Agents are writers, not just readers.
@@ -98,6 +98,9 @@ and pays for it on every reload.
 **Runtime state is not persisted.** `status`, `since`, `last_exit_code`, and the pid live in
 the frontend store (`src/lib/stores/stack.svelte.ts`), rebuilt on boot. Persisting a status
 is how a suspended workspace comes back reporting "crashed" for services nobody started.
+The store does publish its snapshot to Rust (`publish_stack_runtime` → `AppState.stack_runtime`,
+in memory only) so the SessionStart priming can say what is up without a webview round trip
+— the same reason the Overlord board is mirrored for the phone.
 
 ### Status
 
@@ -287,25 +290,25 @@ the reason **not** to implement `start` through the auto-resume path.
 
 **Sidebar.** A collapsible **Stack** section under the workspace row (the workstream rail
 is the pattern): one line per service — status dot, name, `:port` when known, uptime.
-Click → `navigateToTab` (starts it first if stopped, with a confirm when the workspace is
-suspended). Right-click → Start/Stop/Restart · Edit · Remove. The sidebar has no context
-menu today (`WorkspaceSidebar.svelte`, none in 1246 lines); `TerminalTabs.svelte` has one —
-lift it into a shared component rather than growing a second.
+Click → `navigateToTab` (starts it first if stopped). Right-click → Start/Restart · Stop ·
+Open tab · Edit… · Remove. `ContextMenu.svelte` already existed as a shared component
+(`TerminalTabs.svelte` uses it); the sidebar simply had never used it.
 
 **Rollup dot on the workspace row**, batch semantics like the Claude indicator: green when
 every `auto_start` service is ready/running, amber while any is starting, red if any is
 crashed, none when the stack is empty or fully stopped.
 
-**Workspace submenu** (the row's `⋯`, new): Start stack · Stop stack · Restart stack · Add
-service… · Import from project… (§8).
+**Workspace row menu** (right-click the row — no `⋯` glyph, the row is crowded enough): Start
+stack · Stop stack · Restart stack · Add service… · Import from project… (§8). This is how a
+workspace with an empty stack gets its first service; the section itself only renders once
+there is something in it (or the menu just asked for it).
 
-**Tab strip.** Service tabs are shown, in the pinned cluster, with a distinct glyph. Simplest
-possible v1; a "collapse services" toggle is v2 if the clutter is real. Names are the
-service name and `custom_name` is set, so OSC titles from the process don't rename them.
-
-**The service tab itself** gets a one-line header strip above the terminal — status, port,
-Restart — the same slot the SSH bridge bolt and the `@` comms badge use in the tab bar, but
-in-pane so it is visible while you read the log.
+**Tab strip.** Service tabs are ordinary tabs in the strip, created in the background
+(`createTab({ background: true })` — Rust's `create_tab` makes a new tab active, so the
+previous active tab is put back before the mirror sees it). Names are the service name with
+`custom_name` set, so OSC titles from the process don't rename them. The pinned cluster and
+a distinct glyph did not make v1; neither did the in-pane header strip. Both are v2 if the
+sidebar section turns out not to be enough.
 
 **Editing.** A small form (name, command, cwd, env rows, auto-start, restart policy, ready
 pattern with a "test against current output" button). Inline in the sidebar section is too
@@ -349,24 +352,31 @@ thing decided now: the status vocabulary on the wire is the five words in §3, a
 `endpoint_source` ships with the endpoint. The phone must never fall back to "go to the
 desktop" — a crashed service it can see is a crashed service it can restart.
 
-## 11. Build order
+## 11. As built (v1, 2026-09-11)
 
-**v1 — a complete feature on existing plumbing**
+| Stage | Commits |
+|---|---|
+| Model: `Service` on `Workspace`, `Tab.service_id`, `set_workspace_stack` (coarse replace, normalizes server-side), `set_tab_service_id` (clears the same service from any other tab in the same write), `service_id: None` in `clone_workspace_with_id_mapping`, TS mirrors | `2e78c3b` |
+| The write guard: `get_pty_foreground_job` → `PtyForeground { shell_at_prompt, executable, command, pid }` (unix: tty foreground pgid, same query as the ssh probe minus the filter; Windows: deepest first-child chain, approximate); `kill_pty_foreground_job` signals only if `pid` is still the foreground leader | `14d2a4c`, `fc44e63` |
+| Store `stack.svelte.ts` + pure `stack/model.ts` (tests): start/stop/restart, OSC 133 exit → status via `activityStore.onCommandComplete`, bound-tab-gone → crashed, backoff + ceiling, auto-start on activation, `createTab({ background })`, runtime publish to Rust | `fc44e63` |
+| Sidebar section, rollup dot, workspace row menu, service modal | `656892b` |
+| Eleven MCP tools (frontend-handled, workspace-scoped, `stack_enabled` gate, write verbs on `PEER_ADDRESSING_TOOLS`), live priming line from the Rust mirror | `1e60fab` |
+| Suggester (`commands/stack.rs`, tests) + import checklist + `createService` with no args | `c4401df` |
 
-1. [ ] Model: `Service` on `Workspace`, `Tab.service_id`; `set_workspace_stack` (coarse
-       replace, like `set_workspace_mesh_topics`, normalizing `normalized_name` server-side);
-       TS mirrors; `service_id: None` in `clone_workspace_with_id_mapping`; `cargo check --tests`.
-2. [ ] Rust: `foreground_executable(pty_id)` — the ssh-filtered foreground-job query without
-       the filter, unix + Windows, `spawn_blocking` (§4). This is the write guard.
-3. [ ] Store: `stack.svelte.ts` — runtime status, start/stop/restart via PTY writes behind
-       the guard, `activate-tab` to mount a background tab before the first write, OSC 133
-       exit → status, bound-tab close → crashed, restart backoff + ceiling, `auto_start` on
-       workspace activate/resume.
-4. [ ] Sidebar section + rollup dot + shared context menu + edit modal + workspace submenu.
-5. [ ] MCP: the nine tools, workspace-scoped, `stack_enabled` gate, write verbs on the
-       inferred-identity refusal list; priming line rendered from state.
-6. [ ] Suggester command + import flow.
-7. [ ] `docs/stack.md` → "as built" table; CLAUDE.md data model + tools table.
+Where the build departed from the plan above it, the plan was wrong: the guard became a
+struct rather than a bare executable name because the **pid** is the thing the stop path
+needs (the executable of `npm run dev` fronts as `npm`, `node` or `sh`); `startLine` uses
+`env K=V cmd` rather than `K=V cmd` so fish works; and the "nine" tools are eleven —
+`startStack`/`stopStack` earned their own names rather than a `service: "*"` convention.
+
+**v2** — readiness as system trigger with port capture (`ready_pattern` is stored and shown
+but nothing evaluates it yet — `updateService { ready, port }` is the only ready path in v1);
+env at spawn; Overlord `service_crashed` + `driveTab` refusal + `kind: 'service'` in
+`listWorkspaces`; pinned cluster / glyph / collapse for service tabs; SSH services
+(`ssh_command` becomes live — the spawn is the auto-resume triple).
+
+**v3** — `restart: on_change` (needs a watcher; `notify` crate), phone, export to a repo
+file, socket-based port discovery if anything ever needs it.
 
 **v2** — readiness as system trigger with port capture; env at spawn; Overlord
 `service_crashed` + `driveTab` refusal + `kind: 'service'` in `listWorkspaces`; tab-strip
@@ -383,13 +393,20 @@ file, socket-based port discovery if anything ever needs it.
 2. ~~Does `getTabContext` serve a background tab?~~ — resolved: `getTerminalText` reads the
    Rust grid whenever the pane is registered (mount → destroy), and falls back to the SQLite
    scrollback snapshot otherwise. Given 1, a running service always reads the live grid.
-3. **Shell integration on the service tab.** Exit detection is OSC 133; a shell where
+3. **Windows foreground is an approximation.** No tty process groups there; `foreground_job`
+   walks the deepest first-child chain under the shell and reads "no children" as "at the
+   prompt". Good enough to refuse typing over a running program; not good enough to tell two
+   background jobs apart. Nobody runs the stack on Windows yet.
+4. **Auto-start fires on activation, not at boot.** A background workspace's services start
+   the first time it becomes active this session (`autoStarted` set, cleared by suspend).
+   Starting every workspace's stack at launch is a preference waiting for someone to want it.
+5. **Shell integration on the service tab.** Exit detection is OSC 133; a shell where
    integration failed to inject reports nothing. Fallback: `PtyInfo` foreground polling on
    a slow tick (5s) for service tabs only — acceptable, since a crash is not sub-second work.
-4. **Stack in a Mesh workspace.** Nothing special: the roster is agent tabs; a service tab
+6. **Stack in a Mesh workspace.** Nothing special: the roster is agent tabs; a service tab
    is not one. Confirm `agentMesh` derives its roster from `runtime`/`mailink_native`, not
    from "every terminal tab".
-5. **Two services, one port** (`web` and `storybook` both claiming 5173 across restarts).
+7. **Two services, one port** (`web` and `storybook` both claiming 5173 across restarts).
    Last observed wins; `listStack` shows both with the same port and the human sorts it out.
    Not worth a conflict model.
 

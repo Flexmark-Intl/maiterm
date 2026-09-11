@@ -16,7 +16,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled)` (56 tools; the 3 task tools are gated on the `tasks_enabled` preference), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled)` (67 tools; the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
@@ -84,6 +84,14 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | unbindCommsThread | Comms: clear the tab's thread binding without posting (idempotent). Backend-only |
 | getTabPrompt | Overlord agent only: what is blocking a tab — `permission` (tool gate: tool + detail) or `question` (AskUserQuestion: the questions and options), plus the `prompt_id` stale-guard |
 | answerTabPrompt | Overlord agent only: answer that prompt with the human's authority, through the SAME responder the phone uses (runtime-specific permission keymap, one-shot selector guard, submit confirmation). Ledgered. Doctrine requires escalating consequential decisions to the human instead |
+| listStack | Stack (docs/stack.md §6.1): this project's services — status, uptime, port/url with `endpoint_source` (observed/reported/stale), cwd, command, last exit, bound tab, note. Frontend-handled, scoped to the calling tab's workspace, gated on `stack_enabled` |
+| getServiceOutput | Stack: recent output of a service's tab (`getTabContext` under the name an agent reaches for) |
+| startService / stopService / restartService | Stack: the verbs. PTY writes behind `get_pty_foreground_job` — refused when the shell is busy; only the recorded pid is ever signalled. `restartService` waits up to 10s for ready. On the inferred-identity refusal list |
+| startStack / stopStack | Stack: every auto-start service / every running one. Refusal list |
+| waitForService | Stack: block until ready/running (≤120s); returns the last 20 lines when it is not up |
+| updateService | Stack: **the agent as writer** — report an observed `port`/`url`, `ready: true`, a `note`; or edit the definition. Refusal list |
+| createService | Stack: register a service (idempotent by name, does NOT start it). With no name and no command returns `suggestions` from the suggester (package.json / Procfile / compose / justfile / Makefile). Refusal list |
+| removeService | Stack: refused while running, refused for human-created services. Refusal list |
 
 ## Comms Integration (/maiterm resolve)
 
