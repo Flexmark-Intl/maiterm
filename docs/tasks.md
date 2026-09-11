@@ -553,6 +553,16 @@ fallback — so a row rendered BLOCKED while the line under it said the thing bl
 gone. It goes through `resolveBlockers` now, so the panel and `listTasks` cannot disagree
 about why a row is held.
 
+**Both human surfaces explain a held row through one `explainBlocked` (2026-09-11).** They
+had drifted, and the board's version was false: every dep-blocked card read *"It moves on its
+own once that task is done"*, which cannot be true of a **retracted** prerequisite — that
+work is never going to be done, so the card never clears and the reader was told to wait for
+something nobody intends to do. The panel named the blocking row but never its lane, so
+"waiting on Retry queue" read identically whether that row was active or dropped — opposite
+facts for whoever decides what to do next. `explainBlocked` names the row AND its lane and
+says plainly when a retraction means this will not resolve itself. `listTasks` had shipped
+`blocked_by[].title` and `.status` to agents all along; the human was the only one guessing.
+
 - All calls are scoped to the **calling tab's workspace** — a tab cannot read or write
   another project's tasks. Identity comes from the connection→tab affinity that
   `initSession` establishes, same as every other tab-scoped tool.
@@ -714,6 +724,16 @@ move: "Unpark — back to To-do" left it reading BLOCKED, and Do it told an agen
 whose prerequisite had not landed, with nothing on screen changing. This is verbatim what the
 board already guards with `PINNED_WHY` — and unlike the board's steppers, Do it also emits a
 terminal injection.
+
+**So is the status chip (2026-09-11).** It was not on this list because it is not a row
+*action* — it sits on the row's main line — and that is exactly how it stayed unguarded
+after the three above were fixed. It had already been changed to step from the DISPLAYED
+status, to stop it looking frozen; but `blocked` is in `FLOW_STATUSES`, so one click on a row
+reading BLOCKED stored `review` and changed nothing on screen. When the prerequisite landed,
+the task surfaced in **Review** having never been worked. Both readings share one flaw: a
+control whose label cannot move must not move the value either. `cycleStatus` now refuses a
+dependency-blocked row itself, not only via the `disabled` attribute, so a future keyboard
+shortcut cannot reintroduce it.
 
 **`N unclaimed` is not a scope violation, it is the only way a HUMAN reaches that work.**
 The panel is the only surface a person has that writes `Task.tab_id` — the board reassigns
