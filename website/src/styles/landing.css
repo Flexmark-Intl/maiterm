@@ -1,0 +1,420 @@
+/* ---------------------------------------------------------------------------
+   Landing page styles.
+
+   Deliberately NOT Starlight's. The docs live under /features and /guides and
+   keep Starlight's chrome; `/` is a hand-authored Astro page with a marketing
+   layout Starlight's `template: splash` cannot express — full-bleed bands,
+   alternating grounds, a nav with actual destinations in it.
+
+   Only the theme contract is shared: `data-theme` on <html> and the
+   `starlight-theme` localStorage key, so a visitor who toggles here stays in
+   the same theme when they click into the docs and vice versa.
+--------------------------------------------------------------------------- */
+
+/* --- Tokens -------------------------------------------------------------- */
+
+:root {
+  /* Tokyo Night, matching the app's default theme. Dark is the base: Starlight
+     writes a literal light/dark onto <html> before first paint, and with JS off
+     the site has no prefers-color-scheme fallback at all — it is
+     unconditionally dark. Keep that true here. */
+  --ln-bg: #1a1b26;
+  --ln-bg-raised: #21243a;
+  --ln-bg-sunken: #14141b;
+  --ln-border: #2c3049;
+  --ln-border-strong: #414868;
+  --ln-fg: #c8d3f5;
+  --ln-fg-dim: #8b93a7;
+  --ln-fg-faint: #646b85;
+  --ln-accent: #7aa2f7;
+  --ln-accent-soft: #a8bcff;
+  --ln-accent-ink: #0e1017;
+  --ln-green: #9ece6a;
+  --ln-purple: #bb9af7;
+  --ln-orange: #e0af68;
+  --ln-shadow: 0 24px 64px -24px rgba(0, 0, 0, 0.7);
+
+  --ln-max: 1180px;
+  --ln-gutter: clamp(1.25rem, 5vw, 4rem);
+
+  /* Display type is fluid and tight; body type is not. A marketing headline
+     that reflows into three lines on a laptop reads as an accident. */
+  --ln-step-display: clamp(2.6rem, 1.2rem + 4.4vw, 5rem);
+  --ln-step-h2: clamp(2rem, 1.1rem + 2.8vw, 3.35rem);
+  --ln-step-h3: clamp(1.15rem, 1rem + 0.5vw, 1.45rem);
+  --ln-step-lead: clamp(1.05rem, 0.98rem + 0.35vw, 1.3rem);
+  --ln-step-body: 1.0625rem;
+
+  --ln-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --ln-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+:root[data-theme='light'] {
+  --ln-bg: #ffffff;
+  --ln-bg-raised: #f6f7fb;
+  --ln-bg-sunken: #eef0f7;
+  --ln-border: #dfe3ef;
+  --ln-border-strong: #c3cadd;
+  --ln-fg: #1a1b26;
+  --ln-fg-dim: #4c5370;
+  --ln-fg-faint: #6b7391;
+  --ln-accent: #3d5bd9;
+  --ln-accent-soft: #5965d6;
+  --ln-accent-ink: #ffffff;
+  --ln-green: #4b7a1f;
+  --ln-purple: #7a4cc4;
+  --ln-orange: #9a6b12;
+  --ln-shadow: 0 24px 64px -28px rgba(26, 27, 38, 0.28);
+}
+
+/* --- Reset --------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--ln-bg);
+  color: var(--ln-fg);
+  font-family: var(--ln-font);
+  font-size: var(--ln-step-body);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+img,
+svg,
+video {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+a {
+  color: var(--ln-accent-soft);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol,
+figure {
+  margin: 0;
+}
+
+code {
+  font-family: var(--ln-mono);
+  font-size: 0.9em;
+  padding: 0.12em 0.38em;
+  border-radius: 0.3rem;
+  background: color-mix(in srgb, var(--ln-fg) 10%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ln-accent);
+  outline-offset: 3px;
+  border-radius: 0.3rem;
+}
+
+.ln-skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: 0.7rem 1.1rem;
+  background: var(--ln-accent);
+  color: var(--ln-accent-ink);
+  font-weight: 600;
+  border-radius: 0 0 0.4rem 0;
+}
+.ln-skip:focus {
+  left: 0;
+}
+
+/* --- Wordmark ------------------------------------------------------------
+   Same 764-byte six-glyph subset the docs use. See custom.css for why the
+   family is named for the wordmark and must never be reached for as a body
+   font: any other text takes its missing letters from the fallback stack and
+   comes out in two sets of letterforms.
+-------------------------------------------------------------------------- */
+
+@font-face {
+  font-family: 'maiTerm Wordmark';
+  src: url('/fonts/maiterm-wordmark.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+.ln-wordmark {
+  font-family: 'maiTerm Wordmark', var(--ln-mono);
+  font-weight: 400;
+  font-synthesis: none;
+  letter-spacing: -0.01em;
+}
+.ln-wordmark .wm-mai {
+  color: var(--ln-wm-mai, #8b93a7);
+}
+.ln-wordmark .wm-term {
+  color: var(--ln-wm-term, #a8bcff);
+}
+:root {
+  --ln-wm-mai: #8b93a7;
+  --ln-wm-term: #a8bcff;
+}
+:root[data-theme='light'] {
+  --ln-wm-mai: #5c6173;
+  --ln-wm-term: #5965d6;
+}
+
+/* --- Layout primitives --------------------------------------------------- */
+
+.ln-band {
+  padding-block: clamp(4rem, 8vw, 7.5rem);
+  padding-inline: var(--ln-gutter);
+  border-top: 1px solid var(--ln-border);
+}
+.ln-band--flush {
+  border-top: 0;
+}
+.ln-band--raised {
+  background: var(--ln-bg-raised);
+}
+.ln-band--sunken {
+  background: var(--ln-bg-sunken);
+}
+.ln-band--tight {
+  padding-block: clamp(2.5rem, 5vw, 4rem);
+}
+
+.ln-inner {
+  max-width: var(--ln-max);
+  margin-inline: auto;
+}
+.ln-inner--narrow {
+  max-width: 48rem;
+}
+
+.ln-eyebrow {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--ln-accent);
+  margin-bottom: 0.9rem;
+}
+
+.ln-h2 {
+  font-size: var(--ln-step-h2);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  font-weight: 650;
+  max-width: 18ch;
+  text-wrap: balance;
+}
+.ln-h2--wide {
+  max-width: 24ch;
+}
+
+.ln-lead {
+  font-size: var(--ln-step-lead);
+  line-height: 1.55;
+  color: var(--ln-fg-dim);
+  max-width: 58ch;
+  margin-top: 1.4rem;
+}
+.ln-lead strong {
+  color: var(--ln-fg);
+  font-weight: 600;
+}
+.ln-lead + .ln-lead {
+  margin-top: 1rem;
+}
+
+.ln-cta-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 1.75rem;
+  font-weight: 600;
+  color: var(--ln-accent-soft);
+  text-decoration: none;
+}
+.ln-cta-link::after {
+  content: '→';
+  transition: transform 0.15s ease;
+}
+.ln-cta-link:hover::after {
+  transform: translateX(3px);
+}
+
+/* Two-column band: prose left, visual right. Stacks under 60rem.
+   Only for visuals that suit a column — a portrait shot, a pair of phones. A
+   full 2400×1500 app window shrunk to half a column is unreadable; those go in
+   `.ln-stack` below at full container width instead. */
+.ln-split {
+  display: grid;
+  gap: clamp(2rem, 5vw, 4rem);
+  align-items: center;
+}
+@media (min-width: 60rem) {
+  .ln-split {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  }
+  .ln-split--visual-first > :first-child {
+    order: 2;
+  }
+}
+
+/* Prose in a readable measure, then the visual at full container width. */
+.ln-stack > :first-child {
+  max-width: 46rem;
+}
+.ln-stack > .ln-shot,
+.ln-stack > .ln-stack-visual {
+  margin-top: clamp(2.5rem, 5vw, 3.5rem);
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+
+.ln-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1.35rem;
+  border-radius: 0.55rem;
+  font-size: 1rem;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.ln-btn--primary {
+  background: var(--ln-accent);
+  color: var(--ln-accent-ink);
+}
+.ln-btn--primary:hover {
+  background: var(--ln-accent-soft);
+  transform: translateY(-1px);
+}
+.ln-btn--ghost {
+  border-color: var(--ln-border-strong);
+  color: var(--ln-fg);
+}
+.ln-btn--ghost:hover {
+  border-color: var(--ln-accent);
+  color: var(--ln-accent-soft);
+}
+.ln-btn--lg {
+  padding: 0.85rem 1.7rem;
+  font-size: 1.05rem;
+}
+
+/* --- Cards --------------------------------------------------------------- */
+
+.ln-cards {
+  display: grid;
+  gap: 1.1rem;
+  margin-top: 2.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+}
+
+.ln-card {
+  padding: 1.4rem 1.5rem 1.5rem;
+  border: 1px solid var(--ln-border);
+  border-radius: 0.7rem;
+  background: var(--ln-bg);
+}
+.ln-band--raised .ln-card,
+.ln-band--sunken .ln-card {
+  background: var(--ln-bg);
+}
+.ln-card h3 {
+  font-size: var(--ln-step-h3);
+  font-weight: 640;
+  letter-spacing: -0.012em;
+  line-height: 1.25;
+  margin-bottom: 0.55rem;
+}
+.ln-card p {
+  color: var(--ln-fg-dim);
+  font-size: 0.975rem;
+  line-height: 1.58;
+}
+.ln-card p strong {
+  color: var(--ln-fg);
+  font-weight: 600;
+}
+
+/* --- Product shots ------------------------------------------------------- */
+
+.ln-shot {
+  border-radius: 0.75rem;
+  border: 1px solid var(--ln-border-strong);
+  box-shadow: var(--ln-shadow);
+  overflow: hidden;
+  background: var(--ln-bg-sunken);
+}
+.ln-shot img {
+  width: 100%;
+}
+
+.ln-phones {
+  display: flex;
+  gap: 1.1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.ln-phones img {
+  width: 210px;
+  max-width: 43%;
+  border-radius: 1.2rem;
+  box-shadow: var(--ln-shadow);
+}
+
+/* --- Utilities ----------------------------------------------------------- */
+
+.ln-note {
+  font-size: 0.9rem;
+  color: var(--ln-fg-faint);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

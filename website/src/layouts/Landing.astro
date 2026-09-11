@@ -1,0 +1,91 @@
+---
+/**
+ * Shell for the hand-authored marketing pages (`/`, `/compare/*`).
+ *
+ * Starlight owns /features and /guides and brings its own <html>; these pages
+ * are plain Astro and bring their own. The one thing they must agree on is the
+ * theme contract — `data-theme` on <html>, persisted under the
+ * `starlight-theme` localStorage key — so toggling here and then clicking into
+ * the docs doesn't flip the page back.
+ */
+import '../styles/landing.css';
+import Nav from '../components/landing/Nav.astro';
+import Footer from '../components/landing/Footer.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  /** Page-specific canonical path, e.g. "/compare/warp/". */
+  path?: string;
+}
+
+const { title, description, path = '/' } = Astro.props;
+const canonical = new URL(path, Astro.site ?? 'https://maiterm.dev').href;
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href="/favicon.png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    {/* Preload the wordmark: it is in the nav and the final CTA, so it paints
+        in the first frame — without this it swaps in late and the nav jumps. */}
+    <link
+      rel="preload"
+      href="/fonts/maiterm-wordmark.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+
+    {/* Theme, before first paint, or the page flashes dark→light for anyone who
+        chose light in the docs. `data-theme="dark"` is already on <html> above,
+        so with JS off the site stays unconditionally dark — same as Starlight's
+        behaviour, which has no prefers-color-scheme fallback either. */}
+    <script is:inline>
+      (() => {
+        try {
+          const stored = localStorage.getItem('starlight-theme');
+          if (stored === 'light' || stored === 'dark') {
+            document.documentElement.dataset.theme = stored;
+          } else if (stored === null) {
+            // First-time visitor: match the docs, which default to dark and
+            // write that choice through so both halves of the site agree.
+            localStorage.setItem('starlight-theme', 'dark');
+          } else if (
+            stored === 'auto' ||
+            stored === ''
+          ) {
+            // Starlight stores "auto" as an empty string. Follow the OS.
+            document.documentElement.dataset.theme = window.matchMedia(
+              '(prefers-color-scheme: light)'
+            ).matches
+              ? 'light'
+              : 'dark';
+          }
+        } catch {
+          /* Private mode or blocked storage — the dark default stands. */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="ln-skip" href="#main">Skip to content</a>
+    <Nav />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

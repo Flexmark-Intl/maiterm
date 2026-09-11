@@ -1,0 +1,521 @@
+---
+/**
+ * The landing page.
+ *
+ * Deliberately outside the Starlight docs collection: `/features` and `/guides`
+ * keep Starlight's chrome, and `src/pages/` takes route priority over
+ * Starlight's injected routes, so this owns `/` with no collision.
+ *
+ * House rule for the copy here: one idea per band, a statement headline, at
+ * most three short paragraphs, one visual. Every band ends with a link to the
+ * docs page that carries the detail — if a paragraph is explaining lane
+ * semantics or flag behaviour, it belongs there, not here.
+ */
+import Landing from '../layouts/Landing.astro';
+import Faq from '../components/landing/Faq.astro';
+
+const title = 'maiTerm — keep a window full of coding agents on track';
+const description =
+  'A terminal for running Claude Code, Codex and your shells side by side: one task list shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
+
+const EVERYTHING = [
+  {
+    title: 'Restart without losing anything',
+    body: 'Reboot the machine and every tab comes back as it was — scrollback, layout, SSH sessions, agent sessions — each resumed agent reconnected to its tab with nothing typed by anyone.',
+  },
+  {
+    title: 'Know what is in every tab',
+    body: 'Interpolated names like <code>CustomName %title</code> combine your label with live terminal state. No more guessing across fifteen identical “bash” tabs.',
+  },
+  {
+    title: 'Workspaces per project',
+    body: 'Group terminals by project, each with its own pane layout and context. Suspend the inactive ones to free resources; they resume with full state.',
+  },
+  {
+    title: 'Bridge two agents',
+    body: 'Connect two running sessions — one local, one over SSH, a Claude Code and a Codex — so they ask each other questions directly, in a split pane you can watch.',
+  },
+  {
+    title: 'Resolve support threads in-terminal',
+    body: 'Watch your Mattermost channels; an <code>@mention</code> binds the thread to a dispatcher tab, which works the bug in that tab’s repo and posts the resolution back.',
+  },
+  {
+    title: 'A composer, not a shell line',
+    body: 'A multi-line dock under every terminal. Enter makes newlines, <code>Cmd+Enter</code> sends, drafts survive restarts, and pasted screenshots become attachments — uploaded automatically over SSH.',
+  },
+  {
+    title: 'Built-in editor',
+    body: 'Click any file path in terminal output to open it in an editor tab — over SSH too, loaded transparently. 50+ languages, with an inline merge view when a file changes under your unsaved edits.',
+  },
+  {
+    title: 'Deshittify your agent',
+    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, and the <code>Co-Authored-By</code> trailer in your history.',
+  },
+  {
+    title: 'A Rust terminal underneath',
+    body: 'alacritty_terminal does VTE parsing, buffering and scrollback in the backend, so the frontend only ever paints one screen. Scrollback persists to SQLite, crash-safe.',
+  },
+];
+---
+
+<Landing title={title} description={description} path="/">
+  {/* ---------------------------------------------------------------- Hero */}
+  <section class="ln-band ln-band--flush hero">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">A terminal for multi-agent work</p>
+      <h1 class="hero-title">Keep a window full of agents on track</h1>
+      <p class="hero-sub">
+        maiTerm runs Claude Code, Codex and your shells side by side — then shares one task
+        list with them, supervises them against rules you write, and brings every tab back
+        exactly as it was. No LLM inside, no chat sidebar.
+      </p>
+
+      <div class="hero-actions">
+        <a class="ln-btn ln-btn--primary ln-btn--lg" href="/download/">Download maiTerm</a>
+        <a class="ln-btn ln-btn--ghost ln-btn--lg" href="/guides/getting-started/">Get started</a>
+      </div>
+      <p class="ln-note hero-note">
+        Free, source available. macOS, Windows and Linux.
+      </p>
+    </div>
+
+    <div class="hero-shot">
+      <div class="ln-shot">
+        <img
+          src="/screenshots/overlord-board.webp"
+          alt="maiTerm's Overlord board: a triage queue of agents needing attention, and a fleet card per agent showing its context ring and live state"
+          width="2400"
+          height="1500"
+          fetchpriority="high"
+        />
+      </div>
+    </div>
+  </section>
+
+  {/* --------------------------------------------------------- Progression */}
+  <section class="ln-band ln-band--raised">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Start with what you know</p>
+      <h2 class="ln-h2 ln-h2--wide">It is a terminal first. The rest waits until you want it.</h2>
+      <p class="ln-lead">
+        Nothing here asks you to change how you work on day one. Open a project, run a shell,
+        keep moving — and turn on the parts that manage a desk full of agents when you
+        actually have one.
+      </p>
+
+      <ol class="steps">
+        <li>
+          <span class="steps-when">Day one</span>
+          <h3>A terminal that feels familiar</h3>
+          <p>
+            Tabs, splits, search, themes, a real editor on any file path. Fast, native, and
+            small — Tauri 2 and the system webview, not a bundled browser.
+          </p>
+        </li>
+        <li>
+          <span class="steps-when">As you settle in</span>
+          <h3>Your projects become workspaces</h3>
+          <p>
+            Group tabs by project with their own layout and context. Suspend what you are not
+            using. Restart the machine and find all of it exactly where you left it.
+          </p>
+        </li>
+        <li>
+          <span class="steps-when">When you are ready</span>
+          <h3>Your agents get a shared desk</h3>
+          <p>
+            One task list both sides write to, a supervisor watching the whole window, agents
+            that can talk to each other, and your phone as a way in.
+          </p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  {/* --------------------------------------------------------------- Tasks */}
+  <section class="ln-band">
+    <div class="ln-inner ln-stack">
+      <div>
+        <p class="ln-eyebrow">Tasks</p>
+        <h2 class="ln-h2">One task list, shared with your agents</h2>
+        <p class="ln-lead">
+          Agents keep private to-do lists. You watch one scroll past in a terminal, and that is
+          the whole relationship — no way to add an item, correct one, or see across a window
+          what is actually in flight.
+        </p>
+        <p class="ln-lead">
+          <strong>maiTerm owns that state now</strong>, and both sides read and write the same
+          list. It hangs off the workspace, so it outlives a tab reload, a window move, and the
+          agent that wrote it.
+        </p>
+        <p class="ln-lead">
+          Open the panel with <code>Cmd+Shift+E</code>: add, retitle, park, reassign, or hand a
+          row to the agent with <strong>Do it</strong>. It sees every one of those edits through
+          the same tools it writes with.
+        </p>
+        <a class="ln-cta-link" href="/features/tasks/">How tasks work</a>
+      </div>
+      <div class="ln-shot">
+        <img
+          src="/screenshots/tasks-panel.webp"
+          alt="The maiTerm task panel docked beside a terminal, showing tasks grouped into lanes and attributed to the agent working them"
+          width="2400"
+          height="1500"
+          loading="lazy"
+        />
+      </div>
+    </div>
+  </section>
+
+  {/* ------------------------------------------------------------ Overlord */}
+  <section class="ln-band ln-band--raised">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Overlord</p>
+      <h2 class="ln-h2">A supervisor for a window full of agents</h2>
+      <p class="ln-lead">
+        With a dozen agents running, what you lose is not any single answer — it is track.
+        Which tab is about to hit a compaction wall, which has been sitting at a permission
+        prompt for twenty minutes, which one quietly stopped being connected at all.
+      </p>
+      <p class="ln-lead">
+        A rule is a condition and a sequence: <em>when context reaches 55%, tell the agent to
+        update its docs, then to prepare for compaction, then <code>/compact</code></em> —
+        waiting for each step to genuinely land before sending the next.
+        <strong>No model sits in that loop</strong>, so it is predictable and costs nothing to
+        run.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Held for your approval</h3>
+          <p>
+            Overlord types with your authority, so propose mode is on out of the box: every
+            directive waits for you, showing the exact words it would send. Your own keystrokes
+            abort a sequence already in progress.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>An operations deck</h3>
+          <p>
+            <strong>Triage</strong> is one severity-ordered queue of everything wanting a
+            person. <strong>Fleet</strong> is a card per agent. <strong>Ledger</strong> is a
+            verbatim record of every directive sent and what came back.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Rules you actually tune</h3>
+          <p>
+            Conditions fire on semantic state — context, commits, idle time, stale tasks,
+            waiting permission prompts — not on scraped terminal output. Scoped globally or per
+            workspace.
+          </p>
+        </div>
+      </div>
+      <a class="ln-cta-link" href="/features/overlord/">How Overlord works</a>
+    </div>
+  </section>
+
+  {/* ---------------------------------------------------------------- Mesh */}
+  <section class="ln-band">
+    <div class="ln-inner ln-stack">
+      <div>
+        <p class="ln-eyebrow">Mesh workspace</p>
+        <h2 class="ln-h2">A team of specialists, not one giant context</h2>
+        <p class="ln-lead">
+          Flip a workspace into a <strong>mesh</strong> and every agent in it can message any
+          other by role. The frontend agent asks the backend agent for an endpoint's exact
+          shape, the backend loops in infra, and nobody waits for you to play messenger.
+        </p>
+        <p class="ln-lead">
+          It is also a token win. One monolithic agent drags every codebase into a single
+          enormous context and re-reads it turn after turn. A mesh keeps each agent's context
+          small and sharply scoped, and they trade short addressed messages instead of
+          duplicating each other's worlds.
+        </p>
+        <a class="ln-cta-link" href="/features/mesh-workspace/">How mesh works</a>
+      </div>
+      <div class="ln-stack-visual mesh-shot">
+        <img
+          src="/screenshots/mesh-cockpit.webp"
+          alt="The maiTerm mesh cockpit: a node graph of six specialist agents, the topics they are collaborating on with turn counts, and a status board"
+          width="820"
+          height="1230"
+          loading="lazy"
+        />
+      </div>
+    </div>
+  </section>
+
+  {/* ------------------------------------------------------------- maiLink */}
+  <section class="ln-band ln-band--raised">
+    <div class="ln-inner ln-split">
+      <div>
+        <p class="ln-eyebrow">maiLink companion</p>
+        <h2 class="ln-h2">Your agents, in your pocket. No cloud in the middle.</h2>
+        <p class="ln-lead">
+          A phone app that connects <strong>directly to maiTerm on your own computer</strong>.
+          Watch agents work, answer their questions, approve permissions, and interrupt a
+          runaway turn — from the couch, the garden, anywhere in the house.
+        </p>
+        <p class="ln-lead">
+          It writes, too: edit the shared task list, approve an Overlord proposal, rename or
+          archive a tab, wake a suspended workspace.
+        </p>
+        <p class="ln-lead">
+          It travels over <strong>your LAN only</strong>, on an encrypted, authenticated
+          channel. The single exception is a content-free push doorbell that wakes the app
+          carrying nothing but a tab name and an event kind — never a transcript.
+        </p>
+        <a class="ln-cta-link" href="/features/mailink/">How maiLink works</a>
+      </div>
+      <div class="ln-phones">
+        <img
+          src="/screenshots/mailink-inbox.webp"
+          alt="maiLink on iPhone: an inbox of agents, with the ones needing attention pinned to the top"
+          width="860"
+          height="1290"
+          loading="lazy"
+        />
+        <img
+          src="/screenshots/mailink-answer.webp"
+          alt="Answering an agent's question from a phone: pick an option or type a free-text reply"
+          width="860"
+          height="1290"
+          loading="lazy"
+        />
+      </div>
+    </div>
+  </section>
+
+  {/* ------------------------------------------------------ Compatibility */}
+  <section class="ln-band ln-band--sunken ln-band--tight">
+    <div class="ln-inner compat">
+      <p class="compat-label">
+        Runs the agent CLIs<br />you already have installed
+      </p>
+      <ul class="compat-list">
+        <li>Claude Code</li>
+        <li>OpenAI Codex</li>
+        <li>Local shells</li>
+        <li>SSH hosts</li>
+        <li>macOS</li>
+        <li>Windows</li>
+        <li>Linux</li>
+      </ul>
+    </div>
+  </section>
+
+  {/* ----------------------------------------------------- Everything else */}
+  <section class="ln-band">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">The daily work</p>
+      <h2 class="ln-h2 ln-h2--wide">The rest of it still has to be a good terminal.</h2>
+      <p class="ln-lead">
+        Orchestration is worth nothing if the thing you sit in front of all day is annoying.
+      </p>
+
+      <div class="ln-cards grid-tight">
+        {
+          EVERYTHING.map((f) => (
+            <div class="ln-card">
+              <h3>{f.title}</h3>
+              <p set:html={f.body} />
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  {/* ----------------------------------------------------------------- FAQ */}
+  <Faq />
+
+  {/* ----------------------------------------------------------- Final CTA */}
+  <section class="ln-band ln-band--raised final">
+    <div class="ln-inner ln-inner--narrow">
+      <h2 class="ln-h2 final-title">
+        Give every agent on your desk the same place to work.
+      </h2>
+      <p class="ln-lead final-lead">
+        Start with a terminal. Turn on the supervisor when the desk gets busy.
+      </p>
+      <div class="hero-actions final-actions">
+        <a class="ln-btn ln-btn--primary ln-btn--lg" href="/download/">Download maiTerm</a>
+        <a class="ln-btn ln-btn--ghost ln-btn--lg" href="https://github.com/Flexmark-Intl/maiterm">
+          View on GitHub
+        </a>
+      </div>
+      <p class="ln-note">Free, source available. macOS, Windows and Linux.</p>
+    </div>
+  </section>
+</Landing>
+
+<style>
+  /* --- Hero -------------------------------------------------------------- */
+
+  .hero {
+    /* Tighter than a standard band on purpose: the screenshot has to reach
+       into the fold to read as a running app rather than a framed picture. */
+    padding-block: clamp(2.75rem, 5vw, 4.25rem) 0;
+    text-align: center;
+    overflow: hidden;
+    background:
+      radial-gradient(
+        ellipse 90% 60% at 50% -10%,
+        color-mix(in srgb, var(--ln-accent) 16%, transparent),
+        transparent 70%
+      ),
+      var(--ln-bg);
+  }
+
+  .hero-title {
+    font-size: var(--ln-step-display);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+    font-weight: 680;
+    max-width: 16ch;
+    margin-inline: auto;
+    text-wrap: balance;
+  }
+
+  .hero-sub {
+    font-size: var(--ln-step-lead);
+    line-height: 1.55;
+    color: var(--ln-fg-dim);
+    max-width: 52ch;
+    margin: 1.5rem auto 0;
+    text-wrap: pretty;
+  }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+    margin-top: 2.25rem;
+  }
+
+  .hero-note {
+    margin-top: 1rem;
+  }
+
+  /* The shot is cropped by the fold on purpose: it reads as a running app you
+     are looking into, not a framed picture sitting in a slot. */
+  .hero-shot {
+    max-width: calc(var(--ln-max) + 6rem);
+    margin: clamp(2.25rem, 4vw, 3.25rem) auto 0;
+    padding-inline: var(--ln-gutter);
+  }
+  .hero-shot .ln-shot {
+    max-height: 62vh;
+    overflow: hidden;
+    border-bottom: 0;
+    border-radius: 0.75rem 0.75rem 0 0;
+  }
+
+  /* --- Progression steps -------------------------------------------------- */
+
+  .steps {
+    list-style: none;
+    padding: 0;
+    margin-top: 3rem;
+    display: grid;
+    gap: 1.1rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+    counter-reset: step;
+  }
+  .steps li {
+    padding: 1.5rem;
+    border: 1px solid var(--ln-border);
+    border-radius: 0.7rem;
+    background: var(--ln-bg);
+  }
+  .steps-when {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ln-fg-faint);
+    margin-bottom: 0.9rem;
+  }
+  .steps h3 {
+    font-size: var(--ln-step-h3);
+    font-weight: 640;
+    letter-spacing: -0.012em;
+    line-height: 1.25;
+    margin-bottom: 0.6rem;
+  }
+  .steps p {
+    color: var(--ln-fg-dim);
+    font-size: 0.975rem;
+    line-height: 1.58;
+  }
+
+  /* --- Mesh --------------------------------------------------------------- */
+
+  /* The cockpit shot is portrait and only 820px wide natively. Scaled into
+     half a column it is unreadable, and stretched past 820 it is soft — so cap
+     it at its own resolution and centre it. */
+  .mesh-shot {
+    max-width: 820px;
+    margin-inline: auto;
+  }
+  .mesh-shot img {
+    border-radius: 0.75rem;
+    border: 1px solid var(--ln-border-strong);
+    box-shadow: var(--ln-shadow);
+  }
+
+  /* --- Compatibility ------------------------------------------------------ */
+
+  .compat {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1.25rem 2.5rem;
+  }
+  .compat-label {
+    font-size: 0.9rem;
+    line-height: 1.45;
+    color: var(--ln-fg-faint);
+    flex-shrink: 0;
+  }
+  .compat-list {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+  .compat-list li {
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--ln-border-strong);
+    border-radius: 2rem;
+    font-size: 0.925rem;
+    font-weight: 550;
+    color: var(--ln-fg-dim);
+  }
+
+  /* --- Everything-else grid ----------------------------------------------- */
+
+  .grid-tight {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  }
+
+  /* --- Final CTA ---------------------------------------------------------- */
+
+  .final {
+    text-align: center;
+  }
+  .final-title {
+    max-width: none;
+    margin-inline: auto;
+  }
+  .final-lead {
+    margin-inline: auto;
+  }
+  .final-actions {
+    margin-bottom: 1rem;
+  }
+</style>

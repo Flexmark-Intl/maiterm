@@ -1,0 +1,161 @@
+---
+const COLUMNS = [
+  {
+    heading: 'Product',
+    links: [
+      { label: 'Download', href: '/download/' },
+      { label: 'Getting started', href: '/guides/getting-started/' },
+      { label: 'Keyboard shortcuts', href: '/guides/keyboard-shortcuts/' },
+      { label: 'Build from source', href: '/guides/building/' },
+    ],
+  },
+  {
+    heading: 'Features',
+    links: [
+      { label: 'Terminal', href: '/features/terminal/' },
+      { label: 'Agent integration', href: '/features/agents/' },
+      { label: 'Tasks', href: '/features/tasks/' },
+      { label: 'Overlord', href: '/features/overlord/' },
+      { label: 'Mesh workspace', href: '/features/mesh-workspace/' },
+      { label: 'maiLink companion', href: '/features/mailink/' },
+    ],
+  },
+  {
+    heading: 'Compare',
+    links: [
+      { label: 'All comparisons', href: '/compare/' },
+      { label: 'maiTerm vs Warp', href: '/compare/warp/' },
+      { label: 'maiTerm vs iTerm2', href: '/compare/iterm2/' },
+      { label: 'maiTerm vs Solo', href: '/compare/solo/' },
+    ],
+  },
+  {
+    heading: 'Project',
+    links: [
+      { label: 'GitHub', href: 'https://github.com/Flexmark-Intl/maiterm' },
+      { label: 'Releases', href: 'https://github.com/Flexmark-Intl/maiterm/releases' },
+      { label: 'Issues', href: 'https://github.com/Flexmark-Intl/maiterm/issues' },
+      { label: 'Licence', href: 'https://github.com/Flexmark-Intl/maiterm/blob/main/LICENSE' },
+    ],
+  },
+];
+
+const year = new Date().getFullYear();
+---
+
+<footer class="foot">
+  <div class="foot-inner">
+    <div class="foot-brand">
+      <a class="foot-mark" href="/">
+        <img src="/favicon.png" alt="" width="24" height="24" />
+        <span class="ln-wordmark"><span class="wm-mai">mai</span><span class="wm-term">Term</span></span>
+      </a>
+      <p>
+        A terminal that keeps a desk full of coding agents organised — one task list shared
+        with them, a supervisor watching the window, and every tab back exactly as it was
+        after a restart.
+      </p>
+      <p class="ln-note">Free, source available. macOS, Windows and Linux.</p>
+    </div>
+
+    {
+      COLUMNS.map((col) => (
+        <nav class="foot-col" aria-label={col.heading}>
+          <h2>{col.heading}</h2>
+          <ul>
+            {col.links.map((l) => (
+              <li>
+                <a href={l.href}>{l.label}</a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      ))
+    }
+  </div>
+
+  <div class="foot-base">
+    <p class="ln-note">© {year} Flexmark International. Source available under the <a href="https://github.com/Flexmark-Intl/maiterm/blob/main/LICENSE">aiTerm licence</a>.</p>
+  </div>
+</footer>
+
+<style>
+  .foot {
+    border-top: 1px solid var(--ln-border);
+    background: var(--ln-bg-sunken);
+    padding-inline: var(--ln-gutter);
+  }
+
+  .foot-inner {
+    max-width: var(--ln-max);
+    margin-inline: auto;
+    padding-block: clamp(2.5rem, 5vw, 4rem);
+    display: grid;
+    gap: 2.25rem;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  }
+
+  .foot-brand {
+    grid-column: 1 / -1;
+    max-width: 34rem;
+  }
+  @media (min-width: 64rem) {
+    .foot-brand {
+      grid-column: span 2;
+      max-width: 24rem;
+    }
+  }
+  .foot-mark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.15rem;
+    text-decoration: none;
+    margin-bottom: 0.9rem;
+  }
+  .foot-mark img {
+    border-radius: 0.3rem;
+  }
+  .foot-brand p {
+    color: var(--ln-fg-dim);
+    font-size: 0.95rem;
+    line-height: 1.6;
+  }
+  .foot-brand p + p {
+    margin-top: 0.75rem;
+  }
+
+  .foot-col h2 {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ln-fg-faint);
+    margin-bottom: 0.85rem;
+  }
+  .foot-col ul {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .foot-col a {
+    color: var(--ln-fg-dim);
+    text-decoration: none;
+    font-size: 0.95rem;
+    /* The docks taught this one: real link labels overflow a 11rem column and
+       two sharing a prefix clip to the same visible string. Let them wrap. */
+    overflow-wrap: anywhere;
+  }
+  .foot-col a:hover {
+    color: var(--ln-accent-soft);
+  }
+
+  .foot-base {
+    max-width: var(--ln-max);
+    margin-inline: auto;
+    padding-block: 1.25rem;
+    border-top: 1px solid var(--ln-border);
+  }
+</style>

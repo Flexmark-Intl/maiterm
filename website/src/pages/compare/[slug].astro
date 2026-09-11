@@ -1,0 +1,205 @@
+---
+import Landing from '../../layouts/Landing.astro';
+import { COMPARISONS, COMPARED_AS_OF, inlineCode } from '../../data/comparisons';
+
+export function getStaticPaths() {
+  return COMPARISONS.map((c) => ({ params: { slug: c.slug }, props: { c } }));
+}
+
+const { c } = Astro.props;
+const others = COMPARISONS.filter((o) => o.slug !== c.slug);
+
+const title = `maiTerm vs ${c.name}`;
+const description = c.summary;
+---
+
+<Landing title={title} description={description} path={`/compare/${c.slug}/`}>
+  <section class="ln-band ln-band--flush">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">
+        <a class="crumb" href="/compare/">Compare</a>
+      </p>
+      <h1 class="ln-h2 ln-h2--wide">maiTerm vs {c.name}</h1>
+      <p class="ln-lead">{c.summary}</p>
+    </div>
+  </section>
+
+  <section class="ln-band ln-band--raised">
+    <div class="ln-inner ln-inner--narrow">
+      <h2 class="sub">What {c.name} is</h2>
+      <p class="ln-lead" set:html={inlineCode(c.whatItIs)} />
+
+      <h2 class="sub">Where {c.name} is the better choice</h2>
+      <p class="ln-lead" set:html={inlineCode(c.theirEdge)} />
+
+      <h2 class="sub">Which to use</h2>
+      <p class="ln-lead" set:html={inlineCode(c.verdict)} />
+    </div>
+  </section>
+
+  <section class="ln-band">
+    <div class="ln-inner">
+      <h2 class="ln-h2 ln-h2--wide">Side by side</h2>
+
+      {/* The table scrolls rather than squeezing: three columns of prose do not
+          fit a phone, and a squeezed table is unreadable in a way a scrolled
+          one is not. */}
+      <div class="table-scroll">
+        <table class="cmp">
+          <thead>
+            <tr>
+              <th scope="col">&nbsp;</th>
+              <th scope="col">maiTerm</th>
+              <th scope="col">{c.name}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              c.rows.map((r) => (
+                <tr>
+                  <th scope="row">{r.dimension}</th>
+                  <td set:html={inlineCode(r.maiterm)} />
+                  <td set:html={inlineCode(r.theirs)} />
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <p class="ln-note asof">
+        {c.name} details are as published by its makers as of {COMPARED_AS_OF} and may have
+        changed since — check their own documentation before deciding.
+      </p>
+    </div>
+  </section>
+
+  <section class="ln-band ln-band--raised final">
+    <div class="ln-inner ln-inner--narrow">
+      <h2 class="ln-h2 final-title">Try it against your own desk</h2>
+      <p class="ln-lead final-lead">
+        It is a terminal first. Open a project, run a shell, and turn the rest on when you
+        want it.
+      </p>
+      <div class="final-actions">
+        <a class="ln-btn ln-btn--primary ln-btn--lg" href="/download/">Download maiTerm</a>
+        <a class="ln-btn ln-btn--ghost ln-btn--lg" href="/guides/getting-started/">Get started</a>
+      </div>
+
+      <p class="other-links">
+        Also compare:
+        {
+          others.map((o, i) => (
+            <>
+              {i > 0 && <span aria-hidden="true"> · </span>}
+              <a href={`/compare/${o.slug}/`}>maiTerm vs {o.name}</a>
+            </>
+          ))
+        }
+      </p>
+    </div>
+  </section>
+</Landing>
+
+<style>
+  .crumb {
+    color: var(--ln-accent);
+    text-decoration: none;
+  }
+  .crumb:hover {
+    text-decoration: underline;
+  }
+
+  .sub {
+    font-size: var(--ln-step-h3);
+    font-weight: 640;
+    letter-spacing: -0.012em;
+    margin-top: 2.5rem;
+  }
+  .sub:first-of-type {
+    margin-top: 0;
+  }
+  .sub + .ln-lead {
+    margin-top: 0.85rem;
+  }
+
+  .table-scroll {
+    margin-top: 2.5rem;
+    overflow-x: auto;
+  }
+
+  .cmp {
+    width: 100%;
+    min-width: 46rem;
+    border-collapse: collapse;
+    text-align: left;
+  }
+  .cmp th,
+  .cmp td {
+    padding: 1rem 1.15rem;
+    border-bottom: 1px solid var(--ln-border);
+    vertical-align: top;
+    font-size: 0.95rem;
+    line-height: 1.55;
+  }
+  .cmp thead th {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ln-fg-faint);
+    border-bottom-color: var(--ln-border-strong);
+  }
+  .cmp thead th:nth-child(2) {
+    color: var(--ln-accent);
+  }
+  .cmp tbody th {
+    font-weight: 600;
+    width: 11rem;
+    color: var(--ln-fg);
+  }
+  .cmp td {
+    color: var(--ln-fg-dim);
+  }
+  /* Our column carries the emphasis; theirs stays plainly readable. */
+  .cmp td:nth-child(2) {
+    color: var(--ln-fg);
+    background: color-mix(in srgb, var(--ln-accent) 6%, transparent);
+  }
+
+  .asof {
+    margin-top: 1.25rem;
+    max-width: 60ch;
+  }
+
+  .final {
+    text-align: center;
+  }
+  .final-title {
+    max-width: none;
+    margin-inline: auto;
+  }
+  .final-lead {
+    margin-inline: auto;
+  }
+  .final-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+    margin-top: 2rem;
+  }
+
+  .other-links {
+    margin-top: 2rem;
+    font-size: 0.95rem;
+    color: var(--ln-fg-faint);
+  }
+  .other-links a {
+    color: var(--ln-accent-soft);
+    text-decoration: none;
+  }
+  .other-links a:hover {
+    text-decoration: underline;
+  }
+</style>

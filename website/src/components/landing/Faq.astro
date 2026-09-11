@@ -1,0 +1,172 @@
+---
+/**
+ * Landing FAQ.
+ *
+ * These are the objections the product actually raises and the site answered
+ * nowhere: whether it is another Electron editor fork, whether it sits between
+ * an agent and its provider, what happens to a session on restart, what it
+ * costs. Every answer here has to stay true to the app — if behaviour changes,
+ * this file changes with it.
+ *
+ * Rendered as <details> so it works with JS off and costs nothing.
+ */
+const FAQS = [
+  {
+    q: 'Is this a VS Code or Electron fork?',
+    a: 'No. maiTerm is a Tauri 2 desktop app using the operating system\'s own webview — WebKit on macOS, WebView2 on Windows, WebKitGTK on Linux. There is no bundled browser and no editor fork. The terminal itself is Rust: alacritty_terminal does the VTE parsing and buffering in the backend.',
+  },
+  {
+    q: 'Does maiTerm see my API keys or proxy my prompts?',
+    a: 'No. maiTerm launches the agent CLIs already installed on your machine and they keep using their own accounts, authentication and configuration. Your conversations go from that local CLI to its provider. maiTerm is not a model gateway and never asks you for a provider key.',
+  },
+  {
+    q: 'Which coding agents does it support?',
+    a: 'Claude Code and OpenAI Codex, through one runtime-neutral pipeline — you pick which ones maiTerm wires up in Preferences. Any other CLI still runs in a tab like it would in any terminal; it just does not get the agent-aware features.',
+  },
+  {
+    q: 'Is there an LLM built into the terminal?',
+    a: 'No, and that is deliberate. There is no chat sidebar and no model maiTerm calls on your behalf. It manages the agents you run, rather than being another one.',
+  },
+  {
+    q: 'What happens when I restart, or it crashes?',
+    a: 'Every tab comes back as it was: scrollback, pane layout, working directories, SSH sessions and agent sessions. Each resumed agent reconnects to its tab on its own, with nothing typed by anyone. Scrollback persists to SQLite in WAL mode, so an unclean exit does not take the buffer with it.',
+  },
+  {
+    q: 'Does it work over SSH?',
+    a: 'Yes, and it is a first-class path rather than an afterthought. Agents on a remote host get the same tab identity, task list, notes and MCP tools through a reverse tunnel. Remote files open in the editor transparently, and file paths in output are clickable the same way.',
+  },
+  {
+    q: 'Do my agents get to change things without me?',
+    a: 'Only what you allow. Overlord ships in propose mode: every directive is held for your approval showing the exact words it would send, and your own keystrokes abort a sequence in progress. The rule guards are human-only and cannot be edited by an agent. Agents can mark a task done but there is deliberately no delete tool.',
+  },
+  {
+    q: 'What does it cost?',
+    a: 'Nothing. Every feature is included — there is no paid tier, no licence check and no account.',
+  },
+  {
+    q: 'What licence is it under?',
+    a: 'Source available, not OSI open source. The full source is published and you may use, modify, distribute and sublicense it; the one restriction is that you may not use it to build a competing terminal emulator. Building it into something with a substantially different purpose — an IDE, a DevOps platform — is explicitly allowed. The terms are in LICENSE in the repository.',
+  },
+  {
+    q: 'Which platforms does it run on?',
+    a: 'macOS (Apple Silicon only — there is no Intel build), Windows 10 and later as a 64-bit installer, and Linux as an AppImage or .deb built against webkit2gtk-4.1 on Ubuntu 24.04.',
+  },
+  {
+    q: 'Does it phone home?',
+    a: 'Only the update check, and it is counted. That check reaches a small Cloudflare Worker which records one row per unique user per day — a salted hash of IP and user-agent, where the salt is random, rotates daily and is then discarded, so it cannot be reversed or linked across days. No IP, user-agent, cookie or device ID is stored, and nothing about your projects, tabs, terminal output or agents ever leaves the machine. There is no other analytics, no error uploads and no account. maiTerm also ships a Preferences section that switches off the telemetry and error reporting in the agent CLIs it launches.',
+  },
+  {
+    q: 'How do updates work?',
+    a: 'maiTerm checks GitHub Releases automatically and installs an update with one click, showing you the release notes first. You can turn the startup check off in Preferences and update from the menu instead.',
+  },
+  {
+    q: 'Can I get my state onto another machine?',
+    a: 'Yes. Export workspaces, tabs, scrollback, notes, triggers and preferences to a single archive — on a schedule if you want, with compression and auto-trim. Importing previews what is inside so you can pick which workspaces to bring in and whether to merge or overwrite.',
+  },
+];
+
+// Split into two columns without reflowing the reading order down one side.
+const half = Math.ceil(FAQS.length / 2);
+const columns = [FAQS.slice(0, half), FAQS.slice(half)];
+---
+
+<section class="ln-band" id="faq">
+  <div class="ln-inner">
+    <p class="ln-eyebrow">Questions</p>
+    <h2 class="ln-h2 ln-h2--wide">Frequently asked questions</h2>
+
+    <div class="faq-cols">
+      {
+        columns.map((col) => (
+          <div class="faq-col">
+            {col.map((f) => (
+              <details class="faq-item">
+                <summary>
+                  <span>{f.q}</span>
+                  <svg
+                    class="faq-chevron"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </summary>
+                <p>{f.a}</p>
+              </details>
+            ))}
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .faq-cols {
+    margin-top: 2.75rem;
+    display: grid;
+    gap: 0 3rem;
+    align-items: start;
+  }
+  @media (min-width: 56rem) {
+    .faq-cols {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
+  .faq-col {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .faq-item {
+    border-bottom: 1px solid var(--ln-border);
+  }
+
+  .faq-item summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.25rem;
+    padding: 1.15rem 0;
+    cursor: pointer;
+    list-style: none;
+    font-weight: 600;
+    font-size: 1.05rem;
+    line-height: 1.4;
+    /* The docks taught this one: real question text overflows a half-width
+       column, so let it wrap rather than clip. */
+    overflow-wrap: anywhere;
+  }
+  .faq-item summary::-webkit-details-marker {
+    display: none;
+  }
+  .faq-item summary:hover {
+    color: var(--ln-accent-soft);
+  }
+
+  .faq-chevron {
+    flex-shrink: 0;
+    color: var(--ln-fg-faint);
+    transition: transform 0.18s ease;
+  }
+  .faq-item[open] .faq-chevron {
+    transform: rotate(180deg);
+  }
+
+  .faq-item p {
+    padding-bottom: 1.25rem;
+    margin-top: -0.25rem;
+    color: var(--ln-fg-dim);
+    font-size: 0.975rem;
+    line-height: 1.62;
+    max-width: 60ch;
+  }
+</style>

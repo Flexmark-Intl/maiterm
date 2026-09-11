@@ -1,0 +1,74 @@
+---
+/**
+ * Comparison index.
+ *
+ * These pages exist to answer "how is this different from X" for people who
+ * arrive already using X. House rule: describe the other tool as its makers
+ * would recognise it. A comparison that strawmans the alternative is worth
+ * less than no comparison, and anyone who uses the other tool spots it in one
+ * line.
+ */
+import Landing from '../../layouts/Landing.astro';
+import { COMPARISONS } from '../../data/comparisons';
+
+const title = 'maiTerm compared — Warp, iTerm2, Solo';
+const description =
+  'How maiTerm differs from Warp, iTerm2 and Solo: what each one is for, and which one fits the way you work with coding agents.';
+---
+
+<Landing title={title} description={description} path="/compare/">
+  <section class="ln-band ln-band--flush">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Compare</p>
+      <h1 class="ln-h2 ln-h2--wide">How maiTerm fits beside the tools you already use</h1>
+      <p class="ln-lead">
+        maiTerm is a terminal that manages a desk full of coding agents. It does not host a
+        model, replace your editor, or ask you to move your work anywhere. Here is how that
+        lands against the alternatives people usually weigh it against.
+      </p>
+
+      <div class="ln-cards">
+        {
+          COMPARISONS.map((c) => (
+            <a class="ln-card compare-card" href={`/compare/${c.slug}/`}>
+              <h2>maiTerm vs {c.name}</h2>
+              <p>{c.summary}</p>
+              <span class="compare-more">Read the comparison →</span>
+            </a>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+</Landing>
+
+<style>
+  .compare-card {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .compare-card:hover {
+    border-color: var(--ln-accent);
+    transform: translateY(-2px);
+  }
+  .compare-card h2 {
+    font-size: var(--ln-step-h3);
+    font-weight: 640;
+    letter-spacing: -0.012em;
+    margin-bottom: 0.55rem;
+  }
+  .compare-card p {
+    color: var(--ln-fg-dim);
+    font-size: 0.975rem;
+    line-height: 1.58;
+  }
+  .compare-more {
+    display: inline-block;
+    margin-top: 1rem;
+    font-size: 0.925rem;
+    font-weight: 600;
+    color: var(--ln-accent-soft);
+  }
+</style>
