@@ -135,7 +135,8 @@ does not**. That single fact makes the lifecycle cheap:
 | start | `send_command`-style PTY write: `cd`, exports, command, CR | trigger action already exists |
 | stop | write `^C`; if still foreground after 3s, `^C` again; then `kill` the child | needs the foreground query below |
 | restart | stop, then start, same tab, same shell | — |
-| exit detection | OSC 133 `D;<code>` on the service tab | `term-osc133-${ptyId}` carries the code |
+| exit detection | OSC 133 `D;<code>` on the service tab, via `activityStore.onCommandExit` — **unfiltered**. `onCommandComplete` hides exits inside the pane's 2s mount window and under its 2s completion floor, which is exactly where a service that fails at boot exits (review, 2026-09-11) | `term-osc133-${ptyId}` carries the code |
+| exit without integration | the post-start settle: prompt back, no `D` seen → `crashed` "(no exit code seen)" | foreground probe |
 | shell death | `pty-close-${ptyId}` — the tab is deleted; store records `crashed` | existing event + listener |
 | logs | `getTabContext` on the bound tab — reads the Rust grid while the pane is registered | existing tool |
 | readiness | system trigger scoped to the tab via `Trigger.tabs` | trigger engine, per-tab scope exists |
@@ -144,10 +145,14 @@ The human can click into the tab, Ctrl-C it, poke at the process, and run the co
 again by hand — the tab reads the OSC 133 result either way and the status follows. A
 service tab is never a black box the way a managed process is.
 
-**Never type into a foreground that isn't ours.** Every write is gated on the foreground
-executable matching the service, or the shell sitting at its prompt. The comms watcher
-learned this the hard way (`agent_owns_terminal`): a wrong "yes" types a command into
-whatever the human left running there. A wrong "no" costs a retry.
+**Never type into a foreground that isn't ours.** A start is typed only when the shell is
+at its prompt; a stop signals only the **pid recorded at start**, and refuses when there is
+no recorded pid or the foreground is a different one — never "whatever is in front". The
+comms watcher learned this the hard way (`agent_owns_terminal`): a wrong "yes" types a
+command into whatever the human left running there, or SIGTERMs their vim. A wrong "no"
+costs a retry. `start` and `stop` also hold a per-service in-flight set: the status alone
+cannot guard re-entry, because `start` does four IPC round trips before it can set
+`starting`, and a double-click lands inside that window and mints a second tab.
 
 > **This guard needs one new primitive.** `PtyInfo.foreground_command` is *not* the
 > foreground executable — on every platform it reports `Some` only for `ssh`/`mosh`/`autossh`
@@ -198,8 +203,13 @@ once the pane registers. No navigation, no fallback.
   No remap. Reload of a running service is a restart (the new tab's shell is fresh).
 - **Archive** → refused for a bound tab; the UI offers "Stop and archive", which unbinds
   first. A service is never in `archived_tabs`.
-- **Move tab to another workspace** → clears `service_id` (the stack is per-workspace).
-  Tasks has the same open item (§8.4 there); here it is decided.
+- **Move tab to another workspace** → `move_tab_to_workspace` clears `service_id` (the
+  stack is per-workspace; the process goes with the tab, the binding does not), and
+  `reconcileBindings` only looks inside the owning workspace, so the source shows it
+  `crashed` rather than "running" with no tab. Tasks has the same open item (§8.4 there).
+- **Reload of a service tab** → `service_id` rides along, but the new shell has nothing
+  running in it. The store records the `ptyId` it typed into and `reconcileBindings` reads
+  a bound tab whose live PTY differs as `stopped` ("its tab was reloaded — start it again").
 - **Session restore** → the bound tabs come back through the ordinary restore; since the
   binding is a tab field, nothing to reconcile. Status is `stopped` until the command runs.
 - **Workspace delete** → services go with it. **Workspace export/import** → the stack
@@ -295,8 +305,9 @@ Open tab · Edit… · Remove. `ContextMenu.svelte` already existed as a shared 
 (`TerminalTabs.svelte` uses it); the sidebar simply had never used it.
 
 **Rollup dot on the workspace row**, batch semantics like the Claude indicator: green when
-every `auto_start` service is ready/running, amber while any is starting, red if any is
-crashed, none when the stack is empty or fully stopped.
+every `auto_start` service is ready/running, amber (pulsing) while any is starting, amber
+hollow when some are up and some never started (`partial`), red if any is crashed, none when
+the stack is empty or fully stopped. `rollupStatus` in `stack/model.ts`, tested.
 
 **Workspace row menu** (right-click the row — no `⋯` glyph, the row is crowded enough): Start
 stack · Stop stack · Restart stack · Add service… · Import from project… (§8). This is how a
@@ -362,6 +373,7 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Sidebar section, rollup dot, workspace row menu, service modal | `656892b` |
 | Eleven MCP tools (frontend-handled, workspace-scoped, `stack_enabled` gate, write verbs on `PEER_ADDRESSING_TOOLS`), live priming line from the Rust mirror | `1e60fab` |
 | Suggester (`commands/stack.rs`, tests) + import checklist + `createService` with no args | `c4401df` |
+| Review fixes (seven defects): unfiltered `onCommandExit` + post-start settle for fast exits; in-flight guard on start/stop; move clears the binding and reconciliation is workspace-scoped; a stop that gives up keeps `stopping`; stop refuses without a recorded pid; `waitForService` capped at 100s under the 120s MCP response timeout; rollup is batch-true with `partial`; reload of a service tab reads as stopped | *(next commit)* |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path

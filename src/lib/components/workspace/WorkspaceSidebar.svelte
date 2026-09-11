@@ -689,11 +689,13 @@
             {#if stackStore.rollup(workspace.id)}
               {@const roll = stackStore.rollup(workspace.id)}
               <!-- Stack rollup (docs/stack.md §7): batch semantics like the Claude dot —
-                   green only when every service is up, amber while any starts, red if any crashed. -->
+                   green only when every auto-start service is up, amber while any starts or
+                   when only some are up, red if any crashed. -->
               <StatusDot
-                color={roll === 'crashed' ? 'red' : roll === 'starting' ? 'yellow' : 'green'}
+                color={roll === 'crashed' ? 'red' : roll === 'ready' ? 'green' : 'yellow'}
                 pulse={roll === 'starting'}
-                tooltip={roll === 'crashed' ? 'A service crashed' : roll === 'starting' ? 'Stack starting' : 'Stack up'}
+                hollow={roll === 'partial'}
+                tooltip={roll === 'crashed' ? 'A service crashed' : roll === 'starting' ? 'Stack starting' : roll === 'partial' ? 'Stack partly up' : 'Stack up'}
               />
             {/if}
             {#if workspace.bridge_all}
@@ -746,6 +748,7 @@
           {workspace}
           expanded={expandedStacks.has(workspace.id)}
           ontoggle={() => toggleStack(workspace.id)}
+          onsettled={() => { if (addingStackFor === workspace.id) addingStackFor = null; }}
         />
       {/if}
     {/each}

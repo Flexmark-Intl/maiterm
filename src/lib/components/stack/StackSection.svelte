@@ -18,9 +18,12 @@
     workspace: Workspace;
     expanded: boolean;
     ontoggle: () => void;
+    /** An add/import modal closed (saved or cancelled) — the sidebar uses it to drop the
+     *  section it mounted for an empty stack if nothing was added. */
+    onsettled?: () => void;
   }
 
-  let { workspace, expanded, ontoggle }: Props = $props();
+  let { workspace, expanded, ontoggle, onsettled }: Props = $props();
 
   const services = $derived(workspace.stack ?? []);
 
@@ -103,6 +106,14 @@
     }
     editing = null;
     adding = false;
+    onsettled?.();
+  }
+
+  function cancelModal() {
+    editing = null;
+    adding = false;
+    importing = false;
+    onsettled?.();
   }
 
   export function openAdd() { adding = true; }
@@ -117,6 +128,7 @@
         logError(`stack: import ${r.name}: ${e}`);
       }
     }
+    onsettled?.();
   }
 </script>
 
@@ -161,7 +173,7 @@
 </div>
 
 {#if importing}
-  <ImportServicesModal cwd={defaultCwd()} existingNames={services.map((s) => s.name)} onsubmit={importRows} oncancel={() => (importing = false)} />
+  <ImportServicesModal cwd={defaultCwd()} existingNames={services.map((s) => s.name)} onsubmit={importRows} oncancel={cancelModal} />
 {/if}
 
 {#if menu}
@@ -169,7 +181,7 @@
 {/if}
 
 {#if editing || adding}
-  <ServiceModal service={editing} defaultCwd={defaultCwd()} onsubmit={submit} oncancel={() => { editing = null; adding = false; }} />
+  <ServiceModal service={editing} defaultCwd={defaultCwd()} onsubmit={submit} oncancel={cancelModal} />
 {/if}
 
 <style>

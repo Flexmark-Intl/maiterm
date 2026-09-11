@@ -1010,7 +1010,9 @@ function createClaudeCodeStore() {
     if ('error' in scope) return scope;
     const s = resolveService(scope.workspace, args.service);
     if ('error' in s) return s;
-    const timeout = Math.min(Math.max(1, args.timeout ?? 30), 120) * 1000;
+    // The MCP server's own response timeout is 120s and starts before this handler runs;
+    // a wait that long would answer "Tool response timeout" instead of the status.
+    const timeout = Math.min(Math.max(1, args.timeout ?? 30), 100) * 1000;
     const status = await stackStore.waitFor(scope.workspace.id, s.id, timeout);
     const view = serviceView(scope.workspace, s);
     const up = status === 'ready' || status === 'running';

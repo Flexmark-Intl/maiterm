@@ -708,6 +708,9 @@
     });
 
     unlistenShell = await listen<OscShellEvent>(`term-osc133-${ptyId}`, (event) => {
+      // The stack store wants every exit, including the ones the gates below hide: a
+      // service typed 300ms after mount that dies 900ms later (docs/stack.md §4).
+      if (event.payload.cmd === 'D') activityStore.noteCommandExit(tabId, event.payload.exit_code ?? 0);
       if (!trackActivity) return;
       const { cmd, exit_code } = event.payload;
       if (cmd === 'A') {

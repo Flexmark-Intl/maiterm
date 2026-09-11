@@ -21,7 +21,7 @@ import { activityStore } from './activity.svelte';
 import { normalizeTitle } from '$lib/tasks/model';
 import {
   exitIsCrash, restartAllowed, restartDelay, rollupStatus, startLine,
-  RESTART_CEILING, RESTART_WINDOW_MS, type ServiceStatus,
+  RESTART_CEILING, RESTART_WINDOW_MS, type Rollup, type ServiceStatus,
 } from '$lib/stack/model';
 
 export type { ServiceStatus } from '$lib/stack/model';
@@ -33,6 +33,9 @@ export interface ServiceRuntime {
   lastExitCode: number | null;
   /** Foreground job leader recorded after start — the stop guard (§4). */
   pid: number | null;
+  /** The PTY the command was typed into. A bound tab whose live PTY is a different one
+   *  (reload, respawn) is a fresh shell with nothing running in it. */
+  ptyId: string | null;
   /** A stop is in flight: the next exit is `stopped`, never `crashed`. */
   stopping: boolean;
   /** ms epochs of automatic restarts, for the ceiling. */
@@ -52,7 +55,7 @@ export interface ServiceInput {
   origin?: ServiceOrigin;
 }
 
-const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, stopping: false, restarts: [], note: null };
+const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, stopping: false, restarts: [], note: null };
 
 /** How long a freshly mounted tab gets to reach its prompt before a start gives up. */
 const PROMPT_WAIT_MS = 8000;
@@ -67,6 +70,13 @@ function createStackStore() {
   /** Workspaces whose auto_start already fired for this activation. Cleared on suspend. */
   const autoStarted = new Set<string>();
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Services with a start or stop in flight. The status alone cannot guard re-entry:
+   *  `start` does four IPC round trips before it can set `starting`, and a double-click
+   *  or two parallel agent calls land inside that window and mint a second tab. */
+  const inflight = new Set<string>();
+  /** Bumped per service by every observed exit, so the post-start settle knows whether an
+   *  OSC 133 D already explained what it is seeing. */
+  const exitEpoch = new Map<string, number>();
   let unsubscribe: (() => void)[] = [];
 
   function rt(serviceId: string): ServiceRuntime {
@@ -142,20 +152,25 @@ function createStackStore() {
     return false;
   }
 
-  function onExit(tabId: string, exitCode: number) {
+  function onExit(tabId: string, exitCode: number | null) {
     const hit = serviceForTab(tabId);
     if (!hit) return;
     const { workspaceId, service } = hit;
     const r = rt(service.id);
     if (r.status === 'stopped' || r.status === 'crashed') return;
-    const crashed = !r.stopping && exitIsCrash(exitCode);
+    exitEpoch.set(service.id, (exitEpoch.get(service.id) ?? 0) + 1);
+    // A deliberate stop is a stop whatever the code — `make dev` returns 2 when its child
+    // is interrupted. An exit with no code (the settle path, no shell integration) after
+    // a start we never saw come up is a crash.
+    const crashed = !r.stopping && (exitCode === null || exitIsCrash(exitCode));
     setRt(service.id, {
       status: crashed ? 'crashed' : 'stopped',
       since: null,
       pid: null,
+      ptyId: null,
       stopping: false,
       lastExitCode: exitCode,
-      note: crashed ? `exit ${exitCode}` : null,
+      note: crashed ? (exitCode === null ? 'exited before it was ready (no exit code seen)' : `exit ${exitCode}`) : null,
     });
     if (crashed) {
       logWarn(`stack: ${service.name} crashed with exit ${exitCode}`);
@@ -185,20 +200,27 @@ function createStackStore() {
 
   /** A bound tab that disappears (its shell died and `pty-close` deleted it, or the human
    *  closed it) takes its running service down with it — `crashed` unless a stop was in
-   *  flight. No restart: there is no tab to restart in; the next start mints one. */
+   *  flight. No restart: there is no tab to restart in; the next start mints one. A bound
+   *  tab whose live PTY is not the one the command was typed into (a reload minted a fresh
+   *  shell) is `stopped`: nothing is running there, and a green dot over it would lie. */
   function reconcileBindings() {
     for (const [serviceId, r] of runtime) {
       if (r.status === 'stopped' || r.status === 'crashed') continue;
-      let stillBound = false;
-      let workspaceId: string | null = null;
-      for (const ws of workspacesStore.workspaces) {
-        if (ws.stack?.some((s) => s.id === serviceId)) workspaceId = ws.id;
-        if (ws.panes.some((p) => p.tabs.some((t) => t.service_id === serviceId))) { stillBound = true; break; }
+      // The binding only counts inside the workspace that owns the definition — a tab
+      // moved elsewhere has its binding cleared by Rust, and searching every workspace
+      // would keep a moved-away service "running" here with no tab to show for it.
+      const ws = workspacesStore.workspaces.find((w) => w.stack?.some((s) => s.id === serviceId));
+      const tab = ws?.panes.flatMap((p) => p.tabs).find((t) => t.service_id === serviceId);
+      if (!tab) {
+        const crashed = !r.stopping;
+        setRt(serviceId, { status: crashed ? 'crashed' : 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: crashed ? 'its tab closed' : null });
+        if (crashed) logWarn(`stack: service ${serviceId} lost its tab`);
+        continue;
       }
-      if (stillBound) continue;
-      const crashed = !r.stopping;
-      setRt(serviceId, { status: crashed ? 'crashed' : 'stopped', since: null, pid: null, stopping: false, note: crashed ? 'its tab closed' : null });
-      if (crashed && workspaceId) logWarn(`stack: service ${serviceId} lost its tab`);
+      const live = terminalsStore.get(tab.id);
+      if (r.ptyId && live && live.ptyId !== r.ptyId) {
+        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: 'its tab was reloaded — start it again' });
+      }
     }
   }
 
@@ -210,7 +232,7 @@ function createStackStore() {
       autoStarted.delete(ws.id);
       for (const s of ws.stack ?? []) {
         const r = rt(s.id);
-        if (r.status !== 'stopped') setRt(s.id, { status: 'stopped', since: null, pid: null, stopping: false, note: null });
+        if (r.status !== 'stopped') setRt(s.id, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
       }
     }
   }
@@ -224,6 +246,18 @@ function createStackStore() {
     if (ws.suspended) throw new Error('Workspace is suspended — resume it first');
     const r = rt(serviceId);
     if (r.status === 'starting' || r.status === 'running' || r.status === 'ready') return r.status;
+    if (inflight.has(serviceId)) return r.status;
+    inflight.add(serviceId);
+    try {
+      return await startInner(workspaceId, service);
+    } finally {
+      inflight.delete(serviceId);
+    }
+  }
+
+  async function startInner(workspaceId: string, service: Service): Promise<ServiceStatus> {
+    const serviceId = service.id;
+    const ws = workspaceOf(workspaceId)!;
     const timer = restartTimers.get(serviceId);
     if (timer) { clearTimeout(timer); restartTimers.delete(serviceId); }
 
@@ -265,14 +299,35 @@ function createStackStore() {
 
     // 4. Type it.
     const line = startLine(service);
+    const epochBefore = exitEpoch.get(serviceId) ?? 0;
+    setRt(serviceId, { ptyId: instance.ptyId });
     await commands.writeTerminal(instance.ptyId, Array.from(new TextEncoder().encode(line + '\n')));
     logInfo(`stack: started ${service.name} in tab ${tabId}`);
 
-    // 5. Record the job that took the terminal — the pid the stop guard compares against.
-    await sleep(400);
-    const fg = await probeForeground(instance.ptyId);
-    if (fg && fg.shell_at_prompt === false) {
-      setRt(serviceId, { status: rt(serviceId).status === 'starting' ? 'running' : rt(serviceId).status, pid: fg.pid });
+    // 5. Settle: record the job that took the terminal (the pid the stop guard compares
+    //    against), or notice that nothing did. The OSC 133 D normally explains a fast
+    //    exit; when the shell has no integration the prompt coming back with no exit seen
+    //    is the only evidence, and it is read as a crash rather than left `starting`.
+    let sawJob = false;
+    for (const wait of [400, 600, 1000, 1000]) {
+      await sleep(wait);
+      const now = rt(serviceId);
+      if (now.status === 'stopped' || now.status === 'crashed') return now.status;
+      const fg = await probeForeground(instance.ptyId);
+      if (fg?.shell_at_prompt === false) {
+        if (!sawJob) {
+          sawJob = true;
+          setRt(serviceId, { status: now.status === 'starting' ? 'running' : now.status, pid: fg.pid });
+        }
+        continue;
+      }
+      if (fg?.shell_at_prompt === true && (exitEpoch.get(serviceId) ?? 0) === epochBefore) {
+        // Back at the prompt, and no exit event told us why.
+        if (sawJob || wait >= 1000) {
+          onExit(tabId, null);
+          return rt(serviceId).status;
+        }
+      }
     }
     return rt(serviceId).status;
   }
@@ -282,25 +337,39 @@ function createStackStore() {
     if (!service) throw new Error('Service not found');
     const r = rt(serviceId);
     if (r.status === 'stopped' || r.status === 'crashed') return r.status;
+    if (inflight.has(serviceId)) return r.status;
+    inflight.add(serviceId);
+    try {
+      return await stopInner(workspaceId, serviceId, r);
+    } finally {
+      inflight.delete(serviceId);
+    }
+  }
+
+  async function stopInner(workspaceId: string, serviceId: string, r: ServiceRuntime): Promise<ServiceStatus> {
     const bound = boundTab(workspaceId, serviceId);
     const instance = bound ? terminalsStore.get(bound.tab.id) : undefined;
-    if (!instance) {
-      setRt(serviceId, { status: 'stopped', since: null, pid: null, stopping: false, note: null });
+    if (!instance || (r.ptyId && instance.ptyId !== r.ptyId)) {
+      // No live shell, or a different one than the command went into: nothing is running.
+      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
       return 'stopped';
     }
-    setRt(serviceId, { stopping: true });
 
     // Already back at the prompt: nothing to signal, just record it.
-    let fg = await probeForeground(instance.ptyId);
+    const fg = await probeForeground(instance.ptyId);
     if (fg?.shell_at_prompt === true) {
-      setRt(serviceId, { status: 'stopped', since: null, pid: null, stopping: false, note: null });
+      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
       return 'stopped';
     }
-    // Something else took the terminal since we started: not ours to kill.
-    if (r.pid !== null && fg?.pid != null && fg.pid !== r.pid) {
-      setRt(serviceId, { stopping: false, note: `not stopped — ${fg.executable ?? 'another job'} is in the foreground` });
+    // The guard (§4): only the job we recorded is ever signalled. No recorded pid means we
+    // cannot tell whose job holds the terminal — refuse, never fall back to "whatever is in
+    // front". A wrong "yes" here ^C's and SIGTERMs the human's vim.
+    if (r.pid === null || fg?.pid == null || fg.pid !== r.pid) {
+      const what = fg?.executable ? `${fg.executable} is in the foreground` : 'cannot tell which job holds the terminal';
+      setRt(serviceId, { note: `not stopped — ${what}` });
       return r.status;
     }
+    setRt(serviceId, { stopping: true });
 
     const ctrlC = [0x03];
     await commands.writeTerminal(instance.ptyId, ctrlC);
@@ -308,15 +377,15 @@ function createStackStore() {
     await commands.writeTerminal(instance.ptyId, ctrlC);
     if (await waitForPrompt(instance.ptyId, 2000)) return finishStop(serviceId);
 
-    const pid = r.pid ?? fg?.pid ?? null;
-    if (pid !== null) {
-      await commands.killPtyForegroundJob(instance.ptyId, pid, false).catch(() => false);
-      if (await waitForPrompt(instance.ptyId, 3000)) return finishStop(serviceId);
-      await commands.killPtyForegroundJob(instance.ptyId, pid, true).catch(() => false);
-      if (await waitForPrompt(instance.ptyId, 2000)) return finishStop(serviceId);
-    }
-    fg = await probeForeground(instance.ptyId);
-    setRt(serviceId, { stopping: false, note: `did not stop — ${fg?.executable ?? 'the job'} is still in the foreground` });
+    await commands.killPtyForegroundJob(instance.ptyId, r.pid, false).catch(() => false);
+    if (await waitForPrompt(instance.ptyId, 3000)) return finishStop(serviceId);
+    await commands.killPtyForegroundJob(instance.ptyId, r.pid, true).catch(() => false);
+    if (await waitForPrompt(instance.ptyId, 2000)) return finishStop(serviceId);
+
+    // Gave up waiting, but the stop was asked for: leave `stopping` set so the exit, when
+    // it finally comes, is filed as a stop and not a crash that auto-restarts.
+    const after = await probeForeground(instance.ptyId);
+    setRt(serviceId, { note: `still stopping — ${after?.executable ?? 'the job'} has not exited yet` });
     return rt(serviceId).status;
   }
 
@@ -324,7 +393,7 @@ function createStackStore() {
     // The OSC 133 exit usually lands first and clears `stopping`; this is the fallback
     // for shells without integration.
     if (rt(serviceId).status !== 'stopped') {
-      setRt(serviceId, { status: 'stopped', since: null, pid: null, stopping: false, note: null });
+      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
     }
     return 'stopped';
   }
@@ -341,8 +410,8 @@ function createStackStore() {
     },
 
     /** Rollup for the sidebar dot: null when the stack is empty or all stopped. */
-    rollup(workspaceId: string): 'ready' | 'starting' | 'crashed' | null {
-      return rollupStatus(this.services(workspaceId).map((s) => rt(s.id).status));
+    rollup(workspaceId: string): Rollup {
+      return rollupStatus(this.services(workspaceId).map((s) => ({ status: rt(s.id).status, autoStart: s.auto_start ?? true })));
     },
 
     // ── Definitions ─────────────────────────────────────────────────────────────
@@ -470,7 +539,10 @@ function createStackStore() {
     // ── Lifecycle ────────────────────────────────────────────────────────────────
 
     init() {
-      unsubscribe.push(activityStore.onCommandComplete(onExit));
+      // Every OSC 133 D, unfiltered — `onCommandComplete` hides exits inside the pane's 2s
+      // mount window and under its 2s completion floor, which is precisely where a service
+      // that fails at boot exits. `onExit` ignores tabs it did not start.
+      unsubscribe.push(activityStore.onCommandExit(onExit));
       unsubscribe.push(activityStore.onCommandStart((tabId) => {
         const hit = serviceForTab(tabId);
         if (hit && rt(hit.service.id).status === 'starting') setRt(hit.service.id, { status: 'running' });
@@ -478,9 +550,11 @@ function createStackStore() {
       const self = this;
       unsubscribe.push($effect.root(() => {
         $effect(() => {
-          // Subscribe to tab membership and suspend flags only; the reconcilers read and
-          // write `runtime`, which must not re-trigger this effect (CLAUDE.md: untrack).
+          // Subscribe to tab membership, suspend flags and PTY (re)registrations only; the
+          // reconcilers read and write `runtime`, which must not re-trigger this effect
+          // (CLAUDE.md: untrack).
           void workspacesStore.workspaces.map((w) => [w.suspended, ...w.panes.map((p) => p.tabs.map((t) => t.service_id).join(','))]);
+          void terminalsStore.instanceVersion;
           untrack(() => { reconcileBindings(); reconcileSuspended(); });
         });
         $effect(() => {

@@ -15,6 +15,7 @@ function createActivityStore() {
 
   const commandStartListeners = new Set<CommandStartListener>();
   const commandCompleteListeners = new Set<CommandCompleteListener>();
+  const commandExitListeners = new Set<CommandCompleteListener>();
 
   return {
     hasActivity(tabId: string): boolean {
@@ -83,6 +84,19 @@ function createActivityStore() {
     onCommandComplete(fn: CommandCompleteListener): () => void {
       commandCompleteListeners.add(fn);
       return () => { commandCompleteListeners.delete(fn); };
+    },
+
+    /** EVERY OSC 133 D, unfiltered — no 2s completion floor, no mount-window gate. The
+     *  filters above exist for notifications ("this command was worth telling you about");
+     *  the stack store needs the opposite: a dev server that dies 900ms after being typed
+     *  is exactly the exit it must see. Restored-scrollback replays reach this too, and
+     *  consumers must ignore exits for anything they did not start. */
+    noteCommandExit(tabId: string, exitCode: number) {
+      for (const fn of commandExitListeners) fn(tabId, exitCode);
+    },
+    onCommandExit(fn: CommandCompleteListener): () => void {
+      commandExitListeners.add(fn);
+      return () => { commandExitListeners.delete(fn); };
     },
 
     // Tab state (alert / question) — set by trigger actions, cleared on tab focus

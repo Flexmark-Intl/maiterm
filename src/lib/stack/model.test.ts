@@ -51,13 +51,20 @@ describe('restart ceiling', () => {
 });
 
 describe('rollupStatus', () => {
+  const row = (status: Parameters<typeof rollupStatus>[0][number]['status'], autoStart = true) => ({ status, autoStart });
+
   it('is null for an empty or fully stopped stack', () => {
     expect(rollupStatus([])).toBeNull();
-    expect(rollupStatus(['stopped', 'stopped'])).toBeNull();
+    expect(rollupStatus([row('stopped'), row('stopped')])).toBeNull();
   });
   it('reports the worst thing first', () => {
-    expect(rollupStatus(['ready', 'crashed'])).toBe('crashed');
-    expect(rollupStatus(['ready', 'starting'])).toBe('starting');
-    expect(rollupStatus(['ready', 'running', 'stopped'])).toBe('ready');
+    expect(rollupStatus([row('ready'), row('crashed')])).toBe('crashed');
+    expect(rollupStatus([row('ready'), row('starting')])).toBe('starting');
+  });
+  it('is green only when every auto-start service is up', () => {
+    expect(rollupStatus([row('ready'), row('running')])).toBe('ready');
+    expect(rollupStatus([row('ready'), row('stopped')])).toBe('partial');
+    // A stopped service that was never meant to auto-start does not count against it.
+    expect(rollupStatus([row('ready'), row('stopped', false)])).toBe('ready');
   });
 });

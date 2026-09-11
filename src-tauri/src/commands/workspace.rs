@@ -394,7 +394,11 @@ pub fn move_tab_to_workspace(
             .ok_or("Source pane not found")?;
         let tab_pos = source_pane.tabs.iter().position(|t| t.id == tab_id)
             .ok_or("Tab not found")?;
-        let tab = source_pane.tabs.remove(tab_pos);
+        let mut tab = source_pane.tabs.remove(tab_pos);
+        // The stack is per-workspace (docs/stack.md §5): a service tab that leaves takes
+        // the process with it but not the binding, or the source workspace would show a
+        // running service with no tab and mint a second process on the next start.
+        tab.service_id = None;
 
         // Fix source pane's active tab if we removed the active one
         if source_pane.active_tab_id.as_ref() == Some(&tab_id) {

@@ -751,7 +751,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         {
             "name": "waitForService",
             "description": "Block until a service is ready (or running, when it has no ready pattern), up to `timeout` seconds; returns its status and, if it is not up, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service.",
-            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 120)" } }, "required": ["service"] }
+            "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 100)" } }, "required": ["service"] }
         },
         {
             "name": "updateService",

@@ -44,11 +44,20 @@ export function restartDelay(recentRestarts: number): number {
   return RESTART_BACKOFF_MS[Math.min(recentRestarts, RESTART_BACKOFF_MS.length - 1)];
 }
 
-/** Rollup for the sidebar dot: null when the stack is empty or fully stopped. */
-export function rollupStatus(statuses: ServiceStatus[]): 'ready' | 'starting' | 'crashed' | null {
-  if (statuses.length === 0) return null;
-  if (statuses.some((s) => s === 'crashed')) return 'crashed';
-  if (statuses.some((s) => s === 'starting')) return 'starting';
-  if (statuses.some((s) => s === 'running' || s === 'ready')) return 'ready';
-  return null;
+export type Rollup = 'ready' | 'starting' | 'partial' | 'crashed' | null;
+
+/** Rollup for the sidebar dot, batch semantics like the Claude indicator (docs/stack.md
+ *  §7): red if anything crashed, amber while anything starts, green only when EVERY
+ *  auto-start service is up, `partial` when some are up and some never started, null when
+ *  the stack is empty or fully stopped. */
+export function rollupStatus(rows: { status: ServiceStatus; autoStart: boolean }[]): Rollup {
+  if (rows.length === 0) return null;
+  const up = (s: ServiceStatus) => s === 'running' || s === 'ready';
+  if (rows.some((r) => r.status === 'crashed')) return 'crashed';
+  if (rows.some((r) => r.status === 'starting')) return 'starting';
+  const anyUp = rows.some((r) => up(r.status));
+  if (!anyUp) return null;
+  const expected = rows.filter((r) => r.autoStart);
+  const allExpectedUp = expected.length > 0 ? expected.every((r) => up(r.status)) : rows.every((r) => up(r.status));
+  return allExpectedUp ? 'ready' : 'partial';
 }
