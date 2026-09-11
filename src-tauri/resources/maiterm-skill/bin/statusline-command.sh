@@ -54,10 +54,31 @@ host=$(hostname -s 2>/dev/null | tr '[:lower:]' '[:upper:]')
 # keeping 11 plus an ellipsis so truncation is visible.
 [ "${#host}" -gt 12 ] && host="${host:0:11}…"
 
+# Context window for this model. THREE tests, in falling order of confidence — the same
+# ladder as `context_limit_for` in src-tauri/src/mailink/mod.rs, which solved this first.
+# Keep the two in step: they are separate code paths reading different inputs, which is
+# exactly why this one sat wrong after the other was fixed.
+#
+#   1. The explicit variant marker. Claude Code puts it on `.model.id` in the statusLine
+#      input, so for Claude this is authoritative and nothing below runs.
+#   2. Model families known to be 1M with no marker. Other runtimes carry no marker at all:
+#      `fable-5-1` matched neither pattern, fell through to 200k, and rendered a real
+#      session as "182.2%" — which is not a percentage of anything.
+#   3. Observed usage as a self-correcting backstop. A session already past 200k is
+#      definitively on a bigger window whatever its id says. This is the part that makes
+#      the next unrecognised 1M model merely wrong-until-200k instead of permanently
+#      pegged over 100%, with no code change per model.
 case "$model_id" in
   *"[1m]"*|*"-1m"*) ctx_limit=1000000 ;;
+  *"opus-4-8"*|*"opus-5"*|*"fable-5"*) ctx_limit=1000000 ;;
   *) ctx_limit=200000 ;;
 esac
+# Compared through awk, not `[ -gt ]`, so a non-integer token count can never make this
+# render an error instead of a status line. Non-numeric reads as 0 there and the backstop
+# simply doesn't trigger, which is the right way to fail.
+if [ "$ctx_limit" -eq 200000 ] && awk -v t="$ctx_tokens" 'BEGIN{exit !(t>200000)}'; then
+  ctx_limit=1000000
+fi
 pct=$(awk -v t="$ctx_tokens" -v l="$ctx_limit" 'BEGIN{printf "%.1f", (t/l)*100}')
 
 GREEN='\033[1;32m'

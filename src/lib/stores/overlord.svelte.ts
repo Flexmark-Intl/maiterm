@@ -97,6 +97,10 @@ export interface OutstandingDirective {
   /** Raised the unacked-TTL escalation once. The directive keeps sitting there, and
    *  re-raising every tick would bury the queue in one stuck tab. */
   unackedNotified?: boolean;
+  /** Last tick this tab was seen `active` since the directive went out. The unacked TTL
+   *  measures from `max(sentAt, lastActiveAt)`, so its clock only runs while the agent is
+   *  NOT demonstrably working — see the tick's escalate site. */
+  lastActiveAt?: number;
 }
 
 export interface OverlordProposal {
@@ -2699,6 +2703,10 @@ function createOverlordStore() {
         // A driveTab directive with no ritual watching it is spent once the target's
         // turn demonstrably ran (or it was acked) — otherwise it locks the tab.
         const od = outstanding.get(tab.id);
+        // The unacked clock only runs while the tab is NOT working. Stamped before the
+        // branches below read it, and mutated in place like `acked`/`unackedNotified`.
+        if (od && st === 'active') od.lastActiveAt = now;
+        const unackedFor = od ? now - Math.max(od.sentAt, od.lastActiveAt ?? 0) : 0;
         if (od && od.ruleId === null && (od.acked || (f?.last_turn_ts !== undefined && f.last_turn_ts > od.sentAt))) {
           clearOutstanding(tab.id);
         } else if (
@@ -2706,25 +2714,46 @@ function createOverlordStore() {
           !od.acked &&
           !od.unackedNotified &&
           !driveWatch.has(tab.id) &&
-          now - od.sentAt >= DIRECTIVE_UNACKED_MS
+          !rituals.has(tab.id) &&
+          unackedFor >= DIRECTIVE_UNACKED_MS
         ) {
           // The TTL sweep the design called for on day one. A directive Overlord typed and
           // nobody answered is the supervisor's blind spot: it holds the tab's outstanding
           // slot, blocks every `only_if_no_outstanding` rule behind it, and reports nothing.
           //
-          // Scoped to directives with no drive watch — a driveTab directive has its own
-          // return leg, which reports both the answer and its own expiry, so escalating here
-          // too would double-report every one of them. What's left is rule-issued directives,
-          // whose only feedback channel is the ack that never came.
+          // Three things have to be true, and TWO of them were missing — the card fired at
+          // tabs that were demonstrably alive, three times in four days, every one of them
+          // working on the very directive it was reported for.
+          //
+          // - **No drive watch.** A driveTab directive has its own return leg, reporting
+          //   both the answer and its own expiry, so escalating here would double-report it.
+          // - **No ritual.** This was the real defect. `DIRECTIVE_UNACKED_MS` is 600_000 and
+          //   the step gate's own deadline is `(step.timeout_seconds ?? 600) * 1000` — the
+          //   SAME 600 seconds. Two independent timers on one directive, racing, and the
+          //   one that won reported the more alarming fact (observed firing at 9m58s). A
+          //   mid-ritual directive is not a directive with no feedback channel: `awaitGate`
+          //   is watching it and the rule author chose its `on_timeout`. Every `ruleId !==
+          //   null` directive comes from a ritual, so this is the guard that matters.
+          // - **The clock only runs while the tab isn't working** (`lastActiveAt` above).
+          //   Not "never while active": a directive swallowed by a mid-turn paste leaves a
+          //   tab active on something else entirely, and that is a live failure class here
+          //   (`reinit_unbound_agent` is instrumented, not cured). Measuring idle time still
+          //   surfaces it once the tab goes quiet, instead of never.
+          //
+          // What is left after all three is what the card was always for: a directive with
+          // no ritual and no drive watch — the census track-request — sitting unanswered at
+          // a tab that has stopped working. There the advice below is sound.
           od.unackedNotified = true;
           escalate(
             tab.id,
             od.ruleId,
             'directive_unacked',
-            `${tabDisplayName(tab.id)} has not acknowledged a directive for ` +
-              `${Math.round((now - od.sentAt) / 60_000)} min: ${JSON.stringify(od.text.slice(0, 160))}. ` +
-              `Nothing else can be sent to that tab until it clears. Check whether the agent is ` +
-              `still running there — driveTab it, or recover the tab — then clear this.`,
+            `${tabDisplayName(tab.id)} has not acknowledged a directive sent ` +
+              `${Math.round((now - od.sentAt) / 60_000)} min ago, and has not been working ` +
+              `for the last ${Math.round(unackedFor / 60_000)} min of that: ` +
+              `${JSON.stringify(od.text.slice(0, 160))}. Nothing else can be sent to that tab ` +
+              `until it clears. Check whether the agent is still running there — driveTab it, ` +
+              `or recover the tab — then clear this.`,
           );
         }
         // Claude task-store importer — one-way, into maiTerm's own store.

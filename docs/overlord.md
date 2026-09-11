@@ -345,6 +345,46 @@ card anyway. Same family: **the kind silently decides the audience, and nobody c
 kind's audience against its producer's intent.** Worth sweeping every kind against its
 producers rather than fixing one.
 
+### 3.1.2 `directive_unacked` measured the wrong thing, twice
+
+Confirmed three times in four days (Sep 7, 10, 11), every one a false positive at a tab that
+was demonstrably alive and working on the very directive it was reported for — a subagent
+review 9m58s in, a Bash command mid-run, a Railway cert poll with 5–6 minute command
+timeouts. The escalation's advice ("driveTab it, or recover the tab") would have interrupted
+work proceeding correctly, and the operator stood down each time.
+
+**The smoking gun: `DIRECTIVE_UNACKED_MS` is `600_000`, and the step gate's own deadline is
+`(step.timeout_seconds ?? 600) * 1000`. The same 600 seconds.** Two independent timers on one
+directive, racing, and the one that won reported the more alarming fact. 9m58s is that race
+landing on the wrong side.
+
+So the primary fix is not a better clock, it is **not running a second clock at all for a
+directive a ritual already owns**. `awaitGate` is watching it, with the deadline and the
+`on_timeout` behaviour the rule author chose. The card's own stated purpose — directives
+"whose only feedback channel is the ack that never came" — is exactly untrue of a mid-ritual
+directive. Every `ruleId !== null` directive comes from a ritual, so `!rituals.has(tabId)`
+removes all three observed cases on its own.
+
+**The clock still had to change for what's left.** `ruleId === null` directives are either
+`driveTab` (already excluded by `driveWatch`) or the census track-request, which clears on
+turn end — and would false-fire on the same long turn. It now measures from
+`max(sentAt, lastActiveAt)`, so the clock only runs while the tab is NOT working.
+
+Deliberately *not* "never fire while active", which was the first proposal. A directive
+swallowed by a mid-turn paste leaves the tab active on something else entirely, and that is a
+live failure class here (`reinit_unbound_agent` is instrumented, not cured). Measuring idle
+time still surfaces a swallowed directive once the tab goes quiet; suppressing on `active`
+would lose it permanently. The message reports both durations, since "sent 40 min ago" and
+"not working for the last 11 of them" are different facts and only the second fired it.
+
+**What this does NOT fix, and the cost attribution that was wrong.** The tab being blocked —
+"nothing else can be sent" — comes from the outstanding directive itself via the
+`only_if_no_outstanding` guard, not from the escalation. The tab stays blocked for those ten
+minutes either way; the escalation only reported it. Holding the slot while a ritual is
+genuinely mid-sequence is the honest state, so it stays held (decided 2026-09-11, from three
+incidents where nothing needed sending to those tabs). The false alarm and the bad advice
+were the real costs and both are gone.
+
 ### 3.1.1 `escalate` dedupes one kind, and the exclusions are the point
 
 `escalate` was a bare append, so a chatty agent stacked a card per report and nothing
