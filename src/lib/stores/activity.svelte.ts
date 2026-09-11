@@ -7,6 +7,11 @@ export interface ShellState {
 
 type CommandStartListener = (tabId: string) => void;
 type CommandCompleteListener = (tabId: string, exitCode: number) => void;
+/** Raw-feed listeners carry the PTY too: a tab id outlives its shell (suspend/resume,
+ *  reload keep or copy it), and a consumer keying "has this shell prompted yet" by tab
+ *  would be answered by a dead shell's prompt. */
+type RawShellListener = (tabId: string, ptyId: string) => void;
+type RawExitListener = (tabId: string, ptyId: string, exitCode: number) => void;
 
 function createActivityStore() {
   let active = $state<Set<string>>(new Set());
@@ -15,9 +20,9 @@ function createActivityStore() {
 
   const commandStartListeners = new Set<CommandStartListener>();
   const commandCompleteListeners = new Set<CommandCompleteListener>();
-  const commandExitListeners = new Set<CommandCompleteListener>();
-  const shellPromptListeners = new Set<CommandStartListener>();
-  const commandBeginListeners = new Set<CommandStartListener>();
+  const commandExitListeners = new Set<RawExitListener>();
+  const shellPromptListeners = new Set<RawShellListener>();
+  const commandBeginListeners = new Set<RawShellListener>();
 
   return {
     hasActivity(tabId: string): boolean {
@@ -95,24 +100,24 @@ function createActivityStore() {
      *  D for that command even if it dies 900ms later. Consumers sequence these against
      *  their own writes and ignore everything else — a D on a tab they did not start, or
      *  one that precedes their command's B/C, is not theirs. */
-    noteShellPrompt(tabId: string) {
-      for (const fn of shellPromptListeners) fn(tabId);
+    noteShellPrompt(tabId: string, ptyId: string) {
+      for (const fn of shellPromptListeners) fn(tabId, ptyId);
     },
-    noteCommandBegin(tabId: string) {
-      for (const fn of commandBeginListeners) fn(tabId);
+    noteCommandBegin(tabId: string, ptyId: string) {
+      for (const fn of commandBeginListeners) fn(tabId, ptyId);
     },
-    noteCommandExit(tabId: string, exitCode: number) {
-      for (const fn of commandExitListeners) fn(tabId, exitCode);
+    noteCommandExit(tabId: string, ptyId: string, exitCode: number) {
+      for (const fn of commandExitListeners) fn(tabId, ptyId, exitCode);
     },
-    onShellPrompt(fn: CommandStartListener): () => void {
+    onShellPrompt(fn: RawShellListener): () => void {
       shellPromptListeners.add(fn);
       return () => { shellPromptListeners.delete(fn); };
     },
-    onCommandBegin(fn: CommandStartListener): () => void {
+    onCommandBegin(fn: RawShellListener): () => void {
       commandBeginListeners.add(fn);
       return () => { commandBeginListeners.delete(fn); };
     },
-    onCommandExit(fn: CommandCompleteListener): () => void {
+    onCommandExit(fn: RawExitListener): () => void {
       commandExitListeners.add(fn);
       return () => { commandExitListeners.delete(fn); };
     },

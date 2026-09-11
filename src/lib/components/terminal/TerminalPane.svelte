@@ -713,9 +713,9 @@
       // it typed, and an exit 900ms later (docs/stack.md §4).
       {
         const raw = event.payload.cmd;
-        if (raw === 'A') activityStore.noteShellPrompt(tabId);
-        else if (raw === 'B' || raw === 'C') activityStore.noteCommandBegin(tabId);
-        else if (raw === 'D') activityStore.noteCommandExit(tabId, event.payload.exit_code ?? 0);
+        if (raw === 'A') activityStore.noteShellPrompt(tabId, ptyId);
+        else if (raw === 'B' || raw === 'C') activityStore.noteCommandBegin(tabId, ptyId);
+        else if (raw === 'D') activityStore.noteCommandExit(tabId, ptyId, event.payload.exit_code ?? 0);
       }
       if (!trackActivity) return;
       const { cmd, exit_code } = event.payload;

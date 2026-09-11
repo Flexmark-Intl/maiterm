@@ -64,7 +64,10 @@ export interface ServiceInput {
 
 const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, stopping: false, restarts: [], note: null };
 
-/** Everything the store has to remember about a tab's shell, from the raw OSC 133 feed. */
+/** Everything the store has to remember about a SHELL, from the raw OSC 133 feed. Keyed
+ *  by PTY id, never tab id: a tab id outlives its shell (suspend/resume respawns under the
+ *  same id; reload copies the binding to a new id), and a respawned shell must earn its
+ *  own first prompt — the dead shell's A said nothing about the rc this one is still in. */
 interface ShellFacts {
   /** ms epoch of the last A. A fresh shell has none until its rc finishes. */
   lastPromptAt: number | null;
@@ -78,8 +81,11 @@ interface ShellFacts {
  *  shell has no integration and fall back to the tty-foreground heuristic. Real rcs
  *  (oh-my-zsh + nvm + conda) take 2–3s; 12s is generous without being forever. */
 const FIRST_PROMPT_WAIT_MS = 12000;
-/** After the write, how long until the shell's B/C must have arrived. */
-const BEGIN_WAIT_MS = 5000;
+/** After the write, how long until the shell's B/C must have arrived. Generous: a prompt
+ *  hook (direnv evaluating a fresh .envrc) can sit between Enter and preexec, and giving up
+ *  early is worse than waiting — the line is queued in the tty and WILL run, and a start
+ *  that has already disowned it leaves a running service nothing can stop. */
+const BEGIN_WAIT_MS = 30000;
 const MOUNT_WAIT_MS = 15000;
 
 function sleep(ms: number) {
@@ -104,21 +110,21 @@ function createStackStore() {
   const shellFacts = new Map<string, ShellFacts>();
   let unsubscribe: (() => void)[] = [];
 
-  function facts(tabId: string): ShellFacts {
-    let f = shellFacts.get(tabId);
-    if (!f) { f = { lastPromptAt: null, lastBeginAt: null, lastExitAt: null }; shellFacts.set(tabId, f); }
+  function facts(ptyId: string): ShellFacts {
+    let f = shellFacts.get(ptyId);
+    if (!f) { f = { lastPromptAt: null, lastBeginAt: null, lastExitAt: null }; shellFacts.set(ptyId, f); }
     return f;
   }
 
   /** Poll `facts` until `pred` holds or the deadline passes. Event-driven would be nicer;
-   *  250ms polling is invisible next to a shell rc and keeps this a plain loop. */
-  async function waitForFact(tabId: string, pred: (f: ShellFacts) => boolean, timeoutMs: number): Promise<boolean> {
+   *  150ms polling is invisible next to a shell rc and keeps this a plain loop. */
+  async function waitForFact(ptyId: string, pred: (f: ShellFacts) => boolean, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (pred(facts(tabId))) return true;
+      if (pred(facts(ptyId))) return true;
       await sleep(150);
     }
-    return pred(facts(tabId));
+    return pred(facts(ptyId));
   }
 
   function rt(serviceId: string): ServiceRuntime {
@@ -196,32 +202,34 @@ function createStackStore() {
     return false;
   }
 
-  function onShellPrompt(tabId: string) {
-    facts(tabId).lastPromptAt = Date.now();
+  function onShellPrompt(_tabId: string, ptyId: string) {
+    facts(ptyId).lastPromptAt = Date.now();
   }
 
-  function onCommandBegin(tabId: string) {
+  function onCommandBegin(tabId: string, ptyId: string) {
     const now = Date.now();
-    facts(tabId).lastBeginAt = now;
+    facts(ptyId).lastBeginAt = now;
     const hit = serviceForTab(tabId);
     if (!hit) return;
     const r = rt(hit.service.id);
-    // The B/C for OUR line: the first one after the write. Anything earlier is a command
-    // the shell was already running (or the rc's own hooks) and says nothing about us.
-    if (r.writeAt !== null && r.beganAt === null && now >= r.writeAt && r.status === 'starting') {
+    // The B/C for OUR line: the first one after the write, on the PTY we wrote to.
+    // Anything earlier is a command the shell was already running (or the rc's own
+    // hooks) and says nothing about us.
+    if (r.writeAt !== null && r.beganAt === null && r.ptyId === ptyId && now >= r.writeAt && r.status === 'starting') {
       setRt(hit.service.id, { beganAt: now, status: 'running' });
     }
   }
 
   /** `exitCode === null` is the no-integration fallback: the tty came back with nothing
    *  to say why. With integration, a D counts only once the command's own B/C was seen. */
-  function onExit(tabId: string, exitCode: number | null) {
-    facts(tabId).lastExitAt = Date.now();
+  function onExit(tabId: string, ptyId: string, exitCode: number | null) {
+    facts(ptyId).lastExitAt = Date.now();
     const hit = serviceForTab(tabId);
     if (!hit) return;
     const { workspaceId, service } = hit;
     const r = rt(service.id);
     if (r.status === 'stopped' || r.status === 'crashed') return;
+    if (r.ptyId !== null && r.ptyId !== ptyId) return; // a different shell's exit
     if (exitCode !== null && !r.noIntegration && r.beganAt === null) {
       // A D before our command began: the fresh shell's unconditional first-prompt D;0,
       // or a human's command finishing on the bound tab while we waited. Not ours.
@@ -373,15 +381,18 @@ function createStackStore() {
     // 3. The guard. With shell integration, "ready for input" is the shell's own A: a fresh
     //    shell has none until its rc finishes (and its first prompt also emits an
     //    unconditional D;0, which is why exits are gated on B/C below). A live shell must
-    //    have had a prompt since its last B/C, or it is mid-command. Without integration
-    //    (no A within the wait) fall back to the tty foreground, which can only say that
-    //    no external job holds it.
-    const f = facts(tabId);
+    //    have had a prompt since its last B/C, or it is mid-command. Facts are per PTY, so
+    //    a shell that respawned under this tab id, or a reload's new id, waits for ITS
+    //    first prompt like any fresh shell — `wasLive` says nothing about that. Without
+    //    integration (no A within the wait) fall back to the tty foreground, which can
+    //    only say that no external job holds it.
+    const ptyId = instance.ptyId;
+    const f = facts(ptyId);
     const promptSince = (t: number | null) => f.lastPromptAt !== null && (t === null || f.lastPromptAt >= t);
-    let integrated = await waitForFact(tabId, (x) => x.lastPromptAt !== null, wasLive ? 0 : FIRST_PROMPT_WAIT_MS);
+    const integrated = await waitForFact(ptyId, (x) => x.lastPromptAt !== null, FIRST_PROMPT_WAIT_MS);
     if (aborted(serviceId)) return 'stopped';
     if (integrated) {
-      const idle = await waitForFact(tabId, (x) => promptSince(x.lastBeginAt), wasLive ? 4000 : 0);
+      const idle = await waitForFact(ptyId, (x) => promptSince(x.lastBeginAt), wasLive ? 4000 : 0);
       if (!idle) {
         const fg = await probeForeground(instance.ptyId);
         const what = fg?.executable ? `${fg.executable} is in the foreground` : 'the shell is mid-command';
@@ -411,12 +422,14 @@ function createStackStore() {
     // 5. Confirm the shell took it, then record the job that holds the tty — the pid the
     //    stop guard compares against.
     if (integrated) {
-      const began = await waitForFact(tabId, () => rt(serviceId).beganAt !== null || rt(serviceId).status === 'stopped' || rt(serviceId).status === 'crashed', BEGIN_WAIT_MS);
+      const began = await waitForFact(ptyId, () => rt(serviceId).beganAt !== null || rt(serviceId).status === 'stopped' || rt(serviceId).status === 'crashed', BEGIN_WAIT_MS);
       const now = rt(serviceId);
       if (now.status === 'stopped' || now.status === 'crashed') return now.status;
       if (!began) {
-        setRt(serviceId, { status: 'stopped', since: null, ptyId: null, writeAt: null, note: 'not started — the shell never ran the command' });
-        logWarn(`stack: ${service.name}: no B/C after the write`);
+        // Thirty seconds and no B/C: the shell ate the line (an rc step reading stdin) or
+        // is wedged. Keep `ptyId` so a later exit on that shell still resolves here.
+        setRt(serviceId, { status: 'stopped', since: null, writeAt: null, note: 'not started — the shell never ran the command; check the tab' });
+        logWarn(`stack: ${service.name}: no B/C within ${BEGIN_WAIT_MS}ms of the write`);
         return 'stopped';
       }
     } else {
@@ -431,9 +444,9 @@ function createStackStore() {
         }
         return false;
       })();
-      if (!took) { onExit(tabId, null); return rt(serviceId).status; }
+      if (!took) { onExit(tabId, ptyId, null); return rt(serviceId).status; }
       setRt(serviceId, { status: 'running', beganAt: Date.now() });
-      void watchNoIntegration(serviceId, instance.ptyId);
+      void watchNoIntegration(serviceId, ptyId);
     }
     for (let i = 0; i < 4; i++) {
       const fg = await probeForeground(instance.ptyId);
@@ -455,7 +468,7 @@ function createStackStore() {
       const fg = await probeForeground(ptyId);
       if (fg?.shell_at_prompt === true) {
         const bound = [...workspacesStore.workspaces].flatMap((w) => w.panes).flatMap((p) => p.tabs).find((t) => t.service_id === serviceId);
-        if (bound) onExit(bound.id, null);
+        if (bound) onExit(bound.id, ptyId, null);
         return;
       }
     }
