@@ -18,7 +18,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, resolveBlockers } from '$lib/tasks/model';
+  import { effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
@@ -157,26 +157,43 @@
     };
   }
 
-  /** Click the status chip to advance; shift-click to go back. Cycling beats a dropdown
-   *  here — status changes are the panel's most frequent action by far.
-   *
-   *  Steps from the status the chip DISPLAYS, not the stored one. On a task blocked by an
-   *  unfinished dependency those differ, and stepping from the stored value made the chip
-   *  look frozen: three clicks would silently walk the stored status through the whole
-   *  vocabulary while the label stayed "BLOCKED", then jump to "DONE" on the fourth. */
   /** The prerequisites actually holding a task up — `waiting` and `parked`, never `met` or
    *  `gone`. Draws on the same resolver the agent tools use, so the line on screen and the
    *  line in `listTasks` cannot disagree about why a row is blocked. */
-  function unmetBlockers(t: Task) {
-    return resolveBlockers(t, all, workspacesStore.parkedTaskIds, (id) => {
-      const held = workspacesStore.parkedTasks.get(id);
-      return held
-        ? { title: held.task.title, status: held.task.status, tab_id: held.tabId, tab_name: held.tabName }
-        : undefined;
-    }).filter((b) => b.state === 'waiting' || b.state === 'parked');
+  /** The same sentence the Overlord board shows, so the two surfaces cannot tell the
+   *  reader different things about one held row. */
+  function blockedWhy(t: Task): string {
+    return explainBlocked(t, all, workspacesStore.parkedTaskIds, parkedLookup) ?? 'Waiting on an unfinished prerequisite.';
   }
 
+  const parkedLookup: ParkedLookup = (id) => {
+    const held = workspacesStore.parkedTasks.get(id);
+    return held
+      ? { title: held.task.title, status: held.task.status, tab_id: held.tabId, tab_name: held.tabName }
+      : undefined;
+  };
+
+  function unmetBlockers(t: Task) {
+    return resolveBlockers(t, all, workspacesStore.parkedTaskIds, parkedLookup).filter(
+      (b) => b.state === 'waiting' || b.state === 'parked',
+    );
+  }
+
+  /** Click the status chip to advance; shift-click to go back. Cycling beats a dropdown
+   *  here — status changes are the panel's most frequent action by far.
+   *
+   *  A dependency-blocked row does not cycle at all. Stepping from the STORED status made
+   *  the chip look frozen while the value walked underneath it; stepping from the DISPLAYED
+   *  one, which is what it did next, was worse — `blocked` is in the flow, so one click on
+   *  a row reading BLOCKED stored `review` and changed nothing on screen. When the
+   *  prerequisite finally landed, the task surfaced in Review having never been worked.
+   *  Both readings share the same flaw: a control whose label cannot move must not move the
+   *  value either. The board holds these cards for the same reason, and so do this panel's
+   *  own Park and Do-it buttons. */
   function cycleStatus(t: Task, back: boolean) {
+    // Guarded here and not only on the button: this is the invariant, and the next caller
+    // wiring up a keyboard shortcut should not have to rediscover it.
+    if (hasUnmetDeps(t, all, workspacesStore.parkedTaskIds)) return;
     const shown = effectiveStatus(t, all, workspacesStore.parkedTaskIds);
     // FLOW_STATUSES, not every lane: `dropped` is reachable by decision, never by clicking
     // one past DONE. A dropped row has no index in the flow, so the chip lands it back at
@@ -453,10 +470,12 @@
               <div class="task-main">
                 <Tooltip text={isDropped(t.status)
                   ? 'Dropped — retracted, not finished. Nothing waiting on it counts it as done. Use ↑ to put it back in play.'
-                  : `${STATUS_LABEL[eff]} — click to advance, shift-click to go back`}>
+                  : depBlocked
+                    ? `${blockedWhy(t)} The lane is held until then.`
+                    : `${STATUS_LABEL[eff]} — click to advance, shift-click to go back`}>
                   <button
                     class="status s-{eff}"
-                    disabled={isDropped(t.status)}
+                    disabled={isDropped(t.status) || depBlocked}
                     onclick={(e) => cycleStatus(t, e.shiftKey)}
                   >
                     {STATUS_LABEL[eff]}
@@ -566,7 +585,12 @@
                         ? b.title
                           ? `${b.title} (parked with “${b.parked_with?.tab_name}”)`
                           : 'a task parked with an archived tab'
-                        : b.title,
+                        : // The lane, not just the title: "waiting on Retry queue" read
+                          // identically whether that row was active or retracted, and those
+                          // are opposite facts for whoever has to decide what to do next.
+                          b.status
+                          ? `${b.title} (${laneName(b.status)})`
+                          : b.title,
                     )
                     .join(', ')}
                 </div>

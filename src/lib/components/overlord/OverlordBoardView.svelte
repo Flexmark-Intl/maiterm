@@ -2,7 +2,7 @@
   import { workspacesStore, navigateToTab, tabDisplayName } from '$lib/stores/workspaces.svelte';
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
+  import { effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isParked, TASK_STATUSES, type TaskRow } from '$lib/tasks/model';
   import type { TaskStatus } from '$lib/tauri/types';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -388,6 +388,20 @@
    *  destination explicitly, rather than one that guesses where retracted work resumes. */
   const DROPPED_WHY = 'Retracted — drag it back into a lane to put it in play again.';
 
+  /** Shared with the panel via `explainBlocked`, so the two surfaces cannot drift back into
+   *  telling the reader different things about the same held row. */
+  function waitingWhy(t: TaskRow): string {
+    const all = grouped.get(t.workspace_id) ?? [];
+    return (
+      explainBlocked(t, all, workspacesStore.parkedTaskIds, (id) => {
+        const held = workspacesStore.parkedTasks.get(id);
+        return held
+          ? { title: held.task.title, status: held.task.status, tab_id: held.tabId, tab_name: held.tabName }
+          : undefined;
+      }) ?? 'Waiting on an unfinished prerequisite.'
+    );
+  }
+
   function laneTone(l: TaskStatus): string {
     switch (l) {
       case 'backlog': return 'var(--ov-ink-dim)';
@@ -690,7 +704,7 @@
                         </button>
                       {/if}
                       {#if depBlocked.has(t.id)}
-                        <Tooltip text="Waiting on an unfinished prerequisite. It moves on its own once that task is done.">
+                        <Tooltip text={waitingWhy(t)}>
                           <span class="ov-chip card-dep">waiting</span>
                         </Tooltip>
                       {/if}

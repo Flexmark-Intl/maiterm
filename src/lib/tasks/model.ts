@@ -424,3 +424,51 @@ export function findImportedDuplicate(
     list.find((t) => !t.tab_id && !isRetired(t.status) && sameTitle(t))
   );
 }
+
+/** One sentence explaining why a row is held, naming the prerequisites and their lanes.
+ *
+ *  Lives here rather than in a component because the two human surfaces disagreed, and the
+ *  board's version was wrong. It read "It moves on its own once that task is done" for
+ *  every blocked card — false in precisely the case `dropped` exists for: a RETRACTED
+ *  prerequisite is never going to be done, so the card never clears and the reader was
+ *  being told to wait for work nobody intends to do. The panel, meanwhile, named the row
+ *  but never its lane, so "waiting on Retry queue" looked identical whether that task was
+ *  active or retracted.
+ *
+ *  `listTasks` has shipped `blocked_by[].title` and `.status` to agents all along. The
+ *  human was the only one guessing. */
+export function explainBlocked(
+  task: Task,
+  all: Task[],
+  parked?: ReadonlySet<string>,
+  parkedLookup?: ParkedLookup,
+): string | null {
+  const unmet = resolveBlockers(task, all, parked, parkedLookup).filter(
+    (b) => b.state === 'waiting' || b.state === 'parked',
+  );
+  if (!unmet.length) return null;
+
+  const name = (b: ResolvedBlocker) => {
+    if (!b.title) return 'a task parked with an archived tab';
+    const where =
+      b.state === 'parked' && b.parked_with
+        ? `parked with “${b.parked_with.tab_name}”`
+        : b.status
+          ? laneName(b.status)
+          : null;
+    return where ? `“${b.title}” (${where})` : `“${b.title}”`;
+  };
+
+  const head = `Waiting on ${unmet.map(name).join(' and ')}.`;
+  // A retracted prerequisite is the one that cannot resolve itself. Say so instead of
+  // promising a clearance that will never arrive.
+  return unmet.some((b) => b.status === 'dropped')
+    ? `${head} That work was retracted, so this will not clear on its own — restore it, or retract this one too.`
+    : `${head} It clears on its own once that lands.`;
+}
+
+/** Lane as it reads in a sentence. `todo` is the only one whose stored value is not the
+ *  word a human uses for it. */
+export function laneName(status: TaskStatus): string {
+  return status === 'todo' ? 'to-do' : status;
+}

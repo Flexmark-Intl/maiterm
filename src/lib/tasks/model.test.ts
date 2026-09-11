@@ -5,6 +5,7 @@ import {
   coerceStatus,
   TASK_NOTE_CAP,
   effectiveStatus,
+  explainBlocked,
   FLOW_STATUSES,
   isDropped,
   isInFlight,
@@ -490,5 +491,86 @@ describe('statusFromAgent', () => {
     expect(statusFromAgent('in_progress', true)).toBe('blocked');
     // ...but not over completion.
     expect(statusFromAgent('completed', true)).toBe('done');
+  });
+});
+
+describe('explainBlocked', () => {
+  it('says nothing when nothing is holding the row', () => {
+    const a = task({ title: 'A' });
+    expect(explainBlocked(a, [a])).toBeNull();
+  });
+
+  it('names the prerequisite and its lane', () => {
+    const dep = task({ title: 'Ship the migration', status: 'active' });
+    const a = task({ title: 'A', blocked_by: [dep.id] });
+    expect(explainBlocked(a, [a, dep])).toBe(
+      'Waiting on “Ship the migration” (active). It clears on its own once that lands.',
+    );
+  });
+
+  it('calls `todo` by the name the UI uses for it', () => {
+    const dep = task({ title: 'Dep', status: 'todo' });
+    const a = task({ title: 'A', blocked_by: [dep.id] });
+    expect(explainBlocked(a, [a, dep])).toContain('“Dep” (to-do)');
+  });
+
+  /** The bug this function exists for: the board promised every blocked card that it
+   *  "moves on its own once that task is done". A retracted prerequisite is never going to
+   *  be done, so that promise could not be kept. */
+  it('does not promise a clearance a retracted prerequisite cannot deliver', () => {
+    const dep = task({ title: 'Retry queue', status: 'dropped' });
+    const a = task({ title: 'A', blocked_by: [dep.id] });
+    const why = explainBlocked(a, [a, dep])!;
+    expect(why).toContain('“Retry queue” (dropped)');
+    expect(why).toContain('was retracted, so this will not clear on its own');
+    expect(why).not.toContain('clears on its own once');
+  });
+
+  it('warns about the retraction even when another prerequisite is still live', () => {
+    const live = task({ title: 'Live', status: 'active' });
+    const gone = task({ title: 'Gone', status: 'dropped' });
+    const a = task({ title: 'A', blocked_by: [live.id, gone.id] });
+    const why = explainBlocked(a, [a, live, gone])!;
+    expect(why).toContain('“Live” (active) and “Gone” (dropped)');
+    expect(why).toContain('was retracted');
+  });
+
+  it('ignores a met prerequisite', () => {
+    const done = task({ title: 'Done', status: 'done' });
+    const live = task({ title: 'Live', status: 'active' });
+    const a = task({ title: 'A', blocked_by: [done.id, live.id] });
+    const why = explainBlocked(a, [a, done, live])!;
+    expect(why).toContain('“Live”');
+    expect(why).not.toContain('“Done”');
+  });
+
+  /** A blocker parked with an archived tab is off the list but still blocking. Naming the
+   *  tab holding it is what makes it recoverable rather than merely mysterious. */
+  it('names the archived tab holding a parked prerequisite', () => {
+    const a = task({ title: 'A', blocked_by: ['parked-1'] });
+    const why = explainBlocked(a, [a], new Set(['parked-1']), () => ({
+      title: 'Notarise the build',
+      status: 'todo',
+      tab_id: 't1',
+      tab_name: 'release-bot',
+    }))!;
+    expect(why).toBe(
+      'Waiting on “Notarise the build” (parked with “release-bot”). It clears on its own once that lands.',
+    );
+  });
+
+  it('falls back when a parked prerequisite cannot even be named', () => {
+    const a = task({ title: 'A', blocked_by: ['parked-1'] });
+    expect(explainBlocked(a, [a], new Set(['parked-1']))).toContain(
+      'a task parked with an archived tab',
+    );
+  });
+
+  /** `gone` means deleted, which does NOT block — `hasUnmetDeps` draws the same line, and
+   *  the two must not disagree about whether a row is held. */
+  it('says nothing for a deleted prerequisite, matching hasUnmetDeps', () => {
+    const a = task({ title: 'A', blocked_by: ['vanished'] });
+    expect(hasUnmetDeps(a, [a])).toBe(false);
+    expect(explainBlocked(a, [a])).toBeNull();
   });
 });
