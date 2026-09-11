@@ -2178,7 +2178,13 @@ function createOverlordStore() {
     'working on (several items if several things are in flight), and keep the statuses ' +
     'current with updateTasks as you go. Then carry on with what you were doing — nothing ' +
     "else is needed. If you have no task tools, instead call replyToOverlord once with " +
-    "kind:'status' and `task` set to a one-line description.";
+    // `ack`, not `status`. This directive takes the tab's outstanding slot, and ONLY an
+    // `ack` releases it (`handleAgentReply`) — so an agent that did exactly as it was told
+    // complied and jammed its own tab, blocking every `only_if_no_outstanding` rule and
+    // every driveTab until someone reloaded it. `ack` carries `task` and `summary` just the
+    // same, so the census still gets its answer; it just also closes the directive it is
+    // answering. The instruction was pointing at the one kind that cannot do that.
+    "kind:'ack' and `task` set to a one-line description.";
 
   /** Find this tab's Overlord-owned board row, in ANY state. Matching must include
    *  `done`: filtering it out made "mark done" un-sticky — the next scan couldn't see the
@@ -2489,11 +2495,24 @@ function createOverlordStore() {
         // — where the watch is gone but the directive is not: the tick's unacked check three
         // lines down then sees no drive watch, no ritual, and a directive 15 min old, and
         // raises `directive_unacked` as a SECOND card about the directive `drive_reply` has
-        // just reported. Same text-equality guard the timeout uses, so a directive sent
-        // since this watch began is left alone. The timeout stays as the backstop for paths
-        // where this loop does not run (Overlord switched off mid-flight).
+        // just reported. The timeout stays as the backstop for paths where this loop does
+        // not run (Overlord switched off mid-flight).
+        //
+        // **Both of the timeout's guards, text AND age.** Text alone is not enough, because
+        // `outstanding` and `driveWatch` desynchronise as a matter of routine: this loop
+        // deliberately KEEPS the watch on an empty read (the pasted directive is itself a
+        // user turn, so `last_turn_ts` moves on delivery), while the tick's first branch
+        // clears the slot on that very signal. The watch then outlives its directive by up
+        // to 15 minutes, and a RITUAL step can take the slot in the meantime — with the same
+        // text, which is not a coincidence: `driveTab` matches step text verbatim to detect
+        // an agent hand-driving a ritual the engine owns, so identical strings are a
+        // designed-for case. Text-only would then clear a minute-old ritual directive out
+        // from under a running `awaitGate`, taking the board's badge, the phone's row, and —
+        // for an `ack` gate — any possibility of the gate ever resolving. The age test can
+        // never block the intended clear: `driveTab` stamps `outstanding.sentAt` before
+        // `driveWatch.sentAt`, so the directive is always at least as old as its watch.
         const od = outstanding.get(tabId);
-        if (od && od.text === w.text) clearOutstanding(tabId);
+        if (od && od.text === w.text && now - od.sentAt > DRIVE_WATCH_MS) clearOutstanding(tabId);
         // Never expire silently. The doctrine promises "you WILL get the answer back", so a
         // watch that gives up owes the supervisor a word — otherwise it waits forever on a
         // reply that is never coming.

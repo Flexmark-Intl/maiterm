@@ -402,9 +402,27 @@ away: **`ackOutstanding` exists but is wired to no control**, so there is no man
 `harvestDriveReplies` dropped the watch on expiry but left `outstanding` to a `setTimeout`
 armed for `DRIVE_WATCH_MS + 1000` — leaving roughly one tick in five where the watch was gone
 and the directive was not, so the unacked check raised a second card about the directive
-`drive_reply` had just reported. The slot is released at expiry now, under the same
-text-equality guard the timeout uses; the timeout stays as the backstop for paths where the
-loop does not run.
+`drive_reply` had just reported. The slot is released at expiry now, under **both** of the
+timeout's guards — text and age; the timeout stays as the backstop for paths where the loop
+does not run.
+
+Text alone is not enough, and the reason is worth keeping: `outstanding` and `driveWatch`
+desynchronise routinely. The harvest deliberately KEEPS the watch on an empty read (the pasted
+directive is itself a user turn, so `last_turn_ts` moves on delivery), while the tick's first
+branch clears the slot on that very signal — so a watch outlives its directive by up to 15
+minutes, and a ritual step can take the slot meanwhile. With the *same text*, which is not a
+coincidence: `driveTab` matches step text verbatim to detect an agent hand-driving a ritual the
+engine owns, so identical strings are designed for. Text-only would clear a minute-old ritual
+directive out from under a running `awaitGate` — taking the board's badge, the phone's row, and
+for an `ack` gate any possibility of the gate resolving at all.
+
+**The census directive was telling agents to jam their own tab.** `TRACK_REQUEST_TEXT` asked an
+agent with no task tools to answer with `replyToOverlord kind:'status'` — and only `kind:'ack'`
+releases the outstanding slot. An agent that complied exactly blocked every
+`only_if_no_outstanding` rule and every `driveTab` on its tab until someone reloaded it. That
+is the case the 30-minute ceiling now reports, so the directive was fixed rather than left as
+the thing generating the reports: `ack` carries `task` and `summary` identically, so the census
+still gets its answer and also closes the directive it is answering.
 
 **What this does NOT fix, and the cost attribution that was wrong.** The tab being blocked —
 "nothing else can be sent" — comes from the outstanding directive itself via the
