@@ -221,6 +221,26 @@ describe('blockers are legible, not raw ids', () => {
     ]);
   });
 
+  it('names a parked prerequisite and the archived tab holding it', () => {
+    // `Tab.archived_tasks` is off every list the tools read, so this arrived as a bare id
+    // resolving to nothing — an agent told it was waiting on something invisible. The tab
+    // id is what makes it actionable: restoreArchivedTab takes one.
+    const t = task({ id: 'c', blocked_by: ['parked'] });
+    const [b] = resolveBlockers(t, [t], new Set(['parked']), () => ({
+      title: 'migrate schema',
+      status: 'active',
+      tab_id: 'tab-db',
+      tab_name: 'db-work',
+    }));
+    expect(b).toEqual({
+      id: 'parked',
+      title: 'migrate schema',
+      status: 'active',
+      state: 'parked',
+      parked_with: { tab_id: 'tab-db', tab_name: 'db-work' },
+    });
+  });
+
   it('tells a deleted prerequisite from one parked with an archived tab', () => {
     const t = task({ id: 'c', blocked_by: ['gone', 'parked'] });
     const resolved = resolveBlockers(t, [t], new Set(['parked']));

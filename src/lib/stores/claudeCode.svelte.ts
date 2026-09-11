@@ -1365,6 +1365,19 @@ function createClaudeCodeStore() {
 
   /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
    *  internal dedup key and would only invite an agent to try to set it. */
+  /** Names a prerequisite parked with an archived tab, and says which tab holds it.
+   *
+   *  `Tab.archived_tasks` is off every list the tools read, so such a blocker arrived as a
+   *  bare id that resolved to nothing in the payload — an agent was told it was waiting on
+   *  something it could neither see nor act on. It can act: `restoreArchivedTab` takes the
+   *  tab id this carries. */
+  const parkedLookup = (id: string) => {
+    const held = workspacesStore.parkedTasks.get(id);
+    return held
+      ? { title: held.task.title, status: held.task.status, tab_id: held.tabId, tab_name: held.tabName }
+      : undefined;
+  };
+
   function taskForAgent(t: Task, all: Task[], selfTabId: string, workstream?: string, noteTail = 3) {
     const parked = workspacesStore.parkedTaskIds;
     // Blockers RESOLVED, not raw ids. An agent handed `["a3f8…"]` had to scan the whole
@@ -1374,7 +1387,7 @@ function createClaudeCodeStore() {
     // `waiting` is live, `parked` is off-list with an archived tab (still blocks), `gone`
     // is deleted (does not). A `waiting` blocker sitting in `dropped` is the case worth
     // reading — nobody intends to do it, and this task is waiting anyway.
-    const blockers = resolveBlockers(t, all, parked);
+    const blockers = resolveBlockers(t, all, parked, parkedLookup);
     // The reverse edge: who is waiting on THIS. Nothing answered it before, and it is what
     // an agent needs before it goes idle — "who did I just unblock". Empty for almost every
     // row, so it costs nothing on the rows that don't block anything.

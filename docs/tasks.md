@@ -463,6 +463,20 @@ Two refusals, both because the alternative is an edge that lies:
   are accepted: off the list, still blocking.
 - **A self-edge.** Never met, so the row would sit in Blocked forever.
 
+**A parked prerequisite is named, and the tab holding it comes with it.** `Tab.archived_tasks`
+is off every list the tools read, so a blocker parked with an archived tab resolved to nothing
+in the payload — an agent was told it was waiting on something it could neither see nor reach.
+`parked_with: {tab_id, tab_name}` makes it actionable: `restoreArchivedTab` takes that id.
+`workspacesStore.parkedTasks` is the accessor; `parkedTaskIds` stays for the lane logic, which
+only ever needs "does this block".
+
+The side panel's *waiting on* line had the same blind spot and one worse: it listed every
+`blocked_by` title including finished ones ("waiting on X" about a prerequisite that had
+landed), and a parked blocker fell through to its `|| 'a task that no longer exists'`
+fallback — so a row rendered BLOCKED while the line under it said the thing blocking it was
+gone. It goes through `resolveBlockers` now, so the panel and `listTasks` cannot disagree
+about why a row is held.
+
 - All calls are scoped to the **calling tab's workspace** — a tab cannot read or write
   another project's tasks. Identity comes from the connection→tab affinity that
   `initSession` establishes, same as every other tab-scoped tool.
@@ -479,10 +493,19 @@ Two refusals, both because the alternative is an edge that lies:
   so a task the human removed comes straight back on the agent's next list re-send
   (re-prime, resume, compaction). Both delete paths — the board card and the side panel —
   route through `overlordStore.deleteTask`, which tells the owning tab directly when it is
-  idle and hands the notice to the Overlord agent to relay when it isn't. With Overlord
-  disabled it is exactly the old silent remove: maiTerm does not type into a terminal on
-  behalf of a supervisor that is switched off. See `docs/overlord.md` for why this is a
-  notice rather than a directive, and why it is not a tombstone.
+  idle and hands the notice to the Overlord agent to relay when it isn't. See
+  `docs/overlord.md` for why this is a notice rather than a directive, and why it is not a
+  tombstone.
+
+  **The direct notice is NOT gated on `overlord_enabled` (corrected 2026-09-10).** It was,
+  on the reasoning that maiTerm must not type into a terminal for a supervisor the human
+  switched off — but that is `startTask`'s reasoning, and `startTask` draws the opposite
+  conclusion from it (§6): the human clicked delete, on the tab they were looking at, so
+  this is the human speaking. Gating it meant that with Overlord off — most installs —
+  deleting a task told the agent nothing and the row came straight back, which is the exact
+  hole the notice exists to close, left open for everyone not running a supervisor. Only
+  the RELAY is the supervisor's, gated on the same three conditions `startTask` uses
+  (enabled, an agent tab exists, target not exempt).
 
 ### Priming (decided 2026-08-23: every agent tab)
 

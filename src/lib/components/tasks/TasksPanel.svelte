@@ -18,7 +18,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked } from '$lib/tasks/model';
+  import { effectiveStatus, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, resolveBlockers } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
@@ -164,6 +164,18 @@
    *  unfinished dependency those differ, and stepping from the stored value made the chip
    *  look frozen: three clicks would silently walk the stored status through the whole
    *  vocabulary while the label stayed "BLOCKED", then jump to "DONE" on the fourth. */
+  /** The prerequisites actually holding a task up — `waiting` and `parked`, never `met` or
+   *  `gone`. Draws on the same resolver the agent tools use, so the line on screen and the
+   *  line in `listTasks` cannot disagree about why a row is blocked. */
+  function unmetBlockers(t: Task) {
+    return resolveBlockers(t, all, workspacesStore.parkedTaskIds, (id) => {
+      const held = workspacesStore.parkedTasks.get(id);
+      return held
+        ? { title: held.task.title, status: held.task.status, tab_id: held.tabId, tab_name: held.tabName }
+        : undefined;
+    }).filter((b) => b.state === 'waiting' || b.state === 'parked');
+  }
+
   function cycleStatus(t: Task, back: boolean) {
     const shown = effectiveStatus(t, all, workspacesStore.parkedTaskIds);
     // FLOW_STATUSES, not every lane: `dropped` is reachable by decision, never by clicking
@@ -540,12 +552,23 @@
                 </span>
               </div>
 
-              {#if t.blocked_by?.length}
+              <!-- Only what is actually HOLDING IT UP. Listing every `blocked_by` id said
+                   "waiting on X" about a prerequisite that had finished, and a parked one —
+                   off the list with an archived tab, still blocking — resolved to nothing
+                   and fell into the "no longer exists" fallback, so a row rendered BLOCKED
+                   while this line said the thing blocking it was gone. Naming the holding
+                   tab is what makes it recoverable rather than just mysterious. -->
+              {#if unmetBlockers(t).length}
                 <div class="deps">
-                  waiting on {t.blocked_by
-                    .map((id) => all.find((x) => x.id === id)?.title)
-                    .filter(Boolean)
-                    .join(', ') || 'a task that no longer exists'}
+                  waiting on {unmetBlockers(t)
+                    .map((b) =>
+                      b.state === 'parked'
+                        ? b.title
+                          ? `${b.title} (parked with “${b.parked_with?.tab_name}”)`
+                          : 'a task parked with an archived tab'
+                        : b.title,
+                    )
+                    .join(', ')}
                 </div>
               {/if}
 

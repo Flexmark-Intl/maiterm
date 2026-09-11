@@ -1,4 +1,4 @@
-import type { SplitDirection, SplitNode, Tab, Pane, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding } from '$lib/tauri/types';
+import type { SplitDirection, SplitNode, Tab, Pane, Task, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
 import { getAdapter } from '$lib/agents/adapter';
@@ -212,6 +212,26 @@ function createWorkspacesStore() {
       for (const ws of workspaces) {
         for (const tab of ws.archived_tabs ?? []) {
           for (const t of tab.archived_tasks ?? []) out.add(t.id);
+        }
+      }
+      return out;
+    },
+
+    /** The same rows, with enough to NAME one and reach it.
+     *
+     *  `parkedTaskIds` answers "does this id still block", which is all the lane logic needs.
+     *  It is not enough for anything that has to explain itself: a dependent renders as
+     *  blocked by an id its own list does not contain, and an agent reading that has no way
+     *  to learn what the work is or that it can be recovered. `restoreArchivedTab` is an MCP
+     *  tool, so carrying the holding tab makes the prerequisite actionable rather than just
+     *  legible. */
+    get parkedTasks(): ReadonlyMap<string, { task: Task; tabId: string; tabName: string }> {
+      const out = new Map<string, { task: Task; tabId: string; tabName: string }>();
+      for (const ws of workspaces) {
+        for (const tab of ws.archived_tabs ?? []) {
+          for (const t of tab.archived_tasks ?? []) {
+            out.set(t.id, { task: t, tabId: tab.id, tabName: tab.name });
+          }
         }
       }
       return out;

@@ -2804,7 +2804,18 @@ function createOverlordStore() {
      *
      *  NOT a tombstone: an agent that ignores the notice can still re-add the row. Making
      *  that impossible needs a persisted drop list the dedup consults, which is a schema
-     *  change; this closes the "nobody ever told it" hole, which was the actual bug. */
+     *  change; this closes the "nobody ever told it" hole, which was the actual bug.
+     *
+     *  **The direct notice is NOT gated on `overlordEnabled`** (corrected 2026-09-10). It
+     *  used to be, on the reasoning that maiTerm must not type into a terminal for a
+     *  supervisor the human switched off — but that reasoning is `startTask`'s, and
+     *  `startTask` reaches the opposite conclusion from it: the human clicked delete, on the
+     *  tab they were looking at, so this is the human speaking, not the supervisor. Gating
+     *  it meant that with Overlord off — which is most installs — deleting a task told the
+     *  agent nothing, and `findDuplicate` put the row straight back on its next list
+     *  re-send. That is the exact hole this notice exists to close, left open for everyone
+     *  who is not running a supervisor. Only the RELAY belongs to Overlord, and it is gated
+     *  below, on the same three conditions `startTask` uses. */
     async deleteTask(id: string): Promise<{ removed: boolean; told: 'tab' | 'agent' | 'nobody' }> {
       const hit = tasksStore.findAnywhere(id);
       if (!hit) return { removed: false, told: 'nobody' };
@@ -2817,12 +2828,7 @@ function createOverlordStore() {
       // there anything to say about work already finished or parked: the agent isn't going
       // to re-add what it has closed out, and clearing out done rows is routine tidying
       // that would otherwise type a line into a tab for every card swept.
-      //
-      // And nothing at all with the supervisor switched off. The task panel routes its
-      // deletes through here too, and it is available whether or not Overlord is enabled —
-      // maiTerm must not type into a terminal on behalf of a supervisor the human turned
-      // off. There is no agent to escalate to in that state either.
-      if (!tabId || !isInFlight(task) || !preferencesStore.overlordEnabled) {
+      if (!tabId || !isInFlight(task)) {
         return { removed: true, told: 'nobody' };
       }
 
@@ -2845,6 +2851,11 @@ function createOverlordStore() {
         return { removed: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+      // The RELAY is the supervisor's, and only it. Same split `startTask` makes, and for
+      // the same reason — see the comment on the direct notice above.
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+        return { removed: true, told: 'nobody' };
+      }
       escalate(
         tabId,
         null,

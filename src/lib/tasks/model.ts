@@ -140,12 +140,20 @@ export interface ResolvedBlocker {
   status: TaskStatus | null;
   /** Why this one is or isn't holding the dependent up. */
   state: 'met' | 'waiting' | 'parked' | 'gone';
+  /** For a `parked` blocker: the archived tab holding it, so the reader can restore it
+   *  (`restoreArchivedTab`) rather than only being told something invisible is in the way. */
+  parked_with?: { tab_id: string; tab_name: string };
 }
+
+/** Names a parked blocker. Optional — the lane logic only needs `parked` (does it block),
+ *  but nothing that has to EXPLAIN a blocked row can work from an id alone. */
+export type ParkedLookup = (id: string) => { title: string; status: TaskStatus; tab_id: string; tab_name: string } | undefined;
 
 export function resolveBlockers(
   task: Task,
   all: Task[],
   parked?: ReadonlySet<string>,
+  parkedLookup?: ParkedLookup,
 ): ResolvedBlocker[] {
   return (task.blocked_by ?? []).map((id) => {
     const dep = all.find((t) => t.id === id);
@@ -159,9 +167,15 @@ export function resolveBlockers(
     }
     // Unresolvable: parked with an archived tab (still blocks) or genuinely deleted (does
     // not). `hasUnmetDeps` draws the same line — keep the two in step.
-    return parked?.has(id)
-      ? { id, title: null, status: null, state: 'parked' as const }
-      : { id, title: null, status: null, state: 'gone' as const };
+    if (!parked?.has(id)) return { id, title: null, status: null, state: 'gone' as const };
+    const held = parkedLookup?.(id);
+    return {
+      id,
+      title: held?.title ?? null,
+      status: held?.status ?? null,
+      state: 'parked' as const,
+      ...(held ? { parked_with: { tab_id: held.tab_id, tab_name: held.tab_name } } : {}),
+    };
   });
 }
 
