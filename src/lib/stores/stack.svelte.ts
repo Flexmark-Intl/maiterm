@@ -18,6 +18,7 @@ import type { Service, ServiceOrigin, ServiceRestart, Tab, Workspace } from '$li
 import { workspacesStore } from './workspaces.svelte';
 import { terminalsStore } from './terminals.svelte';
 import { activityStore } from './activity.svelte';
+import { preferencesStore } from './preferences.svelte';
 import { normalizeTitle } from '$lib/tasks/model';
 import {
   exitIsCrash, restartAllowed, restartDelay, rollupStatus, startLine,
@@ -283,6 +284,9 @@ function createStackStore() {
   function reconcileBindings() {
     for (const [serviceId, r] of runtime) {
       if (r.status === 'stopped' || r.status === 'crashed') continue;
+      // A start in flight owns its runtime until it returns: it is between "chose a tab"
+      // and "typed into it", and any reading of its half-written fields here is wrong.
+      if (startsInFlight.has(serviceId)) continue;
       // The binding only counts inside the workspace that owns the definition — a tab
       // moved elsewhere has its binding cleared by Rust, and searching every workspace
       // would keep a moved-away service "running" here with no tab to show for it.
@@ -376,7 +380,9 @@ function createStackStore() {
       setRt(serviceId, { status: 'stopped', note: 'its tab could not be mounted' });
       return 'stopped';
     }
-    setRt(serviceId, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null, writeAt: null, beganAt: null, noIntegration: false });
+    // A fresh run: nothing from a previous one may survive into it — a stale `ptyId` in
+    // particular, which `reconcileBindings` would read as "its tab was reloaded" mid-start.
+    setRt(serviceId, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false });
 
     // 3. The guard. With shell integration, "ready for input" is the shell's own A: a fresh
     //    shell has none until its rc finishes (and its first prompt also emits an
@@ -389,10 +395,17 @@ function createStackStore() {
     const ptyId = instance.ptyId;
     const f = facts(ptyId);
     const promptSince = (t: number | null) => f.lastPromptAt !== null && (t === null || f.lastPromptAt >= t);
-    const integrated = await waitForFact(ptyId, (x) => x.lastPromptAt !== null, FIRST_PROMPT_WAIT_MS);
+    const cancelled = () => abortStart.has(serviceId);
+    // With integration switched off no A will ever come; don't wait 12s to learn that. (A
+    // PTY reattached after a webview reload is the one case that still pays the wait: its
+    // A was emitted before this store existed, and it will not prompt again until Enter.)
+    const integrated = preferencesStore.shellIntegration
+      ? await waitForFact(ptyId, (x) => x.lastPromptAt !== null || cancelled(), FIRST_PROMPT_WAIT_MS) && !cancelled()
+      : false;
     if (aborted(serviceId)) return 'stopped';
     if (integrated) {
-      const idle = await waitForFact(ptyId, (x) => promptSince(x.lastBeginAt), wasLive ? 4000 : 0);
+      const idle = await waitForFact(ptyId, (x) => promptSince(x.lastBeginAt) || cancelled(), wasLive ? 4000 : 0);
+      if (aborted(serviceId)) return 'stopped';
       if (!idle) {
         const fg = await probeForeground(instance.ptyId);
         const what = fg?.executable ? `${fg.executable} is in the foreground` : 'the shell is mid-command';
@@ -427,8 +440,11 @@ function createStackStore() {
       if (now.status === 'stopped' || now.status === 'crashed') return now.status;
       if (!began) {
         // Thirty seconds and no B/C: the shell ate the line (an rc step reading stdin) or
-        // is wedged. Keep `ptyId` so a later exit on that shell still resolves here.
-        setRt(serviceId, { status: 'stopped', since: null, writeAt: null, note: 'not started — the shell never ran the command; check the tab' });
+        // is wedged. Disown it completely — a kept `ptyId` cannot help (`onExit` returns
+        // on `stopped` first) and poisons the next start. If the line does run later it
+        // is unowned; adopting "the first B/C after the fact" would as easily adopt the
+        // human's `ls` when they go and look, and then SIGTERM it on Stop.
+        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, note: 'not started — the shell never ran the command; check the tab' });
         logWarn(`stack: ${service.name}: no B/C within ${BEGIN_WAIT_MS}ms of the write`);
         return 'stopped';
       }
