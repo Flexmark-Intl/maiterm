@@ -428,9 +428,9 @@ file, socket-based port discovery if anything ever needs it.
 4. **Auto-start fires on activation, not at boot.** A background workspace's services start
    the first time it becomes active this session (`autoStarted` set, cleared by suspend).
    Starting every workspace's stack at launch is a preference waiting for someone to want it.
-5. **Shell integration on the service tab.** Exit detection is OSC 133; a shell where
-   integration failed to inject reports nothing. Fallback: `PtyInfo` foreground polling on
-   a slow tick (5s) for service tabs only — acceptable, since a crash is not sub-second work.
+5. ~~Shell integration on the service tab~~ — built: no A within 12s of the start (or the
+   preference off) → the tty-foreground fallback, with `watchNoIntegration` polling every 2s
+   for the job leaving the tty. Coarser than OSC 133 and blind to the exit code, by design.
 6. **Stack in a Mesh workspace.** Nothing special: the roster is agent tabs; a service tab
    is not one. Confirm `agentMesh` derives its roster from `runtime`/`mailink_native`, not
    from "every terminal tab".

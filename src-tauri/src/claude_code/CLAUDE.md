@@ -88,7 +88,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getServiceOutput | Stack: recent output of a service's tab (`getTabContext` under the name an agent reaches for) |
 | startService / stopService / restartService | Stack: the verbs. PTY writes behind `get_pty_foreground_job` — refused when the shell is busy; only the recorded pid is ever signalled. `restartService` waits up to 10s for ready. On the inferred-identity refusal list |
 | startStack / stopStack | Stack: every auto-start service / every running one. Refusal list |
-| waitForService | Stack: block until ready/running (≤120s); returns the last 20 lines when it is not up |
+| waitForService | Stack: block until ready/running (≤100s — under the server's 120s `RESPONSE_TIMEOUT`, which starts before the webview sees the call); returns the last 20 lines when it is not up |
 | updateService | Stack: **the agent as writer** — report an observed `port`/`url`, `ready: true`, a `note`; or edit the definition. Refusal list |
 | createService | Stack: register a service (idempotent by name, does NOT start it). With no name and no command returns `suggestions` from the suggester (package.json / Procfile / compose / justfile / Makefile). Refusal list |
 | removeService | Stack: refused while running, refused for human-created services. Refusal list |

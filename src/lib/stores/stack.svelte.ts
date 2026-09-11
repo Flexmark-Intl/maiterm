@@ -6,9 +6,16 @@
  *  tasks), and ALL of the runtime state — status, uptime, the foreground pid — which is
  *  never persisted: a parked workspace would otherwise wake up "crashed".
  *
- *  Every write into a terminal goes through the guard in §4: start only when the shell is
- *  at its prompt, signal only the pid recorded at start. A wrong "no" costs a retry; a
- *  wrong "yes" types into whatever the human left running there.
+ *  Every write into a terminal goes through the guard in §4, and the guard is the shell's
+ *  OWN OSC 133 sequence, not a probe of the tty: a start is typed only after the shell's
+ *  prompt (A) — its own, per PTY, never a dead shell's — and only when no command has begun
+ *  (B/C) since; the command is ours once the first B/C after our write arrives; a D counts
+ *  as our exit only after that; a stop signals only the pid recorded then. The tty
+ *  foreground (`get_pty_foreground_job`) captures that pid and is the fallback for shells
+ *  with no integration — it cannot tell "idle at a prompt" from "still in .zshrc", which
+ *  is why it is not the guard. A wrong "no" costs a retry; a wrong "yes" types into, or
+ *  SIGTERMs, whatever the human left running there. Four review rounds shaped this; the
+ *  as-built table in the doc records what each one caught.
  */
 
 import { untrack } from 'svelte';
