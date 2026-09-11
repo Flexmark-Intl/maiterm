@@ -36,6 +36,13 @@ export interface ServiceRuntime {
   /** The PTY the command was typed into. A bound tab whose live PTY is a different one
    *  (reload, respawn) is a fresh shell with nothing running in it. */
   ptyId: string | null;
+  /** ms epoch of the write; the B/C that begins OUR command must come after it. */
+  writeAt: number | null;
+  /** ms epoch of the B/C observed after `writeAt` — the command is running. Until this is
+   *  set, no D on the tab is ours (the fresh shell's first-prompt D;0, a human's `ls`). */
+  beganAt: number | null;
+  /** The shell showed no OSC 133 at all; exits are inferred from the tty foreground. */
+  noIntegration: boolean;
   /** A stop is in flight: the next exit is `stopped`, never `crashed`. */
   stopping: boolean;
   /** ms epochs of automatic restarts, for the ceiling. */
@@ -55,10 +62,24 @@ export interface ServiceInput {
   origin?: ServiceOrigin;
 }
 
-const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, stopping: false, restarts: [], note: null };
+const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, stopping: false, restarts: [], note: null };
 
-/** How long a freshly mounted tab gets to reach its prompt before a start gives up. */
-const PROMPT_WAIT_MS = 8000;
+/** Everything the store has to remember about a tab's shell, from the raw OSC 133 feed. */
+interface ShellFacts {
+  /** ms epoch of the last A. A fresh shell has none until its rc finishes. */
+  lastPromptAt: number | null;
+  /** ms epoch of the last B/C. */
+  lastBeginAt: number | null;
+  /** ms epoch of the last D. */
+  lastExitAt: number | null;
+}
+
+/** How long a freshly mounted tab gets to show its first prompt (A) before we conclude the
+ *  shell has no integration and fall back to the tty-foreground heuristic. Real rcs
+ *  (oh-my-zsh + nvm + conda) take 2–3s; 12s is generous without being forever. */
+const FIRST_PROMPT_WAIT_MS = 12000;
+/** After the write, how long until the shell's B/C must have arrived. */
+const BEGIN_WAIT_MS = 5000;
 const MOUNT_WAIT_MS = 15000;
 
 function sleep(ms: number) {
@@ -70,14 +91,35 @@ function createStackStore() {
   /** Workspaces whose auto_start already fired for this activation. Cleared on suspend. */
   const autoStarted = new Set<string>();
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Services with a start or stop in flight. The status alone cannot guard re-entry:
-   *  `start` does four IPC round trips before it can set `starting`, and a double-click
-   *  or two parallel agent calls land inside that window and mint a second tab. */
-  const inflight = new Set<string>();
-  /** Bumped per service by every observed exit, so the post-start settle knows whether an
-   *  OSC 133 D already explained what it is seeing. */
-  const exitEpoch = new Map<string, number>();
+  /** Starts in flight, by service. The status alone cannot guard re-entry: `start` does
+   *  four IPC round trips before it can set `starting`, and a double-click or two parallel
+   *  agent calls land inside that window and mint a second tab. A second caller gets the
+   *  SAME promise rather than a silent no-op, so an auto-restart timer or a human's second
+   *  click never evaporates; `stop` awaits it (after asking it to abort) instead of
+   *  returning without doing anything. */
+  const startsInFlight = new Map<string, Promise<ServiceStatus>>();
+  const stopsInFlight = new Map<string, Promise<ServiceStatus>>();
+  /** A stop arrived while the start was still before its write: abort instead of typing. */
+  const abortStart = new Set<string>();
+  const shellFacts = new Map<string, ShellFacts>();
   let unsubscribe: (() => void)[] = [];
+
+  function facts(tabId: string): ShellFacts {
+    let f = shellFacts.get(tabId);
+    if (!f) { f = { lastPromptAt: null, lastBeginAt: null, lastExitAt: null }; shellFacts.set(tabId, f); }
+    return f;
+  }
+
+  /** Poll `facts` until `pred` holds or the deadline passes. Event-driven would be nicer;
+   *  250ms polling is invisible next to a shell rc and keeps this a plain loop. */
+  async function waitForFact(tabId: string, pred: (f: ShellFacts) => boolean, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (pred(facts(tabId))) return true;
+      await sleep(150);
+    }
+    return pred(facts(tabId));
+  }
 
   function rt(serviceId: string): ServiceRuntime {
     return runtime.get(serviceId) ?? IDLE;
@@ -140,8 +182,10 @@ function createStackStore() {
     }
   }
 
-  /** Poll until the shell is at its prompt (Some(true)). Resolves false on timeout or
-   *  when the tty is held by something we did not start. */
+  /** Poll until no external job holds the tty (`shell_at_prompt === true`). NOTE this is
+   *  NOT "idle at a prompt" — builtins, rc files and command substitutions never change the
+   *  tty's foreground group. It is only ever used to wait for a job WE signalled to leave
+   *  the foreground, or as the fallback for a shell with no OSC 133 at all. */
   async function waitForPrompt(ptyId: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -152,25 +196,50 @@ function createStackStore() {
     return false;
   }
 
+  function onShellPrompt(tabId: string) {
+    facts(tabId).lastPromptAt = Date.now();
+  }
+
+  function onCommandBegin(tabId: string) {
+    const now = Date.now();
+    facts(tabId).lastBeginAt = now;
+    const hit = serviceForTab(tabId);
+    if (!hit) return;
+    const r = rt(hit.service.id);
+    // The B/C for OUR line: the first one after the write. Anything earlier is a command
+    // the shell was already running (or the rc's own hooks) and says nothing about us.
+    if (r.writeAt !== null && r.beganAt === null && now >= r.writeAt && r.status === 'starting') {
+      setRt(hit.service.id, { beganAt: now, status: 'running' });
+    }
+  }
+
+  /** `exitCode === null` is the no-integration fallback: the tty came back with nothing
+   *  to say why. With integration, a D counts only once the command's own B/C was seen. */
   function onExit(tabId: string, exitCode: number | null) {
+    facts(tabId).lastExitAt = Date.now();
     const hit = serviceForTab(tabId);
     if (!hit) return;
     const { workspaceId, service } = hit;
     const r = rt(service.id);
     if (r.status === 'stopped' || r.status === 'crashed') return;
-    exitEpoch.set(service.id, (exitEpoch.get(service.id) ?? 0) + 1);
+    if (exitCode !== null && !r.noIntegration && r.beganAt === null) {
+      // A D before our command began: the fresh shell's unconditional first-prompt D;0,
+      // or a human's command finishing on the bound tab while we waited. Not ours.
+      return;
+    }
     // A deliberate stop is a stop whatever the code — `make dev` returns 2 when its child
-    // is interrupted. An exit with no code (the settle path, no shell integration) after
-    // a start we never saw come up is a crash.
+    // is interrupted.
     const crashed = !r.stopping && (exitCode === null || exitIsCrash(exitCode));
     setRt(service.id, {
       status: crashed ? 'crashed' : 'stopped',
       since: null,
       pid: null,
       ptyId: null,
+      writeAt: null,
+      beganAt: null,
       stopping: false,
       lastExitCode: exitCode,
-      note: crashed ? (exitCode === null ? 'exited before it was ready (no exit code seen)' : `exit ${exitCode}`) : null,
+      note: crashed ? (exitCode === null ? 'exited (no exit code — shell has no integration)' : `exit ${exitCode}`) : null,
     });
     if (crashed) {
       logWarn(`stack: ${service.name} crashed with exit ${exitCode}`);
@@ -217,9 +286,12 @@ function createStackStore() {
         if (crashed) logWarn(`stack: service ${serviceId} lost its tab`);
         continue;
       }
+      // `ptyId` is recorded only once the command has been typed into a live PTY, so a
+      // bound tab that now has no instance (suspendTab killed it) or a different one (a
+      // reload minted a fresh shell) has nothing of ours running in it.
       const live = terminalsStore.get(tab.id);
-      if (r.ptyId && live && live.ptyId !== r.ptyId) {
-        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: 'its tab was reloaded — start it again' });
+      if (r.ptyId && (!live || live.ptyId !== r.ptyId)) {
+        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: live ? 'its tab was reloaded — start it again' : 'its tab was suspended' });
       }
     }
   }
@@ -232,7 +304,7 @@ function createStackStore() {
       autoStarted.delete(ws.id);
       for (const s of ws.stack ?? []) {
         const r = rt(s.id);
-        if (r.status !== 'stopped') setRt(s.id, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
+        if (r.status !== 'stopped') setRt(s.id, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: null });
       }
     }
   }
@@ -244,15 +316,24 @@ function createStackStore() {
     if (!service) throw new Error('Service not found');
     const ws = workspaceOf(workspaceId)!;
     if (ws.suspended) throw new Error('Workspace is suspended — resume it first');
+    const pending = startsInFlight.get(serviceId);
+    if (pending) return pending;
+    const stopping = stopsInFlight.get(serviceId);
+    if (stopping) await stopping.catch(() => undefined);
     const r = rt(serviceId);
     if (r.status === 'starting' || r.status === 'running' || r.status === 'ready') return r.status;
-    if (inflight.has(serviceId)) return r.status;
-    inflight.add(serviceId);
-    try {
-      return await startInner(workspaceId, service);
-    } finally {
-      inflight.delete(serviceId);
-    }
+    const p = startInner(workspaceId, service).finally(() => { startsInFlight.delete(serviceId); abortStart.delete(serviceId); });
+    startsInFlight.set(serviceId, p);
+    return p;
+  }
+
+  /** A stop arrived while a start was still working: if the line has not been typed yet,
+   *  the start aborts cleanly; if it has, the stop waits for the start to settle and then
+   *  proceeds against the pid it recorded. */
+  function aborted(serviceId: string): boolean {
+    if (!abortStart.has(serviceId)) return false;
+    setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: 'start cancelled' });
+    return true;
   }
 
   async function startInner(workspaceId: string, service: Service): Promise<ServiceStatus> {
@@ -276,74 +357,126 @@ function createStackStore() {
     const tabId = bound.tab.id;
 
     // 2. Make sure it is mounted (a background workspace's tab may not be) and live.
-    if (!terminalsStore.get(tabId)) {
+    const wasLive = !!terminalsStore.get(tabId);
+    if (!wasLive) {
       window.dispatchEvent(new CustomEvent('activate-tab', { detail: tabId }));
       await terminalsStore.waitForRegister(tabId, MOUNT_WAIT_MS);
     }
+    if (aborted(serviceId)) return 'stopped';
     const instance = terminalsStore.get(tabId);
     if (!instance) {
       setRt(serviceId, { status: 'stopped', note: 'its tab could not be mounted' });
       return 'stopped';
     }
+    setRt(serviceId, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null, writeAt: null, beganAt: null, noIntegration: false });
 
-    // 3. The guard: only type into a shell sitting at its prompt.
-    setRt(serviceId, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null });
-    const atPrompt = await waitForPrompt(instance.ptyId, PROMPT_WAIT_MS);
-    if (!atPrompt) {
-      const fg = await probeForeground(instance.ptyId);
-      const what = fg?.executable ? `${fg.executable} is in the foreground` : 'the shell is not at its prompt';
-      setRt(serviceId, { status: 'stopped', since: null, note: `not started — ${what}` });
-      logWarn(`stack: refused to start ${service.name}: ${what}`);
-      return 'stopped';
+    // 3. The guard. With shell integration, "ready for input" is the shell's own A: a fresh
+    //    shell has none until its rc finishes (and its first prompt also emits an
+    //    unconditional D;0, which is why exits are gated on B/C below). A live shell must
+    //    have had a prompt since its last B/C, or it is mid-command. Without integration
+    //    (no A within the wait) fall back to the tty foreground, which can only say that
+    //    no external job holds it.
+    const f = facts(tabId);
+    const promptSince = (t: number | null) => f.lastPromptAt !== null && (t === null || f.lastPromptAt >= t);
+    let integrated = await waitForFact(tabId, (x) => x.lastPromptAt !== null, wasLive ? 0 : FIRST_PROMPT_WAIT_MS);
+    if (aborted(serviceId)) return 'stopped';
+    if (integrated) {
+      const idle = await waitForFact(tabId, (x) => promptSince(x.lastBeginAt), wasLive ? 4000 : 0);
+      if (!idle) {
+        const fg = await probeForeground(instance.ptyId);
+        const what = fg?.executable ? `${fg.executable} is in the foreground` : 'the shell is mid-command';
+        setRt(serviceId, { status: 'stopped', since: null, note: `not started — ${what}` });
+        logWarn(`stack: refused to start ${service.name}: ${what}`);
+        return 'stopped';
+      }
+    } else {
+      const atPrompt = await waitForPrompt(instance.ptyId, 4000);
+      if (!atPrompt) {
+        const fg = await probeForeground(instance.ptyId);
+        const what = fg?.executable ? `${fg.executable} is in the foreground` : 'the shell is busy';
+        setRt(serviceId, { status: 'stopped', since: null, note: `not started — ${what}` });
+        logWarn(`stack: refused to start ${service.name}: ${what}`);
+        return 'stopped';
+      }
+      setRt(serviceId, { noIntegration: true });
     }
+    if (aborted(serviceId)) return 'stopped';
 
     // 4. Type it.
     const line = startLine(service);
-    const epochBefore = exitEpoch.get(serviceId) ?? 0;
-    setRt(serviceId, { ptyId: instance.ptyId });
+    setRt(serviceId, { ptyId: instance.ptyId, writeAt: Date.now() });
     await commands.writeTerminal(instance.ptyId, Array.from(new TextEncoder().encode(line + '\n')));
     logInfo(`stack: started ${service.name} in tab ${tabId}`);
 
-    // 5. Settle: record the job that took the terminal (the pid the stop guard compares
-    //    against), or notice that nothing did. The OSC 133 D normally explains a fast
-    //    exit; when the shell has no integration the prompt coming back with no exit seen
-    //    is the only evidence, and it is read as a crash rather than left `starting`.
-    let sawJob = false;
-    for (const wait of [400, 600, 1000, 1000]) {
-      await sleep(wait);
+    // 5. Confirm the shell took it, then record the job that holds the tty — the pid the
+    //    stop guard compares against.
+    if (integrated) {
+      const began = await waitForFact(tabId, () => rt(serviceId).beganAt !== null || rt(serviceId).status === 'stopped' || rt(serviceId).status === 'crashed', BEGIN_WAIT_MS);
       const now = rt(serviceId);
       if (now.status === 'stopped' || now.status === 'crashed') return now.status;
+      if (!began) {
+        setRt(serviceId, { status: 'stopped', since: null, ptyId: null, writeAt: null, note: 'not started — the shell never ran the command' });
+        logWarn(`stack: ${service.name}: no B/C after the write`);
+        return 'stopped';
+      }
+    } else {
+      // No integration: the only evidence is a job taking the tty. Give it a moment; if
+      // the foreground never leaves the shell, the command is over (or never ran).
+      const took = await (async () => {
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          const fg = await probeForeground(instance.ptyId);
+          if (fg?.shell_at_prompt === false) return true;
+          await sleep(250);
+        }
+        return false;
+      })();
+      if (!took) { onExit(tabId, null); return rt(serviceId).status; }
+      setRt(serviceId, { status: 'running', beganAt: Date.now() });
+      void watchNoIntegration(serviceId, instance.ptyId);
+    }
+    for (let i = 0; i < 4; i++) {
       const fg = await probeForeground(instance.ptyId);
-      if (fg?.shell_at_prompt === false) {
-        if (!sawJob) {
-          sawJob = true;
-          setRt(serviceId, { status: now.status === 'starting' ? 'running' : now.status, pid: fg.pid });
-        }
-        continue;
-      }
-      if (fg?.shell_at_prompt === true && (exitEpoch.get(serviceId) ?? 0) === epochBefore) {
-        // Back at the prompt, and no exit event told us why.
-        if (sawJob || wait >= 1000) {
-          onExit(tabId, null);
-          return rt(serviceId).status;
-        }
-      }
+      if (fg?.shell_at_prompt === false && fg.pid != null) { setRt(serviceId, { pid: fg.pid }); break; }
+      const now = rt(serviceId);
+      if (now.status === 'stopped' || now.status === 'crashed') break;
+      await sleep(300);
     }
     return rt(serviceId).status;
+  }
+
+  /** The no-integration fallback's exit watch: while a service started without OSC 133 is
+   *  running, its tty returning to the shell is the only exit signal there is. */
+  async function watchNoIntegration(serviceId: string, ptyId: string) {
+    while (true) {
+      await sleep(2000);
+      const r = rt(serviceId);
+      if (!r.noIntegration || r.ptyId !== ptyId || (r.status !== 'running' && r.status !== 'ready')) return;
+      const fg = await probeForeground(ptyId);
+      if (fg?.shell_at_prompt === true) {
+        const bound = [...workspacesStore.workspaces].flatMap((w) => w.panes).flatMap((p) => p.tabs).find((t) => t.service_id === serviceId);
+        if (bound) onExit(bound.id, null);
+        return;
+      }
+    }
   }
 
   async function stop(workspaceId: string, serviceId: string): Promise<ServiceStatus> {
     const service = serviceOf(workspaceId, serviceId);
     if (!service) throw new Error('Service not found');
+    const pending = stopsInFlight.get(serviceId);
+    if (pending) return pending;
+    const starting = startsInFlight.get(serviceId);
+    if (starting) {
+      // Ask the start to abort if it has not typed yet, then wait for it either way.
+      abortStart.add(serviceId);
+      await starting.catch(() => undefined);
+    }
     const r = rt(serviceId);
     if (r.status === 'stopped' || r.status === 'crashed') return r.status;
-    if (inflight.has(serviceId)) return r.status;
-    inflight.add(serviceId);
-    try {
-      return await stopInner(workspaceId, serviceId, r);
-    } finally {
-      inflight.delete(serviceId);
-    }
+    const p = stopInner(workspaceId, serviceId, r).finally(() => stopsInFlight.delete(serviceId));
+    stopsInFlight.set(serviceId, p);
+    return p;
   }
 
   async function stopInner(workspaceId: string, serviceId: string, r: ServiceRuntime): Promise<ServiceStatus> {
@@ -351,14 +484,14 @@ function createStackStore() {
     const instance = bound ? terminalsStore.get(bound.tab.id) : undefined;
     if (!instance || (r.ptyId && instance.ptyId !== r.ptyId)) {
       // No live shell, or a different one than the command went into: nothing is running.
-      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
+      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: null });
       return 'stopped';
     }
 
     // Already back at the prompt: nothing to signal, just record it.
     const fg = await probeForeground(instance.ptyId);
     if (fg?.shell_at_prompt === true) {
-      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
+      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: null });
       return 'stopped';
     }
     // The guard (§4): only the job we recorded is ever signalled. No recorded pid means we
@@ -393,7 +526,7 @@ function createStackStore() {
     // The OSC 133 exit usually lands first and clears `stopping`; this is the fallback
     // for shells without integration.
     if (rt(serviceId).status !== 'stopped') {
-      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: null });
+      setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: null });
     }
     return 'stopped';
   }
@@ -539,14 +672,13 @@ function createStackStore() {
     // ── Lifecycle ────────────────────────────────────────────────────────────────
 
     init() {
-      // Every OSC 133 D, unfiltered — `onCommandComplete` hides exits inside the pane's 2s
-      // mount window and under its 2s completion floor, which is precisely where a service
-      // that fails at boot exits. `onExit` ignores tabs it did not start.
+      // The raw OSC 133 feed — `onCommandComplete` hides exits inside the pane's 2s mount
+      // window and under its 2s completion floor, which is precisely where a service that
+      // fails at boot exits. Everything is sequenced against our own write: a D counts
+      // only after our command's B/C, and a fresh shell is not written to before its A.
+      unsubscribe.push(activityStore.onShellPrompt(onShellPrompt));
+      unsubscribe.push(activityStore.onCommandBegin(onCommandBegin));
       unsubscribe.push(activityStore.onCommandExit(onExit));
-      unsubscribe.push(activityStore.onCommandStart((tabId) => {
-        const hit = serviceForTab(tabId);
-        if (hit && rt(hit.service.id).status === 'starting') setRt(hit.service.id, { status: 'running' });
-      }));
       const self = this;
       unsubscribe.push($effect.root(() => {
         $effect(() => {

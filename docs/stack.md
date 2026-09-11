@@ -135,8 +135,18 @@ does not**. That single fact makes the lifecycle cheap:
 | start | `send_command`-style PTY write: `cd`, exports, command, CR | trigger action already exists |
 | stop | write `^C`; if still foreground after 3s, `^C` again; then `kill` the child | needs the foreground query below |
 | restart | stop, then start, same tab, same shell | — |
-| exit detection | OSC 133 `D;<code>` on the service tab, via `activityStore.onCommandExit` — **unfiltered**. `onCommandComplete` hides exits inside the pane's 2s mount window and under its 2s completion floor, which is exactly where a service that fails at boot exits (review, 2026-09-11) | `term-osc133-${ptyId}` carries the code |
-| exit without integration | the post-start settle: prompt back, no `D` seen → `crashed` "(no exit code seen)" | foreground probe |
+| ready for input | the shell's own OSC 133 **A** (`activityStore.onShellPrompt`, raw feed): a fresh shell has none until its rc finishes; a live one must have prompted since its last B/C | `term-osc133-${ptyId}` |
+| the command began | the first **B/C** after our write (`onCommandBegin`) → `running`; only now does a D count as ours | same |
+| exit detection | **D** after that B/C (`onCommandExit`, raw feed). The gated `onCommandComplete` hides exits inside the pane's 2s mount window and under its 2s completion floor — exactly where a service that fails at boot exits. And a fresh shell's first prompt emits an unconditional `D;0`, which is why a D before our B/C is ignored (second review, 2026-09-11) | same |
+| no integration at all | no A within 12s of mount → tty-foreground fallback: write when no external job holds the tty, `running` when one takes it, exit when it leaves (`watchNoIntegration`, 2s tick), `crashed` "(no exit code)" | foreground probe |
+
+**`shell_at_prompt` is not "idle at a prompt".** It is `tpgid == pgid`: no *external* job owns
+the tty. Builtins, rc files, functions and command substitutions never change it, so a shell
+three seconds into `.zshrc` reads exactly like one waiting at its prompt. The first version
+of this store typed on that signal and inferred crashes from it, and both were wrong in
+production-shaped ways (typing into a shell still sourcing its rc; calling a healthy
+service crashed because its rc took >2s). It is now used for two things only: capturing
+the pid of a job we saw begin, and the no-integration fallback.
 | shell death | `pty-close-${ptyId}` — the tab is deleted; store records `crashed` | existing event + listener |
 | logs | `getTabContext` on the bound tab — reads the Rust grid while the pane is registered | existing tool |
 | readiness | system trigger scoped to the tab via `Trigger.tabs` | trigger engine, per-tab scope exists |
@@ -150,9 +160,12 @@ at its prompt; a stop signals only the **pid recorded at start**, and refuses wh
 no recorded pid or the foreground is a different one — never "whatever is in front". The
 comms watcher learned this the hard way (`agent_owns_terminal`): a wrong "yes" types a
 command into whatever the human left running there, or SIGTERMs their vim. A wrong "no"
-costs a retry. `start` and `stop` also hold a per-service in-flight set: the status alone
-cannot guard re-entry, because `start` does four IPC round trips before it can set
-`starting`, and a double-click lands inside that window and mints a second tab.
+costs a retry. `start` and `stop` also dedupe in flight: the status alone cannot guard
+re-entry, because `start` does four IPC round trips before it can set `starting`, and a
+double-click lands inside that window and mints a second tab. A second `start` gets the
+**same promise** (so an auto-restart timer or a second click never evaporates); a `stop`
+during a start asks it to abort — it bails before the write, or the stop waits for it to
+settle and proceeds against the pid it recorded.
 
 > **This guard needs one new primitive.** `PtyInfo.foreground_command` is *not* the
 > foreground executable — on every platform it reports `Some` only for `ssh`/`mosh`/`autossh`
@@ -374,6 +387,7 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Eleven MCP tools (frontend-handled, workspace-scoped, `stack_enabled` gate, write verbs on `PEER_ADDRESSING_TOOLS`), live priming line from the Rust mirror | `1e60fab` |
 | Suggester (`commands/stack.rs`, tests) + import checklist + `createService` with no args | `c4401df` |
 | Review fixes (seven defects): unfiltered `onCommandExit` + post-start settle for fast exits; in-flight guard on start/stop; move clears the binding and reconciliation is workspace-scoped; a stop that gives up keeps `stopping`; stop refuses without a recorded pid; `waitForService` capped at 100s under the 120s MCP response timeout; rollup is batch-true with `partial`; reload of a service tab reads as stopped | `982711f` |
+| Second review (five defects in the fix): start/exit rebuilt on the raw OSC 133 A/B-C/D sequence instead of the tty foreground (first-prompt `D;0` was filing every fresh start as stopped; rcs >2s read as crashes); in-flight starts are shared promises and stops abort/await them; a suspended service tab reads as stopped | *(next commit)* |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path

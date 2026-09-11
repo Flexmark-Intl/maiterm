@@ -16,6 +16,8 @@ function createActivityStore() {
   const commandStartListeners = new Set<CommandStartListener>();
   const commandCompleteListeners = new Set<CommandCompleteListener>();
   const commandExitListeners = new Set<CommandCompleteListener>();
+  const shellPromptListeners = new Set<CommandStartListener>();
+  const commandBeginListeners = new Set<CommandStartListener>();
 
   return {
     hasActivity(tabId: string): boolean {
@@ -86,13 +88,29 @@ function createActivityStore() {
       return () => { commandCompleteListeners.delete(fn); };
     },
 
-    /** EVERY OSC 133 D, unfiltered — no 2s completion floor, no mount-window gate. The
-     *  filters above exist for notifications ("this command was worth telling you about");
-     *  the stack store needs the opposite: a dev server that dies 900ms after being typed
-     *  is exactly the exit it must see. Restored-scrollback replays reach this too, and
-     *  consumers must ignore exits for anything they did not start. */
+    /** The raw OSC 133 feed — EVERY A / B-C / D, no 2s completion floor, no mount-window
+     *  gate. The filters above exist for notifications ("this command was worth telling
+     *  you about"); the stack store needs the opposite: the shell's first prompt (so it
+     *  knows when a fresh shell can take input), the B/C for the line it typed, and the
+     *  D for that command even if it dies 900ms later. Consumers sequence these against
+     *  their own writes and ignore everything else — a D on a tab they did not start, or
+     *  one that precedes their command's B/C, is not theirs. */
+    noteShellPrompt(tabId: string) {
+      for (const fn of shellPromptListeners) fn(tabId);
+    },
+    noteCommandBegin(tabId: string) {
+      for (const fn of commandBeginListeners) fn(tabId);
+    },
     noteCommandExit(tabId: string, exitCode: number) {
       for (const fn of commandExitListeners) fn(tabId, exitCode);
+    },
+    onShellPrompt(fn: CommandStartListener): () => void {
+      shellPromptListeners.add(fn);
+      return () => { shellPromptListeners.delete(fn); };
+    },
+    onCommandBegin(fn: CommandStartListener): () => void {
+      commandBeginListeners.add(fn);
+      return () => { commandBeginListeners.delete(fn); };
     },
     onCommandExit(fn: CommandCompleteListener): () => void {
       commandExitListeners.add(fn);

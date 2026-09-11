@@ -708,9 +708,15 @@
     });
 
     unlistenShell = await listen<OscShellEvent>(`term-osc133-${ptyId}`, (event) => {
-      // The stack store wants every exit, including the ones the gates below hide: a
-      // service typed 300ms after mount that dies 900ms later (docs/stack.md §4).
-      if (event.payload.cmd === 'D') activityStore.noteCommandExit(tabId, event.payload.exit_code ?? 0);
+      // The stack store wants the raw sequence, including what the gates below hide: the
+      // fresh shell's first prompt (and its unconditional first D;0), the B/C for the line
+      // it typed, and an exit 900ms later (docs/stack.md §4).
+      {
+        const raw = event.payload.cmd;
+        if (raw === 'A') activityStore.noteShellPrompt(tabId);
+        else if (raw === 'B' || raw === 'C') activityStore.noteCommandBegin(tabId);
+        else if (raw === 'D') activityStore.noteCommandExit(tabId, event.payload.exit_code ?? 0);
+      }
       if (!trackActivity) return;
       const { cmd, exit_code } = event.payload;
       if (cmd === 'A') {
