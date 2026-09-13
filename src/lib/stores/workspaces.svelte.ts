@@ -1639,7 +1639,11 @@ function createWorkspacesStore() {
       const ws = workspaces.find(w => w.id === workspaceId);
       if (!ws) return;
       ws.stack = stack;
-      await commands.setWorkspaceStack(workspaceId, $state.snapshot(stack) as Service[]);
+      // Rust normalizes on write (names, `~` in cwd); the mirror must carry THAT, because
+      // the stack store types `cd '<cwd>'` from the mirror and `'~/x'` is a literal.
+      const stored = await commands.setWorkspaceStack(workspaceId, $state.snapshot(stack) as Service[]);
+      const again = workspaces.find(w => w.id === workspaceId);
+      if (again) again.stack = stored;
     },
 
     /** Operator kill switch: end a tab's comms thread binding(s). Omit rootId = all. */

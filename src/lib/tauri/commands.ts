@@ -820,7 +820,8 @@ export async function setWorkspaceMeshTopics(workspaceId: string, topics: MeshTo
 /** Coarse whole-list replace of a workspace's stack definitions (docs/stack.md §3);
  *  Rust recomputes `normalized_name` on the way in. Bindings are separate — see
  *  `setTabServiceId`. */
-export async function setWorkspaceStack(workspaceId: string, stack: Service[]): Promise<void> {
+/** Returns the rows as Rust stored them — names normalized, `~` in cwd expanded. */
+export async function setWorkspaceStack(workspaceId: string, stack: Service[]): Promise<Service[]> {
   return invoke('set_workspace_stack', { workspaceId, stack });
 }
 

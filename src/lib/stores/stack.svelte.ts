@@ -294,15 +294,23 @@ function createStackStore() {
    *  shell) is `stopped`: nothing is running there, and a green dot over it would lie. */
   function reconcileBindings() {
     for (const [serviceId, r] of runtime) {
-      if (r.status === 'stopped' || r.status === 'crashed') continue;
-      // A start in flight owns its runtime until it returns: it is between "chose a tab"
-      // and "typed into it", and any reading of its half-written fields here is wrong.
-      if (startsInFlight.has(serviceId)) continue;
       // The binding only counts inside the workspace that owns the definition — a tab
       // moved elsewhere has its binding cleared by Rust, and searching every workspace
       // would keep a moved-away service "running" here with no tab to show for it.
       const ws = workspacesStore.workspaces.find((w) => w.stack?.some((s) => s.id === serviceId));
       const tab = ws?.panes.flatMap((p) => p.tabs).find((t) => t.service_id === serviceId);
+      if (r.status === 'stopped') {
+        // suspendTab unregisters the instance BEFORE it stamps `suspended_at`, so the pass
+        // that saw the instance vanish filed a reload; the stamp arrives a tick later and
+        // the effect tracks it — correct the note here, as reconcileSuspended does for a
+        // whole workspace.
+        if (r.note === RELOADED_NOTE && tab?.suspended_at) setRt(serviceId, { note: SUSPENDED_NOTE });
+        continue;
+      }
+      if (r.status === 'crashed') continue;
+      // A start in flight owns its runtime until it returns: it is between "chose a tab"
+      // and "typed into it", and any reading of its half-written fields here is wrong.
+      if (startsInFlight.has(serviceId)) continue;
       if (!tab) {
         const crashed = !r.stopping;
         setRt(serviceId, { status: crashed ? 'crashed' : 'stopped', since: null, pid: null, ptyId: null, stopping: false, note: crashed ? 'its tab closed' : null });
@@ -529,7 +537,9 @@ function createStackStore() {
       // seen. The exit code stays for listStack.
       const timer = restartTimers.get(serviceId);
       if (timer) { clearTimeout(timer); restartTimers.delete(serviceId); }
-      setRt(serviceId, { status: 'stopped', note: null });
+      // scheduleRestart books the restart when it ARMS the timer; a cancelled one must
+      // not count against the ceiling.
+      setRt(serviceId, { status: 'stopped', note: null, restarts: timer ? r.restarts.slice(0, -1) : r.restarts });
       return 'stopped';
     }
     const p = stopInner(workspaceId, serviceId, r).finally(() => stopsInFlight.delete(serviceId));
@@ -636,7 +646,8 @@ function createStackStore() {
         updated_at: now,
       };
       await persist(workspaceId, [...(ws.stack ?? []), service]);
-      return service;
+      // The stored row, not the draft: Rust expanded `~` in cwd on the way in.
+      return workspaceOf(workspaceId)?.stack?.find((s) => s.id === service.id) ?? service;
     },
 
     async updateService(workspaceId: string, serviceId: string, patch: Partial<Omit<Service, 'id' | 'created_at' | 'normalized_name'>>): Promise<Service> {
@@ -649,7 +660,7 @@ function createStackStore() {
         next.normalized_name = normalizeTitle(next.name);
       }
       await persist(workspaceId, (ws.stack ?? []).map((s) => (s.id === serviceId ? next : s)));
-      return next;
+      return workspaceOf(workspaceId)?.stack?.find((s) => s.id === serviceId) ?? next;
     },
 
     /** Refused while running — stop first (the caller decides; nothing here types ^C). */
@@ -743,7 +754,7 @@ function createStackStore() {
           // Subscribe to tab membership, suspend flags and PTY (re)registrations only; the
           // reconcilers read and write `runtime`, which must not re-trigger this effect
           // (CLAUDE.md: untrack).
-          void workspacesStore.workspaces.map((w) => [w.suspended, ...w.panes.map((p) => p.tabs.map((t) => t.service_id).join(','))]);
+          void workspacesStore.workspaces.map((w) => [w.suspended, ...w.panes.map((p) => p.tabs.map((t) => `${t.service_id}:${t.suspended_at}`).join(','))]);
           void terminalsStore.instanceVersion;
           untrack(() => { reconcileBindings(); reconcileSuspended(); });
         });

@@ -2206,12 +2206,15 @@ pub fn set_workspace_stack(
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     mut stack: Vec<crate::state::Service>,
-) -> Result<(), String> {
+) -> Result<Vec<crate::state::Service>, String> {
     let label = window.label().to_string();
     for s in stack.iter_mut() {
         s.normalized_name = crate::state::Service::normalize_name(&s.name);
         s.cwd = crate::state::Service::expand_cwd(&s.cwd);
     }
+    // Returned so the frontend mirror carries the normalized rows: the store types
+    // `cd '<cwd>'` from ITS copy, and an unexpanded `~` there is a literal to the shell.
+    let normalized = stack.clone();
     let data_clone = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
@@ -2224,7 +2227,7 @@ pub fn set_workspace_stack(
         app_data.clone()
     };
     save_state(&data_clone)?;
-    Ok(())
+    Ok(normalized)
 }
 
 #[tauri::command]
