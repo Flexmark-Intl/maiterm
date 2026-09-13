@@ -83,7 +83,7 @@
         <div class="empty">Scanning…</div>
       {:else if rows.length === 0}
         <div class="empty">
-          Nothing found{#if scannedDir} in <span class="mono">{scannedDir}</span>{/if}. Looked for package.json scripts, a Procfile, a compose file, a justfile and a Makefile.
+          Nothing found{#if scannedDir}{' '}in <span class="mono">{scannedDir}</span>{/if}. Looked for package.json scripts, a Procfile, a compose file, a justfile and a Makefile.
         </div>
       {:else}
         <div class="list">

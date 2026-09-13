@@ -2210,6 +2210,7 @@ pub fn set_workspace_stack(
     let label = window.label().to_string();
     for s in stack.iter_mut() {
         s.normalized_name = crate::state::Service::normalize_name(&s.name);
+        s.cwd = crate::state::Service::expand_cwd(&s.cwd);
     }
     let data_clone = {
         let mut app_data = state.app_data.write();

@@ -193,6 +193,9 @@ pub fn suggest_for_dir(dir: &Path) -> Vec<StackSuggestion> {
 
 #[tauri::command]
 pub async fn suggest_stack(cwd: String) -> Result<Vec<StackSuggestion>, String> {
+    // The modal prefills the tab's cwd as displayed (`~/…`) and people type it the same
+    // way; `Path` does not expand it, and the rows carry this dir as their service cwd.
+    let cwd = crate::state::Service::expand_cwd(&cwd);
     tauri::async_runtime::spawn_blocking(move || suggest_for_dir(Path::new(&cwd)))
         .await
         .map_err(|e| format!("suggester failed to run: {e}"))
@@ -201,6 +204,16 @@ pub async fn suggest_stack(cwd: String) -> Result<Vec<StackSuggestion>, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_service_cwd_never_keeps_a_tilde() {
+        // `cd '~/x'` is a literal to every shell; the modals prefill and people type `~/…`.
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(crate::state::Service::expand_cwd("~/DATA/IDE"), home.join("DATA/IDE").to_string_lossy());
+        assert_eq!(crate::state::Service::expand_cwd(" ~ "), home.to_string_lossy());
+        assert_eq!(crate::state::Service::expand_cwd("/abs/path"), "/abs/path");
+        assert_eq!(crate::state::Service::expand_cwd("~user/x"), "~user/x");
+    }
 
     #[test]
     fn compose_services_reads_the_top_level_block_only() {

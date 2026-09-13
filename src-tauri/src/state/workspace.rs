@@ -552,6 +552,20 @@ impl Service {
     pub fn normalize_name(name: &str) -> String {
         Task::normalize_title(name)
     }
+
+    /// A service cwd must be absolute: the store types it as `cd '<cwd>' && …`, and a
+    /// single-quoted `~` is a literal to every shell. The paths that reach here are mostly
+    /// human-shaped — a tab's `last_cwd` is displayed as `~/…`, and that is what the modals
+    /// prefill and what people type — so expand a leading `~` on the way in, once.
+    pub fn expand_cwd(cwd: &str) -> String {
+        let cwd = cwd.trim();
+        let Some(home) = dirs::home_dir() else { return cwd.to_string() };
+        match cwd.strip_prefix("~/") {
+            Some(rest) => home.join(rest).to_string_lossy().to_string(),
+            None if cwd == "~" => home.to_string_lossy().to_string(),
+            None => cwd.to_string(),
+        }
+    }
 }
 
 /// A unit of work owned by a workspace (docs/tasks.md). A workspace IS a project, so
