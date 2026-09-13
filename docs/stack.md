@@ -1,6 +1,7 @@
 # maiTerm Stack — a workspace's services, known to every tab in it
 
-> Status: **v1 implemented** 2026-09-11 (§11 has the commits). Owner: Darryl.
+> Status: **v1 implemented** 2026-09-11, **run against a real project** 2026-09-13 (§11 has
+> the commits and what the run found). Owner: Darryl.
 > Scope: a workspace can declare the services its project runs (dev server, API, db,
 > worker…), start them as tabs it owns, and expose them — status, ports, logs, control —
 > to every human and agent tab in that workspace. Agents are writers, not just readers.
@@ -390,6 +391,7 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Second review (five defects in the fix): start/exit rebuilt on the raw OSC 133 A/B-C/D sequence instead of the tty foreground (first-prompt `D;0` was filing every fresh start as stopped; rcs >2s read as crashes); in-flight starts are shared promises and stops abort/await them; a suspended service tab reads as stopped | `d586596` |
 | Third review (three defects, one cause): shell facts were keyed by TAB id, but a tab id outlives its shell — a respawned shell inherited the dead one's "prompted" fact and was typed into mid-rc; a reload's new id had no facts and fell into the no-integration path. Facts are now keyed by PTY id (the raw feed carries it), a B/C or D from a different PTY is never ours, and the B/C wait is 30s so a slow prompt hook cannot orphan a queued command | `b5740f1` |
 | Fourth review: a start resets every per-run field (a stale `ptyId` had let `reconcileBindings` void a start mid-flight — the "kept ptyId" from the third round was inert and harmful, reverted); reconciliation skips in-flight starts; the first-prompt wait is skipped when integration is off and abortable by Stop | `c1b213e` |
+| **Runtime verification** (2026-09-13, `tauri:dev`, `maiSoft/website` — pnpm + vite): import from `package.json` (pm from the lockfile, `dev` pre-ticked), `startService` in under a second with the command typed after the shell's A, Ctrl-C → exit 130 → stopped, `kill -TERM` → 143 → crashed → restarted 1s later, `stopService`/`stopStack` via ^C, `waitForService`, `updateService { port, ready }` → `ready` and `endpoint_source: stale` after a stop, `removeService` refused while running, tab reload → binding carried to the new id and `stopped`, app relaunch → binding restored and auto-start on the active workspace, suspend → all stopped, resume → auto-start, a `sh -c 'sleep 1; exit 1'` service → five backed-off restarts then the ceiling note, sidebar rollup red over a crashed service, Start/Stop stack from the row menu. Four defects fixed on the way: a `~/…` cwd was never expanded (the scan of `~/DATA/IDE` found nothing; a saved one would have been typed as `cd '~/…'`); the reload note read as suspended (reconciled before the fresh pane mounted) and a suspend read as reloaded (PTYs die before the flag flips); the priming advertised a stale URL on a stopped service; and a stop on a crashed service left its backoff timer armed, so "Stop" was followed by a restart | `dd028cb`, `5b89221`, `25dfe49`, `2a8f703` |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path
@@ -402,14 +404,6 @@ but nothing evaluates it yet — `updateService { ready, port }` is the only rea
 env at spawn; Overlord `service_crashed` + `driveTab` refusal + `kind: 'service'` in
 `listWorkspaces`; pinned cluster / glyph / collapse for service tabs; SSH services
 (`ssh_command` becomes live — the spawn is the auto-resume triple).
-
-**v3** — `restart: on_change` (needs a watcher; `notify` crate), phone, export to a repo
-file, socket-based port discovery if anything ever needs it.
-
-**v2** — readiness as system trigger with port capture; env at spawn; Overlord
-`service_crashed` + `driveTab` refusal + `kind: 'service'` in `listWorkspaces`; tab-strip
-collapse toggle; SSH services (`ssh_command` becomes live — the spawn is the auto-resume
-triple).
 
 **v3** — `restart: on_change` (needs a watcher; `notify` crate), phone, export to a repo
 file, socket-based port discovery if anything ever needs it.
@@ -437,6 +431,16 @@ file, socket-based port discovery if anything ever needs it.
 7. **Two services, one port** (`web` and `storybook` both claiming 5173 across restarts).
    Last observed wins; `listStack` shows both with the same port and the human sorts it out.
    Not worth a conflict model.
+8. **A fresh store over a shell that is already running the service.** Seen in the
+   2026-09-13 run under dev HMR: the webview reloads, the PTY and its vite survive, the new
+   store's auto-start waits 12s for an A that was emitted before it existed, falls to the tty
+   probe, and files the service `stopped — the shell is busy` while the server is up. Only a
+   webview reload reaches this (an app relaunch kills the PTYs; a WebContent crash is the
+   production analogue, and the terminals are blank then anyway). Adoption of a running job
+   stays rejected (§13); the human presses Ctrl-C and starts it, or it stays a plain tab.
+9. **Removing a service leaves its tab.** `removeService` clears the definition; the bound
+   tab stays as an ordinary terminal (its name keeps the service's). Deliberate — the tab may
+   hold output worth reading — but nothing says so in the UI yet.
 
 ## 13. Rejected
 
