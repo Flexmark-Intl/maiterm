@@ -310,7 +310,11 @@ function createStackStore() {
       // reload minted a fresh shell) has nothing of ours running in it.
       const live = terminalsStore.get(tab.id);
       if (r.ptyId && (!live || live.ptyId !== r.ptyId)) {
-        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: live ? 'its tab was reloaded — start it again' : 'its tab was suspended' });
+        // The reload case is reconciled BEFORE the fresh tab's pane has mounted, so "is
+        // there a live instance" reads as suspended for both; the tab's own record tells
+        // them apart (`suspended_at` is set by a suspend and by nothing else).
+        const suspended = !!tab.suspended_at || !!ws?.suspended;
+        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: suspended ? 'its tab was suspended' : 'its tab was reloaded — start it again' });
       }
     }
   }

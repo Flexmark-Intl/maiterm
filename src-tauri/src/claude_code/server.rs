@@ -571,9 +571,12 @@ fn stack_priming_list(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         .map(|s| {
             let status = runtime.get(&s.id).map(|r| r.status.as_str()).unwrap_or("stopped");
             let mut d = format!("{} ({}", s.name, status);
-            if let Some(url) = &s.url {
+            // The endpoint is remembered across runs (listStack shows it as `stale`), but
+            // "dev (stopped, http://localhost:5174/)" reads as an invitation to curl it.
+            let up = matches!(status, "running" | "ready");
+            if let (true, Some(url)) = (up, &s.url) {
                 d.push_str(&format!(", {}", url));
-            } else if let Some(port) = s.port {
+            } else if let (true, Some(port)) = (up, s.port) {
                 d.push_str(&format!(", :{}", port));
             }
             d.push(')');
