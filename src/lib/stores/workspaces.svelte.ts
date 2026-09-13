@@ -1641,9 +1641,20 @@ function createWorkspacesStore() {
       ws.stack = stack;
       // Rust normalizes on write (names, `~` in cwd); the mirror must carry THAT, because
       // the stack store types `cd '<cwd>'` from the mirror and `'~/x'` is a literal.
+      // Merge the two normalized fields onto whatever the mirror holds NOW, by id — never
+      // assign the returned list: a write issued while this one was in flight has already
+      // advanced the mirror, and replacing it would roll that write back (and the next
+      // writer would persist the rollback).
       const stored = await commands.setWorkspaceStack(workspaceId, $state.snapshot(stack) as Service[]);
       const again = workspaces.find(w => w.id === workspaceId);
-      if (again) again.stack = stored;
+      if (!again?.stack) return;
+      const byId = new Map(stored.map(s => [s.id, s]));
+      for (const row of again.stack) {
+        const norm = byId.get(row.id);
+        if (!norm) continue;
+        if (row.cwd !== norm.cwd) row.cwd = norm.cwd;
+        if (row.normalized_name !== norm.normalized_name) row.normalized_name = norm.normalized_name;
+      }
     },
 
     /** Operator kill switch: end a tab's comms thread binding(s). Omit rootId = all. */
