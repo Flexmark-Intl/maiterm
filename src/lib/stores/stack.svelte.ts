@@ -521,7 +521,17 @@ function createStackStore() {
       await starting.catch(() => undefined);
     }
     const r = rt(serviceId);
-    if (r.status === 'stopped' || r.status === 'crashed') return r.status;
+    if (r.status === 'stopped') return r.status;
+    if (r.status === 'crashed') {
+      // Nothing to kill, but a stop is an answer to the crash: the backoff timer is still
+      // armed (it re-checks `crashed` when it fires, so leaving the status alone would
+      // let it restart a service the human just asked to stop), and the red dot has been
+      // seen. The exit code stays for listStack.
+      const timer = restartTimers.get(serviceId);
+      if (timer) { clearTimeout(timer); restartTimers.delete(serviceId); }
+      setRt(serviceId, { status: 'stopped', note: null });
+      return 'stopped';
+    }
     const p = stopInner(workspaceId, serviceId, r).finally(() => stopsInFlight.delete(serviceId));
     stopsInFlight.set(serviceId, p);
     return p;
@@ -688,8 +698,8 @@ function createStackStore() {
 
     async stopStack(workspaceId: string): Promise<void> {
       for (const s of this.services(workspaceId)) {
-        const st = rt(s.id).status;
-        if (st === 'stopped' || st === 'crashed') continue;
+        if (rt(s.id).status === 'stopped') continue;
+        // Crashed ones too: a pending auto-restart must not outlive "Stop stack".
         try { await stop(workspaceId, s.id); } catch (e) { logError(`stack: stop ${s.name}: ${e}`); }
       }
     },
