@@ -95,6 +95,10 @@ const FIRST_PROMPT_WAIT_MS = 12000;
  *  that has already disowned it leaves a running service nothing can stop. */
 const BEGIN_WAIT_MS = 30000;
 const MOUNT_WAIT_MS = 15000;
+/** The two ways a bound tab loses the shell our command ran in; reconcileSuspended
+ *  corrects the first into the second when the workspace turns out to be suspended. */
+const RELOADED_NOTE = 'its tab was reloaded — start it again';
+const SUSPENDED_NOTE = 'its tab was suspended';
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
@@ -314,7 +318,7 @@ function createStackStore() {
         // there a live instance" reads as suspended for both; the tab's own record tells
         // them apart (`suspended_at` is set by a suspend and by nothing else).
         const suspended = !!tab.suspended_at || !!ws?.suspended;
-        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: suspended ? 'its tab was suspended' : 'its tab was reloaded — start it again' });
+        setRt(serviceId, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: suspended ? SUSPENDED_NOTE : RELOADED_NOTE });
       }
     }
   }
@@ -327,7 +331,11 @@ function createStackStore() {
       autoStarted.delete(ws.id);
       for (const s of ws.stack ?? []) {
         const r = rt(s.id);
-        if (r.status !== 'stopped') setRt(s.id, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: null });
+        // A suspend kills the PTYs first and flags the workspace second, so
+        // reconcileBindings has usually filed the service as "reloaded" by the time this
+        // runs; the flag is the truth, and "start it again" is wrong advice here.
+        if (r.status !== 'stopped') setRt(s.id, { status: 'stopped', since: null, pid: null, ptyId: null, writeAt: null, beganAt: null, stopping: false, note: SUSPENDED_NOTE });
+        else if (r.note === RELOADED_NOTE) setRt(s.id, { note: SUSPENDED_NOTE });
       }
     }
   }
