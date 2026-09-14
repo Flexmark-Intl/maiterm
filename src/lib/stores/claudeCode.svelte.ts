@@ -1520,11 +1520,28 @@ function createClaudeCodeStore() {
 
   // --- Agent Bridge tools ---
 
+  /** Does `recipient` name one of this tab's mesh peers — by handle, current role, or a
+   *  former role (the same three the mesh router resolves)? Used to keep the mesh ahead
+   *  of the bridge when a name could mean either. */
+  function namesMeshPeer(tabId: string, recipient: string): boolean {
+    const r = recipient.toLowerCase();
+    return agentMeshStore.rosterForTab(tabId).some((m) =>
+      m.tabId !== tabId &&
+      (m.tabId === recipient || m.role.trim().toLowerCase() === r || (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === r)),
+    );
+  }
+
   /** A tab can hold a 1:1 bridge AND sit on a mesh, so the send is routed by what the
    *  caller ASKED for, not by where it sits: a recipient or topic names a mesh thread; a
    *  bare message goes to the bridge partner when there is one. Routing by membership
    *  alone (the old rule) sent every mesh member's bare reply to the mesh — in a 2-agent
-   *  mesh that is a silent misroute, since the router accepts an omitted recipient there. */
+   *  mesh that is a silent misroute, since the router accepts an omitted recipient there.
+   *
+   *  The mesh wins any name it can resolve. A recipient that names a mesh peer is a mesh
+   *  send even when that peer is ALSO the bridge partner (a fork spawned beside a mesh
+   *  caller is exactly that) — the mesh has the topics, the loop control and the cockpit,
+   *  and the bridge has none of them. Only a recipient the mesh does NOT know, and that
+   *  names the partner, is taken as the bridge (topic ignored). */
   async function handleSendToBridgedAgent(args: { tabId?: string; message: string; recipient?: string; topic?: string }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
@@ -1532,8 +1549,11 @@ function createClaudeCodeStore() {
     const bridged = agentBridgeStore.isBridgedToLivePartner(tabId);
     const inMesh = agentMeshStore.isMeshTab(tabId);
     const recipient = args.recipient?.trim() ?? '';
-    // Naming the bridge partner as `recipient` is still the bridge (topic ignored).
-    if (bridged && recipient && agentBridgeStore.matchesPartner(tabId, recipient)) {
+    if (
+      bridged && recipient &&
+      agentBridgeStore.matchesPartner(tabId, recipient) &&
+      !(inMesh && namesMeshPeer(tabId, recipient))
+    ) {
       const r = await agentBridgeStore.sendFromTab(tabId, args.message);
       return args.topic && r.ok ? { ...r, note: `${r.note} (Sent over your 1:1 bridge — it has no topics, so "${args.topic}" was ignored.)` } : r;
     }
@@ -1544,7 +1564,11 @@ function createClaudeCodeStore() {
   }
 
   /** Both views at once: the 1:1 partner (if any) and the mesh roster (if any), so a tab
-   *  that has both can see both. Shape is unchanged for a tab that has only one. */
+   *  that has both can see both. Shape is unchanged for a tab that has only one. The
+   *  note must agree with the dispatch above, which keys on a LIVE partner: a bridge whose
+   *  partner tab is gone still reports `bridged: true` (with `available: false`), but a bare
+   *  send from a mesh tab then goes to the mesh — say so, or the agent talks to the wrong
+   *  peer believing it reached its partner. */
   function handleGetBridgedAgent(args: { tabId?: string }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
@@ -1552,11 +1576,13 @@ function createClaudeCodeStore() {
     if (!agentMeshStore.isMeshTab(loc.tab.id)) return bridge;
     const mesh = agentMeshStore.listPeers(loc.tab.id);
     if (!bridge.bridged) return { ...mesh, bridged: false };
-    return {
-      ...bridge,
-      mesh,
-      note: 'You hold a 1:1 bridge AND sit on a mesh. sendToBridgedAgent with no recipient/topic (or recipient = your partner) goes over the bridge; a recipient/topic goes to the mesh.',
-    };
+    const partnerOnMesh = !!bridge.partner && namesMeshPeer(loc.tab.id, bridge.partner.tabId);
+    const note = !agentBridgeStore.isBridgedToLivePartner(loc.tab.id)
+      ? 'Your 1:1 bridge partner is no longer available (its tab is gone), so sendToBridgedAgent routes to the mesh — a recipient and topic are required.'
+      : partnerOnMesh
+        ? 'Your 1:1 bridge partner is also a peer on this mesh. Address it with a recipient and topic like any mesh peer; only a message with NO recipient and NO topic goes over the bridge.'
+        : 'You hold a 1:1 bridge AND sit on a mesh. sendToBridgedAgent with no recipient/topic (or recipient = your partner) goes over the bridge; a recipient/topic goes to the mesh.';
+    return { ...bridge, mesh, note };
   }
 
   function handleListBridgedPeers(args: { tabId?: string }) {

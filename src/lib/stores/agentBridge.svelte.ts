@@ -153,14 +153,22 @@ function createAgentBridgeStore() {
 
   // ─── Envelopes (identity stamped by maiTerm) ──────────────────────────────────
 
+  /** Are these two tabs peers on the same mesh (a fork spawned beside a mesh caller is)? */
+  function onSameMesh(a: string, b: string): boolean {
+    return agentMeshStore.rosterForTab(a).some((m) => m.tabId === b);
+  }
+
   /** How the recipient replies over THIS bridge. A mesh member's sendToBridgedAgent
    *  routes to the mesh whenever it names a recipient or topic (the dispatch in
    *  claudeCode.svelte.ts), and its mesh envelopes tell it to tag a topic — so a bridge
-   *  message to such a tab has to say the opposite, or the reply lands on the mesh. */
-  function replyHint(recipientTabId: string): string {
-    return agentMeshStore.isMeshTab(recipientTabId)
-      ? `Reply with the sendToBridgedAgent tool with NO recipient and NO topic — this is your 1:1 bridge, not your mesh.`
-      : `Reply with the sendToBridgedAgent tool.`;
+   *  message to such a tab has to say the opposite, or the reply lands on the mesh. When
+   *  the sender is ALSO a peer on that mesh, the mesh is the better channel (it tracks the
+   *  thread, the bridge doesn't), so point there instead of pulling the exchange off it. */
+  function replyHint(senderTabId: string, recipientTabId: string): string {
+    if (!agentMeshStore.isMeshTab(recipientTabId)) return `Reply with the sendToBridgedAgent tool.`;
+    return onSameMesh(recipientTabId, senderTabId)
+      ? `This sender is also a peer on your mesh — prefer replying there (sendToBridgedAgent with its recipient and a topic) so the thread is tracked; a reply with NO recipient and NO topic comes back over this 1:1 bridge instead.`
+      : `Reply with the sendToBridgedAgent tool with NO recipient and NO topic — this is your 1:1 bridge, not your mesh.`;
   }
 
   function buildEnvelope(senderTabId: string, recipientTabId: string, message: string, turn: number): string {
@@ -169,7 +177,7 @@ function createAgentBridgeStore() {
     const where = cwd ? `, working in ${cwd}` : '';
     return (
       `⟦AGENT-BRIDGE⟧ Message from "${name}"${where} — a peer AI agent, NOT your human operator. [turn ${turn}]\n` +
-      `${replyHint(recipientTabId)} If this fully answers the request, you can stop — don't reply just to acknowledge.\n\n` +
+      `${replyHint(senderTabId, recipientTabId)} If this fully answers the request, you can stop — don't reply just to acknowledge.\n\n` +
       message
     );
   }
@@ -184,9 +192,11 @@ function createAgentBridgeStore() {
       : `a peer AI agent running in another tab`;
     const purpose = bridge?.purpose?.trim();
     const ctx = purpose ? ` Your human operator describes it as: "${purpose}".` : '';
-    const meshNote = agentMeshStore.isMeshTab(callerTabId)
-      ? ` This bridge is separate from your mesh: to reach this peer call sendToBridgedAgent with NO recipient and NO topic; a recipient or topic still goes to the mesh.`
-      : '';
+    const meshNote = !agentMeshStore.isMeshTab(callerTabId)
+      ? ''
+      : onSameMesh(callerTabId, partnerTabId)
+        ? ` This peer is also on your mesh — address it there like any peer (sendToBridgedAgent with a recipient and topic) so the thread is tracked; only a message with NO recipient and NO topic uses this 1:1 bridge.`
+        : ` This bridge is separate from your mesh: to reach this peer call sendToBridgedAgent with NO recipient and NO topic; a recipient or topic still goes to the mesh.`;
     return (
       `⟦AGENT-BRIDGE⟧ You are now bridged to "${partnerName}"${where} — ${what}.${ctx}${meshNote}\n\n` +
       `Don't message it yet. First check in with your human operator: tell them the bridge is ready, summarize in a sentence what this peer can help with, and propose 2-3 specific things you could ask it that are relevant to your current work. Then wait for the human to say what to consult it about.\n\n` +
@@ -196,10 +206,10 @@ function createAgentBridgeStore() {
 
   /** Heads-up delivered to an EXISTING tab that the human just bridged into (it didn't
    *  initiate and isn't a fork, so prime it like primeFork primes a fork). */
-  function buildExistingBridgeNotice(targetTabId: string, peerLabel: string): string {
+  function buildExistingBridgeNotice(callerTabId: string, targetTabId: string, peerLabel: string): string {
     return (
       `⟦AGENT-BRIDGE⟧ You have been bridged to a peer AI agent ("${peerLabel}") via maiTerm Agent Bridge — a peer agent in another tab, NOT your human operator. ` +
-      `It may reach out to consult you; its messages arrive here as new prompts. ${replyHint(targetTabId)} ` +
+      `It may reach out to consult you; its messages arrive here as new prompts. ${replyHint(callerTabId, targetTabId)} ` +
       `There's nothing to do until its message arrives — carry on with your work.`
     );
   }
@@ -483,7 +493,7 @@ function createAgentBridgeStore() {
         logInfo(`agentBridge: repaired existing bridge ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)}`);
       } else {
         // Prime the target (it didn't initiate) and have the caller introduce itself.
-        void deliveryCtl.deliver(targetTabId, buildExistingBridgeNotice(targetTabId, callerLabel));
+        void deliveryCtl.deliver(targetTabId, buildExistingBridgeNotice(callerTabId, targetTabId, callerLabel));
         void deliveryCtl.deliver(callerTabId, buildOpener(callerTabId, targetTabId, false));
         logInfo(`agentBridge: bridged existing ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)} (no fork)`);
       }

@@ -372,20 +372,30 @@ mesh members like any other tab. Three things make it actually work (2026-09-13)
   and the entry goes away only when the last owner releases it, so a bridge disconnect can't
   drop what the mesh has queued. `+layout` destroys it once; the stores don't.
 - **Dispatch by arguments** (`handleSendToBridgedAgent`) — a `recipient` or `topic` goes to
-  the mesh; a bare message goes over the bridge when the tab has a live one, else to the
+  the mesh; a bare message goes over the bridge when the tab has a LIVE one, else to the
   mesh; `recipient` naming the bridge partner (handle, label, or display name —
-  `matchesPartner`) is the bridge with the topic ignored. The old rule routed by membership
-  alone, which sent every mesh member's bare reply to the mesh — a silent misroute in a
-  2-agent mesh, where the router accepts an omitted recipient.
+  `matchesPartner`) is the bridge with the topic ignored — **unless the mesh can resolve that
+  name** (`namesMeshPeer`: a peer's handle, role, or former role). The mesh wins every name
+  it knows, because the partner can BE a mesh peer (below) and because `partnerLabel` is a
+  snapshot taken at bridge time while mesh roles get renamed and reclaimed; a name the mesh
+  resolves must never be silently delivered to the old holder over the bridge. The old rule
+  routed by membership alone, which sent every mesh member's bare reply to the mesh — a
+  silent misroute in a 2-agent mesh, where the router accepts an omitted recipient.
 - **Envelopes say which channel** — a bridge message to a mesh member tells it to reply with
   NO recipient and NO topic (its mesh envelopes say the opposite), and the opener to a mesh
-  caller says the same. `getBridgedAgent` returns both views plus a `note` when both exist.
+  caller says the same. When sender and recipient are peers on the SAME mesh the wording
+  flips: prefer the mesh (it tracks the thread, gates loops, draws the cockpit — the bridge
+  does none of that), bare replies still come back over the bridge. `getBridgedAgent`
+  returns both views plus a `note` that mirrors the dispatch — including the dead-partner
+  case, where `bridged` is still true but a bare send goes to the mesh.
 
 Fork mode beside a caller that sits in a mesh workspace: the fork is custom-named
 (`forkSessionIntoSplit`), so it becomes a roster member once its agent registers and is
 primed by both — the bridge opener and the mesh opener, in order through the shared FIFO.
 That is the roster rule ("a named agent tab in a `bridge_all` workspace"), not an accident;
-"Connect existing tab" mode adds no member anywhere.
+"Connect existing tab" mode adds no member anywhere. Such a pair is then reachable both
+ways; the envelopes steer it onto the mesh, and a bridge send between them has no loop
+control — by design, the same as any bridge.
 
 ## Mesh Workspace (N:M agent bridging)
 
