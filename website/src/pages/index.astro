@@ -323,25 +323,31 @@ const EVERYTHING = [
       <p class="ln-lead">
         A customer problem shows up in a Mattermost thread. Normally you read it, switch to
         your editor, reproduce it, fix it, then come back and write up what you did. Point a
-        tab at that channel instead: an <code>@mention</code> of your bot binds the whole
-        thread to it — every message, plus the screenshots, logs and spec documents staged as
-        real files the agent can open — and it works the issue in <em>that tab's repository</em>.
+        tab at that channel instead: set up a bot account once, and an <code>@mention</code> of
+        it hands that tab the thread — the conversation so far, plus the screenshots, logs and
+        documents staged as real files on disk — to work in <em>that tab's repository</em>.
       </p>
       <p class="ln-lead">
-        It replies before it investigates, with its own one-line read of what is being asked,
-        so a misunderstanding surfaces immediately instead of ten minutes later in the shape of
-        the wrong fix. Then it goes quiet, works, and posts the resolution in two halves: plain
-        language for whoever is talking to the customer, and the root cause below the divider
-        for the devs.
+        The channel keeps flowing normally. Only messages that <code>@mention</code> the bot are
+        delivered into the session, so the agent answers deliberate asks rather than reacting to
+        everything said near it.
+      </p>
+      <p class="ln-lead">
+        It replies before it investigates — its one-line read of what is being asked, and how to
+        reach it again — so a misunderstanding surfaces immediately instead of ten minutes later
+        in the shape of the wrong fix. Then it goes quiet, works, and posts the resolution in two
+        halves: plain language for whoever is talking to the customer, and the root cause below
+        the divider for the devs.
       </p>
 
       <div class="ln-cards">
         <div class="ln-card">
           <h3>Support can ask, not authorize</h3>
           <p>
-            Two lists in Preferences decide who may summon the bot and whose word carries your
-            authority. Reading is free — reproduce it, explain it, confirm the bug is real.
-            Changing code, deploying, touching data: that waits on someone you named.
+            Who may summon the bot is enforced in Preferences — an <code>@mention</code> from
+            anyone else never reaches an agent. Above that, every delivered message arrives
+            tagged with its sender's tier and a standing rule: reading is free, but changing
+            code, deploying or touching data goes back to someone you named.
           </p>
         </div>
         <div class="ln-card">
