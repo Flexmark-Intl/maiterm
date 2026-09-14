@@ -1293,7 +1293,7 @@
           <Tooltip text={`Bridged to ${agentBridgeStore.getPartnerLabel(tab.id) ?? 'an agent'} — they can message this agent`}><span class="agent-bridge-indicator">⇄</span></Tooltip>
         {/if}
         {#if !isEditor && (tab.comms_bindings?.length ?? 0) > 0}
-          <Tooltip text={`Bound to ${tab.comms_bindings!.length > 1 ? `${tab.comms_bindings!.length} chat threads` : 'a chat thread'} — @mention replies steer this agent. Right-click → End thread binding to stop.`}><span class="comms-indicator">@{#if tab.comms_bindings!.length > 1}{tab.comms_bindings!.length}{/if}</span></Tooltip>
+          <Tooltip text={`Bound to ${tab.comms_bindings!.length > 1 ? `${tab.comms_bindings!.length} chat threads` : 'a chat thread'} — @mention replies steer this agent. Right-click → End thread binding${tab.comms_bindings!.length > 1 ? 's' : ''} to stop.`}><span class="comms-indicator">@{#if tab.comms_bindings!.length > 1}{tab.comms_bindings!.length}{/if}</span></Tooltip>
         {:else if !isEditor && tab.comms_monitor}
           <Tooltip text={`Chat monitoring ${tab.comms_monitor.channels.length} channel${tab.comms_monitor.channels.length === 1 ? '' : 's'} — @bot summons land here. Right-click → Chat monitoring… to change.`}><span class="comms-indicator comms-monitoring">@</span></Tooltip>
         {/if}
