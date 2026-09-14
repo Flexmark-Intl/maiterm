@@ -131,7 +131,7 @@ So "can you check whether X is broken?" gets an answer; "can you fix X" — or "
 
 ### An operator kill switch
 
-You can end a binding yourself at any time: right-click the tab and choose **End thread binding(s)**. On a tab working several threads at once this clears **all** of them; the agent releases individual threads on its own as it finishes them. This is the human override — **severing a binding never depends on the agent cooperating**, and it posts nothing to the thread. Forwarding stops within a few seconds.
+You can end a binding yourself at any time: right-click the tab and choose **End thread binding** — on a tab holding several, the item reads **End thread bindings** with the count, and clears **all** of them; the agent releases individual threads on its own as it finishes them. This is the human override — **severing a binding never depends on the agent cooperating**, and it posts nothing to the thread. Forwarding stops within a few seconds.
 
 ### A finished thread releases its slot
 

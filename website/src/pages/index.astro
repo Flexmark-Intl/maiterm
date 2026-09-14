@@ -36,10 +36,6 @@ const EVERYTHING = [
     body: 'Connect two running sessions — one local, one over SSH, a Claude Code and a Codex — so they ask each other questions directly, in a split pane you can watch.',
   },
   {
-    title: 'Resolve support threads in-terminal',
-    body: 'Watch your Mattermost channels; an <code>@mention</code> binds the thread to a dispatcher tab, which works the bug in that tab’s repo and posts the resolution back.',
-  },
-  {
     title: 'A composer, not a shell line',
     body: 'A multi-line dock under every terminal. Enter makes newlines, <code>Cmd+Enter</code> sends, drafts survive restarts, and pasted screenshots become attachments — uploaded automatically over SSH.',
   },
@@ -131,7 +127,7 @@ const EVERYTHING = [
           <h3>Your agents get a shared desk</h3>
           <p>
             One kanban board both sides work, a supervisor watching the whole window, agents
-            that can talk to each other, and your phone as a way in.
+            that can talk to each other, and ways in from your phone and your team's chat.
           </p>
         </li>
       </ol>
@@ -314,6 +310,61 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ---------------------------------------------------------- Chat threads */}
+  {/* Promoted out of the nine-card grid on 2026-09-13: work arriving from your
+      team and leaving answered is a whole axis, and one card could not carry it.
+      No screenshot here on purpose — a real Mattermost thread is a customer bug
+      report with real usernames on it, and staging a fake one convincingly is a
+      bigger job than this band is worth. */}
+  <section class="ln-band">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Chat threads</p>
+      <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
+      <p class="ln-lead">
+        A customer problem shows up in a Mattermost thread. Normally you read it, switch to
+        your editor, reproduce it, fix it, then come back and write up what you did. Point a
+        tab at that channel instead: an <code>@mention</code> of your bot binds the whole
+        thread to it — every message, plus the screenshots, logs and spec documents staged as
+        real files the agent can open — and it works the issue in <em>that tab's repository</em>.
+      </p>
+      <p class="ln-lead">
+        It replies before it investigates, with its own one-line read of what is being asked,
+        so a misunderstanding surfaces immediately instead of ten minutes later in the shape of
+        the wrong fix. Then it goes quiet, works, and posts the resolution in two halves: plain
+        language for whoever is talking to the customer, and the root cause below the divider
+        for the devs.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Support can ask, not authorize</h3>
+          <p>
+            Two lists in Preferences decide who may summon the bot and whose word carries your
+            authority. Reading is free — reproduce it, explain it, confirm the bug is real.
+            Changing code, deploying, touching data: that waits on someone you named.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Six threads, and a kill switch</h3>
+          <p>
+            One tab works up to six at once and queues the rest, telling a waiting thread it is
+            at capacity rather than leaving people wondering. The tab's right-click menu ends a
+            binding — every one of them on a busy tab — without the agent's cooperation.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>It can start the conversation</h3>
+          <p>
+            A regression it tripped over, a heads-up before a deploy, a question only a person
+            can settle — the agent opens its own thread in a channel you put on that tab's
+            list, <code>@mentions</code> whoever should see it, and stays bound for the replies.
+          </p>
+        </div>
+      </div>
+      <a class="ln-cta-link" href="/features/comms/">How chat threads work</a>
+    </div>
+  </section>
+
   {/* ------------------------------------------------------ Compatibility */}
   <section class="ln-band ln-band--sunken ln-band--tight">
     <div class="ln-inner compat">
@@ -361,8 +412,8 @@ const EVERYTHING = [
       <h2 class="ln-h2 ln-h2--wide">Free. All of it. There is no tier above this one.</h2>
       <p class="ln-lead">
         Not free-for-four-projects, not free-until-you-need-the-good-part. Overlord, mesh,
-        the shared board, the phone companion, SSH — every feature on this page is in the
-        build you download, and there is nothing to buy later.
+        the shared board, chat threads, the phone companion, SSH — every feature on this page
+        is in the build you download, and there is nothing to buy later.
       </p>
 
       <div class="ln-cards">
