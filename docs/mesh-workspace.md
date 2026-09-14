@@ -336,9 +336,10 @@ mesh_purpose: Option<String>,      // one-line human description
 status_note_id: Option<String>,    // the agent's owned workspace note
 ```
 
-The existing 1:1 `agent_bridge` field is superseded inside a mesh by roster membership
-(presence in a `bridge_all` workspace), but the in-memory `delivery`/queue machinery is
-unchanged.
+The existing 1:1 `agent_bridge` field is independent of roster membership (presence in a
+`bridge_all` workspace): a tab can hold a bridge AND sit on a mesh (2026-09-13). The two share
+one live delivery mailbox with owner-tagged slots, and the send tool routes by its arguments —
+see "A bridge and a mesh coexist on one tab" in `src-tauri/src/claude_code/CLAUDE.md`.
 
 ### TypeScript
 

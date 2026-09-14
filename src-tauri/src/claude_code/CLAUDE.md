@@ -70,8 +70,8 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | getClaudeSessions | All active Claude sessions across tabs (state, tool, model, cwd) — multi-agent coordination |
 | listArchivedTabs | List archived (suspended) tabs with names, dates, restore context |
 | restoreArchivedTab | Restore an archived tab back into the active workspace |
-| sendToBridgedAgent | Send a message to a peer agent. 1:1 bridge: omit recipient/topic. Mesh Workspace: recipient (role/handle) + topic required. Async — reply arrives as a new prompt turn |
-| getBridgedAgent | Report whether this tab is bridged and, if so, the partner's label/cwd (in a mesh, returns the roster) |
+| sendToBridgedAgent | Send a message to a peer agent. 1:1 bridge: omit recipient/topic (or name the partner). Mesh Workspace: recipient (role/handle) + topic required. A tab can have both — routing follows the ARGUMENTS, not membership. Async — reply arrives as a new prompt turn |
+| getBridgedAgent | Report whether this tab is bridged and, if so, the partner's label/cwd; in a mesh also the roster (`mesh`), both when the tab has both |
 | listBridgedPeers | Mesh only: roster of reachable peers — handle (tabId), role, cwd, purpose, live |
 | listTopics | Mesh only: conversation topics — id, label, state, owner, participants, turn count |
 | startTopic | Mesh only: start/reuse a topic (caller becomes owner); returns the topic id |
@@ -362,6 +362,31 @@ drops the fork flag so it resumes its own conversation like any Claude tab.
 **Injection:** bracketed paste (`ESC[200~ … ESC[201~`) + a deferred `\r` so multi-line
 messages stay one prompt and submit cleanly into Claude's TUI.
 
+**A bridge and a mesh coexist on one tab.** Either end of a bridge may also be a member of a
+mesh workspace; nothing tears a bridge down when a mesh is enabled, and the picker offers
+mesh members like any other tab. Three things make it actually work (2026-09-13):
+- **One live mailbox** — `agentDeliveryLive.ts` is the single `createDeliveryController`
+  both stores drive. Two instances gave such a tab two `injecting` guards, so a bridge paste
+  and a mesh paste could overlap on one PTY. Slots are owner-tagged (`claim`/`release` under
+  `DELIVERY_OWNER_BRIDGE` / `DELIVERY_OWNER_MESH`): a second claimant never resets the queue,
+  and the entry goes away only when the last owner releases it, so a bridge disconnect can't
+  drop what the mesh has queued. `+layout` destroys it once; the stores don't.
+- **Dispatch by arguments** (`handleSendToBridgedAgent`) — a `recipient` or `topic` goes to
+  the mesh; a bare message goes over the bridge when the tab has a live one, else to the
+  mesh; `recipient` naming the bridge partner (handle, label, or display name —
+  `matchesPartner`) is the bridge with the topic ignored. The old rule routed by membership
+  alone, which sent every mesh member's bare reply to the mesh — a silent misroute in a
+  2-agent mesh, where the router accepts an omitted recipient.
+- **Envelopes say which channel** — a bridge message to a mesh member tells it to reply with
+  NO recipient and NO topic (its mesh envelopes say the opposite), and the opener to a mesh
+  caller says the same. `getBridgedAgent` returns both views plus a `note` when both exist.
+
+Fork mode beside a caller that sits in a mesh workspace: the fork is custom-named
+(`forkSessionIntoSplit`), so it becomes a roster member once its agent registers and is
+primed by both — the bridge opener and the mesh opener, in order through the shared FIFO.
+That is the roster rule ("a named agent tab in a `bridge_all` workspace"), not an accident;
+"Connect existing tab" mode adds no member anywhere.
+
 ## Mesh Workspace (N:M agent bridging)
 
 A **Mesh Workspace** (`Workspace.bridge_all = true`) generalizes the 1:1 bridge: every agent
@@ -371,7 +396,8 @@ is headless (agents run in normal splits); the stage/filmstrip view is Phase 2.
 
 **Layered for testability** (each layer unit-tested, no Svelte/Tauri in the cores):
 - `src/lib/stores/agentDelivery.ts` — the recipient-keyed FIFO mailbox, **shared** with the
-  1:1 bridge (the mesh constructs its own controller instance).
+  1:1 bridge: ONE live instance (`agentDeliveryLive.ts`) with owner-tagged slots, so a tab
+  that is both a mesh member and a bridge partner has one inject guard and one queue.
 - `src/lib/stores/meshRouting.ts` — recipient resolution + the topic registry. Routing keys
   off the **stable tabId handle**, never the editable role name (rename can't misroute);
   ambiguous/unknown recipient → hard error with the roster (never a silent drop). Topics are
@@ -395,8 +421,9 @@ label). Tests: `meshRouting.test.ts` (18), `meshSend.test.ts` (8), Rust `mesh_to
 
 **MCP tools:** `sendToBridgedAgent` gains optional `recipient` + `topic` (required-by-context
 at runtime in a mesh, untouched for 1:1 — Codex #1); `listBridgedPeers`, `listTopics`,
-`startTopic`, `completeTopic`. Dispatch in `claudeCode.svelte.ts` routes to `agentMeshStore`
-when the tab is in a mesh workspace, else the 1:1 `agentBridgeStore`.
+`startTopic`, `completeTopic`. Dispatch in `claudeCode.svelte.ts` routes by the ARGUMENTS
+(recipient/topic → mesh; bare → the 1:1 bridge if the tab has one, else mesh), because a tab
+can be in both — see "A bridge and a mesh coexist on one tab" above.
 
 ## Claude Code Hooks Integration
 
