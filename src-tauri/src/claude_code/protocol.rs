@@ -494,20 +494,20 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "sendToBridgedAgent",
-            "description": "Send a message to a peer AI agent in another maiTerm pane. Two contexts: (1) a 1:1 Agent Bridge — omit `recipient`/`topic`, the message goes to your single bridged partner; (2) a Mesh Workspace — every agent here is reachable, so `recipient` (a peer's role name or tabId handle from listBridgedPeers) and `topic` (an existing topic id from listTopics, or a short new label to start a thread) are REQUIRED, and each message must be crafted for that one recipient (no broadcast). The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. maiTerm stamps your identity (role, cwd) and the topic on the message so the recipient knows it's from you, a peer agent, NOT from a human. If your exchange is complete, just stop — do not reply only to acknowledge.",
+            "description": "Send a message to a peer AI agent in another maiTerm pane. Two contexts, and you may be in BOTH at once: (1) a 1:1 Agent Bridge — omit `recipient`/`topic` (or set `recipient` to your bridged partner), the message goes to your single bridged partner; (2) a Mesh Workspace — every agent here is reachable, so `recipient` (a peer's role name or tabId handle from listBridgedPeers) and `topic` (an existing topic id from listTopics, or a short new label to start a thread) are REQUIRED, and each message must be crafted for that one recipient (no broadcast). Routing follows the arguments: a recipient or topic goes to the mesh; a bare message goes over your bridge if you have one, else to the mesh. getBridgedAgent shows which you have. The recipient's reply arrives later as a new turn in your own prompt — this is asynchronous, so finish your current turn after sending. maiTerm stamps your identity (role, cwd) and the topic on the message so the recipient knows it's from you, a peer agent, NOT from a human. If your exchange is complete, just stop — do not reply only to acknowledge.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "message": { "type": "string", "description": "The message. Be explicit: state who you are and why you're asking on first contact, then your question or information." },
-                    "recipient": { "type": "string", "description": "Mesh only: the peer to send to — its role name (exact, case-insensitive) or its tabId handle from listBridgedPeers. Omit in a 1:1 bridge." },
-                    "topic": { "type": "string", "description": "Mesh only: the conversation thread — an existing topic id from listTopics, or a short new label (e.g. 'auth-refactor') to start one (you become its owner). Omit in a 1:1 bridge." }
+                    "recipient": { "type": "string", "description": "Mesh: the peer to send to — its role name (exact, case-insensitive) or its tabId handle from listBridgedPeers. 1:1 bridge: omit, or name your bridged partner." },
+                    "topic": { "type": "string", "description": "Mesh only: the conversation thread — an existing topic id from listTopics, or a short new label (e.g. 'auth-refactor') to start one (you become its owner). Omit in a 1:1 bridge (a bridge has no topics)." }
                 },
                 "required": ["message"]
             }
         },
         {
             "name": "getBridgedAgent",
-            "description": "Check whether you are currently bridged to a peer AI agent and, if so, who. Returns the bridged agent's tab name, workspace, and working directory, or indicates that no bridge is active. Use this to discover the context of the agent you can reach via sendToBridgedAgent. In a Mesh Workspace use listBridgedPeers instead (there are many peers).",
+            "description": "Check whether you are currently bridged to a peer AI agent and, if so, who. Returns the bridged agent's tab name, workspace, and working directory, or indicates that no bridge is active. Use this to discover the context of the agent you can reach via sendToBridgedAgent. In a Mesh Workspace it also returns the mesh roster (`mesh`) — a tab can hold a 1:1 bridge and sit on a mesh at the same time; listBridgedPeers lists the mesh alone.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         },
         {

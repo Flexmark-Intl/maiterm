@@ -144,7 +144,7 @@ describe('performMeshSend × real delivery controller (routed to recipient queue
       liveState: (tabId) => live.has(tabId),
       awaitingHuman: () => false,
     });
-    ctl.ensure('t-mob', false);
+    ctl.claim('t-mob', 'mesh', false);
     deps = {
       router,
       deliver: (tabId, text) => ctl.deliver(tabId, text),

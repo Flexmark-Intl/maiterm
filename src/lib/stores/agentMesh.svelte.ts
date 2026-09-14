@@ -6,7 +6,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
-import { createDeliveryController } from '$lib/stores/agentDelivery';
+import { agentDelivery as deliveryCtl, DELIVERY_OWNER_MESH as OWNER } from '$lib/stores/agentDeliveryLive';
 import { createMeshRouter, roleName, MESH_ONBOARDED_VAR, MESH_FORMER_ROLES_VAR, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
 import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores/meshSend';
 import { createLoopController, type LoopReason } from '$lib/stores/meshLoopControl';
@@ -62,15 +62,9 @@ function createAgentMeshStore() {
   // Mesh workspaces we've already offered an auto re-check for this session (so switching
   // between workspaces doesn't re-prompt). Cleared on destroy.
   const autoRechecked = new Set<string>();
-  // Recipient-keyed FIFO mailbox, shared core with the 1:1 bridge (separate instance).
-  const deliveryCtl = createDeliveryController({
-    inject: (tabId, text) => injectPrompt(tabId, text),
-    liveState: (tabId) => !!claudeStateStore.getState(tabId),
-    awaitingHuman: (tabId) => {
-      const st = claudeStateStore.getState(tabId);
-      return !!st && getAdapter(workspacesStore.getTabRuntime(tabId)).isAwaitingHumanInput(st);
-    },
-  });
+  // Recipient-keyed FIFO mailbox: the ONE live controller (agentDeliveryLive.ts), shared
+  // with the 1:1 bridge — a tab can be on a mesh AND hold a bridge, and one PTY needs one
+  // inject guard. This store's slots are held under OWNER.
   // Per-topic loop control (§10): soft cap + hard ceiling + TTL, limits live from prefs.
   const loopCtl = createLoopController({
     limits: () => ({
@@ -269,23 +263,6 @@ function createAgentMeshStore() {
     logInfo(`agentMesh: topic sweep for ws ${wsId.slice(0, 8)} — auto-completed ${autoCompleted.length} stale open, expired ${expired.length} completed`);
   }
 
-  // ─── Injection (shared shape with the 1:1 bridge) ───────────────────────────
-
-  async function injectPrompt(tabId: string, text: string): Promise<boolean> {
-    const inst = terminalsStore.get(tabId);
-    if (!inst) {
-      logError(`agentMesh: cannot inject — no terminal instance for tab ${tabId.slice(0, 8)}`);
-      return false;
-    }
-    try {
-      await bracketedPasteSubmit(inst.ptyId, text);
-      return true;
-    } catch (e) {
-      logError(`agentMesh: inject failed for tab ${tabId.slice(0, 8)}: ${e}`);
-      return false;
-    }
-  }
-
   // ─── Envelope (identity + topic stamped by maiTerm) ─────────────────────────
 
   function buildEnvelope(senderTabId: string, topic: MeshTopic, turn: number, message: string): string {
@@ -347,15 +324,14 @@ function createAgentMeshStore() {
 
   // ─── Membership lifecycle ───────────────────────────────────────────────────
 
-  /** Ensure a delivery entry exists for a member (idempotent), keyed by its live state. */
+  /** Hold a delivery slot for a member (idempotent), created ready iff its agent is live. */
   function ensureMember(tabId: string) {
-    if (!deliveryCtl.has(tabId)) {
-      deliveryCtl.ensure(tabId, !!claudeStateStore.getState(tabId));
-    }
+    deliveryCtl.claim(tabId, OWNER, !!claudeStateStore.getState(tabId));
   }
 
+  /** Let go of the mesh's hold; a bridge holding the same slot keeps it (and its queue). */
   function removeMember(tabId: string) {
-    deliveryCtl.remove(tabId);
+    deliveryCtl.release(tabId, OWNER);
   }
 
   /** Prime a member on join: introduce it to the mesh once by injecting the opener. Idempotent
@@ -405,7 +381,7 @@ function createAgentMeshStore() {
     get version() { return version; },
 
     getInternalSizes() {
-      return { routers: routers.size, delivery: deliveryCtl.size(), edges: edges.length };
+      return { routers: routers.size, edges: edges.length };
     },
 
     /** Is this tab inside a mesh workspace? */
@@ -842,15 +818,16 @@ function createAgentMeshStore() {
 
     /** A tab is being closed — drop its mesh delivery slot. Topics persist (it may reopen). */
     handleTabClosed(tabId: string) {
-      if (deliveryCtl.has(tabId)) removeMember(tabId);
+      removeMember(tabId);
       primed.delete(tabId);
       for (const s of stage.values()) { if (s.left === tabId) s.left = null; if (s.right === tabId) s.right = null; }
       bump();
     },
 
-    /** Tab reload minted a new id — carry the delivery queue + priming state across. */
+    /** Tab reload minted a new id — carry the delivery queue + priming state across. The
+     *  delivery remap is a no-op when the bridge store already moved the shared slot. */
     remapTab(oldTabId: string, newTabId: string) {
-      if (oldTabId === newTabId || !deliveryCtl.has(oldTabId)) return;
+      if (oldTabId === newTabId) return;
       deliveryCtl.remap(oldTabId, newTabId);
       if (primed.has(oldTabId)) { primed.delete(oldTabId); primed.add(newTabId); }
       for (const s of stage.values()) { if (s.left === oldTabId) s.left = newTabId; if (s.right === oldTabId) s.right = newTabId; }
@@ -862,7 +839,7 @@ function createAgentMeshStore() {
       const u1 = await listen<{ tab_id: string | null; session_id: string }>('agent-init-session', (e) => {
         const tabId = e.payload.tab_id;
         if (!tabId || !meshWorkspaceForTab(tabId)) return;
-        deliveryCtl.markReadyOrCreate(tabId);
+        deliveryCtl.markReadyOrCreate(tabId, OWNER);
         void tryPrime(tabId); // a member just came online → prime it (idempotent)
         bump();
       });
@@ -911,7 +888,7 @@ function createAgentMeshStore() {
     destroy() {
       for (const u of unlisteners) u();
       unlisteners.length = 0;
-      deliveryCtl.destroy();
+      // The shared delivery controller is torn down once by +layout, not per store.
       loopCtl.reset();
       routers.clear();
       primed.clear();

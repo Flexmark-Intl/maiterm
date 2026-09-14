@@ -1520,21 +1520,43 @@ function createClaudeCodeStore() {
 
   // --- Agent Bridge tools ---
 
+  /** A tab can hold a 1:1 bridge AND sit on a mesh, so the send is routed by what the
+   *  caller ASKED for, not by where it sits: a recipient or topic names a mesh thread; a
+   *  bare message goes to the bridge partner when there is one. Routing by membership
+   *  alone (the old rule) sent every mesh member's bare reply to the mesh — in a 2-agent
+   *  mesh that is a silent misroute, since the router accepts an omitted recipient there. */
   async function handleSendToBridgedAgent(args: { tabId?: string; message: string; recipient?: string; topic?: string }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
-    // In a Mesh Workspace, route N:M (recipient + topic). Otherwise the 1:1 bridge.
-    if (agentMeshStore.isMeshTab(loc.tab.id)) {
-      return agentMeshStore.sendFromTab(loc.tab.id, { recipient: args.recipient, topic: args.topic, message: args.message });
+    const tabId = loc.tab.id;
+    const bridged = agentBridgeStore.isBridgedToLivePartner(tabId);
+    const inMesh = agentMeshStore.isMeshTab(tabId);
+    const recipient = args.recipient?.trim() ?? '';
+    // Naming the bridge partner as `recipient` is still the bridge (topic ignored).
+    if (bridged && recipient && agentBridgeStore.matchesPartner(tabId, recipient)) {
+      const r = await agentBridgeStore.sendFromTab(tabId, args.message);
+      return args.topic && r.ok ? { ...r, note: `${r.note} (Sent over your 1:1 bridge — it has no topics, so "${args.topic}" was ignored.)` } : r;
     }
-    return agentBridgeStore.sendFromTab(loc.tab.id, args.message);
+    if (inMesh && (recipient || args.topic || !bridged)) {
+      return agentMeshStore.sendFromTab(tabId, { recipient: args.recipient, topic: args.topic, message: args.message });
+    }
+    return agentBridgeStore.sendFromTab(tabId, args.message);
   }
 
+  /** Both views at once: the 1:1 partner (if any) and the mesh roster (if any), so a tab
+   *  that has both can see both. Shape is unchanged for a tab that has only one. */
   function handleGetBridgedAgent(args: { tabId?: string }) {
     const loc = resolveActiveTab(args.tabId);
     if ('error' in loc) return loc;
-    if (agentMeshStore.isMeshTab(loc.tab.id)) return agentMeshStore.listPeers(loc.tab.id);
-    return agentBridgeStore.getBridgeInfo(loc.tab.id);
+    const bridge = agentBridgeStore.getBridgeInfo(loc.tab.id);
+    if (!agentMeshStore.isMeshTab(loc.tab.id)) return bridge;
+    const mesh = agentMeshStore.listPeers(loc.tab.id);
+    if (!bridge.bridged) return { ...mesh, bridged: false };
+    return {
+      ...bridge,
+      mesh,
+      note: 'You hold a 1:1 bridge AND sit on a mesh. sendToBridgedAgent with no recipient/topic (or recipient = your partner) goes over the bridge; a recipient/topic goes to the mesh.',
+    };
   }
 
   function handleListBridgedPeers(args: { tabId?: string }) {

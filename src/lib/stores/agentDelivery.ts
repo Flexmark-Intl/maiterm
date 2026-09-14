@@ -21,6 +21,13 @@
  * human prompt (permission / elicitation), is not mid-cooldown, and has no inject in flight.
  * `busy` is a short post-inject cooldown that auto-clears, so the queue can never wedge.
  * A drain poller backstops anything queued while held; it self-stops when all queues empty.
+ *
+ * One instance serves BOTH the bridge and the mesh (agentDeliveryLive.ts): a tab can hold a
+ * 1:1 bridge and sit on a mesh at the same time, and two controllers would mean two
+ * `injecting` guards for one PTY — the interleaving this module exists to prevent. So a
+ * slot is OWNED, not created: each consumer `claim`s it under its own tag and `release`s
+ * its tag; the entry (and its queue) goes away only when the last owner lets go, so a
+ * bridge disconnect can't drop messages the mesh has queued for the same tab.
  */
 
 export interface DeliveryState {
@@ -30,6 +37,9 @@ export interface DeliveryState {
   busy: boolean;
   /** Framed envelopes waiting to be delivered to this tab. */
   queue: string[];
+  /** Consumers holding this slot ('bridge', 'mesh'). Empty = created by markReadyOrCreate
+   *  without an owner; a release by anyone then removes it. */
+  owners: Set<string>;
   busyTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -164,21 +174,40 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
     queueDepth(tabId: string) { return delivery.get(tabId)?.queue.length ?? 0; },
     isReady(tabId: string) { return delivery.get(tabId)?.ready ?? false; },
 
-    /** Create (or replace) a fresh delivery entry for a tab. */
-    ensure(tabId: string, ready: boolean) {
-      delivery.set(tabId, { ready, busy: false, queue: [] });
+    /** Claim a tab's delivery slot for `owner`. Creates the entry (with `ready`) if absent;
+     *  an existing one is kept as-is — its queue and readiness belong to every owner, so a
+     *  second claimant never resets what the first has in flight. Idempotent per owner. */
+    claim(tabId: string, owner: string, ready: boolean) {
+      const d = delivery.get(tabId);
+      if (d) { d.owners.add(owner); return; }
+      delivery.set(tabId, { ready, busy: false, queue: [], owners: new Set([owner]) });
     },
 
-    remove(tabId: string) {
+    /** Drop `owner`'s claim. The entry — queue included — is removed only when no owner
+     *  remains, so one consumer leaving can't discard another's queued messages. No-op if
+     *  `owner` never claimed it, EXCEPT for an ownerless entry (markReadyOrCreate without an
+     *  owner), which any release removes. */
+    release(tabId: string, owner: string) {
       const d = delivery.get(tabId);
-      if (d?.busyTimer) clearTimeout(d.busyTimer);
+      if (!d) return;
+      d.owners.delete(owner);
+      if (d.owners.size > 0) return;
+      if (d.busyTimer) clearTimeout(d.busyTimer);
       delivery.delete(tabId);
     },
 
-    /** Carry a tab's queue to a new id (tab reload mints a new id). Forces not-ready so
-     *  nothing injects into a booting shell until the new id re-inits. */
+    /** Does `owner` currently hold this tab's slot? */
+    ownedBy(tabId: string, owner: string) {
+      return delivery.get(tabId)?.owners.has(owner) ?? false;
+    },
+
+    /** Carry a tab's queue (and owners) to a new id (tab reload mints a new id). Forces
+     *  not-ready so nothing injects into a booting shell until the new id re-inits.
+     *  Idempotent: the bridge and the mesh both call it for one reload, and the second
+     *  call finds nothing under the old id. */
     remap(oldId: string, newId: string) {
-      const d = delivery.get(oldId) ?? { ready: false, busy: false, queue: [] };
+      const d = delivery.get(oldId);
+      if (!d) return;
       delivery.delete(oldId);
       if (d.busyTimer) { clearTimeout(d.busyTimer); d.busyTimer = undefined; }
       d.ready = false;
@@ -196,10 +225,12 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
       void flush(tabId);
     },
 
-    /** Like markReady but creates the entry if missing (resume/rehydrate path). */
-    markReadyOrCreate(tabId: string) {
-      if (!delivery.has(tabId)) delivery.set(tabId, { ready: true, busy: false, queue: [] });
+    /** Like markReady but creates the entry if missing (resume/rehydrate path), claimed for
+     *  `owner` when one is given. */
+    markReadyOrCreate(tabId: string, owner?: string) {
+      if (!delivery.has(tabId)) delivery.set(tabId, { ready: true, busy: false, queue: [], owners: new Set() });
       const d = delivery.get(tabId)!;
+      if (owner) d.owners.add(owner);
       d.ready = true;
       releaseCooldown(tabId);
       void flush(tabId);

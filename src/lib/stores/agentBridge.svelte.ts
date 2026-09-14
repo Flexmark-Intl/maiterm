@@ -4,10 +4,10 @@ import type { AgentBridge } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
+import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import type { AgentRuntime } from '$lib/agents/types';
-import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
-import { createDeliveryController } from '$lib/stores/agentDelivery';
+import { agentDelivery as deliveryCtl, injectPrompt, DELIVERY_OWNER_BRIDGE as OWNER } from '$lib/stores/agentDeliveryLive';
 import { roleName } from '$lib/stores/meshRouting';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
@@ -47,6 +47,12 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
  * Bridges are self-healing: at send time the recipient must still have a live Claude
  * session; if its session id drifted (it resumed) the bridge re-binds rather than
  * breaking, and a closed tab tears the bridge down cleanly.
+ *
+ * A bridge is independent of the Mesh: either end may also be a member of a mesh
+ * workspace. The two share ONE delivery mailbox (agentDeliveryLive.ts) so their pastes
+ * can't interleave on a shared PTY, and the send tool routes by what the caller asked for
+ * (claudeCode.svelte.ts handleSendToBridgedAgent) — a bare message goes over the bridge,
+ * a recipient/topic goes to the mesh. Envelopes to a mesh member say so explicitly.
  */
 
 const FORK_BOOT_POLL_MS = 500;       // poll interval while waiting for the fork's Claude to register
@@ -79,16 +85,6 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 function createAgentBridgeStore() {
   // Both tabs of a bridge get an entry pointing at each other (symmetric).
   const bridges = new Map<string, BridgeEntry>();
-  // Recipient-keyed FIFO delivery mailbox (queue + cooldown + drain), shared with the mesh.
-  // injectPrompt is hoisted (function declaration), so referencing it here is safe.
-  const deliveryCtl = createDeliveryController({
-    inject: (tabId, text) => injectPrompt(tabId, text),
-    liveState: (tabId) => !!claudeStateStore.getState(tabId),
-    awaitingHuman: (tabId) => {
-      const st = claudeStateStore.getState(tabId);
-      return !!st && getAdapter(workspacesStore.getTabRuntime(tabId)).isAwaitingHumanInput(st);
-    },
-  });
   // Forked partners awaiting init → opener-into-caller (keyed by fork tab id).
   const pendingOpeners = new Map<string, { callerTabId: string }>();
   // Best-effort cwd label when live OSC cwd isn't available yet.
@@ -148,45 +144,32 @@ function createAgentBridgeStore() {
     }
   }
 
-  // ─── Injection ──────────────────────────────────────────────────────────────
-
-  /** Write a prompt into a tab's PTY as a bracketed paste, then submit with CR.
-   *  Bracketed paste keeps multi-line content as one prompt (newlines don't submit
-   *  early); the deferred, settle-scaled CR submits it. Shares bracketedPasteSubmit
-   *  with the composer dock so the submit timing can't drift apart — a too-short gap
-   *  here was dropping the CR on long replies (a 20-line message stages as
-   *  `[Pasted text]` but never sends). */
-  async function injectPrompt(tabId: string, text: string): Promise<boolean> {
-    const inst = terminalsStore.get(tabId);
-    if (!inst) {
-      logError(`agentBridge: cannot inject — no terminal instance for tab ${tabId.slice(0, 8)}`);
-      return false;
-    }
-    try {
-      await bracketedPasteSubmit(inst.ptyId, text);
-      return true;
-    } catch (e) {
-      logError(`agentBridge: inject failed for tab ${tabId.slice(0, 8)}: ${e}`);
-      return false;
-    }
-  }
-
   // ─── Delivery ─────────────────────────────────────────────────────────────────
-  // The recipient-keyed FIFO mailbox (gating, cooldown, queue, drain) lives in the shared
-  // agentDelivery controller (deliveryCtl above). agentBridge wires the PTY write + liveness
-  // + awaiting-human predicates and otherwise drives it via deliveryCtl.deliver / .markReady
-  // / .ensure / .remap / .remove. injectPrompt (above) is also used directly for one-off
-  // writes that intentionally bypass the queue (fork re-init directive, disconnect notice).
+  // The recipient-keyed FIFO mailbox (gating, cooldown, queue, drain) is the live
+  // controller in agentDeliveryLive.ts, shared with the mesh; this store holds its slots
+  // under OWNER and drives it via deliveryCtl.deliver / .markReady / .claim / .remap /
+  // .release. injectPrompt (same module) is used directly for one-off writes that
+  // intentionally bypass the queue (fork re-init directive, disconnect notice).
 
   // ─── Envelopes (identity stamped by maiTerm) ──────────────────────────────────
 
-  function buildEnvelope(senderTabId: string, message: string, turn: number): string {
+  /** How the recipient replies over THIS bridge. A mesh member's sendToBridgedAgent
+   *  routes to the mesh whenever it names a recipient or topic (the dispatch in
+   *  claudeCode.svelte.ts), and its mesh envelopes tell it to tag a topic — so a bridge
+   *  message to such a tab has to say the opposite, or the reply lands on the mesh. */
+  function replyHint(recipientTabId: string): string {
+    return agentMeshStore.isMeshTab(recipientTabId)
+      ? `Reply with the sendToBridgedAgent tool with NO recipient and NO topic — this is your 1:1 bridge, not your mesh.`
+      : `Reply with the sendToBridgedAgent tool.`;
+  }
+
+  function buildEnvelope(senderTabId: string, recipientTabId: string, message: string, turn: number): string {
     const name = label(senderTabId);
     const cwd = getCwd(senderTabId);
     const where = cwd ? `, working in ${cwd}` : '';
     return (
       `⟦AGENT-BRIDGE⟧ Message from "${name}"${where} — a peer AI agent, NOT your human operator. [turn ${turn}]\n` +
-      `Reply with the sendToBridgedAgent tool. If this fully answers the request, you can stop — don't reply just to acknowledge.\n\n` +
+      `${replyHint(recipientTabId)} If this fully answers the request, you can stop — don't reply just to acknowledge.\n\n` +
       message
     );
   }
@@ -201,8 +184,11 @@ function createAgentBridgeStore() {
       : `a peer AI agent running in another tab`;
     const purpose = bridge?.purpose?.trim();
     const ctx = purpose ? ` Your human operator describes it as: "${purpose}".` : '';
+    const meshNote = agentMeshStore.isMeshTab(callerTabId)
+      ? ` This bridge is separate from your mesh: to reach this peer call sendToBridgedAgent with NO recipient and NO topic; a recipient or topic still goes to the mesh.`
+      : '';
     return (
-      `⟦AGENT-BRIDGE⟧ You are now bridged to "${partnerName}"${where} — ${what}.${ctx}\n\n` +
+      `⟦AGENT-BRIDGE⟧ You are now bridged to "${partnerName}"${where} — ${what}.${ctx}${meshNote}\n\n` +
       `Don't message it yet. First check in with your human operator: tell them the bridge is ready, summarize in a sentence what this peer can help with, and propose 2-3 specific things you could ask it that are relevant to your current work. Then wait for the human to say what to consult it about.\n\n` +
       `When the human gives the go-ahead, use the sendToBridgedAgent tool — open by identifying yourself (who you are, what you're working on) and why you're reaching out, then ask. The peer's replies arrive here as new prompts; when you have what you need, just stop.`
     );
@@ -210,10 +196,10 @@ function createAgentBridgeStore() {
 
   /** Heads-up delivered to an EXISTING tab that the human just bridged into (it didn't
    *  initiate and isn't a fork, so prime it like primeFork primes a fork). */
-  function buildExistingBridgeNotice(peerLabel: string): string {
+  function buildExistingBridgeNotice(targetTabId: string, peerLabel: string): string {
     return (
       `⟦AGENT-BRIDGE⟧ You have been bridged to a peer AI agent ("${peerLabel}") via maiTerm Agent Bridge — a peer agent in another tab, NOT your human operator. ` +
-      `It may reach out to consult you; its messages arrive here as new prompts. Reply with the sendToBridgedAgent tool. ` +
+      `It may reach out to consult you; its messages arrive here as new prompts. ${replyHint(targetTabId)} ` +
       `There's nothing to do until its message arrives — carry on with your work.`
     );
   }
@@ -258,7 +244,7 @@ function createAgentBridgeStore() {
   // ─── Lifecycle: bridge / disconnect ────────────────────────────────────────────────
 
   function cleanup(tabId: string) {
-    deliveryCtl.remove(tabId);
+    deliveryCtl.release(tabId, OWNER);
     bridges.delete(tabId);
     pendingOpeners.delete(tabId);
     cwdHint.delete(tabId);
@@ -268,7 +254,7 @@ function createAgentBridgeStore() {
     get version() { return version; },
 
     getInternalSizes() {
-      return { bridges: bridges.size, delivery: deliveryCtl.size(), pending_openers: pendingOpeners.size };
+      return { bridges: bridges.size, pending_openers: pendingOpeners.size };
     },
 
     isBridged(tabId: string): boolean {
@@ -350,6 +336,20 @@ function createAgentBridgeStore() {
       return bridges.get(tabId)?.partnerLabel ?? null;
     },
 
+    /** Does a `recipient` argument name this tab's bridge partner? Matches the partner's
+     *  tabId handle, its full label, or its display name (case-insensitive) — so a mesh
+     *  member that addresses its bridge partner the way it addresses mesh peers still
+     *  goes over the bridge instead of getting a "not on the mesh" error. */
+    matchesPartner(tabId: string, recipient: string): boolean {
+      const bridge = bridges.get(tabId);
+      if (!bridge) return false;
+      const r = recipient.trim().toLowerCase();
+      if (!r) return false;
+      if (r === bridge.partnerTabId.toLowerCase()) return true;
+      if (r === bridge.partnerLabel.toLowerCase()) return true;
+      return r === label(bridge.partnerTabId).toLowerCase();
+    },
+
     /** For the getBridgedAgent MCP tool. */
     getBridgeInfo(tabId: string) {
       const bridge = bridges.get(tabId);
@@ -409,8 +409,8 @@ function createAgentBridgeStore() {
       bridges.set(partnerTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: 0, partnerSessionId: callerSessionId, role: 'fork' });
       // Caller is a live, established agent → ready now. The forked partner becomes
       // ready when its initSession lands.
-      deliveryCtl.ensure(callerTabId, true);
-      deliveryCtl.ensure(partnerTabId, false);
+      deliveryCtl.claim(callerTabId, OWNER, true);
+      deliveryCtl.claim(partnerTabId, OWNER, false);
       if (target.cwd) cwdHint.set(partnerTabId, target.cwd);
       const callerCwd = getCwd(callerTabId);
       if (callerCwd) cwdHint.set(callerTabId, callerCwd);
@@ -470,8 +470,8 @@ function createAgentBridgeStore() {
       // claudeState immediately, each records the other's live session id.
       bridges.set(callerTabId, { partnerTabId: targetTabId, partnerLabel: targetLabel, turn: callerTurn, partnerSessionId: targetState.sessionId, role: 'caller', purpose: purpose?.trim() || undefined });
       bridges.set(targetTabId, { partnerTabId: callerTabId, partnerLabel: callerLabel, turn: targetTurn, partnerSessionId: callerState?.sessionId, role: 'peer' });
-      deliveryCtl.ensure(callerTabId, true);
-      deliveryCtl.ensure(targetTabId, true);
+      deliveryCtl.claim(callerTabId, OWNER, true);
+      deliveryCtl.claim(targetTabId, OWNER, true);
       const callerCwd = getCwd(callerTabId); if (callerCwd) cwdHint.set(callerTabId, callerCwd);
       const targetCwd = getCwd(targetTabId); if (targetCwd) cwdHint.set(targetTabId, targetCwd);
 
@@ -483,7 +483,7 @@ function createAgentBridgeStore() {
         logInfo(`agentBridge: repaired existing bridge ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)}`);
       } else {
         // Prime the target (it didn't initiate) and have the caller introduce itself.
-        void deliveryCtl.deliver(targetTabId, buildExistingBridgeNotice(callerLabel));
+        void deliveryCtl.deliver(targetTabId, buildExistingBridgeNotice(targetTabId, callerLabel));
         void deliveryCtl.deliver(callerTabId, buildOpener(callerTabId, targetTabId, false));
         logInfo(`agentBridge: bridged existing ${callerTabId.slice(0, 8)} ⇄ ${targetTabId.slice(0, 8)} (no fork)`);
       }
@@ -520,7 +520,7 @@ function createAgentBridgeStore() {
       }
       bridge.turn += 1;
       void persistBridge(senderTabId); // keep the turn counter durable
-      const text = buildEnvelope(senderTabId, message, bridge.turn);
+      const text = buildEnvelope(senderTabId, recipient, message, bridge.turn);
       const status = await deliveryCtl.deliver(recipient, text);
       const recipName = bridge.partnerLabel;
       if (status === 'delivered') {
@@ -597,7 +597,7 @@ function createAgentBridgeStore() {
             partner.partnerSessionId = session_id;
             void persistBridge(bridge.partnerTabId);
           }
-          deliveryCtl.markReadyOrCreate(tab_id);
+          deliveryCtl.markReadyOrCreate(tab_id, OWNER);
           bump();
           logInfo(`agentBridge: ${tab_id.slice(0, 8)} re-initialized → bridge re-bound`);
         }
@@ -665,7 +665,7 @@ function createAgentBridgeStore() {
         // up yet → ready=false; the init handler flips it on resume. If already live
         // (e.g. webview reload), start ready.
         const live = !!claudeStateStore.getState(tabId);
-        deliveryCtl.ensure(tabId, live);
+        deliveryCtl.claim(tabId, OWNER, live);
         restored++;
       }
       if (restored) { bump(); logInfo(`agentBridge: rehydrated ${restored / 2} bridge(s) from persisted state`); }
@@ -674,7 +674,7 @@ function createAgentBridgeStore() {
     destroy() {
       for (const u of unlisteners) u();
       unlisteners.length = 0;
-      deliveryCtl.destroy();
+      // The shared delivery controller is torn down once by +layout, not per store.
       bridges.clear();
       pendingOpeners.clear();
       cwdHint.clear();

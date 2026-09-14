@@ -24,6 +24,7 @@
   import { stackStore } from '$lib/stores/stack.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
+  import { agentDelivery } from '$lib/stores/agentDeliveryLive';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
   import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
@@ -1192,6 +1193,7 @@
       stackStore.destroy();
       agentBridgeStore.destroy();
       agentMeshStore.destroy();
+      agentDelivery.destroy(); // the mailbox both of them share
       unlistenNotificationAction?.unregister();
       unlistenFocus?.();
       unlistenResize?.();
