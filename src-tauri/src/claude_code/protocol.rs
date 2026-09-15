@@ -912,7 +912,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
                     "tab_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "TARGET tab ids — archive several in one call (max 50). Each is guarded, ledgered and reported on its own, so one refusal does not stop the rest: the result is `{ results: [{ tab_id, ok, reason, detail }], archived, refused }`. Prefer this over one call per tab."
+                        "description": "TARGET tab ids — archive several in one call (max 50). Each is guarded, ledgered and reported on its own, so one refusal does not stop the rest: the result is `{ ok, succeeded, refused, results: [{ tab_id, ok, reason, detail }] }`. Top-level `ok` is true ONLY when every tab was archived — check it before reporting a sweep as clean, and read `results` for the ones that were refused. Prefer this over one call per tab."
                     }
                 }
             }
@@ -928,7 +928,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
                     "tab_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "TARGET tab ids — close several in one call (max 50). Each is guarded, ledgered and reported on its own: `{ results: [{ tab_id, ok, reason, detail }], closed, refused }`. Irreversible per row — list only tabs you have individually judged finished."
+                        "description": "TARGET tab ids — close several in one call (max 50). Each is guarded, ledgered and reported on its own: `{ ok, succeeded, refused, results: [{ tab_id, ok, reason, detail }] }`. Top-level `ok` is true ONLY when every tab was closed; `succeeded` counts the ones that were, and `results` says why the rest were not. Irreversible per row — list only tabs you have individually judged finished."
                     }
                 }
             }
@@ -956,7 +956,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
                     "tab_ids": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Archived tab ids — prune several in one call (max 50). Each is reported on its own: `{ results: [{ tab_id, ok, reason, detail }], deleted, refused }`."
+                        "description": "Archived tab ids — prune several in one call (max 50). Each is reported on its own: `{ ok, succeeded, refused, results: [{ tab_id, ok, reason, detail }] }`. Top-level `ok` is true ONLY when every id was deleted; `succeeded` counts the ones that were."
                     }
                 }
             }

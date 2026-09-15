@@ -3778,10 +3778,14 @@ function createOverlordStore() {
      * Close a finished session — IRREVERSIBLE. Kills the PTY, tears down bridges, keeps no
      * archive entry.
      *
-     * Deliberately has no bulk form and no rule: Overlord never does an irreversible thing
-     * on its own, which is the same line that keeps `stopped` agents out of bulk recovery
-     * and task deletion out of the MCP surface. One tab, one explicit click, behind a
-     * confirmation in the UI.
+     * Deliberately has no bulk form on the DECK and no rule: Overlord never does an
+     * irreversible thing on its own, which is the same line that keeps `stopped` agents out
+     * of bulk recovery and task deletion out of the MCP surface. One tab, one explicit click,
+     * behind a confirmation in the UI.
+     *
+     * `retireTabs` is not a counter-example. A rule firing `closeTab` on a timer is the thing
+     * that line forbids; an agent naming fifty tabs it has judged finished is fifty judgements
+     * sent down one wire, each still guarded and ledgered on its own.
      */
     async closeSpentTab(tabId: string): Promise<boolean> {
       if (!isBoardableTab(tabId)) return false;
