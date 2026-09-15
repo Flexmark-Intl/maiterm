@@ -232,37 +232,129 @@
   //
   // Two drop surfaces, one gesture each: a LANE changes status, an index ROW changes which
   // job the task belongs to. The ‹ › buttons remain the pointer-free path.
+  //
+  // **POINTER EVENTS, NOT HTML5 DRAG-AND-DROP — and this is not a style preference.**
+  // `draggable` + ondragover/ondrop cannot work anywhere in this app. Tauri installs a
+  // native drag-drop handler on the webview whenever `dragDropEnabled` is on (it defaults
+  // to on, and we depend on it: dropping files on a terminal SCPs them to the remote host,
+  // and the composer dock takes attachments the same way — see ComposerDock.svelte). That
+  // handler is NOT limited to file drags. wry calls it for every drag entering the webview
+  // and forwards to the OS default only if it returns false (`wkwebview/drag_drop.rs`), and
+  // Tauri's handler returns `true` unconditionally, without so much as looking at the
+  // pasteboard (`tauri-runtime-wry/src/lib.rs`). So WKWebView never sees the drop and no
+  // `dragover`/`drop` event ever reaches the page — including for a drag that started
+  // inside it. The card picked up and the drop went nowhere, on every lane, full or empty.
+  //
+  // This board was the only HTML5 DnD left in the app; tab reordering
+  // (`TerminalTabs.svelte`) and workspace reordering (`WorkspaceSidebar.svelte`) were
+  // already written this way. Match them, and do not reintroduce `draggable` here.
+
+  const DRAG_THRESHOLD = 5;
 
   let dragging = $state<string | null>(null);
   let dragLane = $state<TaskStatus | null>(null);
   let dragRow = $state<string | null>(null);
+
+  /** Pressed, but not past the threshold yet — a click until it moves far enough. */
+  let pendingDrag: string | null = null;
+  let dragStartX = 0;
+  let dragStartY = 0;
+  let ghost: HTMLElement | null = null;
+  /** Suppresses the `click` that follows a real drag, so releasing over a lane does not
+   *  also toggle the card's detail panel (the title is a button and is grabbable). */
+  let justDragged = false;
 
   const draggingWs = $derived(
     dragging ? (overlordStore.tasks.find((t) => t.id === dragging)?.workspace_id ?? null) : null,
   );
 
   function endDrag() {
+    document.removeEventListener('keydown', onDragKey);
+    ghost?.remove();
+    ghost = null;
+    // However the drag ended — dropped, cancelled with Escape, or the pointer taken away —
+    // the press that started it was a drag and not a click on the title underneath it.
+    if (dragging) {
+      justDragged = true;
+      requestAnimationFrame(() => { justDragged = false; });
+    }
     dragging = null;
     dragLane = null;
     dragRow = null;
+    pendingDrag = null;
   }
 
-  function onDragStart(e: DragEvent, taskId: string) {
-    dragging = taskId;
-    e.dataTransfer?.setData('text/plain', taskId);
-    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  function onDragKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') endDrag();
   }
 
-  function dropped(e: DragEvent): TaskRow | null {
-    e.preventDefault();
-    const id = dragging ?? e.dataTransfer?.getData('text/plain');
+  function onCardPointerDown(e: PointerEvent, taskId: string) {
+    if (e.button !== 0) return;
+    // The card is mostly controls — the steppers, View/Send, and the delete ×. Those stay
+    // immediately clickable; everything else (head, title, detail) is the grab area.
+    if ((e.target as HTMLElement).closest('.card-foot, .card-meta, .tick-del')) return;
+    pendingDrag = taskId;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+  }
+
+  function onCardPointerMove(e: PointerEvent) {
+    if (!pendingDrag && !dragging) return;
+
+    if (pendingDrag && !dragging) {
+      if (Math.abs(e.clientX - dragStartX) < DRAG_THRESHOLD && Math.abs(e.clientY - dragStartY) < DRAG_THRESHOLD) return;
+      dragging = pendingDrag;
+      pendingDrag = null;
+      const card = (e.currentTarget as HTMLElement);
+      // Captured HERE and not on pointerdown, deliberately. The title is a <button> and is
+      // part of the grab area, so capturing on press would put its click in doubt for every
+      // ordinary tap; by the time the pointer has travelled the threshold this is a drag and
+      // no longer a click. Nothing is lost — the first move past 5px is still over the card.
+      card.setPointerCapture(e.pointerId);
+      ghost = card.cloneNode(true) as HTMLElement;
+      ghost.classList.add('card-ghost');
+      ghost.style.width = `${card.getBoundingClientRect().width}px`;
+      document.body.appendChild(ghost);
+      document.addEventListener('keydown', onDragKey);
+    }
+    if (!dragging || !ghost) return;
+
+    ghost.style.left = `${e.clientX}px`;
+    ghost.style.top = `${e.clientY}px`;
+
+    // Hit-test by rect rather than elementFromPoint: the ghost sits under the cursor, and
+    // the lane bodies scroll, so the topmost element there is rarely the drop surface.
+    dragLane = hitTest<TaskStatus>('[data-lane]', 'lane', e);
+    dragRow = hitTest<string>('[data-stream-key]', 'streamKey', e);
+  }
+
+  /** The `data-*` value of the first element under the pointer, or null. */
+  function hitTest<T extends string>(selector: string, key: string, e: PointerEvent): T | null {
+    for (const el of document.querySelectorAll<HTMLElement>(selector)) {
+      const r = el.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+        return (el.dataset[key] as T) ?? null;
+      }
+    }
+    return null;
+  }
+
+  function onCardPointerUp(e: PointerEvent) {
+    // Only held while a drag is live (see onCardPointerMove), so a plain click never took it.
+    if (!dragging) { pendingDrag = null; return; }
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    const t = overlordStore.tasks.find((x) => x.id === dragging) ?? null;
+    const lane = dragLane;
+    const row = dragRow;
     endDrag();
-    return id ? (overlordStore.tasks.find((t) => t.id === id) ?? null) : null;
+    if (!t) return;
+    // A row is inside the rail and a lane is inside the board, so they never overlap —
+    // but resolve the row first, since dropping on the index is the more specific intent.
+    if (row !== null) dropOnStream(t, row);
+    else if (lane !== null) dropOnLane(t, lane);
   }
 
-  function dropOnLane(e: DragEvent, lane: TaskStatus) {
-    const t = dropped(e);
-    if (!t) return;
+  function dropOnLane(t: TaskRow, lane: TaskStatus) {
     // Compare against the EFFECTIVE status — the lane the card is actually rendered in.
     // Comparing the stored one meant dropping a dependency-blocked card back on Blocked
     // rewrote its stored status to 'blocked', so it never returned to Active when the
@@ -271,11 +363,11 @@
     if (effectiveStatus(t, all, workspacesStore.parkedTaskIds) !== lane) tasksStore.setStatus(t.workspace_id, t.id, lane);
   }
 
-  function dropOnStream(e: DragEvent, entry: StreamEntry) {
-    const t = dropped(e);
+  function dropOnStream(t: TaskRow, rowKey: string) {
+    const entry = rail.find((r) => r.key === rowKey);
     // Refuse a cross-workspace move rather than silently relocating a task between
     // projects: the lists persist per workspace, and the tab assignment travels with it.
-    if (!t || t.workspace_id !== entry.wsId) return;
+    if (!entry || t.workspace_id !== entry.wsId) return;
     if ((t.workstream_id ?? null) !== entry.streamId) {
       tasksStore.update(t.workspace_id, t.id, { workstream_id: entry.streamId });
     }
@@ -502,10 +594,8 @@
             class:dimmed={e.suspended}
             class:drop={dragRow === e.key && draggingWs === e.wsId}
             class:deny={dragRow === e.key && draggingWs !== null && draggingWs !== e.wsId}
+            data-stream-key={e.key}
             onclick={() => (selected = e.key)}
-            ondragover={(ev) => { ev.preventDefault(); dragRow = e.key; }}
-            ondragleave={() => { if (dragRow === e.key) dragRow = null; }}
-            ondrop={(ev) => dropOnStream(ev, e)}
           >
             <span class="ov-dot" style:--tone={pipTone(e)}></span>
             <span class="row-name" class:loose={!e.name}>{e.name ?? 'Unfiled'}</span>
@@ -622,20 +712,17 @@
         </div>
       </Tooltip>
 
-      <div class="lanes">
+      <div class="lanes" style:--lane-count={LANES.length}>
         {#each LANES as lane, li (lane)}
           {@const cards = current.lanes[lane]}
           {@const shown = isEverything ? cards.slice(0, LANE_CAP) : cards}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="lane ov-in"
             class:parked={lane === 'backlog' || lane === 'dropped'}
             class:drop={dragLane === lane}
             style:--i={li}
             style:--lane={laneTone(lane)}
-            ondragover={(e) => { e.preventDefault(); dragLane = lane; }}
-            ondragleave={() => { if (dragLane === lane) dragLane = null; }}
-            ondrop={(e) => dropOnLane(e, lane)}
+            data-lane={lane}
           >
             <div class="lane-head">
               <span class="ov-label lane-name">{laneLabel(lane)}</span>
@@ -648,14 +735,16 @@
                 <!-- The accent marks "an agent put this here", covering both a task created
                      over MCP ('agent') and one imported from a runtime's own list
                      ('imported'). Testing for 'agent' alone would miss every importer row. -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
                   class="card"
                   class:from-agent={t.origin === 'agent' || t.origin === 'imported'}
                   class:from-overlord={t.origin === 'overlord'}
                   class:dragging={dragging === t.id}
-                  draggable="true"
-                  ondragstart={(e) => onDragStart(e, t.id)}
-                  ondragend={endDrag}
+                  onpointerdown={(e) => onCardPointerDown(e, t.id)}
+                  onpointermove={onCardPointerMove}
+                  onpointerup={onCardPointerUp}
+                  onpointercancel={endDrag}
                 >
                   <!-- Whose tab this is headlines the card as plain text, one line, clipped.
                        It was a chip button, which wrapped on long tab names and pushed the
@@ -676,7 +765,7 @@
                   <Tooltip text={t.detail || t.notes?.length ? 'Click to read the description and progress log' : 'No description'} block>
                     <button
                       class="card-title"
-                      onclick={() => (openCard = openCard === t.id ? null : t.id)}
+                      onclick={() => { if (!justDragged) openCard = openCard === t.id ? null : t.id; }}
                     >
                       {t.title}
                       {#if t.detail || t.notes?.length}<span class="has-detail" class:open={openCard === t.id}>▾</span>{/if}
@@ -989,8 +1078,11 @@
     min-height: 0;
     display: grid;
     /* One board on screen means the lanes finally get real width. A floor keeps them
-       readable in a split pane; the grid scrolls sideways rather than crushing cards. */
-    grid-template-columns: repeat(6, minmax(168px, 1fr));
+       readable in a split pane; the grid scrolls sideways rather than crushing cards.
+       The count comes from LANES rather than a literal: it was hardcoded to 6, and adding
+       the seventh lane (`dropped`) wrapped it onto an implicit second row that the
+       horizontal scroller could not reach — the lane existed and could not be dropped on. */
+    grid-template-columns: repeat(var(--lane-count), minmax(168px, 1fr));
     gap: 8px;
     overflow-x: auto;
   }
@@ -1059,6 +1151,21 @@
   .card.dragging { opacity: 0.4; }
   .card.from-agent { border-left-color: var(--ov-live); }
   .card.from-overlord { border-left-color: var(--ov-note); }
+
+  /* The dragged card follows the cursor. HTML5 DnD would have drawn this for us; the
+     pointer-event drag has to carry its own (see the Drag and drop block above). It is a
+     clone appended to <body>, so it needs the card's own paint — the scoped-CSS hash rides
+     along on the cloned class list, which is why these rules reach it at all. */
+  :global(.card-ghost) {
+    position: fixed;
+    z-index: 9999;
+    margin: 0;
+    pointer-events: none;
+    opacity: 0.92;
+    transform: translate(-16px, -14px) rotate(-1.2deg);
+    box-shadow: 0 8px 22px rgb(0 0 0 / 0.45);
+    cursor: grabbing;
+  }
 
   /* Headline: who owns it, how old, and the one control that removes it. */
   .card-head {
