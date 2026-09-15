@@ -268,8 +268,35 @@
     dragging ? (overlordStore.tasks.find((t) => t.id === dragging)?.workspace_id ?? null) : null,
   );
 
+  /**
+   * A press is live somewhere other than a card — arm the document so it cannot be stranded.
+   *
+   * Capturing the pointer only once the drag is real (see `onCardPointerMove`) is what keeps
+   * the card title clickable, but it means the release is NOT guaranteed to come back to the
+   * card: press near a card's edge, drift into the 6px gutter between cards, release there,
+   * and no `.card` handler ever runs. `pendingDrag` then stays set with stale start
+   * coordinates, and the next pointermove over ANY card is far past the threshold — so the
+   * board would latch a ghost to the cursor with no button held and silently re-lane a task
+   * on the next click. The `e.buttons` guard below makes that unreachable on its own; this
+   * clears the state at the moment it stops being true, which is where it belongs.
+   */
+  function armPress() {
+    document.addEventListener('pointerup', onAnyPointerUp);
+    document.addEventListener('pointercancel', onAnyPointerUp);
+  }
+  function disarmPress() {
+    document.removeEventListener('pointerup', onAnyPointerUp);
+    document.removeEventListener('pointercancel', onAnyPointerUp);
+  }
+  function onAnyPointerUp() {
+    // The card's own handler has already run for a release that landed on a card, and it
+    // owns the drop. This is only the release that never reached one.
+    if (!dragging) { pendingDrag = null; disarmPress(); }
+  }
+
   function endDrag() {
     document.removeEventListener('keydown', onDragKey);
+    disarmPress();
     ghost?.remove();
     ghost = null;
     // However the drag ended — dropped, cancelled with Escape, or the pointer taken away —
@@ -288,6 +315,11 @@
     if (e.key === 'Escape') endDrag();
   }
 
+  // A live drag holds a body-appended ghost and a document keydown listener; neither belongs
+  // to the component tree, so unmounting mid-drag (the board tab closed, the view switched)
+  // would leave a full card clone stuck at z-index 9999 over whatever came next.
+  $effect(() => () => endDrag());
+
   function onCardPointerDown(e: PointerEvent, taskId: string) {
     if (e.button !== 0) return;
     // The card is mostly controls — the steppers, View/Send, and the delete ×. Those stay
@@ -296,10 +328,14 @@
     pendingDrag = taskId;
     dragStartX = e.clientX;
     dragStartY = e.clientY;
+    armPress();
   }
 
   function onCardPointerMove(e: PointerEvent) {
     if (!pendingDrag && !dragging) return;
+    // `pointermove` fires on plain hover with nothing held down. Without this, any stranded
+    // `pendingDrag` would promote itself into a drag the moment the mouse crossed a card.
+    if (!(e.buttons & 1)) { if (!dragging) pendingDrag = null; return; }
 
     if (pendingDrag && !dragging) {
       if (Math.abs(e.clientX - dragStartX) < DRAG_THRESHOLD && Math.abs(e.clientY - dragStartY) < DRAG_THRESHOLD) return;
@@ -322,21 +358,32 @@
     ghost.style.left = `${e.clientX}px`;
     ghost.style.top = `${e.clientY}px`;
 
-    // Hit-test by rect rather than elementFromPoint: the ghost sits under the cursor, and
-    // the lane bodies scroll, so the topmost element there is rarely the drop surface.
-    dragLane = hitTest<TaskStatus>('[data-lane]', 'lane', e);
-    dragRow = hitTest<string>('[data-stream-key]', 'streamKey', e);
+    const hit = surfaceUnder(e);
+    dragLane = hit.lane;
+    dragRow = hit.row;
   }
 
-  /** The `data-*` value of the first element under the pointer, or null. */
-  function hitTest<T extends string>(selector: string, key: string, e: PointerEvent): T | null {
-    for (const el of document.querySelectorAll<HTMLElement>(selector)) {
-      const r = el.getBoundingClientRect();
-      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-        return (el.dataset[key] as T) ?? null;
-      }
-    }
-    return null;
+  /**
+   * The drop surface under the pointer, or neither.
+   *
+   * `elementFromPoint`, NOT a sweep of `getBoundingClientRect()`. A rect sweep reports an
+   * element's own unclipped box, and both surfaces live in scrollers — `.rail-list` scrolls
+   * vertically and `.lanes` scrolls horizontally once seven lanes exceed the width. So a
+   * workstream scrolled out of the rail still had a rect sitting over the search box, and a
+   * lane scrolled off the left still had one lying under the rail: releasing on the filter
+   * input reassigned the task to a workstream the user could not see, and releasing on rail
+   * whitespace re-laned it into an off-screen lane. Both silent, both persisted, and neither
+   * visible — the `.drop` highlight went onto a clipped element that paints nothing.
+   *
+   * Hit-testing the rendering resolves clipping, z-order and overlap in one step, which also
+   * retires the old "a row and a lane can never overlap" assumption rather than relying on
+   * it. The ghost is `pointer-events: none`, so it never shadows the surface beneath it.
+   */
+  function surfaceUnder(e: PointerEvent): { lane: TaskStatus | null; row: string | null } {
+    const el = document
+      .elementFromPoint(e.clientX, e.clientY)
+      ?.closest<HTMLElement>('[data-lane], [data-stream-key]');
+    return { lane: (el?.dataset.lane as TaskStatus) ?? null, row: el?.dataset.streamKey ?? null };
   }
 
   function onCardPointerUp(e: PointerEvent) {
@@ -348,8 +395,7 @@
     const row = dragRow;
     endDrag();
     if (!t) return;
-    // A row is inside the rail and a lane is inside the board, so they never overlap —
-    // but resolve the row first, since dropping on the index is the more specific intent.
+    // `surfaceUnder` returns at most one of the two — they are the same hit, read two ways.
     if (row !== null) dropOnStream(t, row);
     else if (lane !== null) dropOnLane(t, lane);
   }
@@ -735,6 +781,12 @@
                 <!-- The accent marks "an agent put this here", covering both a task created
                      over MCP ('agent') and one imported from a runtime's own list
                      ('imported'). Testing for 'agent' alone would miss every importer row. -->
+                <!-- `onlostpointercapture`: the capture target is this card and the {#each}
+                     is keyed by task id, so any write that re-lanes the dragged task mid-drag
+                     (an agent over MCP, the importer, an engine sweep) destroys this node. A
+                     disconnected capture target releases with `lostpointercapture` and NO
+                     `pointercancel`, so without it the drag stranded — ghost still stuck to
+                     the cursor, `dragging` still set, and the next click dropping the task. -->
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div
                   class="card"
@@ -745,6 +797,7 @@
                   onpointermove={onCardPointerMove}
                   onpointerup={onCardPointerUp}
                   onpointercancel={endDrag}
+                  onlostpointercapture={endDrag}
                 >
                   <!-- Whose tab this is headlines the card as plain text, one line, clipped.
                        It was a chip button, which wrapped on long tab names and pushed the
