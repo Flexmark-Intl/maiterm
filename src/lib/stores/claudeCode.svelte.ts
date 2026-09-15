@@ -11,6 +11,7 @@ import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelt
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
+import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isDelegation, isInFlight, normalizeTitle, resolveBlockers, resolveEdges, TASK_NOTE_CAP } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
@@ -289,13 +290,26 @@ function createClaudeCodeStore() {
         }
         case 'archiveTab':
         case 'closeTab': {
-          const a = args as { tabId?: string; tab_id: string };
+          const a = args as { tabId?: string; tab_id?: string; tab_ids?: string[] };
+          const mode = tool === 'archiveTab' ? 'archive' : 'close';
+          const targets = normalizeTabBatch(a.tab_id, a.tab_ids);
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
           else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: `${tool} is available only to the Overlord agent tab.` };
-          else if (!a.tab_id) result = { error: 'tab_id is required.' };
-          // Retiring your own tab takes the supervisor out of the window mid-call.
-          else if (a.tab_id === a.tabId) result = { ok: false, reason: 'cannot retire your own tab' };
-          else result = await overlordStore.retireTab(a.tab_id, tool === 'archiveTab' ? 'archive' : 'close');
+          else if ('error' in targets) result = { error: targets.error };
+          // Retiring your own tab takes the supervisor out of the window mid-call. In a batch
+          // that is one bad row, not a bad call — the other tabs the agent named are still
+          // fine to retire, so it is refused in place rather than rejecting the whole list.
+          else if (!targets.batch && targets.ids[0] === a.tabId) result = { ok: false, reason: 'cannot retire your own tab' };
+          else {
+            const ids = targets.ids.filter((id) => id !== a.tabId);
+            const batched = await overlordStore.retireTabs(ids, mode);
+            if (ids.length < targets.ids.length) {
+              batched.results.unshift({ tab_id: a.tabId, ok: false, reason: 'cannot retire your own tab' });
+              batched.refused += 1;
+              batched.ok = false;
+            }
+            result = targets.batch ? batched : batched.results[0];
+          }
           break;
         }
         case 'recoverTab': {
@@ -308,11 +322,15 @@ function createClaudeCodeStore() {
           break;
         }
         case 'deleteArchivedTab': {
-          const a = args as { tabId?: string; tab_id: string };
+          const a = args as { tabId?: string; tab_id?: string; tab_ids?: string[] };
+          const targets = normalizeTabBatch(a.tab_id, a.tab_ids);
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
           else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'deleteArchivedTab is available only to the Overlord agent tab.' };
-          else if (!a.tab_id) result = { error: 'tab_id is required.' };
-          else result = await overlordStore.deleteArchivedTabById(a.tab_id);
+          else if ('error' in targets) result = { error: targets.error };
+          else {
+            const batched = await overlordStore.deleteArchivedTabsById(targets.ids);
+            result = targets.batch ? batched : batched.results[0];
+          }
           break;
         }
         case 'resumeTab': {

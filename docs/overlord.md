@@ -1397,6 +1397,9 @@ going wrong) offering three answers:
 | **Close** | **no** — PTY killed, bridges torn down, no archive entry | **no** | `closeTab` | no |
 | **Keep** | n/a — suppresses the offer for a week | — | — | — |
 
+("Bulk" is the *deck's* button. Both tools take a `tab_ids` list of their own —
+see [Batched retirement](#batched-retirement-tab_ids-2026-09-14).)
+
 Archive is the expected answer, and the reason the distinction exists: a session
 responsible for complex work that is now complete may still be needed when a bug
 surfaces in what it built. Close is for sessions with nothing worth recovering.
@@ -1449,8 +1452,54 @@ need a new step kind, editor UI and migration. Deliberately deferred — and the
 line about irreversible things holds for anything *automatic*: a rule firing
 `closeTab` on a timer is not the same as an agent judging one session finished.
 
-Close still has no bulk form, and the deck still confirms inline (`confirm()` is
-inert in a Tauri webview).
+Close still has no bulk form **on the deck**, and the deck still confirms inline
+(`confirm()` is inert in a Tauri webview).
+
+#### Batched retirement (`tab_ids`, 2026-09-14)
+
+Cleanup is the one job that arrives as a *list*: a human pointing the agent at a
+window full of finished sessions. One tab per MCP call made that N model turns —
+the model emitting N tool_use blocks and waiting on each — for work the engine
+does in a loop. `archiveTab`, `closeTab` and `deleteArchivedTab` therefore take
+`tab_ids: string[]` alongside the original scalar `tab_id`.
+
+**Batching is transport, not permission.** Each id goes through the same
+`retireTab` / `deleteArchivedTabById` it would have gone through alone, so it
+keeps its own `retireGuard` evaluation (including the 60s/5min quiet window
+scaled to reversibility), its own ledger entry, and its own row in the reply.
+Nothing about being in a list relaxes a check, and the `closeTab` description
+says so in as many words — the agent is told the list must be tabs it would have
+closed individually.
+
+Four decisions worth keeping:
+
+- **A refusal stops that tab, never the batch.** The reply is
+  `{ ok, succeeded, refused, results: [{ tab_id, ok, reason, detail }] }`, and
+  top-level `ok` is true only when every row succeeded — an agent that checks
+  just the flag is never told a partial sweep went fine. The old failure mode
+  here is a call that dies halfway with no way to tell how far it got.
+- **Sequential, never concurrent.** Each retirement mutates the pane tree and
+  persists the whole workspace; firing them in parallel races the write and
+  loses tabs from the saved state.
+- **`TAB_BATCH_MAX` = 50** (`stores/tabBatch.ts`) — a *timeout* limit, not a safety one. The MCP
+  server abandons a tool call after 120s and its clock starts before the webview
+  sees the call, so an overlong batch leaves the agent holding a timeout while
+  the work carries on behind it. Making it send two calls is the better outcome.
+- **The agent's own tab is refused as a row, not as a call.** Retiring yourself
+  takes the supervisor out of the window mid-call; in a list that is one bad id
+  among good ones, so it comes back `cannot retire your own tab` and the rest
+  proceed. Duplicates are dropped for the mirror-image reason: a second pass over
+  an already-archived tab answers `not_boardable`, which reads as a refusal of
+  work that in fact succeeded.
+
+Argument normalization and result shaping live in `src/lib/stores/tabBatch.ts` —
+pure and unit-tested (`tabBatch.test.ts`), separate from the store for the same
+reason `meshRouting.ts` is separate from `agentMesh.svelte.ts`.
+
+`recoverTab` and `resumeTab` are deliberately **not** batched. Both write into a
+live PTY and carry their own per-tab watch (recoverTab's 45s `rebind_failed`);
+fanning typing out over a list is a different risk from removing tabs, and the
+fleet views already drive those one at a time.
 
 ### Suspended tab, suspended workspace, archived, not loaded — four things
 

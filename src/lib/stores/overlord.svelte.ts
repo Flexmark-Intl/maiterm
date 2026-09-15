@@ -24,6 +24,7 @@ import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
+import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
 import { findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
@@ -3824,6 +3825,26 @@ function createOverlordStore() {
     },
 
     /**
+     * Retire SEVERAL tabs in one call (S4 archiveTab/closeTab with `tab_ids`).
+     *
+     * Batching is a transport convenience and nothing more: every tab goes through the same
+     * `retireTab` it would have gone through alone, so it keeps its own `retireGuard` check,
+     * its own ledger entry and its own row in the result. A refusal stops that tab, never the
+     * batch — the agent gets back which ones went and which ones did not, rather than a call
+     * that failed halfway with no way to tell how far it got.
+     *
+     * Sequential on purpose. Each retirement mutates the pane tree and persists it, so firing
+     * these concurrently would race the write and lose tabs from the saved state.
+     */
+    async retireTabs(tabIds: string[], mode: 'archive' | 'close'): Promise<TabBatchResult> {
+      const results: TabBatchRow[] = [];
+      for (const tabId of tabIds) {
+        results.push({ tab_id: tabId, ...(await this.retireTab(tabId, mode)) });
+      }
+      return summarizeBatch(results);
+    },
+
+    /**
      * Delete an ARCHIVED tab for good (S4 deleteArchivedTab) — the one disposition verb the
      * archive had no way to reach.
      *
@@ -3858,6 +3879,15 @@ function createOverlordStore() {
       ledger(tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `[delete-archived] ${name}` }, 'sent');
       logInfo(`overlord: deleted archived tab ${tabId.slice(0, 8)} from "${ws.name}"`);
       return { ok: true };
+    },
+
+    /** Prune several archived tabs in one call — see `retireTabs` for why this is sequential. */
+    async deleteArchivedTabsById(tabIds: string[]): Promise<TabBatchResult> {
+      const results: TabBatchRow[] = [];
+      for (const tabId of tabIds) {
+        results.push({ tab_id: tabId, ...(await this.deleteArchivedTabById(tabId)) });
+      }
+      return summarizeBatch(results);
     },
 
     /**

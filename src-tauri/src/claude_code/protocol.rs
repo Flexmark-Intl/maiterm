@@ -903,26 +903,34 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "archiveTab",
-            "description": "Overlord agent only: archive a finished session — RECOVERABLE. The tab leaves the pane tree keeping its scrollback, cwd and ssh context, and comes back with restoreArchivedTab. Use this when there is any chance of returning to that session — a bug in what it built, or follow-up work on it. This is the DEFAULT choice for a finished session; prefer it to closeTab whenever you are unsure. A suspended tab can be archived directly — there is no process to end, so it is the safest thing to put away. Refuses, with `reason` and `detail`, anything still working: agent_busy (mid-turn), awaiting_permission (stopped at a prompt — that work is not over, it is waiting), agent_running_unbound (an agent IS alive there and archiving kills its PTY — recoverTab first), tab_in_use (output or a keystroke in the last 60s — a tab with no AGENT is not necessarily idle; a shell part-way through a build looks exactly like one), not_classified (the liveness probe has not reached it yet — retry), outstanding_directive, not_boardable. Ledgered.",
+            "description": "Overlord agent only: archive a finished session — RECOVERABLE. The tab leaves the pane tree keeping its scrollback, cwd and ssh context, and comes back with restoreArchivedTab. Use this when there is any chance of returning to that session — a bug in what it built, or follow-up work on it. This is the DEFAULT choice for a finished session; prefer it to closeTab whenever you are unsure. A suspended tab can be archived directly — there is no process to end, so it is the safest thing to put away. Clearing out several sessions? Pass them all as `tab_ids` in ONE call — each is still judged and ledgered separately, you just do not pay a turn per tab. Refuses, per tab, with `reason` and `detail`, anything still working: agent_busy (mid-turn), awaiting_permission (stopped at a prompt — that work is not over, it is waiting), agent_running_unbound (an agent IS alive there and archiving kills its PTY — recoverTab first), tab_in_use (output or a keystroke in the last 60s — a tab with no AGENT is not necessarily idle; a shell part-way through a build looks exactly like one), not_classified (the liveness probe has not reached it yet — retry), outstanding_directive, not_boardable. Ledgered.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
-                    "tab_id": { "type": "string", "description": "TARGET tab id — the session to archive" }
-                },
-                "required": ["tab_id"]
+                    "tab_id": { "type": "string", "description": "TARGET tab id — the session to archive. Pass this OR tab_ids." },
+                    "tab_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "TARGET tab ids — archive several in one call (max 50). Each is guarded, ledgered and reported on its own, so one refusal does not stop the rest: the result is `{ results: [{ tab_id, ok, reason, detail }], archived, refused }`. Prefer this over one call per tab."
+                    }
+                }
             }
         },
         {
             "name": "closeTab",
-            "description": "Overlord agent only: close a session — IRREVERSIBLE. The PTY is killed, bridges are torn down, and NO archive entry is kept: the scrollback and context are gone. Use this only when the session is definitively over, or when starting a fresh session would serve just as well. If you would ever want to read that session again, use archiveTab instead — archiving costs nothing and is undoable, this is not. Same refusals as archiveTab (agent_busy, awaiting_permission, agent_running_unbound, tab_in_use, not_classified, outstanding_directive, not_boardable), and the same rule behind them: never take away a tab that is still working — with a longer quiet window, 5 minutes rather than 60s, because this cannot be undone. Ledgered.",
+            "description": "Overlord agent only: close a session — IRREVERSIBLE. The PTY is killed, bridges are torn down, and NO archive entry is kept: the scrollback and context are gone. Use this only when the session is definitively over, or when starting a fresh session would serve just as well. If you would ever want to read that session again, use archiveTab instead — archiving costs nothing and is undoable, this is not. `tab_ids` closes several in one call, which saves turns but grants no licence to be casual: batching is a transport convenience, and every id in the list has to be one you would have closed on its own. Same refusals as archiveTab (agent_busy, awaiting_permission, agent_running_unbound, tab_in_use, not_classified, outstanding_directive, not_boardable), applied per tab, and the same rule behind them: never take away a tab that is still working — with a longer quiet window, 5 minutes rather than 60s, because this cannot be undone. Ledgered.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
-                    "tab_id": { "type": "string", "description": "TARGET tab id — the session to close for good" }
-                },
-                "required": ["tab_id"]
+                    "tab_id": { "type": "string", "description": "TARGET tab id — the session to close for good. Pass this OR tab_ids." },
+                    "tab_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "TARGET tab ids — close several in one call (max 50). Each is guarded, ledgered and reported on its own: `{ results: [{ tab_id, ok, reason, detail }], closed, refused }`. Irreversible per row — list only tabs you have individually judged finished."
+                    }
+                }
             }
         },
         {
@@ -939,14 +947,18 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "deleteArchivedTab",
-            "description": "Overlord agent only: permanently delete an ARCHIVED tab — the archive's own disposition verb. closeTab only reaches tabs still in a pane, so without this an archive could be added to and restored from but never pruned. Irreversible, but with none of closeTab's danger: an archived tab holds no PTY and no process, so only the record is destroyed. Read its notes with getTabNotes first if you want to know what it was. Refuses `not_archived` when the id is not in any workspace's archivedTabs[].",
+            "description": "Overlord agent only: permanently delete an ARCHIVED tab — the archive's own disposition verb. closeTab only reaches tabs still in a pane, so without this an archive could be added to and restored from but never pruned. Irreversible, but with none of closeTab's danger: an archived tab holds no PTY and no process, so only the record is destroyed. Read its notes with getTabNotes first if you want to know what it was. Pruning a long archive is the normal case, so pass `tab_ids` and do it in one call. Refuses `not_archived`, per tab, when the id is not in any workspace's archivedTabs[].",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
-                    "tab_id": { "type": "string", "description": "The archived tab id to delete" }
-                },
-                "required": ["tab_id"]
+                    "tab_id": { "type": "string", "description": "The archived tab id to delete. Pass this OR tab_ids." },
+                    "tab_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Archived tab ids — prune several in one call (max 50). Each is reported on its own: `{ results: [{ tab_id, ok, reason, detail }], deleted, refused }`."
+                    }
+                }
             }
         },
         {
