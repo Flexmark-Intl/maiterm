@@ -167,7 +167,10 @@ export interface OverlordEscalation {
   /** The board task this is about (`task_handoff`), so the card's "Sent" receipt can be
    *  withdrawn if the handoff is ever swept undelivered. */
   taskId?: string;
-  /** Consumed by listEscalations (S4); stays visible on the board until dismissed. */
+  /** The AGENT's delivery receipt — set by listEscalations (S4), not by anything the human
+   *  does; the card stays on the board until they dismiss it either way. Never goes true for
+   *  a BOARD_ONLY_ESCALATIONS kind, which is never handed to the agent at all. Read it as
+   *  "the supervisor has this", never as "the human has seen it". */
   read: boolean;
 }
 
@@ -328,6 +331,46 @@ const AGENT_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>([
 /** Escalations that carry a HUMAN's board action to the agent rather than the engine's own
  *  judgement. They outlive exemption of the tab they name (see `sweepClosedTabs`). */
 const HUMAN_BOARD_ESCALATIONS = new Set<OverlordEscalation['kind']>(['task_handoff', 'task_dropped']);
+
+/**
+ * Escalations addressed to the human's BOARD ONLY — never queued for the Overlord agent,
+ * never ringing its doorbell.
+ *
+ * The third audience, and the one a two-way split could not express.
+ * `AGENT_ONLY_ESCALATIONS` hides a kind from the deck; nothing hid a kind from the AGENT, so
+ * every card reached the supervisor whether or not there was anything for it to do with one.
+ *
+ * `agent_report` is the kind where that costs the human a second prompt. It is raised by
+ * `needs_human` / `kind: 'escalate'`, whose whole definition is *this is not the agent's to
+ * decide* — so the supervisor's only move is to put the question to the human with
+ * AskUserQuestion, its only sanctioned channel (§9.2). Meanwhile the tab that raised it is
+ * usually already asking the human the same question directly, in its own AskUserQuestion or
+ * permission prompt. One decision, two prompts — and the supervisor's is the one that CANNOT
+ * act on the answer: it lands in the supervisor's transcript while the tab sits at its own
+ * prompt, still waiting, and the human has to go there anyway.
+ *
+ * Board-only keeps every push channel that does not cost a prompt — the deck, the sidebar
+ * badge, and the phone doorbell, none of which route through the agent — and drops the one
+ * that does. The card's remedy is "Open tab": answer it where answering it does something.
+ *
+ * **Not the same judgement as the other human-addressed kinds.** `blocked`, `step_timeout`
+ * and `directive_unacked` all describe a tab the supervisor can ACT on — drive it, recover
+ * it, re-issue the directive — so they stay in both queues: the agent may well fix one
+ * before the human ever opens the board, which is most of the reason to run a supervisor.
+ * The test for this set is not "is it about a human" but "is re-asking the human the only
+ * thing the agent could do with it".
+ */
+const BOARD_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>(['agent_report']);
+
+/** Does this kind reach the Overlord agent's queue at all?
+ *
+ *  One predicate behind the pull, the doorbell and the nudge's count, because they disagree
+ *  the moment they are spelled separately: a card `consumeEscalations` refuses would still
+ *  be counted in "N Overlord items pending", ringing the agent for a queue that then comes
+ *  back short — or empty. */
+function deliverableToAgent(kind: OverlordEscalation['kind']): boolean {
+  return !BOARD_ONLY_ESCALATIONS.has(kind);
+}
 
 /**
  * Kinds where a second card for the same tab is the SAME fact restated, so `escalate`
@@ -1169,8 +1212,13 @@ function createOverlordStore() {
       },
     ];
     scheduleMirror();
-    unNudged.add(id);
-    void wakeOverlordAgent();
+    // A board-only kind never enters the agent's queue, so it must not ring the agent's
+    // doorbell either: the nudge names a count the pull cannot produce, and an agent rung
+    // for nothing is exactly the noise the doorbell exists to ration.
+    if (deliverableToAgent(kind)) {
+      unNudged.add(id);
+      void wakeOverlordAgent();
+    }
     return id;
   }
 
@@ -1501,7 +1549,9 @@ function createOverlordStore() {
           if (!(await hasLiveRepl(tab.id))) continue;
           const inst = terminalsStore.get(tab.id);
           if (!inst) return;
-          const unread = escalations.filter((e) => !e.read);
+          // What the PULL will actually hand over — board-only kinds are not in it. Counting
+          // the raw unread list promised the agent items `listEscalations` then withheld.
+          const unread = escalations.filter((e) => !e.read && deliverableToAgent(e.kind));
           const n = unread.length;
           // Word it for what's actually queued: calling a tab's answer an "escalation" makes
           // the agent open it braced for a problem.
@@ -2962,18 +3012,27 @@ function createOverlordStore() {
     },
 
     // ── Escalations (§9.1) ───────────────────────────────────────────────────
-    /** Pull + mark read — the listEscalations MCP surface (S4) and the board both use this. */
+    /** Pull + mark read — backs the listEscalations MCP surface (S4), and nothing else: the
+     *  deck reads `humanEscalations` and never consumes. */
     consumeEscalations(): OverlordEscalation[] {
       // Unread only — re-delivering handled escalations makes the agent re-resolve
       // day-old timeouts. Read ones stay on the board until the human dismisses them.
-      const out = ($state.snapshot(escalations) as OverlordEscalation[]).filter((e) => !e.read);
+      // Board-only kinds are never handed over at all (see BOARD_ONLY_ESCALATIONS).
+      const out = ($state.snapshot(escalations) as OverlordEscalation[]).filter(
+        (e) => !e.read && deliverableToAgent(e.kind),
+      );
       // Drop delivered replies rather than marking them read. Read escalations linger on
       // purpose — they stay on the human's board until dismissed — but a `drive_reply` is
       // filtered off that board, so nobody would ever dismiss one and they would pile up
       // for the life of the window. Handing it to the agent IS its disposal.
+      //
+      // A board-only card is left UNREAD, deliberately. `read` is the agent's delivery
+      // receipt, and marking one here would be a receipt for a delivery that did not
+      // happen — which the human's own surfaces read as "seen": the sidebar badge is the
+      // one thing telling them the deck has something on it.
       escalations = escalations
         .filter((e) => !(AGENT_ONLY_ESCALATIONS.has(e.kind) && !e.read))
-        .map((e) => (e.read ? e : { ...e, read: true }));
+        .map((e) => (e.read || !deliverableToAgent(e.kind) ? e : { ...e, read: true }));
       unNudged.clear(); // delivered by the pull itself; no doorbell owed
       return out;
     },

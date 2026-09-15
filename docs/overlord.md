@@ -345,6 +345,13 @@ card anyway. Same family: **the kind silently decides the audience, and nobody c
 kind's audience against its producer's intent.** Worth sweeping every kind against its
 producers rather than fixing one.
 
+`agent_report` was the next one swept (§9.1.1, 2026-09-15) and it failed in the *other*
+direction: a kind whose producer says "only a human can decide this" was delivered to the
+agent as well, which then spent its one channel re-asking the human a question the tab was
+already asking them. `step_timeout` is still open — see the board task, and read §3.1's
+maiLink constraint before moving it, because the phone anchors its Recover button on that
+kind.
+
 ### 3.1.2 `directive_unacked` measured the wrong thing, twice
 
 Confirmed three times in four days (Sep 7, 10, 11), every one a false positive at a tab that
@@ -847,7 +854,9 @@ replyToOverlord({
   task?: string,             // what it believes it's working on
   blockers?: string[],
   next?: string,
-  needs_human?: boolean,     // → AskUserQuestion, never a status note
+  needs_human?: boolean,     // → an `agent_report` card on the human's board, never a
+                             //   status note. BOARD-ONLY: the supervisor is not rung for
+                             //   it and will not re-ask the question (§9.1.1)
 })
 → { received: true, outstanding_directive: string | null }
 ```
@@ -918,6 +927,59 @@ pending — call listEscalations."` The PTY carries only the doorbell; the conte
 stays structured behind an MCP pull (`listEscalations`), keeping Overlord's
 transcript lean. Note the no-envelope rule governs *supervised* tabs; the
 supervisor's own tab receiving structured notices is fine.
+
+### 9.1.1 Three audiences, not two (2026-09-15)
+
+An escalation has an audience, and the kind decides it. There were two sets and they
+described one axis — whether the human sees it:
+
+| | reaches the agent | reaches the deck / phone |
+|---|---|---|
+| `AGENT_ONLY_ESCALATIONS` | yes, and **deleted** on delivery | no |
+| `BOARD_ONLY_ESCALATIONS` | no, and no doorbell | yes |
+| everything else | yes, marked `read` | yes |
+
+Nothing expressed the middle row, so *every* card reached the supervisor whether or not
+there was anything for it to do with one — and for `agent_report` there is not.
+
+**The double prompt.** A tab hits a decision only its human can make. It asks the human
+directly (`AskUserQuestion`, or a permission gate), and — exactly as `replyToOverlord` and
+the initSession priming instruct — it also files `needs_human`. That raises `agent_report`,
+whose definition is *this is not the agent's to decide*. So the supervisor's only move is
+to put the same question to the human with `AskUserQuestion`, its only sanctioned channel
+(§9.2, §11). The human is now asked twice about one decision, and **the supervisor's copy
+is the one that cannot act on the answer**: it lands in the supervisor's transcript while
+the tab is still sitting at its own prompt, so the human has to go to the tab regardless.
+
+`agent_report` is therefore board-only. Nothing is lost that the human was relying on: the
+deck, the sidebar badge and the phone doorbell are all fed from `humanEscalations` and the
+mirror, none of which route through the agent. The card carries **Open tab** and says why
+there is no second prompt — answer it where answering it does something.
+
+**The test for this set is not "is it about a human"** but *"is re-asking the human the
+only thing the agent could do with it"*. `blocked`, `step_timeout` and `directive_unacked`
+all describe a tab the supervisor can act on — drive it, recover it, re-issue the directive
+— and so stay in both queues. The agent fixing one before the human opens the board is most
+of the reason to run a supervisor at all. `permission_stuck` likewise stays agent-addressed:
+there, escalating to the human is the *exception* path for consequential gates, and the
+answer closes the loop through `answerTabPrompt`, which `agent_report` has no equivalent of.
+
+**One predicate, three call sites.** `deliverableToAgent` backs the pull
+(`consumeEscalations`), the doorbell (`escalate` → `unNudged`/`wakeOverlordAgent`) and the
+nudge's own count. Spelled separately they disagree immediately: a card the pull refuses
+still counts in `"N Overlord items pending"`, so the agent is rung for a queue that comes
+back short — or empty.
+
+**`read` is the AGENT's delivery receipt, and the human's surfaces were reading it as
+theirs.** It is set by `listEscalations` and by nothing the human does. The sidebar badge —
+their only standing signal that the deck holds anything — counted `!read`, so the
+supervisor pulling its queue silently zeroed the badge over a deck still showing every
+card, with nothing to bring it back. The badge now counts deck rows, so badge and deck are
+the same number by construction and both clear on dismissal, which is the human's own act.
+A board-only card is left unread for the same reason: a receipt for a delivery that never
+happened is worse than no receipt. (The mirror publishes `read` to the phone unchanged; a
+permanently-unread card was already reachable there — any window with no Overlord agent tab
+produces them — so this is not a wire change.)
 
 ### 9.2 The ruleset is also Overlord's own harness
 
@@ -2044,6 +2106,11 @@ attention queue is for the actual pain.
 
 Per existing working norms: Overlord reaches the human **only** via native
 AskUserQuestion / permission prompts, plus the board. No status chatter.
+
+And **never with a question a tab is already asking them** — the board carries that one
+alone (§9.1.1). The channel being narrow is what makes it expensive: an AskUserQuestion
+stops the supervisor dead and interrupts the human, so spending one to relay a question
+whose answer it cannot act on is the worst use of the only channel it has.
 
 ---
 

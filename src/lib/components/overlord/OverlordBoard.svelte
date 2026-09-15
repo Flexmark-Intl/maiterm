@@ -238,6 +238,10 @@
     // `humanEscalations`. This used to name them inline, so every kind added to the set
     // afterwards leaked onto the deck — and the sidebar badge, which already read
     // `humanEscalations`, disagreed with the deck about what was waiting.
+    //
+    // The traffic runs the other way too: a `BOARD_ONLY_ESCALATIONS` kind reaches the human
+    // and never the agent, so for `agent_report` this deck is the whole delivery. It is the
+    // only surface that can carry the remedy, which is why that card gets an Open tab.
     for (const e of overlordStore.humanEscalations) {
       out.push({ sev: 0, id: e.id, type: 'escalation', e });
     }
@@ -752,7 +756,20 @@
                 <span class="signal-age ov-mono">{fmtAge(s.e.ts)}</span>
               </div>
               <p class="signal-text">{s.e.detail}</p>
+              {#if s.e.kind === 'agent_report'}
+                <!-- Says why there is no second prompt. This card is board-only
+                     (BOARD_ONLY_ESCALATIONS): the supervisor's only channel to the human is
+                     AskUserQuestion, and a copy of the question raised there cannot act on
+                     the answer — the tab would still be sitting at its own prompt. -->
+                <p class="signal-note">
+                  This tab asked for you directly. Answer it there — Overlord deliberately does
+                  not repeat the question here, because its copy could not act on your answer.
+                </p>
+              {/if}
               <div class="signal-actions">
+                {#if s.e.tabId}
+                  <button class="ov-btn ov-btn-primary" onclick={() => navigateToTab(s.e.tabId)}>Open tab</button>
+                {/if}
                 <button class="ov-btn" onclick={() => overlordStore.dismissEscalation(s.e.id)}>Clear</button>
               </div>
 

@@ -513,10 +513,16 @@
     ];
   }
 
+  // Counts what is ON THE DECK, not what the agent has yet to read. `read` is the Overlord
+  // AGENT's delivery receipt (see OverlordEscalation), and this badge is the human's only
+  // standing signal that the board has something on it — so reading one as the other meant
+  // the supervisor pulling its queue silently zeroed the badge over a deck still holding
+  // every card, and nothing brought it back. Badge count and deck row count are the same
+  // number by construction now; both clear on dismissal, which is the human's own act.
   const overlordAttention = $derived(
-    overlordStore.proposals.length + overlordStore.humanEscalations.filter(e => !e.read).length
+    overlordStore.proposals.length + overlordStore.humanEscalations.length
   );
-  const overlordUrgent = $derived(overlordStore.humanEscalations.some(e => !e.read));
+  const overlordUrgent = $derived(overlordStore.humanEscalations.length > 0);
   const overlordBusy = $derived(overlordStore.ritualProgress.length > 0);
 
   async function handleOverlordClick() {
