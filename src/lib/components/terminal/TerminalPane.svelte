@@ -1399,7 +1399,12 @@
         // (e.g. auto-resume reconnecting to Claude Code at default 80x24).
         const { cols, rows } = terminal;
         resizeTerminal(ptyId, cols, rows).catch(e => logError(String(e)));
-        if (!autoResumePrompt) terminal.focus();
+        // A stack service's terminal never takes the keyboard on its own (docs/stack.md
+        // §7): becoming visible means its console drawer opened over the tab you are
+        // working in, and a peek must not move your cursor into a dev server's shell.
+        // Click into it to type. It also keeps Escape as the drawer's dismiss rather than
+        // a byte only the shell would see.
+        if (!autoResumePrompt && !isServiceTab()) terminal.focus();
       });
       untrack(() => {
         activityStore.clearActive(tabId);
@@ -1585,6 +1590,12 @@
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     const pane = ws?.panes.find(p => p.id === paneId);
     return pane?.tabs.find(t => t.id === tabId);
+  }
+
+  /** This tab runs a stack service, so it is not in the strip and is only ever visible
+   *  inside the console drawer (docs/stack.md §7). */
+  function isServiceTab(): boolean {
+    return !!getCurrentTab()?.service_id;
   }
 
   // --- SSH drop detection / recovery ---

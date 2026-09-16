@@ -1049,16 +1049,12 @@ function createWorkspacesStore() {
       // `background`: the tab exists but the pane keeps showing what it showed (a stack
       // service starting behind the user's work — docs/stack.md §4). Rust's create_tab
       // made the new tab active, so put the previous one back before the mirror sees it.
-      if (options?.background) {
-        if (previousActiveTabId) {
-          await commands.setActiveTab(workspaceId, paneId, previousActiveTabId).catch(() => {});
-        } else {
-          // A pane holding only service tabs has no active tab to restore — a legal state
-          // since they left the strip (docs/stack.md §7). Without this, Rust keeps the
-          // service tab create_tab just made active, and the next wholesale mirror refresh
-          // picks it up as the pane's active tab.
-          await commands.healPaneActiveTab(workspaceId, paneId).catch(() => {});
-        }
+      // A pane holding only service tabs has no active tab to put back — a legal state since
+      // they left the strip (docs/stack.md §7). Rust's `create_tab` has made the new tab
+      // active; nothing can correct that here, because the new tab is still an ordinary one.
+      // `setTabServiceId` re-applies the invariant at the moment it stops being one.
+      if (options?.background && previousActiveTabId) {
+        await commands.setActiveTab(workspaceId, paneId, previousActiveTabId).catch(() => {});
       }
 
       // Open the new tab at the host/cwd of the previous (active) tab — the
@@ -1688,6 +1684,15 @@ function createWorkspacesStore() {
       }
       tab.service_id = serviceId;
       await commands.setTabServiceId(workspaceId, paneId, tabId, serviceId);
+      // Binding is the moment a tab leaves the strip, so it is the moment the invariant can
+      // break: `create_tab` made this tab active on the way in, and it was an ordinary tab
+      // then — every earlier check passed it (docs/stack.md §7). Re-apply the rule here,
+      // where "is it a service tab" is finally true, and take Rust's answer for the mirror
+      // because a pane of only services legitimately has no active tab.
+      if (serviceId && pane && pane.active_tab_id === tabId) {
+        const healed = await commands.healPaneActiveTab(workspaceId, paneId).catch(() => undefined);
+        if (healed !== undefined) pane.active_tab_id = healed;
+      }
     },
 
     /** Replace a workspace's stack definitions (docs/stack.md §3). The stack store owns
