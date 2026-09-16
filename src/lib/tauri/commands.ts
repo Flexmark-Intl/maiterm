@@ -542,6 +542,12 @@ export async function setActiveTab(workspaceId: string, paneId: string, tabId: s
   return invoke('set_active_tab', { workspaceId, paneId, tabId });
 }
 
+/** Select a tab the human can actually see in this pane, or nothing when there is none
+ *  (docs/stack.md §7). Returns the tab it settled on. */
+export async function healPaneActiveTab(workspaceId: string, paneId: string): Promise<string | null> {
+  return invoke('heal_pane_active_tab', { workspaceId, paneId });
+}
+
 export async function setTabPtyId(workspaceId: string, paneId: string, tabId: string, ptyId: string): Promise<void> {
   return invoke('set_tab_pty_id', { workspaceId, paneId, tabId, ptyId });
 }

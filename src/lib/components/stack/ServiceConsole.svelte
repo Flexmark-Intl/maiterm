@@ -17,7 +17,6 @@
   import { tick } from 'svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -65,10 +64,15 @@
   $effect(() => {
     if (!openId) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        stackStore.closeConsole(workspaceId);
-      }
+      if (e.key !== 'Escape') return;
+      // Not when the service's own terminal has the keyboard: Escape is a byte a shell or
+      // TUI wants (leaving insert mode, dismissing a completion), and swallowing it to
+      // close the drawer would make the console unusable for the thing it is for. The × ,
+      // the sidebar row and a click on the work behind still dismiss it.
+      const target = e.target as Element | null;
+      if (target?.closest?.('.console-slot')) return;
+      e.preventDefault();
+      stackStore.closeConsole(workspaceId);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -118,16 +122,9 @@
     dragging = false;
   }
 
-  // Opening the drawer puts the cursor in the service's shell: the point of showing it is
-  // usually to type into it (a Ctrl-C, a `r` to restart vite). Explicit focus on a frame,
-  // never `autofocus` — it compiles to a microtask that only fires when the body holds
-  // focus, which is false whenever a keyboard opened the drawer (root CLAUDE.md).
-  $effect(() => {
-    const id = tabId;
-    if (!id) return;
-    const frame = requestAnimationFrame(() => terminalsStore.focusTerminal(id));
-    return () => cancelAnimationFrame(frame);
-  });
+  // Deliberately NOT focused on open. A peek should not take the keyboard away from the
+  // tab you are working in — and with focus in the service's terminal, Escape belongs to
+  // that terminal, so the drawer would lose its keyboard dismiss. Click into it to type.
 </script>
 
 {#if service}

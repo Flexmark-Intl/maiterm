@@ -619,6 +619,7 @@ pub fn run() {
             commands::workspace::resume_workspace,
             commands::workspace::set_active_pane,
             commands::workspace::set_active_tab,
+            commands::workspace::heal_pane_active_tab,
             commands::workspace::set_tab_pty_id,
             commands::workspace::suspend_tab,
             commands::workspace::mark_tabs_suspended,

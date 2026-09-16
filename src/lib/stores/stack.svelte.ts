@@ -634,10 +634,10 @@ function createStackStore() {
       next.set(workspaceId, serviceId);
       consoleService = next;
       const bound = boundTab(workspaceId, serviceId);
+      // `activate-tab` carries a bare tab id — an object detail is silently ignored by the
+      // listener in `+page`, and the drawer then shows an empty slot forever.
       if (bound && !terminalsStore.get(bound.tab.id)) {
-        window.dispatchEvent(new CustomEvent('activate-tab', {
-          detail: { workspaceId, paneId: bound.pane.id, tabId: bound.tab.id },
-        }));
+        window.dispatchEvent(new CustomEvent('activate-tab', { detail: bound.tab.id }));
       }
     },
 

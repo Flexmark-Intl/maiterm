@@ -362,6 +362,54 @@ fn pick_active_after_close(tabs: &[crate::state::Tab], closed_index: usize) -> O
     None
 }
 
+/// Apply the invariant to one pane: if its active tab is a stack service tab (or it has
+/// none), select the first tab that IS in the strip, or nothing when there is none.
+///
+/// `set_active_tab` can only name a tab, and the frontend needs "none" as an answer: a pane
+/// whose only remaining tabs are services is a legal state (docs/stack.md §7), and
+/// `create_tab` makes every new tab active — including a service tab minted into such a
+/// pane, which would otherwise persist as its active tab with nothing to put back.
+#[tauri::command]
+pub fn heal_pane_active_tab(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    pane_id: String,
+) -> Result<Option<String>, String> {
+    let label = window.label().to_string();
+    let (data_clone, active) = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        let pane = workspace
+            .panes
+            .iter_mut()
+            .find(|p| p.id == pane_id)
+            .ok_or("Pane not found")?;
+        let healthy = pane
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| pane.tabs.iter().find(|t| &t.id == id))
+            .is_some_and(|t| t.service_id.is_none());
+        if healthy {
+            return Ok(pane.active_tab_id.clone());
+        }
+        pane.active_tab_id = pane
+            .tabs
+            .iter()
+            .find(|t| t.service_id.is_none())
+            .map(|t| t.id.clone());
+        let active = pane.active_tab_id.clone();
+        (app_data.clone(), active)
+    };
+    save_state(&data_clone)?;
+    Ok(active)
+}
+
 #[tauri::command]
 pub fn delete_tab(
     window: tauri::Window,
@@ -421,12 +469,7 @@ pub fn move_tab_to_workspace(
 
         // Fix source pane's active tab if we removed the active one
         if source_pane.active_tab_id.as_ref() == Some(&tab_id) {
-            source_pane.active_tab_id = if source_pane.tabs.is_empty() {
-                None
-            } else {
-                let new_index = if tab_pos > 0 { tab_pos - 1 } else { 0 };
-                Some(source_pane.tabs[new_index].id.clone())
-            };
+            source_pane.active_tab_id = pick_active_after_close(&source_pane.tabs, tab_pos);
         }
 
         // Insert into target workspace's first pane and make it the active tab
@@ -477,12 +520,7 @@ pub fn move_tab_to_pane(
             .ok_or("Tab not found")?;
         let tab = source_pane.tabs.remove(tab_pos);
         if source_pane.active_tab_id.as_ref() == Some(&tab_id) {
-            source_pane.active_tab_id = if source_pane.tabs.is_empty() {
-                None
-            } else {
-                let new_index = if tab_pos > 0 { tab_pos - 1 } else { 0 };
-                Some(source_pane.tabs[new_index].id.clone())
-            };
+            source_pane.active_tab_id = pick_active_after_close(&source_pane.tabs, tab_pos);
         }
         let source_now_empty = source_pane.tabs.is_empty();
 
@@ -545,12 +583,7 @@ pub fn move_tab_to_split(
             .ok_or("Tab not found")?;
         let tab = source_pane.tabs.remove(tab_pos);
         if source_pane.active_tab_id.as_ref() == Some(&tab_id) {
-            source_pane.active_tab_id = if source_pane.tabs.is_empty() {
-                None
-            } else {
-                let new_index = if tab_pos > 0 { tab_pos - 1 } else { 0 };
-                Some(source_pane.tabs[new_index].id.clone())
-            };
+            source_pane.active_tab_id = pick_active_after_close(&source_pane.tabs, tab_pos);
         }
         let source_now_empty = source_pane.tabs.is_empty();
 

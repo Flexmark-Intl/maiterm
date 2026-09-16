@@ -319,9 +319,10 @@ function createWorkspacesStore() {
           if (!active?.service_id) continue;
           const replacement = pane.tabs.find(t => !t.service_id);
           pane.active_tab_id = replacement?.id ?? null;
-          if (replacement) {
-            commands.setActiveTab(ws.id, pane.id, replacement.id).catch(() => {});
-          }
+          // Through Rust either way: when there is no replacement, writing only the mirror
+          // would leave the service tab persisted as active and the heal would run, and
+          // fail the same way, on every launch.
+          commands.healPaneActiveTab(ws.id, pane.id).catch(() => {});
         }
       }
 
@@ -1048,8 +1049,16 @@ function createWorkspacesStore() {
       // `background`: the tab exists but the pane keeps showing what it showed (a stack
       // service starting behind the user's work — docs/stack.md §4). Rust's create_tab
       // made the new tab active, so put the previous one back before the mirror sees it.
-      if (options?.background && previousActiveTabId) {
-        await commands.setActiveTab(workspaceId, paneId, previousActiveTabId).catch(() => {});
+      if (options?.background) {
+        if (previousActiveTabId) {
+          await commands.setActiveTab(workspaceId, paneId, previousActiveTabId).catch(() => {});
+        } else {
+          // A pane holding only service tabs has no active tab to restore — a legal state
+          // since they left the strip (docs/stack.md §7). Without this, Rust keeps the
+          // service tab create_tab just made active, and the next wholesale mirror refresh
+          // picks it up as the pane's active tab.
+          await commands.healPaneActiveTab(workspaceId, paneId).catch(() => {});
+        }
       }
 
       // Open the new tab at the host/cwd of the previous (active) tab — the
@@ -2772,6 +2781,14 @@ export async function navigateToTab(tabId: string): Promise<void> {
       if (tab) {
         if (ws.id !== workspacesStore.activeWorkspaceId) {
           await workspacesStore.setActiveWorkspace(ws.id);
+        }
+        // "Go to this tab" for a service tab means showing its console: there is no tab to
+        // switch to (docs/stack.md §7), and `setActiveTab` would refuse, leaving a toast
+        // click or an Overlord chip doing nothing at all.
+        if (tab.service_id) {
+          const { stackStore } = await import('$lib/stores/stack.svelte');
+          stackStore.viewConsole(ws.id, tab.service_id);
+          return;
         }
         if (pane.active_tab_id !== tabId) {
           await workspacesStore.setActiveTab(ws.id, pane.id, tabId);
