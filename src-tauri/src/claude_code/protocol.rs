@@ -735,7 +735,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "restartService",
-            "description": "Stop then start a service in the same tab, and wait up to 10s for it to come back before replying — so your next step sees a live server, not a starting one. Use this after changing config the service only reads at boot.",
+            "description": "Stop then start a service in the same tab. Replies once the command is running again, which is not the same as serving — call waitForService before you hit it. Use this after changing config the service only reads at boot.",
             "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
         },
         {
@@ -750,7 +750,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "waitForService",
-            "description": "Block until a service is ready (or running, when it has no ready pattern), up to `timeout` seconds; returns its status and, if it is not up, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service.",
+            "description": "Block until a service is up, up to `timeout` seconds; returns its status and, if it is not up, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service. 'Up' means running — nothing watches output for a ready pattern yet, so 'ready' is a state you report with updateService once you have read the service's own line saying it is serving.",
             "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 100)" } }, "required": ["service"] }
         },
         {
