@@ -48,6 +48,10 @@ Right-click a service for **Start** / **Restart**, **Stop**, **Show console**, *
 
 A dev server tells you where it is serving the moment it comes up — `Local: http://localhost:5173/`, `Listening on port 8080`, `Serving HTTP on 0.0.0.0 port 8000`. maiTerm reads that line out of the service's own output and fills in the address, marks it **ready**, and shows it to every agent in the workspace. Nothing sniffs sockets and nothing has to be configured.
 
+![A workspace's Stack section in the sidebar: web-ui on port 5173, api-gateway on 4000, and a worker with no address, each with a status dot and uptime](/screenshots/stack-sidebar.webp)
+
+The `worker` above is the honest case: it serves nothing and announces nothing, so it stays **running** with no address rather than pretending to have one.
+
 An address that a browser can open becomes a **launch**: shift-click the service's row, use the `↗` that appears on hover, or pick `Open http://localhost:5173` from its right-click menu. Only for services actually serving something openable — a database's `:5432` is an address, not a page. And the link is offered only while the service is up *and* the address came from **this** run: a port carried over from the last one might now belong to something else entirely.
 
 Two things it is careful about, both learned from real output:
@@ -62,6 +66,8 @@ If a service announces itself in some way maiTerm doesn't recognise, put a regul
 ## The console drawer
 
 Click a service and its console opens **over** your work — a drawer along the bottom of the terminal area, not a dock beside it. Click the service again, click the tab behind it, or press `Escape`, and it's gone.
+
+![The console drawer open along the bottom of the terminal area, showing the web-ui service's output over the tab being worked in, with a pill per service and Restart and Stop buttons](/screenshots/stack-console.webp)
 
 That shape is deliberate. A side dock takes width from the terminal you're working in, and a width change makes an agent re-render its whole transcript into your scrollback. The drawer floats, so the tab underneath never sees a resize — and the service's terminal is never moved between panes either, so showing or hiding a service does nothing whatsoever to the process.
 
