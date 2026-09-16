@@ -9,6 +9,8 @@
   import WorkspaceSidebar from '$lib/components/workspace/WorkspaceSidebar.svelte';
   import SplitContainer from '$lib/components/pane/SplitContainer.svelte';
   import MeshStageView from '$lib/components/MeshStageView.svelte';
+  import ServiceConsole from '$lib/components/stack/ServiceConsole.svelte';
+  import { stackStore } from '$lib/stores/stack.svelte';
   import TerminalPane from '$lib/components/terminal/TerminalPane.svelte';
   import EditorPane from '$lib/components/editor/EditorPane.svelte';
   import DiffPane from '$lib/components/editor/DiffPane.svelte';
@@ -556,6 +558,8 @@
               />
             {/key}
           {/if}
+          <!-- Floats over the split tree; renders nothing unless a service is being shown. -->
+          <ServiceConsole workspaceId={workspace.id} />
         {:else}
           {@const suspendedWorkspaces = workspacesStore.workspaces.filter(w => w.suspended)}
           {@const activeWorkspaces = workspacesStore.workspaces.filter(w => !w.suspended)}
@@ -629,12 +633,13 @@
                     editorFile={tab.editor_file}
                   />
                 {:else if tab.tab_type === 'terminal' && (activatedTabIds.has(tab.id) || (meshStage && agentMeshStore.isMeshMemberTab(tab.id)))}
+                  {@const inConsole = !!tab.service_id && ws.id === workspacesStore.activeWorkspaceId && stackStore.consoleTabId(ws.id) === tab.id}
                   <TerminalPane
                     workspaceId={ws.id}
                     paneId={pane.id}
                     tabId={tab.id}
                     existingPtyId={(terminalsStore.get(tab.id) || terminalsStore.shouldReattach(tab.pty_id)) ? tab.pty_id : null}
-                    visible={meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId)}
+                    visible={inConsole || (meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId))}
                     restoreCwd={tab.restore_cwd}
                     restoreSshCommand={tab.restore_ssh_command}
                     restoreRemoteCwd={tab.restore_remote_cwd}
@@ -747,6 +752,9 @@
     display: flex;
     min-width: 0;
     background: var(--bg-dark);
+    /* The service console drawer anchors to this box, so it covers the terminal area and
+       leaves the sidebar clickable (docs/stack.md §7). */
+    position: relative;
   }
 
   .empty-state {

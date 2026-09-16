@@ -1037,6 +1037,12 @@ fn default_tasks_width() -> u32 {
     320
 }
 
+/// Height of the service console drawer (docs/stack.md §7). A drawer, not a dock: it
+/// floats over the terminal area, so this height never resizes the tab underneath.
+fn default_stack_console_height() -> u32 {
+    300
+}
+
 fn default_toast_font_size() -> u32 {
     14
 }
@@ -1343,6 +1349,9 @@ pub struct Preferences {
     /// Width of the task side panel (docs/tasks.md §6).
     #[serde(default = "default_tasks_width")]
     pub tasks_width: u32,
+    /// Height of the service console drawer (docs/stack.md §7).
+    #[serde(default = "default_stack_console_height")]
+    pub stack_console_height: u32,
     #[serde(default = "default_true")]
     pub notes_word_wrap: bool,
     #[serde(default = "default_toast_font_size")]
@@ -1696,6 +1705,7 @@ impl Default for Preferences {
             notes_font_family: default_font_family(),
             notes_width: default_notes_width(),
             tasks_width: default_tasks_width(),
+            stack_console_height: default_stack_console_height(),
             notes_word_wrap: true,
             toast_font_size: default_toast_font_size(),
             toast_width: default_toast_width(),

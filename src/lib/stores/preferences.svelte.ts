@@ -36,6 +36,7 @@ function createPreferencesStore() {
   let notesFontFamily = $state('Menlo');
   let notesWidth = $state(320);
   let tasksWidth = $state(320);
+  let stackConsoleHeight = $state(300);
   let notesWordWrap = $state(true);
   let toastFontSize = $state(14);
   let toastWidth = $state(400);
@@ -126,6 +127,7 @@ function createPreferencesStore() {
     get notesFontFamily() { return notesFontFamily; },
     get notesWidth() { return notesWidth; },
     get tasksWidth() { return tasksWidth; },
+    get stackConsoleHeight() { return stackConsoleHeight; },
     get notesWordWrap() { return notesWordWrap; },
     get toastFontSize() { return toastFontSize; },
     get toastWidth() { return toastWidth; },
@@ -225,6 +227,7 @@ function createPreferencesStore() {
       notesFontFamily = prefs.notes_font_family ?? 'Menlo';
       notesWidth = prefs.notes_width ?? 320;
       tasksWidth = prefs.tasks_width ?? 320;
+      stackConsoleHeight = prefs.stack_console_height ?? 300;
       notesWordWrap = prefs.notes_word_wrap ?? true;
       toastFontSize = prefs.toast_font_size ?? 14;
       toastWidth = prefs.toast_width ?? 400;
@@ -422,6 +425,11 @@ function createPreferencesStore() {
 
     async setTasksWidth(value: number) {
       tasksWidth = Math.max(200, value);
+      await this.save();
+    },
+
+    async setStackConsoleHeight(value: number) {
+      stackConsoleHeight = Math.max(120, value);
       await this.save();
     },
 
@@ -758,6 +766,7 @@ function createPreferencesStore() {
       notesFontFamily = prefs.notes_font_family ?? 'Menlo';
       notesWidth = prefs.notes_width ?? 320;
       tasksWidth = prefs.tasks_width ?? 320;
+      stackConsoleHeight = prefs.stack_console_height ?? 300;
       notesWordWrap = prefs.notes_word_wrap ?? true;
       toastFontSize = prefs.toast_font_size ?? 14;
       toastWidth = prefs.toast_width ?? 400;
@@ -849,6 +858,7 @@ function createPreferencesStore() {
         notes_font_family: notesFontFamily,
         notes_width: notesWidth,
         tasks_width: tasksWidth,
+        stack_console_height: stackConsoleHeight,
         notes_word_wrap: notesWordWrap,
         toast_font_size: toastFontSize,
         toast_width: toastWidth,

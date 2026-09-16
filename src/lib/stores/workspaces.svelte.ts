@@ -106,7 +106,11 @@ function allTabNames(ws: Workspace): string[] {
  * When groupActiveTabs is on, prefers non-suspended (live terminal) tabs.
  * Falls back to adjacent tab by index if no live tabs remain.
  */
-function pickNextActiveTab(tabs: Tab[], closedIndex: number): string | null {
+function pickNextActiveTab(allTabs: Tab[], closedIndex: number): string | null {
+  // A stack service tab is never a pane's active tab (docs/stack.md §7). It is also the
+  // likeliest pick here, being live and adjacent, and choosing it would leave the strip
+  // with nothing selected and `activeTab` pointing at something the human cannot see.
+  const tabs = allTabs.filter(t => !t.service_id);
   if (tabs.length === 0) return null;
   if (preferencesStore.groupActiveTabs) {
     // Prefer live (non-suspended) terminal tabs, searching outward from closedIndex
@@ -304,6 +308,22 @@ function createWorkspacesStore() {
       }
       notesVisible = seeded;
       tasksVisible = seededTasks;
+
+      // Self-heal: a pane whose active tab is a stack service tab. Only state written
+      // before service tabs left the strip can look like this (docs/stack.md §7), but the
+      // result is a pane with nothing selected and an `activeTab` the human cannot see, so
+      // move to the first tab that IS in the strip.
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const active = pane.tabs.find(t => t.id === pane.active_tab_id);
+          if (!active?.service_id) continue;
+          const replacement = pane.tabs.find(t => !t.service_id);
+          pane.active_tab_id = replacement?.id ?? null;
+          if (replacement) {
+            commands.setActiveTab(ws.id, pane.id, replacement.id).catch(() => {});
+          }
+        }
+      }
 
       // Migration: update old auto-resume commands and backfill missing context
       const OLD_RESUME_COMMANDS = [
@@ -1265,6 +1285,27 @@ function createWorkspacesStore() {
       import('$lib/stores/navHistory.svelte').then(m => m.navHistoryStore.removeTab(tabId));
     },
 
+    /** Close a tab, and take its pane with it when nothing is left to show. The three
+     *  entry points that close a tab (the × button, Cmd+W, and a shell that exited) all
+     *  need this same arithmetic, and it stopped being `pane.tabs.length > 1` when stack
+     *  service tabs became invisible (docs/stack.md §7): they inflate the count while
+     *  showing nothing, and handing their pane to `deletePane` would kill their PTYs with
+     *  no stack teardown. A pane that still runs services therefore stays, showing its
+     *  empty state, until the human stops them. */
+    async closeTabOrPane(workspaceId: string, paneId: string, tabId: string) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      const pane = ws?.panes.find(p => p.id === paneId);
+      if (!ws || !pane) return;
+      // The pane goes only when NOTHING is left in it — a remaining service tab counts,
+      // even though the strip will look empty.
+      const remaining = pane.tabs.filter(t => t.id !== tabId);
+      if (remaining.length > 0 || ws.panes.length <= 1) {
+        await this.deleteTab(workspaceId, paneId, tabId);
+        return;
+      }
+      await this.deletePane(workspaceId, paneId);
+    },
+
     async suspendTab(workspaceId: string, paneId: string, tabId: string) {
       const ws = workspaces.find(w => w.id === workspaceId);
       const pane = ws?.panes.find(p => p.id === paneId);
@@ -1802,6 +1843,12 @@ function createWorkspacesStore() {
     },
 
     async setActiveTab(workspaceId: string, paneId: string, tabId: string) {
+      // The invariant the whole hidden-service-tab design rests on (docs/stack.md §7): a
+      // service tab is never a pane's active tab, so `activeTab` and its many consumers
+      // (notes, tasks, composer, Cmd+D, the agent tools) can never be handed one. Callers
+      // that mean "show me this service" open the console drawer instead.
+      const target = findTab(workspaceId, paneId, tabId).tab;
+      if (target?.service_id) return;
       await commands.setActiveTab(workspaceId, paneId, tabId);
       const { pane, tab } = findTab(workspaceId, paneId, tabId);
       if (pane) pane.active_tab_id = tabId;
@@ -2477,7 +2524,12 @@ function createWorkspacesStore() {
       reordered.splice(reordered.indexOf(tabId), 1);
       await commands.reorderTabs(workspaceId, paneId, reordered);
 
-      await commands.setActiveTab(workspaceId, paneId, newTab.id);
+      // A reloaded SERVICE tab must not drag the pane onto itself: it is not in the strip,
+      // so showing it would leave the pane blank with nothing selected (docs/stack.md §7).
+      // `carry_tab_state_on_reload` copies `service_id` to the replacement, so read it
+      // from the source tab we are about to delete.
+      const reloadingService = !!freshPane.tabs.find(t => t.id === tabId)?.service_id;
+      if (!reloadingService) await commands.setActiveTab(workspaceId, paneId, newTab.id);
       await commands.deleteTab(workspaceId, paneId, tabId);
 
       // Final state reload

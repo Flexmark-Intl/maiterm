@@ -42,9 +42,16 @@
     return () => { cancelled = true; };
   });
 
+  /** Tabs this pane shows. A stack service's tab is deliberately absent from the strip and
+   *  from the pane body (docs/stack.md §7) — it is watched in the console drawer, which
+   *  claims its terminal through the same `data-terminal-slot` portal. Rendering a slot for
+   *  it here would win that claim (the portal takes the first match in the DOM) and the
+   *  drawer would come up empty. */
+  const visibleTabs = $derived(pane.tabs.filter((t) => !t.service_id));
+
   // Notify portaled TerminalPanes that their slots are ready
   onMount(() => {
-    for (const tab of pane.tabs) {
+    for (const tab of visibleTabs) {
       window.dispatchEvent(new CustomEvent('terminal-slot-ready', { detail: { tabId: tab.id } }));
     }
   });
@@ -129,14 +136,14 @@
 
   <TerminalTabs {workspaceId} {pane} />
 
-  {#if pane.tabs.length > 0}
+  {#if visibleTabs.length > 0}
     <div class="terminal-with-notes">
       <div class="terminal-column">
         <div class="terminal-area">
           {#if pane.active_tab_id}
             <SearchBar tabId={pane.active_tab_id} />
           {/if}
-          {#each pane.tabs as tab (tab.id)}
+          {#each visibleTabs as tab (tab.id)}
             <div
               class="terminal-slot"
               class:hidden-tab={tab.id !== pane.active_tab_id}

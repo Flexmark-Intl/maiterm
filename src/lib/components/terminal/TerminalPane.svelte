@@ -825,14 +825,7 @@
       const pane = ws?.panes.find(p => p.id === paneId);
       if (!ws || !pane) return;
 
-      if (pane.tabs.length > 1) {
-        workspacesStore.deleteTab(workspaceId, paneId, tabId).catch(() => {});
-      } else if (ws.panes.length > 1) {
-        workspacesStore.deletePane(workspaceId, paneId).catch(() => {});
-      } else {
-        // Last tab in last pane — delete tab, pane shows empty state
-        workspacesStore.deleteTab(workspaceId, paneId, tabId).catch(() => {});
-      }
+      workspacesStore.closeTabOrPane(workspaceId, paneId, tabId).catch(() => {});
     });
 
     // Check for split context (cwd, SSH command from source pane)

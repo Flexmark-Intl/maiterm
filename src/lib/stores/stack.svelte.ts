@@ -106,6 +106,10 @@ function sleep(ms: number) {
 
 function createStackStore() {
   let runtime = $state<Map<string, ServiceRuntime>>(new Map());
+  /** Which service the console drawer is showing, per workspace. Session-only, like every
+   *  other stack runtime fact (§3): a drawer left open is not worth restoring, and it must
+   *  never be the reason a service tab survives a restart. */
+  let consoleService = $state<Map<string, string>>(new Map());
   /** Workspaces whose auto_start already fired for this activation. Cleared on suspend. */
   const autoStarted = new Set<string>();
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -605,6 +609,49 @@ function createStackStore() {
     status(serviceId: string): ServiceStatus { return rt(serviceId).status; },
     boundTab,
     serviceForTab,
+
+    // ── The console drawer (docs/stack.md §7) ────────────────────────────────────
+    // A service tab is never in the tab strip and is never a pane's active tab; this is
+    // the only way to see one. The terminal itself does not move panes — it portals into
+    // the drawer's slot, which is why opening the drawer resizes nothing else.
+
+    /** The service this workspace's drawer is showing, or null when it is closed. */
+    consoleServiceId(workspaceId: string): string | null {
+      return consoleService.get(workspaceId) ?? null;
+    },
+
+    /** The tab whose terminal the open drawer is showing — what `+page` makes visible. */
+    consoleTabId(workspaceId: string): string | null {
+      const serviceId = consoleService.get(workspaceId);
+      if (!serviceId) return null;
+      return boundTab(workspaceId, serviceId)?.tab.id ?? null;
+    },
+
+    /** Show a service. Mounts its tab if it is not mounted yet (a service started in an
+     *  earlier session has a tab but no pane to mount it), so the terminal can portal in. */
+    viewConsole(workspaceId: string, serviceId: string) {
+      const next = new Map(consoleService);
+      next.set(workspaceId, serviceId);
+      consoleService = next;
+      const bound = boundTab(workspaceId, serviceId);
+      if (bound && !terminalsStore.get(bound.tab.id)) {
+        window.dispatchEvent(new CustomEvent('activate-tab', {
+          detail: { workspaceId, paneId: bound.pane.id, tabId: bound.tab.id },
+        }));
+      }
+    },
+
+    closeConsole(workspaceId: string) {
+      if (!consoleService.has(workspaceId)) return;
+      const next = new Map(consoleService);
+      next.delete(workspaceId);
+      consoleService = next;
+    },
+
+    toggleConsole(workspaceId: string, serviceId: string) {
+      if (consoleService.get(workspaceId) === serviceId) this.closeConsole(workspaceId);
+      else this.viewConsole(workspaceId, serviceId);
+    },
 
     services(workspaceId: string): Service[] {
       return workspaceOf(workspaceId)?.stack ?? [];

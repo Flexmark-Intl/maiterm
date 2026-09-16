@@ -108,12 +108,18 @@
   // (non-suspended) tabs, then suspended tabs, each preserving relative order.
   // Pinned tabs are exempt from the active/suspended split: they hold their slot
   // regardless of liveness.
+  //
+  /** The tabs this strip shows. A stack service's tab is NOT one of them (docs/stack.md §7):
+   *  it has no close button to kill the service with, takes no slot in Cmd+1-9, and is
+   *  watched in the console drawer instead. Everything below derives from this, never from
+   *  `pane.tabs` — a raw count here reads "3 tabs" to the user's "1". */
+  const visibleTabs = $derived(pane.tabs.filter(t => !t.service_id));
   const groupedTabs = $derived.by(() => {
-    const pinned = pane.tabs.filter(t => t.pinned);
-    const rest = pane.tabs.filter(t => !t.pinned);
+    const pinned = visibleTabs.filter(t => t.pinned);
+    const rest = visibleTabs.filter(t => !t.pinned);
     if (!preferencesStore.groupActiveTabs) {
       // No active-grouping — but pinned still cluster at the front.
-      if (pinned.length === 0) return { tabs: pane.tabs, activeCount: 0, pinnedCount: 0 };
+      if (pinned.length === 0) return { tabs: visibleTabs, activeCount: 0, pinnedCount: 0 };
       return { tabs: [...pinned, ...rest], activeCount: 0, pinnedCount: pinned.length };
     }
     // Read instanceVersion to re-derive when terminals register/unregister
@@ -208,13 +214,14 @@
     const grouping = preferencesStore.groupActiveTabs;
     untrack(() => {
       const isTerminal = (t: Tab) => t.tab_type === 'terminal' || !t.tab_type;
+      // Service tabs are excluded: promotion reorders the strip, and they are not in it.
       const liveNow = new Set(
-        pane.tabs
+        visibleTabs
           .filter(t => isTerminal(t) && (terminalsStore.get(t.id) || terminalsStore.isSpawning(t.id)))
           .map(t => t.id)
       );
       const resumed: { id: string; anchor: string | null }[] = [];
-      for (const t of pane.tabs) {
+      for (const t of visibleTabs) {
         // Only tabs that just went live this tick are candidates.
         if (!isTerminal(t) || !liveNow.has(t.id) || prevLive.has(t.id)) continue;
         // Consume the archive-restore marker on this first live transition
@@ -343,7 +350,7 @@
   }
 
   async function handleNewTab() {
-    const count = pane.tabs.length + 1;
+    const count = visibleTabs.length + 1;
     await workspacesStore.createTab(workspaceId, pane.id, `Terminal ${count}`, { append: true });
   }
 
@@ -360,7 +367,8 @@
     const name = displayName(tab);
     const ws = workspacesStore.activeWorkspace;
 
-    if (pane.tabs.length > 1) {
+    if (visibleTabs.length > 1 || pane.tabs.length > visibleTabs.length) {
+      // More to show, or hidden service tabs keeping this pane alive (docs/stack.md §7).
       await workspacesStore.archiveTab(workspaceId, pane.id, tabId, name);
     } else if (ws && ws.panes.length > 1) {
       // Last tab in pane — archive then delete pane
@@ -476,16 +484,7 @@
 
   async function handleCloseTab(tabId: string, e: MouseEvent) {
     e.stopPropagation();
-    const ws = workspacesStore.activeWorkspace;
-    if (pane.tabs.length > 1) {
-      await workspacesStore.deleteTab(workspaceId, pane.id, tabId);
-    } else if (ws && ws.panes.length > 1) {
-      // Last tab in pane — close the pane
-      await workspacesStore.deletePane(workspaceId, pane.id);
-    } else {
-      // Last tab in last pane — close tab, pane shows empty state
-      await workspacesStore.deleteTab(workspaceId, pane.id, tabId);
-    }
+    await workspacesStore.closeTabOrPane(workspaceId, pane.id, tabId);
   }
 
   async function handleTabClick(tabId: string) {
@@ -743,7 +742,7 @@
           const isOwnPane = paneId === pane.id;
           // Dropping a tab in its own pane's center is a no-op; splitting a
           // pane off with its only tab just churns pane IDs.
-          if (isOwnPane && (edge === 'center' || pane.tabs.length === 1)) break;
+          if (isOwnPane && (edge === 'center' || visibleTabs.length === 1)) break;
           nextSplit = { paneId, edge };
           break;
         }
@@ -883,7 +882,11 @@
           const ids = displayed.map(t => t.id);
           const [moved] = ids.splice(fromIndex, 1);
           ids.splice(toIndex, 0, moved);
-          workspacesStore.reorderTabs(workspaceId, pane.id, ids);
+          // `reorderTabs` persists the WHOLE pane; the strip only knows its visible tabs,
+          // so the hidden service tabs have to ride along or this drag deletes them
+          // (docs/stack.md §7).
+          const hidden = pane.tabs.filter(t => !!t.service_id).map(t => t.id);
+          workspacesStore.reorderTabs(workspaceId, pane.id, [...ids, ...hidden]);
           dropped = true;
         }
       }
@@ -997,7 +1000,7 @@
   }
 
   function tabMenuItems(tabId: string) {
-    const onlyTab = pane.tabs.length === 1;
+    const onlyTab = visibleTabs.length === 1;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     const otherPanes = (ws?.panes ?? []).filter(p => p.id !== pane.id);
     const tabObj = pane.tabs.find(t => t.id === tabId);

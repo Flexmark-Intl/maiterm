@@ -1,11 +1,11 @@
 <script lang="ts">
   /** The Stack section under a workspace row in the sidebar (docs/stack.md §7): one line
-   *  per service — status dot, name, port, uptime — click to open its tab, right-click for
-   *  the verbs. The rows wrap rather than clip: real service names and ports share prefixes
+   *  per service — status dot, name, port, uptime — click to show it in the console
+   *  drawer (click again to hide), right-click for the verbs. The rows wrap rather than clip: real service names and ports share prefixes
    *  and the dock is narrow (CLAUDE.md on `white-space: nowrap` in the side docks). */
   import type { Service, Workspace } from '$lib/tauri/types';
   import { stackStore, type ServiceInput } from '$lib/stores/stack.svelte';
-  import { navigateToTab } from '$lib/stores/workspaces.svelte';
+  import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
@@ -72,15 +72,15 @@
     p.catch((e) => logError(`stack: ${label}: ${e}`));
   }
 
-  async function openService(service: Service) {
-    const bound = stackStore.boundTab(workspace.id, service.id);
-    if (bound) { await navigateToTab(bound.tab.id); return; }
-    const st = stackStore.status(service.id);
-    if (st === 'stopped' || st === 'crashed') {
-      await stackStore.start(workspace.id, service.id);
-      const after = stackStore.boundTab(workspace.id, service.id);
-      if (after) await navigateToTab(after.tab.id);
+  /** Show a service in the console drawer (docs/stack.md §7). Clicking the row that is
+   *  already showing hides it again — the drawer is a peek, not a place you have to
+   *  navigate out of. A stopped service opens the drawer too, on its Start button, rather
+   *  than starting behind the human's back. */
+  function openService(service: Service) {
+    if (workspace.id !== workspacesStore.activeWorkspaceId) {
+      void workspacesStore.setActiveWorkspace(workspace.id);
     }
+    stackStore.toggleConsole(workspace.id, service.id);
   }
 
   function menuItems(service: Service) {
@@ -89,7 +89,7 @@
     return [
       { label: live ? 'Restart' : 'Start', action: () => run('start', live ? stackStore.restart(workspace.id, service.id) : stackStore.start(workspace.id, service.id)) },
       { label: 'Stop', disabled: !live, action: () => run('stop', stackStore.stop(workspace.id, service.id)) },
-      { label: 'Open tab', disabled: !stackStore.boundTab(workspace.id, service.id), action: () => run('open', openService(service)) },
+      { label: stackStore.consoleServiceId(workspace.id) === service.id ? 'Hide console' : 'Show console', action: () => openService(service) },
       { label: '', separator: true, action: () => {} },
       { label: 'Edit…', action: () => { editing = service; } },
       { label: 'Remove', disabled: live, action: () => run('remove', stackStore.removeService(workspace.id, service.id)) },
@@ -148,8 +148,8 @@
           class:crashed={r.status === 'crashed'}
           role="button"
           tabindex="0"
-          onclick={(e) => { e.stopPropagation(); run('open', openService(service)); }}
-          onkeydown={(e) => { if (e.key === 'Enter') run('open', openService(service)); }}
+          onclick={(e) => { e.stopPropagation(); openService(service); }}
+          onkeydown={(e) => { if (e.key === 'Enter') openService(service); }}
           oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); menu = { x: e.clientX, y: e.clientY, service }; }}
         >
           <StatusDot color={dotColor(r.status)} pulse={r.status === 'starting'} tooltip={r.note ?? r.status} />

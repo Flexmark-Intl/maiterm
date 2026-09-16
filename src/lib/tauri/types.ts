@@ -467,6 +467,7 @@ export interface Preferences {
   notes_width: number;
   /** Width of the task side panel (docs/tasks.md §6). */
   tasks_width: number;
+  stack_console_height: number;
   notes_word_wrap: boolean;
   toast_font_size: number;
   toast_width: number;

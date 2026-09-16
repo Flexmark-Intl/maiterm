@@ -667,9 +667,13 @@
       return isTerminal && !terminalsStore.get(tab.id) && !terminalsStore.isSpawning(tab.id);
     }
 
+    /** What the keyboard can reach: the tabs in the strip, in strip order. Stack service
+     *  tabs are not in the strip (docs/stack.md §7), so Cmd+1-9 must not spend a number on
+     *  one and cycling must not land on one — there would be nothing to see. */
     function tabCycleList(tabs: Tab[]): Tab[] {
-      if (!preferencesStore.groupActiveTabs) return tabs;
-      return tabs.filter(t => !isSuspendedTerminal(t));
+      const visible = tabs.filter(t => !t.service_id);
+      if (!preferencesStore.groupActiveTabs) return visible;
+      return visible.filter(t => !isSuspendedTerminal(t));
     }
 
     function cycleActiveTab(dir: 1 | -1) {
@@ -771,7 +775,9 @@
         const ws = workspacesStore.activeWorkspace;
         const pane = workspacesStore.activePane;
         if (ws && pane) {
-          const count = pane.tabs.length + 1;
+          // Visible tabs only — hidden service tabs would make the next one "Terminal 5"
+          // in a strip showing one (docs/stack.md §7).
+          const count = pane.tabs.filter(t => !t.service_id).length + 1;
           workspacesStore.createTab(ws.id, pane.id, `Terminal ${count}`);
         }
         return;
@@ -931,14 +937,7 @@
           return;
         }
         clearCloseConfirm();
-        if (pane.tabs.length > 1) {
-          workspacesStore.deleteTab(ws.id, pane.id, tab.id);
-        } else if (ws.panes.length > 1) {
-          workspacesStore.deletePane(ws.id, pane.id);
-        } else {
-          // Last tab in last pane — close tab, pane shows empty state
-          workspacesStore.deleteTab(ws.id, pane.id, tab.id);
-        }
+        workspacesStore.closeTabOrPane(ws.id, pane.id, tab.id);
         return;
       }
 
