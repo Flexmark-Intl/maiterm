@@ -78,7 +78,7 @@ src-tauri/src/                # Backend (Rust)
 - `docs/mailink-protocol.md` — the maiLink wire contract, shared with the phone app's own repo. §4 REST/WS, §5 replies and prompts, §6 the doorbell relay, §13 Overlord + task writes. **Read §13.1 before touching the mirror**: the Overlord engine is a frontend store, so the phone is served a published snapshot rather than a webview round trip. Every wire change bumps `protocolVersion` (§13.5), additive ones included
 - `docs/overlord.md` — Overlord per-window supervisor: engine/agent split, rule schema, checkpoint ritual, MCP tools (replyToOverlord/driveTab/listEscalations/proposeRuleChanges)
 - `website/CLAUDE.md` — maiterm.dev: the Starlight-docs / hand-authored-landing split, the shared theme contract, the gutter rule, and the copy that has to stay true (licence is source-available, the updater does count users). **Pushing `website/**` to main publishes the site**
-- `docs/stack.md` — Workspace Stack (v1 2026-09-11): a workspace's services (dev server, api, db…) as maiTerm-owned tabs; a service is a tab whose shell stays up, the binding lives on `Tab.service_id` (never a `tab_id` on the service), status is never persisted (a Rust mirror serves the priming), every PTY write is behind `get_pty_foreground_job` (shell at prompt / recorded pid), agents are writers over MCP (`updateService` reports ports — no socket sniffing), `createService` with no args returns the suggester's list. Read §5 before adding lifecycle paths that copy a `Tab`
+- `docs/stack.md` — Workspace Stack (v1 2026-09-11, console drawer 2026-09-15): a workspace's services (dev server, api, db…) as maiTerm-owned tabs that are **not in the tab strip** (§7 — they open in a drawer over the terminal area, and `pane.active_tab_id` is never one of them); a service is a tab whose shell stays up, the binding lives on `Tab.service_id` (never a `tab_id` on the service), status is never persisted (a Rust mirror serves the priming), every PTY write is behind `get_pty_foreground_job` (shell at prompt / recorded pid), agents are writers over MCP (`updateService` reports ports — no socket sniffing), `createService` with no args returns the suggester's list. Read §5 before adding lifecycle paths that copy a `Tab`
 
 ## Commands
 
@@ -180,7 +180,7 @@ Tab
 ├── notes, notes_open, notes_mode (per-tab markdown notes)
 ├── tasks_open (per-tab task panel visibility)
 ├── overlord_exempt (per-tab Overlord exemption; the workspace flag covers all its tabs)
-├── service_id (the stack service this tab runs — carried on reload, never on duplicate; `clone_workspace_with_id_mapping` sets None)
+├── service_id (the stack service this tab runs — carried on reload, never on duplicate; `clone_workspace_with_id_mapping` sets None). **A tab with one is NOT in the tab strip** and is never `pane.active_tab_id`: it is seen in the console drawer (docs/stack.md §7). Anything counting or picking "a tab" must filter it out
 └── trigger_variables (persisted variable map from triggers)
 
 SplitNode = SplitLeaf { pane_id } | SplitBranch { id, direction, ratio, children }
@@ -194,7 +194,7 @@ Preferences
 ├── claude_code_ide, claude_code_ide_ssh
 ├── triggers, hidden_default_triggers
 ├── tasks_enabled (gates the task MCP tools AND the initSession priming), tasks_width
-├── stack_enabled (gates the eleven stack MCP tools AND the live priming line)
+├── stack_enabled (gates the eleven stack MCP tools AND the live priming line), stack_console_height
 ├── overlord_enabled, overlord_propose_mode, overlord_rules, hidden_default_overlord_rules
 ├── comms_provider, comms_server_url, comms_bot_token, comms_authorized_users, comms_pickup_users, comms_instructions (Mattermost bot; token + user lists + instructions never in preference_meta)
 └── (see state/workspace.rs for full list)

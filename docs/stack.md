@@ -314,8 +314,8 @@ the reason **not** to implement `start` through the auto-resume path.
 
 **Sidebar.** A collapsible **Stack** section under the workspace row (the workstream rail
 is the pattern): one line per service — status dot, name, `:port` when known, uptime.
-Click → `navigateToTab` (starts it first if stopped). Right-click → Start/Restart · Stop ·
-Open tab · Edit… · Remove. `ContextMenu.svelte` already existed as a shared component
+Click → show it in the console drawer, click again → hide. Right-click → Start/Restart ·
+Stop · Show/Hide console · Edit… · Remove. `ContextMenu.svelte` already existed as a shared component
 (`TerminalTabs.svelte` uses it); the sidebar simply had never used it.
 
 **Rollup dot on the workspace row**, batch semantics like the Claude indicator: green when
@@ -328,12 +328,46 @@ stack · Stop stack · Restart stack · Add service… · Import from project…
 workspace with an empty stack gets its first service; the section itself only renders once
 there is something in it (or the menu just asked for it).
 
-**Tab strip.** Service tabs are ordinary tabs in the strip, created in the background
-(`createTab({ background: true })` — Rust's `create_tab` makes a new tab active, so the
-previous active tab is put back before the mirror sees it). Names are the service name with
-`custom_name` set, so OSC titles from the process don't rename them. The pinned cluster and
-a distinct glyph did not make v1; neither did the in-pane header strip. Both are v2 if the
-sidebar section turns out not to be enough.
+**Tab strip — service tabs are not in it** (changed 2026-09-15; v1 shipped them as ordinary
+tabs and that was wrong). A service tab is created in the background (`createTab({
+background: true })` — Rust's `create_tab` makes a new tab active, so the previous active
+tab is put back before the mirror sees it) and never appears in the strip: it takes no slot,
+no `Cmd+1-9` number, and has no close button. The v1 behaviour cost a service its life the
+first time a human clicked into one to read it and then closed the tab.
+
+**The console drawer** (`components/stack/ServiceConsole.svelte`) is how a service is seen.
+It is absolutely positioned inside `.main-content`, floating over the terminal area:
+
+- **A drawer, not a dock.** A side dock is a flex sibling, so opening it changes the working
+  terminal's WIDTH — and a width change makes Claude Code re-render its transcript into
+  scrollback (root CLAUDE.md). The drawer changes neither width nor height of the tab
+  underneath; verified in the app (198×50 before, during and after).
+- **The terminal is borrowed, not moved.** The flat `TerminalPane` in `+page.svelte` portals
+  its container into the drawer's `data-terminal-slot`, exactly as the mesh stage does.
+  `+page` extends the `visible` prop for the drawer's tab the same way the `meshStage`
+  branch already extends it. Showing or hiding a service therefore does nothing to its PTY.
+  **The pane must not render a slot for a service tab** — the portal takes the first match in
+  the DOM, and the pane's slot would win, leaving the drawer empty.
+- Header: a pill per service (switch without closing), the last-reported endpoint, Start or
+  Restart/Stop, and ×. Drag the top edge to resize; the height is `stack_console_height`.
+- Dismissed by Escape, by the × , by clicking the same service again — or by clicking the
+  work behind it (a capture-phase `pointerdown` inside `.main-content`, which does not
+  swallow the click, so the terminal still takes focus). Clicks in the sidebar are exempt:
+  they swap what the drawer shows.
+
+**The invariant that makes it safe: a service tab is never `pane.active_tab_id`.** With it,
+every one of the ~40 `workspacesStore.activeTab` consumers is correct without knowing that
+services exist. It is enforced in `setActiveTab` (refuses), `pickNextActiveTab` and Rust's
+`pick_active_after_close` (skip them — `active_tab_id` is persisted from Rust, so the
+frontend guard alone would not survive a restart), `reloadTab` (does not switch to a
+reloaded service tab) and `load()` (heals a pane that already had one).
+
+Two counts that used to be `pane.tabs.length` now have to mean "visible": the strip's own
+grouping, new-tab naming, the archive/close/split guards, and `tabCycleList`. `reorderTabs`
+persists the WHOLE pane, so the strip's drag has to splice the hidden tabs back into the id
+list or the drag deletes them. `closeTabOrPane` is shared by the × , Cmd+W and `pty-close`:
+a pane that still hosts services stays (showing its empty state) rather than handing their
+PTYs to `deletePane`.
 
 **Editing.** A small form (name, command, cwd, env rows, auto-start, restart policy, ready
 pattern with a "test against current output" button). Inline in the sidebar section is too
@@ -394,6 +428,7 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | **Runtime verification** (2026-09-13, `tauri:dev`, `maiSoft/website` — pnpm + vite): import from `package.json` (pm from the lockfile, `dev` pre-ticked), `startService` in under a second with the command typed after the shell's A, Ctrl-C → exit 130 → stopped, `kill -TERM` → 143 → crashed → restarted 1s later, `stopService`/`stopStack` via ^C, `waitForService`, `updateService { port, ready }` → `ready` and `endpoint_source: stale` after a stop, `removeService` refused while running, tab reload → binding carried to the new id and `stopped`, app relaunch → binding restored and auto-start on the active workspace, suspend → all stopped, resume → auto-start, a `sh -c 'sleep 1; exit 1'` service → five backed-off restarts then the ceiling note, sidebar rollup red over a crashed service, Start/Stop stack from the row menu. Four defects fixed on the way: a `~/…` cwd was never expanded (the scan of `~/DATA/IDE` found nothing; a saved one would have been typed as `cd '~/…'`); the reload note read as suspended (reconciled before the fresh pane mounted) and a suspend read as reloaded (PTYs die before the flag flips); the priming advertised a stale URL on a stopped service; and a stop on a crashed service left its backoff timer armed, so "Stop" was followed by a restart | `dd028cb`, `5b89221`, `25dfe49`, `2a8f703` |
 | Review of those fixes (three findings): the `~` expansion lived in Rust only, so the mirror the store types from still said `cd '~/…'` — `set_workspace_stack` returns the stored rows and the store (and `createService`/`updateService`) carry them; a suspend of a single TAB unregisters before it stamps `suspended_at`, the same ordering as the workspace case, so the effect tracks the stamp and corrects the note; a cancelled auto-restart is un-booked from `restarts` so it costs no slot of the ceiling. Each verified live | `0a2261b` |
 | Review of that: assigning the returned list to the mirror rolled back any stack write issued while the IPC was in flight, and the next writer persisted the rollback (a concurrent `createService` vanished from memory and disk). The store now merges only `cwd`/`normalized_name` by id onto whatever the mirror holds when the reply lands — the mirror only ever advances | `7bd6722` |
+| **Service tabs leave the tab strip** (2026-09-15): closing one killed its service, because a service was a tab like any other. Now it is not in the strip at all — it opens in the console drawer (§7), which borrows its terminal through the portal. Plus the invariant (`active_tab_id` is never a service tab, in Rust too), the visible-tab counts, the shared `closeTabOrPane`, and the paths that used to walk into a service tab by accident: Quick Open's `cd` target, Suspend Other Tabs, archive, the workspace row's count/activity/live dots, task assignees, and `switchTab` | `6a27160`, `6af617b`, `ba99464` |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path
@@ -440,9 +475,12 @@ file, socket-based port discovery if anything ever needs it.
    webview reload reaches this (an app relaunch kills the PTYs; a WebContent crash is the
    production analogue, and the terminals are blank then anyway). Adoption of a running job
    stays rejected (§13); the human presses Ctrl-C and starts it, or it stays a plain tab.
-9. **Removing a service leaves its tab.** `removeService` clears the definition; the bound
-   tab stays as an ordinary terminal (its name keeps the service's). Deliberate — the tab may
-   hold output worth reading — but nothing says so in the UI yet.
+9. ~~Removing a service leaves its tab~~ — still true, and now it is the feature: the tab
+   was hidden while it was a service, and `removeService` clears `service_id`, so it simply
+   reappears in the strip as an ordinary terminal holding its output.
+10. **A pane can hold nothing but services.** Legal by design (`closeTabOrPane` keeps it, so
+    `deletePane` never takes a running service's PTY with it), and it renders as the normal
+    empty pane. Nothing in the empty state says "3 services are running in here" yet.
 
 ## 13. Rejected
 
