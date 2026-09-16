@@ -142,13 +142,13 @@ export const COMPARISONS: Comparison[] = [
     slug: 'solo',
     name: 'Solo',
     summary:
-      'The closest comparison: both wrap the agent CLIs you already have. Solo leads on running your dev stack; maiTerm leads on supervising agents and reaching them remotely.',
+      'The closest comparison: both wrap the agent CLIs you already have, and both run your project’s processes. Solo leads on breadth of agent support and a stack that commits with the repo; maiTerm leads on supervising agents and reaching them remotely.',
     whatItIs:
       'Solo is a Tauri desktop app that describes itself as a meta-harness for coding agents. It runs the CLI agents already installed on your machine alongside your project’s processes — dev server, queue workers, tunnels — defined once in a shared `solo.yml`, and exposes the whole workspace to agents through MCP, HTTP and a CLI, with scratchpads, todos, prompt templates and agent spawning as primitives.',
     verdict:
-      'These two overlap more than either does with anything else, and the honest split is about what you are trying to keep track of. If the pain is your local dev stack — nine processes, duplicate ports, rebuilding the same layout every morning — Solo is built squarely for that and maiTerm has no answer to `solo.yml`. If the pain is the agents themselves — a dozen sessions, one about to hit a compaction wall, one stuck at a permission prompt, three of them on remote hosts — that is what maiTerm is built around.',
+      'These two overlap more than either does with anything else, and since maiTerm 2.4 they overlap on your dev stack too — nine processes, duplicate ports and rebuilding the same layout every morning are a problem both of them now answer. The split that is left is where the stack lives. Solo’s is a manifest in your repository, which is the better answer when a team all needs the same processes. maiTerm’s belongs to a workspace on your machine, and earns its place by being a terminal underneath — a service is a real tab with real scrollback — and by sitting beside the agent supervision. If the pain is the agents themselves — a dozen sessions, one about to hit a compaction wall, one stuck at a permission prompt, three of them on remote hosts — that is what maiTerm is built around.',
     theirEdge:
-      'Solo manages your dev stack as a first-class thing, which maiTerm simply does not do: a shared manifest, process supervision, port and orphan handling. It also supports more agent CLIs out of the box, has prompt templates and git-worktree linking, and has a considerably larger community around it.',
+      'Solo’s stack is a `solo.yml` committed to the repository, so a teammate who clones it has the same processes; maiTerm’s is defined in the app, on one machine, and there is nothing to check in. Solo also does its own port and orphan handling, where maiTerm waits for an agent to report a port it read in the output. It supports more agent CLIs out of the box, has prompt templates and git-worktree linking, and has a considerably larger community around it.',
     rows: [
       {
         dimension: 'The agent CLIs',
@@ -159,9 +159,10 @@ export const COMPARISONS: Comparison[] = [
       },
       {
         dimension: 'Your dev stack',
-        maiterm: 'Not managed. Run your processes in tabs like any terminal.',
+        maiterm:
+          'A workspace declares what its project runs, imported from `package.json`, a Procfile, compose or a justfile. Each service is a real tab maiTerm owns — kept out of the tab strip so it cannot be closed by accident, watched, restarted with backoff when it crashes — and every agent in the workspace sees and drives the same one.',
         theirs:
-          'The centrepiece: `solo.yml` defines the processes, humans and agents share them, no duplicate `npm run dev`.',
+          'The centrepiece: `solo.yml` defines the processes and commits with the repo, humans and agents share them, no duplicate `npm run dev`.',
       },
       {
         dimension: 'Supervision',
