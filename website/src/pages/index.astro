@@ -157,11 +157,16 @@ const EVERYTHING = [
         never a dock that steals width from the tab you are typing in. Click away and it is gone.
       </p>
       <p class="ln-lead">
+        It knows <strong>where</strong>, too. A dev server announces its address the moment it
+        comes up, so maiTerm reads it off the output and fills it in — no sockets sniffed, no
+        configuration. Shift-click the row to open it in your browser.
+      </p>
+      <p class="ln-lead">
         The stack belongs to the workspace, so <strong>every agent in it sees the same one</strong>.
         On a mesh workspace that is sixteen agents and still one dev server: each session is told
         what is running and where — <code>web (ready, http://localhost:5173), api (crashed)</code>
-        — and eleven tools let them read a failing service's log, restart it, wait for it, and
-        report the port they just read in its output so everyone else gets it too.
+        — and eleven tools let them read a failing service's log, restart it, and wait for it to
+        come up before they call it.
       </p>
 
       <div class="ln-cards">

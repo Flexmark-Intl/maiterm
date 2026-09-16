@@ -30,19 +30,32 @@ The obviously-dev ones — `dev`, `start`, `serve`, `up` — come pre-ticked; th
 
 ## The sidebar
 
-Services live in a **Stack** section under their workspace row. Each line carries a status dot, the service's name, its last reported port, and how long it's been up:
+Services live in a **Stack** section under their workspace row. Each line carries a status dot, the service's name, the address it is serving on, and how long it's been up:
 
 | Status | Means |
 |--------|-------|
 | **stopped** | Not running. A note says why if maiTerm held back — "the shell is mid-command", "its tab was reloaded — start it again" |
 | **starting** | The command has been sent and hasn't begun producing output yet |
 | **running** | The process is alive |
-| **ready** | An agent has reported it as ready to serve traffic |
+| **ready** | It announced an address, or an agent reported it ready |
 | **crashed** | It exited on its own with a failure code |
 
 The workspace row itself carries a **rollup dot**, with the same batch semantics as the agent indicator: red if anything crashed, amber while anything is starting, green only when *every* auto-start service is up, and amber for a partly-up stack. A green rollup means the project is actually running, not that something in it is.
 
 Right-click a service for **Start** / **Restart**, **Stop**, **Show console**, **Edit…** and **Remove** (held while it's running — stop it first). Right-click the workspace row for **Start stack**, **Stop stack** and **Restart stack**, which walk the services in order.
+
+## It reads the address off the service
+
+A dev server tells you where it is serving the moment it comes up — `Local: http://localhost:5173/`, `Listening on port 8080`, `Serving HTTP on 0.0.0.0 port 8000`. maiTerm reads that line out of the service's own output and fills in the address, marks it **ready**, and shows it to every agent in the workspace. Nothing sniffs sockets and nothing has to be configured.
+
+An address that a browser can open becomes a **launch**: shift-click the service's row, use the `↗` that appears on hover, or pick `Open http://localhost:5173` from its right-click menu. Only for services actually serving something openable — a database's `:5432` is an address, not a page, and a service that isn't running doesn't offer a link to a port that might now belong to something else.
+
+Two things it is careful about, both learned from real output:
+
+- **It waits for the service to speak.** The terminal echoes the command maiTerm typed, so `uvicorn app:app --port 8000` would otherwise "announce" port 8000 before uvicorn had started. maiTerm ignores everything up to the point the shell confirms the command is running, and a bare port number only counts when something like *listening* or *serving* is in front of it.
+- **It ignores a port the service didn't get.** `Port 3000 is in use, trying 3001 instead.` names the port it failed to bind, and it prints *before* the one it succeeds on. Lines carrying a conflict or a failure are skipped, so the address you get is the one it is actually serving.
+
+If a service announces itself in some way maiTerm doesn't recognise, give it a **ready pattern** in the service's settings — a regular expression, with an optional `port` group — and that takes over. An agent can also just tell it, with `updateService`.
 
 ## The console drawer
 
@@ -82,13 +95,13 @@ Then eleven tools, all scoped to the calling tab's workspace:
 | `startService` / `stopService` / `restartService` | The verbs. They reply once the command is running, which isn't the same as serving |
 | `startStack` / `stopStack` | Every auto-start service, or everything that's running |
 | `waitForService` | Block until it's up, and return its last 20 lines if it isn't — what to call before hitting a service you just started |
-| `updateService` | Report what you observed — the port you read in the output, a one-line note for the sidebar — or edit the definition |
+| `updateService` | Correct an address maiTerm read wrong, supply one for a service that announces nothing, leave a one-line note for the sidebar, or edit the definition |
 | `createService` | Register something this project runs. Called with no arguments it instead returns what the directory declares, which is the fast way to set a project up |
 | `removeService` | Retract a definition — refused while it's running, and refused outright for a service **you** created |
 
-Two rules make this safe to hand over. An agent is the **port discovery**: nothing sniffs sockets, so when an agent reads `:5173` in a service's output it reports it with `updateService`, and every other tab and the sidebar then show it. And `createService` does **not** start anything — registering and starting are two deliberate acts, so you see both.
+One rule makes this safe to hand over: `createService` does **not** start anything. Registering and starting are two deliberate acts, so you see both.
 
-An endpoint carries where it came from: observed, reported by an agent, or **stale** from a previous run. Agents are told not to trust a stale one.
+An endpoint carries where it came from — **observed** (maiTerm read it in the service's own output), **reported** (an agent called `updateService`), or **stale**, carried over from a previous run. Agents are told not to trust a stale one, and `updateService` is now the correction path rather than the discovery one.
 
 ## Turning it off
 

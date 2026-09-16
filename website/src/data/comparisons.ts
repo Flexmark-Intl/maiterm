@@ -148,7 +148,7 @@ export const COMPARISONS: Comparison[] = [
     verdict:
       'These two overlap more than either does with anything else, and since maiTerm 2.4 they overlap on your dev stack too — nine processes, duplicate ports and rebuilding the same layout every morning are a problem both of them now answer. They come at it from opposite ends. Solo has you declare the processes once, in a file that commits with the repository. maiTerm reads what the project already declares — `package.json` scripts, a Procfile, a compose file, a justfile — and offers that back as a checklist, so setting a project up is a few ticks, or one instruction to an agent. Solo’s way is the better one when the processes are not written down anywhere yet; maiTerm’s avoids keeping a second copy of something the repo already says. Past that the question is what else is watching, and if the pain is the agents themselves — a dozen sessions, one about to hit a compaction wall, one stuck at a permission prompt, three of them on remote hosts — that is what maiTerm is built around.',
     theirEdge:
-      'Solo does its own port and orphan handling. maiTerm has no socket discovery at all: a port reaches the sidebar only when an agent reads it in a service’s output and reports it, so run the stack without agents and you never see one. Solo also supports more agent CLIs out of the box, has prompt templates and git-worktree linking, and has a considerably larger community around it. And because its stack is a file in the repo rather than state in the app, a teammate gets the same processes on clone — which matters most for a project whose processes are not already declared in something maiTerm can import.',
+      'Solo supervises processes; maiTerm runs them in terminal tabs. That difference keeps mattering at the edges — quit maiTerm and its stack goes with it, to come back as definitions waiting to be started, where Solo can reattach to something already running, and it handles orphaned processes itself. Solo also supports more agent CLIs out of the box, has prompt templates and git-worktree linking, and has a considerably larger community around it. And its `solo.yml` commits with the repository, which matters most for a project whose processes are not declared in anything maiTerm could import.',
     rows: [
       {
         dimension: 'The agent CLIs',
@@ -160,7 +160,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Your dev stack',
         maiterm:
-          'A workspace declares what its project runs, imported from `package.json`, a Procfile, compose or a justfile. Each service is a real tab maiTerm owns — kept out of the tab strip so it cannot be closed by accident, watched, restarted with backoff when it crashes — and every agent in the workspace sees and drives the same one.',
+          'A workspace declares what its project runs, imported from `package.json`, a Procfile, compose or a justfile. Each service is a real tab maiTerm owns — kept out of the tab strip so it cannot be closed by accident, watched, restarted with backoff when it crashes, and read for the address it announces so the port lands in the sidebar by itself. Every agent in the workspace drives the same one.',
         theirs:
           'The centrepiece: `solo.yml` defines the processes and commits with the repo, humans and agents share them, no duplicate `npm run dev`.',
       },
@@ -190,6 +190,13 @@ export const COMPARISONS: Comparison[] = [
         maiterm:
           'maiLink connects a phone directly to your machine over your LAN — watch, answer, approve, and work the board. No cloud in the data path.',
         theirs: 'None.',
+      },
+      {
+        dimension: 'When the app restarts',
+        maiterm:
+          'Tabs, layout and scrollback come back. Services come back as definitions, stopped, for you to start again — a service is a tab, and a tab does not outlive the app.',
+        theirs:
+          'Can reattach to a process that is still running, so a restart of the UI need not be a restart of your stack.',
       },
       {
         dimension: 'Terminal state',
