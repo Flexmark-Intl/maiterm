@@ -1,7 +1,8 @@
 # maiTerm Stack — a workspace's services, known to every tab in it
 
-> Status: **v1 implemented** 2026-09-11, **run against a real project** 2026-09-13 (§11 has
-> the commits and what the run found). Owner: Darryl.
+> Status: **shipped in v2.4.0**, 2026-09-15. Built 09-11, run against a real project 09-13,
+> service tabs moved out of the tab strip into the console drawer (§7) on 09-15. §11 has the
+> commits, what each review round found, and what the live runs corrected. Owner: Darryl.
 > Scope: a workspace can declare the services its project runs (dev server, API, db,
 > worker…), start them as tabs it owns, and expose them — status, ports, logs, control —
 > to every human and agent tab in that workspace. Agents are writers, not just readers.
@@ -354,15 +355,28 @@ It is absolutely positioned inside `.main-content`, floating over the terminal a
   work behind it (a capture-phase `pointerdown` inside `.main-content`, which does not
   swallow the click, so the terminal still takes focus). Clicks in the sidebar are exempt:
   they swap what the drawer shows. Escape typed **inside** the service's terminal belongs to
-  that terminal, and the drawer does not take focus on open — a peek should not take the
-  keyboard away from the tab you are working in.
+  that terminal — so the drawer must not hold focus, or it has no keyboard dismiss at all.
+  The drawer does not focus anything, and `TerminalPane` does not focus a service tab when
+  it becomes visible or when it mounts (it focuses only a terminal the human is looking at,
+  which also stops a background session restore pulling the cursor out of your tab). Click
+  into the console to type.
 
 **The invariant that makes it safe: a service tab is never `pane.active_tab_id`.** With it,
 every one of the ~40 `workspacesStore.activeTab` consumers is correct without knowing that
 services exist. It is enforced in `setActiveTab` (refuses), `pickNextActiveTab` and Rust's
-`pick_active_after_close` (skip them — `active_tab_id` is persisted from Rust, so the
-frontend guard alone would not survive a restart), `reloadTab` (does not switch to a
-reloaded service tab) and `load()` (heals a pane that already had one).
+`pick_active_after_close` — used by `delete_tab`, `archive_tab` and all three `move_tab_*`
+commands, because `active_tab_id` is persisted from Rust and a frontend-only guard would not
+survive a restart — plus `reloadTab` (does not switch to a reloaded service tab) and
+`load()` (heals a pane that already had one).
+
+The one moment none of those cover is **binding**: `create_tab` makes every new tab active,
+and a service's tab is an ordinary tab until `setTabServiceId` runs a beat later. So the
+invariant is re-applied there, through `heal_pane_active_tab` — a Rust command rather than
+`set_active_tab` because the answer may be **none** (a pane of only services legitimately
+has no active tab, and `set_active_tab` can only name one). It runs on unbinding too, so a
+`removeService` that hands a tab back to the strip can select it. Do not gate that call on
+the mirror's `active_tab_id`: `createTab({ background })` deliberately leaves the mirror
+alone while Rust moves on, so the very disagreement it repairs makes the gate false.
 
 Two counts that used to be `pane.tabs.length` now have to mean "visible": the strip's own
 grouping, new-tab naming, the archive/close/split guards, and `tabCycleList`. `reorderTabs`
@@ -432,6 +446,8 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Review of that: assigning the returned list to the mirror rolled back any stack write issued while the IPC was in flight, and the next writer persisted the rollback (a concurrent `createService` vanished from memory and disk). The store now merges only `cwd`/`normalized_name` by id onto whatever the mirror holds when the reply lands — the mirror only ever advances | `7bd6722` |
 | **Service tabs leave the tab strip** (2026-09-15): closing one killed its service, because a service was a tab like any other. Now it is not in the strip at all — it opens in the console drawer (§7), which borrows its terminal through the portal. Plus the invariant (`active_tab_id` is never a service tab, in Rust too), the visible-tab counts, the shared `closeTabOrPane`, and the paths that used to walk into a service tab by accident: Quick Open's `cd` target, Suspend Other Tabs, archive, the workspace row's count/activity/live dots, task assignees, and `switchTab` | `6a27160`, `6af617b`, `ba99464` |
 | Review of the drawer (five findings): the three `move_tab_*` commands still picked a replacement active tab the old way, so moving your last ordinary tab out of a pane selected the service behind it and Cmd+W then took its PTY — the exact loss the change exists to prevent; a pane of only services has NO active tab, which made `createTab({background})` reachable with nothing to restore (`heal_pane_active_tab` applies the invariant in Rust and can answer "none", which `set_active_tab` cannot — `load()`'s self-heal goes through it too, so the null case persists); `viewConsole` dispatched `activate-tab` with an object where the listener reads a bare id, so an unmounted service tab opened a blank drawer forever; `navigateToTab` on a service tab did nothing (a toast click switched workspace and stopped) and now opens the console; Escape inside the service's terminal is the terminal's byte, and the drawer no longer takes focus on open | `0d0e8c2` |
+| Review of those (two findings, both ordering, both verified in the app rather than by reading): the heal ran inside `createTab`, before `setTabServiceId`, so Rust saw an ordinary tab and did nothing — it now runs on bind and unbind, ungated by the mirror; and the drawer still took the keyboard, because `TerminalPane` focuses at the end of mount and on every false→true `visible`, not only where the removed call was. A terminal now takes focus only when it is one the human is looking at | `58d4280` |
+| **Shipped in v2.4.0** (2026-09-15). Fact-checking the docs site against the source first caught two promises the code does not keep: `restartService` claimed a 10s wait for the service to come back (it replies as soon as the command is running), and `waitForService` offered to block until "ready" for a service with a `ready_pattern`, which nothing evaluates — so it would have waited out the full timeout. Both descriptions and the service form now say what the code does | `a8c556c`, `d50db98` |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path
@@ -439,11 +455,14 @@ needs (the executable of `npm run dev` fronts as `npm`, `node` or `sh`); `startL
 `env K=V cmd` rather than `K=V cmd` so fish works; and the "nine" tools are eleven —
 `startStack`/`stopStack` earned their own names rather than a `service: "*"` convention.
 
-**v2** — readiness as system trigger with port capture (`ready_pattern` is stored and shown
-but nothing evaluates it yet — `updateService { ready, port }` is the only ready path in v1);
-env at spawn; Overlord `service_crashed` + `driveTab` refusal + `kind: 'service'` in
-`listWorkspaces`; pinned cluster / glyph / collapse for service tabs; SSH services
-(`ssh_command` becomes live — the spawn is the auto-resume triple).
+**v2** — readiness as system trigger with port capture. `ready_pattern` is stored and shown
+but **nothing evaluates it**; `updateService { ready, port }` is the only ready path there
+is. Until that lands, nothing may promise otherwise: the service form calls the field
+"recorded, not yet watched", and the `waitForService` / `restartService` tool descriptions
+say readiness is what an agent reported. Restore the stronger wording with the feature, not
+before. Also: env at spawn; Overlord `service_crashed` + `driveTab` refusal + `kind:
+'service'` in `listWorkspaces`; pinned cluster / glyph / collapse for service tabs; SSH
+services (`ssh_command` becomes live — the spawn is the auto-resume triple).
 
 **v3** — `restart: on_change` (needs a watcher; `notify` crate), phone, export to a repo
 file, socket-based port discovery if anything ever needs it.
@@ -495,5 +514,5 @@ file, socket-based port discovery if anything ever needs it.
 | Persisting status | A parked workspace would wake up "crashed". Status is rebuilt from the tab. |
 | Respawning the PTY to restart | The shell survives the process; typing the command again is cheaper, visible, and leaves the human's shell state (venv, exports) intact. |
 | Socket scanning for ports | Only needed when nothing else knows the port; with agents as writers, nothing else is the rare case. |
-| Service tabs hidden from the tab strip in v1 | A new hide mechanism for a clutter problem that may not exist. Pinned cluster first; measure. |
+| ~~Service tabs hidden from the tab strip in v1~~ | **Overturned 2026-09-15 (§7).** The reasoning was wrong about the problem: it was never clutter. A service in the strip has a close button, and the first thing Darryl did was click into one to read it and then close the tab, which killed the service. The hide mechanism turned out to be one filter plus one invariant, not a new subsystem. |
 | Human-only `removeService` | An agent may retract a service it created (`origin: 'agent'`), mirroring `dropped` for tasks; it may not remove a human's. |

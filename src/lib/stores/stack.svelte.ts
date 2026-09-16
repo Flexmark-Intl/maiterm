@@ -772,7 +772,12 @@ function createStackStore() {
     },
 
     /** Resolve when the service is ready (or running, when it has no ready pattern), else
-     *  after `timeoutMs` with whatever the status is then. */
+     *  after `timeoutMs` with whatever the status is then.
+     *
+     *  NOTE: nothing evaluates `ready_pattern` yet (docs/stack.md §11, v2) — `ready` arrives
+     *  only from `updateService { ready: true }`. So a service that HAS a pattern waits here
+     *  for the whole timeout unless an agent reports it. Don't let a caller's wording promise
+     *  otherwise until the readiness trigger lands. */
     async waitFor(workspaceId: string, serviceId: string, timeoutMs: number): Promise<ServiceStatus> {
       const service = serviceOf(workspaceId, serviceId);
       const target: ServiceStatus = service?.ready_pattern ? 'ready' : 'running';
