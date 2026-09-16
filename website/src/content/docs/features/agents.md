@@ -143,11 +143,26 @@ See [Agent Bridge](/features/agent-bridge/) for the full feature.
 
 | Tool | Description |
 |------|-------------|
-| `listTasks` | List the project's tasks, grouped by workstream — this tab's, or the whole workspace |
+| `listTasks` | List the project's tasks, grouped by workstream — this tab's or the whole workspace, narrowed to what's *ready to start*, ranked and bounded |
 | `createTasks` | Create a batch of tasks, optionally into a named workstream |
-| `updateTasks` | Update a batch — status, title, detail, workstream, blockers |
+| `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, and an appended note |
 
-Three batched tools over one list you and your agent both edit. There is deliberately no delete tool — an agent may mark a task done, only a human removes one. See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
+Three batched tools over one list you and your agent both edit. There is deliberately no delete tool — an agent may mark a task done or *retract* one it filed by mistake, only a human removes a row. See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
+
+### Workspace stack
+
+| Tool | Description |
+|------|-------------|
+| `listStack` | What this project runs and what state each service is in — status, uptime, port or URL, command, last exit code |
+| `getServiceOutput` | A service's recent output — its log |
+| `startService` / `stopService` / `restartService` | Start, stop or restart one service |
+| `startStack` / `stopStack` | Start every auto-start service, or stop everything running |
+| `waitForService` | Block until a service is up, and show its last lines if it isn't |
+| `updateService` | Report an observed port or a one-line note, or edit the definition |
+| `createService` | Register a service — or, called with no arguments, return what this directory already declares |
+| `removeService` | Retract a service definition (never one a human created, never one that's running) |
+
+Every agent session is also told what the workspace runs and what's up right now, so it stops starting a dev server that's already serving. See [Workspace Stack](/features/stack/); the tools and the briefing are gated on **Preferences → AI Agents → Workspace stack**.
 
 ### Send files to your phone
 

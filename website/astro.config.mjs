@@ -40,6 +40,7 @@ export default defineConfig({
           items: [
             { label: 'Terminal', slug: 'features/terminal' },
             { label: 'Workspaces & Panes', slug: 'features/workspaces' },
+            { label: 'Workspace Stack', slug: 'features/stack' },
             { label: 'Code Editor', slug: 'features/editor' },
             { label: 'Agent Integration', slug: 'features/agents' },
             { label: 'Deshittification', slug: 'features/deshittification' },

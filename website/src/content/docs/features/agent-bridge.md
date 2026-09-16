@@ -43,6 +43,16 @@ The agents are kept fully aware of the situation they're in:
 - **They know they're talking to a peer, not to you.** maiTerm stamps each message with the sender's identity — tab, workspace, and working directory — pulled from its own session registry. An agent can't fake being the human operator, so the recipient always knows a message came from a peer agent.
 - **They know you're still in charge.** Rather than letting the calling agent interrogate its new peer unprompted, the opener tells it to check in with you first — summarize what the peer offers, propose a few things it could ask — and wait for your direction before reaching out. You remain the decision-maker the agents defer to.
 
+## A tab can be bridged *and* on a mesh
+
+The two aren't alternatives. A tab can hold a 1:1 bridge and sit on a [mesh workspace](/features/mesh-workspace/) at the same time — which happens by default the moment you fork a peer beside a mesh member — and maiTerm routes each message by what the sender actually asked for rather than by which system the sender belongs to:
+
+- A message naming a **recipient** (and optionally a topic) goes to the mesh.
+- A **bare** message goes to the live bridge if there is one, and to the mesh otherwise.
+- A recipient naming the **bridge partner** goes over the bridge — unless that name also resolves to a mesh peer, in which case the mesh wins, because a mesh send that quietly arrived over a bridge loses its topic, its loop control and its place in the cockpit.
+
+Each message says how to answer it, so an agent never has to work this out: a bridge envelope delivered to a mesh member tells it to reply with no recipient, while its mesh envelopes say the opposite. Underneath, a tab in both has **one** delivery queue rather than two systems taking turns at the same terminal, so a bridge disconnecting can't drop messages the mesh had waiting.
+
 ## Bridges survive restarts
 
 A bridge is durable. The pairing is saved on both tabs, so it survives quitting and reopening maiTerm. On the next launch the bridge is rebuilt automatically, and because an agent can pick up a fresh session id when it auto-resumes, maiTerm re-binds the pair instead of dropping the link. If one side ends its session, the bridge is suspended rather than torn down — when that agent resumes, it reconnects. Only an explicit disconnect or closing the tab removes a bridge for good.

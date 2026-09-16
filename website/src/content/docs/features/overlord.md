@@ -67,10 +67,14 @@ With Overlord enabled, a **♔ Overlord** row appears above the workspace list i
 
 ![The Overlord deck showing the Board view — workstreams from four workspaces indexed down the left, and task cards laid out across the backlog, active and blocked lanes](/screenshots/overlord-board.webp)
 
-- **Triage** — one severity-ordered queue of everything wanting a person: proposals, escalations, permission prompts, context pressure, stale work, tabs that have stopped answering. Not six stacked lists. Every card carries its own remedy, and a **Run all** clears the two things that need no judgement — re-bind every unbound agent, then approve every pending proposal — paced so a deck of forty signals doesn't become forty simultaneous API streams. It reports what came back, not what it typed: a `/maiterm init` typed at a tab whose agent is gone is delivered perfectly and achieves nothing, so the run stays open until each target has either re-bound or run out of time, and says how many never answered.
+- **Triage** — one severity-ordered queue of everything wanting a person: proposals, escalations, permission prompts, context pressure, stale work, [work one agent handed to another tab](/features/tasks/#handing-work-to-another-tab), tabs that have stopped answering. Not six stacked lists. Every card carries its own remedy, and a **Run all** clears the two things that need no judgement — re-bind every unbound agent, then approve every pending proposal — paced so a deck of forty signals doesn't become forty simultaneous API streams. It reports what came back, not what it typed: a `/maiterm init` typed at a tab whose agent is gone is delivered perfectly and achieves nothing, so the run stays open until each target has either re-bound or run out of time, and says how many never answered.
 - **Fleet** — a card per agent tab: context ring, live state, how long since its last turn, what it's working on, and any sequence in flight with its step progress. Sort the grid by **peak context** (most in need first) or by **latest activity**. **View** navigates to the tab and **Trigger ▾** fires a rule at it by hand. Tabs inside a suspended workspace get no card each — a dozen rows describing agents nobody expects to be running — and the bar above the grid counts them so you can see where they went; a tab suspended on its own inside a live workspace is still shown.
-- **Board** — the [task board](/features/tasks/) for the whole window, indexed by workstream rather than by workspace, with cards you drag between lanes.
+- **Board** — the [task board](/features/tasks/) for the whole window, indexed by workstream rather than by workspace. Drag a card between lanes, or onto a workstream in the index to move it to that job; `Escape` cancels a drag mid-flight.
 - **Ledger** — a verbatim record of every directive sent: which tab, which rule (or you, or the agent), the exact bytes, and what came of it. Because injections are by design indistinguishable from you typing, this is the only way to reconstruct who told a project to do something at 3am.
+
+**You're never asked the same question twice.** When a tab hits a decision only you can make, it asks you directly — on screen, where you can answer it — *and* files the fact with Overlord. The supervisor's only possible move on a card like that would be to put the same question to you a second time, in a transcript you'd then have to leave anyway to answer the original. So those cards stay on the deck and out of the agent's queue: the card carries **Open tab** and says why there's no second prompt. Everything the supervisor can actually *do* something about — a blocked tab, a timed-out step, an unanswered directive — still reaches it, because fixing one before you get to the board is most of the point of running a supervisor.
+
+**A blocked card withdraws itself** when the tab it's about reports that it isn't blocked any more, rather than sitting on the deck until someone dismisses a problem that already went away.
 
 Two buttons sit in the command bar: **Scan tabs**, which reads every running agent tab and populates the board from it (safe to repeat — nothing is typed into anything), and **Re-bind *N***, which appears when more than one tab's agent is running unbound.
 
@@ -111,7 +115,7 @@ Clicking the Overlord row creates the Overlord workspace if it doesn't exist yet
 | `driveTab` | Inject a directive into another tab in this window, with your authority |
 | `getTabPrompt` / `answerTabPrompt` | See what a tab is stopped at, and answer it |
 | `proposeRuleChanges` | Propose rule edits for you to approve or reject |
-| `archiveTab` / `closeTab` / `deleteArchivedTab` | Put a finished session away |
+| `archiveTab` / `closeTab` / `deleteArchivedTab` | Put a finished session away — one tab or a list of them in a single call |
 | `recoverTab` / `resumeTab` / `resumeWorkspace` | Get a tab responding again, whatever state it's in |
 
 Supervised agents — every other agent tab in the window — get one tool in return, `replyToOverlord`, to report ready, acknowledge a finished directive, or escalate something that needs a human.
@@ -119,6 +123,7 @@ Supervised agents — every other agent tab in the window — get one tool in re
 A few things worth knowing about how it behaves:
 
 - **It goes through the same door the rules do.** `driveTab` is one injection tool with identical guards for both callers; the agent gets no privileged path, cannot race a sequence a rule is already running, and everything it sends lands in the same ledger.
+- **Cleanup arrives as a list, so it's sent as one.** Pointing the supervisor at a window full of finished sessions used to cost a model turn per tab. Archiving, closing and deleting take a list of tabs in one call — but batching is transport, not permission: every tab still goes through its own quiet-window check and its own ledger entry, a refusal stops that tab rather than the batch, and the reply is clean only when *every* row succeeded.
 - **Refusals are structured and specific.** "The tab is at a permission prompt" and "a rule owns this tab right now" call for opposite responses, so the refusal names which and the agent is told not to retry the ones retrying can't fix.
 - **It answers routine prompts, and escalates the rest.** Approvals in service of work already underway are its to make; anything destructive or irreversible, anything touching money, credentials, production or an external party, and any question about what you actually *want* goes to you instead.
 - **It reaches tabs the engine can't type into** — suspended, archived, in a suspended workspace, or on the far end of an SSH connection.

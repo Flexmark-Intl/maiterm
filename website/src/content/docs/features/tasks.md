@@ -27,7 +27,21 @@ BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE      DROPPED
 
 So a dropped row **does not satisfy a dependent** — an agent cannot unblock its own task by dropping the one it was waiting on. The dependent stays blocked, and when an agent reads the board it is told which row it is waiting on and the lane that row is in, so a retraction surfaces as a real question rather than work quietly starting. It is counted separately from *Done*, because "12 done" must never include four tasks nobody did. And it is reversible: a lane, not a delete, so the card stays reachable and you can drag it back out. It sits off the flow for that reason — the steppers walk the six, and reaching *Dropped* is always a deliberate act rather than one click past *Done*.
 
-A task can also declare that it's waiting on another one. A row with an unfinished prerequisite renders as **Blocked** whatever its stored lane says — unless it has already been retired to *Done* or *Dropped*, which keep their own lane. On the board its controls are held while the prerequisite is outstanding, and in the panel parking and starting are held: a control that couldn't move would otherwise report a change that never happened.
+## Dependencies
+
+A task can declare that it's waiting on another one. A row with an unfinished prerequisite renders as **Blocked** whatever its stored lane says — unless it has already been retired to *Done* or *Dropped*, which keep their own lane. While it's held, every control that would move it is held with it, on the board and in the panel alike: the status chip, the steppers, **Park** and **Do it**. A control whose label can't move must not move the value either.
+
+Both surfaces say **why**, in the same words: which task this one is waiting on, and the lane that task is in. That last part is the difference between "waiting on Retry queue" meaning *it's coming* and meaning *it never will* — a **dropped** prerequisite is retracted work that nobody intends to do, so the row is told plainly that it will not clear itself rather than being promised a clearance that can't arrive.
+
+A prerequisite that was [archived along with its tab](#archiving-carries-the-work-with-the-tab) is named too, with the tab it's parked on, so it's something you can actually act on rather than a dependency on a task nobody can find.
+
+For agents, the same edges are readable and writable one at a time: `listTasks` returns each blocker as a title, a lane and whether it's met, waiting, parked or gone, and `blocking` names what's waiting on *this* task — the thing an agent needs to know before it goes idle. Edits are incremental (`block_on` / `unblock_from`) rather than a whole-array replace, so two agents editing dependencies on the same board don't clobber each other. maiTerm refuses an unknown prerequisite and a task blocked on itself: both record an edge that reads as real and either does nothing or parks the row forever.
+
+## An append-only log per task
+
+A row sitting in **Blocked** with nothing on it saying why is the most useless card on the board. The task's **description** is a spec — edited, rewritten, replaced — so an agent that wanted to record *why* it stalled had to destroy whatever was already there.
+
+Notes are a separate, append-only log: one line at a time, shown on the board card and under the spec on an expanded row in the panel, and never edited afterwards. Who wrote it is stamped by maiTerm rather than claimed by the writer, because "the agent says it's blocked on the migration" and "I wrote that down" are different claims about the same row. The log is capped at the twenty most recent entries, so an agent in a retry loop can't grow a task without bound.
 
 ## Workstreams
 
@@ -45,7 +59,7 @@ The panel answers one question — *what am I doing here* — so it shows **this
 
 Per row you can:
 
-- **Click the status chip** to advance a task a lane, or shift-click to move it back.
+- **Click the status chip** to advance a task a lane, or shift-click to move it back. It's held on a row that's blocked by an unfinished prerequisite, along with everything else that would move that row.
 - **Do it** — move the task to Active *and* tell this tab's agent to start on it now. The row then reports what actually reached the agent, because "Active on the board" and "the agent has been told" are different facts: a tab mid-turn, at a permission prompt, or not currently mounted can't be typed into, and the status moves either way.
 - **Park** / **Unpark** — shelve a row for later, or bring it back to To-do.
 - **Unassign** — hand the row back to the project so any tab can claim it. That's ownership, not status: the task stays in whatever lane it's in.
@@ -65,9 +79,27 @@ Every agent tab — Claude Code, Codex, local or over SSH — gets three tools:
 |------|-------------|
 | `listTasks` | List this project's tasks, grouped by workstream. `scope: 'tab'` for just this tab's work, `'workspace'` (default) for the whole project |
 | `createTasks` | Create a batch of tasks, optionally into a named workstream |
-| `updateTasks` | Update a batch — status, title, detail, workstream, blockers |
+| `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, and an appended note |
 
 They're batched to keep both round trips and token cost down, and every call is scoped to the **calling tab's workspace**, so an agent can never read or write another project's list.
+
+### "What can I actually start?"
+
+Scope used to be the only lever, so every call came back with the whole project — and a project only grows, since finished rows are never swept. `listTasks` now answers the question it was always being asked:
+
+- **`ready`** — not retired, not parked, nothing unmet blocking it, and either this tab's or unclaimed. The dependency part is exactly why this belongs in the tool rather than in the agent's head: an agent can't tell whether a prerequisite on another tab has landed.
+- **`status`** — matches the lane the board actually shows, not the stored one, so a call can't omit a task the same call reports as blocked.
+- **`limit`** — 100 by default, and rows are **ranked before they're cut** (active, then blocked, review, to-do, backlog, done, dropped). Cutting in stored order drops whatever happens to be last, routinely the task in flight, while a year of finished rows survives above it. A shortened list says so and says how to reach the rest, because a silently short list is indistinguishable from a small project.
+
+A narrowed call still carries the full list of workstream names, so an agent that filtered can't invent a second spelling of a job it couldn't see.
+
+### Handing work to another tab
+
+An agent can assign a task to another tab, claim an unclaimed row, or release one of its own. The hand-off lands on the board — silently, always — and the *notice* goes to whoever may act on it: when [Overlord](/features/overlord/) is running, it raises a card naming the task and the tab, and if the target tab is exempt from supervision no card is raised at all.
+
+What doesn't happen is one agent typing into another agent's terminal. A tab can't tell an injected line from something you typed, so cross-tab injection carries your authority and stays with the tools that have it — Overlord's `driveTab` and the panel's own **Do it** button. An agent able to notify a peer by writing one field of a task update would hold that authority for the price of an ordinary edit.
+
+The reply says which of those happened, in words. "Nobody was told" isn't a failure — the row is assigned, it's on the board, it's on the target's panel — but the caller is told so, because the alternative is an agent that believes it delegated the work and stops tracking it.
 
 **There is deliberately no delete tool.** An agent may mark a task done, or *retract* one to **Dropped** when it filed work it had misread; only a human removes a row. An agent tidying away work it didn't understand is unrecoverable, and between those two it has an honest exit either way — which is why the tool description tells it to drop such a task rather than close it as done. When you *do* delete a row, the owning agent is told — otherwise it would restate the task on its next list re-send and the deletion would quietly undo itself.
 
