@@ -30,7 +30,7 @@ The obviously-dev ones — `dev`, `start`, `serve`, `up` — come pre-ticked; th
 
 ## The sidebar
 
-Services live in a **Stack** section under their workspace row. Each line carries a status dot, the service's name, the address it is serving on, and how long it's been up:
+Services live in a **Stack** section under their workspace row. Each line carries a status dot, the service's name, its last known address, and how long it's been up:
 
 | Status | Means |
 |--------|-------|
@@ -48,14 +48,16 @@ Right-click a service for **Start** / **Restart**, **Stop**, **Show console**, *
 
 A dev server tells you where it is serving the moment it comes up — `Local: http://localhost:5173/`, `Listening on port 8080`, `Serving HTTP on 0.0.0.0 port 8000`. maiTerm reads that line out of the service's own output and fills in the address, marks it **ready**, and shows it to every agent in the workspace. Nothing sniffs sockets and nothing has to be configured.
 
-An address that a browser can open becomes a **launch**: shift-click the service's row, use the `↗` that appears on hover, or pick `Open http://localhost:5173` from its right-click menu. Only for services actually serving something openable — a database's `:5432` is an address, not a page, and a service that isn't running doesn't offer a link to a port that might now belong to something else.
+An address that a browser can open becomes a **launch**: shift-click the service's row, use the `↗` that appears on hover, or pick `Open http://localhost:5173` from its right-click menu. Only for services actually serving something openable — a database's `:5432` is an address, not a page. And the link is offered only while the service is up *and* the address came from **this** run: a port carried over from the last one might now belong to something else entirely.
 
 Two things it is careful about, both learned from real output:
 
 - **It waits for the service to speak.** The terminal echoes the command maiTerm typed, so `uvicorn app:app --port 8000` would otherwise "announce" port 8000 before uvicorn had started. maiTerm ignores everything up to the point the shell confirms the command is running, and a bare port number only counts when something like *listening* or *serving* is in front of it.
 - **It ignores a port the service didn't get.** `Port 3000 is in use, trying 3001 instead.` names the port it failed to bind, and it prints *before* the one it succeeds on. Lines carrying a conflict or a failure are skipped, so the address you get is the one it is actually serving.
 
-If a service announces itself in some way maiTerm doesn't recognise, give it a **ready pattern** in the service's settings — a regular expression, with an optional `port` group — and that takes over. An agent can also just tell it, with `updateService`.
+It's a start-up scan rather than a permanent watch: it stops at the first address a run announces, and gives up five minutes into that run — a queue worker that prints all day and serves nothing shouldn't be searched for an address it is never going to give.
+
+If a service announces itself in some way maiTerm doesn't recognise, put a regular expression in **Ready when output matches** in the service's settings — with an optional `port` group to capture the number — and that takes over from the built-in shapes. An agent can also just tell it, with `updateService`.
 
 ## The console drawer
 
@@ -94,7 +96,7 @@ Then eleven tools, all scoped to the calling tab's workspace:
 | `getServiceOutput` | A service's recent output — its log — for reading a failure instead of restarting blind |
 | `startService` / `stopService` / `restartService` | The verbs. They reply once the command is running, which isn't the same as serving |
 | `startStack` / `stopStack` | Every auto-start service, or everything that's running |
-| `waitForService` | Block until it's up, and return its last 20 lines if it isn't — what to call before hitting a service you just started |
+| `waitForService` | Block until the service announces it's serving, and return its last 20 lines if it doesn't — what to call before hitting a service you just started. It waits for the address, not merely for the command to have started. A service that announces nothing a browser would recognise never gets there, so pass a short timeout when waiting on a worker |
 | `updateService` | Correct an address maiTerm read wrong, supply one for a service that announces nothing, leave a one-line note for the sidebar, or edit the definition |
 | `createService` | Register something this project runs. Called with no arguments it instead returns what the directory declares, which is the fast way to set a project up |
 | `removeService` | Retract a definition — refused while it's running, and refused outright for a service **you** created |

@@ -153,16 +153,16 @@ Three batched tools over one list you and your agent both edit. There is deliber
 
 | Tool | Description |
 |------|-------------|
-| `listStack` | What this project runs and what state each service is in — status, uptime, port or URL, command, last exit code |
+| `listStack` | What this project runs and what state each service is in — status, uptime, port or URL and where that address came from, command, last exit code |
 | `getServiceOutput` | A service's recent output — its log |
 | `startService` / `stopService` / `restartService` | Start, stop or restart one service |
 | `startStack` / `stopStack` | Start every auto-start service, or stop everything running |
-| `waitForService` | Block until a service is up, and show its last lines if it isn't |
-| `updateService` | Report an observed port or a one-line note, or edit the definition |
+| `waitForService` | Block until a service announces it's serving, and show its last lines if it doesn't |
+| `updateService` | Correct an address maiTerm read wrong or supply one it couldn't read, leave a one-line note, or edit the definition |
 | `createService` | Register a service — or, called with no arguments, return what this directory already declares |
 | `removeService` | Retract a service definition (never one a human created, never one that's running) |
 
-Every agent session is also told what the workspace runs and what's up right now, so it stops starting a dev server that's already serving. See [Workspace Stack](/features/stack/); the tools and the briefing are gated on **Preferences → AI Agents → Workspace stack**.
+Every agent session is also told what the workspace runs and what's up right now — including where each service is serving, because maiTerm reads that address out of the service's own output rather than waiting for an agent to notice it — so a session stops starting a dev server that's already up, and knows the URL to call without hunting for it. See [Workspace Stack](/features/stack/); the tools and the briefing are gated on **Preferences → AI Agents → Workspace stack**.
 
 ### Send files to your phone
 

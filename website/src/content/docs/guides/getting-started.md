@@ -67,3 +67,5 @@ Your agent also shares a [kanban board](/features/tasks/) with you out of the bo
 ## Let the workspace run your project
 
 Right-click a workspace in the sidebar and choose **Import from project…**. maiTerm reads what the directory already declares — `package.json` scripts, a Procfile, a compose file, a justfile or a Makefile — and offers them as a checklist. Tick the ones that should come up with the workspace and they become part of its [stack](/features/stack/): started in tabs maiTerm owns, watched in a console drawer, restarted when they crash, and visible to your agents so they stop starting a second copy of a dev server that's already running.
+
+When a service announces where it's serving, maiTerm reads the address off its own output and puts it on the row — nothing to configure. Shift-click the row, or use the `↗` on it, to open that in your browser.
