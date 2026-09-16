@@ -1298,7 +1298,12 @@
     });
 
     initialized = true;
-    terminal.focus();
+    // Only a terminal the human is looking at takes the keyboard. A pane mounted in the
+    // background (session restore, `activate-tab`) gets its focus from the `visible` effect
+    // below when it is actually shown, and a stack service's terminal never takes it at all
+    // (docs/stack.md §7): starting a service must not move the cursor out of the tab you
+    // are typing in, and a drawer that holds focus has no keyboard dismiss.
+    if (visible && !isServiceTab()) terminal.focus();
     // Delay activity tracking and trigger actions so initial shell prompt
     // and restored/auto-resumed output don't fire indicators or triggers.
     // Auto-resume (especially SSH + Claude) can take much longer to produce

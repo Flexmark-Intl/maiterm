@@ -1689,10 +1689,18 @@ function createWorkspacesStore() {
       // then — every earlier check passed it (docs/stack.md §7). Re-apply the rule here,
       // where "is it a service tab" is finally true, and take Rust's answer for the mirror
       // because a pane of only services legitimately has no active tab.
-      if (serviceId && pane && pane.active_tab_id === tabId) {
-        const healed = await commands.healPaneActiveTab(workspaceId, paneId).catch(() => undefined);
-        if (healed !== undefined) pane.active_tab_id = healed;
-      }
+      //
+      // Unconditional on purpose: the mirror cannot be the test. `createTab({background})`
+      // deliberately leaves the mirror's `active_tab_id` alone while Rust makes the new tab
+      // active, so the disagreement this repairs is invisible from here. The command is a
+      // no-op when the pane's active tab is already an ordinary one, and its answer
+      // re-syncs the mirror either way.
+      //
+      // Both directions: binding takes a tab out of the strip (so the pane must stop
+      // pointing at it), and unbinding puts one back (so a pane left with nothing selected
+      // can select it).
+      const healed = await commands.healPaneActiveTab(workspaceId, paneId).catch(() => undefined);
+      if (healed !== undefined && pane) pane.active_tab_id = healed;
     },
 
     /** Replace a workspace's stack definitions (docs/stack.md §3). The stack store owns
