@@ -74,6 +74,24 @@
     return () => window.removeEventListener('keydown', onKey);
   });
 
+  /** Clicking the work behind the drawer dismisses it — it is an overlay, and reaching for
+   *  the tab underneath IS the intent to put the service away. Scoped to the content area
+   *  so the sidebar stays usable: clicking another service there swaps the drawer's
+   *  contents rather than closing it. Capture phase, and never `preventDefault` — the
+   *  click must still land, so the terminal takes focus on the same press. */
+  $effect(() => {
+    if (!openId) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target || !(target instanceof Element)) return;
+      if (target.closest('.service-console')) return;
+      if (!target.closest('.main-content')) return;
+      stackStore.closeConsole(workspaceId);
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    return () => window.removeEventListener('pointerdown', onPointerDown, true);
+  });
+
   // ── Drag-resize from the top edge (TasksPanel.svelte does the same on its left edge) ──
   let dragging = false;
   let dragStartY = 0;
@@ -144,7 +162,13 @@
 
       <div class="controls">
         {#if service.port || service.url}
-          <span class="endpoint">{service.url ?? `:${service.port}`}</span>
+          <!-- Last REPORTED, not observed: nothing sniffs sockets (docs/stack.md §9), so a
+               service that moved ports this run still shows the old one until an agent or
+               the ready trigger says otherwise. Say "last reported" rather than implying
+               this is where it is listening now. -->
+          <Tooltip text="Last reported endpoint">
+            <span class="endpoint">{service.url ?? `:${service.port}`}</span>
+          </Tooltip>
         {/if}
         {#if live}
           <Tooltip text="Restart {service.name}">

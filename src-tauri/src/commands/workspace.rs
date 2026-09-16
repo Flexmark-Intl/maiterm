@@ -333,6 +333,35 @@ pub fn create_tab(
     Ok(tab)
 }
 
+/// Which tab a pane shows after the active one is closed or archived: the nearest tab to
+/// its left, skipping stack service tabs.
+///
+/// A service tab is never a pane's active tab (docs/stack.md §7) — it is not in the strip,
+/// so selecting one leaves the strip with nothing selected and the pane blank. It is also
+/// the likeliest neighbour to land on, since services sit at the end of the tab list. The
+/// frontend enforces the same rule in `pickNextActiveTab`; this is the copy that survives
+/// a restart, because `active_tab_id` is persisted from here.
+fn pick_active_after_close(tabs: &[crate::state::Tab], closed_index: usize) -> Option<String> {
+    if tabs.is_empty() {
+        return None;
+    }
+    // `tabs` is the list AFTER the removal, so the closed tab's left neighbour now sits at
+    // `closed_index - 1`. Prefer it, then keep walking left, then fall right — the same
+    // order as before service tabs existed, just skipping them.
+    let start = closed_index.saturating_sub(1).min(tabs.len() - 1);
+    for tab in tabs[..=start].iter().rev() {
+        if tab.service_id.is_none() {
+            return Some(tab.id.clone());
+        }
+    }
+    for tab in &tabs[start + 1..] {
+        if tab.service_id.is_none() {
+            return Some(tab.id.clone());
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub fn delete_tab(
     window: tauri::Window,
@@ -350,17 +379,7 @@ pub fn delete_tab(
                 if pane.active_tab_id.as_ref() == Some(&tab_id) {
                     let old_index = pane.tabs.iter().position(|t| t.id == tab_id).unwrap_or(0);
                     pane.tabs.retain(|t| t.id != tab_id);
-                    pane.active_tab_id = if pane.tabs.is_empty() {
-                        None
-                    } else {
-                        // Prefer previous (left) tab; fall back to next if closing first tab
-                        let new_index = if old_index > 0 {
-                            old_index - 1
-                        } else {
-                            0
-                        };
-                        Some(pane.tabs[new_index].id.clone())
-                    };
+                    pane.active_tab_id = pick_active_after_close(&pane.tabs, old_index);
                 } else {
                     pane.tabs.retain(|t| t.id != tab_id);
                 }
@@ -2310,12 +2329,7 @@ pub fn archive_tab(
 
         // Adjust active_tab_id (same logic as delete_tab)
         if pane.active_tab_id.as_ref() == Some(&tab_id) {
-            pane.active_tab_id = if pane.tabs.is_empty() {
-                None
-            } else {
-                let new_index = if tab_index > 0 { tab_index - 1 } else { 0 };
-                Some(pane.tabs[new_index].id.clone())
-            };
+            pane.active_tab_id = pick_active_after_close(&pane.tabs, tab_index);
         }
 
         // The tab's task rows go WITH it. Leaving them on the board meant work attributed to
@@ -3159,6 +3173,51 @@ pub fn read_app_logs(lines: Option<usize>, level: Option<String>, search: Option
         "lines": result,
         "truncated": truncated,
     }))
+}
+
+#[cfg(test)]
+mod active_tab_pick_tests {
+    use super::pick_active_after_close;
+    use crate::state::Tab;
+
+    fn tabs(spec: &[(&str, bool)]) -> Vec<Tab> {
+        spec.iter()
+            .map(|(id, is_service)| {
+                let mut t = Tab::new(id.to_string());
+                t.id = id.to_string();
+                t.service_id = is_service.then(|| format!("svc-{id}"));
+                t
+            })
+            .collect()
+    }
+
+    // The list passed in is the one left AFTER the removal, as the callers have it.
+
+    #[test]
+    fn prefers_the_left_neighbour() {
+        let t = tabs(&[("a", false), ("c", false)]);
+        // "b" was closed at index 1; its left neighbour "a" takes over.
+        assert_eq!(pick_active_after_close(&t, 1).as_deref(), Some("a"));
+        // Closing the first tab falls to what is now first.
+        assert_eq!(pick_active_after_close(&t, 0).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn never_lands_on_a_service_tab() {
+        // The shape that bit: the human's tabs go, the services remain around them.
+        let t = tabs(&[("dev", true), ("shell", false), ("api", true)]);
+        assert_eq!(pick_active_after_close(&t, 0).as_deref(), Some("shell"));
+        assert_eq!(pick_active_after_close(&t, 3).as_deref(), Some("shell"));
+    }
+
+    #[test]
+    fn a_pane_of_only_services_selects_nothing() {
+        // Legal state: the pane survives with its services running and shows its empty
+        // state rather than handing their PTYs to delete_pane.
+        let t = tabs(&[("dev", true), ("api", true)]);
+        assert_eq!(pick_active_after_close(&t, 0), None);
+        assert_eq!(pick_active_after_close(&[], 0), None);
+    }
 }
 
 #[cfg(test)]
