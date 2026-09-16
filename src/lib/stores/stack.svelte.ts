@@ -774,7 +774,13 @@ function createStackStore() {
       if (report.url !== undefined) patch.url = report.url;
       if (Object.keys(patch).length) {
         await this.updateService(workspaceId, serviceId, patch);
-        setRt(serviceId, { endpointFrom: from });
+        // Provenance belongs to an endpoint that EXISTS. An agent clearing a stale value
+        // (`updateService { port: null }`, which the tool description invites) is removing
+        // a wrong answer, not supplying a right one — recording it as provenance would
+        // disarm `observeOutput` for the rest of the run and leave the service with no
+        // address at all. Clearing re-arms the scan instead.
+        const establishes = report.port != null || report.url != null;
+        setRt(serviceId, { endpointFrom: establishes ? from : null });
       }
       const r = rt(serviceId);
       if (report.ready && (r.status === 'starting' || r.status === 'running')) setRt(serviceId, { status: 'ready' });
@@ -796,6 +802,14 @@ function createStackStore() {
       // Stop at the first answer of a run: `ready` is the destination either route reaches.
       if (r.endpointFrom) return;
       if (r.status !== 'starting' && r.status !== 'running') return;
+      // Nothing before the command BEGAN is the command talking. The pty echoes the line
+      // maiTerm typed, so without this the scan matches the start line against itself —
+      // `uvicorn app:app --port 8000` announcing port 8000 before uvicorn has run at all.
+      // Same doctrine as every other write in this store: sequence on the shell's own
+      // OSC 133, never on "output arrived". It also keeps `onCommandBegin`'s
+      // `status === 'starting'` guard reachable, which a premature flip to `ready` would
+      // consume — and that would strand the service as "the shell never ran the command".
+      if (!r.beganAt) return;
       // And stop looking eventually. A service that announces itself does so while it is
       // starting; a chatty worker that never will should not be scanned for its whole life.
       if (r.since && Date.now() - r.since > SCAN_WINDOW_MS) return;

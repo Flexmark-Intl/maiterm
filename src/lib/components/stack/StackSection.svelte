@@ -86,18 +86,31 @@
     stackStore.toggleConsole(workspace.id, service.id);
   }
 
+  /** The launchable url for a service that is actually serving it. `launchableUrl` alone
+   *  reads the PERSISTED url, which outlives the run that earned it — offering to open
+   *  `localhost:5173` for a stopped service opens a dead tab, or worse, whatever took the
+   *  port since. This is the same "not stale" test `endpointSource` applies for agents
+   *  (docs/stack.md §9); the human-facing affordance should not be laxer than the
+   *  machine-facing one. */
+  function liveUrl(service: Service): string | null {
+    const r = stackStore.runtime(service.id);
+    if (r.status !== 'running' && r.status !== 'ready') return null;
+    if (!r.endpointFrom) return null;
+    return launchableUrl(service);
+  }
+
   /** Open an http service in the real browser. Shift-click on the row is the shortcut;
    *  plain click stays "show me the console", which is the commoner intent. Only a URL
    *  with a scheme qualifies — a bare `:5432` is an address, not a page. */
   function launch(service: Service) {
-    const url = launchableUrl(service);
+    const url = liveUrl(service);
     if (url) run('launch', shellOpen(url));
   }
 
   function menuItems(service: Service) {
     const st = stackStore.status(service.id);
     const live = st === 'running' || st === 'ready' || st === 'starting';
-    const url = launchableUrl(service);
+    const url = liveUrl(service);
     return [
       { label: live ? 'Restart' : 'Start', action: () => run('start', live ? stackStore.restart(workspace.id, service.id) : stackStore.start(workspace.id, service.id)) },
       { label: 'Stop', disabled: !live, action: () => run('stop', stackStore.stop(workspace.id, service.id)) },
@@ -156,14 +169,20 @@
     <div class="stack-rows">
       {#each services as service (service.id)}
         {@const r = stackStore.runtime(service.id)}
-        {@const url = launchableUrl(service)}
+        {@const url = liveUrl(service)}
         <div
           class="svc"
           class:crashed={r.status === 'crashed'}
           role="button"
           tabindex="0"
           onclick={(e) => { e.stopPropagation(); if (e.shiftKey && url) launch(service); else openService(service); }}
-          onkeydown={(e) => { if (e.key === 'Enter') { if (e.shiftKey && url) launch(service); else openService(service); } }}
+          onkeydown={(e) => {
+            // Only the row's OWN Enter. The launch button is a real focusable child, and
+            // its keydown bubbles here — without this, Enter on it opens the browser AND
+            // toggles the drawer.
+            if (e.target !== e.currentTarget) return;
+            if (e.key === 'Enter') { if (e.shiftKey && url) launch(service); else openService(service); }
+          }}
           oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); menu = { x: e.clientX, y: e.clientY, service }; }}
         >
           <StatusDot color={dotColor(r.status)} pulse={r.status === 'starting'} tooltip={r.note ?? r.status} />

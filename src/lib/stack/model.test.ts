@@ -122,3 +122,40 @@ describe('launchableUrl', () => {
     expect(launchableUrl({ url: 'postgres://localhost:5432' })).toBeNull();
   });
 });
+
+describe('detectEndpoint — things that name a port but are not an address', () => {
+  it('ignores the start line the pty echoes back', () => {
+    // observeOutput is fed the raw pty stream, which carries the echo of the line maiTerm
+    // typed. Believing it announces a port before the process has bound anything.
+    expect(detectEndpoint(`cd '/srv/app' && uvicorn app:app --port 8000`)).toBeNull();
+    expect(detectEndpoint(`cd '/srv/app' && php artisan serve --port=8000`)).toBeNull();
+    expect(detectEndpoint(`cd '/srv/app' && PORT=5173 npm run dev`)).toBeNull();
+  });
+
+  it("ignores a runner echoing the script it is about to run", () => {
+    expect(detectEndpoint('> app@1.0.0 dev\n> vite --port 5173')).toBeNull();
+  });
+
+  it('ignores a port the service failed to get', () => {
+    // Vite and Next both print this BEFORE binding the port they actually take.
+    expect(detectEndpoint('⚠ Port 3000 is in use, trying 3001 instead.')).toBeNull();
+    expect(detectEndpoint('Port 5173 is in use, trying another one...')).toBeNull();
+    expect(detectEndpoint('listen EADDRINUSE: address already in use :::4000')).toBeNull();
+    expect(detectEndpoint('Error: could not bind to port 8080')).toBeNull();
+  });
+
+  it('takes the address from the line that has one, not the conflict above it', () => {
+    const banner = [
+      'Port 5173 is in use, trying another one...',
+      '',
+      '  ➜  Local:   http://localhost:5174/',
+      '  ➜  Network: http://192.168.1.14:5174/',
+    ].join('\n');
+    expect(detectEndpoint(banner)).toEqual({ port: 5174, url: 'http://localhost:5174' });
+  });
+
+  it('still reads a genuine announcement with no url', () => {
+    expect(detectEndpoint('Listening on port 8080')).toEqual({ port: 8080, url: null });
+    expect(detectEndpoint('Serving HTTP on 0.0.0.0 port 8123 ...')).toEqual({ port: 8123, url: null });
+  });
+});

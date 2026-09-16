@@ -68,11 +68,20 @@ const LOOPBACK = String.raw`localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]`;
  *  dev server prints. ANSI is stripped before this runs. */
 const URL_RE = new RegExp(String.raw`\b(https?)://(${LOOPBACK})(?::(\d{1,5}))?`, 'i');
 
-/** `Listening on port 8080`. `\bport\b` will not match inside "support". */
-const PORT_WORD_RE = /\bport\s*[:=]?\s*(\d{2,5})\b/i;
+/** A line naming a port it did NOT get. Vite prints `Port 5173 is in use, trying another
+ *  one...` and Next `⚠ Port 3000 is in use, trying 3001 instead.` — both BEFORE binding the
+ *  port they actually take, so believing the first number in the output records the wrong
+ *  one and then disarms the scan that would have found the right one. */
+const REJECT_RE = /\b(?:in use|already|EADDRINUSE|unavailable|failed|failure|error|cannot|could not|couldn't|can't|retry|retrying|trying|instead)\b/i;
 
-/** `listening on 0.0.0.0:4000`, `serving at :3000`. The serving verb is required —
- *  a bare `:3000` matches a duration ("in 3:42") and a great deal else besides. */
+/** A serving verb is REQUIRED before a bare port. Without it `--port 5173` in a command
+ *  line matches — and the pty echoes back the very line maiTerm typed to start the
+ *  service, so the scan would otherwise match the start line against itself before the
+ *  process has bound anything. `\bport\b` will not match inside "support". */
+const PORT_WORD_RE = /\b(?:listening|serving|bound|available|accessible)\b[^\n]{0,40}?\bport\b\s*[:=]?\s*(\d{2,5})\b/i;
+
+/** `listening on 0.0.0.0:4000`, `serving at :3000`. Same rule, same reason — and a bare
+ *  `:3000` also matches a duration ("in 3:42") and a great deal else besides. */
 const HOST_PORT_RE = /\b(?:listening|serving|bound)\b\s*(?:on|at)?\s*(?:[a-z0-9.\-]*|\[[0-9a-f:]*\]):(\d{2,5})\b/i;
 
 export interface DetectedEndpoint {
@@ -85,24 +94,36 @@ function validPort(n: number): boolean {
   return Number.isInteger(n) && n > 0 && n <= 65535;
 }
 
-/** The first endpoint a chunk of (ANSI-stripped) service output announces, or null.
- *  A URL wins over a bare port: it carries the scheme, so it is the one that can be
- *  opened in a browser. */
+function fromUrl(line: string): DetectedEndpoint | null {
+  const m = URL_RE.exec(line);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  const host = BROWSABLE[m[2].toLowerCase()] ?? m[2].toLowerCase();
+  const port = m[3] ? Number(m[3]) : scheme === 'https' ? 443 : 80;
+  if (!validPort(port)) return null;
+  const implicit = port === (scheme === 'https' ? 443 : 80);
+  return { port, url: implicit ? `${scheme}://${host}` : `${scheme}://${host}:${port}` };
+}
+
+/** The endpoint a chunk of (ANSI-stripped) service output announces, or null.
+ *
+ *  Line by line, because a conflict warning and the real address routinely arrive in one
+ *  chunk and only the line carrying the number decides whether to believe it. Two passes,
+ *  so a URL anywhere in the chunk beats a bare port anywhere else: the URL carries the
+ *  scheme, which is what makes it openable. */
 export function detectEndpoint(text: string): DetectedEndpoint | null {
-  const m = URL_RE.exec(text);
-  if (m) {
-    const scheme = m[1].toLowerCase();
-    const host = BROWSABLE[m[2].toLowerCase()] ?? m[2].toLowerCase();
-    const port = m[3] ? Number(m[3]) : scheme === 'https' ? 443 : 80;
-    if (!validPort(port)) return null;
-    const implicit = port === (scheme === 'https' ? 443 : 80);
-    return { port, url: implicit ? `${scheme}://${host}` : `${scheme}://${host}:${port}` };
+  const lines = text.split('\n').filter((l) => !REJECT_RE.test(l));
+  for (const line of lines) {
+    const hit = fromUrl(line);
+    if (hit) return hit;
   }
-  for (const re of [PORT_WORD_RE, HOST_PORT_RE]) {
-    const p = re.exec(text);
-    if (p) {
-      const port = Number(p[1]);
-      if (validPort(port)) return { port, url: null };
+  for (const line of lines) {
+    for (const re of [PORT_WORD_RE, HOST_PORT_RE]) {
+      const p = re.exec(line);
+      if (p) {
+        const port = Number(p[1]);
+        if (validPort(port)) return { port, url: null };
+      }
     }
   }
   return null;
