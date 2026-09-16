@@ -9,7 +9,7 @@ The **stack** is a workspace saying what its project runs. maiTerm starts each s
 
 ## A service is a tab maiTerm owns
 
-There is no process manager hiding behind this. A running service **is** a terminal tab: maiTerm mints one, types the command into it after the shell's own prompt, and watches what comes back. That means a service gets everything a tab already has — real scrollback, search, exit codes, colour, a TUI that renders properly — and stopping one is a `^C` into the same shell, not a signal fired at something you can't see.
+There is no process manager hiding behind this. A running service **is** a terminal tab: maiTerm mints one, types the command into it after the shell's own prompt, and watches what comes back. That means a service gets everything a tab already has — real scrollback, exit codes, colour, a TUI that renders properly — and stopping one is a `^C` into the same shell, not a signal fired at something you can't see.
 
 What it *doesn't* get is a slot in your tab strip. A service tab isn't in the strip, has no `Cmd+1`–`9` number, and can never become a pane's active tab, so it can't be closed by a stray `Cmd+W` or picked up by anything that reaches for "a tab": Quick Open won't `cd` into your dev server, **Suspend Other Tabs** won't kill your database, a task can't be assigned to it, and the workspace's own activity dot ignores a log that writes all day. Agents see it named as the service it runs rather than as a tab they can switch to.
 

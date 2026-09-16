@@ -151,8 +151,9 @@ const EVERYTHING = [
       <p class="ln-lead">
         A workspace can just <strong>say what its project runs</strong>. maiTerm starts each
         service, watches its exit code, brings it back when it crashes, and shows the set under
-        the workspace with a rollup dot that is green only when the whole project is actually
-        up. Click one and its console opens <em>over</em> your work — a drawer along the bottom,
+        the workspace with a rollup dot that goes green only once every service meant to start
+        with it has — never because one of them did. Click one and its console opens
+        <em>over</em> your work — a drawer along the bottom,
         never a dock that steals width from the tab you are typing in. Click away and it is gone.
       </p>
       <p class="ln-lead">
@@ -176,8 +177,8 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>A service is a real tab</h3>
           <p>
-            Not a process hidden behind a panel — a terminal, with scrollback, search, colour
-            and a TUI that renders properly. It just has no slot in your tab strip, so no
+            Not a process hidden behind a panel — a terminal, with real scrollback, colour and
+            a TUI that renders properly. It just has no slot in your tab strip, so no
             stray <code>Cmd+W</code> can take your database down with it.
           </p>
         </div>
