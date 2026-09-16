@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.4.0
+
+Your project's services — the dev server, the API, the database — become something the workspace runs and every tab can see, including your agents. The task board learned to hand work between tabs. And Overlord stopped nagging about things that were already fine.
+
+### The workspace stack
+
+A workspace can now declare what its project runs, and maiTerm runs it.
+
+- **Import what the project already declares.** Right-click a workspace → Import from project, and maiTerm reads its `package.json` scripts, a Procfile, a compose file, a justfile or a Makefile, and offers them as a checklist. The dev-shaped ones come pre-ticked.
+- **Start, stop and restart from the sidebar.** Each service shows a status dot, its port and its uptime under the workspace row, and the workspace row itself carries a rollup dot. Services marked auto-start come up with the workspace.
+- **A crash restarts itself,** backing off each time, and stops after five in ten minutes rather than thrashing forever. Stopping a service cancels that, and Ctrl-C in its own console counts as a stop, not a crash.
+- **Watch one without giving it a tab.** Click a service and its console opens over your work; click your work, press Escape, or click the service again and it's gone. It never resizes the tab you're in, and nothing you do in that drawer can stop the service by accident.
+- **Your agents can see it.** A new session is told what this workspace runs and what state it's in, so it stops trying to start a dev server that's already up. Agents can read a service's log, start or restart one, wait for one to come up, register a new one, and report the port they found. They cannot remove a service you created.
+
+Prefer to keep your agents out of it? One switch in Preferences takes away the tools and the briefing. The services stay yours to run from the sidebar.
+
+### The task board
+
+- **An agent can hand work to another tab** — the receiving tab is told, in its own session, rather than having the request typed into its terminal.
+- **Tasks can depend on each other.** Block a task on another, name a prerequisite that's still parked, and a blocked row can say why in its own words. `listTasks` now answers "what can I actually start", and won't flood a session with a board's worth of history.
+- **An agent can retract work it shouldn't have created** instead of being forced to mark it done or shelve it.
+
+### Overlord
+
+- **A blocked card withdraws itself** when the tab it's about says it isn't blocked any more.
+- **It stops asking you a question the tab is already asking you** on screen.
+- **Working agents are no longer reported as ignoring you.**
+- **A jammed tab is no longer mistaken for an idle one** — the clock alone said it was fine.
+- **The board's cards can be dragged between lanes again.** They could not be dropped, in any lane.
+
+### Fixes
+
+- **Agent Bridge and the mesh work on the same tab.** A mesh member's reply to its 1:1 partner went to the mesh instead, and a tab in both had two delivery queues competing for one terminal.
+- **The comms badge tooltip names the right menu item** on a tab bound to more than one thread.
+
 ## v2.3.0
 
 A new Preferences section that switches off the parts of an AI agent that work for its vendor rather than for you. Windows you can name. And your phone can finally tell you what an agent is actually doing.
