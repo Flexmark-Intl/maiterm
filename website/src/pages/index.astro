@@ -134,8 +134,68 @@ const EVERYTHING = [
     </div>
   </section>
 
-  {/* --------------------------------------------------------------- Tasks */}
+  {/* --------------------------------------------------------------- Stack */}
+  {/* No screenshot yet — the sidebar Stack section and the console drawer both
+      want a staged capture, and this band reads fine without one meanwhile.
+      When it lands, this becomes an .ln-stack two-column like Tasks below. */}
   <section class="ln-band">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Workspace stack</p>
+      <h2 class="ln-h2 ln-h2--wide">One dev server, however many agents.</h2>
+      <p class="ln-lead">
+        Every project has things that must be running before any of it works — a dev server,
+        an API, a database, a queue worker. You start them by hand in four tabs, lose track of
+        which one died, and then an agent starts a fifth copy of the dev server because nothing
+        ever told it the first one was up.
+      </p>
+      <p class="ln-lead">
+        A workspace can just <strong>say what its project runs</strong>. maiTerm starts each
+        service, watches its exit code, brings it back when it crashes, and shows the set under
+        the workspace with a rollup dot that is green only when the whole project is actually
+        up. Click one and its console opens <em>over</em> your work — a drawer along the bottom,
+        never a dock that steals width from the tab you are typing in. Click away and it is gone.
+      </p>
+      <p class="ln-lead">
+        The stack belongs to the workspace, so <strong>every agent in it sees the same one</strong>.
+        On a mesh workspace that is sixteen agents and still one dev server: each session is told
+        what is running and where — <code>web (ready, http://localhost:5173), api (crashed)</code>
+        — and eleven tools let them read a failing service's log, restart it, wait for it, and
+        report the port they just read in its output so everyone else gets it too.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>It reads the project first</h3>
+          <p>
+            Point it at a directory and it offers what is already declared —
+            <code>package.json</code> scripts through whichever package manager your lockfile
+            implies, a <code>Procfile</code>, the services in a compose file, a
+            <code>justfile</code> or <code>Makefile</code>. Tick what you want.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>A service is a real tab</h3>
+          <p>
+            Not a process hidden behind a panel — a terminal, with scrollback, search, colour
+            and a TUI that renders properly. It just has no slot in your tab strip, so no
+            stray <code>Cmd+W</code> can take your database down with it.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Crashes, within reason</h3>
+          <p>
+            A service that dies comes back on its own, waiting longer each time. After five
+            restarts in ten minutes it stops and says so on the row, rather than thrashing all
+            afternoon against something that is not going to start.
+          </p>
+        </div>
+      </div>
+      <a class="ln-cta-link" href="/features/stack/">How the stack works</a>
+    </div>
+  </section>
+
+  {/* --------------------------------------------------------------- Tasks */}
+  <section class="ln-band ln-band--raised">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -190,7 +250,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -238,7 +298,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band">
+  <section class="ln-band ln-band--raised">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -269,7 +329,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -316,7 +376,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band">
+  <section class="ln-band ln-band--raised">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
