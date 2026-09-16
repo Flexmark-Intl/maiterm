@@ -146,7 +146,7 @@
       </label>
 
       <label class="field">
-        <span class="label">Ready when output matches <span class="opt">recorded, not yet watched — an agent reports readiness for now</span></span>
+        <span class="label">Ready when output matches <span class="opt">optional — maiTerm recognises the usual shapes on its own; set this to override it</span></span>
         <input class="text-input mono" bind:value={readyPattern} placeholder="Local:\s+http://localhost:(?<port>\d+)" spellcheck="false" />
         {#if readyPatternError}<span class="error">{readyPatternError}</span>{/if}
       </label>

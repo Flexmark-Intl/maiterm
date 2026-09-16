@@ -109,8 +109,9 @@ in memory only) so the SessionStart priming can say what is up without a webview
 ```
 stopped   no service tab, or the tab's shell is at a prompt with exit 0 / SIGINT
 starting  command sent, no ready match yet (and no exit)
-running   process alive, no ready_pattern defined → this is as good as it gets
-ready     ready_pattern matched, or an agent set ready over MCP
+running   process alive, nothing announced an address yet
+ready     the output scan matched (a ready_pattern, or a built-in address shape), or an
+          agent set ready over MCP
 crashed   command exited non-zero (OSC 133 D), or the tab's shell itself died
 ```
 
@@ -285,13 +286,16 @@ values, which is why agents are pointed at MCP instead. v2.
 
 ### 6.4 Triggers
 
-Readiness detection *is* a trigger: `ready_pattern` becomes a **system-owned trigger**
-scoped to the service tab — `set_tab_state(ready)`, `%port` captured if the pattern names
-it. The engine already does regex over stripped output with capture groups into
-`trigger_variables`, dedup, cooldown, **and per-tab scope** — `Trigger.tabs: string[]` is
-filtered in `processOutput` beside the workspace filter. The only thing missing is a
-`system: true` flag so these never appear in the trigger editor and are never swept into
-`hidden_default_triggers`.
+Readiness detection was designed as a trigger: `ready_pattern` becoming a **system-owned
+trigger** scoped to the service tab, which would have needed a `system: true` flag so these
+never appeared in the trigger editor nor were swept into `hidden_default_triggers`.
+
+**Built differently, and more simply.** The stack scans the output itself
+(`stackStore.observeOutput`, §9) rather than renting the trigger engine. Two reasons: the
+trigger engine early-returns when the user has no triggers configured, so the stack would
+have depended on unrelated state being non-empty; and readiness wanted a built-in default
+for services with no pattern at all, which is not a thing the trigger model can express.
+The flag is unneeded and the trigger editor never learns the stack exists.
 
 The 15s auto-resume suppression window is decided per pane mount from the tab's
 `autoResumeCommand`, and a service tab has none (its command is typed by the store, not
@@ -405,19 +409,37 @@ Offered as a checklist in the Add service flow, pre-ticked for `dev`/`start`; im
 get `origin: 'suggested'`. An agent gets the same list through `createService`'s reply when
 called with no arguments — so "set up this project's stack" is one round trip for it too.
 
-## 9. Ports and readiness — agent-reported first
+## 9. Ports and readiness — the service's own words first
 
-Port discovery was the hard part of every earlier version of this idea. It collapses once
-agents are writers:
+Port discovery was the hard part of every earlier version of this idea. The answer is that
+the service already announces the address, in its own output, every single time:
 
-1. `ready_pattern` with a `port` group — observed, authoritative (`endpoint_source:
-   'observed'`).
-2. `updateService { port }` from the agent that read the output — reported.
-3. The persisted `port` from last time, until the service is next `ready` — **stale**, and
-   labelled as such in `listStack` so an agent does not curl a port from yesterday.
+1. **maiTerm's own output scan** — `stackStore.observeOutput`, fed every PTY chunk from a
+   service tab by `TerminalPane`. A human-set `ready_pattern` overrides the built-in shapes
+   (its optional `port` group carries the port); otherwise `detectEndpoint` in
+   `stack/model.ts` recognises what dev servers print. Either route means
+   `endpoint_source: 'observed'` and `ready`.
+2. `updateService { port }` from an agent — **reported**. No longer the only way a port
+   arrives; it is now the correction path, and how a service that prints nothing gets one.
+3. The persisted `port` from last time — **stale**, and labelled as such in `listStack` so
+   an agent does not curl a port from yesterday.
 4. Socket scanning of the PTY's process tree — **not built**. It is the only approach that
    needs the subprocess-scan machinery, with its `spawn_blocking` and never-on-an-edge rules,
    for a case the first three cover.
+
+Three rules the scan obeys, all of them about staying cheap and staying honest:
+
+- **Provenance belongs to a RUN, not a definition.** `ServiceRuntime.endpointFrom` is
+  cleared at every start, which is what makes a carried-over port read as stale. Deriving
+  it from `ready_pattern` instead — as `endpointSource` did until this landed — made
+  `'observed'` unreachable while still advertising it to agents.
+- **The scan stops.** At the first answer of a run, and in any case `SCAN_WINDOW_MS` (5 min)
+  after the start: a server announces itself while it is starting, and a queue worker that
+  prints all day and serves nothing should not be matched against forever.
+- **The host must be loopback.** A start-up banner routinely also carries a docs link and a
+  LAN address; only the loopback one is what this service is serving. `0.0.0.0` and `[::]`
+  are rewritten to `localhost` so the stored URL is one a browser can follow — which is what
+  makes the sidebar's launch affordance (shift-click a row, or its `↗`) possible at all.
 
 ## 10. The phone
 
@@ -449,18 +471,20 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Review of those (two findings, both ordering, both verified in the app rather than by reading): the heal ran inside `createTab`, before `setTabServiceId`, so Rust saw an ordinary tab and did nothing — it now runs on bind and unbind, ungated by the mirror; and the drawer still took the keyboard, because `TerminalPane` focuses at the end of mount and on every false→true `visible`, not only where the removed call was. A terminal now takes focus only when it is one the human is looking at | `58d4280` |
 | **Shipped in v2.4.0** (2026-09-15). Fact-checking the docs site against the source first caught two promises the code does not keep: `restartService` claimed a 10s wait for the service to come back (it replies as soon as the command is running), and `waitForService` offered to block until "ready" for a service with a `ready_pattern`, which nothing evaluates — so it would have waited out the full timeout. Both descriptions and the service form now say what the code does | `a8c556c`, `d50db98` |
 
+| **Ports read from the service's own output** (2026-09-15): `updateService` was the ONLY way a port ever reached the sidebar, so a human running the stack without agents never saw one — and `endpoint_source: 'observed'` was advertised to agents while being unreachable, since it was derived from `ready_pattern` and nothing evaluated that. `observeOutput` now scans a service tab's chunks for the address it announces, `ready_pattern` overrides the built-in shapes where one is set, and `endpointFrom` records the real provenance per RUN so a carried-over port reads as stale. Plus the launch affordance the URL makes possible: shift-click a sidebar row, its `↗`, or the context menu | *this change* |
+
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path
 needs (the executable of `npm run dev` fronts as `npm`, `node` or `sh`); `startLine` uses
 `env K=V cmd` rather than `K=V cmd` so fish works; and the "nine" tools are eleven —
 `startStack`/`stopStack` earned their own names rather than a `service: "*"` convention.
 
-**v2** — readiness as system trigger with port capture. `ready_pattern` is stored and shown
-but **nothing evaluates it**; `updateService { ready, port }` is the only ready path there
-is. Until that lands, nothing may promise otherwise: the service form calls the field
-"recorded, not yet watched", and the `waitForService` / `restartService` tool descriptions
-say readiness is what an agent reported. Restore the stronger wording with the feature, not
-before. Also: env at spawn; Overlord `service_crashed` + `driveTab` refusal + `kind:
+**v2** — ~~readiness with port capture~~ **done** (2026-09-15, §9): built as the stack's own
+output scan rather than a system trigger, with a built-in default so a service needs no
+pattern at all, and `ready_pattern` overriding it where one is set. The wording held back
+at v2.4.0 is restored in step — the service form, the `waitForService` row, the `listStack`
+`endpoint_source` enum and the session priming all describe the scan now. Still open: env
+at spawn; Overlord `service_crashed` + `driveTab` refusal + `kind:
 'service'` in `listWorkspaces`; pinned cluster / glyph / collapse for service tabs; SSH
 services (`ssh_command` becomes live — the spawn is the auto-resume triple).
 

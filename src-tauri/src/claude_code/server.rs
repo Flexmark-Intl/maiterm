@@ -540,8 +540,9 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
         out.push_str(&format!(
             "\n\nThis workspace runs a stack maiTerm manages: {}. Use listStack / \
              getServiceOutput / restartService rather than starting these yourself. If you \
-             start a server maiTerm does not know about, register it with createService, and \
-             when you read a port in a service's output, report it with updateService.",
+             start a server maiTerm does not know about, register it with createService. \
+             maiTerm reads a service's own output for the address it serves on, so use \
+             updateService only to report an address it could not read, or to correct one.",
             list
         ));
     }

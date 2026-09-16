@@ -16,6 +16,7 @@
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
   import { readText as clipboardReadText, writeText as clipboardWriteText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { stackStore } from '$lib/stores/stack.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { activityStore } from '$lib/stores/activity.svelte';
@@ -586,6 +587,9 @@
     unlistenRaw = await listen<number[]>(`pty-raw-${ptyId}`, (event) => {
       const data = new Uint8Array(event.payload);
       processOutput(tabId, data);
+      // A service tab announces its own address; the stack reads it (docs/stack.md §9).
+      // Cheap and self-limiting — the store drops the scan at the first hit of a run.
+      if (isServiceTab()) stackStore.observeOutput(tabId, data);
       terminalsStore.markDirty(tabId);
       // Fallback SSH-drop detection for sessions *without* shell integration
       // (no OSC 133 exit code to read). Match ssh's transport-failure stderr;

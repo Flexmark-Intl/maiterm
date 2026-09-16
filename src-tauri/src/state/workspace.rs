@@ -525,13 +525,14 @@ pub struct Service {
     #[serde(default = "default_restart_policy")]
     pub restart: String,
     /// Regex over the tab's stripped output; first match → `ready`. An optional named
-    /// group `port` captures the port. Becomes a system trigger scoped to the tab.
+    /// group `port` captures the port. Evaluated by the store's output scan, where it
+    /// OVERRIDES the built-in address shapes (docs/stack.md §9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_pattern: Option<String>,
-    /// Last known endpoint — written by the ready trigger or by an agent over MCP
-    /// (`updateService`), never by socket sniffing. Persisted because the next start
-    /// usually lands on the same port; consumers label it stale until the service is
-    /// next `ready` (docs/stack.md §9).
+    /// Last known endpoint — written by maiTerm reading the service's own output, or by an
+    /// agent over MCP (`updateService`), never by socket sniffing. Persisted because the
+    /// next start usually lands on the same port; consumers label it stale until THIS run
+    /// announces one of its own (docs/stack.md §9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

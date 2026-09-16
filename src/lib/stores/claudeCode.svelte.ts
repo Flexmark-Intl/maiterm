@@ -956,11 +956,15 @@ function createClaudeCodeStore() {
     return { error: `No service "${ref}" in this project. listStack names ${stack.length ? stack.map((s) => s.name).join(', ') : 'none'}.` };
   }
 
+  /** Where the endpoint an agent is about to read came from. `endpointFrom` is the
+   *  provenance of the CURRENT run, so an endpoint with none — a port persisted from a
+   *  previous run — is stale no matter what the service is doing now. Previously this was
+   *  inferred from `ready_pattern`, which made `observed` unreachable in practice. */
   function endpointSource(s: Service, r: ServiceRuntime): 'observed' | 'reported' | 'stale' | null {
     if (s.port == null && !s.url) return null;
-    if (r.status === 'ready') return s.ready_pattern ? 'observed' : 'reported';
-    if (r.status === 'running' || r.status === 'starting') return 'reported';
-    return 'stale';
+    if (!r.endpointFrom) return 'stale';
+    if (r.status === 'stopped' || r.status === 'crashed') return 'stale';
+    return r.endpointFrom;
   }
 
   function serviceView(ws: Workspace, s: Service) {

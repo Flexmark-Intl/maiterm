@@ -28,9 +28,10 @@ import { activityStore } from './activity.svelte';
 import { preferencesStore } from './preferences.svelte';
 import { normalizeTitle } from '$lib/tasks/model';
 import {
-  exitIsCrash, restartAllowed, restartDelay, rollupStatus, startLine,
+  detectEndpoint, exitIsCrash, restartAllowed, restartDelay, rollupStatus, startLine,
   RESTART_CEILING, RESTART_WINDOW_MS, type Rollup, type ServiceStatus,
 } from '$lib/stack/model';
+import { stripAnsi } from '$lib/utils/ansi';
 
 export type { ServiceStatus } from '$lib/stack/model';
 
@@ -57,6 +58,11 @@ export interface ServiceRuntime {
   restarts: number[];
   /** One line of why, for the sidebar and `listStack`. */
   note: string | null;
+  /** Where the CURRENT run's endpoint came from: `observed` is maiTerm reading the
+   *  service's own output, `reported` is an agent calling `updateService`. Null until
+   *  this run announces one, which is what makes a persisted port read as stale (§9).
+   *  Runtime, not persisted — provenance belongs to a run, not to a definition. */
+  endpointFrom: 'observed' | 'reported' | null;
 }
 
 export interface ServiceInput {
@@ -70,7 +76,7 @@ export interface ServiceInput {
   origin?: ServiceOrigin;
 }
 
-const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, stopping: false, restarts: [], note: null };
+const IDLE: ServiceRuntime = { status: 'stopped', since: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, stopping: false, restarts: [], note: null, endpointFrom: null };
 
 /** Everything the store has to remember about a SHELL, from the raw OSC 133 feed. Keyed
  *  by PTY id, never tab id: a tab id outlives its shell (suspend/resume respawns under the
@@ -124,7 +130,37 @@ function createStackStore() {
   /** A stop arrived while the start was still before its write: abort instead of typing. */
   const abortStart = new Set<string>();
   const shellFacts = new Map<string, ShellFacts>();
+  /** Tail of a service tab's output while we are still looking for its address, so a URL
+   *  split across two PTY chunks is still seen whole. Dropped the moment a run announces
+   *  one — this is not a log buffer and must never grow into one. */
+  const scanTails = new Map<string, string>();
+  const SCAN_TAIL_CHARS = 512;
+  /** How long into a run we keep looking for an address. A server announces itself while
+   *  it is starting — generous enough for a cold webpack build, short of "forever" for a
+   *  queue worker that prints all day and never serves anything. */
+  const SCAN_WINDOW_MS = 5 * 60 * 1000;
+  /** Compiled `ready_pattern`s by service id, rebuilt only when the pattern text changes.
+   *  A regex that does not compile is complained about once and then treated as absent: a
+   *  typo in that field must not silence the built-in detection too. */
+  const readyPatterns = new Map<string, { src: string; re: RegExp | null }>();
   let unsubscribe: (() => void)[] = [];
+
+  function readyPattern(service: Service): RegExp | null {
+    const src = service.ready_pattern?.trim();
+    if (!src) return null;
+    let entry = readyPatterns.get(service.id);
+    if (!entry || entry.src !== src) {
+      let re: RegExp | null = null;
+      try {
+        re = new RegExp(src);
+      } catch (e) {
+        logWarn(`stack: ${service.name} has an unusable ready_pattern (${e}) — ignoring it`);
+      }
+      entry = { src, re };
+      readyPatterns.set(service.id, entry);
+    }
+    return entry.re;
+  }
 
   function facts(ptyId: string): ShellFacts {
     let f = shellFacts.get(ptyId);
@@ -413,7 +449,10 @@ function createStackStore() {
     }
     // A fresh run: nothing from a previous one may survive into it — a stale `ptyId` in
     // particular, which `reconcileBindings` would read as "its tab was reloaded" mid-start.
-    setRt(serviceId, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false });
+    // `endpointFrom: null` re-arms the output scan: a port belongs to a RUN, so the one
+    // carried over from the last one is stale until this run announces its own (§9).
+    scanTails.delete(serviceId);
+    setRt(serviceId, { status: 'starting', since: Date.now(), stopping: false, note: null, lastExitCode: null, pid: null, ptyId: null, writeAt: null, beganAt: null, noIntegration: false, endpointFrom: null });
 
     // 3. The guard. With shell integration, "ready for input" is the shell's own A: a fresh
     //    shell has none until its rc finishes (and its first prompt also emits an
@@ -726,15 +765,72 @@ function createStackStore() {
       await persist(workspaceId, (ws.stack ?? []).filter((s) => s.id !== serviceId));
     },
 
-    /** An agent (or the ready trigger) reporting what it observed (§6.1, §9). */
-    async reportEndpoint(workspaceId: string, serviceId: string, report: { port?: number | null; url?: string | null; ready?: boolean; note?: string | null }) {
+    /** An agent, or maiTerm's own output scan, reporting what it saw (§6.1, §9). `from`
+     *  records which — an agent's report is hearsay maiTerm passes on, an observation is
+     *  maiTerm reading the service's own words. */
+    async reportEndpoint(workspaceId: string, serviceId: string, report: { port?: number | null; url?: string | null; ready?: boolean; note?: string | null }, from: 'observed' | 'reported' = 'reported') {
       const patch: Partial<Service> = {};
       if (report.port !== undefined) patch.port = report.port;
       if (report.url !== undefined) patch.url = report.url;
-      if (Object.keys(patch).length) await this.updateService(workspaceId, serviceId, patch);
+      if (Object.keys(patch).length) {
+        await this.updateService(workspaceId, serviceId, patch);
+        setRt(serviceId, { endpointFrom: from });
+      }
       const r = rt(serviceId);
       if (report.ready && (r.status === 'starting' || r.status === 'running')) setRt(serviceId, { status: 'ready' });
       if (report.note !== undefined) setRt(serviceId, { note: report.note });
+    },
+
+    /** Every PTY chunk out of a service tab. maiTerm reads the service's own output for
+     *  the address it is serving on, so a port reaches the sidebar with no agent in the
+     *  loop — before this, `updateService` was the ONLY way one ever got there.
+     *
+     *  Bounded by design: the scan stops at the first endpoint of a run, so the cost is a
+     *  regex over the first seconds of a start and nothing whatsoever after that. An agent
+     *  can still correct what we read; `updateService` simply overwrites it. */
+    observeOutput(tabId: string, data: Uint8Array) {
+      const found = serviceForTab(tabId);
+      if (!found) return;
+      const { workspaceId, service } = found;
+      const r = rt(service.id);
+      // Stop at the first answer of a run: `ready` is the destination either route reaches.
+      if (r.endpointFrom) return;
+      if (r.status !== 'starting' && r.status !== 'running') return;
+      // And stop looking eventually. A service that announces itself does so while it is
+      // starting; a chatty worker that never will should not be scanned for its whole life.
+      if (r.since && Date.now() - r.since > SCAN_WINDOW_MS) return;
+
+      const probe = (scanTails.get(service.id) ?? '') + stripAnsi(new TextDecoder().decode(data)).replace(/\r/g, '');
+
+      // A human-supplied `ready_pattern` overrides the built-in shapes — that is the whole
+      // point of the field. It carries readiness; the address comes from its optional
+      // `port` group, or failing that from whatever the built-in can still find.
+      const pattern = readyPattern(service);
+      if (pattern) {
+        const m = pattern.exec(probe);
+        if (!m) { scanTails.set(service.id, probe.slice(-SCAN_TAIL_CHARS)); return; }
+        scanTails.delete(service.id);
+        const grouped = m.groups?.port ? Number(m.groups.port) : null;
+        const fallback = grouped == null ? detectEndpoint(probe) : null;
+        const port = grouped ?? fallback?.port ?? null;
+        void this.reportEndpoint(
+          workspaceId, service.id,
+          port == null ? { ready: true } : { port, url: fallback?.url ?? null, ready: true },
+          'observed',
+        ).catch((e) => logError(`stack: ready pattern for ${service.name}: ${e}`));
+        return;
+      }
+
+      const hit = detectEndpoint(probe);
+      if (!hit) {
+        scanTails.set(service.id, probe.slice(-SCAN_TAIL_CHARS));
+        return;
+      }
+      scanTails.delete(service.id);
+      // `url` is passed even when null: it CLEARS a launchable url left over from a run
+      // that served on a different port, which would otherwise outlive its port.
+      void this.reportEndpoint(workspaceId, service.id, { port: hit.port, url: hit.url, ready: true }, 'observed')
+        .catch((e) => logError(`stack: endpoint for ${service.name}: ${e}`));
     },
 
     // ── Verbs ────────────────────────────────────────────────────────────────────
@@ -774,10 +870,11 @@ function createStackStore() {
     /** Resolve when the service is ready (or running, when it has no ready pattern), else
      *  after `timeoutMs` with whatever the status is then.
      *
-     *  NOTE: nothing evaluates `ready_pattern` yet (docs/stack.md §11, v2) — `ready` arrives
-     *  only from `updateService { ready: true }`. So a service that HAS a pattern waits here
-     *  for the whole timeout unless an agent reports it. Don't let a caller's wording promise
-     *  otherwise until the readiness trigger lands. */
+     *  `ready` now has three sources (§9): `observeOutput` matching the service's own
+     *  `ready_pattern`, `observeOutput` recognising a built-in address shape, and an agent
+     *  calling `updateService { ready: true }`. A service whose pattern never matches and
+     *  that nothing reports still waits out the whole timeout — the guarantee is "ready is
+     *  reached when it is announced", not "ready is reached". */
     async waitFor(workspaceId: string, serviceId: string, timeoutMs: number): Promise<ServiceStatus> {
       const service = serviceOf(workspaceId, serviceId);
       const target: ServiceStatus = service?.ready_pattern ? 'ready' : 'running';

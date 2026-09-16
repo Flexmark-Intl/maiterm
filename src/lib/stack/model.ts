@@ -44,6 +44,76 @@ export function restartDelay(recentRestarts: number): number {
   return RESTART_BACKOFF_MS[Math.min(recentRestarts, RESTART_BACKOFF_MS.length - 1)];
 }
 
+// ── Endpoint detection (docs/stack.md §9) ──────────────────────────────────────────
+//
+// maiTerm reads a service's own output for the address it is serving on, so a port
+// reaches the sidebar without an agent in the loop. Deliberately NOT socket sniffing:
+// the PID is known, but asking the OS means a subprocess on a timer, permissions, and
+// a process that opens three ports and a helper that opens two more.
+
+/** Hosts a server prints to mean "every interface", which a browser cannot follow.
+ *  Rewritten so the stored URL is one a human can actually click. */
+const BROWSABLE: Record<string, string> = {
+  '0.0.0.0': 'localhost',
+  '[::]': 'localhost',
+  '[::1]': 'localhost',
+};
+
+/** The host is restricted to loopback ON PURPOSE: a start-up banner routinely also
+ *  carries a docs link or a network address, and only the loopback one is the thing
+ *  this service is serving. */
+const LOOPBACK = String.raw`localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|\[::\]`;
+
+/** `http://localhost:5173/`, `➜  Local:   https://127.0.0.1:8443/` — what nearly every
+ *  dev server prints. ANSI is stripped before this runs. */
+const URL_RE = new RegExp(String.raw`\b(https?)://(${LOOPBACK})(?::(\d{1,5}))?`, 'i');
+
+/** `Listening on port 8080`. `\bport\b` will not match inside "support". */
+const PORT_WORD_RE = /\bport\s*[:=]?\s*(\d{2,5})\b/i;
+
+/** `listening on 0.0.0.0:4000`, `serving at :3000`. The serving verb is required —
+ *  a bare `:3000` matches a duration ("in 3:42") and a great deal else besides. */
+const HOST_PORT_RE = /\b(?:listening|serving|bound)\b\s*(?:on|at)?\s*(?:[a-z0-9.\-]*|\[[0-9a-f:]*\]):(\d{2,5})\b/i;
+
+export interface DetectedEndpoint {
+  port: number;
+  /** Only when the service announced a scheme — a bare port is not launchable. */
+  url: string | null;
+}
+
+function validPort(n: number): boolean {
+  return Number.isInteger(n) && n > 0 && n <= 65535;
+}
+
+/** The first endpoint a chunk of (ANSI-stripped) service output announces, or null.
+ *  A URL wins over a bare port: it carries the scheme, so it is the one that can be
+ *  opened in a browser. */
+export function detectEndpoint(text: string): DetectedEndpoint | null {
+  const m = URL_RE.exec(text);
+  if (m) {
+    const scheme = m[1].toLowerCase();
+    const host = BROWSABLE[m[2].toLowerCase()] ?? m[2].toLowerCase();
+    const port = m[3] ? Number(m[3]) : scheme === 'https' ? 443 : 80;
+    if (!validPort(port)) return null;
+    const implicit = port === (scheme === 'https' ? 443 : 80);
+    return { port, url: implicit ? `${scheme}://${host}` : `${scheme}://${host}:${port}` };
+  }
+  for (const re of [PORT_WORD_RE, HOST_PORT_RE]) {
+    const p = re.exec(text);
+    if (p) {
+      const port = Number(p[1]);
+      if (validPort(port)) return { port, url: null };
+    }
+  }
+  return null;
+}
+
+/** Whether an endpoint is something "Open in browser" can actually open. */
+export function launchableUrl(service: Pick<Service, 'url'>): string | null {
+  const url = service.url ?? null;
+  return url && /^https?:\/\//i.test(url) ? url : null;
+}
+
 export type Rollup = 'ready' | 'starting' | 'partial' | 'crashed' | null;
 
 /** Rollup for the sidebar dot, batch semantics like the Claude indicator (docs/stack.md

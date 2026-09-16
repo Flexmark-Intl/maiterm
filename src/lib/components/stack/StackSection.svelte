@@ -5,8 +5,11 @@
    *  and the dock is narrow (CLAUDE.md on `white-space: nowrap` in the side docks). */
   import type { Service, Workspace } from '$lib/tauri/types';
   import { stackStore, type ServiceInput } from '$lib/stores/stack.svelte';
+  import { launchableUrl } from '$lib/stack/model';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
+  import { open as shellOpen } from '@tauri-apps/plugin-shell';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
   import ServiceModal from './ServiceModal.svelte';
@@ -83,13 +86,23 @@
     stackStore.toggleConsole(workspace.id, service.id);
   }
 
+  /** Open an http service in the real browser. Shift-click on the row is the shortcut;
+   *  plain click stays "show me the console", which is the commoner intent. Only a URL
+   *  with a scheme qualifies — a bare `:5432` is an address, not a page. */
+  function launch(service: Service) {
+    const url = launchableUrl(service);
+    if (url) run('launch', shellOpen(url));
+  }
+
   function menuItems(service: Service) {
     const st = stackStore.status(service.id);
     const live = st === 'running' || st === 'ready' || st === 'starting';
+    const url = launchableUrl(service);
     return [
       { label: live ? 'Restart' : 'Start', action: () => run('start', live ? stackStore.restart(workspace.id, service.id) : stackStore.start(workspace.id, service.id)) },
       { label: 'Stop', disabled: !live, action: () => run('stop', stackStore.stop(workspace.id, service.id)) },
       { label: stackStore.consoleServiceId(workspace.id) === service.id ? 'Hide console' : 'Show console', action: () => openService(service) },
+      ...(url ? [{ label: `Open ${url}`, action: () => launch(service) }] : []),
       { label: '', separator: true, action: () => {} },
       { label: 'Edit…', action: () => { editing = service; } },
       { label: 'Remove', disabled: live, action: () => run('remove', stackStore.removeService(workspace.id, service.id)) },
@@ -143,13 +156,14 @@
     <div class="stack-rows">
       {#each services as service (service.id)}
         {@const r = stackStore.runtime(service.id)}
+        {@const url = launchableUrl(service)}
         <div
           class="svc"
           class:crashed={r.status === 'crashed'}
           role="button"
           tabindex="0"
-          onclick={(e) => { e.stopPropagation(); openService(service); }}
-          onkeydown={(e) => { if (e.key === 'Enter') openService(service); }}
+          onclick={(e) => { e.stopPropagation(); if (e.shiftKey && url) launch(service); else openService(service); }}
+          onkeydown={(e) => { if (e.key === 'Enter') { if (e.shiftKey && url) launch(service); else openService(service); } }}
           oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); menu = { x: e.clientX, y: e.clientY, service }; }}
         >
           <StatusDot color={dotColor(r.status)} pulse={r.status === 'starting'} tooltip={r.note ?? r.status} />
@@ -158,6 +172,16 @@
           <span class="svc-meta">
             {#if r.status === 'crashed'}crashed{:else if r.status === 'starting'}starting{:else if r.status === 'stopped'}{r.note ? 'held' : ''}{:else}{uptime(r.since)}{/if}
           </span>
+          {#if url}
+            <Tooltip text={`Open ${url}`}>
+              <button
+                type="button"
+                class="svc-launch"
+                aria-label={`Open ${service.name} at ${url}`}
+                onclick={(e) => { e.stopPropagation(); launch(service); }}
+              >↗</button>
+            </Tooltip>
+          {/if}
         </div>
       {/each}
       <button type="button" class="svc add" onclick={(e) => { e.stopPropagation(); adding = true; }}>
@@ -256,6 +280,26 @@
     flex-shrink: 0;
     font-size: 0.7rem;
   }
+
+  /* Quiet until the row is hovered or the button itself is focused, so a stack of
+     launchable services is not a column of arrows. Always in the layout — revealing it
+     by adding it would reflow the row and shift the uptime out from under the pointer. */
+  .svc-launch {
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: inherit;
+    font-size: 0.75rem;
+    line-height: 1;
+    opacity: 0;
+    padding: 2px 3px;
+  }
+  .svc:hover .svc-launch,
+  .svc-launch:focus-visible { opacity: 1; }
+  .svc-launch:hover { color: var(--accent); }
 
   .svc.add { color: var(--fg-dim); }
   .svc.add:hover { color: var(--fg); }

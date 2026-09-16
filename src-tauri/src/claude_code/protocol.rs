@@ -715,7 +715,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
     tools.extend(serde_json::json!([
         {
             "name": "listStack",
-            "description": "The services this project runs, as maiTerm manages them (the workspace this tab belongs to): name, status (stopped | starting | running | ready | crashed), uptime, port/url with `endpoint_source` ('observed' from the ready pattern, 'reported' by an agent, 'stale' from a previous run — do not trust a stale port), cwd, command, last exit code, the tab running it, and a `note` saying why a service is held or crashed. Check this before starting a dev server or database yourself: it is probably already running, or maiTerm can start it for you.",
+            "description": "The services this project runs, as maiTerm manages them (the workspace this tab belongs to): name, status (stopped | starting | running | ready | crashed), uptime, port/url with `endpoint_source` ('observed' — maiTerm read the address in the service's own output; 'reported' — an agent called updateService; 'stale' — carried over from a previous run, do not trust it), cwd, command, last exit code, the tab running it, and a `note` saying why a service is held or crashed. Check this before starting a dev server or database yourself: it is probably already running, or maiTerm can start it for you.",
             "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" } }, "required": [] }
         },
         {
@@ -755,7 +755,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "updateService",
-            "description": "Report what you observed, or edit a service. You are the port discovery: when you read ':5173' in a service's output, report it here as `port` (and `url` if you know it) so every other tab and your human see it. `ready: true` marks a service up when it has no ready pattern. `note` is one line shown in the sidebar (why it is held, what you changed). `command`/`cwd`/`env`/`auto_start`/`restart`/`ready_pattern` edit the definition and take effect on the next start.",
+            "description": "Report what you observed, or edit a service. maiTerm already watches a service's output for the address it announces, so the common case is handled — report a `port`/`url` here when you know one it could not read (a service that prints nothing, or an address only you can work out), or to CORRECT one it got wrong. `ready: true` marks a service up. `note` is one line shown in the sidebar (why it is held, what you changed). `command`/`cwd`/`env`/`auto_start`/`restart`/`ready_pattern` edit the definition and take effect on the next start.",
             "inputSchema": { "type": "object", "properties": {
                 "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
                 "service": { "type": "string", "description": "Service name or id" },
