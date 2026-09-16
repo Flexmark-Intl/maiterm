@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.5.0
+
+Your services now tell maiTerm where they are, and maiTerm listens.
+
+### The stack knows the address
+
+- **The port fills itself in.** A dev server announces where it's serving the moment it comes up, and maiTerm reads that off its output — no configuration, no sockets sniffed. The sidebar shows the address, the service goes green, and every agent in the workspace is told the same thing.
+- **Open it in your browser.** Shift-click a service, use the `↗` on its row, or pick `Open http://localhost:5173` from its right-click menu. Only for services actually serving something a browser can open, and only while they're running — no links to a port that may now belong to something else.
+- **It waits for the service to speak.** The terminal echoes the command maiTerm typed, so a command like `uvicorn app:app --port 8000` would otherwise "announce" a port before the server had started. And `Port 3000 is in use, trying 3001 instead.` names the port a service *didn't* get, printed before the one it did — both are ignored, so the address you see is the one it's actually serving.
+- **Your ready pattern works now.** A service that announces itself in some way maiTerm doesn't recognise can carry a regular expression, optionally capturing the port, and that takes over. The field has been in the service settings all along; it finally does something.
+- **`waitForService` waits for the real thing.** It used to settle for "the command has started", which for a dev server is well before it has bound a port — an agent that waited and then called the service got a connection refused. It now waits until the service says it is serving.
+
 ## v2.4.0
 
 Your project's services — the dev server, the API, the database — become something the workspace runs and every tab can see, including your agents. The task board learned to hand work between tabs. And Overlord stopped nagging about things that were already fine.
