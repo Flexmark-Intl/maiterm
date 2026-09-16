@@ -353,7 +353,9 @@ It is absolutely positioned inside `.main-content`, floating over the terminal a
 - Dismissed by Escape, by the × , by clicking the same service again — or by clicking the
   work behind it (a capture-phase `pointerdown` inside `.main-content`, which does not
   swallow the click, so the terminal still takes focus). Clicks in the sidebar are exempt:
-  they swap what the drawer shows.
+  they swap what the drawer shows. Escape typed **inside** the service's terminal belongs to
+  that terminal, and the drawer does not take focus on open — a peek should not take the
+  keyboard away from the tab you are working in.
 
 **The invariant that makes it safe: a service tab is never `pane.active_tab_id`.** With it,
 every one of the ~40 `workspacesStore.activeTab` consumers is correct without knowing that
@@ -429,6 +431,7 @@ desktop" — a crashed service it can see is a crashed service it can restart.
 | Review of those fixes (three findings): the `~` expansion lived in Rust only, so the mirror the store types from still said `cd '~/…'` — `set_workspace_stack` returns the stored rows and the store (and `createService`/`updateService`) carry them; a suspend of a single TAB unregisters before it stamps `suspended_at`, the same ordering as the workspace case, so the effect tracks the stamp and corrects the note; a cancelled auto-restart is un-booked from `restarts` so it costs no slot of the ceiling. Each verified live | `0a2261b` |
 | Review of that: assigning the returned list to the mirror rolled back any stack write issued while the IPC was in flight, and the next writer persisted the rollback (a concurrent `createService` vanished from memory and disk). The store now merges only `cwd`/`normalized_name` by id onto whatever the mirror holds when the reply lands — the mirror only ever advances | `7bd6722` |
 | **Service tabs leave the tab strip** (2026-09-15): closing one killed its service, because a service was a tab like any other. Now it is not in the strip at all — it opens in the console drawer (§7), which borrows its terminal through the portal. Plus the invariant (`active_tab_id` is never a service tab, in Rust too), the visible-tab counts, the shared `closeTabOrPane`, and the paths that used to walk into a service tab by accident: Quick Open's `cd` target, Suspend Other Tabs, archive, the workspace row's count/activity/live dots, task assignees, and `switchTab` | `6a27160`, `6af617b`, `ba99464` |
+| Review of the drawer (five findings): the three `move_tab_*` commands still picked a replacement active tab the old way, so moving your last ordinary tab out of a pane selected the service behind it and Cmd+W then took its PTY — the exact loss the change exists to prevent; a pane of only services has NO active tab, which made `createTab({background})` reachable with nothing to restore (`heal_pane_active_tab` applies the invariant in Rust and can answer "none", which `set_active_tab` cannot — `load()`'s self-heal goes through it too, so the null case persists); `viewConsole` dispatched `activate-tab` with an object where the listener reads a bare id, so an unmounted service tab opened a blank drawer forever; `navigateToTab` on a service tab did nothing (a toast click switched workspace and stopped) and now opens the console; Escape inside the service's terminal is the terminal's byte, and the drawer no longer takes focus on open | `0d0e8c2` |
 
 Where the build departed from the plan above it, the plan was wrong: the guard became a
 struct rather than a bare executable name because the **pid** is the thing the stop path
