@@ -513,6 +513,11 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setStackEnabled(value: boolean) {
+      stackEnabled = value;
+      await this.save();
+    },
+
     async setOverlordEnabled(value: boolean) {
       overlordEnabled = value;
       await this.save();

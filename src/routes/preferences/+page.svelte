@@ -2022,6 +2022,32 @@
           </button>
         </div>
 
+        <h3 class="section-heading">Workspace stack</h3>
+
+        <div class="setting" style="align-items: flex-start;">
+          <div>
+            <label for="stack-enabled">Let agents see and control this project's services</label>
+            <p class="setting-hint">
+              A workspace can run its project's services — a dev server, an API, a database —
+              in tabs maiTerm owns, shown under the workspace in the sidebar. With this on,
+              every agent tab is told what the workspace runs and gets tools to read a
+              service's log, start, stop or restart one, and report the port it found.
+              Turning it off removes the tools and the briefing; the services themselves stay
+              yours to run from the sidebar.
+            </p>
+          </div>
+          <button
+            id="stack-enabled"
+            class="toggle"
+            class:active={preferencesStore.stackEnabled}
+            onclick={() => preferencesStore.setStackEnabled(!preferencesStore.stackEnabled)}
+            aria-pressed={preferencesStore.stackEnabled}
+            aria-label="Toggle agent access to the workspace stack"
+          >
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+
         <h3 class="section-heading">Claude Code</h3>
 
         <div class="setting" style="align-items: flex-start;">
