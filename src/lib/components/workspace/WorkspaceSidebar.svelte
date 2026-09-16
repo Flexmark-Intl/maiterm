@@ -25,6 +25,7 @@
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
+  import type { Workspace } from '$lib/tauri/types';
   import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
   import type { Update } from '@tauri-apps/plugin-updater';
 
@@ -171,18 +172,25 @@
     navigateToTab(next);
   }
 
+  /** Tabs the human can actually see in this workspace. Stack service tabs are excluded
+   *  (docs/stack.md §7): a dev server writing to its log all day would otherwise hold the
+   *  workspace row's activity dot on permanently, for a tab that is not in any strip. */
+  function visibleTabIds(ws: Workspace): string[] {
+    return ws.panes.flatMap(p => p.tabs.filter(t => !t.service_id).map(t => t.id));
+  }
+
   function workspaceHasActivity(workspaceId: string): boolean {
     if (workspaceId === workspacesStore.activeWorkspaceId) return false;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return false;
-    const tabIds = ws.panes.flatMap(p => p.tabs.map(t => t.id));
+    const tabIds = visibleTabIds(ws);
     return activityStore.hasAnyActivity(tabIds);
   }
 
   function workspaceTabState(workspaceId: string): 'alert' | 'question' | null {
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return null;
-    const tabIds = ws.panes.flatMap(p => p.tabs.map(t => t.id));
+    const tabIds = visibleTabIds(ws);
     return activityStore.getWorkspaceTabState(tabIds);
   }
 
@@ -190,7 +198,7 @@
     if (workspaceId === workspacesStore.activeWorkspaceId) return null;
     const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
     if (!ws) return null;
-    const tabIds = ws.panes.flatMap(p => p.tabs.map(t => t.id));
+    const tabIds = visibleTabIds(ws);
     return claudeStateStore.getWorkspaceClaudeState(tabIds);
   }
 
@@ -208,6 +216,9 @@
     let hasTerminalTab = false;
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
+        // A running service is not the workspace being awake: a workspace whose own tabs
+        // are all suspended would read as live forever behind its dev server.
+        if (tab.service_id) continue;
         const isTerminal = tab.tab_type === 'terminal' || !tab.tab_type;
         if (!isTerminal) continue;
         hasTerminalTab = true;
@@ -667,7 +678,7 @@
           {@const wsClaude = workspaceClaudeState(workspace.id)}
           {@const wsActivity = workspaceHasActivity(workspace.id)}
           {#if preferencesStore.showWorkspaceTabCount}
-            <span class="tab-count-badge" class:active={workspace.id === workspacesStore.activeWorkspaceId} class:status-alert={wsTabState === 'alert'} class:status-question={wsTabState === 'question'} class:status-claude-active={!wsTabState && wsClaude === 'active'} class:status-claude-idle={!wsTabState && wsClaude === 'idle-unread'} class:status-claude-idle-read={!wsTabState && wsClaude === 'idle-read'} class:status-activity={!wsTabState && !wsClaude && wsActivity}>{workspace.panes.reduce((sum, p) => sum + p.tabs.length, 0)}</span>
+            <span class="tab-count-badge" class:active={workspace.id === workspacesStore.activeWorkspaceId} class:status-alert={wsTabState === 'alert'} class:status-question={wsTabState === 'question'} class:status-claude-active={!wsTabState && wsClaude === 'active'} class:status-claude-idle={!wsTabState && wsClaude === 'idle-unread'} class:status-claude-idle-read={!wsTabState && wsClaude === 'idle-read'} class:status-activity={!wsTabState && !wsClaude && wsActivity}>{visibleTabIds(workspace).length}</span>
           {:else}
             <span class="workspace-indicator">
               {#if wsTabState === 'alert'}

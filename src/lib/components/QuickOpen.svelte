@@ -264,6 +264,9 @@
     const pane = workspacesStore.activePane;
     if (pane) {
       for (const tab of pane.tabs) {
+        // Never a stack service tab (docs/stack.md §7): running a `cd` in one would type
+        // over a dev server, and the human would not even see where it went.
+        if (tab.service_id) continue;
         if (tab.tab_type === 'terminal') {
           const inst = terminalsStore.get(tab.id);
           if (inst) return { tabId: tab.id, ptyId: inst.ptyId };

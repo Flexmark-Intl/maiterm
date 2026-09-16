@@ -826,6 +826,10 @@ function createClaudeCodeStore() {
               tabType: tab.tab_type ?? 'terminal',
               isActive: tab.id === pane.active_tab_id,
               hasNotes: !!tab.notes,
+              // A stack service's tab: real, running, readable with getTabContext — but
+              // not in the human's tab strip, so `switchTab` cannot show it and nobody is
+              // watching it. Say so, or an agent reads a silent tab as an idle colleague.
+              ...(tab.service_id ? { service: stackStore.serviceForTab(tab.id)?.service.name ?? true } : {}),
               // `state` and `loaded` answer two different questions and are both needed to
               // choose an action: what the agent is doing, and whether anything can reach it.
               // A healthy `idle` agent in an unmounted pane is not drivable.
@@ -904,6 +908,12 @@ function createClaudeCodeStore() {
   async function handleSwitchTab(args: { tabId: string }) {
     const loc = findTabLocation(args.tabId);
     if (!loc) return { error: `Tab not found: ${args.tabId}` };
+    if (loc.tab.service_id) {
+      // A service tab is not in the strip, so there is nothing to switch to; navigateToTab
+      // would silently do nothing (docs/stack.md §7). Point at the tool that does work.
+      const name = stackStore.serviceForTab(loc.tab.id)?.service.name;
+      return { error: `That tab runs the service ${name ?? ''}`.trim() + '. Service tabs are not in the tab strip — read it with getServiceOutput, or ask the human to open its console.' };
+    }
     await navigateToTab(args.tabId);
     return { success: true, tabId: args.tabId, workspace: loc.workspace.name, displayName: tabDisplayName(loc.tab) };
   }
@@ -1852,8 +1862,10 @@ function createClaudeCodeStore() {
    *  walks lists looking for the tab that closed — the row would be attributed to a tab that
    *  is not there and reachable from nowhere. Exactly the state `archive_tab`'s
    *  cross-workspace release exists to prevent. */
+  /** Tabs that can carry work: a stack service's tab runs a dev server, not an agent, so
+   *  assigning a task to it parks that task forever (docs/stack.md §7). */
   function tabIdsInWorkspace(ws: Workspace): Set<string> {
-    return new Set(ws.panes.flatMap((p) => p.tabs.map((t) => t.id)));
+    return new Set(ws.panes.flatMap((p) => p.tabs.filter((t) => !t.service_id).map((t) => t.id)));
   }
 
   function handleUpdateTasks(args: { tabId?: string; updates?: TaskToolUpdate[] }) {

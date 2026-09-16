@@ -686,6 +686,10 @@ function createWorkspacesStore() {
         for (const tab of pane.tabs) {
           if (tab.tab_type !== 'terminal') continue;
           if (tab.id === activeTabId) continue;
+          // "Suspend other tabs" means the tabs the human can see. A service tab is not
+          // one of them, and suspending it kills the service (docs/stack.md §7) — the
+          // stack has its own Stop for that.
+          if (tab.service_id) continue;
 
           const instance = terminalsStore.get(tab.id);
           if (!instance) continue;
@@ -1397,6 +1401,9 @@ function createWorkspacesStore() {
       const pane = ws?.panes.find(p => p.id === paneId);
       const tab = pane?.tabs.find(t => t.id === tabId);
       if (!tab) return;
+      // Archiving lifts a tab out of the pane tree, which would kill a running service and
+      // strand its binding — `restoreArchivedTab` does not re-bind (docs/stack.md §7).
+      if (tab.service_id) return;
 
       // Gather context (terminal-specific for terminal tabs, null for editor/diff)
       let scrollback: string | null = null;
