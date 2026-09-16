@@ -881,21 +881,25 @@ function createStackStore() {
       await this.startStack(workspaceId);
     },
 
-    /** Resolve when the service is ready (or running, when it has no ready pattern), else
-     *  after `timeoutMs` with whatever the status is then.
+    /** Resolve when the service is READY — it announced where it is serving — or when it
+     *  reaches a terminal state, else after `timeoutMs` with whatever the status is then.
      *
-     *  `ready` now has three sources (§9): `observeOutput` matching the service's own
-     *  `ready_pattern`, `observeOutput` recognising a built-in address shape, and an agent
-     *  calling `updateService { ready: true }`. A service whose pattern never matches and
-     *  that nothing reports still waits out the whole timeout — the guarantee is "ready is
-     *  reached when it is announced", not "ready is reached". */
-    async waitFor(workspaceId: string, serviceId: string, timeoutMs: number): Promise<ServiceStatus> {
-      const service = serviceOf(workspaceId, serviceId);
-      const target: ServiceStatus = service?.ready_pattern ? 'ready' : 'running';
+     *  It deliberately does NOT settle for `running`, which used to be the target for a
+     *  service with no `ready_pattern`. `running` is set at `onCommandBegin`, the instant
+     *  the shell reports the command started — for `npm run dev` that is well before Vite
+     *  binds a port, so a caller that waited and then hit the service got ECONNREFUSED,
+     *  the exact failure this exists to prevent. Now that `observeOutput` gives every
+     *  service a route to `ready` (§9), waiting for it is both possible and right.
+     *
+     *  The cost lands on a service that never announces anything — a queue worker — which
+     *  burns the caller's whole timeout and returns `running`. That is the better error of
+     *  the two: waiting too long is an annoyance, answering "up" too early is a wrong
+     *  answer. Callers who know they are waiting on such a service pass a short timeout. */
+    async waitFor(_workspaceId: string, serviceId: string, timeoutMs: number): Promise<ServiceStatus> {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const st = rt(serviceId).status;
-        if (st === target || st === 'ready' || st === 'crashed' || st === 'stopped') return st;
+        if (st === 'ready' || st === 'crashed' || st === 'stopped') return st;
         await sleep(250);
       }
       return rt(serviceId).status;

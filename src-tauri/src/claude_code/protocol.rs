@@ -750,7 +750,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "waitForService",
-            "description": "Block until a service is up, up to `timeout` seconds; returns its status and, if it is not up, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service. 'Up' means running — nothing watches output for a ready pattern yet, so 'ready' is a state you report with updateService once you have read the service's own line saying it is serving.",
+            "description": "Block until a service is READY — it has announced where it is serving — up to `timeout` seconds; returns its status and, if it is not ready, its last 20 output lines so you can see why. Use after startService/restartService before hitting the service. maiTerm reads the address out of the service's own output, so this waits for the real thing rather than for the command merely having started. A service that announces nothing a browser would recognise (a queue worker, a job runner) never reaches `ready` and will use your whole timeout before answering `running` — pass a short `timeout` when you are waiting on one of those.",
             "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" }, "timeout": { "type": "integer", "description": "Seconds (default 30, max 100)" } }, "required": ["service"] }
         },
         {

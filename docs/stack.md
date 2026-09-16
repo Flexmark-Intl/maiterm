@@ -247,7 +247,7 @@ the schemas can be switched off wholesale.
 | `getServiceOutput { service, lines }` | Recent stripped output of the bound tab. `getTabContext` under a name an agent will reach for |
 | `startService` / `stopService` / `restartService { service }` | The verbs. Reply carries the resulting status; `restartService` waits up to 10s for ready before replying, so an agent's next step sees a live server |
 | `startStack` / `stopStack` | All `auto_start` services / all running services |
-| `waitForService { service, timeout }` | Block until `ready` (or `running` when no pattern), else return the status and the last 20 lines |
+| `waitForService { service, timeout }` | Block until `ready` — always, never `running`, which is set at `onCommandBegin` before the server binds — else return the status and the last 20 lines |
 | `updateService { service, port?, url?, ready?, note? }` | **The agent as writer.** It ran the server and read ":5173" — it reports it. `ready: true` sets status when no pattern exists. `note` appends to a bounded log on the service, same shape as task notes |
 | `createService { name, command, cwd?, env?, auto_start?, restart?, ready_pattern? }` | Idempotent by normalized name (returns the existing one). `origin: 'agent'`. Does not start it — an agent that wants it up calls `startService`, which is one more call and one more thing the human can see |
 | `removeService { service }` | Refused while running; stop first. Human-only delete was the tasks rule; here an agent that created a service may remove it (`origin: 'agent'` only) |
