@@ -48,6 +48,41 @@ path across platforms: deliberately breaking a security mechanism to reach a fal
 patch release away from breaking. On macOS the local store is the Keychain, and §5 is built
 so that this is not our problem.
 
+### 2.1.1 `CLAUDE_SECURESTORAGE_CONFIG_DIR` — the credential is separable from the config dir
+
+> **Read out of 2.1.278 on 2026-09-19, and confirmed on the wire (macOS).** The blockquote
+> above is true only while this variable is unset. The credential store resolves its
+> directory through one function, shared by the Keychain path and the `.credentials.json`
+> path alike:
+>
+> ```js
+> function qS() {
+>   const n = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
+>   if (n !== undefined) return (n || join(homedir(), ".claude")).normalize("NFC");
+>   return configDir();            // the CLAUDE_CONFIG_DIR-resolved directory
+> }
+> ```
+>
+> On macOS the Keychain *service name* is suffixed with `sha256(dir).slice(0,8)` — but the
+> suffix is computed from `CLAUDE_SECURESTORAGE_CONFIG_DIR` when that is defined, and is
+> **omitted entirely when it is defined-but-empty**. So `CLAUDE_SECURESTORAGE_CONFIG_DIR=`
+> (set, empty) pins the credential to the stock location on every platform: the default
+> `Claude Code-credentials` Keychain item on macOS, `~/.claude/.credentials.json` on Linux.
+
+Two consequences, and they pull in opposite directions:
+
+- **For §5 (local identities), leave it unset.** Identity isolation depends on the credential
+  following `CLAUDE_CONFIG_DIR`, which is the default behaviour. Note the converse risk: a
+  user (or a parent process) who exports this variable silently collapses every maiTerm
+  identity onto one credential. If §5 ships, scrub it from the spawn environment.
+- **For a per-instance *remote* config dir, set it to empty.** That relocates hooks, MCP,
+  `projects/` and the rest while the account's real login stays exactly where it is and is
+  shared by every instance, unchanged — which is what dissolves the credential-refresh
+  question that blocked that work (§5.4, and `dfb1d893` on the board).
+
+It is undocumented, so treat it as version-sensitive: re-verify with the A/B in §5.4 before
+relying on it in a release.
+
 ### 2.2 Credential precedence (docs: Authentication → Authentication precedence)
 
 1. Cloud provider (`CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY`)
@@ -335,8 +370,30 @@ Still to settle before building:
   `sessions` are arguable — sharing keeps maiLink working, separating keeps identities clean.
 - **Write-through.** Claude Code writing `settings.json` through a symlink edits the user's real
   file. Mostly desirable, occasionally not; find out what it writes and when.
-- **On Linux, `.credentials.json` lives in the dir** and must never be symlinked. On macOS the
-  credential is in the Keychain keyed by dir path, so it stays separate for free.
+- **On Linux, `.credentials.json` lives in the dir** and **cannot** be symlinked — this is
+  enforced, not merely inadvisable. 2.1.278 opens the credential store with `O_NOFOLLOW` on
+  both the read and the write path (`ELOOP` → the internal state `refused-symlink`), and
+  `probeCredentials` additionally `lstat`s it and rejects `isSymbolicLink()`. A hard link
+  does not rescue it either: the write is temp-file-plus-rename, so the first refresh gives
+  the path a new inode and the two names diverge — precisely the mutual-invalidation failure
+  we were worried about, with a concrete mechanism. **Use `CLAUDE_SECURESTORAGE_CONFIG_DIR=`
+  (§2.1.1) instead of any filesystem trick.** On macOS the credential is in the Keychain
+  keyed by dir path, so it stays separate for free.
+
+**The A/B that verifies §2.1.1**, cheap and safe — it touches a throwaway config dir and the
+credential store no more than a normal `claude` run does:
+
+```bash
+CLAUDE_CONFIG_DIR=$(mktemp -d) claude auth status                                  # control
+CLAUDE_CONFIG_DIR=$(mktemp -d) CLAUDE_SECURESTORAGE_CONFIG_DIR= claude auth status # test
+```
+
+Read `authMethod`, not `loggedIn` — a stray `ANTHROPIC_API_KEY` (§2.2) makes the control
+report `loggedIn: true` with `authMethod: "api_key"`. The test must say `claude.ai`.
+
+> **Verified 2026-09-19 (2.1.278, macOS):** control `api_key`, test `claude.ai`. The Linux
+> half is unverified — the classifier blocks running it over SSH from an agent, so it needs
+> a human to run it on nova.
 
 > **This is the thing to prototype first.** It also revises the §13 claim that §5 is nearly
 > free: the switching mechanism is one environment variable, but making it safe is a directory
@@ -560,7 +617,7 @@ included.
 
 | # | Question | Result |
 |---|---|---|
-| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes**, on the read side — a fresh dir reports `loggedIn: false` rather than finding the default Keychain item (§5). **Write side still unproven**: the first attempt authenticated the *same* account because the browser reused its claude.ai session (§5.1), so both dirs held one identity. Retest needs a private window or a signed-out browser. |
+| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes**, on the read side — a fresh dir reports `loggedIn: false` rather than finding the default Keychain item (§5). **Write side still unproven**: the first attempt authenticated the *same* account because the browser reused its claude.ai session (§5.1), so both dirs held one identity. Retest needs a private window or a signed-out browser. **Qualified 2026-09-19:** it keys off `CLAUDE_CONFIG_DIR` only while `CLAUDE_SECURESTORAGE_CONFIG_DIR` is unset — that variable overrides the credential directory (and the Keychain service suffix) independently. See §2.1.1. |
 | 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
 
 ## 13. Build order
