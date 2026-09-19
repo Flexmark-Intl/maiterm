@@ -198,16 +198,48 @@ org will be signed into their first in that browser essentially always.
 The message has to name the cause and the fix — sign out of claude.ai first, or use a private
 window — because "login successful" has already told the user the opposite.
 
-Better, if it proves workable: Claude Code prints the authorization URL to stdout
-(`If the browser didn't open, visit: …`). maiTerm can capture that and open it in an isolated
-context — a private window, or its own webview with a separate cookie store — so each identity
-authenticates cleanly instead of relying on the user to remember. Worth prototyping in step 1;
-the detection guard above is mandatory regardless, since it is what catches the failure when
-the isolation does not hold.
+The guard is the safety net, not the fix. §5.2 is the fix.
 
 Incidental corroboration of §8, from the URL Claude Code printed: a full `/login` requests
 `org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers
 user:file_upload user:plugins`, against `setup-token`'s `user:inference` alone.
+
+### 5.2 In-app authentication — no paste, no instructions
+
+Telling the user to sign out of claude.ai, or to shuttle a code into a private window, is a
+defect in a setup flow. maiTerm owns a PTY **and** a webview, which is exactly what this needs:
+
+1. Spawn `claude auth login` with `CLAUDE_CONFIG_DIR` set, in a PTY maiTerm already controls.
+2. Scrape the authorization URL it prints (`If the browser didn't open, visit: …`).
+3. Open that URL in a **Tauri incognito `WebviewWindow`** — a fresh cookie jar, so claude.ai
+   renders a real login page instead of resuming the existing session.
+4. The user signs in there.
+5. The hosted callback at `platform.claude.com/oauth/code/callback` bounces the code to Claude
+   Code's **local callback server**, which is on the same machine and therefore reachable from
+   the webview.
+6. Claude Code receives it, writes the credential into that config dir, prints `Login successful`.
+7. maiTerm closes the window and runs the §5.1 duplicate check.
+
+> **Verified 2026-09-19.** `claude auth login` does run a local callback server — observed
+> listening on `127.0.0.1:60854`, an ephemeral port per run, which is why the earlier run
+> completed without anyone pasting anything. maiTerm never needs to know the port: the page
+> redirects itself. `incognito(bool)` exists on `WebviewWindowBuilder` in the Tauri 2.11.3 this
+> project already depends on.
+
+**This preserves §5's principle exactly.** Claude Code still owns the entire exchange — the
+URL, the PKCE challenge, the callback server, the credential write. maiTerm chooses the
+*rendering context* and nothing else. We never see the authorization code or the credential.
+
+Risks to settle while prototyping, in order of likelihood:
+
+- **Federated sign-in in an embedded webview.** Google refuses OAuth in embedded user agents
+  (`disallowed_useragent`), and passkeys in `WKWebView` need particular entitlements. A user
+  whose Claude account signs in via Google SSO may be blocked in step 4. This does not sink the
+  design — it decides how often the fallback runs.
+- **Store isolation across windows.** Two sequential incognito webviews must not share a data
+  store, or identity B still resumes identity A's session. Verify before relying on it.
+- **Fallback, if either bites:** system browser plus the §5.1 duplicate guard and the §10
+  warning. That is a worse experience, not a broken one — and it is still never a paste flow.
 
 Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
 use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
@@ -366,10 +398,9 @@ has to *teach* and *authenticate* before it can mean anything.
 6. **Authenticate** — runs the flow for the first identity.
 7. **Save and enable.**
 
-Adding a *second* identity later needs its own warning, immediately before the browser opens:
-**sign out of claude.ai or use a private window, or you will sign in as the account you
-already have** (§5.1). The duplicate guard catches it either way, but a user who reads this
-first does not have to hit the failure to learn it.
+Adding a *second* identity needs no warning and no instructions — §5.2 authenticates in an
+in-app incognito webview, so the session-reuse trap never arises. The warning text belongs
+only to the system-browser fallback path, and the §5.1 duplicate guard runs either way.
 
 Refuse setup entirely, with the reason shown, when managed settings are present (§3.4).
 
@@ -395,7 +426,7 @@ included.
 | 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
-| 6 | Can maiTerm open the authorization URL in an isolated browser context (private window, or its own webview with a separate cookie store) so each identity authenticates cleanly? | §5.1 — a UX improvement, not a correctness gate; the duplicate-detection guard is required either way |
+| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs; the mechanism itself is already verified |
 ### Resolved 2026-09-19 (2.1.278)
 
 | # | Question | Result |
