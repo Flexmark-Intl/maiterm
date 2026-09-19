@@ -171,6 +171,13 @@ directory. Claude Code drives its own browser flow; we never see or handle the c
 Read back `claude auth status --json` in that dir to learn `email` / `orgName` /
 `subscriptionType` and label the identity.
 
+> **Verified 2026-09-19 (2.1.278, macOS).** A fresh `CLAUDE_CONFIG_DIR` reports
+> `loggedIn: false, authMethod: "none"` while the default dir reports the real `claude.ai`
+> login with `email` / `orgId` / `orgName` / `subscriptionType: "max"`. The credential lookup
+> **is** keyed by config dir — it did not fall through to the default Keychain item. This is
+> the read side, which is the side §5 depends on; the write side (a second login creating a
+> second Keychain item) still needs a real second account to confirm.
+
 Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
 use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
 uniformity with the Linux JSON path is not a reason to intervene, because there is nothing
@@ -183,17 +190,9 @@ Per identity, per host, opt-in:
 
 1. Mint once, locally: `claude setup-token` with that identity's `CLAUDE_CONFIG_DIR`.
    Capture stdout, store in maiTerm's vault (§9.1), record `minted_at`.
-2. On SSH tab spawn for an enabled host, place the token on the remote as a `0600` file and
-   hand Claude Code a **file descriptor** rather than the token itself:
-
-   ```sh
-   exec 3</path/to/token
-   export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3
-   ```
-
-   The remote environment then contains the string `3`. `CLAUDE_CODE_OAUTH_TOKEN` as a plain
-   env var is the fallback (§9.2 for why it is the worse option, and Q5 for what must be
-   verified before preferring the fd).
+2. On SSH tab spawn for an enabled host, inject `CLAUDE_CODE_OAUTH_TOKEN` through the
+   existing env-injection path. See §9.2 — the fd alternative was tested and rejected as the
+   default.
 
 Because the token does not rotate, N hosts sharing one token is safe and concurrent — this
 is exactly the property §3.2 lacks.
@@ -267,21 +266,30 @@ with a platform that has no encrypted store to use.
 
 ### 9.2 In transit and at rest on the remote
 
-SSH protects the wire. Nothing protects the remote environment: `CLAUDE_CODE_OAUTH_TOKEN` as
-a plain env var is readable by every child process and, on Linux, by anything running as that
-user via `/proc/<pid>/environ`.
+SSH protects the wire. On the remote, the token is a standing one-year credential at rest.
 
-> **Prefer `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (§6 step 2).** The fd is opened by the
-> *remote* shell against a local `0600` file, so nothing has to cross SSH — the earlier
-> assumption that fd-passing rules this out on remotes was wrong. The environment carries only
-> an integer; 2.1.278 parses it with `parseInt` and reads the descriptor.
+**The fd alternative was tested and is not worth it.** `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`
+works — verified on macOS and on a Linux host over a plain SSH shell, both reporting
+`authMethod: "oauth_token"` identically to the env var, so the `CLAUDE_CODE_REMOTE` /
+`process.send` bypass does not apply to an SSH shell. It was rejected on two grounds:
 
-Two limits on that, both to verify (Q5): the fd path is bypassed when `CLAUDE_CODE_REMOTE` is
-set or the process has an IPC channel (`process.send`) — believed to target Claude Code's own
-cloud sessions rather than a plain SSH shell — and the descriptor is read once, so anything
-that re-execs `claude` needs the `exec 3<` still in force.
+- **It buys almost nothing.** The argument for it was that `/proc/<pid>/environ` leaks the env
+  var. But that file is mode `0400`, owned by the process owner — verified. The only reader is
+  the same user, who can equally read the `0600` token file the fd needs. There is no threat
+  model where the fd wins and the file does not lose.
+- **It has a silent-failure footgun.** The descriptor is read **once**. With `exec 3<tok` set
+  up at shell init, the first `claude` invocation authenticates and **every subsequent one
+  silently reports `loggedIn: false`** — confirmed. Only a per-command redirect
+  (`claude … 3<tok`) survives repeated use, which cannot be expressed as a plain `export` and
+  would need a shell wrapper that anything invoking `claude` directly would bypass.
 
-Locally, use the fd form too: same reasoning, and no SSH involved at all.
+> **Decision: plain `CLAUDE_CODE_OAUTH_TOKEN`.** An intermittent auth failure that appears on
+> the second invocation is precisely the class of bug this whole feature exists to eliminate.
+> Do not reintroduce the fd form without solving the single-read problem for subprocesses.
+
+Residual exposure to accept and document in the setup modal: the token is inherited by child
+processes of the shell, and may appear in crash dumps or debug logs that capture the
+environment. Both are same-user exposures, consistent with the file-based alternative.
 
 ### 9.3 Agents must never reach credential material
 
@@ -351,8 +359,12 @@ included.
 | 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
-| 4 | Does a second identity's Keychain entry actually key off `CLAUDE_CONFIG_DIR` on this macOS version, or only the file fallback? | §5 — the whole approach |
-| 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell — i.e. is the `CLAUDE_CODE_REMOTE` / `process.send` bypass irrelevant there — and does it survive a re-exec of `claude`? | §6 step 2, §9.2 — falls back to the plain env var if not |
+### Resolved 2026-09-19 (2.1.278)
+
+| # | Question | Result |
+|---|---|---|
+| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes**, on the read side — a fresh dir reports `loggedIn: false` rather than finding the default Keychain item (§5). The write side still needs a real second account. |
+| 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
 
 ## 13. Build order
 
