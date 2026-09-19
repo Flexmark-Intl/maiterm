@@ -220,11 +220,54 @@ defect in a setup flow. maiTerm owns a PTY **and** a webview, which is exactly w
 6. Claude Code receives it, writes the credential into that config dir, prints `Login successful`.
 7. maiTerm closes the window and runs the §5.1 duplicate check.
 
-> **Verified 2026-09-19.** `claude auth login` does run a local callback server — observed
-> listening on `127.0.0.1:60854`, an ephemeral port per run, which is why the earlier run
-> completed without anyone pasting anything. maiTerm never needs to know the port: the page
-> redirects itself. `incognito(bool)` exists on `WebviewWindowBuilder` in the Tauri 2.11.3 this
-> project already depends on.
+> **Verified 2026-09-19.** `claude auth login` runs a real OAuth callback server:
+> `GET http://127.0.0.1:<port>/callback?code=…&state=…` returns `400 Invalid state parameter`
+> and the CLI immediately prints `Login failed: Invalid state parameter` and exits. So the
+> endpoint exists, validates `state`, and delivering a code to it drives the CLI to completion.
+> `incognito(bool)` exists on `WebviewWindowBuilder` in the Tauri 2.11.3 this project already
+> depends on.
+
+> **NOT verified, and step 5 above is written more confidently than the evidence supports:
+> how the browser reaches that port.** It is *ephemeral* — 60854 on one run, 61026 on the
+> next — and the authorization URL contains no port: `redirect_uri` is
+> `https://platform.claude.com/oauth/code/callback`, with `code=true` and an opaque random
+> `state`. Anthropic's hosted page cannot guess 61026. So either the CLI polls Anthropic for
+> the code using `state`, or the hosted page probes localhost, or it decides from **cookies /
+> session state set earlier in the flow** whether a local CLI is reachable at all. That last
+> one is the working hypothesis, and if it holds, a *fresh incognito context could get the
+> long-code form instead of the callback* — precisely the branch this design assumed away.
+
+**This does not sink §5.2, because maiTerm owns the webview.** If the hosted page shows a code
+instead of redirecting, maiTerm reads the code out of the DOM and writes it into the PTY at the
+`Paste code here if prompted >` prompt. Both branches then end with no user action:
+
+| Hosted page does | maiTerm does |
+|---|---|
+| Redirects to the local callback | Nothing — Claude Code completes on its own |
+| Displays a code | Scrape it from the webview, type it into the PTY |
+
+Designing for both branches is cheaper than establishing which one fires, and it is robust to
+Anthropic changing the answer. **Do not build the redirect branch alone.**
+
+### 5.3 The magic-link hole
+
+Claude.ai's email sign-in can deliver a **magic link**, and a link clicked in a mail client
+opens in the *system* browser — outside our incognito webview, in the context that already has
+a session. Nothing maiTerm does to the webview can prevent that; the mail client is not ours.
+
+Mitigations, in order:
+
+- **Steer to the emailed code, not the link.** The code is typed into the page that is already
+  open in our webview, so the flow never leaves. `claude auth login --email <addr>` pre-fills
+  the address, which at least starts the user on that path.
+- **The §5.1 duplicate guard is the backstop.** If a magic link completes the flow in the
+  system browser as the wrong account, the guard catches it after the fact and explains it.
+  This is the case the guard exists for, and it is why the guard is mandatory rather than
+  belt-and-braces.
+
+> **Honest limit:** maiTerm cannot guarantee isolation for a flow the user completes in another
+> application. It can make the in-app path the easy one and detect the bad outcome. That is the
+> whole of what is available, and the setup flow should not imply otherwise.
 
 **This preserves §5's principle exactly.** Claude Code still owns the entire exchange — the
 URL, the PKCE challenge, the callback server, the credential write. maiTerm chooses the
@@ -426,7 +469,8 @@ included.
 | 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
-| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs; the mechanism itself is already verified |
+| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs |
+| 7 | How does the browser reach the CLI's *ephemeral* callback port, given the authorization URL carries no port? Polling, localhost probing, or a cookie/session decision? If cookie-driven, does a fresh incognito context get the long-code form instead? | §5.2 — determines which branch fires, **not** whether the design works: build both branches regardless |
 ### Resolved 2026-09-19 (2.1.278)
 
 | # | Question | Result |
