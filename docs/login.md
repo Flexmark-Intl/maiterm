@@ -41,6 +41,13 @@ change-detection hook if we ever want one.
 > different credential. This is the whole basis of §5 — native multi-identity, no keychain
 > surgery, no mutation of a shared slot.
 
+**There is no switch to force the JSON path on macOS.** Searched 2.1.278 for every plausible
+shape (`*KEYCHAIN*`, `useKeychain`, `disableKeychain`, `skipKeychain`) — nothing. The JSON
+fallback is failure-triggered only. Do not try to induce the failure to get a uniform code
+path across platforms: deliberately breaking a security mechanism to reach a fallback is a
+patch release away from breaking. On macOS the local store is the Keychain, and §5 is built
+so that this is not our problem.
+
 ### 2.2 Credential precedence (docs: Authentication → Authentication precedence)
 
 1. Cloud provider (`CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY`)
@@ -127,6 +134,18 @@ Preferences.login_management            ← off by default; setup is a separate 
 
 ## 5. Local identities — per-tab `CLAUDE_CONFIG_DIR`
 
+> **maiTerm owns the directory. Claude Code owns the credential inside it.**
+>
+> This is the load-bearing distinction in the whole design, so state it before the mechanism:
+> maiTerm **never** reads, writes, parses, transports, or migrates a `/login` credential, and
+> **never touches Claude Code's Keychain item**. We set one environment variable and Claude
+> Code does its own browser flow, its own storage, its own refresh, its own logout. We are not
+> a party to that Keychain item, so there is no shared ACL, no prompt storm, and nothing of
+> ours to break when Anthropic changes the credential format.
+>
+> Any future change that has maiTerm handling local credential material directly is not an
+> extension of this design — it is a different one, and needs its own security review.
+
 Each identity owns a config directory under maiTerm's data dir:
 
 ```
@@ -152,8 +171,11 @@ directory. Claude Code drives its own browser flow; we never see or handle the c
 Read back `claude auth status --json` in that dir to learn `email` / `orgName` /
 `subscriptionType` and label the identity.
 
-> **maiTerm never parses, stores, or transports the `/login` credential.** For local
-> identities we own the *directory*, and Claude Code owns what is in it.
+Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
+use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
+uniformity with the Linux JSON path is not a reason to intervene, because there is nothing
+here for us to unify: on every platform, the local credential is a thing Claude Code puts in
+a directory we happen to own.
 
 ## 6. Remote propagation — `setup-token`
 
@@ -161,11 +183,26 @@ Per identity, per host, opt-in:
 
 1. Mint once, locally: `claude setup-token` with that identity's `CLAUDE_CONFIG_DIR`.
    Capture stdout, store in maiTerm's vault (§9.1), record `minted_at`.
-2. On SSH tab spawn for an enabled host, inject `CLAUDE_CODE_OAUTH_TOKEN` through the
-   existing env-injection path.
+2. On SSH tab spawn for an enabled host, place the token on the remote as a `0600` file and
+   hand Claude Code a **file descriptor** rather than the token itself:
+
+   ```sh
+   exec 3</path/to/token
+   export CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3
+   ```
+
+   The remote environment then contains the string `3`. `CLAUDE_CODE_OAUTH_TOKEN` as a plain
+   env var is the fallback (§9.2 for why it is the worse option, and Q5 for what must be
+   verified before preferring the fd).
 
 Because the token does not rotate, N hosts sharing one token is safe and concurrent — this
 is exactly the property §3.2 lacks.
+
+> **Do not try to write the remote's `.credentials.json` instead.** That file holds the
+> rotating OAuth blob, not an `oat` token — synthesizing it means reverse-engineering an
+> undocumented format *and* re-inheriting the rotation problem from §3.2. The remote store
+> being a JSON file on Linux (and on macOS over SSH, where the Keychain is locked) does not
+> make it a thing we can write.
 
 Host enablement is **per host, explicit, and never inferred**. A token is a standing
 one-year credential; `nova` is fine, a shared build box is not our call to make.
@@ -214,17 +251,37 @@ Only §6 remote propagation is scoped down.
 > **Credential material never touches `aiterm-state.json`.** It is plaintext on disk and
 > is the file we tell people to inspect when debugging.
 
-Tokens go in the OS keychain under maiTerm's own service name. State JSON holds only
-identity metadata: id, label, email, org, `minted_at`, which hosts are enabled. If the
-keychain is unavailable, the feature degrades to local-only (§5) rather than falling back
-to a file.
+Tokens go in the OS keychain **under maiTerm's own service name** — our item, our ACL, never
+Claude Code's (§5). A signed and notarized app reads its own item without prompting, so none
+of the objections to touching someone else's Keychain entry apply.
+
+State JSON holds only identity metadata: id, label, email, org, `minted_at`, which hosts are
+enabled. If the keychain is unavailable, the feature degrades to local-only (§5) rather than
+silently falling back to a plaintext file.
+
+**Why not mirror the Linux `.credentials.json` pattern and keep it simple?** Because the
+`oat` token is the highest-value secret in this design — one year, non-rotating, unlocks the
+subscription — and it is the one piece maiTerm actually holds. Storing it in plaintext beside
+`aiterm-state.json` would be a downgrade on precisely the wrong secret, chosen for symmetry
+with a platform that has no encrypted store to use.
 
 ### 9.2 In transit and at rest on the remote
 
-`CLAUDE_CODE_OAUTH_TOKEN` in the environment is readable by every child process and via
-`/proc/<pid>/environ` on Linux. SSH protects the wire; nothing protects the remote
-environment. `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is better hygiene but fd-passing
-does not cross SSH, so it only helps local tabs — use it there anyway.
+SSH protects the wire. Nothing protects the remote environment: `CLAUDE_CODE_OAUTH_TOKEN` as
+a plain env var is readable by every child process and, on Linux, by anything running as that
+user via `/proc/<pid>/environ`.
+
+> **Prefer `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` (§6 step 2).** The fd is opened by the
+> *remote* shell against a local `0600` file, so nothing has to cross SSH — the earlier
+> assumption that fd-passing rules this out on remotes was wrong. The environment carries only
+> an integer; 2.1.278 parses it with `parseInt` and reads the descriptor.
+
+Two limits on that, both to verify (Q5): the fd path is bypassed when `CLAUDE_CODE_REMOTE` is
+set or the process has an IPC channel (`process.send`) — believed to target Claude Code's own
+cloud sessions rather than a plain SSH shell — and the descriptor is read once, so anything
+that re-execs `claude` needs the `exec 3<` still in force.
+
+Locally, use the fd form too: same reasoning, and no SSH involved at all.
 
 ### 9.3 Agents must never reach credential material
 
@@ -295,6 +352,7 @@ included.
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
 | 4 | Does a second identity's Keychain entry actually key off `CLAUDE_CONFIG_DIR` on this macOS version, or only the file fallback? | §5 — the whole approach |
+| 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell — i.e. is the `CLAUDE_CODE_REMOTE` / `process.send` bypass irrelevant there — and does it survive a re-exec of `claude`? | §6 step 2, §9.2 — falls back to the plain env var if not |
 
 ## 13. Build order
 
