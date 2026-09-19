@@ -351,17 +351,29 @@ and `ide/`.
 > `CLAUDE_CONFIG_DIR/settings.json`, and the user's real `~/.claude/settings.json` is **not**
 > consulted. `projectsDirectory` relocates with it, confirmed in the same run.
 
+**`~/.claude.json` relocates too, and it is the one that carries MCP.** It sits at the home
+root, not inside `~/.claude/`, so it looks like it should be unaffected — it is not.
+
+> **Verified 2026-09-19.** With `CLAUDE_CONFIG_DIR` set to a fresh directory, Claude Code wrote
+> a new `.claude.json` **inside** it and `claude mcp list` reported *"No MCP servers
+> configured"* — against five on the default dir, `maiterm` among them. Note this is the file
+> that matters: the peer tab established that `mcpServers` in `settings.json` is **not** a
+> server source in 2.1.278, so symlinking `settings.json` does not bring MCP with it.
+
 Unmitigated, every managed tab would lose: the `SessionStart` hook that establishes **tab
-identity** (and with it tasks, Overlord, activity, the phone), transcript discovery for maiLink,
-and every skill, command, plugin, permission and CLAUDE.md the user has configured. §5 would
-trade multi-org support for breaking the product.
+identity**, **every MCP server including `maiterm` itself** — no `initSession`, no tasks, no
+Overlord, no `driveTab` — transcript discovery for maiLink, and every skill, command, plugin,
+permission and CLAUDE.md the user has configured. §5 would trade multi-org support for breaking
+the product. The MCP half is the worse one: hooks failing is noisy, an absent tool surface is
+silent.
 
 **Mitigation, verified to work: a symlink farm.** An identity directory holds symlinks to the
 shared configuration and keeps only the credential per-identity.
 
 > **Verified 2026-09-19.** With `settings.json` symlinked into the identity dir, the marker hook
 > still fired. With `projects` symlinked back to `~/.claude/projects`, transcripts landed in the
-> real directory where maiLink already looks.
+> real directory where maiLink already looks. With `.claude.json` symlinked, all five MCP
+> servers came back — `maiterm` connected — and the symlink survived the run intact.
 
 Still to settle before building:
 
@@ -369,7 +381,12 @@ Still to settle before building:
   `plugins`, `CLAUDE.md` are read-mostly and clearly shared. `projects`, `history.jsonl`,
   `sessions` are arguable — sharing keeps maiLink working, separating keeps identities clean.
 - **Write-through.** Claude Code writing `settings.json` through a symlink edits the user's real
-  file. Mostly desirable, occasionally not; find out what it writes and when.
+  file. Mostly desirable, occasionally not; find out what it writes and when. **`.claude.json`
+  makes this urgent rather than academic**: it is 200KB of per-project state, MCP servers,
+  history and onboarding flags that Claude Code rewrites constantly. `claude mcp list` is
+  read-only and did not touch it, so write-through is still unverified on the file where it
+  matters most. If it turns out to rewrite through the symlink, decide deliberately whether
+  identities share project state or get their own.
 - **On Linux, `.credentials.json` lives in the dir** and **cannot** be symlinked — this is
   enforced, not merely inadvisable. 2.1.278 opens the credential store with `O_NOFOLLOW` on
   both the read and the write path (`ELOOP` → the internal state `refused-symlink`), and
