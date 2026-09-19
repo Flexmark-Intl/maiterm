@@ -21,7 +21,7 @@
    *  tab behind keeps the keyboard and stays clickable (that click is what puts the
    *  drawer away), so a full modal dim would be a lie about what is still live.
    */
-  import { tick, untrack } from 'svelte';
+  import { tick } from 'svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -35,40 +35,14 @@
   let { workspaceId }: Props = $props();
 
   const services = $derived(stackStore.services(workspaceId));
+  /** Open vs. still on screen. The store holds the close back by the slide-out (see
+   *  `consoleVisibleServiceId` there) so that the drawer AND `+page`'s `visible` prop for
+   *  the service terminal agree on what is showing — otherwise the terminal is hidden at
+   *  t=0 and what slides out is an empty box. `closing` is the gap between the two. */
   const openId = $derived(stackStore.consoleServiceId(workspaceId));
-  const openTabId = $derived(stackStore.consoleTabId(workspaceId));
-
-  /** The drawer outlives the store's open state by one animation so it can slide out
-   *  rather than blink away, and it keeps showing the same service — terminal included —
-   *  while it does: emptying the slot first would leave a blank box sliding off screen.
-   *  `shown*` tracks `open*` while open and holds the last pair while closing.
-   *
-   *  Matches the CSS below. Overshooting it only delays the unmount of something already
-   *  off screen; undershooting it cuts the slide short. */
-  const CLOSE_MS = 160;
-  let shownId = $state<string | null>(null);
-  let shownTabId = $state<string | null>(null);
-  let closing = $state(false);
-
-  $effect(() => {
-    const id = openId;
-    const tab = openTabId;
-    if (id) {
-      closing = false;
-      shownId = id;
-      shownTabId = tab;
-      return;
-    }
-    // untrack: this effect writes `shownId`, so reading it plainly would re-trigger itself.
-    if (!untrack(() => shownId)) return;
-    closing = true;
-    const timer = setTimeout(() => {
-      closing = false;
-      shownId = null;
-      shownTabId = null;
-    }, CLOSE_MS);
-    return () => clearTimeout(timer);
-  });
+  const shownId = $derived(stackStore.consoleVisibleServiceId(workspaceId));
+  const shownTabId = $derived(stackStore.consoleTabId(workspaceId));
+  const closing = $derived(!openId && !!shownId);
 
   const service = $derived(services.find((s) => s.id === shownId) ?? null);
   const status = $derived(service ? stackStore.status(service.id) : 'stopped');

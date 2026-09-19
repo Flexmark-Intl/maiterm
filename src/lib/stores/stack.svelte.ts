@@ -116,6 +116,22 @@ function createStackStore() {
    *  other stack runtime fact (§3): a drawer left open is not worth restoring, and it must
    *  never be the reason a service tab survives a restart. */
   let consoleService = $state<Map<string, string>>(new Map());
+  /** The same thing, lagging a closed drawer by its slide-out (ServiceConsole.svelte).
+   *
+   *  It is NOT "is the console open" — Escape, the sidebar's Hide/Show label and
+   *  `toggleConsole` all key off `consoleService`, which empties the moment you close.
+   *  This is "what is still on screen", and it has to live in the store rather than in
+   *  the drawer because two components have to agree on it: the drawer renders from it,
+   *  and `+page` derives the service terminal's `visible` prop from it. Keeping it local
+   *  to the drawer is the bug it was written to fix — `+page` hid the terminal at t=0 and
+   *  the drawer slid out as an empty box. */
+  let consoleVisible = $state<Map<string, string>>(new Map());
+  const consoleCloseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Comfortably longer than the drawer's 160ms transition: the transition does not start
+   *  until the class change reaches a style recalc, so matching the two exactly unmounts
+   *  the drawer a frame short and blinks its last sliver away. Overshooting only delays
+   *  the unmount of something already off screen. */
+  const CONSOLE_CLOSE_MS = 220;
   /** Workspaces whose auto_start already fired for this activation. Cleared on suspend. */
   const autoStarted = new Set<string>();
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -654,14 +670,22 @@ function createStackStore() {
     // the only way to see one. The terminal itself does not move panes — it portals into
     // the drawer's slot, which is why opening the drawer resizes nothing else.
 
-    /** The service this workspace's drawer is showing, or null when it is closed. */
+    /** The service this workspace's drawer is OPEN on, or null the instant it is closed.
+     *  Everything that asks "is the console open" wants this one. */
     consoleServiceId(workspaceId: string): string | null {
       return consoleService.get(workspaceId) ?? null;
     },
 
-    /** The tab whose terminal the open drawer is showing — what `+page` makes visible. */
+    /** The service still ON SCREEN, which outlasts the close by the slide-out. The drawer
+     *  renders from this so it keeps its contents while it goes. */
+    consoleVisibleServiceId(workspaceId: string): string | null {
+      return consoleVisible.get(workspaceId) ?? null;
+    },
+
+    /** The tab whose terminal the drawer is showing — what `+page` makes visible. Lags the
+     *  close with the drawer: hide the terminal at t=0 and an empty box slides out. */
     consoleTabId(workspaceId: string): string | null {
-      const serviceId = consoleService.get(workspaceId);
+      const serviceId = consoleVisible.get(workspaceId);
       if (!serviceId) return null;
       return boundTab(workspaceId, serviceId)?.tab.id ?? null;
     },
@@ -669,9 +693,17 @@ function createStackStore() {
     /** Show a service. Mounts its tab if it is not mounted yet (a service started in an
      *  earlier session has a tab but no pane to mount it), so the terminal can portal in. */
     viewConsole(workspaceId: string, serviceId: string) {
+      const timer = consoleCloseTimers.get(workspaceId);
+      if (timer) {
+        clearTimeout(timer);
+        consoleCloseTimers.delete(workspaceId);
+      }
       const next = new Map(consoleService);
       next.set(workspaceId, serviceId);
       consoleService = next;
+      const shown = new Map(consoleVisible);
+      shown.set(workspaceId, serviceId);
+      consoleVisible = shown;
       const bound = boundTab(workspaceId, serviceId);
       // `activate-tab` carries a bare tab id — an object detail is silently ignored by the
       // listener in `+page`, and the drawer then shows an empty slot forever.
@@ -685,6 +717,19 @@ function createStackStore() {
       const next = new Map(consoleService);
       next.delete(workspaceId);
       consoleService = next;
+      // Closed now; still on screen until the drawer has finished sliding out. Reopening
+      // inside the window goes through viewConsole, which cancels this.
+      clearTimeout(consoleCloseTimers.get(workspaceId));
+      consoleCloseTimers.set(
+        workspaceId,
+        setTimeout(() => {
+          consoleCloseTimers.delete(workspaceId);
+          if (consoleService.has(workspaceId)) return;
+          const shown = new Map(consoleVisible);
+          shown.delete(workspaceId);
+          consoleVisible = shown;
+        }, CONSOLE_CLOSE_MS),
+      );
     },
 
     toggleConsole(workspaceId: string, serviceId: string) {
