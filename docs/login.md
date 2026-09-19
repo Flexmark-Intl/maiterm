@@ -375,19 +375,46 @@ shared configuration and keeps only the credential per-identity.
 > real directory where maiLink already looks. With `.claude.json` symlinked, all five MCP
 > servers came back — `maiterm` connected — and the symlink survived the run intact.
 
-Still to settle before building:
+### The contract
 
-- **Which entries are shared and which are per-identity.** `settings.json`, `commands`, `skills`,
-  `plugins`, `CLAUDE.md` are read-mostly and clearly shared. `projects`, `history.jsonl`,
-  `sessions` are arguable — sharing keeps maiLink working, separating keeps identities clean.
-- **Write-through: works on the path tested, unverified on the path that matters.** The
-  remote-config tab tested `claude mcp add` against a config dir holding a symlinked
-  `.claude.json` on 2.1.278/macOS: the symlink survived and the content landed in the target.
-  So `.claude.json` behaves *unlike* `.credentials.json` — Claude Code writes through it. **But
-  the constant in-session project-state rewrites are a different code path and are still
-  untested**, and that is the one that matters for a 200KB file of per-project state, history
-  and onboarding flags. Test it in a live session before relying on it, then decide deliberately
-  whether identities share project state or get their own.
+An identity root is a directory containing **only symlinks** to the user's real `~/.claude`
+entries, plus whatever Claude Code creates for itself. Nothing is copied — a copy would drift.
+
+| Symlinked (shared with `~/.claude`) | Why |
+|---|---|
+| `settings.json`, `settings.local.json` | hooks — **tab identity** — permissions, env, statusLine |
+| `.claude.json` | **every MCP server**, incl. `maiterm`; write-through verified |
+| `projects` | transcripts maiLink tails and mirrors |
+| `ide` | **maiTerm writes `~/.claude/ide/<port>.lock` here.** Easy to miss, and a managed tab that cannot see it loses IDE discovery |
+| `commands`, `skills`, `plugins`, `CLAUDE.md` | the user's own configuration; read-mostly |
+| `statusline-command.sh` | referenced by `settings.json`, so it must resolve |
+
+| Real, per-identity | Why |
+|---|---|
+| `.credentials.json` (Linux) | the point of the split, and it **cannot** be a symlink — see below |
+| `policy-limits.json`, `remote-settings.json`, `statsig`, `cache`, `backups`, `shell-snapshots`, `debug`, `paste-cache` | Claude Code creates these per-dir on first run; observed appearing in a fresh root. Caches and per-dir bookkeeping, correct to keep separate |
+
+On macOS the credential is in the Keychain keyed by dir path, so the first row costs nothing
+there; the split is only load-bearing on Linux.
+
+> **Build the farm as a reconciler, not a one-shot.** The user adds skills and plugins after an
+> identity is created, and `~/.claude` gains entries across Claude Code versions. Re-link on
+> every spawn and treat an unexpected real file where a symlink belongs as drift to repair —
+> that is also how the `mv ~/.claude.json.tmp` hazard below gets absorbed if it ever goes live.
+
+Still to settle before building:
+- **Write-through: verified on both paths.** The remote-config tab tested the `claude mcp add`
+  path; a live `claude -p` session was then tested here, which exercises the in-session
+  project-state rewrite. Both wrote through. In the live run the symlink survived intact while
+  the real `~/.claude.json` changed mtime, size **and inode** — so Claude Code resolves the
+  symlink and then does temp-file-plus-rename on the *resolved* path, which is why the link is
+  stable where `.credentials.json` is not.
+
+> **Decision: identities share `.claude.json`.** It follows from write-through, and it is what
+> we want — shared MCP servers means maiTerm's own bridge keeps working in every managed tab.
+> Shared project state and history is the status quo anyway: every tab today writes one
+> `~/.claude.json`, so concurrent last-writer-wins is a property of the file, not something the
+> farm introduces.
 - **Cross-owner hazard, conditional (§5.5).** maiTerm's own remote setup writes that file as
   `mv ~/.claude.json.tmp ~/.claude.json` — temp-file-plus-rename **replaces** a symlink instead
   of writing through it. Not live today, because that write targets the *remote* home while
