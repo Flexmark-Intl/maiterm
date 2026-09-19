@@ -1,4 +1,5 @@
 mod claude_code;
+mod claude_login;
 mod commands;
 mod comms;
 mod mailink;
