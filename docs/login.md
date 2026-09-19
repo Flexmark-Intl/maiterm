@@ -380,13 +380,20 @@ Still to settle before building:
 - **Which entries are shared and which are per-identity.** `settings.json`, `commands`, `skills`,
   `plugins`, `CLAUDE.md` are read-mostly and clearly shared. `projects`, `history.jsonl`,
   `sessions` are arguable — sharing keeps maiLink working, separating keeps identities clean.
-- **Write-through.** Claude Code writing `settings.json` through a symlink edits the user's real
-  file. Mostly desirable, occasionally not; find out what it writes and when. **`.claude.json`
-  makes this urgent rather than academic**: it is 200KB of per-project state, MCP servers,
-  history and onboarding flags that Claude Code rewrites constantly. `claude mcp list` is
-  read-only and did not touch it, so write-through is still unverified on the file where it
-  matters most. If it turns out to rewrite through the symlink, decide deliberately whether
-  identities share project state or get their own.
+- **Write-through: works on the path tested, unverified on the path that matters.** The
+  remote-config tab tested `claude mcp add` against a config dir holding a symlinked
+  `.claude.json` on 2.1.278/macOS: the symlink survived and the content landed in the target.
+  So `.claude.json` behaves *unlike* `.credentials.json` — Claude Code writes through it. **But
+  the constant in-session project-state rewrites are a different code path and are still
+  untested**, and that is the one that matters for a 200KB file of per-project state, history
+  and onboarding flags. Test it in a live session before relying on it, then decide deliberately
+  whether identities share project state or get their own.
+- **Cross-owner hazard, conditional (§5.5).** maiTerm's own remote setup writes that file as
+  `mv ~/.claude.json.tmp ~/.claude.json` — temp-file-plus-rename **replaces** a symlink instead
+  of writing through it. Not live today, because that write targets the *remote* home while
+  §5's farm is local. It becomes live the moment a remote config root exists, and the fix is on
+  the writer's side. `sshMcpBridge.svelte.ts` also hardcodes `~/.claude.json`, which is correct
+  today and wrong the moment a remote root moves.
 - **On Linux, `.credentials.json` lives in the dir** and **cannot** be symlinked — this is
   enforced, not merely inadvisable. 2.1.278 opens the credential store with `O_NOFOLLOW` on
   both the read and the write path (`ELOOP` → the internal state `refused-symlink`), and
@@ -416,32 +423,32 @@ report `loggedIn: true` with `authMethod: "api_key"`. The test must say `claude.
 > free: the switching mechanism is one environment variable, but making it safe is a directory
 > contract that has to be right.
 
-### 5.5 This collides with the remote config-root work — reconcile before either ships
+### 5.5 Resolved: no collision with the remote config-root work
 
-`src-tauri/src/claude_code/CLAUDE.md` (~line 671) already names per-instance `CLAUDE_CONFIG_DIR`
-as **the fallback** if remote config *convergence* does not hold up, and already predicts §5.4:
-"it relocates the ENTIRE root including `projects/`, `sessions/` and `.credentials.json`, so
-transcripts and credentials must be symlinked back … and the user's own `settings.json` stops
-applying to maiTerm-launched agents." Today's testing measured what that note predicted.
+`src-tauri/src/claude_code/CLAUDE.md` (~line 671) names per-instance `CLAUDE_CONFIG_DIR` as the
+fallback if remote config *convergence* does not hold up, and predicts §5.4's collateral damage.
+An earlier draft of this section treated that as a live collision needing a jointly-owned
+directory contract. **It is not.** Settled with the remote-config tab, 2026-09-19:
 
-Convergence shipped 2026-08-26 (`bf7dc76`, `93ac499`) — remote hooks read `${MAITERM_PORT}` /
-`${MAITERM_AUTH}` / `${MAITERM_TAB_ID}` from the environment, so identical bytes come from every
-instance and a config that names no port cannot be clobbered. No isolation work exists in the
-repo. **So first establish whether convergence has actually failed**, because if it holds, the
-login manager is the only consumer of a config-root split and it is local-only — much simpler.
+- **Convergence has not failed.** The port ratcheting that motivated the direction change
+  (`ews@nova` 28599→28604→28607) turned out to be the `ControlPersist` tunnel leak, not the
+  design — fixed in `16b2271`/`edb2811`, shipped 2026-09-15. The one real field incident (remote
+  hooks on dead port 40865) was a **peer maiTerm on an old build** overwriting the shared config:
+  version skew, not convergence failing on its own terms. Convergence holds once every writer
+  converges, and that machine is now current.
+- **So the remote split stays parked** — insurance against a writer we do not control, not a
+  live defect. That makes this spec the **only** consumer of a config-root split, and it is
+  **local-only**.
+- **The axes never collided in the filesystem anyway.** §5's roots are local; the remote plan's
+  are on the remote host. §6 propagates a token, not a config root, so a managed remote tab
+  creates no root at all.
+- **There is no identity dimension in the remote design** and adding one would be a rename, not
+  an extension. If it is ever un-parked it composes as (identity × instance) with both in the
+  remote directory name. **This spec lands first and sets the scheme; the remote work conforms.**
 
-Two things must be agreed jointly if both ship:
-
-- **They vary on different axes.** Remote work wants one root per **maiTerm instance**, on the
-  **remote** host. This wants one per **identity**, locally. Together a remote tab needs
-  per-(instance × identity), and whoever lands first sets a layout the other has to migrate.
-- **They want opposite things from the same file.** The remote plan symlinks `.credentials.json`
-  **back**, so an isolated remote root keeps the account's login. §5 exists precisely to keep
-  credentials **apart**. The symlink set therefore cannot be a fixed list — it needs a
-  "share credentials / isolate credentials" parameter, chosen per purpose.
-
-> **Decision: the directory contract is one shared artifact, not two.** Naming, which entries
-> are symlinked, which are real, and who creates them — settled once, consumed by both.
+One consequence for §5.4: the cross-owner hazard below (maiTerm's own `mv ~/.claude.json.tmp`
+replacing a symlink) is **not live**, because that write targets the *remote* home and §5's farm
+is local. It becomes live only if the remote split is un-parked.
 
 Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
 use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
@@ -470,6 +477,33 @@ is exactly the property §3.2 lacks.
 
 Host enablement is **per host, explicit, and never inferred**. A token is a standing
 one-year credential; `nova` is fine, a shared build box is not our call to make.
+
+### 6.1 A missing token silently becomes the wrong identity
+
+The precedence list (§2.2) is a fall-through, and every rung below our token is a *different
+account*. This is the sharpest failure mode in the whole design, and it is invisible.
+
+For a managed remote tab, `CLAUDE_CODE_OAUTH_TOKEN` (#5) outranks the host's stored subscription
+login (#7), so the injected identity wins and the credential store is never consulted — which is
+also why `CLAUDE_SECURESTORAGE_CONFIG_DIR` is irrelevant here, neither helping nor fighting.
+
+**But when the token is absent, expired, or revoked, resolution does not fail. It falls through
+to #7** — and the tab comes up as whatever account login happens to exist on that host, with
+`loggedIn: true` and no error anywhere. The user selected identity A; the tab is running as
+whoever last logged into that box. Work proceeds, billed and attributed to the wrong account.
+
+The same applies above us: a stray `ANTHROPIC_API_KEY` is #3 and outranks our injected token
+too. That is not hypothetical — this machine has one, and it surfaced during testing as
+`loggedIn: true, authMethod: api_key` on a config dir holding no credential at all.
+
+> **Decision: never treat `loggedIn` as confirmation.** Verify identity **positively** — read
+> `claude auth status --json` and compare `email` / `orgId` against the identity that was
+> intended. A mismatch is an error state shown on the tab, not a warning in a log.
+
+This is the `absence-read-as-a-claim` defect class the repo has hit six times: a default that is
+correct where it is defined, read by a consumer as a positive assertion of something else.
+`loggedIn: true` truthfully means "some credential resolved". It does **not** mean "your
+credential resolved", and every consumer in this spec wants the second.
 
 ## 7. Expiry and fleet status
 
