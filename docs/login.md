@@ -342,6 +342,33 @@ Still to settle before building:
 > free: the switching mechanism is one environment variable, but making it safe is a directory
 > contract that has to be right.
 
+### 5.5 This collides with the remote config-root work — reconcile before either ships
+
+`src-tauri/src/claude_code/CLAUDE.md` (~line 671) already names per-instance `CLAUDE_CONFIG_DIR`
+as **the fallback** if remote config *convergence* does not hold up, and already predicts §5.4:
+"it relocates the ENTIRE root including `projects/`, `sessions/` and `.credentials.json`, so
+transcripts and credentials must be symlinked back … and the user's own `settings.json` stops
+applying to maiTerm-launched agents." Today's testing measured what that note predicted.
+
+Convergence shipped 2026-08-26 (`bf7dc76`, `93ac499`) — remote hooks read `${MAITERM_PORT}` /
+`${MAITERM_AUTH}` / `${MAITERM_TAB_ID}` from the environment, so identical bytes come from every
+instance and a config that names no port cannot be clobbered. No isolation work exists in the
+repo. **So first establish whether convergence has actually failed**, because if it holds, the
+login manager is the only consumer of a config-root split and it is local-only — much simpler.
+
+Two things must be agreed jointly if both ship:
+
+- **They vary on different axes.** Remote work wants one root per **maiTerm instance**, on the
+  **remote** host. This wants one per **identity**, locally. Together a remote tab needs
+  per-(instance × identity), and whoever lands first sets a layout the other has to migrate.
+- **They want opposite things from the same file.** The remote plan symlinks `.credentials.json`
+  **back**, so an isolated remote root keeps the account's login. §5 exists precisely to keep
+  credentials **apart**. The symlink set therefore cannot be a fixed list — it needs a
+  "share credentials / isolate credentials" parameter, chosen per purpose.
+
+> **Decision: the directory contract is one shared artifact, not two.** Naming, which entries
+> are symlinked, which are real, and who creates them — settled once, consumed by both.
+
 Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
 use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
 uniformity with the Linux JSON path is not a reason to intervene, because there is nothing
