@@ -73,6 +73,22 @@
     });
   });
 
+  /** On screen and typeable are separate facts now, and the close splits them: the drawer
+   *  rides out the slide, but it stops being somewhere you can type the moment you close it.
+   *
+   *  The terminal's own blur hangs off its `visible` prop, which is held back for exactly
+   *  that slide — so without this, a key pressed in the window lands in the service's
+   *  shell. Neither dismiss path that gets here moves DOM focus on its own: the pointerdown
+   *  handler below bails inside `.service-console`, and WebKit doesn't mouse-focus a
+   *  `<button>` (root CLAUDE.md), so the × and the sidebar row both leave the keyboard in
+   *  the console. The other two paths don't need this — Escape can't fire from inside the
+   *  console, and a click on the work behind focuses that terminal on the same press. */
+  $effect(() => {
+    if (!closing) return;
+    const active = document.activeElement as HTMLElement | null;
+    if (active?.closest?.('.console-slot')) active.blur();
+  });
+
   // Escape closes. Capture phase would steal it from the terminal's own handlers; the
   // drawer is a peer of the tab underneath, not a modal, so it listens on the bubble.
   $effect(() => {

@@ -993,6 +993,8 @@ function createStackStore() {
       unsubscribe = [];
       for (const t of restartTimers.values()) clearTimeout(t);
       restartTimers.clear();
+      for (const t of consoleCloseTimers.values()) clearTimeout(t);
+      consoleCloseTimers.clear();
     },
   };
 }
