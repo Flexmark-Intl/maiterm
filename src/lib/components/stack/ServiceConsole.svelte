@@ -13,8 +13,15 @@
    *  portals its container into the `data-terminal-slot` below, the same mechanism the
    *  mesh stage uses. Closing the drawer detaches it again; the PTY is untouched either
    *  way, which is the whole point — hiding a service must never stop it.
+   *
+   *  It slides, and it dims what it covers. Appearing and vanishing outright read as a
+   *  layout change rather than as something arriving over your work — the drawer has to
+   *  say which of the two it is, because it is the one kind of panel here that doesn't
+   *  move anything else. The scrim is deliberately light and `pointer-events: none`: the
+   *  tab behind keeps the keyboard and stays clickable (that click is what puts the
+   *  drawer away), so a full modal dim would be a lie about what is still live.
    */
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -29,10 +36,43 @@
 
   const services = $derived(stackStore.services(workspaceId));
   const openId = $derived(stackStore.consoleServiceId(workspaceId));
-  const service = $derived(services.find((s) => s.id === openId) ?? null);
+  const openTabId = $derived(stackStore.consoleTabId(workspaceId));
+
+  /** The drawer outlives the store's open state by one animation so it can slide out
+   *  rather than blink away, and it keeps showing the same service — terminal included —
+   *  while it does: emptying the slot first would leave a blank box sliding off screen.
+   *  `shown*` tracks `open*` while open and holds the last pair while closing.
+   *
+   *  Matches the CSS below. Overshooting it only delays the unmount of something already
+   *  off screen; undershooting it cuts the slide short. */
+  const CLOSE_MS = 160;
+  let shownId = $state<string | null>(null);
+  let shownTabId = $state<string | null>(null);
+  let closing = $state(false);
+
+  $effect(() => {
+    const id = openId;
+    const tab = openTabId;
+    if (id) {
+      closing = false;
+      shownId = id;
+      shownTabId = tab;
+      return;
+    }
+    // untrack: this effect writes `shownId`, so reading it plainly would re-trigger itself.
+    if (!untrack(() => shownId)) return;
+    closing = true;
+    const timer = setTimeout(() => {
+      closing = false;
+      shownId = null;
+      shownTabId = null;
+    }, CLOSE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  const service = $derived(services.find((s) => s.id === shownId) ?? null);
   const status = $derived(service ? stackStore.status(service.id) : 'stopped');
   const live = $derived(status === 'running' || status === 'ready' || status === 'starting');
-  const tabId = $derived(stackStore.consoleTabId(workspaceId));
   const note = $derived(service ? stackStore.runtime(service.id).note : null);
 
   function dotColor(s: string): 'green' | 'yellow' | 'red' | 'dim' {
@@ -52,7 +92,7 @@
   // Re-home the terminal whenever the shown tab changes. Same contract as MeshStageView:
   // the portal matches on `data-terminal-slot`, and this event tells the pane to look again.
   $effect(() => {
-    const id = tabId;
+    const id = shownTabId;
     if (!id) return;
     tick().then(() => {
       window.dispatchEvent(new CustomEvent('terminal-slot-ready', { detail: { tabId: id } }));
@@ -128,8 +168,13 @@
 </script>
 
 {#if service}
+  <!-- Dims the terminal area the drawer is covering. Never takes the pointer: a click on
+       the work behind has to land, both to dismiss the drawer and to focus what was hit. -->
+  <div class="console-scrim" class:out={closing} aria-hidden="true"></div>
+
   <section
     class="service-console"
+    class:out={closing}
     bind:this={drawerEl}
     style:height="{preferencesStore.stackConsoleHeight}px"
     aria-label="Service console"
@@ -185,9 +230,9 @@
       </div>
     </header>
 
-    {#if tabId}
+    {#if shownTabId}
       <!-- The portaled terminal fills this and takes its own focus on click. -->
-      <div class="console-slot" data-terminal-slot={tabId}></div>
+      <div class="console-slot" data-terminal-slot={shownTabId}></div>
     {:else}
       <div class="console-empty">
         <p>{service.name} is {status}{note ? ` — ${note}` : ''}.</p>
@@ -198,6 +243,19 @@
 {/if}
 
 <style>
+  /* Same box as the drawer's anchor, one layer under it. Light on purpose — what it
+     covers is still focused and still typeable (see the note at the top of this file). */
+  .console-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 39;
+    background: rgba(0, 0, 0, 0.25);
+    pointer-events: none;
+    animation: console-scrim-in 180ms ease-out;
+    transition: opacity 160ms ease-in;
+  }
+  .console-scrim.out { opacity: 0; animation: none; }
+
   /* Absolute, not fixed: the drawer covers the terminal area only, so the sidebar stays
      live and you can click straight from one service to the next while it is open. */
   .service-console {
@@ -213,6 +271,40 @@
     border-top: 1px solid var(--bg-light);
     box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
     overflow: hidden;
+    /* Slides on TRANSFORM, never on height: the drawer holds a live terminal, and
+       animating its height would fire a resize per frame at the PTY — the thing that
+       makes an agent re-render its transcript into scrollback (root CLAUDE.md). A
+       transform moves no layout, so the terminal inside never hears about it.
+       `.app-body` clips, so the off-screen half is never painted below the window.
+
+       Open is a keyframe rather than a transition because the element is mounting:
+       there is no previous value to transition from, and committing a start state by
+       hand would need a rAF — which WKWebView pauses in an occluded window. Close is a
+       transition on an element already on screen, where that problem doesn't arise. */
+    animation: console-drawer-in 180ms cubic-bezier(0.2, 0, 0, 1);
+    transition: transform 160ms ease-in;
+  }
+  .service-console.out {
+    transform: translateY(100%);
+    animation: none;
+    pointer-events: none;
+  }
+
+  @keyframes console-drawer-in {
+    from { transform: translateY(100%); }
+    to { transform: translateY(0); }
+  }
+  @keyframes console-scrim-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .service-console,
+    .console-scrim {
+      animation: none;
+      transition: none;
+    }
   }
 
   .resize-handle {
