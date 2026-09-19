@@ -120,6 +120,22 @@ check before we discard it permanently (§12), but do not plan on it.
 > **Decision:** if any managed-settings source is present on the machine, the feature
 > refuses to enable and says why. This is a solo/small-team feature.
 
+### 3.5 Not temporarily making maiTerm the default system browser
+
+Considered, to capture a magic link clicked in a mail client (§5.3). Rejected:
+
+- **It is not silent.** On macOS 26 the default handler changes through
+  `NSWorkspace.setDefaultApplication(at:toOpenURLsWithScheme:)`, which raises a system
+  confirmation dialog; writing `com.apple.launchservices.secure` directly is protected and does
+  not reliably take. Two OS prompts per identity added — worse than §5.2, which needs none.
+- **A crash leaves the machine reconfigured.** If maiTerm dies between "set" and "revert", every
+  link from every app opens in a terminal emulator. maiTerm dying mid-operation is a documented
+  state, not a theoretical one.
+- **It means becoming a browser permanently.** Eligibility needs `CFBundleURLTypes` for
+  http/https in the Info.plist, so maiTerm would appear in every "open with" list and in System
+  Settings' browser picker for good — to serve a thirty-second flow.
+- **It buys only the magic-link branch.** §5.2 already isolates the main path.
+
 ## 4. Shape
 
 ```
@@ -283,6 +299,48 @@ Risks to settle while prototyping, in order of likelihood:
   store, or identity B still resumes identity A's session. Verify before relying on it.
 - **Fallback, if either bites:** system browser plus the §5.1 duplicate guard and the §10
   warning. That is a worse experience, not a broken one — and it is still never a paste flow.
+
+### 5.4 `CLAUDE_CONFIG_DIR` moves everything, not just the credential
+
+> **This is the biggest risk in the design and it nearly sinks §5.** The variable relocates the
+> whole Claude Code config directory. maiTerm's own integration lives in there.
+
+`~/.claude/settings.json` carries `hooks` — `SessionStart`, `PreToolUse`, `PostToolUse`,
+`Stop`, `Notification`, `PreCompact`, `SessionEnd`, `UserPromptSubmit` — plus `permissions`,
+`env`, `enabledPlugins` and `statusLine`. The directory also holds `projects/` (the transcripts
+maiLink tails and mirrors), `skills/`, `commands/`, `plugins/`, `CLAUDE.md`, `history.jsonl`
+and `ide/`.
+
+> **Verified 2026-09-19.** A config dir containing *only* a `settings.json` with a marker
+> `SessionStart` hook fired that hook and nothing else — so hooks are read from
+> `CLAUDE_CONFIG_DIR/settings.json`, and the user's real `~/.claude/settings.json` is **not**
+> consulted. `projectsDirectory` relocates with it, confirmed in the same run.
+
+Unmitigated, every managed tab would lose: the `SessionStart` hook that establishes **tab
+identity** (and with it tasks, Overlord, activity, the phone), transcript discovery for maiLink,
+and every skill, command, plugin, permission and CLAUDE.md the user has configured. §5 would
+trade multi-org support for breaking the product.
+
+**Mitigation, verified to work: a symlink farm.** An identity directory holds symlinks to the
+shared configuration and keeps only the credential per-identity.
+
+> **Verified 2026-09-19.** With `settings.json` symlinked into the identity dir, the marker hook
+> still fired. With `projects` symlinked back to `~/.claude/projects`, transcripts landed in the
+> real directory where maiLink already looks.
+
+Still to settle before building:
+
+- **Which entries are shared and which are per-identity.** `settings.json`, `commands`, `skills`,
+  `plugins`, `CLAUDE.md` are read-mostly and clearly shared. `projects`, `history.jsonl`,
+  `sessions` are arguable — sharing keeps maiLink working, separating keeps identities clean.
+- **Write-through.** Claude Code writing `settings.json` through a symlink edits the user's real
+  file. Mostly desirable, occasionally not; find out what it writes and when.
+- **On Linux, `.credentials.json` lives in the dir** and must never be symlinked. On macOS the
+  credential is in the Keychain keyed by dir path, so it stays separate for free.
+
+> **This is the thing to prototype first.** It also revises the §13 claim that §5 is nearly
+> free: the switching mechanism is one environment variable, but making it safe is a directory
+> contract that has to be right.
 
 Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
 use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
@@ -480,9 +538,13 @@ included.
 
 ## 13. Build order
 
-1. **Per-tab `CLAUDE_CONFIG_DIR` identities (§5).** Cheapest, most differentiated, no
-   credential handling at all, and it delivers the core requirement — multiple orgs, side
-   by side. Resolves Q4 on contact.
+0. **Prove the directory contract (§5.4) before anything else.** Settle what a managed tab
+   loses and what the symlink farm has to carry. Everything below assumes a managed tab still
+   has its `SessionStart` hook and its transcripts; if that cannot be made solid, §5 does not
+   ship and the feature reduces to §6 plus status.
+1. **Per-tab `CLAUDE_CONFIG_DIR` identities (§5).** Most differentiated, no credential handling
+   at all, and it delivers the core requirement — multiple orgs, side by side. Switching is one
+   environment variable; the cost is the §5.4 directory contract, not the mechanism.
 2. **Status and expiry (§7).** Folds in naturally; the fleet view is the part that exists
    nowhere else.
 3. **Setup lifecycle and modal (§10).** Required before either of the above ships to
