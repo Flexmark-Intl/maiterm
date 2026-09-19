@@ -1,0 +1,318 @@
+# maiTerm Login — managed Claude Code identities, local and remote
+
+> Status: **proposed, not built**, 2026-09-19. Owner: Darryl.
+> Scope: maiTerm optionally holds N Claude subscription identities, runs the auth flow
+> itself, serves the right identity to each tab (local and over SSH), monitors expiry
+> across the fleet, and exposes switching to maiLink. Opt-in, off by default, and
+> explicitly **not for enterprise/managed machines** (§3.4).
+> Ground truth in §2 was verified against Claude Code **2.1.278** on 2026-09-19 — re-verify
+> before building, this surface has moved twice in 2026.
+
+## 1. Why
+
+Three problems, all of which maiTerm is uniquely placed to see:
+
+- **Claude Code has one login slot.** Working across two orgs means `/logout`, `/login`,
+  browser, repeat — and it stomps every tab at once, because the credential is global to
+  the config dir. Multiple subscriptions is a core requirement here, not a nicety.
+- **Remote logins expire silently.** Each SSH host holds its own credential. Nobody is
+  looking at `nova` on a Tuesday; you find out when a tab 401s mid-task. maiTerm already
+  knows every host it has a tab on, so it is the only thing that *could* watch them.
+- **There is no fleet view of auth.** Claude Code 2.1.210+ warns 3 days before a local
+  login expires and shows a `Login` row in `/status` — but only for the machine you are
+  sitting at. Across hosts, nothing exists.
+
+## 2. Ground truth (verified against 2.1.278, 2026-09-19)
+
+### 2.1 Where the credential lives
+
+| Platform | Store |
+|---|---|
+| macOS | Keychain, generic password, service `Claude Code-credentials`, account = local username |
+| macOS (fallback) | `~/.claude/.credentials.json`, mode `0600`, when the Keychain rejects the write — **notably in an SSH session, where the Keychain is locked** |
+| Linux | `~/.claude/.credentials.json`, mode `0600` |
+| Windows | `%USERPROFILE%\.claude\.credentials.json` |
+
+The Keychain entry's `mdat` is rewritten on every token refresh, so it is a free
+change-detection hook if we ever want one.
+
+> **`CLAUDE_CONFIG_DIR` relocates the `.credentials.json` *and keys the macOS Keychain
+> entry to that directory*.** A session with a different `CLAUDE_CONFIG_DIR` reads a
+> different credential. This is the whole basis of §5 — native multi-identity, no keychain
+> surgery, no mutation of a shared slot.
+
+### 2.2 Credential precedence (docs: Authentication → Authentication precedence)
+
+1. Cloud provider (`CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY`)
+2. `ANTHROPIC_AUTH_TOKEN`
+3. `ANTHROPIC_API_KEY`
+4. `apiKeyHelper`
+5. **`CLAUDE_CODE_OAUTH_TOKEN`** ← what we inject on remotes (§6)
+6. Anthropic profile / federation credentials
+7. Subscription OAuth from `/login` ← the default, and what §5 switches between
+
+A signed-in gateway session sits outside the list and outranks everything.
+
+Consequence worth designing around: **a stray `ANTHROPIC_API_KEY` in the user's shell
+profile outranks our injected token.** This machine currently reports
+`apiKeySource: ANTHROPIC_API_KEY` alongside `authMethod: claude.ai`, so this is not
+hypothetical. Any status UI must show the *resolved* source, never a green "logged in".
+
+### 2.3 What `claude auth status --json` gives us
+
+`loggedIn`, `authMethod`, `apiProvider`, `analyticsDisabled`, `projectsDirectory`,
+`configDirectory`, `apiKeySource`, `email`, `orgId`, `orgName`, `subscriptionType`.
+
+**No expiry field.** See §7 for why we derive expiry instead of parsing for it.
+
+### 2.4 `claude setup-token`
+
+- Opens the same browser flow as `/login`; prints an `sk-ant-oat01-…` token to the terminal
+  and **saves it nowhere**. Whoever runs it must capture stdout.
+- **Valid one year. Does not rotate.**
+- Requires a Pro / Max / Team / Enterprise plan; authenticates against the subscription.
+- Consumed as `CLAUDE_CODE_OAUTH_TOKEN`. A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`
+  variant exists (§9.2).
+- **Inference-only scope** — see §8.
+- Bare mode (`--bare`) does not read it.
+
+## 3. What we are not doing, and why
+
+### 3.1 Not the Claude apps gateway
+
+`claude gateway` looked like the ideal answer — one credential holder, N credential-less
+consumers. It is not. Its upstreams are `anthropic` (API key), `bedrock`, `anthropicAws`,
+`vertex`, `foundry`. **A Claude.ai Pro/Max subscription is not a supported upstream**, and
+the `oidc` block is mandatory — there is no static-token client mode. It solves "500 devs
+and a Bedrock account", not "my subscription should follow me to my SSH boxes". Closed.
+
+### 3.2 Not copying the interactive credential blob to remotes
+
+The `/login` credential holds a **rotating** refresh token (the binary carries
+`refreshTokenExpiresAt`, `refresh_token_expires_in`, and a `refresh_token_dead` state).
+Copy one blob to N hosts and each host's `claude` refreshes on its own timer; the first
+refresh invalidates the rest. That is a stable first hour followed by a fleet that logs
+itself out intermittently — worse than no feature, because the failure is non-obvious.
+
+### 3.3 Not a pull model via `apiKeyHelper`
+
+Tempting: the remote holds nothing and fetches the token from maiTerm over the SSH tunnel
+that already exists. But configuring `apiKeyHelper` flips the session into API-key auth —
+the binary says so in as many words (*"apiKeyHelper is configured, so this session is using
+API-key auth"*) — so it cannot carry subscription entitlement. Worth a 10-minute empirical
+check before we discard it permanently (§12), but do not plan on it.
+
+### 3.4 Not for enterprise or managed machines
+
+- Managed policy can forbid the whole thing: *"setup-token creates a long-lived Claude.ai
+  subscription token, which this policy does not permit — use an API key instead."*
+- `claude setup-token` enforces `forceLoginMethod` but **not** `forceLoginOrgUUID`, so it
+  can mint a token in a different organization than an admin intended. We must not automate
+  around an admin control.
+
+> **Decision:** if any managed-settings source is present on the machine, the feature
+> refuses to enable and says why. This is a solo/small-team feature.
+
+## 4. Shape
+
+```
+Preferences.login_management            ← off by default; setup is a separate artifact (§10)
+  ├─ Identity vault (OS keychain)       ← N identities, credential material NEVER in state JSON
+  ├─ Per-tab CLAUDE_CONFIG_DIR          ← local switching, concurrent, zero mutation (§5)
+  ├─ Per-host CLAUDE_CODE_OAUTH_TOKEN   ← remote propagation, opt-in per host (§6)
+  ├─ Fleet status + expiry watch        ← local + every SSH host we have a tab on (§7)
+  ├─ Sidebar accessor + switcher        ← humans
+  └─ maiLink                            ← status + switch + relogin, in-app only (§11)
+```
+
+## 5. Local identities — per-tab `CLAUDE_CONFIG_DIR`
+
+Each identity owns a config directory under maiTerm's data dir:
+
+```
+<app_data>/logins/<identity_id>/        ← CLAUDE_CONFIG_DIR for that identity
+```
+
+Spawning a tab sets `CLAUDE_CONFIG_DIR` to the identity bound to that tab, falling back to
+the workspace default, falling back to the global active identity. Unset means "leave
+Claude Code alone", which is what an unmanaged tab gets.
+
+Why this beats swapping the Keychain entry:
+
+- **No mutation of shared state.** We never write the user's `Claude Code-credentials`
+  entry, so an unmanaged tab and a maiTerm-managed tab coexist.
+- **Concurrent, not global.** Two tabs can run two different orgs *at the same time*. A
+  keychain swap could only ever be "switch the active one", and would not affect already
+  running sessions anyway (the token is in process memory).
+- **Logout is scoped.** `claude auth logout` with that `CLAUDE_CONFIG_DIR` set removes and
+  revokes only that identity.
+
+Adding an identity: spawn `claude auth login` with `CLAUDE_CONFIG_DIR` pointed at a fresh
+directory. Claude Code drives its own browser flow; we never see or handle the credential.
+Read back `claude auth status --json` in that dir to learn `email` / `orgName` /
+`subscriptionType` and label the identity.
+
+> **maiTerm never parses, stores, or transports the `/login` credential.** For local
+> identities we own the *directory*, and Claude Code owns what is in it.
+
+## 6. Remote propagation — `setup-token`
+
+Per identity, per host, opt-in:
+
+1. Mint once, locally: `claude setup-token` with that identity's `CLAUDE_CONFIG_DIR`.
+   Capture stdout, store in maiTerm's vault (§9.1), record `minted_at`.
+2. On SSH tab spawn for an enabled host, inject `CLAUDE_CODE_OAUTH_TOKEN` through the
+   existing env-injection path.
+
+Because the token does not rotate, N hosts sharing one token is safe and concurrent — this
+is exactly the property §3.2 lacks.
+
+Host enablement is **per host, explicit, and never inferred**. A token is a standing
+one-year credential; `nova` is fine, a shared build box is not our call to make.
+
+## 7. Expiry and fleet status
+
+> **Decision: derive expiry from our own mint record; never parse the credential blob.**
+
+The blob is an undocumented private format and `claude auth status --json` does not expose
+expiry, so parsing is the only way to get it — and it would break without warning. Instead:
+
+- **Remote (oat tokens)**: we minted them, so we know `minted_at + 1 year`. Exact, free,
+  and no private formats. Warn at T-30d; this is the silent-failure case that motivated the
+  feature, and a one-year token fails around month eleven on a box nobody is looking at.
+- **Remote liveness**: `claude auth status --json` over SSH per host, cached, cheap. Gives
+  `loggedIn` and the resolved `apiKeySource` — which catches the §2.2 shadowing case.
+- **Local**: we do not have expiry and will not fake it. Claude Code's own 3-day warning
+  and `/status` row cover the machine the user is sitting at. Show "managed by Claude Code"
+  for the local slot rather than inventing a number.
+
+## 8. What this intentionally breaks
+
+A `setup-token` session is **inference-only** (`user:inference`, versus a full login's
+`user:inference user:sessions:claude_code user:mcp_servers`). On any host authed this way:
+
+| | Status |
+|---|---|
+| Model requests | ✅ works |
+| **Locally-configured MCP servers** | ✅ **works** — maiTerm's own bridge is unaffected |
+| Remote Control sessions | ❌ unavailable |
+| claude.ai connectors | ❌ unavailable |
+| `--bare` sessions | ❌ does not read the variable |
+
+**This is a deliberate trade, not a regression.** Losing Remote Control and claude.ai
+connectors on remote hosts is acceptable — desirable, even — but it must be stated plainly
+in the setup modal (§10) rather than discovered. A user who wants those features should not
+enable remote propagation.
+
+Note the asymmetry: §5 local identities are full `/login` credentials and lose nothing.
+Only §6 remote propagation is scoped down.
+
+## 9. Security posture
+
+### 9.1 Storage
+
+> **Credential material never touches `aiterm-state.json`.** It is plaintext on disk and
+> is the file we tell people to inspect when debugging.
+
+Tokens go in the OS keychain under maiTerm's own service name. State JSON holds only
+identity metadata: id, label, email, org, `minted_at`, which hosts are enabled. If the
+keychain is unavailable, the feature degrades to local-only (§5) rather than falling back
+to a file.
+
+### 9.2 In transit and at rest on the remote
+
+`CLAUDE_CODE_OAUTH_TOKEN` in the environment is readable by every child process and via
+`/proc/<pid>/environ` on Linux. SSH protects the wire; nothing protects the remote
+environment. `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is better hygiene but fd-passing
+does not cross SSH, so it only helps local tabs — use it there anyway.
+
+### 9.3 Agents must never reach credential material
+
+Claude Code's own auto-mode classifier blocks agents from reading credential files
+(*"Credential Materialization"*) — correctly. If maiTerm's MCP surface exposed tokens it
+would be a neat bypass of exactly the protection the runtime is providing.
+
+> **Decision:** the MCP surface is **status only** — which identity is active, whether a
+> host is authed, when it expires. No tool returns, accepts, or logs token material, and
+> `switchIdentity` (if we ship it at all) names an identity by id, never a credential.
+
+### 9.4 Revocation — open
+
+`claude auth logout` with the identity's `CLAUDE_CONFIG_DIR` revokes that `/login`
+credential. Whether it also revokes outstanding `setup-token` tokens minted from it is
+**unverified** (setup-token saves nothing locally, so there may be nothing for logout to
+revoke). See §12 — this gates §6 shipping.
+
+## 10. Lifecycle: setup / enable / disable / clear
+
+Four states, not two. A bare on/off toggle is wrong because turning it on the first time
+has to *teach* and *authenticate* before it can mean anything.
+
+| State | Control shown | Meaning |
+|---|---|---|
+| Not set up | **Set up…** | Feature dormant, nothing stored |
+| Set up, enabled | Toggle (on) + **Clear setup** | Identities in force |
+| Set up, disabled | Toggle (off) + **Clear setup** | Identities retained, nothing injected |
+| — | **Clear setup** | Revokes, deletes identities, returns to *Not set up* |
+
+**Setup modal**, in order:
+
+1. **What this does** — maiTerm holds your Claude logins, switches between them per tab,
+   and keeps your SSH hosts signed in.
+2. **What it does not do** — never parses or stores your local login; local identities are
+   directories Claude Code owns (§5).
+3. **What it costs** — the §8 table, stated plainly, with the remote/local asymmetry
+   spelled out.
+4. **Where credentials live** — OS keychain, never `aiterm-state.json`, never reachable by
+   agents over MCP (§9.3).
+5. **Remote hosts are opt-in** — a one-year standing credential, enabled per host, never
+   inferred.
+6. **Authenticate** — runs the flow for the first identity.
+7. **Save and enable.**
+
+Refuse setup entirely, with the reason shown, when managed settings are present (§3.4).
+
+**Toggle off** stops injection and leaves identities intact — reversible with one click.
+**Clear setup** is the destructive one: `claude auth logout` per identity, purge the vault,
+delete the config dirs, drop to *Not set up*. It confirms inline (`window.confirm()` does
+not work in Tauri webviews) and names what it is about to revoke.
+
+## 11. maiLink
+
+Status, switch, and relogin. Per the standing rule, every flow completes **in-app** — no
+"go to the desktop". For an OAuth browser flow that means the phone opens the auth URL
+itself and the desktop captures the callback.
+
+The phone never receives credential material, only identity metadata and expiry (§9.3).
+Wire changes bump `protocolVersion` per `docs/mailink-protocol.md` §13.5, additive
+included.
+
+## 12. Open questions — resolve before building the section that depends on them
+
+| # | Question | Gates |
+|---|---|---|
+| 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
+| 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
+| 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
+| 4 | Does a second identity's Keychain entry actually key off `CLAUDE_CONFIG_DIR` on this macOS version, or only the file fallback? | §5 — the whole approach |
+
+## 13. Build order
+
+1. **Per-tab `CLAUDE_CONFIG_DIR` identities (§5).** Cheapest, most differentiated, no
+   credential handling at all, and it delivers the core requirement — multiple orgs, side
+   by side. Resolves Q4 on contact.
+2. **Status and expiry (§7).** Folds in naturally; the fleet view is the part that exists
+   nowhere else.
+3. **Setup lifecycle and modal (§10).** Required before either of the above ships to
+   users, even though it is built third.
+4. **Remote propagation (§6).** Last, gated on Q1, per-host opt-in, with §8 shown per host.
+
+## 14. Sources
+
+- [Authentication](https://code.claude.com/docs/en/authentication) — precedence, credential
+  storage, `CLAUDE_CONFIG_DIR`, "Generate a long-lived token"
+- [Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway) ·
+  [config](https://code.claude.com/docs/en/claude-apps-gateway-config) — §3.1
+- [Remote Control](https://code.claude.com/docs/en/remote-control) — §8
+- Binary string inspection, `~/.local/share/claude/versions/2.1.278` — scopes, policy
+  strings, `apiKeyHelper` auth-mode message
