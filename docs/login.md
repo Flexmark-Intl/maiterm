@@ -178,6 +178,37 @@ Read back `claude auth status --json` in that dir to learn `email` / `orgName` /
 > the read side, which is the side §5 depends on; the write side (a second login creating a
 > second Keychain item) still needs a real second account to confirm.
 
+### 5.1 The duplicate-identity trap — a required guard, not an edge case
+
+> **Observed 2026-09-19.** `claude auth login` into a fresh config dir opened the system
+> browser, claude.ai **reused the existing session cookie**, and the login completed as the
+> *same account* with no account chooser. Claude Code printed `Login successful`. Both config
+> dirs then reported the identical `email` and `orgName`.
+
+This is the single most likely way the core feature fails in the user's hands: "add a second
+identity" silently produces a second copy of the first, switching appears to do nothing, and
+nothing anywhere reports an error. It is not a testing artifact — a user adding their second
+org will be signed into their first in that browser essentially always.
+
+> **Decision: after every `claude auth login`, read back `claude auth status --json` in the
+> new dir and compare `email` + `orgId` against every existing identity. On a match, discard
+> the directory and tell the user what happened.** An identity list is not allowed to contain
+> two rows for the same account.
+
+The message has to name the cause and the fix — sign out of claude.ai first, or use a private
+window — because "login successful" has already told the user the opposite.
+
+Better, if it proves workable: Claude Code prints the authorization URL to stdout
+(`If the browser didn't open, visit: …`). maiTerm can capture that and open it in an isolated
+context — a private window, or its own webview with a separate cookie store — so each identity
+authenticates cleanly instead of relying on the user to remember. Worth prototyping in step 1;
+the detection guard above is mandatory regardless, since it is what catches the failure when
+the isolation does not hold.
+
+Incidental corroboration of §8, from the URL Claude Code printed: a full `/login` requests
+`org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers
+user:file_upload user:plugins`, against `setup-token`'s `user:inference` alone.
+
 Note what this means for the macOS Keychain question (§2.1): on macOS these identities *will*
 use the Keychain, one item per config dir, and that is fine — **we never read them**. Wanting
 uniformity with the Linux JSON path is not a reason to intervene, because there is nothing
@@ -335,6 +366,11 @@ has to *teach* and *authenticate* before it can mean anything.
 6. **Authenticate** — runs the flow for the first identity.
 7. **Save and enable.**
 
+Adding a *second* identity later needs its own warning, immediately before the browser opens:
+**sign out of claude.ai or use a private window, or you will sign in as the account you
+already have** (§5.1). The duplicate guard catches it either way, but a user who reads this
+first does not have to hit the failure to learn it.
+
 Refuse setup entirely, with the reason shown, when managed settings are present (§3.4).
 
 **Toggle off** stops injection and leaves identities intact — reversible with one click.
@@ -359,11 +395,12 @@ included.
 | 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
+| 6 | Can maiTerm open the authorization URL in an isolated browser context (private window, or its own webview with a separate cookie store) so each identity authenticates cleanly? | §5.1 — a UX improvement, not a correctness gate; the duplicate-detection guard is required either way |
 ### Resolved 2026-09-19 (2.1.278)
 
 | # | Question | Result |
 |---|---|---|
-| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes**, on the read side — a fresh dir reports `loggedIn: false` rather than finding the default Keychain item (§5). The write side still needs a real second account. |
+| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes**, on the read side — a fresh dir reports `loggedIn: false` rather than finding the default Keychain item (§5). **Write side still unproven**: the first attempt authenticated the *same* account because the browser reused its claude.ai session (§5.1), so both dirs held one identity. Retest needs a private window or a signed-out browser. |
 | 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
 
 ## 13. Build order
