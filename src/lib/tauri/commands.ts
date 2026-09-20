@@ -1378,8 +1378,21 @@ export interface NewAccount {
  *  hold a session and silently return the account you already have. That is not prevented here —
  *  the §5.1 duplicate check on `identity` is what catches it. The in-app incognito webview that
  *  avoids the problem is a later upgrade to this same command. */
-export async function beginAccountLogin(runtime: string, timeoutSecs?: number): Promise<NewAccount> {
-  return invoke('begin_account_login', { runtime, timeoutSecs: timeoutSecs ?? null });
+export async function beginAccountLogin(
+  runtime: string,
+  accountId: string,
+  timeoutSecs?: number,
+): Promise<NewAccount> {
+  return invoke('begin_account_login', { runtime, accountId, timeoutSecs: timeoutSecs ?? null });
+}
+
+/** Stop a sign-in that is still running. The child process is killed, so the browser flow
+ *  cannot complete later and strand an authenticated root nothing knows about.
+ *
+ *  The caller supplies the account id to `beginAccountLogin` precisely so it has something to
+ *  pass here while that call is still outstanding. */
+export async function cancelAccountLogin(accountId: string): Promise<void> {
+  return invoke('cancel_account_login', { accountId });
 }
 
 /** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or

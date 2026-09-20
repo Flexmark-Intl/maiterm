@@ -38,11 +38,26 @@
 
   const busy = $derived(phase !== 'explain');
 
+  /** The id of the sign-in in flight. Minted here rather than in Rust so Cancel has something
+   *  to name while `beginAccountLogin` is still outstanding. */
+  let pendingId = $state<string | null>(null);
+
+  async function cancelSignIn() {
+    if (!pendingId) return;
+    try {
+      await commands.cancelAccountLogin(pendingId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   async function signIn() {
     error = null;
     phase = 'signing-in';
+    const id = crypto.randomUUID();
+    pendingId = id;
     try {
-      const account = await commands.beginAccountLogin(runtime);
+      const account = await commands.beginAccountLogin(runtime, id);
       // The browser took focus to authorize and does not give it back — this window ends up
       // behind the main one, which reads as "preferences closed itself". Whatever the outcome,
       // the next thing to look at is in here: the new account, or the error explaining why
@@ -54,6 +69,8 @@
       await focusThisWindow();
       error = e instanceof Error ? e.message : String(e);
       phase = 'explain';
+    } finally {
+      pendingId = null;
     }
   }
 
@@ -184,7 +201,13 @@
     </div>
 
     <div class="footer">
-      <Button variant="ghost" onclick={oncancel} disabled={busy}>Cancel</Button>
+      {#if phase === 'signing-in'}
+        <!-- Enabled DURING the sign-in: a greyed-out Cancel is what sent people to Escape,
+             which used to close the window and leave the login running. -->
+        <Button variant="ghost" onclick={cancelSignIn}>Cancel sign-in</Button>
+      {:else}
+        <Button variant="ghost" onclick={oncancel} disabled={busy}>Cancel</Button>
+      {/if}
       <Button variant="primary" onclick={signIn} disabled={busy || supported.length === 0}>
         {#if phase === 'signing-in'}Waiting for browser…
         {:else if phase === 'saving'}Saving…

@@ -192,6 +192,61 @@ pub async fn read_account_identity(
     })
 }
 
+/// Sign-ins currently in flight, so `cancel_account_login` can reach one. Keyed by the account
+/// id the caller supplies, which is why that id is a parameter rather than minted in here: the
+/// frontend needs a handle on the attempt before the command returns.
+static ACTIVE_LOGINS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, LoginHandle>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+struct LoginHandle {
+    child: std::sync::Arc<parking_lot::Mutex<std::process::Child>>,
+    cancelled: bool,
+}
+
+fn register_login(id: &str, child: std::sync::Arc<parking_lot::Mutex<std::process::Child>>) {
+    ACTIVE_LOGINS.lock().insert(
+        id.to_string(),
+        LoginHandle { child, cancelled: false },
+    );
+}
+
+fn unregister_login(id: &str) {
+    ACTIVE_LOGINS.lock().remove(id);
+}
+
+fn cancelled(id: &str) -> bool {
+    ACTIVE_LOGINS.lock().get(id).map(|h| h.cancelled).unwrap_or(false)
+}
+
+/// Turn a stuck sign-in into something a user can act on. The runtime prints the authorization
+/// URL on stdout; when the browser did not open, that line is the whole difference between
+/// "try again" and "there is nothing I can do".
+fn timeout_message(transcript: &str) -> String {
+    let url = transcript
+        .split_whitespace()
+        .find(|w| w.starts_with("https://") && w.contains("oauth"));
+    match url {
+        Some(u) => format!("Sign-in timed out. If the browser did not open, visit: {u}"),
+        None => "Sign-in timed out before the browser flow completed.".to_string(),
+    }
+}
+
+/// Stop a sign-in that is still running. The child is killed, so the browser flow cannot
+/// complete later and strand an authenticated root nobody knows about.
+#[tauri::command]
+pub async fn cancel_account_login(account_id: String) -> Result<(), String> {
+    let mut guard = ACTIVE_LOGINS.lock();
+    let Some(handle) = guard.get_mut(&account_id) else {
+        // Already finished or never started. Nothing to stop, and not an error.
+        return Ok(());
+    };
+    handle.cancelled = true;
+    let mut child = handle.child.lock();
+    let _ = child.kill();
+    Ok(())
+}
+
 /// The result of an add-account attempt. The caller decides what to do with it: the duplicate
 /// check is §5.1's and belongs where the existing account list lives.
 #[derive(Debug, Clone, Serialize)]
@@ -214,6 +269,7 @@ pub struct NewAccount {
 #[tauri::command]
 pub async fn begin_account_login(
     runtime: String,
+    account_id: String,
     timeout_secs: Option<u64>,
 ) -> Result<NewAccount, String> {
     let rt = runtime_from_slug(&runtime)?;
@@ -225,7 +281,12 @@ pub async fn begin_account_login(
         return Err(format!("{} sign-in is not implemented yet", profile.label));
     }
 
-    let account_id = uuid::Uuid::new_v4().to_string();
+    // The id comes from the caller so it has a handle on the attempt BEFORE this returns —
+    // otherwise there is nothing to pass to `cancel_account_login` while the sign-in is the
+    // very thing that has not come back yet.
+    if uuid::Uuid::parse_str(&account_id).is_err() {
+        return Err("account id must be a UUID".to_string());
+    }
     let home = home_dir()?;
     let id_for_reconcile = account_id.clone();
     tauri::async_runtime::spawn_blocking(move || accounts::reconcile(rt, &id_for_reconcile, &home))
@@ -268,6 +329,7 @@ async fn login_into_root(
     // that a flow which never completes releases the process instead of leaking it forever.
     let deadline = std::time::Duration::from_secs(timeout_secs.unwrap_or(300).clamp(30, 900));
 
+    let id_for_task = account_id.clone();
     let login = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut cmd = Command::new(&cli);
         cmd.args(["auth", "login"]);
@@ -278,30 +340,61 @@ async fn login_into_root(
         // No tty to prompt on. The sign-in completes through the runtime's own local callback
         // server, not the "paste code" fallback, so stdin is genuinely unused.
         cmd.stdin(std::process::Stdio::null());
+        // Capture stdout rather than inheriting it. Inherited output goes to the app's stdout,
+        // which is /dev/null for a Finder-launched bundle — and the one line a stuck user needs
+        // is printed there: "If the browser didn't open, visit: <url>".
+        cmd.stdout(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("starting sign-in: {e}"))?;
 
-        let start = std::time::Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    return if status.success() {
-                        Ok(())
-                    } else {
-                        // Not the logged-out case this time: a failed *login* really is an error.
-                        Err(format!("sign-in exited {}", status.code().unwrap_or(-1)))
+        // Drain stdout on its own thread: a full pipe would otherwise block the child forever
+        // while we poll it, which is a deadlock rather than a slow sign-in.
+        let transcript = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+        if let Some(out) = child.stdout.take() {
+            let sink = transcript.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 4096];
+                let mut out = out;
+                while let Ok(n) = out.read(&mut buf) {
+                    if n == 0 {
+                        break;
                     }
+                    sink.lock().push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            });
+        }
+
+        let child = std::sync::Arc::new(parking_lot::Mutex::new(child));
+        register_login(&id_for_task, child.clone());
+        let start = std::time::Instant::now();
+        let result = loop {
+            let status = child.lock().try_wait();
+            match status {
+                Ok(Some(status)) if status.success() => break Ok(()),
+                Ok(Some(status)) => {
+                    // Not the logged-out case this time: a failed *login* really is an error.
+                    break Err(format!("sign-in exited {}", status.code().unwrap_or(-1)));
                 }
                 Ok(None) => {
+                    if cancelled(&id_for_task) {
+                        let mut c = child.lock();
+                        let _ = c.kill();
+                        let _ = c.wait();
+                        break Err("sign-in cancelled".to_string());
+                    }
                     if start.elapsed() > deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err("sign-in timed out".to_string());
+                        let mut c = child.lock();
+                        let _ = c.kill();
+                        let _ = c.wait();
+                        break Err(timeout_message(&transcript.lock()));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
-                Err(e) => return Err(format!("waiting on sign-in: {e}")),
+                Err(e) => break Err(format!("waiting on sign-in: {e}")),
             }
-        }
+        };
+        unregister_login(&id_for_task);
+        result
     })
     .await
     .map_err(|e| format!("sign-in task failed: {e}"))?;
