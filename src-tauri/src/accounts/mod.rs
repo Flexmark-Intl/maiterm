@@ -539,6 +539,41 @@ fn merge_json(
     Ok(true)
 }
 
+/// The env changes a newly spawned tab needs for every runtime the user has an active account
+/// for: variables to set, and variables to remove.
+///
+/// Returns nothing at all unless setup is complete **and** the feature is enabled — a
+/// configured-but-disabled state must inject nothing (§10), and that rule lives here rather
+/// than at each call site.
+///
+/// An `active_account_ids` entry naming an account that is no longer in the list is ignored
+/// rather than honoured: a dangling pointer must not silently hand a tab a config root that
+/// nothing owns.
+pub fn spawn_env_for(prefs: &crate::state::Preferences) -> (Vec<(String, String)>, Vec<String>) {
+    let mut set = Vec::new();
+    let mut unset = Vec::new();
+    if !prefs.accounts_setup_complete || !prefs.accounts_enabled {
+        return (set, unset);
+    }
+    for runtime in ALL_RUNTIMES {
+        let Some(account_id) = prefs.active_account_ids.get(runtime.slug()) else {
+            continue;
+        };
+        let known = prefs
+            .managed_accounts
+            .iter()
+            .any(|a| &a.id == account_id && a.runtime == runtime.slug());
+        if !known {
+            continue;
+        }
+        if let Some((s, u)) = spawn_env(*runtime, account_id) {
+            set.extend(s);
+            unset.extend(u);
+        }
+    }
+    (set, unset)
+}
+
 /// A collision-free name to park a displaced real file under, beside where it was.
 fn displaced_name(link: &Path) -> PathBuf {
     let stamp = std::time::SystemTime::now()
@@ -876,6 +911,56 @@ mod tests {
         let expected: Vec<String> =
             CLAUDE.shadowing_env.iter().map(|s| s.to_string()).collect();
         assert_eq!(scrub, expected);
+    }
+
+    fn prefs_with(account: Option<&str>, setup: bool, enabled: bool) -> crate::state::Preferences {
+        let mut p = crate::state::Preferences::default();
+        p.accounts_setup_complete = setup;
+        p.accounts_enabled = enabled;
+        if let Some(id) = account {
+            p.managed_accounts.push(crate::state::ManagedAccount {
+                id: id.to_string(),
+                runtime: "claude".into(),
+                label: "a".into(),
+                email: None,
+                org_id: None,
+                org_name: None,
+                plan: None,
+                created_at: 0,
+                last_verified_at: None,
+                remote_hosts: vec![],
+                token_minted_at: None,
+            });
+            p.active_account_ids.insert("claude".into(), id.to_string());
+        }
+        p
+    }
+
+    #[test]
+    fn spawn_env_injects_nothing_unless_set_up_and_enabled() {
+        // §10: "configured but disabled" must behave exactly like "not set up". A tab that
+        // quietly keeps using an account after the toggle is off is the worst of both.
+        assert!(spawn_env_for(&prefs_with(Some("a1"), true, false)).0.is_empty());
+        assert!(spawn_env_for(&prefs_with(Some("a1"), false, true)).0.is_empty());
+        assert!(spawn_env_for(&prefs_with(None, true, true)).0.is_empty());
+    }
+
+    #[test]
+    fn spawn_env_ignores_an_active_id_with_no_account() {
+        // A dangling pointer must not hand a tab a config root nothing owns.
+        let mut p = prefs_with(Some("a1"), true, true);
+        p.managed_accounts.clear();
+        assert!(spawn_env_for(&p).0.is_empty());
+    }
+
+    #[test]
+    fn spawn_env_sets_the_root_and_scrubs_for_an_active_account() {
+        let (set, unset) = spawn_env_for(&prefs_with(Some("a1"), true, true));
+        assert_eq!(set.len(), 1);
+        assert_eq!(set[0].0, "CLAUDE_CONFIG_DIR");
+        assert!(set[0].1.ends_with("accounts/claude/a1"));
+        assert!(unset.contains(&"ANTHROPIC_API_KEY".to_string()));
+        assert!(unset.contains(&"CLAUDE_CODE_OAUTH_TOKEN".to_string()));
     }
 
     #[test]

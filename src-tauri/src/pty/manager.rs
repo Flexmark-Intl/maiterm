@@ -183,6 +183,21 @@ pub fn spawn_pty(
             cmd.env("MAITERM_AUTH", auth);
         }
 
+        // Managed accounts (docs/login.md §5). This is what makes "launch under the active
+        // account" true: the runtime's config-dir variable points at that account's root, and
+        // every variable that could answer INSTEAD of its login is removed — otherwise a tab
+        // silently runs as whoever a leftover ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+        // resolves to, while the UI claims the selected account (§6.1).
+        {
+            let (set, unset) = crate::accounts::spawn_env_for(&state.app_data.read().preferences);
+            for (k, v) in set {
+                cmd.env(k, v);
+            }
+            for k in unset {
+                cmd.env_remove(k);
+            }
+        }
+
         // Most shells use -l for login, fish uses --login
         match shell_name {
             "fish" => { cmd.arg("--login"); }
