@@ -227,11 +227,23 @@ fn write_mcp_settings(port: u16, auth: &str) -> Result<(), String> {
 /// Cheap when nothing moved: `merge_json` compares the rendered result and skips the write.
 fn propagate_to_account_roots() {
     let Some(home) = dirs::home_dir() else { return };
-    match crate::accounts::resync_roots(crate::accounts::Runtime::Claude, &home) {
-        Ok(0) => {}
-        Ok(n) => log::debug!("Resynced {n} managed account root(s) after an MCP settings write"),
-        Err(e) => log::warn!("Resyncing managed account roots failed: {e}"),
-    }
+    // Off the async executor. One caller is the 30s re-assert, which runs on a tokio task, and
+    // this is N × (200KB read + parse + render + write) of blocking I/O — the repo's rule since
+    // the mesh pinwheel. `spawn` rather than `block_on` so the timer is never held up by it.
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            crate::accounts::resync_roots(crate::accounts::Runtime::Claude, &home)
+        })
+        .await;
+        match result {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => {
+                log::debug!("Resynced {n} managed account root(s) after an MCP settings write")
+            }
+            Ok(Err(e)) => log::warn!("Resyncing managed account roots failed: {e}"),
+            Err(e) => log::warn!("Managed account resync task failed: {e}"),
+        }
+    });
 }
 
 /// Re-assert `mcpServers.<key>` in ~/.claude.json *only if it has drifted* from

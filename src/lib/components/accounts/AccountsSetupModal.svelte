@@ -14,6 +14,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
+  import { error as logError } from '@tauri-apps/plugin-log';
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
   import type {
@@ -81,7 +82,7 @@
       } catch (e) {
         // Not an error the user needs: it only costs them the shortcut, and the link is still
         // right there. Surfacing it would put a red box on a dialog that works fine.
-        console.warn('listing private browsers failed', e);
+        logError(`[accounts] listing private browsers failed: ${e}`);
       }
     })();
   });

@@ -127,6 +127,11 @@
     return progress[wsKey] ?? progress[wKey] ?? null;
   }
 
+  /** Anything still running. The receiving window queues overlapping requests rather than
+   *  racing them, but two requests over the same tabs is never what anyone meant — "Reload all"
+   *  after a workspace reload would reload those tabs twice. Block it at the source. */
+  const pending = $derived(Object.values(progress).some(p => p.state === 'pending'));
+
   function handleKeydown(e: KeyboardEvent) {
     const closeKey = e.key === 'Escape' || (e.key.toLowerCase() === 'w' && (e.metaKey || e.ctrlKey));
     if (!closeKey) return;
@@ -171,6 +176,12 @@
           inside it. An agent mid-turn in that tab is interrupted, so leaving them be and letting
           your next tab pick the account up is often the better answer.
         </p>
+        <p class="hint">
+          <strong>Workspaces you are not currently viewing come back dormant.</strong> Their tabs
+          are reloaded, but the shell only starts when you next open that workspace — so an agent
+          running there stops now and is unreachable until you visit it. Reload the workspace you
+          are in; leave the rest unless you mean to stop them.
+        </p>
       </section>
 
       {#if loading}
@@ -187,7 +198,9 @@
         <section>
           <div class="section-head">
             <h4>{totalTabs} running tab{totalTabs === 1 ? '' : 's'}</h4>
-            <Button variant="secondary" onclick={reloadEverything}>Reload all</Button>
+            <Button variant="secondary" disabled={pending} onclick={reloadEverything}>
+              Reload all
+            </Button>
           </div>
           {#each live as w (w.window_id)}
             {@const wKey = `w:${w.window_id}`}
@@ -199,7 +212,7 @@
                 {:else if progress[wKey]?.state === 'done'}
                   <span class="done">Reloaded</span>
                 {:else}
-                  <Button variant="ghost" onclick={() => reload(w, undefined, wKey)}>
+                  <Button variant="ghost" disabled={pending} onclick={() => reload(w, undefined, wKey)}>
                     Reload window
                   </Button>
                 {/if}
@@ -220,7 +233,7 @@
                     <!-- The count is what the window actually reloaded, not what we asked for. -->
                     <span class="done">Reloaded {p.reloaded}</span>
                   {:else}
-                    <Button variant="ghost" onclick={() => reload(w, [ws.id], wsKey)}>
+                    <Button variant="ghost" disabled={pending} onclick={() => reload(w, [ws.id], wsKey)}>
                       Reload
                     </Button>
                   {/if}

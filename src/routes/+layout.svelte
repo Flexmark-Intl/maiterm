@@ -396,8 +396,19 @@
     // stack service tab is skipped outright, since restarting the user's dev server has nothing
     // to do with which account is active.
     let unlistenAccountReload: (() => void) | undefined;
-    listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, async (event) => {
-      const wanted = event.payload.workspace_ids;
+    // Serialized ACROSS invocations, not just within one. `listen` does not await its callback,
+    // so two requests to the same window — "Reload" on a workspace, then "Reload all" a second
+    // later — ran two loops concurrently over overlapping tabs, which is exactly the state the
+    // sequential loop below was written to prevent. Chaining onto the previous promise is what
+    // makes it a queue rather than a race; an in-flight flag that dropped the second request
+    // would silently ignore work the user asked for.
+    let accountReloadChain: Promise<void> = Promise.resolve();
+    listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, (event) => {
+      accountReloadChain = accountReloadChain.then(() => runAccountReload(event.payload));
+    }, { target: appWindow.label }).then(unlisten => { unlistenAccountReload = unlisten; });
+
+    async function runAccountReload(payload: commands.AccountReloadRequest) {
+      const wanted = payload.workspace_ids;
 
       // SNAPSHOT the ids first, then reload them ONE AT A TIME.
       //
@@ -430,20 +441,18 @@
           await workspacesStore.reloadTab(t.wsId, t.paneId, t.tabId);
           reloaded++;
         } catch (e) {
-          // One failure must not strand the rest, nor the completion report.
-          console.warn('account reload failed for tab', t.tabId, e);
+          // One failure must not strand the rest, nor the completion report. Logged to the log
+          // FILE, not the console — a tab that failed to come back is exactly what someone goes
+          // looking for in aiterm.log afterwards.
+          logError(`[accounts] reload failed for tab ${t.tabId}: ${e}`);
         }
       }
       try {
-        await commands.reportAccountReloadDone(
-          event.payload.reply_to,
-          event.payload.request_id,
-          reloaded,
-        );
+        await commands.reportAccountReloadDone(payload.reply_to, payload.request_id, reloaded);
       } catch (e) {
-        console.warn('reporting account reload completion failed', e);
+        logError(`[accounts] reporting reload completion failed: ${e}`);
       }
-    }, { target: appWindow.label }).then(unlisten => { unlistenAccountReload = unlisten; });
+    }
 
     // A maiLink phone renamed a tab — the backend already persisted it; sync the store so the
     // live tab strip reflects the new title without a reload.

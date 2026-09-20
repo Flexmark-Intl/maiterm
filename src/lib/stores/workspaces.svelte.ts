@@ -2498,6 +2498,8 @@ function createWorkspacesStore() {
       // Remember the position before duplication; the name (and the rest of the record)
       // comes back via carry_tab_state_on_reload below.
       const sourceIndex = pane.tabs.findIndex(t => t.id === tabId);
+      // Captured BEFORE the duplicate, which activates what it creates.
+      const wasActiveBeforeDuplicate = pane.active_tab_id === tabId;
 
       // Deep duplicate: clones scrollback, CWD, SSH, notes, history, auto-resume, variables
       await this.duplicateTab(workspaceId, paneId, tabId);
@@ -2558,7 +2560,18 @@ function createWorkspacesStore() {
       // `carry_tab_state_on_reload` copies `service_id` to the replacement, so read it
       // from the source tab we are about to delete.
       const reloadingService = !!freshPane.tabs.find(t => t.id === tabId)?.service_id;
-      if (!reloadingService) await commands.setActiveTab(workspaceId, paneId, newTab.id);
+      // Only follow the replacement when the pane was ALREADY showing the tab being reloaded.
+      // Unconditional was invisible while every caller passed the active tab (menu reload,
+      // Cmd+Shift+R); the account switch is the first caller that reloads BACKGROUND tabs, and
+      // it made each pane jump to whichever of its live tabs came last in the strip — pulling
+      // the user off the agent they were watching and pushing navHistory once per tab.
+      // Read from the pre-duplicate snapshot: `duplicateTab` activates what it creates, so by
+      // the time `freshPane` is fetched the pane is already showing the duplicate and this
+      // would answer false for the tab that really was active.
+      const wasActive = wasActiveBeforeDuplicate;
+      if (!reloadingService && wasActive) {
+        await commands.setActiveTab(workspaceId, paneId, newTab.id);
+      }
       await commands.deleteTab(workspaceId, paneId, tabId);
 
       // Final state reload

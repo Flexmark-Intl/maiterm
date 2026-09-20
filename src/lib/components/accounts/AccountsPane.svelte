@@ -8,6 +8,7 @@
    *  The duplicate guard (§5.1) lives here rather than in Rust because this is the side that
    *  knows the existing account list. It is not a nicety: the browser reuses its session, so
    *  "add a second account" commonly returns the first, reporting success. */
+  import { error as logError } from '@tauri-apps/plugin-log';
   import Button from '$lib/components/ui/Button.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -46,7 +47,7 @@
         privateBrowsers = (await commands.listPrivateBrowsers()).map(b => b.label);
       } catch (e) {
         // Costs only the sharper wording below. Not worth a red box on a working pane.
-        console.warn('listing private browsers failed', e);
+        logError(`[accounts] listing private browsers failed: ${e}`);
       }
     })();
   });
@@ -272,7 +273,6 @@
     error = null;
     notice = null;
     try {
-      await commands.discardAccountRoot(account.runtime, account.id);
       const remaining = accounts.filter(a => a.id !== account.id);
       // Drop the active pointer with the account in the SAME write, so no persisted state ever
       // names a row that is gone.
@@ -289,7 +289,15 @@
         promoted = remaining.find(a => a.runtime === account.runtime) ?? null;
         if (promoted) activeIds[account.runtime] = promoted.id;
       }
+      // **Persist BEFORE discarding the root.** `save()` can genuinely be refused — the
+      // two-instance conflict guard aborts rather than clobber a newer state file — and
+      // `setAccountsState` rolls back on failure. Discarding first meant the rollback restored a
+      // row whose root and credential were already gone: every new tab would then be handed a
+      // CLAUDE_CONFIG_DIR pointing nowhere, and the runtime would recreate it bare — no hooks,
+      // no MCP, no identity, signed out. This order fails the safe way instead, leaving a root
+      // the startup prune collects.
       await preferencesStore.setAccountsState({ accounts: remaining, activeIds });
+      await commands.discardAccountRoot(account.runtime, account.id);
       notice = promoted
         ? `Removed ${account.label}. ${promoted.label} is now the active account.`
         : `Removed ${account.label}.`;
@@ -306,22 +314,29 @@
     busy = true;
     error = null;
     try {
-      for (const a of accounts) {
-        try {
-          await commands.discardAccountRoot(a.runtime, a.id);
-        } catch (e) {
-          // Keep going: a root that is already gone must not strand the rest of the reset.
-          console.warn('discarding account root failed', a.id, e);
-        }
-      }
+      // Snapshot before the write, which empties the list.
+      const toDiscard = accounts.map(a => ({ runtime: a.runtime, id: a.id }));
       // One write. Everything this feature owns is reset here, so a field added later cannot be
       // forgotten in a second reset path.
+      //
+      // And it happens FIRST, for the same reason as in `removeAccount`: a refused save rolls
+      // the rows back, and rows restored after their roots were deleted point every new tab at
+      // a directory that no longer exists. Roots left behind by a failed clear are collected by
+      // the startup prune; rows pointing at nothing are not.
       await preferencesStore.setAccountsState({
         accounts: [],
         activeIds: {},
         enabled: false,
         setupComplete: false,
       });
+      for (const a of toDiscard) {
+        try {
+          await commands.discardAccountRoot(a.runtime, a.id);
+        } catch (e) {
+          // Keep going: a root that is already gone must not strand the rest of the reset.
+          logError(`[accounts] discarding root ${a.id} failed: ${e}`);
+        }
+      }
       identities = {};
       notice = 'Setup cleared.';
       confirmingClear = false;

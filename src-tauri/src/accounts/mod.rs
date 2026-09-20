@@ -646,11 +646,37 @@ fn merge_json(
         .map_err(|e| format!("parsing {}: {e}", source.display()))?;
     let src_obj = src.as_object().ok_or_else(|| format!("{} is not a JSON object", source.display()))?;
 
+    // `read_to_string(..).ok()` alone cannot tell "no file yet" from "the file is there and we
+    // could not read it", and those need opposite answers: the first seeds, the second must
+    // never seed. `symlink_metadata` answers it without following — a symlink here is drift the
+    // caller has already unlinked, and following one would reach the user's real file.
+    let dest_present = fs::symlink_metadata(dest).is_ok();
     let existing = fs::read_to_string(dest).ok();
+    if dest_present && existing.is_none() {
+        return Err(format!(
+            "{} exists but could not be read — refusing to reseed it",
+            dest.display()
+        ));
+    }
     let mut out = match existing.as_deref().map(serde_json::from_str::<serde_json::Value>) {
         Some(Ok(serde_json::Value::Object(o))) => o,
-        // Absent, unreadable or not an object: seed from the user's file minus identity.
-        _ => {
+        // **A destination that EXISTS but does not parse is not seeded over.** Seeding means
+        // "copy the user's file minus identity", which for an existing account silently
+        // replaces its `oauthAccount` and its own project state — the exact "two accounts, one
+        // email" failure this strategy exists to prevent, with no displaced copy to recover
+        // from. Unreadable is transient far more often than it is terminal: a partial read of a
+        // concurrent write by the `claude` process that co-owns this file looks identical. So
+        // refuse, and let the next reconcile try again.
+        //
+        // Seeding stays correct for an ABSENT destination, which is a new account root.
+        Some(_) => {
+            return Err(format!(
+                "{} exists but is not readable JSON — refusing to reseed it, which would \
+                 replace this account's identity with the user's",
+                dest.display()
+            ))
+        }
+        None => {
             let mut seeded = src_obj.clone();
             for k in exclude {
                 seeded.remove(*k);
@@ -1021,6 +1047,57 @@ mod tests {
         assert_eq!(src["userID"], "u1");
 
         fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_corrupt_account_config_is_refused_not_reseeded() {
+        // The dangerous arm: an existing `.claude.json` that does not parse used to be replaced
+        // with a copy of the USER's file minus identity — silently swapping the account's own
+        // `oauthAccount` for nothing and discarding its project state, with no displaced copy.
+        // A partial read of a concurrent write by the co-owning `claude` process looks exactly
+        // like this, so it has to be transient-safe: refuse and try again next reconcile.
+        let base = tmp();
+        let home = fake_home(&base);
+        let source = home.join(".claude.json");
+        fs::write(
+            &source,
+            r#"{"oauthAccount":{"emailAddress":"user@example.com"},"mcpServers":{"a":{"url":"u"}}}"#,
+        )
+        .unwrap();
+
+        let dest = base.join("account-config.json");
+        fs::write(&dest, "{\"oauthAccount\":{\"emailAddress\":\"acct@exa").unwrap(); // truncated
+
+        let err = merge_json(&source, &dest, &["oauthAccount", "userID"], &["mcpServers"])
+            .expect_err("a corrupt destination must be refused");
+        assert!(err.contains("refusing to reseed"), "unexpected error: {err}");
+
+        // Untouched — not replaced, not emptied.
+        assert_eq!(
+            fs::read_to_string(&dest).unwrap(),
+            "{\"oauthAccount\":{\"emailAddress\":\"acct@exa"
+        );
+    }
+
+    #[test]
+    fn an_absent_account_config_is_still_seeded() {
+        // The other half: refusing must not break account CREATION, where absent is normal.
+        let base = tmp();
+        let home = fake_home(&base);
+        let source = home.join(".claude.json");
+        fs::write(
+            &source,
+            r#"{"oauthAccount":{"emailAddress":"user@example.com"},"mcpServers":{"a":{"url":"u"}}}"#,
+        )
+        .unwrap();
+
+        let dest = base.join("fresh.json");
+        assert!(merge_json(&source, &dest, &["oauthAccount", "userID"], &["mcpServers"]).unwrap());
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(written.get("oauthAccount").is_none(), "identity was copied into a new root");
+        assert!(written.get("mcpServers").is_some(), "mcpServers was not seeded");
     }
 
     #[test]
