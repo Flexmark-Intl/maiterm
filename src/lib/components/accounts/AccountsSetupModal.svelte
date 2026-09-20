@@ -8,6 +8,7 @@
    *
    *  Follows ServiceModal — same backdrop/panel/btn vocabulary, same explicit rAF focus
    *  (Svelte's `autofocus` is not focus; it no-ops when a keyboard opened the dialog). */
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
   import type { AccountRuntimeInfo, NewAccount } from '$lib/tauri/commands';
@@ -42,11 +43,28 @@
     phase = 'signing-in';
     try {
       const account = await commands.beginAccountLogin(runtime);
+      // The browser took focus to authorize and does not give it back — this window ends up
+      // behind the main one, which reads as "preferences closed itself". Whatever the outcome,
+      // the next thing to look at is in here: the new account, or the error explaining why
+      // there isn't one.
+      await focusThisWindow();
       phase = 'saving';
       await oncomplete(account, runtime);
     } catch (e) {
+      await focusThisWindow();
       error = e instanceof Error ? e.message : String(e);
       phase = 'explain';
+    }
+  }
+
+  async function focusThisWindow() {
+    try {
+      const win = getCurrentWindow();
+      // Unminimize first: setFocus alone does not restore a minimized window.
+      if (await win.isMinimized()) await win.unminimize();
+      await win.setFocus();
+    } catch {
+      // Focus is a courtesy. Never let it swallow the sign-in result.
     }
   }
 
