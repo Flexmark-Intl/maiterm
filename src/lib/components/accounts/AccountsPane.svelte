@@ -28,8 +28,10 @@
   let notice = $state<string | null>(null);
   /** Inline confirm — `window.confirm()` does not work in Tauri webviews. */
   let confirmingClear = $state(false);
-  /** Label of the account just switched to, which opens the post-switch modal. */
-  let switchedTo = $state<string | null>(null);
+  /** The post-change modal, when a change has just been made that only affects NEW tabs.
+   *  Switching accounts and toggling the feature are the same situation and get the same
+   *  dialog — the reload offer is the whole point, and it applied to both from the start. */
+  let announce = $state<{ title: string; subtitle: string; destination: string } | null>(null);
   /** Last identity read per account id, for the resolved-source row. */
   let identities = $state<Record<string, AccountIdentity>>({});
 
@@ -202,7 +204,41 @@
       // A modal, not a notice: this is the one control here that does not take effect
       // immediately, and the follow-up question — "so how do I move the tabs I have open?" —
       // needs an answer, not a statement. A line under the table was too quiet for both.
-      switchedTo = account.label;
+      announce = {
+        title: `Now using ${account.label}`,
+        subtitle: 'Tabs you open from now on run as this account.',
+        destination: account.label,
+      };
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Turn management on or off.
+   *
+   *  Gets the SAME dialog as switching accounts, because it is the same situation: the change
+   *  reaches new tabs only, and the useful question is "what about the ones I have open?".
+   *  Toggling off without it looked like nothing had happened — every running tab carried on
+   *  under its managed account with no sign that the feature was now off. */
+  async function setEnabled(value: boolean) {
+    busy = true;
+    error = null;
+    try {
+      await preferencesStore.setAccountsEnabled(value);
+      const active = preferencesStore.activeAccountFor('claude');
+      announce = value
+        ? {
+            title: 'Managed logins turned on',
+            subtitle: 'Tabs you open from now on run as the active account.',
+            destination: active?.label ?? 'the active account',
+          }
+        : {
+            title: 'Managed logins turned off',
+            subtitle: 'Tabs you open from now on use your normal login.',
+            destination: 'your normal login',
+          };
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -234,16 +270,29 @@
   async function removeAccount(account: ManagedAccount) {
     busy = true;
     error = null;
+    notice = null;
     try {
       await commands.discardAccountRoot(account.runtime, account.id);
+      const remaining = accounts.filter(a => a.id !== account.id);
       // Drop the active pointer with the account in the SAME write, so no persisted state ever
       // names a row that is gone.
       const activeIds = { ...preferencesStore.activeAccountIds };
-      if (activeIds[account.runtime] === account.id) delete activeIds[account.runtime];
-      await preferencesStore.setAccountsState({
-        accounts: accounts.filter(a => a.id !== account.id),
-        activeIds,
-      });
+      let promoted: ManagedAccount | null = null;
+      if (activeIds[account.runtime] === account.id) {
+        delete activeIds[account.runtime];
+        // **Promote a replacement rather than leaving the runtime with none.** Clearing the
+        // pointer alone is correct bookkeeping and a bad outcome: the feature then silently
+        // does nothing — new tabs quietly use the normal login while the toggle still says
+        // they launch under the active account. Observed after removing the active account
+        // with the feature switched off, where nothing surfaced it until the toggle went back
+        // on and appeared broken.
+        promoted = remaining.find(a => a.runtime === account.runtime) ?? null;
+        if (promoted) activeIds[account.runtime] = promoted.id;
+      }
+      await preferencesStore.setAccountsState({ accounts: remaining, activeIds });
+      notice = promoted
+        ? `Removed ${account.label}. ${promoted.label} is now the active account.`
+        : `Removed ${account.label}.`;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -316,7 +365,7 @@
         class="toggle"
         class:active={enabled}
         disabled={busy}
-        onclick={() => preferencesStore.setAccountsEnabled(!enabled)}
+        onclick={() => setEnabled(!enabled)}
         aria-pressed={enabled}
         aria-labelledby="accounts-enabled-label"
       >
@@ -327,6 +376,14 @@
     {#each grouped as group (group.slug)}
       <div class="group">
         <div class="group-head">{group.label}</div>
+        {#if enabled && !activeIdFor(group.slug)}
+          <!-- Enabled with nothing active is a silent no-op: the toggle claims tabs launch
+               under the active account while there is none, so they quietly use the normal
+               login instead. Say it rather than let the pane imply otherwise. -->
+          <div class="row-warn">
+            No active account — new tabs use your normal login. Choose one with “Use”.
+          </div>
+        {/if}
         {#each group.rows as account (account.id)}
           {@const identity = identities[account.id]}
           {@const isActive = activeIdFor(group.slug) === account.id}
@@ -448,8 +505,13 @@
   </section>
 </div>
 
-{#if switchedTo}
-  <AccountSwitchModal accountLabel={switchedTo} onclose={() => (switchedTo = null)} />
+{#if announce}
+  <AccountSwitchModal
+    title={announce.title}
+    subtitle={announce.subtitle}
+    destination={announce.destination}
+    onclose={() => (announce = null)}
+  />
 {/if}
 
 {#if showSetup}
@@ -646,6 +708,14 @@
 
   .meta.warn {
     color: #e5c07b;
+  }
+
+  .row-warn {
+    border-top: 1px solid var(--bg-light);
+    color: #e5c07b;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    padding: 6px 10px;
   }
 
   .row-actions {

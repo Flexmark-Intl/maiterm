@@ -21,12 +21,16 @@
   import type { AccountReloadWindow, AccountReloadDone } from '$lib/tauri/commands';
 
   interface Props {
-    /** The account just made active, for the headline. */
-    accountLabel: string;
+    /** Headline — what just changed. */
+    title: string;
+    /** One sentence on what it means for tabs opened from now on. */
+    subtitle: string;
+    /** What new tabs will use, named so the "nothing is running" case can be specific. */
+    destination: string;
     onclose: () => void;
   }
 
-  let { accountLabel, onclose }: Props = $props();
+  let { title, subtitle, destination, onclose }: Props = $props();
 
   let windows = $state<AccountReloadWindow[]>([]);
   let loading = $state(true);
@@ -149,10 +153,8 @@
 >
   <div class="panel" bind:this={panelEl} tabindex="-1">
     <div class="header">
-      <div class="title">Now using {accountLabel}</div>
-      <div class="subtitle">
-        Tabs you open from now on run as this account.
-      </div>
+      <div class="title">{title}</div>
+      <div class="subtitle">{subtitle}</div>
     </div>
 
     <div class="body">
@@ -161,7 +163,8 @@
           <strong>Tabs already running keep the account they started with.</strong> An account is
           an environment variable handed to the shell when a tab starts, and that cannot be
           changed from outside once it is running — so the only way to move a tab across is to
-          respawn its shell.
+          respawn its shell. This is true of turning the feature on and off as well as of
+          switching between accounts.
         </p>
         <p class="hint">
           Reloading keeps the tab, its name, directory and scrollback, and restarts the shell
@@ -174,10 +177,10 @@
         <p class="hint">Looking for running tabs…</p>
       {:else if totalTabs === 0}
         <section>
-          <h4>Nothing is running under the old account</h4>
+          <h4>Nothing is running under the old setting</h4>
           <p class="hint">
             No tab currently has a live shell, so there is nothing to move — every tab will start
-            under {accountLabel}.
+            under {destination}.
           </p>
         </section>
       {:else}
