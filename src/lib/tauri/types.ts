@@ -210,10 +210,6 @@ export type ServiceRestart = 'never' | 'on_crash';
 /** Who declared a service. */
 export type ServiceOrigin = 'human' | 'agent' | 'suggested';
 
-/** One service in a workspace's stack (docs/stack.md §3). Mirrors the Rust `Service`.
- *
- *  No `tab_id`: which tab runs it is derived from `Tab.service_id`. No status: that is
- *  runtime state in the stack store, never persisted. */
 /** Agent runtimes maiTerm can hold accounts for. Only `claude` is implemented — the Rust
  *  registry refuses the rest rather than half-wiring them (docs/login.md §5.4). */
 export type AccountRuntime = 'claude' | 'codex' | 'gemini' | 'grok';
@@ -253,6 +249,10 @@ export interface ManagedAccount {
   token_minted_at?: number;
 }
 
+/** One service in a workspace's stack (docs/stack.md §3). Mirrors the Rust `Service`.
+ *
+ *  No `tab_id`: which tab runs it is derived from `Tab.service_id`. No status: that is
+ *  runtime state in the stack store, never persisted. */
 export interface Service {
   id: string;
   /** The handle agents use — "web", "api". */
