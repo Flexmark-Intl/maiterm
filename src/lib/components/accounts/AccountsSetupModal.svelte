@@ -151,7 +151,12 @@
     const id = crypto.randomUUID();
     pendingId = id;
     try {
-      const account = await commands.beginAccountLogin(runtime, id);
+      // Suppress the runtime's own browser whenever WE are handling where the link opens.
+      // Otherwise "Sign in privately" produced two windows: a normal one already signed in to
+      // the account being avoided, with Authorize one click away, and then the private one.
+      const account = await commands.beginAccountLogin(runtime, id, {
+        suppressBrowser: then !== 'none',
+      });
       // The browser took focus to authorize and does not give it back — this window ends up
       // behind the main one, which reads as "preferences closed itself". Whatever the outcome,
       // the next thing to look at is in here: the new account, or the error explaining why
@@ -255,14 +260,14 @@
             {#if browser}
               <li>
                 <strong>Sign in privately</strong> below opens the link in a new private
-                {browser.label} window, which has no session to reuse. The browser tab that opens
-                on its own can be ignored.
+                {browser.label} window, which has no session to reuse. Your normal browser is not
+                opened at all, so there is no signed-in tab to click by mistake.
               </li>
             {:else}
               <li>
                 <strong>Sign in and copy link</strong> below puts the sign-in link on your
-                clipboard; paste it into a private/incognito window, which has no session to
-                reuse. The browser tab that opens on its own can be ignored.
+                clipboard and opens nothing; paste it into a private/incognito window, which has
+                no session to reuse.
               </li>
             {/if}
             <li>Or sign out of the provider in your browser first, then sign in here.</li>
@@ -332,7 +337,8 @@
               {#if openedPrivately}
                 Finish signing in there. If that window was not private, close it and use Copy.
               {:else if copied}
-                Paste it into a private/incognito window to finish as a different account.
+                On your clipboard. Nothing else was opened — paste it into a private/incognito
+                window to finish as a different account.
               {:else}
                 Open this in a private/incognito window to sign in as a different account.
               {/if}

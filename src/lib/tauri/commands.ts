@@ -1381,9 +1381,20 @@ export interface NewAccount {
 export async function beginAccountLogin(
   runtime: string,
   accountId: string,
-  timeoutSecs?: number,
+  opts?: {
+    timeoutSecs?: number;
+    /** Stop the runtime opening the default browser. Set it when you are opening a window
+     *  yourself, or deliberately opening none — otherwise the user gets a normal-browser tab,
+     *  already signed in to the account they are trying not to reuse, next to the private one. */
+    suppressBrowser?: boolean;
+  },
 ): Promise<NewAccount> {
-  return invoke('begin_account_login', { runtime, accountId, timeoutSecs: timeoutSecs ?? null });
+  return invoke('begin_account_login', {
+    runtime,
+    accountId,
+    timeoutSecs: opts?.timeoutSecs ?? null,
+    suppressBrowser: opts?.suppressBrowser ?? null,
+  });
 }
 
 /** Emitted once per sign-in, as soon as the runtime prints its authorization URL.

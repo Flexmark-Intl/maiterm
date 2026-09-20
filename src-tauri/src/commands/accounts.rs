@@ -429,12 +429,19 @@ pub struct NewAccount {
 /// already hold a session and silently return the account they already have. That is expected,
 /// not prevented here — the §5.1 duplicate check on the returned identity is what catches it.
 /// The in-app incognito webview that avoids it is a later upgrade to this same command.
+///
+/// `suppress_browser` stops the runtime opening the default browser at all, and belongs to the
+/// callers that handle the link themselves — §5.2.1's private window, or copy-to-clipboard.
+/// Without it those paths produce a second window signed in to the very account being avoided,
+/// with an Authorize button one click from the duplicate. See
+/// `accounts::browser::suppress_default_browser`.
 #[tauri::command]
 pub async fn begin_account_login(
     app: tauri::AppHandle,
     runtime: String,
     account_id: String,
     timeout_secs: Option<u64>,
+    suppress_browser: Option<bool>,
 ) -> Result<NewAccount, String> {
     let rt = runtime_from_slug(&runtime)?;
     let profile = rt.profile();
@@ -462,7 +469,14 @@ pub async fn begin_account_login(
     // for anyone whose `claude` lives somewhere resolve_cli does not look), a join error, and a
     // failed identity read AFTER a successful login, which strands a root holding a live
     // credential that no UI can reach.
-    let outcome = login_into_root(&app, rt, &account_id, timeout_secs).await;
+    let outcome = login_into_root(
+        &app,
+        rt,
+        &account_id,
+        timeout_secs,
+        suppress_browser.unwrap_or(false),
+    )
+    .await;
     match outcome {
         Ok(identity) => Ok(NewAccount { account_id, identity }),
         Err(e) => {
@@ -481,6 +495,7 @@ async fn login_into_root(
     rt: Runtime,
     account_id: &str,
     timeout_secs: Option<u64>,
+    suppress_browser: bool,
 ) -> Result<AccountIdentity, String> {
     let profile = rt.profile();
     let account_id = account_id.to_string();
@@ -502,6 +517,26 @@ async fn login_into_root(
         cmd.env(&config_env, &root);
         for var in &scrub {
             cmd.env_remove(var);
+        }
+
+        // Kept alive for the child's whole life — dropping it deletes the shim, and a child that
+        // reaches a PATH entry which no longer exists falls through to the real `open`.
+        let _suppressor = suppress_browser
+            .then(accounts::browser::suppress_default_browser)
+            .flatten();
+        if let Some(s) = &_suppressor {
+            let mut entries = vec![s.path_entry().to_path_buf()];
+            entries.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            match std::env::join_paths(entries) {
+                Ok(p) => {
+                    cmd.env("PATH", p);
+                }
+                // A PATH we cannot rebuild is not worth failing a sign-in over; the user just
+                // gets the extra browser window back.
+                Err(e) => log::warn!("accounts: could not shadow the browser opener: {e}"),
+            }
         }
         // No tty to prompt on. The sign-in completes through the runtime's own local callback
         // server, not the "paste code" fallback, so stdin is genuinely unused.

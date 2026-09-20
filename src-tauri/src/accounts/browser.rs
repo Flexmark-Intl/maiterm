@@ -15,6 +15,7 @@
 //! browser a profile directory: the point is a window with no session, and a profile is a
 //! session.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// A browser we know how to open a private window in.
@@ -230,6 +231,85 @@ pub fn open_private_window(browser_id: &str, url: &str) -> Result<(), String> {
         .map_err(|e| format!("opening {}: {e}", browser.label))
 }
 
+/// A directory holding a no-op `open`/`xdg-open`, to be put FIRST on a child's `PATH`.
+///
+/// Deletes itself on drop. The caller must keep it alive for the whole life of the child.
+pub struct BrowserSuppressor {
+    dir: PathBuf,
+}
+
+impl BrowserSuppressor {
+    pub fn path_entry(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for BrowserSuppressor {
+    fn drop(&mut self) {
+        // Best effort: a shim left behind is inert (it is only ever reached through a PATH we
+        // construct for one child), but it should not accumulate.
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Stop the runtime from opening the user's default browser for one sign-in.
+///
+/// **Why this is needed at all:** the runtime opens the default browser itself, so "sign in
+/// privately" produced *two* windows — a normal one already signed in to the account you are
+/// trying not to reuse, showing an Authorize button one click away from the duplicate this whole
+/// path exists to avoid, and then the private one. Telling the user to ignore the first is not a
+/// fix; it is the trap, with a label on it.
+///
+/// **How:** verified against 2.1.278 — the runtime shells out through the `open` npm package,
+/// which resolves `open` (macOS) / `xdg-open` (Linux) on `PATH`. A directory containing a no-op
+/// of that name, placed first on the child's `PATH`, makes the launch a silent success. Confirmed
+/// empirically: the shim was invoked with the authorization URL, and no browser appeared.
+///
+/// **Only for the paths that open a window themselves.** Suppressing the browser for a plain
+/// sign-in would leave the user staring at a dialog with nothing happening.
+///
+/// Returns `None` on Windows (the `open` package uses PowerShell there, not a `PATH` lookup) and
+/// on any filesystem error — the caller then gets the old two-window behaviour, which works.
+pub fn suppress_default_browser() -> Option<BrowserSuppressor> {
+    // Never a shared or predictable path: anything on this PATH is code the runtime will execute.
+    // `temp_dir()` is the per-user private directory on macOS; the 0700 below covers the rest.
+    let dir = std::env::temp_dir().join(format!("maiterm-nobrowser-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).ok()?;
+    }
+
+    let names: &[&str] = if cfg!(target_os = "windows") {
+        &[]
+    } else {
+        &["open", "xdg-open"]
+    };
+    if names.is_empty() {
+        let _ = fs::remove_dir_all(&dir);
+        return None;
+    }
+    for name in names {
+        let path = dir.join(name);
+        // Exit 0: the runtime treats a failed launch as worth reporting, and we are not trying to
+        // tell it anything — only to stop it painting over our private window.
+        if fs::write(&path, "#!/bin/sh\nexit 0\n").is_err() {
+            let _ = fs::remove_dir_all(&dir);
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).is_err() {
+                let _ = fs::remove_dir_all(&dir);
+                return None;
+            }
+        }
+    }
+    Some(BrowserSuppressor { dir })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +354,38 @@ mod tests {
         // Every platform this builds on has a shell at this path.
         #[cfg(unix)]
         assert!(resolve_candidate("/bin/sh").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_suppressor_shadows_open_and_cleans_up_after_itself() {
+        let s = suppress_default_browser().expect("a suppressor on unix");
+        let dir = s.path_entry().to_path_buf();
+
+        // It must actually WIN a PATH lookup, not merely exist — that is the entire mechanism.
+        let saved = std::env::var_os("PATH");
+        let combined = {
+            let mut paths = vec![dir.clone()];
+            paths.extend(std::env::split_paths(saved.as_deref().unwrap_or_default()));
+            std::env::join_paths(paths).unwrap()
+        };
+        // SAFETY-adjacent: this test mutates process-wide PATH. `resolve_candidate` reads it
+        // directly, so there is no way to test the lookup without it; restored below.
+        unsafe { std::env::set_var("PATH", &combined) };
+        let found = resolve_candidate("open");
+        match saved {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(found.as_deref(), Some(dir.join("open").as_path()));
+
+        // And it must be executable, or the child's launch fails loudly instead of quietly.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(dir.join("open")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o100, "shim is not executable: {mode:o}");
+
+        drop(s);
+        assert!(!dir.exists(), "suppressor left its shim behind");
     }
 
     #[cfg(unix)]
