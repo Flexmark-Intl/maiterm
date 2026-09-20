@@ -180,33 +180,6 @@ pub fn run() {
             Err(e) => log::warn!("Startup scrollback prune failed: {}", e),
         }
 
-        // The same backstop for account config roots (docs/login.md §10). Removing an account
-        // deletes its root, but a runtime process launched under it holds CLAUDE_CONFIG_DIR for
-        // its whole life and RECREATES the directory on its next write — by which point maiTerm
-        // has forgotten the account, so no other path would ever clean it up. Startup is the
-        // right moment: preferences are already loaded here, so an empty list means "no
-        // accounts", never "not loaded yet", and the process that resurrected the root is gone.
-        for rt in accounts::ALL_RUNTIMES.iter().copied() {
-            let keep: Vec<String> = data
-                .preferences
-                .managed_accounts
-                .iter()
-                .filter(|a| a.runtime == rt.slug())
-                .map(|a| a.id.clone())
-                .collect();
-            match accounts::prune_orphan_roots(rt, &keep) {
-                Ok(ids) if !ids.is_empty() => log::info!(
-                    "Pruned {} orphan {} account root(s) at startup",
-                    ids.len(),
-                    rt.slug()
-                ),
-                Ok(_) => {}
-                Err(e) => {
-                    log::warn!("Startup account root prune failed for {}: {}", rt.slug(), e)
-                }
-            }
-        }
-
         // Seed memory trend ring buffer from disk so post-mortem analysis
         // after a crash/restart still has the RSS history leading up to it.
         let persisted_trend = load_memory_trend();
@@ -284,6 +257,42 @@ pub fn run() {
             // ControlPath sockets belongs to a run that did not exit cleanly, and would
             // otherwise squat its remote port for as long as the machine stays up.
             commands::ssh_tunnel::kill_orphaned_tunnels();
+
+            // Account config roots no account claims (docs/login.md §10). Removing an account
+            // deletes its root, but a runtime process launched under it holds CLAUDE_CONFIG_DIR
+            // for its whole life and RECREATES the directory on its next write — by which point
+            // maiTerm has forgotten the account, so no other path reaches it again.
+            //
+            // Startup is the right moment: preferences are loaded by now, so an empty keep-list
+            // means "no accounts" rather than "not loaded yet" — the reading that would make
+            // this delete every account — and the process that resurrected a root has exited.
+            // It sits in `setup` rather than beside the load, next to the identical scrollback
+            // prune, because tauri-plugin-log is only active here and a sweep that deletes
+            // directories has to leave a record.
+            {
+                let data = app_state.app_data.read();
+                for rt in accounts::ALL_RUNTIMES.iter().copied() {
+                    let keep: Vec<String> = data
+                        .preferences
+                        .managed_accounts
+                        .iter()
+                        .filter(|a| a.runtime == rt.slug())
+                        .map(|a| a.id.clone())
+                        .collect();
+                    match accounts::prune_orphan_roots(rt, &keep) {
+                        Ok(ids) if !ids.is_empty() => log::info!(
+                            "Pruned {} orphan {} account root(s) at startup: {}",
+                            ids.len(),
+                            rt.slug(),
+                            ids.join(", ")
+                        ),
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("Account root prune failed for {}: {}", rt.slug(), e)
+                        }
+                    }
+                }
+            }
 
             // Window title is set dynamically from the frontend (workspace name)
 
