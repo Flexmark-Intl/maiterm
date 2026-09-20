@@ -342,6 +342,32 @@ hand the "private" window a real profile.
 What this does **not** fix, and §5.2 still would: the user must have a supported browser, and a
 magic link (§5.3) clicked in a mail client still escapes to the default browser.
 
+### 5.2.2 The runtime prints a different URL than it opens — do not scrape stdout
+
+> **Verified 2026-09-20, 2.1.278.** One `claude auth login`, two URLs, same `client_id` and
+> `state`:
+>
+> | | `redirect_uri` | Result |
+> |---|---|---|
+> | Handed to the browser | `http://localhost:<port>/callback` | Completes on its own |
+> | Printed on stdout | `https://platform.claude.com/oauth/code/callback` | Renders a code to paste |
+
+Q7's answer is right and is *half* the story: reading it as "the URL contains a localhost
+redirect" and then taking the URL off stdout produces the paste-code branch — which is
+unreachable here, because the child's stdin is `/dev/null`. That shipped, and a private window
+duly arrived at "paste this into Claude Code".
+
+The fix falls out of §5.2.1's shim. The runtime opens the browser by shelling out to `open` /
+`xdg-open`, so the stand-in on the child's `PATH` **receives the real URL as argv**. It records
+it; the poll loop prefers it over anything scraped.
+
+> **So maiTerm decides where a sign-in opens, and the runtime's launcher is shadowed on every
+> path, not only the private ones.** `open_with` is `"default"`, a browser id, or absent to open
+> nothing. Shadowing it is not only about suppressing an unwanted window — it is the only way to
+> observe the URL that works. Stdout scraping remains as the fallback for when no shim can be
+> installed (Windows, filesystem error); that is the behaviour that shipped before any of this,
+> paste-code branch and all.
+
 ### 5.3 The magic-link hole
 
 Claude.ai's email sign-in can deliver a **magic link**, and a link clicked in a mail client
@@ -822,7 +848,7 @@ included.
 |---|---|---|
 | 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes, both sides.** Read side: a fresh dir reports `loggedIn: false` rather than finding the default Keychain item. **Write side proven 09-20** with two real accounts: two roots held two distinct credentials. They *reported* the same identity only because `.claude.json` was shared — see §5.4, which is a different bug. Qualified by §2.1.1: this holds only while `CLAUDE_SECURESTORAGE_CONFIG_DIR` is unset. |
 | 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
-| 7 | How does the browser reach the CLI's ephemeral callback port? | **It is in the URL.** The URL actually handed to the browser carries `redirect_uri=http://localhost:<port>/callback`; only the *printed fallback* uses the hosted `platform.claude.com` callback. So there is no cookie-driven branch to design around, and stdin being null does not break the redirect path — it only makes the paste-code fallback unreachable. Confirmed by a real sign-in completing with stdin null. **This is what makes §5.2.1 possible**: any browser on the machine can finish the flow, so the private window need not be one we own. |
+| 7 | How does the browser reach the CLI's ephemeral callback port? | **It is in the URL.** The URL actually handed to the browser carries `redirect_uri=http://localhost:<port>/callback`; only the *printed fallback* uses the hosted `platform.claude.com` callback. So there is no cookie-driven branch to design around, and stdin being null does not break the redirect path — it only makes the paste-code fallback unreachable. Confirmed by a real sign-in completing with stdin null. **This is what makes §5.2.1 possible**: any browser on the machine can finish the flow, so the private window need not be one we own. **And the two URLs are not interchangeable — see §5.2.2.** |
 
 ## 13. Build order and status
 
