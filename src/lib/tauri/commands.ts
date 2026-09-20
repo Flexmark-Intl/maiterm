@@ -1418,6 +1418,12 @@ export const ACCOUNT_LOGIN_URL_EVENT = 'account-login-url';
 export interface AccountLoginUrl {
   account_id: string;
   url: string;
+  /** Whether maiTerm actually launched a browser for this URL. **False does not mean "failed"** —
+   *  it is also false when the caller asked for no browser (copy-to-clipboard) and when the
+   *  runtime opened its own because no shim could be installed. `open_error` distinguishes a
+   *  failure from a deliberate no-op; the UI must not claim a window opened on either. */
+  opened: boolean;
+  open_error: string | null;
 }
 
 /** A browser on this machine that can be told to open a private window. */

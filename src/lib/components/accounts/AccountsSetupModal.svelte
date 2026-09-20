@@ -99,9 +99,10 @@
         if (e.payload.account_id !== pendingId) return;
         loginUrl = e.payload.url;
         // Only the clipboard is handled here — Rust does the opening, since it is holding the
-        // URL that actually completes. `openedPrivately` reflects what it was asked to do.
+        // URL that actually completes. Report what it DID, not what it was asked to do.
+        openedPrivately = e.payload.opened && onUrl === 'private';
+        if (e.payload.open_error) error = e.payload.open_error;
         if (onUrl === 'copy') void copyLink();
-        else if (onUrl === 'private') openedPrivately = true;
       });
       if (dead) void fn();
       else unlisten = fn;

@@ -228,10 +228,21 @@ fn cancelled(id: &str) -> bool {
 /// what the runtime prints on stdout for the same purpose.
 pub const LOGIN_URL_EVENT: &str = "account-login-url";
 
+/// How long to wait for the shim to be called before falling back to scraping the transcript.
+/// The runtime opens the browser within milliseconds of printing, so this only elapses if a
+/// future version stops shelling out to `open` altogether — in which case a paste-code link is
+/// still better than a dialog waiting forever for one that never comes.
+const SHIM_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Debug, Clone, Serialize)]
 struct LoginUrlEvent {
     account_id: String,
     url: String,
+    /// Whether maiTerm successfully launched a browser for this URL. False when the caller asked
+    /// for none (copy-to-clipboard) **and** when the launch failed — `open_error` distinguishes
+    /// them, and the UI must not claim a window opened on either.
+    opened: bool,
+    open_error: Option<String>,
 }
 
 /// Pull the authorization URL out of a runtime's sign-in output.
@@ -574,6 +585,13 @@ async fn login_into_root(
         // Shared, not per-thread: two drains each holding their own "have I announced?" would
         // both fire if the URL landed on both streams.
         let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // **The drains must not announce while a shim is installed.** The runtime prints its
+        // URL and calls `open` at essentially the same moment, and the drain thread reliably
+        // won that race — latching `announced`, emitting the paste-code URL, and skipping the
+        // poll loop's shim branch, which is the only thing that opens a browser. The symptom was
+        // "Sign in privately does nothing at all". stdout is the fallback for when there is no
+        // shim to prefer, and the poll loop re-enables it if the shim never fires.
+        let scrape_streams = suppressor.is_none();
         let drain = |reader: Option<Box<dyn std::io::Read + Send>>| {
             let Some(mut reader) = reader else { return };
             let sink = transcript.clone();
@@ -588,7 +606,9 @@ async fn login_into_root(
                     }
                     let mut sink = sink.lock();
                     sink.push_str(&String::from_utf8_lossy(&buf[..n]));
-                    if announced.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Always keep filling the transcript — it is what explains a failure — but
+                    // only announce from it when nothing better is coming.
+                    if !scrape_streams || announced.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
                     // Streaming: require the URL to be terminated before announcing it. This
@@ -599,7 +619,14 @@ async fn login_into_root(
                         if !announced.swap(true, std::sync::atomic::Ordering::Relaxed) {
                             let _ = app.emit(
                                 LOGIN_URL_EVENT,
-                                LoginUrlEvent { account_id: id.clone(), url },
+                                // The no-shim fallback: the runtime opened its own browser, so
+                                // maiTerm opened nothing and must not claim otherwise.
+                                LoginUrlEvent {
+                                    account_id: id.clone(),
+                                    url,
+                                    opened: false,
+                                    open_error: None,
+                                },
                             );
                         }
                     }
@@ -618,35 +645,44 @@ async fn login_into_root(
             // it now that the runtime's own launcher is shadowed.
             if let Some(s) = &suppressor {
                 if !announced.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Some(url) =
-                        s.captured().as_deref().and_then(|c| extract_login_url(c, false))
-                    {
+                    // The shim's capture, or — if it has not fired after a grace period — the
+                    // transcript. A runtime that stopped shelling out to `open` would otherwise
+                    // leave the dialog waiting for a link that never arrives, with the URL
+                    // sitting unread in the transcript the whole time. The paste-code branch is
+                    // a poor link; no link is worse.
+                    let captured =
+                        s.captured().as_deref().and_then(|c| extract_login_url(c, false));
+                    let url = captured.or_else(|| {
+                        (start.elapsed() > SHIM_GRACE)
+                            .then(|| extract_login_url(&transcript.lock(), true))
+                            .flatten()
+                    });
+                    if let Some(url) = url {
                         if !announced.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            // Open FIRST, then emit — so the event carries what actually
+                            // happened rather than what was intended. The UI announces "Opened
+                            // in Chrome"; it should not say that when the launch failed, which
+                            // it cannot know unless we tell it. Best effort either way: the
+                            // link and its Copy button stay on screen, so none of this aborts
+                            // the sign-in.
+                            let open_error = match open_with.as_deref() {
+                                Some("default") => accounts::browser::open_default(&url).err(),
+                                Some(id) => accounts::browser::open_private_window(id, &url).err(),
+                                // Copy-to-clipboard: deliberately opens nothing.
+                                None => None,
+                            };
+                            if let Some(e) = &open_error {
+                                log::warn!("accounts: opening the sign-in link: {e}");
+                            }
                             let _ = app.emit(
                                 LOGIN_URL_EVENT,
                                 LoginUrlEvent {
                                     account_id: id_for_task.clone(),
                                     url: url.clone(),
+                                    opened: open_with.is_some() && open_error.is_none(),
+                                    open_error,
                                 },
                             );
-                            // Best effort. A failure here still leaves the link on screen with
-                            // Copy beside it, which is why none of these abort the sign-in.
-                            match open_with.as_deref() {
-                                Some("default") => {
-                                    if let Err(e) = accounts::browser::open_default(&url) {
-                                        log::warn!("accounts: opening default browser: {e}");
-                                    }
-                                }
-                                Some(id) => {
-                                    if let Err(e) =
-                                        accounts::browser::open_private_window(id, &url)
-                                    {
-                                        log::warn!("accounts: opening private window: {e}");
-                                    }
-                                }
-                                // Copy-to-clipboard: deliberately opens nothing.
-                                None => {}
-                            }
                         }
                     }
                 }
