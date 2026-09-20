@@ -60,18 +60,41 @@ pub enum Source {
     HomeRoot,
 }
 
+/// How an entry is shared into an account root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Strategy {
+    /// A symlink back to the user's file. Correct for anything that is purely configuration.
+    Link,
+    /// A REAL per-account file, seeded from the user's copy with `exclude` stripped, then with
+    /// `resync` keys refreshed from the user's copy on every reconcile.
+    ///
+    /// This exists for `~/.claude.json`, which mixes two things that must not travel together:
+    /// `mcpServers` (shared, or a managed tab loses maiTerm's own bridge) and `oauthAccount` +
+    /// `userID` (the record of WHICH ACCOUNT is signed in). Symlinking it shares the identity,
+    /// so the most recent sign-in speaks for every account — verified: two roots holding two
+    /// different credentials both reported the second account's email.
+    MergeJson {
+        /// Keys never copied from the user's file. Identity lives here.
+        exclude: &'static [&'static str],
+        /// Keys refreshed from the user's file on every reconcile, so a server added later
+        /// reaches existing accounts.
+        resync: &'static [&'static str],
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SharedEntry {
     /// Name inside the account root.
     pub name: &'static str,
     pub source: Source,
+    pub strategy: Strategy,
 }
 
 const fn cfg(name: &'static str) -> SharedEntry {
-    SharedEntry { name, source: Source::ConfigDir }
+    SharedEntry { name, source: Source::ConfigDir, strategy: Strategy::Link }
 }
 const fn home(name: &'static str) -> SharedEntry {
-    SharedEntry { name, source: Source::HomeRoot }
+    SharedEntry { name, source: Source::HomeRoot, strategy: Strategy::Link }
 }
 
 pub struct RuntimeProfile {
@@ -114,7 +137,17 @@ static CLAUDE: RuntimeProfile = RuntimeProfile {
     shared: &[
         cfg("settings.json"),
         cfg("settings.local.json"),
-        home(".claude.json"),
+        SharedEntry {
+            name: ".claude.json",
+            source: Source::HomeRoot,
+            // Seeded once so project trust and history carry over, then only mcpServers is kept
+            // in step. oauthAccount and userID are never copied: they say which account is
+            // signed in, and copying them makes every account claim the same one.
+            strategy: Strategy::MergeJson {
+                exclude: &["oauthAccount", "userID"],
+                resync: &["mcpServers"],
+            },
+        },
         cfg("projects"),
         cfg("ide"),
         cfg("commands"),
@@ -278,28 +311,45 @@ pub fn reconcile_at(
             continue;
         }
 
-        let link = root.join(entry.name);
+        let dest = root.join(entry.name);
 
-        // Compare the link target, not the resolved path — resolving would call a correct link
-        // "wrong" whenever the source is itself a symlink, and relink on every pass.
-        match fs::read_link(&link) {
-            Ok(target) if target == source => continue,
-            Ok(_) => {
-                fs::remove_file(&link)
-                    .map_err(|e| format!("removing stale link {}: {e}", link.display()))?;
+        match entry.strategy {
+            Strategy::MergeJson { exclude, resync } => {
+                // A symlink here is drift from an older build and is exactly the bug this
+                // strategy exists to fix — unlink it rather than writing through it to the
+                // user's real file.
+                if fs::read_link(&dest).is_ok() {
+                    fs::remove_file(&dest)
+                        .map_err(|e| format!("unlinking {}: {e}", dest.display()))?;
+                }
+                if merge_json(&source, &dest, exclude, resync)? {
+                    out.linked.push(entry.name.to_string());
+                }
             }
-            Err(_) if link.exists() => {
-                let aside = displaced_name(&link);
-                fs::rename(&link, &aside)
-                    .map_err(|e| format!("displacing {}: {e}", link.display()))?;
-                out.displaced.push(entry.name.to_string());
+            Strategy::Link => {
+                // Compare the link target, not the resolved path — resolving would call a
+                // correct link "wrong" whenever the source is itself a symlink.
+                match fs::read_link(&dest) {
+                    Ok(target) if target == source => continue,
+                    Ok(_) => {
+                        fs::remove_file(&dest)
+                            .map_err(|e| format!("removing stale link {}: {e}", dest.display()))?;
+                    }
+                    Err(_) if dest.exists() => {
+                        let aside = displaced_name(&dest);
+                        fs::rename(&dest, &aside)
+                            .map_err(|e| format!("displacing {}: {e}", dest.display()))?;
+                        out.displaced.push(entry.name.to_string());
+                    }
+                    Err(_) => {}
+                }
+
+                symlink(&source, &dest).map_err(|e| {
+                    format!("linking {} -> {}: {e}", dest.display(), source.display())
+                })?;
+                out.linked.push(entry.name.to_string());
             }
-            Err(_) => {}
         }
-
-        symlink(&source, &link)
-            .map_err(|e| format!("linking {} -> {}: {e}", link.display(), source.display()))?;
-        out.linked.push(entry.name.to_string());
     }
 
     Ok(out)
@@ -427,6 +477,68 @@ pub fn spawn_env(
     ))
 }
 
+/// Seed-once, resync-always for a JSON file that mixes shared configuration with per-account
+/// identity.
+///
+/// On first run the account gets a copy of the user's file with `exclude` stripped, so project
+/// trust and history carry over but nothing says which account is signed in. On every run after
+/// that, only `resync` keys are refreshed, so an MCP server added later reaches existing accounts
+/// without touching anything the account has since written about itself.
+///
+/// Returns whether the destination changed.
+fn merge_json(
+    source: &Path,
+    dest: &Path,
+    exclude: &[&str],
+    resync: &[&str],
+) -> Result<bool, String> {
+    let src_raw = fs::read_to_string(source)
+        .map_err(|e| format!("reading {}: {e}", source.display()))?;
+    let src: serde_json::Value = serde_json::from_str(&src_raw)
+        .map_err(|e| format!("parsing {}: {e}", source.display()))?;
+    let src_obj = src.as_object().ok_or_else(|| format!("{} is not a JSON object", source.display()))?;
+
+    let existing = fs::read_to_string(dest).ok();
+    let mut out = match existing.as_deref().map(serde_json::from_str::<serde_json::Value>) {
+        Some(Ok(serde_json::Value::Object(o))) => o,
+        // Absent, unreadable or not an object: seed from the user's file minus identity.
+        _ => {
+            let mut seeded = src_obj.clone();
+            for k in exclude {
+                seeded.remove(*k);
+            }
+            seeded
+        }
+    };
+
+    for k in resync {
+        match src_obj.get(*k) {
+            Some(v) => {
+                out.insert((*k).to_string(), v.clone());
+            }
+            None => {
+                out.remove(*k);
+            }
+        }
+    }
+    // `exclude` applies ONLY when seeding from the user's file. Re-applying it here would strip
+    // the identity the runtime wrote for THIS account on every reconcile — deleting the very
+    // thing this strategy exists to keep separate. Caught by a test rather than by a user
+    // wondering why their account forgot itself.
+
+    let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(out))
+        .map_err(|e| format!("rendering {}: {e}", dest.display()))?;
+    if existing.as_deref() == Some(rendered.as_str()) {
+        return Ok(false);
+    }
+    // Write through a temp file in the same directory: a half-written config root is worse than
+    // an unchanged one, and the runtime may be reading this file as we go.
+    let tmp = dest.with_extension("maiterm-tmp");
+    fs::write(&tmp, &rendered).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, dest).map_err(|e| format!("replacing {}: {e}", dest.display()))?;
+    Ok(true)
+}
+
 /// A collision-free name to park a displaced real file under, beside where it was.
 fn displaced_name(link: &Path) -> PathBuf {
     let stamp = std::time::SystemTime::now()
@@ -543,11 +655,13 @@ mod tests {
         for e in ["settings.json", ".claude.json", "projects", "ide"] {
             assert!(r.linked.contains(&e.to_string()), "expected {e} linked, got {r:?}");
         }
-        assert_eq!(
-            fs::read_link(root.join(".claude.json")).unwrap(),
-            home.join(".claude.json"),
-            "home-root entry must link to ~/.claude.json, not ~/.claude/.claude.json"
+        // The home-root entry resolves to ~/.claude.json, not ~/.claude/.claude.json. It is a
+        // merged file rather than a link (see the identity tests), so assert on its content.
+        assert!(
+            fs::read_link(root.join(".claude.json")).is_err(),
+            ".claude.json is merged, not linked"
         );
+        assert!(root.join(".claude.json").is_file());
         assert!(r.absent.contains(&"skills".to_string()));
         assert!(r.displaced.is_empty());
 
@@ -595,20 +709,112 @@ mod tests {
         let home = fake_home(&base);
         let root = base.join("account-a");
         fs::create_dir_all(&root).unwrap();
-        // The runtime wrote its own .claude.json here before the farm was built. It may be the
-        // only copy of that state.
-        fs::write(root.join(".claude.json"), "irreplaceable").unwrap();
+        // A real file where a LINKED entry belongs. It may be the only copy of that state, so
+        // the reconciler parks it rather than deleting it. (`.claude.json` takes the merge path
+        // instead and is covered by its own tests.)
+        fs::write(root.join("settings.json"), "irreplaceable").unwrap();
 
         let r = reconcile_at(&CLAUDE, &root, &home).unwrap();
 
-        assert!(r.displaced.contains(&".claude.json".to_string()));
+        assert!(r.displaced.contains(&"settings.json".to_string()));
         let parked: Vec<_> = fs::read_dir(&root)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".claude.json.displaced-"))
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.displaced-"))
             .collect();
         assert_eq!(parked.len(), 1, "the real file must survive, parked aside");
         assert_eq!(fs::read_to_string(parked[0].path()).unwrap(), "irreplaceable");
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn claude_json_is_merged_not_linked_so_accounts_keep_separate_identities() {
+        // The defect this prevents, observed live: with `.claude.json` symlinked, two roots
+        // holding two DIFFERENT credentials both reported the second account's email, because
+        // oauthAccount is stored in that file and the most recent sign-in rewrote it.
+        let base = tmp();
+        let home = fake_home(&base);
+        fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{"maiterm":{"url":"http://x"}},"oauthAccount":{"emailAddress":"a@b.c"},"userID":"u1","projects":{"/p":{"trusted":true}}}"#,
+        )
+        .unwrap();
+        let root = base.join("account-a");
+
+        reconcile_at(&CLAUDE, &root, &home).unwrap();
+
+        let dest = root.join(".claude.json");
+        assert!(fs::read_link(&dest).is_err(), ".claude.json must be a real file, not a link");
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(v.get("mcpServers").is_some(), "MCP servers must be shared in");
+        assert!(v.get("projects").is_some(), "project trust should be seeded");
+        assert!(v.get("oauthAccount").is_none(), "identity must never be copied");
+        assert!(v.get("userID").is_none(), "identity must never be copied");
+        // The user's own file is untouched.
+        let src: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+        assert!(src.get("oauthAccount").is_some());
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn claude_json_resyncs_mcp_but_keeps_the_accounts_own_identity() {
+        let base = tmp();
+        let home = fake_home(&base);
+        fs::write(home.join(".claude.json"), r#"{"mcpServers":{"one":{}}}"#).unwrap();
+        let root = base.join("account-a");
+        reconcile_at(&CLAUDE, &root, &home).unwrap();
+
+        // The runtime signs in and records who this account is.
+        let dest = root.join(".claude.json");
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        v.as_object_mut().unwrap().insert(
+            "oauthAccount".into(),
+            serde_json::json!({"emailAddress": "mine@example.com"}),
+        );
+        fs::write(&dest, serde_json::to_string(&v).unwrap()).unwrap();
+
+        // The user adds a server later; it must reach this account without disturbing identity.
+        fs::write(home.join(".claude.json"), r#"{"mcpServers":{"one":{},"two":{}}}"#).unwrap();
+        reconcile_at(&CLAUDE, &root, &home).unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(after["mcpServers"].as_object().unwrap().len(), 2, "mcpServers must resync");
+        assert_eq!(
+            after["oauthAccount"]["emailAddress"], "mine@example.com",
+            "the account's own identity must survive a reconcile"
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_symlinked_claude_json_from_an_older_build_is_replaced() {
+        // Migration: existing accounts were created with a symlink. Reconcile must unlink it
+        // rather than write through it into the user's real file.
+        let base = tmp();
+        let home = fake_home(&base);
+        fs::write(home.join(".claude.json"), r#"{"mcpServers":{"one":{}},"userID":"u1"}"#).unwrap();
+        let root = base.join("account-a");
+        fs::create_dir_all(&root).unwrap();
+        symlink(&home.join(".claude.json"), &root.join(".claude.json")).unwrap();
+
+        reconcile_at(&CLAUDE, &root, &home).unwrap();
+
+        let dest = root.join(".claude.json");
+        assert!(fs::read_link(&dest).is_err(), "the stale symlink must be replaced");
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&dest).unwrap()).unwrap();
+        assert!(v.get("userID").is_none());
+        // The user's file still has its own identity key — we did not write through the link.
+        let src: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+        assert_eq!(src["userID"], "u1");
 
         fs::remove_dir_all(&base).ok();
     }
