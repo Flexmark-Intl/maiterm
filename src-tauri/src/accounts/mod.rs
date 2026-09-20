@@ -8,8 +8,14 @@
 //! The catch this module exists to handle: those variables relocate the ENTIRE config root. For
 //! Claude Code, a bare account directory loses the `SessionStart` hook that establishes tab
 //! identity, every MCP server including maiTerm's own, transcript discovery for maiLink, and the
-//! user's skills, commands and permissions — all silently. So an account root is a farm of
-//! symlinks back to the real config dir, and only the credential is per-account.
+//! user's skills, commands and permissions — all silently. So an account root is mostly a farm
+//! of symlinks back to the real config dir.
+//!
+//! **Mostly, not entirely.** `~/.claude.json` mixes shared configuration (`mcpServers`) with the
+//! record of which account is signed in (`oauthAccount`, `userID`), so sharing it hands every
+//! account the most recent sign-in's identity — and because the runtime writes *through* a
+//! symlink, it also rewrites the user's own file. It gets `Strategy::MergeJson` instead. Two
+//! real accounts reporting one email is what surfaced this; see `docs/login.md` §5.4.
 //!
 //! **Claude is the only runtime implemented.** Codex and Gemini are declared from what is
 //! observable on disk so the shape is right, but are marked unsupported until the same

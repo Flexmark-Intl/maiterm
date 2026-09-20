@@ -1,6 +1,8 @@
 # maiTerm Login — managed Claude Code identities, local and remote
 
-> Status: **proposed, not built**, 2026-09-19. Owner: Darryl.
+> Status: **partially built**, 2026-09-20 (spec'd 09-19). Owner: Darryl. §13 has what is done.
+> Code: `src-tauri/src/accounts/`, `src-tauri/src/commands/accounts.rs`,
+> `src/lib/components/accounts/`.
 > Scope: maiTerm optionally holds N Claude subscription identities, runs the auth flow
 > itself, serves the right identity to each tab (local and over SSH), monitors expiry
 > across the fleet, and exposes switching to maiLink. Opt-in, off by default, and
@@ -377,17 +379,45 @@ shared configuration and keeps only the credential per-identity.
 
 ### The contract
 
-An identity root is a directory containing **only symlinks** to the user's real `~/.claude`
-entries, plus whatever Claude Code creates for itself. Nothing is copied — a copy would drift.
+An identity root holds symlinks to the user's real `~/.claude` entries, **one merged file**, and
+whatever Claude Code creates for itself. Implemented in `src-tauri/src/accounts/mod.rs`, where
+`SHARED_ENTRIES` carries a `Strategy` per entry.
 
 | Symlinked (shared with `~/.claude`) | Why |
 |---|---|
 | `settings.json`, `settings.local.json` | hooks — **tab identity** — permissions, env, statusLine |
-| `.claude.json` | **every MCP server**, incl. `maiterm`; write-through verified |
 | `projects` | transcripts maiLink tails and mirrors |
 | `ide` | **maiTerm writes `~/.claude/ide/<port>.lock` here.** Easy to miss, and a managed tab that cannot see it loses IDE discovery |
 | `commands`, `skills`, `plugins`, `CLAUDE.md` | the user's own configuration; read-mostly |
 | `statusline-command.sh` | referenced by `settings.json`, so it must resolve |
+
+| Merged, per-identity | Why |
+|---|---|
+| `.claude.json` | **must NOT be a symlink** — see below |
+
+> **`.claude.json` mixes shared config with identity, so it cannot be shared.** It carries
+> `mcpServers` (which a managed tab needs, or it loses maiTerm's own bridge) *and* `oauthAccount`
+> + `userID`, the record of **which account is signed in**. An earlier draft symlinked it for the
+> MCP servers. Caught by testing with two real accounts: both roots reported the **second**
+> account's email while holding two different credentials, because the newer sign-in rewrote the
+> one shared file. That made §5.1's duplicate key and §6.1's verification both read the wrong
+> identity, and — since the runtime writes *through* a symlink — wrote the managed account's
+> identity into the user's own `~/.claude.json`, which no discard can undo.
+>
+> So it is a real per-account file: seeded once from the user's copy minus `oauthAccount` and
+> `userID` (project trust and history carry over), then only `mcpServers` refreshed on each
+> reconcile. Verified live: a per-account file with `mcpServers` gives a connected `maiterm`
+> **and** the correct per-account email.
+>
+> Two consequences that cost real config before they were guarded:
+> - `exclude` applies at **seed time only**. Re-applying it each reconcile deletes the identity
+>   the runtime wrote for that account — the thing the strategy exists to protect.
+> - **Never run a runtime command against a root whose merged entry is still a symlink.** A root
+>   from an earlier build has one, and `auth logout` on the way to deleting it wrote through and
+>   stripped the identity block out of the user's real file. `detach_write_through_links` unlinks
+>   first. Related and useful: an **absent** `oauthAccount` is refetched on the next session; a
+>   **stale** one is not, because its TTL has not expired. That is why one incident self-healed
+>   and the other needed a manual `claude auth login`.
 
 | Real, per-identity | Why |
 |---|---|
@@ -401,20 +431,15 @@ there; the split is only load-bearing on Linux.
 > identity is created, and `~/.claude` gains entries across Claude Code versions. Re-link on
 > every spawn and treat an unexpected real file where a symlink belongs as drift to repair —
 > that is also how the `mv ~/.claude.json.tmp` hazard below gets absorbed if it ever goes live.
+> Drift repair is **non-destructive**: a real file where a symlink belongs is renamed aside, not
+> deleted. It may be the only copy of something, and the reconciler is not entitled to that call.
 
-Still to settle before building:
-- **Write-through: verified on both paths.** The remote-config tab tested the `claude mcp add`
-  path; a live `claude -p` session was then tested here, which exercises the in-session
-  project-state rewrite. Both wrote through. In the live run the symlink survived intact while
-  the real `~/.claude.json` changed mtime, size **and inode** — so Claude Code resolves the
-  symlink and then does temp-file-plus-rename on the *resolved* path, which is why the link is
-  stable where `.credentials.json` is not.
-
-> **Decision: identities share `.claude.json`.** It follows from write-through, and it is what
-> we want — shared MCP servers means maiTerm's own bridge keeps working in every managed tab.
-> Shared project state and history is the status quo anyway: every tab today writes one
-> `~/.claude.json`, so concurrent last-writer-wins is a property of the file, not something the
-> farm introduces.
+Settled while building:
+- **The runtime writes THROUGH a symlink**, on both the `claude mcp add` path and a live `-p`
+  session. The link survives while the target's mtime, size *and inode* change — it resolves the
+  link, then renames onto the resolved path. That is why a symlink is stable where
+  `.credentials.json` is not, and it is exactly why `.claude.json` cannot be one: a write through
+  it lands in the user's real file.
 - **Cross-owner hazard, conditional (§5.5).** maiTerm's own remote setup writes that file as
   `mv ~/.claude.json.tmp ~/.claude.json` — temp-file-plus-rename **replaces** a symlink instead
   of writing through it. Not live today, because that write targets the *remote* home while
@@ -667,16 +692,35 @@ has to *teach* and *authenticate* before it can mean anything.
 6. **Authenticate** — runs the flow for the first identity.
 7. **Save and enable.**
 
-Adding a *second* identity needs no warning and no instructions — §5.2 authenticates in an
-in-app incognito webview, so the session-reuse trap never arises. The warning text belongs
-only to the system-browser fallback path, and the §5.1 duplicate guard runs either way.
+§5.2's in-app incognito webview is **not built**: sign-in currently uses the system browser
+(the §5.2 fallback), so adding a second identity does warn about the session-reuse trap, and
+the §5.1 duplicate guard is what actually catches it.
 
 Refuse setup entirely, with the reason shown, when managed settings are present (§3.4).
+**Not built** — there is no managed-settings detector yet, and a fake check would be worse
+than none.
 
-**Toggle off** stops injection and leaves identities intact — reversible with one click.
-**Clear setup** is the destructive one: `claude auth logout` per identity, purge the vault,
-delete the config dirs, drop to *Not set up*. It confirms inline (`window.confirm()` does
-not work in Tauri webviews) and names what it is about to revoke.
+**Toggle off** stops injection and leaves identities intact — reversible with one click. The
+gate lives in `accounts::spawn_env_for`, not at each call site, so configured-but-disabled
+behaves exactly like not-set-up.
+**Clear setup** is the destructive one: sign out per identity, delete the config dirs, drop to
+*Not set up*. It confirms inline (`window.confirm()` does not work in Tauri webviews).
+
+> **Sign-out is not optional, and belongs in `discard_account_root` rather than in each
+> caller.** Deleting a root does not touch the credential: on macOS it is a Keychain item keyed
+> by a hash of the config-dir path, so removal alone orphans a still-valid credential under a
+> uuid that is never reused — while the confirm text promises the account is gone. Putting it in
+> the shared path also covers the §5.1 duplicate discard, which has a credential of its own
+> because it signed in. Best effort: a sign-out failure still removes the root, since leaving
+> that behind as well would be strictly worse.
+
+> **Apply account changes in ONE write.** Every preferences setter persists the whole object
+> through a sync command that clones all app data, so a four-setter change was four full write
+> cycles over a multi-megabyte file — and observable half-way. The sequence persisted an account
+> row while `accounts_setup_complete` was still false, and an interruption there left the pane
+> showing *Not set up* beside a live root none of its controls could reach, because the list,
+> Remove and Clear setup all live inside the set-up branch. `setAccountsState` applies any
+> combination of the four fields at once.
 
 ## 11. maiLink
 
@@ -696,28 +740,32 @@ included.
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
 | 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs |
-| 7 | How does the browser reach the CLI's *ephemeral* callback port, given the authorization URL carries no port? Polling, localhost probing, or a cookie/session decision? If cookie-driven, does a fresh incognito context get the long-code form instead? | §5.2 — determines which branch fires, **not** whether the design works: build both branches regardless |
-### Resolved 2026-09-19 (2.1.278)
+| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs, and §5.2 is not built yet |
+
+### Resolved 2026-09-19 / 09-20 (2.1.278)
 
 | # | Question | Result |
 |---|---|---|
-| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes**, on the read side — a fresh dir reports `loggedIn: false` rather than finding the default Keychain item (§5). **Write side still unproven**: the first attempt authenticated the *same* account because the browser reused its claude.ai session (§5.1), so both dirs held one identity. Retest needs a private window or a signed-out browser. **Qualified 2026-09-19:** it keys off `CLAUDE_CONFIG_DIR` only while `CLAUDE_SECURESTORAGE_CONFIG_DIR` is unset — that variable overrides the credential directory (and the Keychain service suffix) independently. See §2.1.1. |
+| 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes, both sides.** Read side: a fresh dir reports `loggedIn: false` rather than finding the default Keychain item. **Write side proven 09-20** with two real accounts: two roots held two distinct credentials. They *reported* the same identity only because `.claude.json` was shared — see §5.4, which is a different bug. Qualified by §2.1.1: this holds only while `CLAUDE_SECURESTORAGE_CONFIG_DIR` is unset. |
+| 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
+| 7 | How does the browser reach the CLI's ephemeral callback port? | **It is in the URL.** The URL actually handed to the browser carries `redirect_uri=http://localhost:<port>/callback`; only the *printed fallback* uses the hosted `platform.claude.com` callback. So there is no cookie-driven branch to design around, and stdin being null does not break the redirect path — it only makes the paste-code fallback unreachable. Confirmed by a real sign-in completing with stdin null. |
 | 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
 
-## 13. Build order
+## 13. Build order and status
 
-0. **Prove the directory contract (§5.4) before anything else.** Settle what a managed tab
-   loses and what the symlink farm has to carry. Everything below assumes a managed tab still
-   has its `SessionStart` hook and its transcripts; if that cannot be made solid, §5 does not
-   ship and the feature reduces to §6 plus status.
-1. **Per-tab `CLAUDE_CONFIG_DIR` identities (§5).** Most differentiated, no credential handling
-   at all, and it delivers the core requirement — multiple orgs, side by side. Switching is one
-   environment variable; the cost is the §5.4 directory contract, not the mechanism.
-2. **Status and expiry (§7).** Folds in naturally; the fleet view is the part that exists
-   nowhere else.
-3. **Setup lifecycle and modal (§10).** Required before either of the above ships to
-   users, even though it is built third.
-4. **Remote propagation (§6).** Last, gated on Q1, per-host opt-in, with §8 shown per host.
+0. ✅ **Directory contract (§5.4).** Proven, and corrected twice by testing — `.claude.json` is
+   merged, not linked, and `ide` had to be added to the shared set.
+1. ✅ **Per-tab `CLAUDE_CONFIG_DIR` identities (§5).** `src-tauri/src/accounts/` holds the
+   runtime registry and reconciler; the PTY spawn path applies the active account's root and
+   scrubs every shadowing variable.
+2. ⬜ **Status and expiry (§7).** Not started. `read_account_identity` is the primitive; the
+   fleet view across remote hosts is the part that exists nowhere else.
+3. 🟡 **Setup lifecycle and pane (§10).** Built, with two gaps: §5.2's in-app incognito webview
+   (sign-in uses the system browser) and §3.4's managed-settings refusal (no detector).
+4. ⬜ **Remote propagation (§6).** Not started, still gated on Q1.
+
+**Not yet exercised:** a tab actually launching under an account. The wiring exists but no
+session has run through it.
 
 ## 14. Sources
 
