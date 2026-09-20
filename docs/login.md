@@ -302,6 +302,46 @@ instead of redirecting, maiTerm reads the code out of the DOM and writes it into
 Designing for both branches is cheaper than establishing which one fires, and it is robust to
 Anthropic changing the answer. **Do not build the redirect branch alone.**
 
+### 5.2.1 Built instead: the external private window
+
+§5.2 is still the right end state, but it is not what ships today, and the gap between "the
+system browser returns the account you already have" and "an in-app webview" had a cheap middle
+that Q7's resolution made viable.
+
+Q7 established that the URL handed to the browser carries
+`redirect_uri=http://localhost:<port>/callback`. **Any** browser on this machine can therefore
+complete the flow — including a private window of a browser we did not launch the sign-in from.
+There is no cookie-driven branch and no code to paste.
+
+So:
+
+1. `login_into_root` drains **both** of the child's streams and extracts the authorization URL
+   as it arrives, emitting it on `account-login-url`. Doing it during the wait is the whole
+   point: the previous code only read the transcript on timeout, by which point the link has
+   expired with the attempt it belonged to.
+2. `accounts::browser` holds a table of browsers that accept a private-window switch —
+   `--incognito` for the Chromium family, `-private-window` for Firefox, `--inprivate` for Edge
+   — resolved against macOS bundle paths, `PATH` on Linux, or `%VAR%`-expanded paths on Windows.
+3. The dialog offers **Sign in privately**, which starts the sign-in and opens the link in such
+   a window the moment it appears. The browser tab the runtime opens on its own is ignored;
+   whichever window completes the flow wins, because both reach the same local callback.
+
+> **This is a convenience, never the mechanism.** Safari has no command-line switch for a
+> private window (AppleScript can open one, but not with a URL loading in it, and it trips the
+> Automation permission prompt), and neither do Arc or Orion. An empty browser list is a normal
+> answer on an ordinary Mac, so the link itself and a **Copy** button are always shown during
+> the sign-in — for both buttons, not just the copy one, since someone who clicked plain
+> **Sign in** and only then saw the wrong account in the browser needs it just as much.
+
+The authorization URL is not credential material: it is the *start* of an OAuth flow and whoever
+opens it still has to authenticate. It is the same string the runtime prints on its own output
+for the same purpose. It is still never logged, and `open_private_window` refuses anything that
+is not `https://` — the URL becomes an argv entry, and `--user-data-dir=…` arriving there would
+hand the "private" window a real profile.
+
+What this does **not** fix, and §5.2 still would: the user must have a supported browser, and a
+magic link (§5.3) clicked in a mail client still escapes to the default browser.
+
 ### 5.3 The magic-link hole
 
 Claude.ai's email sign-in can deliver a **magic link**, and a link clicked in a mail client
@@ -692,9 +732,20 @@ has to *teach* and *authenticate* before it can mean anything.
 6. **Authenticate** — runs the flow for the first identity.
 7. **Save and enable.**
 
-§5.2's in-app incognito webview is **not built**: sign-in currently uses the system browser
-(the §5.2 fallback), so adding a second identity does warn about the session-reuse trap, and
-the §5.1 duplicate guard is what actually catches it.
+§5.2's in-app incognito webview is **not built**: sign-in uses the system browser, with §5.2.1's
+external private window as the one-click way past the session-reuse trap and the §5.1 duplicate
+guard as the safety net behind it.
+
+> **The disclosure above belongs to setup, and only to setup.** The dialog has two modes. The
+> seven steps run once, before the feature is on, because that is the only moment the user can
+> still decline. Every later **Add account** drops them: by then they have been read and agreed
+> to, and repeating them buries the one thing that *is* new each time — the browser is still
+> signed in to the account just added, so this sign-in will silently return it (§5.1). The `add`
+> body names the accounts already held and offers the two ways through (§5.2.1). Same principle
+> as the point-of-action rule above, applied to repetition rather than to timing.
+
+The enable control is the app's switch, not a checkbox — it is a state being turned on, not an
+option being selected, and every other toggle in Preferences is a switch.
 
 Refuse setup entirely, with the reason shown, when managed settings are present (§3.4).
 **Not built** — there is no managed-settings detector yet, and a fake check would be worse
@@ -739,8 +790,7 @@ included.
 | 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
-| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs |
-| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs, and §5.2 is not built yet |
+| 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs, and §5.2 is not built yet. §5.2.1 lowers the stakes: an external private window is a real browser, so SSO and passkeys work there today. |
 
 ### Resolved 2026-09-19 / 09-20 (2.1.278)
 
@@ -748,8 +798,7 @@ included.
 |---|---|---|
 | 4 | Does credential lookup key off `CLAUDE_CONFIG_DIR`? | **Yes, both sides.** Read side: a fresh dir reports `loggedIn: false` rather than finding the default Keychain item. **Write side proven 09-20** with two real accounts: two roots held two distinct credentials. They *reported* the same identity only because `.claude.json` was shared — see §5.4, which is a different bug. Qualified by §2.1.1: this holds only while `CLAUDE_SECURESTORAGE_CONFIG_DIR` is unset. |
 | 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
-| 7 | How does the browser reach the CLI's ephemeral callback port? | **It is in the URL.** The URL actually handed to the browser carries `redirect_uri=http://localhost:<port>/callback`; only the *printed fallback* uses the hosted `platform.claude.com` callback. So there is no cookie-driven branch to design around, and stdin being null does not break the redirect path — it only makes the paste-code fallback unreachable. Confirmed by a real sign-in completing with stdin null. |
-| 5 | Does `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` work in a plain SSH shell, and survive repeated invocations? | **Works, but rejected** (§9.2). Verified on macOS and on Linux over SSH. The descriptor is read once: with `exec 3<tok` at shell init the second `claude` silently reports `loggedIn: false`. Gains nothing anyway — `/proc/<pid>/environ` is `0400`, so the env var's only reader is the same user who can read the token file. |
+| 7 | How does the browser reach the CLI's ephemeral callback port? | **It is in the URL.** The URL actually handed to the browser carries `redirect_uri=http://localhost:<port>/callback`; only the *printed fallback* uses the hosted `platform.claude.com` callback. So there is no cookie-driven branch to design around, and stdin being null does not break the redirect path — it only makes the paste-code fallback unreachable. Confirmed by a real sign-in completing with stdin null. **This is what makes §5.2.1 possible**: any browser on the machine can finish the flow, so the private window need not be one we own. |
 
 ## 13. Build order and status
 
@@ -760,8 +809,9 @@ included.
    scrubs every shadowing variable.
 2. ⬜ **Status and expiry (§7).** Not started. `read_account_identity` is the primitive; the
    fleet view across remote hosts is the part that exists nowhere else.
-3. 🟡 **Setup lifecycle and pane (§10).** Built, with two gaps: §5.2's in-app incognito webview
-   (sign-in uses the system browser) and §3.4's managed-settings refusal (no detector).
+3. 🟡 **Setup lifecycle and pane (§10).** Built, including §5.2.1's external private window and
+   copy-link paths. Two gaps remain: §5.2's in-app incognito webview (sign-in still uses the
+   system browser) and §3.4's managed-settings refusal (no detector).
 4. ⬜ **Remote propagation (§6).** Not started, still gated on Q1.
 
 **Not yet exercised:** a tab actually launching under an account. The wiring exists but no
