@@ -443,6 +443,31 @@ shared configuration and keeps only the credential per-identity.
 > real directory where maiLink already looks. With `.claude.json` symlinked, all five MCP
 > servers came back — `maiterm` connected — and the symlink survived the run intact.
 
+> **The shared set is not static, so reconciling is not a one-off.** maiTerm's own entry in
+> `~/.claude.json` is an **ephemeral port and a per-launch auth token**, rewritten at every start
+> and re-asserted on a 30s timer when the `claude` CLI clobbers it. A root seeded at account
+> creation therefore dials a dead port from the next launch onward — observed 2026-09-20, two
+> roots on ports 31271 and 17680 against a live 57173, so every managed tab reported the maiTerm
+> MCP server as failed while an unmanaged tab worked. `MergeJson`'s `resync` list existed for
+> exactly this and was simply never re-run. `accounts::resync_roots` now re-reconciles every root
+> on disk from both places that write the entry. The trigger is *the config changed*, not *a tab
+> started*, so it costs nothing per spawn. Hooks need none of this: `settings.json` is a symlink
+> and follows on its own.
+>
+> Two constraints on that merge, both learned the hard way:
+> - **A destination that exists but does not parse must be refused, not reseeded.** Seeding means
+>   "copy the user's file minus identity", which for an existing account discards its own
+>   `oauthAccount` and project state — the very failure this strategy exists to prevent, with no
+>   displaced copy to recover from. A partial read of a concurrent write by the co-owning
+>   `claude` process looks identical to corruption, so it is transient far more often than
+>   terminal: refuse and let the next reconcile try again. Absent still seeds; that is creation.
+> - **It runs off the async executor.** One caller is a tokio timer, and this is N × (~200KB read
+>   + parse + render + write).
+>
+> Still open: nothing drift-checks a root's *own* copy, so a managed session that clobbers its
+> own `mcpServers` stays on a dead port until the next app start or the next unrelated drift of
+> the user's file.
+
 ### The contract
 
 An identity root holds symlinks to the user's real `~/.claude` entries, **one merged file**, and
@@ -815,6 +840,45 @@ behaves exactly like not-set-up.
 > > that a backup can be recovered and a config root cannot. **Anything that deletes user data
 > > because a collection came back empty must ask this first.**
 
+> **Switching, and turning the feature on or off, reach NEW tabs only — and the pane has to
+> offer the remedy, not just state the constraint.** The account is an environment variable
+> handed to the shell at exec; nothing can rewrite a running process's environment, and an agent
+> already running holds its credential in memory besides. Every other switch in Preferences
+> applies immediately, so the one that cannot is exactly the one that must explain itself. A
+> notice under the account list was too quiet, and it answered the wrong question — "tabs already
+> open keep their account" invites "so how do I move them?". `AccountSwitchModal` says it and
+> then lists each window with its workspaces and their live-tab counts, offering a reload per
+> window or per workspace, with Close as a first-class outcome. Shared by the switch and the
+> toggle, because they are the same situation.
+>
+> > **Reloading tabs en masse is sharper than it looks**, and three defects came out of it:
+> > 1. **Serializing the loop is not enough — the handler must be serialized too.** `listen` does
+> >    not await its callback, so two requests to one window ran concurrent loops. `reorder_tabs`
+> >    drops any tab id missing from the list it is given, and a second loop's stale list omits
+> >    the first's fresh duplicate, so tabs are destroyed. Requests chain onto the previous
+> >    promise; the buttons disable while anything is pending.
+> > 2. **A replacement tab in a background workspace never mounts.** `TerminalPane` renders only
+> >    for the active workspace's tabs, so "Reload all" stops agents elsewhere in the window and
+> >    they stay stopped until that workspace is opened. Disclosed rather than prevented — the
+> >    tab does come back correctly when visited.
+> > 3. **`reloadTab` followed the replacement unconditionally**, which was invisible while every
+> >    caller passed the already-active tab. This is the first caller that reloads background
+> >    tabs, and it left each pane on whichever live tab came last in the strip.
+>
+> **Removing the active account must promote a replacement.** Clearing the pointer alone is
+> correct bookkeeping and a silent no-op: "active account" then resolves to nothing, new tabs
+> quietly use the normal login, and the toggle still claims otherwise. Worst with the feature
+> switched off, where nothing surfaces it until it is switched back on and appears broken. The
+> first remaining account of that runtime is promoted in the same write, and a runtime left with
+> none carries a warning rather than implying one is in force.
+
+> **Destroy AFTER persisting, never before.** `removeAccount` and "Clear setup" used to discard
+> the root first. `save()` can be refused — the two-instance conflict guard aborts rather than
+> clobber a newer state file — and `setAccountsState` rolls back, so the row returned while its
+> root and credential were gone; every new tab would then be handed a `CLAUDE_CONFIG_DIR`
+> pointing nowhere and the runtime would recreate it bare. The other order fails safely: a
+> leaked root, which the startup prune collects.
+
 > **Apply account changes in ONE write.** Every preferences setter persists the whole object
 > through a sync command that clones all app data, so a four-setter change was four full write
 > cycles over a multi-megabyte file — and observable half-way. The sequence persisted an account
@@ -860,12 +924,21 @@ included.
 2. ⬜ **Status and expiry (§7).** Not started. `read_account_identity` is the primitive; the
    fleet view across remote hosts is the part that exists nowhere else.
 3. 🟡 **Setup lifecycle and pane (§10).** Built, including §5.2.1's external private window and
-   copy-link paths. Two gaps remain: §5.2's in-app incognito webview (sign-in still uses the
-   system browser) and §3.4's managed-settings refusal (no detector).
+   copy-link paths, the post-change reload offer, and the orphan-root sweep. Two gaps remain:
+   §5.2's in-app incognito webview (sign-in still uses the system browser) and §3.4's
+   managed-settings refusal (no detector).
 4. ⬜ **Remote propagation (§6).** Not started, still gated on Q1.
 
-**Not yet exercised:** a tab actually launching under an account. The wiring exists but no
-session has run through it.
+**Verified end to end with two real accounts, 2026-09-20.** Two orgs side by side in one window;
+distinct account *and* org UUIDs on disk; each root resolving its own identity through the
+runtime; `~/.claude.json` untouched; hooks and MCP intact in a managed tab; switch + reload
+landing the same workspace on the new account with tools still connected; toggle off falling back
+to the unmanaged login; removal and "Clear setup" leaving no roots and — confirmed in Keychain —
+no orphaned credentials. The startup sweep collected a root a session had resurrected after its
+account was removed.
+
+**Not verified:** anything on a second machine, any runtime but Claude, and whether a `setup-token`
+survives `auth logout` (Q1, which gates §6).
 
 ## 14. Sources
 

@@ -17,6 +17,13 @@
 //! symlink, it also rewrites the user's own file. It gets `Strategy::MergeJson` instead. Two
 //! real accounts reporting one email is what surfaced this; see `docs/login.md` §5.4.
 //!
+//! **The shared set is not static, so reconciling is not a one-off.** maiTerm's own MCP entry in
+//! `~/.claude.json` is an ephemeral port and a per-launch token, rewritten every start. A root
+//! seeded at account creation dials a dead port from the next launch on, and every managed tab
+//! reports the maiTerm server as failed while an unmanaged one works. `resync_roots` re-runs the
+//! merge wherever that entry is written; `Strategy::MergeJson`'s `resync` list is what it
+//! refreshes. Hooks are unaffected — `settings.json` is a symlink, so it follows on its own.
+//!
 //! **Claude is the only runtime implemented.** Codex and Gemini are declared from what is
 //! observable on disk so the shape is right, but are marked unsupported until the same
 //! verification Claude got (§5.4) has been done for them — see `RuntimeProfile::supported`.
