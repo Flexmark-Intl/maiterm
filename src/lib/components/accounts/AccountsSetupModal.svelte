@@ -1,27 +1,42 @@
 <script lang="ts">
-  /** First-run setup for managed accounts (docs/login.md §10).
+  /** Sign-in dialog for managed accounts (docs/login.md §10).
    *
-   *  This is a modal rather than a toggle because turning the feature on the first time has to
-   *  TEACH and AUTHENTICATE before it can mean anything — §10's four states exist for that
-   *  reason. The disclosure is not boilerplate: §8's losses are real and a user who would rather
-   *  keep Remote Control should be able to decline here, before anything is created.
+   *  **Two modes, because they answer different questions.** `setup` runs once, before the
+   *  feature is enabled, and has to TEACH before it authenticates — §8's losses are real and a
+   *  user who would rather keep Remote Control should be able to decline before anything is
+   *  created. `add` runs every time after that, when all of that has already been read and
+   *  agreed to; repeating it there is noise that hides the one thing that IS new each time —
+   *  the browser is already signed in to the account you just added, so a second sign-in
+   *  silently returns the first one (§5.1).
    *
    *  Follows ServiceModal — same backdrop/panel/btn vocabulary, same explicit rAF focus
    *  (Svelte's `autofocus` is not focus; it no-ops when a keyboard opened the dialog). */
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
-  import type { AccountRuntimeInfo, NewAccount } from '$lib/tauri/commands';
+  import type {
+    AccountRuntimeInfo,
+    NewAccount,
+    AccountLoginUrl,
+    PrivateBrowserInfo,
+  } from '$lib/tauri/commands';
 
   interface Props {
     runtimes: AccountRuntimeInfo[];
+    /** `setup` the first time — full disclosure, and finishing turns the feature on. `add`
+     *  afterwards: the disclosure has been read, so this is about the browser session. */
+    mode: 'setup' | 'add';
+    /** Labels of the accounts already held, for the §5.1 warning. Empty in `setup`. */
+    existing?: string[];
     /** Called with the account the sign-in produced. The parent owns the duplicate check and
      *  persistence — it is the side that knows the existing account list (§5.1). */
     oncomplete: (account: NewAccount, runtime: string) => Promise<void>;
     oncancel: () => void;
   }
 
-  let { runtimes, oncomplete, oncancel }: Props = $props();
+  let { runtimes, mode, existing = [], oncomplete, oncancel }: Props = $props();
 
   let phase = $state<'explain' | 'signing-in' | 'saving'>('explain');
   let error = $state<string | null>(null);
@@ -41,6 +56,81 @@
   /** The id of the sign-in in flight. Minted here rather than in Rust so Cancel has something
    *  to name while `beginAccountLogin` is still outstanding. */
   let pendingId = $state<string | null>(null);
+  /** The authorization URL, once the runtime prints it. Not credential material — it is the
+   *  START of an OAuth flow, and whoever opens it still has to authenticate. */
+  let loginUrl = $state<string | null>(null);
+  /** What to do with the URL the moment it exists, rather than making the user click again
+   *  after the default browser has already stolen focus. Chosen by which button started the
+   *  sign-in; `none` is the plain path, which still gets the link box to act on by hand. */
+  let onUrl = $state<'none' | 'copy' | 'private'>('none');
+  let copied = $state(false);
+  let openedPrivately = $state(false);
+
+  /** Browsers that can be told to open a private window. **Empty is a normal answer** — Safari
+   *  has no such switch — so nothing here may be the only way through; the link and its Copy
+   *  button are always offered. */
+  let browsers = $state<PrivateBrowserInfo[]>([]);
+  let browserId = $state<string | null>(null);
+  const browser = $derived(browsers.find(b => b.id === browserId) ?? browsers[0] ?? null);
+
+  $effect(() => {
+    void (async () => {
+      try {
+        browsers = await commands.listPrivateBrowsers();
+        browserId ??= browsers[0]?.id ?? null;
+      } catch (e) {
+        // Not an error the user needs: it only costs them the shortcut, and the link is still
+        // right there. Surfacing it would put a red box on a dialog that works fine.
+        console.warn('listing private browsers failed', e);
+      }
+    })();
+  });
+
+  // One listener for the whole modal, not one per attempt: a listener registered inside signIn()
+  // would have to be torn down on every exit path, and the one that matters (an error thrown
+  // between registering and awaiting) is the easiest to miss.
+  $effect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let dead = false;
+    void (async () => {
+      const fn = await listen<AccountLoginUrl>(commands.ACCOUNT_LOGIN_URL_EVENT, e => {
+        // Scoped to OUR attempt. The event broadcasts to every window, and a second preferences
+        // window running its own sign-in would otherwise overwrite this one's link.
+        if (e.payload.account_id !== pendingId) return;
+        loginUrl = e.payload.url;
+        if (onUrl === 'copy') void copyLink();
+        else if (onUrl === 'private') void openPrivately();
+      });
+      if (dead) void fn();
+      else unlisten = fn;
+    })();
+    return () => {
+      dead = true;
+      void unlisten?.();
+    };
+  });
+
+  async function copyLink() {
+    if (!loginUrl) return;
+    try {
+      await clipboardWriteText(loginUrl);
+      copied = true;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function openPrivately() {
+    if (!loginUrl || !browser) return;
+    try {
+      await commands.openPrivateWindow(browser.id, loginUrl);
+      openedPrivately = true;
+    } catch (e) {
+      // Report it, but the sign-in is still running and the link is still on screen — this is a
+      // shortcut that failed, not the attempt.
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   async function cancelSignIn() {
     if (!pendingId) return;
@@ -51,8 +141,12 @@
     }
   }
 
-  async function signIn() {
+  async function signIn(then: 'none' | 'copy' | 'private') {
     error = null;
+    loginUrl = null;
+    copied = false;
+    openedPrivately = false;
+    onUrl = then;
     phase = 'signing-in';
     const id = crypto.randomUUID();
     pendingId = id;
@@ -71,6 +165,7 @@
       phase = 'explain';
     } finally {
       pendingId = null;
+      onUrl = 'none';
     }
   }
 
@@ -113,61 +208,97 @@
   onkeydown={handleKeydown}
   role="dialog"
   aria-modal="true"
-  aria-label="Set up managed accounts"
+  aria-label={mode === 'setup' ? 'Set up managed accounts' : 'Add an account'}
   tabindex="-1"
 >
   <div class="panel" bind:this={panelEl} tabindex="-1">
     <div class="header">
-      <div class="title">Set up managed accounts</div>
+      <div class="title">{mode === 'setup' ? 'Set up managed accounts' : 'Add an account'}</div>
       <div class="subtitle">
-        maiTerm holds your agent logins, switches between them per tab, and keeps track of
-        when they expire.
+        {#if mode === 'setup'}
+          maiTerm holds your agent logins, switches between them per tab, and keeps track of
+          when they expire.
+        {:else}
+          Sign in to another account. It joins the list and can be made active per runtime.
+        {/if}
       </div>
     </div>
 
     <div class="body">
-      <section>
-        <h4>What this does</h4>
-        <p>
-          Each account gets its own config directory. A tab launched under an account uses that
-          account's login, so two orgs can run side by side in different tabs at the same time.
-        </p>
-      </section>
+      {#if mode === 'setup'}
+        <section>
+          <h4>What this does</h4>
+          <p>
+            Each account gets its own config directory. A tab launched under an account uses that
+            account's login, so two orgs can run side by side in different tabs at the same time.
+          </p>
+        </section>
 
-      <section>
-        <h4>What it does not do</h4>
-        <p>
-          maiTerm never reads, writes or parses your login, and never touches the runtime's
-          Keychain item. It owns the <em>directory</em>; the runtime owns the credential inside
-          it and does its own sign-in, refresh and sign-out.
-        </p>
-      </section>
+        <section>
+          <h4>What it does not do</h4>
+          <p>
+            maiTerm never reads, writes or parses your login, and never touches the runtime's
+            Keychain item. It owns the <em>directory</em>; the runtime owns the credential inside
+            it and does its own sign-in, refresh and sign-out.
+          </p>
+        </section>
 
-      <section>
-        <h4>What it costs</h4>
-        <p>
-          Nothing, on this machine. Your hooks, skills, commands, permissions and MCP servers
-          are shared into every account, so a managed tab behaves exactly like an unmanaged one
-          and signs in the same way.
-        </p>
-      </section>
+        <section>
+          <h4>What it costs</h4>
+          <p>
+            Nothing, on this machine. Your hooks, skills, commands, permissions and MCP servers
+            are shared into every account, so a managed tab behaves exactly like an unmanaged one
+            and signs in the same way.
+          </p>
+        </section>
 
-      <section>
-        <h4>Where credentials live</h4>
-        <p>
-          Anything maiTerm holds goes in your OS keychain under maiTerm's own entry — never in
-          <code>aiterm-state.json</code>, and never reachable by an agent over MCP.
-        </p>
-      </section>
+        <section>
+          <h4>Where credentials live</h4>
+          <p>
+            Anything maiTerm holds goes in your OS keychain under maiTerm's own entry — never in
+            <code>aiterm-state.json</code>, and never reachable by an agent over MCP.
+          </p>
+        </section>
 
-      <section>
-        <h4>This machine only</h4>
-        <p>
-          Accounts apply to tabs on this computer. Signing SSH hosts in is not built yet; when
-          it is, it will be opt-in per host and explained there, because it carries a tradeoff
-          this does not.
-        </p>
-      </section>
+        <section>
+          <h4>This machine only</h4>
+          <p>
+            Accounts apply to tabs on this computer. Signing SSH hosts in is not built yet; when
+            it is, it will be opt-in per host and explained there, because it carries a tradeoff
+            this does not.
+          </p>
+        </section>
+      {:else}
+        <section>
+          <h4>Your browser is already signed in</h4>
+          <p>
+            {#if existing.length}
+              You already hold <strong>{existing.join(', ')}</strong>, and your browser is very
+              likely still signed in there.
+            {/if}
+            The provider reuses that session, so a second sign-in usually returns the same account
+            without asking — maiTerm will spot the duplicate and refuse it rather than adding
+            a row that is a copy of one you have.
+          </p>
+          <p>Two ways through:</p>
+          <ul>
+            {#if browser}
+              <li>
+                <strong>Sign in privately</strong> below opens the link in a new private
+                {browser.label} window, which has no session to reuse. The browser tab that opens
+                on its own can be ignored.
+              </li>
+            {:else}
+              <li>
+                <strong>Sign in and copy link</strong> below puts the sign-in link on your
+                clipboard; paste it into a private/incognito window, which has no session to
+                reuse. The browser tab that opens on its own can be ignored.
+              </li>
+            {/if}
+            <li>Or sign out of the provider in your browser first, then sign in here.</li>
+          </ul>
+        </section>
+      {/if}
 
       <section>
         <h4>Sign in</h4>
@@ -188,12 +319,57 @@
             Not yet available: {unsupported.map(r => r.label).join(', ')}.
           </p>
         {/if}
-        <p class="hint">
-          Your browser will open. If you are already signed in to a different account there,
-          sign out first or use a private window — otherwise it will return the account you
-          already have, and maiTerm will tell you so rather than adding a duplicate.
-        </p>
+        {#if browsers.length > 1}
+          <label class="field">
+            <span class="label">Private window</span>
+            <select bind:value={browserId} disabled={busy}>
+              {#each browsers as b (b.id)}
+                <option value={b.id}>{b.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+        {#if mode === 'setup'}
+          <p class="hint">
+            Your browser will open. If you are already signed in to a different account there,
+            sign out first or use a private window — otherwise it will return the account you
+            already have, and maiTerm will tell you so rather than adding a duplicate.
+          </p>
+        {/if}
       </section>
+
+      {#if phase === 'signing-in'}
+        <!-- Shown for BOTH buttons, not just the copy one: someone who clicked plain "Sign in"
+             and only then noticed the wrong account in the browser needs the link too, and the
+             link is dead once this attempt times out. -->
+        <section class="link-box">
+          {#if loginUrl}
+            <h4>
+              {#if openedPrivately}Opened in {browser?.label ?? 'a private window'}
+              {:else if copied}Link copied
+              {:else}Sign-in link{/if}
+            </h4>
+            <p class="hint">
+              {#if openedPrivately}
+                Finish signing in there. If that window was not private, close it and use Copy.
+              {:else if copied}
+                Paste it into a private/incognito window to finish as a different account.
+              {:else}
+                Open this in a private/incognito window to sign in as a different account.
+              {/if}
+            </p>
+            <div class="link-row">
+              <code class="url">{loginUrl}</code>
+              {#if browser}
+                <Button variant="secondary" onclick={openPrivately}>Open in {browser.label}</Button>
+              {/if}
+              <Button variant="ghost" onclick={copyLink}>{copied ? 'Copy again' : 'Copy'}</Button>
+            </div>
+          {:else}
+            <p class="hint">Waiting for the runtime to produce a sign-in link…</p>
+          {/if}
+        </section>
+      {/if}
 
       {#if error}
         <p class="error">{error}</p>
@@ -207,11 +383,28 @@
         <Button variant="ghost" onclick={cancelSignIn}>Cancel sign-in</Button>
       {:else}
         <Button variant="ghost" onclick={oncancel} disabled={busy}>Cancel</Button>
+        <!-- The second-account path, one click. Which one it is depends on what this machine
+             can actually do: a private window when a browser supports being told to open one,
+             the clipboard otherwise. Both end up in the same place. -->
+        {#if browser}
+          <Button
+            variant="secondary"
+            onclick={() => signIn('private')}
+            disabled={busy || supported.length === 0}
+          >Sign in privately</Button>
+        {:else}
+          <Button
+            variant="secondary"
+            onclick={() => signIn('copy')}
+            disabled={busy || supported.length === 0}
+          >Sign in and copy link</Button>
+        {/if}
       {/if}
-      <Button variant="primary" onclick={signIn} disabled={busy || supported.length === 0}>
+      <Button variant="primary" onclick={() => signIn('none')} disabled={busy || supported.length === 0}>
         {#if phase === 'signing-in'}Waiting for browser…
         {:else if phase === 'saving'}Saving…
-        {:else}Sign in and enable{/if}
+        {:else if mode === 'setup'}Sign in and enable
+        {:else}Sign in{/if}
       </Button>
     </div>
   </div>
@@ -285,6 +478,17 @@
     margin-bottom: 0;
   }
 
+  ul {
+    color: var(--fg-dim);
+    display: flex;
+    flex-direction: column;
+    font-size: 0.8rem;
+    gap: 5px;
+    line-height: 1.5;
+    margin: 0;
+    padding-left: 18px;
+  }
+
   .hint {
     font-size: 0.75rem;
   }
@@ -300,6 +504,35 @@
     background: var(--bg-dark);
     border-radius: 3px;
     padding: 1px 4px;
+  }
+
+  .link-box {
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light);
+    border-radius: 6px;
+    padding: 10px;
+  }
+
+  .link-row {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .url {
+    color: var(--fg-dim);
+    /* The panel is 520px and these URLs run to several hundred characters — clamped to two
+       lines rather than allowed to push the footer off the bottom of the dialog. */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    flex: 1;
+    font-size: 0.7rem;
+    min-width: 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
 
   .field {

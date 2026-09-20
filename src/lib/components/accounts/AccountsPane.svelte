@@ -211,15 +211,9 @@
       <Button variant="primary" onclick={() => (showSetup = true)}>Set up…</Button>
     </div>
   {:else}
-    <label class="toggle">
-      <input
-        type="checkbox"
-        checked={enabled}
-        disabled={busy}
-        onchange={e => preferencesStore.setAccountsEnabled(e.currentTarget.checked)}
-      />
-      <span>
-        <strong>Manage agent logins</strong>
+    <div class="setting">
+      <div class="setting-text">
+        <span class="setting-label" id="accounts-enabled-label">Manage agent logins</span>
         <span class="sub">
           {#if enabled}
             New tabs launch under the active account for their runtime.
@@ -227,8 +221,18 @@
             Accounts are kept, but nothing is applied — new tabs use your normal login.
           {/if}
         </span>
-      </span>
-    </label>
+      </div>
+      <button
+        class="toggle"
+        class:active={enabled}
+        disabled={busy}
+        onclick={() => preferencesStore.setAccountsEnabled(!enabled)}
+        aria-pressed={enabled}
+        aria-labelledby="accounts-enabled-label"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
 
     {#each grouped as group (group.slug)}
       <div class="group">
@@ -304,6 +308,8 @@
 {#if showSetup}
   <AccountsSetupModal
     {runtimes}
+    mode={setupComplete ? 'add' : 'setup'}
+    existing={accounts.map(a => a.label)}
     oncomplete={async (account, runtime) => {
       // Persist BEFORE unmounting the modal: closing first destroys the component that owns the
       // in-flight promise, so anything that went wrong afterwards had nowhere to be reported.
@@ -353,27 +359,61 @@
     margin: 0;
   }
 
-  .toggle {
+  .setting {
     align-items: flex-start;
-    cursor: pointer;
     display: flex;
-    gap: 8px;
+    gap: 12px;
+    justify-content: space-between;
   }
 
-  .toggle input {
-    accent-color: var(--accent);
-    margin-top: 2px;
-  }
-
-  .toggle span {
+  .setting-text {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
   }
 
-  .toggle strong {
+  .setting-label {
     color: var(--fg);
     font-size: 0.85rem;
+  }
+
+  /* The app-standard switch — same geometry as every other toggle in Preferences. Scoped
+     styles mean it has to be restated here rather than inherited from the page. */
+  .toggle {
+    background: var(--bg-light);
+    border: none;
+    border-radius: 11px;
+    cursor: pointer;
+    flex: none;
+    height: 22px;
+    position: relative;
+    transition: background-color 0.2s;
+    width: 40px;
+  }
+
+  .toggle.active {
+    background: var(--accent);
+  }
+
+  .toggle:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .toggle-knob {
+    background: white;
+    border-radius: 50%;
+    height: 18px;
+    left: 2px;
+    position: absolute;
+    top: 2px;
+    transition: transform 0.2s;
+    width: 18px;
+  }
+
+  .toggle.active .toggle-knob {
+    transform: translateX(18px);
   }
 
   .sub {
