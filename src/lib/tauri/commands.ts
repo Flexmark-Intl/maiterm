@@ -1364,3 +1364,26 @@ export async function readAccountIdentity(runtime: string, accountId: string): P
 export async function accountSpawnEnv(runtime: string, accountId: string): Promise<AccountSpawnEnv> {
   return invoke('account_spawn_env', { runtime, accountId });
 }
+
+/** The result of an add-account attempt. If the caller rejects the account — a §5.1 duplicate,
+ *  or the user changed their mind — it MUST call `discardAccountRoot`, or the directory leaks. */
+export interface NewAccount {
+  account_id: string;
+  identity: AccountIdentity;
+}
+
+/** Run a runtime's interactive sign-in against a fresh account root.
+ *
+ *  This is the §5.2 *fallback* path: the runtime opens the default browser, which may already
+ *  hold a session and silently return the account you already have. That is not prevented here —
+ *  the §5.1 duplicate check on `identity` is what catches it. The in-app incognito webview that
+ *  avoids the problem is a later upgrade to this same command. */
+export async function beginAccountLogin(runtime: string, timeoutSecs?: number): Promise<NewAccount> {
+  return invoke('begin_account_login', { runtime, timeoutSecs: timeoutSecs ?? null });
+}
+
+/** Delete an account's config root — duplicate, cancelled sign-in, or "Clear setup".
+ *  Unlinks symlinks without following them; the root points at the user's real transcripts. */
+export async function discardAccountRoot(runtime: string, accountId: string): Promise<void> {
+  return invoke('discard_account_root', { runtime, accountId });
+}

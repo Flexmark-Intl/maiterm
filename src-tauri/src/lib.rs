@@ -668,6 +668,8 @@ pub fn run() {
             commands::accounts::reconcile_account,
             commands::accounts::read_account_identity,
             commands::accounts::account_spawn_env,
+            commands::accounts::begin_account_login,
+            commands::accounts::discard_account_root,
             commands::workspace::set_tab_mailink_native,
             commands::workspace::set_tab_mailink_excluded,
             commands::workspace::clear_tab_comms_binding,

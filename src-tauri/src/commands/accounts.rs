@@ -192,6 +192,118 @@ pub async fn read_account_identity(
     })
 }
 
+/// The result of an add-account attempt. The caller decides what to do with it: the duplicate
+/// check is §5.1's and belongs where the existing account list lives.
+#[derive(Debug, Clone, Serialize)]
+pub struct NewAccount {
+    /// The root exists on disk under this id. If the caller rejects the account — duplicate,
+    /// or the user cancelled — it must call `discard_account_root`, or the directory leaks.
+    pub account_id: String,
+    pub identity: AccountIdentity,
+}
+
+/// Run a runtime's interactive sign-in against a fresh account root.
+///
+/// The root is created and reconciled first, so the runtime's own login writes into a directory
+/// that already has the hook and MCP farm (§5.4) rather than a bare one.
+///
+/// This is §5.2's **fallback** path: the runtime opens the user's default browser, which may
+/// already hold a session and silently return the account they already have. That is expected,
+/// not prevented here — the §5.1 duplicate check on the returned identity is what catches it.
+/// The in-app incognito webview that avoids it is a later upgrade to this same command.
+#[tauri::command]
+pub async fn begin_account_login(
+    runtime: String,
+    timeout_secs: Option<u64>,
+) -> Result<NewAccount, String> {
+    let rt = runtime_from_slug(&runtime)?;
+    let profile = rt.profile();
+    if !profile.supported {
+        return Err(format!("{} accounts are not supported yet", profile.label));
+    }
+    if rt != Runtime::Claude {
+        return Err(format!("{} sign-in is not implemented yet", profile.label));
+    }
+
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let home = home_dir()?;
+    let id_for_reconcile = account_id.clone();
+    tauri::async_runtime::spawn_blocking(move || accounts::reconcile(rt, &id_for_reconcile, &home))
+        .await
+        .map_err(|e| format!("reconcile task failed: {e}"))??;
+
+    let root = accounts::account_root(rt, &account_id)
+        .ok_or_else(|| "no data directory available".to_string())?;
+    let config_env = profile.config_env.to_string();
+    let scrub: Vec<String> = profile.shadowing_env.iter().map(|s| s.to_string()).collect();
+    let cli = accounts::resolve_cli(profile)
+        .ok_or_else(|| format!("could not find the `{}` command", profile.cli))?;
+    // Long enough for a real person to find the browser window and authenticate; short enough
+    // that a flow which never completes releases the process instead of leaking it forever.
+    let deadline = std::time::Duration::from_secs(timeout_secs.unwrap_or(300).clamp(30, 900));
+
+    let login = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut cmd = Command::new(&cli);
+        cmd.args(["auth", "login"]);
+        cmd.env(&config_env, &root);
+        for var in &scrub {
+            cmd.env_remove(var);
+        }
+        // No tty to prompt on. The sign-in completes through the runtime's own local callback
+        // server, not the "paste code" fallback, so stdin is genuinely unused.
+        cmd.stdin(std::process::Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| format!("starting sign-in: {e}"))?;
+
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return if status.success() {
+                        Ok(())
+                    } else {
+                        // Not the logged-out case this time: a failed *login* really is an error.
+                        Err(format!("sign-in exited {}", status.code().unwrap_or(-1)))
+                    }
+                }
+                Ok(None) => {
+                    if start.elapsed() > deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err("sign-in timed out".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(e) => return Err(format!("waiting on sign-in: {e}")),
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("sign-in task failed: {e}"))?;
+
+    // On any failure the root is ours and half-built, so do not leave it behind.
+    if let Err(e) = login {
+        let id = account_id.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &id)).await;
+        return Err(e);
+    }
+
+    let identity = read_account_identity(runtime, account_id.clone()).await?;
+    Ok(NewAccount { account_id, identity })
+}
+
+/// Delete an account's config root. Used for a §5.1 duplicate, a cancelled sign-in, and
+/// "Clear setup".
+///
+/// Unlinks symlinks without following them — the root points at the user's real transcripts and
+/// project state, which are not ours to delete.
+#[tauri::command]
+pub async fn discard_account_root(runtime: String, account_id: String) -> Result<(), String> {
+    let rt = runtime_from_slug(&runtime)?;
+    tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &account_id))
+        .await
+        .map_err(|e| format!("discard task failed: {e}"))?
+}
+
 /// The environment a tab spawning under this account needs: variables to set, and variables to
 /// REMOVE. The removals are not optional — see `read_account_identity` for what a leftover
 /// override does.
