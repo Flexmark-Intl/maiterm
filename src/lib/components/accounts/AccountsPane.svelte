@@ -184,6 +184,28 @@
     }
   }
 
+  /** Switch which account new tabs run as.
+   *
+   *  **Says out loud that open tabs do not move**, because "Active" reads as a claim about the
+   *  whole app and every other switch in Preferences takes effect immediately. This one cannot:
+   *  the account is an environment variable handed to the shell when the tab spawns, and a
+   *  process's environment is fixed at exec — nothing can rewrite it from outside afterwards.
+   *  Saying so at the moment of the click is the only place it lands. */
+  async function makeActive(account: ManagedAccount) {
+    busy = true;
+    error = null;
+    try {
+      await preferencesStore.setActiveAccount(account.runtime, account.id);
+      notice =
+        `${account.label} is active. Tabs you open from now on run as this account — ` +
+        `tabs already open keep the one they started with.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   /** What the status dot means, in words. A coloured dot with no legend is a puzzle, and this
    *  one has three states rather than the two its colour suggests. */
   function statusTooltip(isActive: boolean, on: boolean): string {
@@ -279,7 +301,8 @@
         <span class="setting-label" id="accounts-enabled-label">Manage agent logins</span>
         <span class="sub">
           {#if enabled}
-            New tabs launch under the active account for their runtime.
+            Tabs launch under the active account for their runtime. Tabs already open are
+            unaffected — an account is chosen when a tab starts.
           {:else}
             Accounts are kept, but nothing is applied — new tabs use your normal login.
           {/if}
@@ -338,11 +361,11 @@
             </div>
             <div class="row-actions">
               {#if !isActive}
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onclick={() => preferencesStore.setActiveAccount(group.slug, account.id)}
-                >Use</Button>
+                <Tooltip text="Run tabs opened from now on as this account">
+                  <Button variant="ghost" disabled={busy} onclick={() => makeActive(account)}>
+                    Use
+                  </Button>
+                </Tooltip>
               {/if}
               <Tooltip text="Check which identity this account currently resolves to">
                 <Button variant="ghost" disabled={busy} onclick={() => verify(account)}>Verify</Button>
@@ -385,6 +408,12 @@
     <p>
       Each account gets its own config directory. A tab launched under an account uses that
       account's login, so two orgs can run side by side in different tabs at the same time.
+    </p>
+    <p>
+      An account is chosen when a tab <em>starts</em>. Switching the active account changes what
+      new tabs use; tabs already open keep the account they started with, and so does an agent
+      already running in one. To move a tab across, open a new one — or reload it
+      (<code>Cmd+Shift+R</code>), which respawns its shell.
     </p>
 
     <h4>What it does not do</h4>
