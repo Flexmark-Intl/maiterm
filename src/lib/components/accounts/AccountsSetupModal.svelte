@@ -235,11 +235,6 @@
     margin-bottom: 0;
   }
 
-  .warn {
-    border-left: 2px solid var(--accent);
-    padding-left: 8px;
-  }
-
   .hint {
     font-size: 0.75rem;
   }
