@@ -471,6 +471,46 @@ pub fn remove_root(runtime: Runtime, account_id: &str) -> Result<(), String> {
     remove_tree_without_following(&root)
 }
 
+/// Re-reconcile every account root that exists for a runtime, returning how many were visited.
+///
+/// **Why this has to be event-driven rather than done once at account creation.** The shared
+/// entries are not static. `~/.claude.json`'s `mcpServers` carries maiTerm's own MCP server as an
+/// **ephemeral port and a per-launch auth token**, rewritten every time maiTerm starts (and
+/// re-asserted on a timer when the `claude` CLI clobbers it). An account root seeded at creation
+/// then holds a dead port forever: observed 2026-09-20, two roots pointing at ports 31271 and
+/// 17680 while the live server was on 57173, so every managed tab reported the maiTerm MCP server
+/// as failed while an unmanaged one worked.
+///
+/// `Strategy::MergeJson`'s `resync` list exists precisely for this; it was simply never re-run.
+/// Called wherever maiTerm writes that entry, so the roots follow it.
+///
+/// Enumerates the directory rather than the account list: a root that preferences no longer knows
+/// about is exactly the one nothing else will fix, and reconciling it costs a no-op.
+pub fn resync_roots(runtime: Runtime, home: &Path) -> Result<usize, String> {
+    let Some(dir) = accounts_dir().map(|d| d.join(runtime.slug())) else {
+        return Ok(0);
+    };
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut visited = 0usize;
+    for entry in fs::read_dir(&dir).map_err(|e| format!("reading {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        match reconcile(runtime, &id, home) {
+            Ok(_) => visited += 1,
+            // One bad root must not stop the rest from being refreshed.
+            Err(e) => log::warn!("accounts: resyncing root {id}: {e}"),
+        }
+    }
+    Ok(visited)
+}
+
 /// Delete every root under a runtime that no account claims, returning the ids removed.
 ///
 /// **Removing an account does not stop the sessions already running under it.** A `claude`

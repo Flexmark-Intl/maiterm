@@ -210,7 +210,28 @@ fn write_mcp_settings(port: u16, auth: &str) -> Result<(), String> {
     let path = claude_settings_path().ok_or("Could not determine home directory")?;
     put_mcp_entry(&path, expected_mcp_entry(port, auth))?;
     log::info!("Registered {} MCP server in ~/.claude.json (port {})", mcp_server_key(), port);
+    propagate_to_account_roots();
     Ok(())
+}
+
+/// Push a fresh `~/.claude.json` into every managed account root (docs/login.md §5.4).
+///
+/// **Our MCP entry is an ephemeral port and a per-launch token**, so a root seeded when the
+/// account was created dials a dead port from the next launch onward — every managed tab then
+/// reports the maiTerm MCP server as failed while an unmanaged tab works. The roots keep their
+/// own copy of that file rather than a symlink (it also carries their identity), so they only
+/// track it when something pushes. This is that push, and it belongs next to every write of the
+/// entry rather than on the tab-spawn path: the trigger is "the config changed", not "a tab
+/// started", and tabs already open pick it up on their next session.
+///
+/// Cheap when nothing moved: `merge_json` compares the rendered result and skips the write.
+fn propagate_to_account_roots() {
+    let Some(home) = dirs::home_dir() else { return };
+    match crate::accounts::resync_roots(crate::accounts::Runtime::Claude, &home) {
+        Ok(0) => {}
+        Ok(n) => log::debug!("Resynced {n} managed account root(s) after an MCP settings write"),
+        Err(e) => log::warn!("Resyncing managed account roots failed: {e}"),
+    }
 }
 
 /// Re-assert `mcpServers.<key>` in ~/.claude.json *only if it has drifted* from
@@ -243,6 +264,9 @@ pub fn ensure_mcp_settings(port: u16, auth: &str) -> Result<bool, String> {
         mcp_server_key(),
         port
     );
+    // Managed account roots hold their own copy of this file, so a drift repair has to reach
+    // them too — otherwise they keep the port the `claude` CLI just clobbered.
+    propagate_to_account_roots();
     Ok(true)
 }
 
