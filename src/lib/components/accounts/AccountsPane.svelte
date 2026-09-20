@@ -205,8 +205,8 @@
   {#if !setupComplete}
     <div class="empty">
       <p>
-        Not set up. Setup explains what maiTerm does and does not do with your logins, then signs
-        you in once.
+        Not set up. What this does and does not do with your logins is below — setup signs you in
+        once and turns it on.
       </p>
       <Button variant="primary" onclick={() => (showSetup = true)}>Set up…</Button>
     </div>
@@ -303,6 +303,45 @@
 
   {#if error}<p class="error">{error}</p>{/if}
   {#if notice && !error}<p class="notice">{notice}</p>{/if}
+
+  <!-- §10's disclosure. It lives HERE rather than only in the setup modal because a modal is
+       read once, under pressure to get past it, and then is unreachable forever — while the
+       questions it answers ("did I give maiTerm my credentials?") get asked months later. On
+       the pane it is available before setup, so it still teaches before the decision, and
+       afterwards, when it is the only place left to check. -->
+  <section class="disclosure">
+    <h4>What this does</h4>
+    <p>
+      Each account gets its own config directory. A tab launched under an account uses that
+      account's login, so two orgs can run side by side in different tabs at the same time.
+    </p>
+
+    <h4>What it does not do</h4>
+    <p>
+      maiTerm never reads, writes or parses your login, and never touches the runtime's Keychain
+      item. It owns the <em>directory</em>; the runtime owns the credential inside it and does
+      its own sign-in, refresh and sign-out.
+    </p>
+
+    <h4>What it costs</h4>
+    <p>
+      Nothing, on this machine. Your hooks, skills, commands, permissions and MCP servers are
+      shared into every account, so a managed tab behaves exactly like an unmanaged one and signs
+      in the same way.
+    </p>
+
+    <h4>Where credentials live</h4>
+    <p>
+      Anything maiTerm holds goes in your OS keychain under maiTerm's own entry — never in
+      <code>aiterm-state.json</code>, and never reachable by an agent over MCP.
+    </p>
+
+    <h4>This machine only</h4>
+    <p>
+      Accounts apply to tabs on this computer. Signing SSH hosts in is not built yet; when it is,
+      it will be opt-in per host and explained there, because it carries a tradeoff this does not.
+    </p>
+  </section>
 </div>
 
 {#if showSetup}
@@ -525,5 +564,36 @@
     color: var(--fg-dim);
     font-size: 0.8rem;
     margin: 0;
+  }
+
+  .disclosure {
+    border-top: 1px solid var(--bg-light);
+    margin-top: 4px;
+    padding-top: 12px;
+  }
+
+  .disclosure h4 {
+    color: var(--fg);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin: 0 0 3px;
+  }
+
+  .disclosure h4:not(:first-child) {
+    margin-top: 12px;
+  }
+
+  .disclosure p {
+    color: var(--fg-dim);
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .disclosure code {
+    background: var(--bg-dark);
+    border-radius: 3px;
+    padding: 1px 4px;
   }
 </style>

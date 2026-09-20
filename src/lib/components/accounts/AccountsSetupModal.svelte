@@ -226,46 +226,16 @@
 
     <div class="body">
       {#if mode === 'setup'}
+        <!-- The five disclosure sections live on the Accounts pane behind this dialog, not
+             here. A modal is read once, under pressure to get past it, and is then unreachable;
+             the pane shows the same text before setup AND afterwards, which is when the
+             questions it answers actually get asked. -->
         <section>
-          <h4>What this does</h4>
           <p>
-            Each account gets its own config directory. A tab launched under an account uses that
-            account's login, so two orgs can run side by side in different tabs at the same time.
-          </p>
-        </section>
-
-        <section>
-          <h4>What it does not do</h4>
-          <p>
-            maiTerm never reads, writes or parses your login, and never touches the runtime's
-            Keychain item. It owns the <em>directory</em>; the runtime owns the credential inside
-            it and does its own sign-in, refresh and sign-out.
-          </p>
-        </section>
-
-        <section>
-          <h4>What it costs</h4>
-          <p>
-            Nothing, on this machine. Your hooks, skills, commands, permissions and MCP servers
-            are shared into every account, so a managed tab behaves exactly like an unmanaged one
-            and signs in the same way.
-          </p>
-        </section>
-
-        <section>
-          <h4>Where credentials live</h4>
-          <p>
-            Anything maiTerm holds goes in your OS keychain under maiTerm's own entry — never in
-            <code>aiterm-state.json</code>, and never reachable by an agent over MCP.
-          </p>
-        </section>
-
-        <section>
-          <h4>This machine only</h4>
-          <p>
-            Accounts apply to tabs on this computer. Signing SSH hosts in is not built yet; when
-            it is, it will be opt-in per host and explained there, because it carries a tradeoff
-            this does not.
+            Signing in creates a config directory for this account. maiTerm never reads or
+            parses the login itself — the runtime owns the credential, maiTerm owns the
+            directory. <strong>What this does and does not do</strong> is on the Accounts pane
+            behind this dialog.
           </p>
         </section>
       {:else}
@@ -320,14 +290,23 @@
           </p>
         {/if}
         {#if browsers.length > 1}
-          <label class="field">
-            <span class="label">Private window</span>
-            <select bind:value={browserId} disabled={busy}>
+          <!-- Segmented rather than a dropdown: there are two or three of these, they are all
+               worth seeing at once, and picking one is a single click instead of two. -->
+          <div class="field">
+            <span class="label" id="private-browser-label">Private window</span>
+            <div class="segments" role="radiogroup" aria-labelledby="private-browser-label">
               {#each browsers as b (b.id)}
-                <option value={b.id}>{b.label}</option>
+                <button
+                  class="segment"
+                  class:selected={browser?.id === b.id}
+                  role="radio"
+                  aria-checked={browser?.id === b.id}
+                  disabled={busy}
+                  onclick={() => (browserId = b.id)}
+                >{b.label}</button>
               {/each}
-            </select>
-          </label>
+            </div>
+          </div>
         {/if}
         {#if mode === 'setup'}
           <p class="hint">
@@ -554,6 +533,47 @@
     color: var(--fg);
     font-size: 0.85rem;
     padding: 5px 7px;
+  }
+
+  .segments {
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light);
+    border-radius: 5px;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    /* Two or three short labels, but a narrow pane is a narrow pane — let them wrap rather
+       than squeezing each one to an unreadable width. */
+    flex-wrap: wrap;
+  }
+
+  .segment {
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    flex: 1;
+    font-size: 0.8rem;
+    min-width: 64px;
+    padding: 4px 10px;
+    transition: background-color 0.15s, color 0.15s;
+    white-space: nowrap;
+  }
+
+  .segment:hover:not(:disabled):not(.selected) {
+    background: var(--bg-light);
+    color: var(--fg);
+  }
+
+  .segment.selected {
+    background: var(--accent);
+    color: var(--bg-dark);
+  }
+
+  .segment:disabled {
+    cursor: default;
+    opacity: 0.5;
   }
 
   .footer {
