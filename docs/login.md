@@ -765,6 +765,20 @@ behaves exactly like not-set-up.
 > because it signed in. Best effort: a sign-out failure still removes the root, since leaving
 > that behind as well would be strictly worse.
 
+> **Removing an account does not stop the sessions already running under it, and they bring the
+> root back.** A runtime process holds `CLAUDE_CONFIG_DIR` for its whole life. After
+> `remove_root` deletes the tree, that process's next periodic write *recreates* it — a bare real
+> directory, no symlink farm — and maiTerm has already dropped the account, so "Clear setup",
+> which iterates the account *list*, cannot see it. Observed 2026-09-20: a root still on disk 30
+> minutes and two clears after its account was removed, holding a session sidecar. The cost is
+> not clutter: a credential refresh from such a session re-mints a Keychain item keyed by the
+> deleted path, so an account the user was told is gone survives under a uuid nothing tracks.
+> `accounts::prune_orphan_roots` sweeps at startup, where preferences are already loaded — so an
+> empty keep-list means "no accounts" rather than "not loaded yet", which is the reading that
+> would delete every account — and where the process responsible has since exited. It runs inside
+> `setup()` rather than beside the state load, because the log plugin is not active until then
+> and a sweep that deletes directories has to leave a record.
+
 > **Apply account changes in ONE write.** Every preferences setter persists the whole object
 > through a sync command that clones all app data, so a four-setter change was four full write
 > cycles over a multi-megabyte file — and observable half-way. The sequence persisted an account
