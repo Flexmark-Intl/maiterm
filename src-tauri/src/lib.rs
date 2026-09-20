@@ -671,6 +671,8 @@ pub fn run() {
             commands::accounts::begin_account_login,
             commands::accounts::cancel_account_login,
             commands::accounts::discard_account_root,
+            commands::accounts::list_private_browsers,
+            commands::accounts::open_private_window,
             commands::workspace::set_tab_mailink_native,
             commands::workspace::set_tab_mailink_excluded,
             commands::workspace::clear_tab_comms_binding,

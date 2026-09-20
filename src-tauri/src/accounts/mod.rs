@@ -21,6 +21,8 @@
 //! observable on disk so the shape is right, but are marked unsupported until the same
 //! verification Claude got (§5.4) has been done for them — see `RuntimeProfile::supported`.
 
+pub mod browser;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

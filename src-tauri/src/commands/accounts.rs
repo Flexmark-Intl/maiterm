@@ -6,6 +6,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::Emitter;
 
 use crate::accounts::{self, Reconciled, Runtime};
 
@@ -219,16 +220,90 @@ fn cancelled(id: &str) -> bool {
     ACTIVE_LOGINS.lock().get(id).map(|h| h.cancelled).unwrap_or(false)
 }
 
+/// Event carrying the authorization URL to the UI, so "copy the link and open a private window"
+/// is a button rather than an instruction the user cannot follow.
+///
+/// The URL is not credential material: it is the *start* of an OAuth flow, and completing it
+/// still requires the user to authenticate. It is safe to put on the clipboard and is exactly
+/// what the runtime prints on stdout for the same purpose.
+pub const LOGIN_URL_EVENT: &str = "account-login-url";
+
+#[derive(Debug, Clone, Serialize)]
+struct LoginUrlEvent {
+    account_id: String,
+    url: String,
+}
+
+/// Pull the authorization URL out of a runtime's sign-in output.
+///
+/// Not `split_whitespace().find(...)`: the runtime colours that line, so the URL commonly arrives
+/// with a reset sequence glued to its end, and a URL is not whitespace-terminated in the presence
+/// of control bytes. Cut at the first whitespace *or* control character instead, and keep looking
+/// past any earlier `https://` that is not the authorization link (the runtime prints a docs URL
+/// first on some paths).
+fn extract_login_url(transcript: &str) -> Option<String> {
+    let mut from = 0usize;
+    while let Some(rel) = transcript[from..].find("https://") {
+        let start = from + rel;
+        let rest = &transcript[start..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c.is_control())
+            .unwrap_or(rest.len());
+        let url = &rest[..end];
+        if url.contains("oauth") || url.contains("authorize") {
+            return Some(url.to_string());
+        }
+        from = start + "https://".len();
+    }
+    None
+}
+
 /// Turn a stuck sign-in into something a user can act on. The runtime prints the authorization
 /// URL on stdout; when the browser did not open, that line is the whole difference between
 /// "try again" and "there is nothing I can do".
 fn timeout_message(transcript: &str) -> String {
-    let url = transcript
-        .split_whitespace()
-        .find(|w| w.starts_with("https://") && w.contains("oauth"));
-    match url {
+    match extract_login_url(transcript) {
         Some(u) => format!("Sign-in timed out. If the browser did not open, visit: {u}"),
         None => "Sign-in timed out before the browser flow completed.".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_login_url;
+
+    #[test]
+    fn finds_a_plain_url() {
+        let t = "Opening browser…\nIf it didn't open, visit: https://claude.ai/oauth/authorize?code=1&x=2\n";
+        assert_eq!(
+            extract_login_url(t).as_deref(),
+            Some("https://claude.ai/oauth/authorize?code=1&x=2")
+        );
+    }
+
+    #[test]
+    fn strips_a_trailing_colour_reset() {
+        // The reason this is not `split_whitespace`: the reset sequence is glued to the URL, so
+        // a whitespace split hands the user a link with `\u{1b}[0m` on the end of it.
+        let t = "visit: \u{1b}[4mhttps://claude.ai/oauth/authorize?code=1\u{1b}[0m and sign in";
+        assert_eq!(
+            extract_login_url(t).as_deref(),
+            Some("https://claude.ai/oauth/authorize?code=1")
+        );
+    }
+
+    #[test]
+    fn skips_a_url_that_is_not_the_authorization_link() {
+        let t = "docs: https://docs.claude.com/en/docs\nvisit: https://claude.ai/oauth/authorize?code=1";
+        assert_eq!(
+            extract_login_url(t).as_deref(),
+            Some("https://claude.ai/oauth/authorize?code=1")
+        );
+    }
+
+    #[test]
+    fn none_before_the_url_is_printed() {
+        assert_eq!(extract_login_url("Starting sign-in…\n"), None);
     }
 }
 
@@ -268,6 +343,7 @@ pub struct NewAccount {
 /// The in-app incognito webview that avoids it is a later upgrade to this same command.
 #[tauri::command]
 pub async fn begin_account_login(
+    app: tauri::AppHandle,
     runtime: String,
     account_id: String,
     timeout_secs: Option<u64>,
@@ -298,7 +374,7 @@ pub async fn begin_account_login(
     // for anyone whose `claude` lives somewhere resolve_cli does not look), a join error, and a
     // failed identity read AFTER a successful login, which strands a root holding a live
     // credential that no UI can reach.
-    let outcome = login_into_root(rt, &account_id, timeout_secs).await;
+    let outcome = login_into_root(&app, rt, &account_id, timeout_secs).await;
     match outcome {
         Ok(identity) => Ok(NewAccount { account_id, identity }),
         Err(e) => {
@@ -313,6 +389,7 @@ pub async fn begin_account_login(
 /// The part of `begin_account_login` that runs once the root exists. Split out so its caller can
 /// clean up on any error without every early return having to remember.
 async fn login_into_root(
+    app: &tauri::AppHandle,
     rt: Runtime,
     account_id: &str,
     timeout_secs: Option<u64>,
@@ -330,6 +407,7 @@ async fn login_into_root(
     let deadline = std::time::Duration::from_secs(timeout_secs.unwrap_or(300).clamp(30, 900));
 
     let id_for_task = account_id.clone();
+    let app = app.clone();
     let login = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut cmd = Command::new(&cli);
         cmd.args(["auth", "login"]);
@@ -340,29 +418,57 @@ async fn login_into_root(
         // No tty to prompt on. The sign-in completes through the runtime's own local callback
         // server, not the "paste code" fallback, so stdin is genuinely unused.
         cmd.stdin(std::process::Stdio::null());
-        // Capture stdout rather than inheriting it. Inherited output goes to the app's stdout,
-        // which is /dev/null for a Finder-launched bundle — and the one line a stuck user needs
-        // is printed there: "If the browser didn't open, visit: <url>".
+        // Capture both streams rather than inheriting them. Inherited output goes to the app's
+        // stdout, which is /dev/null for a Finder-launched bundle — and the one line a stuck user
+        // needs is printed there: "If the browser didn't open, visit: <url>". Which of the two
+        // streams carries it is a runtime detail that can change between versions, so both are
+        // drained into one transcript instead of betting on stdout.
         cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("starting sign-in: {e}"))?;
 
-        // Drain stdout on its own thread: a full pipe would otherwise block the child forever
-        // while we poll it, which is a deadlock rather than a slow sign-in.
+        // Drain on their own threads: a full pipe would otherwise block the child forever while
+        // we poll it, which is a deadlock rather than a slow sign-in.
+        //
+        // The drain also watches for the authorization URL and emits it the moment it appears,
+        // rather than only reporting it in the timeout message. That is what makes "copy the
+        // link and finish in a private window" possible WHILE the sign-in is still waiting —
+        // after it has timed out is too late, because the link has expired with it.
         let transcript = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
-        if let Some(out) = child.stdout.take() {
+        // Shared, not per-thread: two drains each holding their own "have I announced?" would
+        // both fire if the URL landed on both streams.
+        let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drain = |reader: Option<Box<dyn std::io::Read + Send>>| {
+            let Some(mut reader) = reader else { return };
             let sink = transcript.clone();
+            let app = app.clone();
+            let id = id_for_task.clone();
+            let announced = announced.clone();
             std::thread::spawn(move || {
-                use std::io::Read;
                 let mut buf = [0u8; 4096];
-                let mut out = out;
-                while let Ok(n) = out.read(&mut buf) {
+                while let Ok(n) = reader.read(&mut buf) {
                     if n == 0 {
                         break;
                     }
-                    sink.lock().push_str(&String::from_utf8_lossy(&buf[..n]));
+                    let mut sink = sink.lock();
+                    sink.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if announced.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
+                    if let Some(url) = extract_login_url(&sink) {
+                        // swap, not store: whichever drain sees it first is the one that emits.
+                        if !announced.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            let _ = app.emit(
+                                LOGIN_URL_EVENT,
+                                LoginUrlEvent { account_id: id.clone(), url },
+                            );
+                        }
+                    }
                 }
             });
-        }
+        };
+        drain(child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
+        drain(child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
 
         let child = std::sync::Arc::new(parking_lot::Mutex::new(child));
         register_login(&id_for_task, child.clone());
@@ -466,6 +572,29 @@ pub async fn discard_account_root(runtime: String, account_id: String) -> Result
     tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &account_id))
         .await
         .map_err(|e| format!("discard task failed: {e}"))?
+}
+
+/// Browsers on this machine that can be told to open a private window, in preference order.
+///
+/// An empty list is a normal answer, not a failure — Safari and several others have no such
+/// switch. The caller keeps the copy-the-link path either way.
+#[tauri::command]
+pub async fn list_private_browsers() -> Result<Vec<accounts::browser::PrivateBrowserInfo>, String> {
+    // Touches the filesystem and reads PATH: off the async executor, per the mesh-pinwheel rule.
+    tauri::async_runtime::spawn_blocking(accounts::browser::available)
+        .await
+        .map_err(|e| format!("browser scan failed: {e}"))
+}
+
+/// Open a sign-in link in a private window, so it can be completed as a *different* account
+/// without signing the current one out of the browser (§5.1).
+#[tauri::command]
+pub async fn open_private_window(browser_id: String, url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        accounts::browser::open_private_window(&browser_id, &url)
+    })
+    .await
+    .map_err(|e| format!("browser launch failed: {e}"))?
 }
 
 /// The environment a tab spawning under this account needs: variables to set, and variables to

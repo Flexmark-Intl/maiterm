@@ -1386,6 +1386,43 @@ export async function beginAccountLogin(
   return invoke('begin_account_login', { runtime, accountId, timeoutSecs: timeoutSecs ?? null });
 }
 
+/** Emitted once per sign-in, as soon as the runtime prints its authorization URL.
+ *
+ *  Broadcasts to every window, so a listener MUST match `account_id` against the attempt it
+ *  started — otherwise a second window signing in at the same time overwrites the link. */
+export const ACCOUNT_LOGIN_URL_EVENT = 'account-login-url';
+
+/** The payload of {@link ACCOUNT_LOGIN_URL_EVENT}.
+ *
+ *  `url` is not credential material: it is the *start* of an OAuth flow, and whoever opens it
+ *  still has to authenticate. It is the same link the runtime prints on its own output, and is
+ *  safe to put on the clipboard — which is the point, since pasting it into a private window is
+ *  how you sign in as a second account without logging the first one out (§5.1). */
+export interface AccountLoginUrl {
+  account_id: string;
+  url: string;
+}
+
+/** A browser on this machine that can be told to open a private window. */
+export interface PrivateBrowserInfo {
+  id: string;
+  label: string;
+}
+
+/** Browsers that can open a private window, in preference order.
+ *
+ *  **An empty list is a normal answer.** Safari has no command-line switch for a private window,
+ *  and neither do several others — callers must keep offering the link itself. */
+export async function listPrivateBrowsers(): Promise<PrivateBrowserInfo[]> {
+  return invoke('list_private_browsers', {});
+}
+
+/** Open a sign-in link in a private window, so it can be completed as a different account
+ *  without signing the current one out of the browser (§5.1). */
+export async function openPrivateWindow(browserId: string, url: string): Promise<void> {
+  return invoke('open_private_window', { browserId, url });
+}
+
 /** Stop a sign-in that is still running. The child process is killed, so the browser flow
  *  cannot complete later and strand an authenticated root nothing knows about.
  *
