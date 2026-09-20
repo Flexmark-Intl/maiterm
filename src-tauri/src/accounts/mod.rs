@@ -85,10 +85,21 @@ pub struct RuntimeProfile {
     pub shared: &'static [SharedEntry],
     /// Credential files that must stay per-account and must NEVER be symlinked.
     pub never_link: &'static [&'static str],
-    /// Variables that would silently defeat isolation and are scrubbed from the spawn
-    /// environment. For Claude, `CLAUDE_SECURESTORAGE_CONFIG_DIR` overrides the credential
-    /// directory independently, collapsing every account onto one login (§2.1.1).
-    pub scrub_env: &'static [&'static str],
+    /// The CLI to ask about this runtime's auth state. Resolved via `resolve_cli`, never handed
+    /// to `Command::new` bare — see that function.
+    pub cli: &'static str,
+    /// **Every** environment variable that can answer *instead of* the account root's own
+    /// login, and therefore must be removed from both the verification call and a managed
+    /// tab's spawn environment.
+    ///
+    /// This is the full credential-precedence list from `docs/login.md` §2.2 above the stored
+    /// login, not a sample of it. A variable missing here does not fail loudly: the runtime
+    /// answers from that rung instead, reporting an identity with no `email`/`orgId` at all, so
+    /// every account looks identical — the §5.1 duplicate guard then fires on every new account
+    /// and the §6.1 verification can never fail. Note rung 4, `apiKeyHelper`, is a *settings
+    /// file* key and cannot be scrubbed from the environment at all; `AccountIdentity` handles
+    /// that by reporting what answered rather than pretending it is an identity.
+    pub shadowing_env: &'static [&'static str],
     /// False until this runtime has had the §5.4 verification Claude has had. An unsupported
     /// runtime is shown in the UI as not yet available, never silently half-wired.
     pub supported: bool,
@@ -113,7 +124,28 @@ static CLAUDE: RuntimeProfile = RuntimeProfile {
         cfg("statusline-command.sh"),
     ],
     never_link: &[".credentials.json"],
-    scrub_env: &["CLAUDE_SECURESTORAGE_CONFIG_DIR"],
+    cli: "claude",
+    // docs/login.md §2.2, rungs 1-6, plus the credential-dir override from §2.1.1.
+    shadowing_env: &[
+        // 1. cloud provider — answers as `third_party`, no email at all
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        // 2-3. bearer token / API key
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        // 5. the long-lived token — the one THIS FEATURE mints and injects on remotes (§6),
+        //    and the one a user is told to export in their shell profile
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+        // 6. Anthropic profile / workload identity federation
+        "ANTHROPIC_PROFILE",
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_ORGANIZATION_ID",
+        // §2.1.1 — overrides the credential dir independently of CLAUDE_CONFIG_DIR, collapsing
+        // every account onto one login
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    ],
     supported: true,
 };
 
@@ -134,7 +166,8 @@ static CODEX: RuntimeProfile = RuntimeProfile {
         cfg("history.jsonl"),
     ],
     never_link: &["auth.json"],
-    scrub_env: &[],
+    cli: "codex",
+    shadowing_env: &[],
     supported: false,
 };
 
@@ -147,7 +180,8 @@ static GEMINI: RuntimeProfile = RuntimeProfile {
     config_dir: ".gemini",
     shared: &[cfg("settings.json"), cfg("commands"), cfg("GEMINI.md")],
     never_link: &["oauth_creds.json", "google_accounts.json"],
-    scrub_env: &[],
+    cli: "gemini",
+    shadowing_env: &[],
     supported: false,
 };
 
@@ -159,7 +193,8 @@ static GROK: RuntimeProfile = RuntimeProfile {
     config_dir: ".grok",
     shared: &[],
     never_link: &[],
-    scrub_env: &[],
+    cli: "",
+    shadowing_env: &[],
     supported: false,
 };
 
@@ -270,6 +305,54 @@ pub fn reconcile_at(
     Ok(out)
 }
 
+/// Locate a runtime's CLI as an absolute path.
+///
+/// `Command::new("claude")` is a trap here. It works under `npm run tauri:dev`, which inherits
+/// the terminal's `PATH`, and fails in the installed build: a Finder or Dock launch gets
+/// launchd's `PATH` — `/usr/bin:/bin:/usr/sbin:/sbin` — which contains neither `~/.local/bin`
+/// (where Claude Code's native installer puts it) nor Homebrew. Dev-clean, broken after deploy,
+/// which is the repo's standing "runs against the INSTALLED build" trap.
+pub fn resolve_cli(profile: &RuntimeProfile) -> Option<PathBuf> {
+    if profile.cli.is_empty() {
+        return None;
+    }
+    // PATH first, so a user's own install wins over anything we guess at.
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let candidate = dir.join(profile.cli);
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(h) = dirs::home_dir() {
+        // Claude Code's native install location, then the usual per-user bins.
+        for d in [".local/bin", "bin", ".bun/bin", ".volta/bin", ".npm-global/bin"] {
+            candidates.push(h.join(d).join(profile.cli));
+        }
+    }
+    for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        candidates.push(Path::new(d).join(profile.cli));
+    }
+    candidates.into_iter().find(|c| is_executable(c))
+}
+
+fn is_executable(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows would need the PATHEXT dance; no runtime is supported there yet.
+        p.is_file()
+    }
+}
+
 /// Delete an account's config root.
 ///
 /// **The dangerous operation in this module.** The root is a farm of symlinks into the user's
@@ -337,7 +420,10 @@ pub fn spawn_env(
     let root = account_root(runtime, account_id)?;
     Some((
         vec![(profile.config_env.to_string(), root.to_string_lossy().into_owned())],
-        profile.scrub_env.iter().map(|s| s.to_string()).collect(),
+        // The SAME list the verifier scrubs. If these differ, the pane reports the identity the
+        // root holds while the tab runs as whatever a leftover variable resolves to — a green
+        // "signed in as alice" over a session billed to someone else.
+        profile.shadowing_env.iter().map(|s| s.to_string()).collect(),
     ))
 }
 
@@ -573,11 +659,40 @@ mod tests {
     }
 
     #[test]
-    fn claude_spawn_env_sets_the_root_and_scrubs_the_override() {
+    fn claude_spawn_env_sets_the_root_and_scrubs_every_shadowing_var() {
         let (set, scrub) = spawn_env(Runtime::Claude, "acct-1").unwrap();
         assert_eq!(set[0].0, "CLAUDE_CONFIG_DIR");
         assert!(set[0].1.ends_with("accounts/claude/acct-1"));
-        // Leaving this set would collapse every account onto one credential, silently.
-        assert!(scrub.contains(&"CLAUDE_SECURESTORAGE_CONFIG_DIR".to_string()));
+
+        // The spawn scrub and the verifier's scrub must be the SAME list. If they diverge, the
+        // pane reports the identity the root holds while the tab runs as whatever a leftover
+        // variable resolves to — a green "signed in as alice" over a session billed elsewhere.
+        let expected: Vec<String> =
+            CLAUDE.shadowing_env.iter().map(|s| s.to_string()).collect();
+        assert_eq!(scrub, expected);
+    }
+
+    #[test]
+    fn claude_shadowing_list_covers_every_precedence_rung() {
+        // docs/login.md §2.2. A variable missing here does not fail loudly — the runtime answers
+        // from that rung with no email/orgId, so every account looks identical, the duplicate
+        // guard fires on every new account, and the §6.1 check can never fail. Rung 4
+        // (apiKeyHelper) is absent on purpose: it is a settings-file key, not an env var, and is
+        // handled by reporting what answered instead of treating it as an identity.
+        for required in [
+            "CLAUDE_CODE_USE_BEDROCK",   // 1
+            "CLAUDE_CODE_USE_VERTEX",    // 1
+            "CLAUDE_CODE_USE_FOUNDRY",   // 1
+            "ANTHROPIC_AUTH_TOKEN",      // 2
+            "ANTHROPIC_API_KEY",         // 3
+            "CLAUDE_CODE_OAUTH_TOKEN",   // 5 — the one this feature itself mints
+            "ANTHROPIC_PROFILE",         // 6
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR", // §2.1.1
+        ] {
+            assert!(
+                CLAUDE.shadowing_env.contains(&required),
+                "{required} can answer instead of the account's own login and must be scrubbed"
+            );
+        }
     }
 }

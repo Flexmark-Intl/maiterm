@@ -1312,18 +1312,30 @@ export interface AccountReconciled {
 
 /** What a runtime reports about the account in one config root.
  *
- *  **`logged_in` is never sufficient on its own** (§6.1): credential precedence is a
- *  fall-through, so a root holding none of our credentials still reports `logged_in: true` via
- *  another rung — an env API key, or the host's own login. Compare `email`/`org_id` against the
- *  account you expected; `auth_method` says which rung answered. */
+ *  **Branch on `is_account_login`, never on `logged_in`.** Credential precedence is a
+ *  fall-through, so a root holding none of our credentials still reports `logged_in: true` from
+ *  another rung — and every such answer arrives with no email and no org id. Treating that as an
+ *  identity makes every account look identical: the duplicate guard then fires on every new
+ *  account and discards a valid login, and the §6.1 verification can never fail.
+ *
+ *  Optional fields are Rust `Option<String>` with no `skip_serializing_if`, so they are always
+ *  present and `null` when unset — not `undefined`. */
 export interface AccountIdentity {
+  /** True only when this root's own claude.ai login answered AND carried an email. The only
+   *  field you may branch on before using `email`/`org_id`. */
+  is_account_login: boolean;
+  /** What answered instead, when `is_account_login` is false — the "resolved source" to show
+   *  rather than a green "logged in". */
+  shadowed_by: string | null;
   logged_in: boolean;
-  auth_method?: string;
-  api_key_source?: string;
-  email?: string;
-  org_id?: string;
-  org_name?: string;
-  plan?: string;
+  auth_method: string | null;
+  api_key_source: string | null;
+  /** `firstParty`, `bedrock`, … — set when a cloud provider answered. */
+  api_provider: string | null;
+  email: string | null;
+  org_id: string | null;
+  org_name: string | null;
+  plan: string | null;
 }
 
 /** Variables to set AND to remove when spawning under an account. The removals are not
