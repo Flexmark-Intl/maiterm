@@ -270,6 +270,60 @@ pub fn reconcile_at(
     Ok(out)
 }
 
+/// Delete an account's config root.
+///
+/// **The dangerous operation in this module.** The root is a farm of symlinks into the user's
+/// real config — `projects` points at their transcripts, `.claude.json` at 200KB of project
+/// state. Anything that follows those links while deleting destroys data that is not ours and
+/// has no copy. So: symlinks are unlinked, never traversed, and real directories are recursed
+/// into only after `symlink_metadata` confirms they are not links.
+///
+/// Refuses any path outside `accounts_dir()`, so a bad id cannot aim this at the home directory.
+pub fn remove_root(runtime: Runtime, account_id: &str) -> Result<(), String> {
+    let parent = accounts_dir().ok_or_else(|| "no data directory available".to_string())?;
+    let root = account_root(runtime, account_id)
+        .ok_or_else(|| "no data directory available".to_string())?;
+
+    // The id must be ONE ordinary path component. Checking `starts_with` alone is not enough:
+    // it compares components lexically, so `<accounts>/claude/..` "starts with" `<accounts>`
+    // while actually BEING it — an id of ".." would delete every account. `Component::Normal`
+    // excludes `.`, `..`, absolute roots and Windows prefixes in one test.
+    let is_simple_name = {
+        let mut comps = Path::new(account_id).components();
+        matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+    };
+    if !is_simple_name || !root.starts_with(&parent) {
+        return Err(format!(
+            "refusing to remove account root for id {account_id:?}: not a simple name"
+        ));
+    }
+    if !root.exists() {
+        return Ok(());
+    }
+    remove_tree_without_following(&root)
+}
+
+fn remove_tree_without_following(dir: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let path = entry.path();
+        // symlink_metadata does NOT follow — that distinction is the whole point here.
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            // Unlinks the link itself. On Windows a directory symlink needs remove_dir.
+            fs::remove_file(&path)
+                .or_else(|_| fs::remove_dir(&path))
+                .map_err(|e| format!("unlinking {}: {e}", path.display()))?;
+        } else if meta.is_dir() {
+            remove_tree_without_following(&path)?;
+        } else {
+            fs::remove_file(&path).map_err(|e| format!("removing {}: {e}", path.display()))?;
+        }
+    }
+    fs::remove_dir(dir).map_err(|e| format!("removing {}: {e}", dir.display()))
+}
+
 /// The environment a spawned tab needs for this account: the config-dir variable pointed at the
 /// account root, plus the variables that must be *removed* to keep isolation honest.
 pub fn spawn_env(
@@ -471,6 +525,43 @@ mod tests {
         assert_eq!(fs::read_to_string(parked[0].path()).unwrap(), "irreplaceable");
 
         fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn removing_a_root_unlinks_but_never_follows() {
+        // The catastrophic bug this guards: `projects` points at the user's transcripts and
+        // `.claude.json` at their project state. Deleting the root must unlink, never traverse.
+        let base = tmp();
+        let home = fake_home(&base);
+        let root = base.join("account-a");
+        reconcile_at(&CLAUDE, &root, &home).unwrap();
+
+        // A file inside the linked directory, standing in for a transcript.
+        let transcript = home.join(".claude").join("projects").join("session.jsonl");
+        fs::write(&transcript, "irreplaceable").unwrap();
+
+        remove_tree_without_following(&root).unwrap();
+
+        assert!(!root.exists(), "the account root should be gone");
+        assert!(transcript.exists(), "the link target must survive");
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), "irreplaceable");
+        assert!(home.join(".claude.json").exists(), "home-root link target must survive");
+        assert!(home.join(".claude").join("settings.json").exists());
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn remove_root_refuses_a_traversing_id() {
+        // Without this, an id of "../.." aims a recursive delete at the data directory.
+        // ".." is the one that matters: it resolves to the accounts directory itself, so a
+        // lexical starts_with check passes it and the recursive delete takes every account.
+        for bad in ["..", "../..", "a/b", "", ".", "/", "/etc", "a/../..", "./x"] {
+            assert!(
+                remove_root(Runtime::Claude, bad).is_err(),
+                "should refuse id {bad:?}"
+            );
+        }
     }
 
     #[test]
