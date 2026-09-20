@@ -236,20 +236,27 @@ struct LoginUrlEvent {
 
 /// Pull the authorization URL out of a runtime's sign-in output.
 ///
-/// Not `split_whitespace().find(...)`: the runtime colours that line, so the URL commonly arrives
-/// with a reset sequence glued to its end, and a URL is not whitespace-terminated in the presence
-/// of control bytes. Cut at the first whitespace *or* control character instead, and keep looking
-/// past any earlier `https://` that is not the authorization link (the runtime prints a docs URL
-/// first on some paths).
-fn extract_login_url(transcript: &str) -> Option<String> {
+/// Not `split_whitespace().find(...)`: a URL is not whitespace-terminated in the presence of
+/// control bytes, so a decorated line would hand back a link with an escape sequence glued to
+/// its end. Cut at the first whitespace *or* control character, and keep looking past any
+/// earlier `https://` that is not the authorization link.
+///
+/// **`require_terminator` is the difference between the two callers, and it matters.** A
+/// complete transcript may legitimately end mid-URL — there is no more output coming, and half a
+/// link is still better than nothing in a timeout message. A *streaming* transcript ends at the
+/// last `read()`, which can land anywhere, and the caller latches on the first answer: emitting a
+/// truncated link there means the UI shows a URL that OAuth rejects and never corrects it when
+/// the rest arrives 30ms later. When streaming, an unterminated tail means "not yet", not "done".
+fn extract_login_url(transcript: &str, require_terminator: bool) -> Option<String> {
     let mut from = 0usize;
     while let Some(rel) = transcript[from..].find("https://") {
         let start = from + rel;
         let rest = &transcript[start..];
-        let end = rest
-            .find(|c: char| c.is_whitespace() || c.is_control())
-            .unwrap_or(rest.len());
-        let url = &rest[..end];
+        let terminator = rest.find(|c: char| c.is_whitespace() || c.is_control());
+        if require_terminator && terminator.is_none() {
+            return None;
+        }
+        let url = &rest[..terminator.unwrap_or(rest.len())];
         if url.contains("oauth") || url.contains("authorize") {
             return Some(url.to_string());
         }
@@ -258,11 +265,44 @@ fn extract_login_url(transcript: &str) -> Option<String> {
     None
 }
 
+/// The tail of what the runtime said, for an error message.
+///
+/// Sign-in failures are reported by the runtime itself — `Login failed: <reason>` on stderr —
+/// and that reason is the difference between "try again" and knowing the org requires SSO.
+/// Without it the user gets an exit code and nothing to act on.
+///
+/// Bounded and sanitised because it goes into a message box, not a log: last few non-empty
+/// lines, control bytes dropped. The transcript carries no credential material — the
+/// authorization URL and a paste prompt are all that is on those streams.
+fn transcript_tail(transcript: &str) -> Option<String> {
+    let tail: Vec<&str> = transcript
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(3)
+        .collect();
+    if tail.is_empty() {
+        return None;
+    }
+    let text: String = tail
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" · ")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(400)
+        .collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 /// Turn a stuck sign-in into something a user can act on. The runtime prints the authorization
 /// URL on stdout; when the browser did not open, that line is the whole difference between
 /// "try again" and "there is nothing I can do".
 fn timeout_message(transcript: &str) -> String {
-    match extract_login_url(transcript) {
+    match extract_login_url(transcript, false) {
         Some(u) => format!("Sign-in timed out. If the browser did not open, visit: {u}"),
         None => "Sign-in timed out before the browser flow completed.".to_string(),
     }
@@ -270,40 +310,88 @@ fn timeout_message(transcript: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_login_url;
+    use super::{extract_login_url, transcript_tail};
 
     #[test]
     fn finds_a_plain_url() {
         let t = "Opening browser…\nIf it didn't open, visit: https://claude.ai/oauth/authorize?code=1&x=2\n";
         assert_eq!(
-            extract_login_url(t).as_deref(),
+            extract_login_url(t, true).as_deref(),
             Some("https://claude.ai/oauth/authorize?code=1&x=2")
         );
     }
 
     #[test]
     fn strips_a_trailing_colour_reset() {
-        // The reason this is not `split_whitespace`: the reset sequence is glued to the URL, so
-        // a whitespace split hands the user a link with `\u{1b}[0m` on the end of it.
+        // The reason this is not `split_whitespace`: a reset sequence glued to the URL means a
+        // whitespace split hands the user a link with `\u{1b}[0m` on the end of it.
         let t = "visit: \u{1b}[4mhttps://claude.ai/oauth/authorize?code=1\u{1b}[0m and sign in";
         assert_eq!(
-            extract_login_url(t).as_deref(),
+            extract_login_url(t, true).as_deref(),
             Some("https://claude.ai/oauth/authorize?code=1")
         );
     }
 
     #[test]
     fn skips_a_url_that_is_not_the_authorization_link() {
-        let t = "docs: https://docs.claude.com/en/docs\nvisit: https://claude.ai/oauth/authorize?code=1";
+        let t = "docs: https://docs.claude.com/en/docs\nvisit: https://claude.ai/oauth/authorize?code=1\n";
         assert_eq!(
-            extract_login_url(t).as_deref(),
+            extract_login_url(t, true).as_deref(),
             Some("https://claude.ai/oauth/authorize?code=1")
         );
     }
 
     #[test]
     fn none_before_the_url_is_printed() {
-        assert_eq!(extract_login_url("Starting sign-in…\n"), None);
+        assert_eq!(extract_login_url("Starting sign-in…\n", true), None);
+    }
+
+    #[test]
+    fn streaming_waits_for_the_whole_url() {
+        // A `read()` can stop anywhere. The streaming caller latches on the first answer, so
+        // announcing this prefix would leave the UI showing a link OAuth rejects, permanently.
+        let half = "visit: https://claude.ai/oauth/authorize?code=abc&challenge=Q";
+        assert_eq!(extract_login_url(half, true), None);
+
+        let whole = format!("{half}xYz&state=42\n");
+        assert_eq!(
+            extract_login_url(&whole, true).as_deref(),
+            Some("https://claude.ai/oauth/authorize?code=abc&challenge=QxYz&state=42")
+        );
+    }
+
+    #[test]
+    fn a_complete_transcript_accepts_an_unterminated_tail() {
+        // The timeout path has no more output coming. Half a link beats nothing there.
+        let t = "visit: https://claude.ai/oauth/authorize?code=abc";
+        assert_eq!(
+            extract_login_url(t, false).as_deref(),
+            Some("https://claude.ai/oauth/authorize?code=abc")
+        );
+    }
+
+    #[test]
+    fn tail_carries_the_runtimes_own_explanation() {
+        let t = "Opening browser…\n\nLogin failed: Your organization requires SSO\n";
+        assert_eq!(
+            transcript_tail(t).as_deref(),
+            Some("Opening browser… · Login failed: Your organization requires SSO")
+        );
+    }
+
+    #[test]
+    fn tail_drops_control_bytes_and_is_bounded() {
+        let t = format!("\u{1b}[31mLogin failed: {}\u{1b}[0m\n", "x".repeat(600));
+        let tail = transcript_tail(&t).expect("a tail");
+        assert!(!tail.contains('\u{1b}'), "control bytes survived: {tail:?}");
+        assert!(tail.len() <= 400, "unbounded tail: {}", tail.len());
+        assert!(tail.starts_with("[31mLogin failed: "));
+    }
+
+    #[test]
+    fn tail_is_none_when_nothing_was_said() {
+        assert_eq!(transcript_tail(""), None);
+        assert_eq!(transcript_tail("  \n\n \n"), None);
     }
 }
 
@@ -455,7 +543,10 @@ async fn login_into_root(
                     if announced.load(std::sync::atomic::Ordering::Relaxed) {
                         continue;
                     }
-                    if let Some(url) = extract_login_url(&sink) {
+                    // Streaming: require the URL to be terminated before announcing it. This
+                    // read may have stopped in the middle of the link, and the latch below
+                    // means a truncated one would be the only one the UI ever gets.
+                    if let Some(url) = extract_login_url(&sink, true) {
                         // swap, not store: whichever drain sees it first is the one that emits.
                         if !announced.swap(true, std::sync::atomic::Ordering::Relaxed) {
                             let _ = app.emit(
@@ -478,8 +569,24 @@ async fn login_into_root(
             match status {
                 Ok(Some(status)) if status.success() => break Ok(()),
                 Ok(Some(status)) => {
-                    // Not the logged-out case this time: a failed *login* really is an error.
-                    break Err(format!("sign-in exited {}", status.code().unwrap_or(-1)));
+                    // Cancellation is checked HERE, before the exit is classified, not only in
+                    // the still-running arm below. Cancelling SIGKILLs the child, so by the time
+                    // this thread wakes from its 250ms sleep the process is usually already
+                    // reaped — the `Ok(Some)` arm wins the race almost every time, and a signal
+                    // death has no exit code. A user who deliberately cancelled was being told
+                    // "sign-in exited -1".
+                    if cancelled(&id_for_task) {
+                        break Err("sign-in cancelled".to_string());
+                    }
+                    // Not the logged-out case this time: a failed *login* really is an error —
+                    // and the runtime has already explained it on stderr ("Login failed: …"),
+                    // which is now in the transcript. Without that the user gets an exit code
+                    // and nothing to act on, which is the same as nothing.
+                    let code = status.code().unwrap_or(-1);
+                    break Err(match transcript_tail(&transcript.lock()) {
+                        Some(tail) => format!("Sign-in failed: {tail}"),
+                        None => format!("Sign-in failed (exited {code})"),
+                    });
                 }
                 Ok(None) => {
                     if cancelled(&id_for_task) {
