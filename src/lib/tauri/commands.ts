@@ -1285,3 +1285,70 @@ export async function deshittifySetRules(ids: string[], enabled: boolean): Promi
 export async function buildDeshittifySetupScript(): Promise<string> {
   return invoke('build_deshittify_setup_script');
 }
+
+// ---------------------------------------------------------------------------
+// Managed agent accounts (docs/login.md)
+//
+// Nothing in this section carries credential material. An account is named by id; what comes
+// back is identity metadata the Accounts pane displays and the duplicate guard compares.
+// ---------------------------------------------------------------------------
+
+/** One row of the runtime registry. */
+export interface AccountRuntimeInfo {
+  slug: string;
+  label: string;
+  config_env: string;
+  /** False until the runtime has had the §5.4 verification Claude has had. Shown as not yet
+   *  available rather than hidden — a runtime that silently half-works is the bad outcome. */
+  supported: boolean;
+}
+
+/** What `reconcileAccount` did. `displaced` names real files renamed aside, never deleted. */
+export interface AccountReconciled {
+  linked: string[];
+  absent: string[];
+  displaced: string[];
+}
+
+/** What a runtime reports about the account in one config root.
+ *
+ *  **`logged_in` is never sufficient on its own** (§6.1): credential precedence is a
+ *  fall-through, so a root holding none of our credentials still reports `logged_in: true` via
+ *  another rung — an env API key, or the host's own login. Compare `email`/`org_id` against the
+ *  account you expected; `auth_method` says which rung answered. */
+export interface AccountIdentity {
+  logged_in: boolean;
+  auth_method?: string;
+  api_key_source?: string;
+  email?: string;
+  org_id?: string;
+  org_name?: string;
+  plan?: string;
+}
+
+/** Variables to set AND to remove when spawning under an account. The removals are not
+ *  optional: a leftover `CLAUDE_SECURESTORAGE_CONFIG_DIR` collapses every account onto one
+ *  credential, silently. */
+export interface AccountSpawnEnv {
+  set: [string, string][];
+  unset: string[];
+}
+
+/** The runtimes maiTerm knows about, supported or not. */
+export async function listAccountRuntimes(): Promise<AccountRuntimeInfo[]> {
+  return invoke('list_account_runtimes', {});
+}
+
+/** Create or repair an account's config root. Safe on every spawn, and meant to be. */
+export async function reconcileAccount(runtime: string, accountId: string): Promise<AccountReconciled> {
+  return invoke('reconcile_account', { runtime, accountId });
+}
+
+/** Ask the runtime who it thinks it is inside one account root. */
+export async function readAccountIdentity(runtime: string, accountId: string): Promise<AccountIdentity> {
+  return invoke('read_account_identity', { runtime, accountId });
+}
+
+export async function accountSpawnEnv(runtime: string, accountId: string): Promise<AccountSpawnEnv> {
+  return invoke('account_spawn_env', { runtime, accountId });
+}
