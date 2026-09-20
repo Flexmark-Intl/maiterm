@@ -60,7 +60,18 @@
     return preferencesStore.activeAccountIds[slug] ?? null;
   }
 
+  /** Never throws. It runs while the setup modal is closing, so a rejection here would surface
+   *  on a component that is about to be destroyed: the user would finish a browser sign-in and
+   *  see the UI change in no way at all — no row, no error, just a line in the log. */
   async function addAccount(account: NewAccount, runtime: string) {
+    try {
+      await addAccountInner(account, runtime);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function addAccountInner(account: NewAccount, runtime: string) {
     const { identity, account_id } = account;
 
     // Not an identity we can trust — something above the account's own login answered. Reporting
@@ -230,7 +241,15 @@
               {#if account.org_name}<div class="meta">{account.org_name}</div>{/if}
               {#if identity && !identity.is_account_login}
                 <div class="meta warn">
-                  Resolving as {identity.shadowed_by ?? 'another credential'}, not this account
+                  {#if !identity.logged_in}
+                    <!-- Nothing is answering. A different problem from being shadowed, with a
+                         different fix, so it must not borrow that wording. -->
+                    Signed out — sign in again to use this account
+                  {:else if identity.shadowed_by}
+                    Resolving as {identity.shadowed_by}, not this account
+                  {:else}
+                    Signed in, but not as this account
+                  {/if}
                 </div>
               {/if}
             </div>
@@ -278,8 +297,10 @@
   <AccountsSetupModal
     {runtimes}
     oncomplete={async (account, runtime) => {
-      showSetup = false;
+      // Persist BEFORE unmounting the modal: closing first destroys the component that owns the
+      // in-flight promise, so anything that went wrong afterwards had nowhere to be reported.
       await addAccount(account, runtime);
+      showSetup = false;
     }}
     oncancel={() => (showSetup = false)}
   />

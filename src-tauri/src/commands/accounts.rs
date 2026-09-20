@@ -232,6 +232,32 @@ pub async fn begin_account_login(
         .await
         .map_err(|e| format!("reconcile task failed: {e}"))??;
 
+    // From here the root exists, so EVERY failure has to remove it. Cleaning up only the
+    // sign-in's own error left three leaking paths — a missing CLI (one leaked root per click
+    // for anyone whose `claude` lives somewhere resolve_cli does not look), a join error, and a
+    // failed identity read AFTER a successful login, which strands a root holding a live
+    // credential that no UI can reach.
+    let outcome = login_into_root(rt, &account_id, timeout_secs).await;
+    match outcome {
+        Ok(identity) => Ok(NewAccount { account_id, identity }),
+        Err(e) => {
+            let id = account_id.clone();
+            let _ =
+                tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &id)).await;
+            Err(e)
+        }
+    }
+}
+
+/// The part of `begin_account_login` that runs once the root exists. Split out so its caller can
+/// clean up on any error without every early return having to remember.
+async fn login_into_root(
+    rt: Runtime,
+    account_id: &str,
+    timeout_secs: Option<u64>,
+) -> Result<AccountIdentity, String> {
+    let profile = rt.profile();
+    let account_id = account_id.to_string();
     let root = accounts::account_root(rt, &account_id)
         .ok_or_else(|| "no data directory available".to_string())?;
     let config_env = profile.config_env.to_string();
@@ -279,16 +305,9 @@ pub async fn begin_account_login(
     })
     .await
     .map_err(|e| format!("sign-in task failed: {e}"))?;
+    login?;
 
-    // On any failure the root is ours and half-built, so do not leave it behind.
-    if let Err(e) = login {
-        let id = account_id.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &id)).await;
-        return Err(e);
-    }
-
-    let identity = read_account_identity(runtime, account_id.clone()).await?;
-    Ok(NewAccount { account_id, identity })
+    read_account_identity(rt.slug().to_string(), account_id).await
 }
 
 /// Delete an account's config root. Used for a §5.1 duplicate, a cancelled sign-in, and

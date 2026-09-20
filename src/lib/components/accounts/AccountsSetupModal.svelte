@@ -69,10 +69,19 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && !busy) {
-      e.stopPropagation();
-      oncancel();
+    const closeKey = e.key === 'Escape' || (e.key.toLowerCase() === 'w' && (e.metaKey || e.ctrlKey));
+    if (!closeKey) return;
+    // Swallow these WHILE BUSY as well as when idle. The preferences window closes itself on
+    // Escape and Cmd+W, and the sign-in child process does not stop when it does — pressing
+    // Escape at "Waiting for browser…" (the reflex, because Cancel is greyed out) closed the
+    // window and left a root behind that later completed a real login and was persisted
+    // nowhere. Not cancellable yet, so the least it can do is not disappear.
+    e.stopPropagation();
+    if (busy) {
+      e.preventDefault();
+      return;
     }
+    oncancel();
   }
 
   function handleBackdropClick(e: MouseEvent) {
