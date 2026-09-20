@@ -773,11 +773,21 @@ behaves exactly like not-set-up.
 > minutes and two clears after its account was removed, holding a session sidecar. The cost is
 > not clutter: a credential refresh from such a session re-mints a Keychain item keyed by the
 > deleted path, so an account the user was told is gone survives under a uuid nothing tracks.
-> `accounts::prune_orphan_roots` sweeps at startup, where preferences are already loaded — so an
-> empty keep-list means "no accounts" rather than "not loaded yet", which is the reading that
-> would delete every account — and where the process responsible has since exited. It runs inside
-> `setup()` rather than beside the state load, because the log plugin is not active until then
-> and a sweep that deletes directories has to leave a record.
+> `accounts::prune_orphan_roots` sweeps at startup, where the process responsible has since
+> exited. It runs inside `setup()` rather than beside the state load, because the log plugin is
+> not active until then and a sweep that deletes directories has to leave a record.
+>
+> > **The sweep is gated on `state_loaded_successfully()`, and the first version was not.** The
+> > safety property written here originally — "preferences are loaded in this same process, so an
+> > empty keep-list means *no accounts* and never *not loaded yet*" — is true of **timing** and
+> > false of **outcome**. `load_state()` returns `AppData::default()` when the state file is
+> > missing, unreadable or unparseable, so an empty `managed_accounts` from that path means "no
+> > idea". Ungated, one corrupt launch deleted every account root — in the same second
+> > `preserve_corrupt` was saving the file for recovery, leaving restored rows pointing at roots
+> > that no longer exist and Keychain items orphaned but still valid, because nothing signed them
+> > out. Same flag `save_state` uses to refuse clobbering a known-good backup; the difference is
+> > that a backup can be recovered and a config root cannot. **Anything that deletes user data
+> > because a collection came back empty must ask this first.**
 
 > **Apply account changes in ONE write.** Every preferences setter persists the whole object
 > through a sync command that clones all app data, so a four-setter change was four full write
