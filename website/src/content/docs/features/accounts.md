@@ -11,7 +11,7 @@ Claude Code has a single login slot. One credential, shared by every terminal yo
 
 Nothing, is the short answer — and this is the load-bearing distinction in the whole feature.
 
-Each account is its own **configuration directory**. maiTerm creates the directory, links your existing setup into it and tells the agent to use it — and stops at the credential: the agent runs its own sign-in, stores it its own way, refreshes it on its own timer and signs out of it on its own. maiTerm never reads, writes or parses a login, and never touches the keychain item one lives in.
+Each account is its own **configuration directory**. maiTerm creates the directory, links your existing setup into it and tells the agent to use it — and stops at the credential: the agent runs its own sign-in, stores it its own way, refreshes it on its own timer and signs out of it on its own. maiTerm never reads, writes or parses a login, and never touches the keychain entry or credentials file one lives in.
 
 That means there is nothing for maiTerm to get wrong when the credential format changes, and nothing an agent can reach over MCP. What it does keep is what the agent reported back after sign-in — the account's label, plan and organisation, so the list has something to show. Never a token.
 
