@@ -18,6 +18,9 @@
   import type { ManagedAccount } from '$lib/tauri/types';
 
   let runtimes = $state<AccountRuntimeInfo[]>([]);
+  /** Only so the duplicate message can name the button that fixes it. Empty is normal — Safari
+   *  has no private-window switch — and the wording changes to match. */
+  let privateBrowsers = $state<string[]>([]);
   let showSetup = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -33,6 +36,12 @@
         runtimes = await commands.listAccountRuntimes();
       } catch (e) {
         error = e instanceof Error ? e.message : String(e);
+      }
+      try {
+        privateBrowsers = (await commands.listPrivateBrowsers()).map(b => b.label);
+      } catch (e) {
+        // Costs only the sharper wording below. Not worth a red box on a working pane.
+        console.warn('listing private browsers failed', e);
       }
     })();
   });
@@ -93,9 +102,17 @@
     );
     if (dupe) {
       await commands.discardAccountRoot(runtime, account_id);
+      // Name the button that fixes this, not the manual equivalent — by the time this shows,
+      // the modal has closed and the user is looking at a wall of text telling them to go and
+      // do by hand the thing "Add account…" now offers in one click.
       error =
         `That is the account you already have (${dupe.label}). Your browser was still signed ` +
-        `in to it. Sign out of the provider, or use a private window, then try again.`;
+        `in to it. ` +
+        (privateBrowsers.length
+          ? `Try again with “Sign in privately”, which opens a private ${privateBrowsers[0]} ` +
+            `window with no session to reuse — or sign out of the provider first.`
+          : `Use “Sign in and copy link”, then paste it into a private/incognito window — or ` +
+            `sign out of the provider first.`);
       return;
     }
 
