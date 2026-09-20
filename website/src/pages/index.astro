@@ -19,30 +19,50 @@ const description =
   'A terminal for running Claude Code, Codex and your shells side by side: a kanban board shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
 
 /**
- * The newest headline feature, given a fixed home in the hero.
+ * The hero rail: this page's own table of contents, newest feature first.
  *
- * This is a SLOT, not a one-off: each release that ships something worth leading
- * with replaces the entry below and moves on. Keep it to one, two at the outside —
- * three is a feature list, and a hero that lists features has stopped having a
- * headline. `href` points at the band further down that carries the detail, so
- * nothing here has to explain itself.
+ * **Every row is one band on this page, in page order.** That rule is what keeps
+ * the rail honest — a row cannot outlive the thing it names, because adding one
+ * means adding an `id` to a band and removing one means the anchor breaks in an
+ * obvious way. Do not list a feature here that has no band to land on; if it is
+ * worth the rail it is worth a band, and if it is not, it belongs in EVERYTHING.
  *
- * `tag` is deliberately not a version number. Nobody tracks ours, and a stale
- * "New in 2.4" is worse than no label at all.
+ * The first entry is the SLOT: each release that ships something worth leading
+ * with takes the top of the list and the `new` flag, and the previous holder
+ * drops back into the plain rows below it. Exactly one entry carries `new` — two
+ * "New" badges means neither is.
+ *
+ * `blurb` runs to about six words. It is a signpost, not a summary; the band it
+ * points at does the explaining.
+ *
+ * On the top entry, name the RUNTIME rather than "agent". Everywhere else on this
+ * site an agent IS a CLI — Claude Code, Codex — so "two agent logins" reads as
+ * two different agents signed in, which is the one thing that feature does not
+ * do. It is two accounts for the same agent.
  */
-/*
- * Name the runtime, not "agent". Everywhere else on this site an agent IS a CLI —
- * Claude Code, Codex — so "two agent logins" reads as two different agents signed
- * in, which is the one thing this does not do. It is two accounts for the same
- * agent, and Claude Code is the only one wired up.
- */
-const WHATS_NEW = [
+const KEY_FEATURES = [
   {
-    tag: 'New',
-    title: 'Two Claude Code accounts at once',
-    body: 'Claude Code has one login slot, shared by every terminal you open. Keep an account per client and run them in different tabs, side by side.',
-    href: '#accounts',
+    id: 'accounts',
+    // Not "two". There is no cap — managed_accounts is an unbounded list and every
+    // active one is handed to the tabs that ask for it — so naming a number both
+    // undersells the feature and invites the question of where the limit is.
+    title: 'Run as many Claude Code accounts as you need',
+    // NOT "an account per client". There is no per-tab or per-workspace binding —
+    // one account per runtime is active at a time (Preferences.active_account_ids)
+    // and a tab reads it at spawn. Two can run at once because each tab keeps what
+    // it started with, but nothing remembers the pairing, and tabs that respawn
+    // come back under whatever is active then. Promise the simultaneity, not an
+    // assignment the app does not store.
+    blurb:
+      'Claude Code has one login slot, shared by every terminal you open. Hold as many as you like and choose which one each new tab starts under.',
+    new: true,
   },
+  { id: 'stack', title: 'Workspace stack', blurb: 'One dev server, however many agents' },
+  { id: 'board', title: 'Task board', blurb: 'A real kanban board, shared with them' },
+  { id: 'overlord', title: 'Overlord', blurb: 'Rules that watch the whole window' },
+  { id: 'mesh', title: 'Mesh workspace', blurb: 'Specialists that ask each other' },
+  { id: 'mailink', title: 'maiLink companion', blurb: 'Your agents in your pocket, no cloud' },
+  { id: 'comms', title: 'Chat threads', blurb: 'Answer where the report landed' },
 ];
 
 const EVERYTHING = [
@@ -106,34 +126,47 @@ const EVERYTHING = [
         <li><strong>Source published</strong></li>
       </ul>
       <p class="ln-note hero-note">macOS, Windows and Linux.</p>
+    </div>
 
-      {/* The newest thing we shipped, in the fold. Without this it waits nine bands
-          down for someone who already decided to keep scrolling — which is exactly
-          the visitor who did not need convincing. */}
-      <div class="whats-new">
+    {/* The desktop fold used to be one screenshot with a single card floating over
+        it, and the whitespace either side of that card was doing nothing. A visitor
+        who has never heard of us cannot tell from one picture of a kanban board
+        what this product is for, and the answer was nine bands down — past the
+        point where the people who needed convincing had already left.
+
+        So the fold now carries the page's own contents list beside the shot: what
+        maiTerm does, in seven lines, newest at the top with the weight it earns.
+        It is a rail rather than a grid because a grid of seven would compete with
+        the h1 for the eye; a single narrow column reads as an index, which is what
+        it is.
+
+        Below 64rem it stacks, and the rail goes FIRST — it is the content, the
+        screenshot is the atmosphere. */}
+    <div class="hero-lower">
+      <nav class="hero-rail" aria-label="What maiTerm does">
         {
-          WHATS_NEW.map((f) => (
-            <a class="whats-new-item" href={f.href}>
-              <span class="whats-new-tag">{f.tag}</span>
-              <span class="whats-new-body">
+          KEY_FEATURES.map((f) => (
+            <a class:list={['rail-item', { 'rail-item--new': f.new }]} href={`#${f.id}`}>
+              {f.new && <span class="rail-tag">New</span>}
+              <span class="rail-text">
                 <strong>{f.title}</strong>
-                <span>{f.body}</span>
+                <span class="rail-blurb">{f.blurb}</span>
               </span>
             </a>
           ))
         }
-      </div>
-    </div>
+      </nav>
 
-    <div class="hero-shot">
-      <div class="ln-shot">
-        <img
-          src="/screenshots/overlord-board.webp"
-          alt="maiTerm's Overlord board: a triage queue of agents needing attention, and a fleet card per agent showing its context ring and live state"
-          width="2400"
-          height="1500"
-          fetchpriority="high"
-        />
+      <div class="hero-shot">
+        <div class="ln-shot">
+          <img
+            src="/screenshots/overlord-board.webp"
+            alt="maiTerm's Overlord board: a triage queue of agents needing attention, and a fleet card per agent showing its context ring and live state"
+            width="2400"
+            height="1500"
+            fetchpriority="high"
+          />
+        </div>
       </div>
     </div>
   </section>
@@ -157,10 +190,11 @@ const EVERYTHING = [
         machine. The agent itself offers no way to switch.
       </p>
       <p class="ln-lead">
-        maiTerm holds <strong>as many logins as you need</strong> and hands each tab the right
-        one as it starts. The client's account works in the client's workspace while your own
-        runs in the next tab over — <strong>at the same time</strong>, no signing out, nothing
-        to redo when you switch back.
+        maiTerm holds <strong>as many logins as you need</strong> and starts each new tab under
+        whichever one you have made active. Pick an account, open a tab, pick another, open the
+        next — and the client's account is working in one while your own runs in the tab beside
+        it, <strong>at the same time</strong>, no signing out, nothing to redo when you switch
+        back.
       </p>
       <p class="ln-lead">
         It does that without ever holding your credentials. Each account is a
@@ -192,15 +226,15 @@ const EVERYTHING = [
           <p>
             An <code>ANTHROPIC_API_KEY</code> or a cloud-provider variable outranks a
             subscription login while still reporting itself as signed in. maiTerm strips those
-            out of every tab it starts, and <strong>Verify</strong> reads back the identity that
-            genuinely resolved — not a green light.
+            out of every tab it starts under a managed account, and <strong>Verify</strong>
+            reads back the identity that genuinely resolved — not a green light.
           </p>
         </div>
       </div>
       <p class="ln-note accounts-note">
-        Off until you turn it on, and it applies to tabs on this computer — signing your SSH
-        hosts in is not built yet. Claude Code today; the other runtimes are listed and decline
-        rather than half-work.
+        Off until you turn it on. macOS and Linux for now, and it applies to tabs on this
+        computer — signing your SSH hosts in is not built yet. Claude Code today; the other
+        runtimes are named as not yet available rather than half-wired.
       </p>
       <a class="ln-cta-link" href="/features/accounts/">How accounts work</a>
     </div>
@@ -249,7 +283,7 @@ const EVERYTHING = [
   {/* --------------------------------------------------------------- Stack */}
   {/* .ln-cards sits OUTSIDE the text block on purpose: `.ln-stack > :first-child`
       caps at 46rem, which drops the three-card grid to two columns. */}
-  <section class="ln-band">
+  <section class="ln-band" id="stack">
     <div class="ln-inner ln-stack">
     <div>
       <p class="ln-eyebrow">Workspace stack</p>
@@ -324,7 +358,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------------- Tasks */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band ln-band--raised" id="board">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -379,7 +413,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band">
+  <section class="ln-band" id="overlord">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -427,7 +461,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band ln-band--raised" id="mesh">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -458,7 +492,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band">
+  <section class="ln-band" id="mailink">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -505,7 +539,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band ln-band--raised" id="comms">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
@@ -746,75 +780,112 @@ const EVERYTHING = [
     margin-top: 0.85rem;
   }
 
-  /* --- What's new -------------------------------------------------------
-     A banner would compete with the h1; a line of text would be missed. This
-     is a card that reads as an aside — left-aligned inside a centred hero on
-     purpose, because two lines of centred body copy are hard to read and it is
-     the one block here that is a sentence rather than a slogan.
+  /* --- Hero rail + shot ---------------------------------------------------
+     The rail is the page's contents list, in the fold, beside the screenshot.
+     One narrow column rather than a grid: a grid of seven competes with the h1
+     for the eye, where a single column reads as an index and is skimmed in one
+     pass down the left edge.
+
+     No padding-inline on this wrapper: .hero is a .ln-band and already applies
+     the gutter, so adding it again insets the shot 16px INSIDE the content
+     column it is supposed to overhang by 3rem.
   ---------------------------------------------------------------------- */
 
-  .whats-new {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 0.75rem;
-    margin-top: clamp(2rem, 3.5vw, 2.75rem);
+  .hero-lower {
+    max-width: calc(var(--ln-max) + 6rem);
+    margin: clamp(2.25rem, 4vw, 3.25rem) auto 0;
+    display: grid;
+    gap: clamp(1.75rem, 3vw, 2.75rem);
+    /* The hero centres its copy; the rail is a list and must not inherit that. */
+    text-align: start;
   }
 
-  .whats-new-item {
+  @media (min-width: 64rem) {
+    .hero-lower {
+      grid-template-columns: minmax(0, 19rem) minmax(0, 1fr);
+      align-items: start;
+    }
+  }
+
+  .hero-rail {
     display: flex;
-    align-items: baseline;
-    gap: 0.7rem;
-    max-width: 34rem;
-    padding: 0.8rem 1.1rem;
-    text-align: start;
-    text-decoration: none;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .rail-item {
+    display: block;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid transparent;
+    border-radius: 0.55rem;
     color: inherit;
-    border: 1px solid color-mix(in srgb, var(--ln-accent) 35%, var(--ln-border));
-    border-radius: 0.65rem;
-    background: color-mix(in srgb, var(--ln-accent) 7%, transparent);
+    text-decoration: none;
     transition:
       border-color 0.15s,
       background-color 0.15s;
   }
-  .whats-new-item:hover {
-    border-color: color-mix(in srgb, var(--ln-accent) 60%, transparent);
-    background: color-mix(in srgb, var(--ln-accent) 12%, transparent);
+  .rail-item:hover {
+    background: color-mix(in srgb, var(--ln-accent) 8%, transparent);
   }
 
-  .whats-new-tag {
-    flex-shrink: 0;
-    padding: 0.15rem 0.5rem;
-    border-radius: 0.3rem;
-    background: color-mix(in srgb, var(--ln-accent) 22%, transparent);
-    color: var(--ln-accent-soft);
-    font-size: 0.75rem;
-    font-weight: 650;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-  }
-
-  .whats-new-body {
+  .rail-text {
     display: block;
-    font-size: 0.95rem;
-    line-height: 1.5;
-    color: var(--ln-fg-dim);
-    text-wrap: pretty;
+    min-width: 0;
   }
-  .whats-new-body strong {
-    color: var(--ln-fg);
+  .rail-text strong {
+    display: block;
+    font-size: 0.975rem;
     font-weight: 640;
+    line-height: 1.3;
+    letter-spacing: -0.012em;
+    color: var(--ln-fg);
+    text-wrap: pretty;
   }
   /* The arrow belongs to the last word, not to a floated span: it must wrap with
      the text rather than stranding itself on a line of its own. */
-  .whats-new-body strong::after {
+  .rail-text strong::after {
     content: ' →';
     color: var(--ln-accent);
     font-weight: 500;
   }
-  .whats-new-body span {
+  .rail-blurb {
     display: block;
-    margin-top: 0.15rem;
+    margin-top: 0.1rem;
+    font-size: 0.875rem;
+    line-height: 1.45;
+    color: var(--ln-fg-dim);
+    text-wrap: pretty;
+  }
+
+  /* The celebrated one. It is a card and the rest are rows, which is the whole
+     point — "newest" has to be legible before a word is read. */
+  .rail-item--new {
+    display: flex;
+    flex-direction: column;
+    align-items: start;
+    gap: 0.45rem;
+    padding: 0.85rem 0.9rem;
+    margin-bottom: 0.55rem;
+    border-color: color-mix(in srgb, var(--ln-accent) 35%, var(--ln-border));
+    background: color-mix(in srgb, var(--ln-accent) 7%, transparent);
+  }
+  .rail-item--new:hover {
+    border-color: color-mix(in srgb, var(--ln-accent) 60%, transparent);
+    background: color-mix(in srgb, var(--ln-accent) 12%, transparent);
+  }
+  .rail-item--new .rail-blurb {
+    margin-top: 0.25rem;
+  }
+
+  .rail-tag {
+    padding: 0.15rem 0.5rem;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--ln-accent) 22%, transparent);
+    color: var(--ln-accent-soft);
+    font-size: 0.7rem;
+    font-weight: 650;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
   }
 
   /* --- Accounts ---------------------------------------------------------- */
@@ -827,18 +898,23 @@ const EVERYTHING = [
 
   /* The shot is cropped by the fold on purpose: it reads as a running app you
      are looking into, not a framed picture sitting in a slot. */
-  /* No padding-inline here: .hero is a .ln-band and already applies the
-     gutter, so adding it again inset the shot 16px INSIDE the content column
-     it is supposed to overhang by 3rem. */
   .hero-shot {
-    max-width: calc(var(--ln-max) + 6rem);
-    margin: clamp(2.25rem, 4vw, 3.25rem) auto 0;
+    min-width: 0;
   }
   .hero-shot .ln-shot {
     max-height: 62vh;
     overflow: hidden;
     border-bottom: 0;
     border-radius: 0.75rem 0.75rem 0 0;
+  }
+  /* Beside the rail the shot is ~930px wide, where the image's own aspect makes
+     it ~580px tall — under 62vh, so nothing would crop and it reverts to the
+     framed picture the full-width version existed to avoid. Cap it lower so the
+     crop survives the narrower column. */
+  @media (min-width: 64rem) {
+    .hero-shot .ln-shot {
+      max-height: min(62vh, 30rem);
+    }
   }
 
   /* --- Progression steps -------------------------------------------------- */

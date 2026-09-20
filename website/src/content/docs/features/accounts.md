@@ -5,7 +5,7 @@ description: Hold more than one Claude Code login and run them side by side — 
 
 Claude Code has a single login slot. One credential, shared by every terminal you open, so working across two organisations means `/logout`, `/login`, a browser round trip — and it takes every tab with it. The agent offers no way to switch, and no way to be two identities at once.
 
-**Preferences → Accounts** holds as many logins as you need and hands each tab the right one as it starts. A client's account runs in the client's workspace while your own runs in the tab beside it, at the same time.
+**Preferences → Accounts** holds as many logins as you need, and every tab starts under the one you have made active. Pick an account, open a tab, pick another, open the next — and the client's account is working in one while your own runs in the tab beside it, at the same time.
 
 ## What maiTerm actually holds
 
@@ -30,10 +30,12 @@ The toggle and the accounts are separate things on purpose:
 
 This is the step with a trap in it, and the dialog says so before you hit it: **your browser is already signed in**. The provider reuses that session, so a second sign-in usually hands back the account you already have without ever asking who you are.
 
-Two ways through, both offered in the dialog:
+There are two ways through it, and the dialog offers whichever one your machine can actually do:
 
-- **Sign in privately** opens the sign-in link in a new private window of a browser that supports one, which has no session to reuse. Your normal browser is never opened, so there is no signed-in tab to click by mistake.
-- **Sign in and copy link** opens nothing and puts the link on your clipboard, for pasting into a private or incognito window yourself. This is the path on Safari, which has no private-window switch to drive from outside.
+- **Sign in privately** — shown when a browser that can be told to open a private window is installed (Chrome, Brave, Edge, Chromium or Firefox). It opens the link in a fresh private window with no session to reuse. Your normal browser is never opened, so there is no signed-in tab to click by mistake.
+- **Sign in and copy link** — shown when none of those is. It opens nothing and puts the link on your clipboard, for pasting into a private window yourself. Safari cannot be driven into a private window from outside, so a Safari-only machine gets this one.
+
+Either way the sign-in link is also shown in the dialog with its own **Copy** button, so you can take it into any window you like.
 
 If a sign-in comes back as an account you already hold, maiTerm refuses it and says which one rather than adding a duplicate row.
 
@@ -53,7 +55,7 @@ Each row is one login, grouped by runtime, showing its plan and organisation. Th
 
 Credential resolution is a fall-through. A cloud-provider variable, an `ANTHROPIC_AUTH_TOKEN`, an `ANTHROPIC_API_KEY`, a long-lived OAuth token or an `apiKeyHelper` all rank *above* a subscription login — and every one of them answers with no account attached at all. So "signed in" stays true while the account you picked is not the one doing the work.
 
-maiTerm strips every one of those variables out of the environment it hands a tab, so nothing a tab inherits can quietly outrank the account it was started as. The one rung it cannot strip is `apiKeyHelper`, which is a key in a settings file rather than a variable.
+maiTerm strips every one of those variables out of the environment it hands a tab, so nothing a tab inherits can quietly outrank the account it was started as. The rungs it cannot strip are the ones that are not variables at all: `apiKeyHelper` and an `env` block, both keys in `settings.json` — which is deliberately shared into every account, so they apply inside all of them.
 
 **Verify** is what tells you. It asks the agent — in the same environment a tab gets — who it actually resolves to, so it reports an identity rather than a green light. It says so out loud when all is well, and when it is not, it distinguishes the two cases that need different fixes: an account that is **signed out**, and one that is **resolving as something else** — naming what answered instead.
 
@@ -63,7 +65,11 @@ An account is an environment variable handed to the shell **when the tab starts*
 
 So switching decides what *new* tabs use. Tabs already open keep the account they started with, and so does an agent already working in one.
 
-To move tabs across, respawn their shells — reloading a tab (`Cmd+Shift+R`) keeps its name, directory and scrollback and restarts the shell inside it. Switching accounts offers to do that for you at the granularity you think in: everything, one window, or one workspace. Declining is a perfectly good answer, and often the right one — an agent mid-turn is interrupted by a reload, and your next new tab picks the account up anyway.
+There is no per-tab or per-workspace assignment behind this. One account per runtime is active at a time, and a tab reads it once, at spawn. Two accounts can be live together because each tab keeps what it started with — but nothing records the pairing, so a tab that respawns later (a restart, a reload, a resumed workspace) comes back under whatever is active *then*.
+
+To move tabs across, respawn their shells — reloading a tab (`Cmd+Shift+R`) keeps its name, directory and scrollback and restarts the shell inside it. Switching accounts offers to do that for you at the granularity you think in: everything, one window, or one workspace.
+
+Declining is a perfectly good answer, and often the right one. An agent mid-turn is interrupted by a reload, and your next new tab picks the account up anyway. Reloading a workspace you are not currently looking at is the one to think twice about: its tabs come back, but their shells do not start until you next open that workspace, so an agent running there stops now and is out of reach until you visit it. In practice, reload the workspace you are in and leave the rest.
 
 ## Nothing else about the tab changes
 
@@ -73,6 +79,7 @@ It doesn't. Those are shared into every account, so a tab running as one behaves
 
 ## Limits worth knowing
 
+- **macOS and Linux.** The Windows build does not hand a tab its account yet — the pane works and the accounts are kept, but tabs still launch under your normal login.
 - **This computer only.** Accounts apply to tabs on your own machine. Signing your SSH hosts in is a separate job that is not built yet — it carries a trade-off this does not, so it will be opt-in per host and explained there.
 - **Claude Code today.** The other runtimes are named in the sign-in dialog as not yet available, rather than half-wired.
 - **A key your own shell exports is still a key.** maiTerm cleans the environment it starts a tab in, but your shell profile runs afterwards, inside the tab. An `ANTHROPIC_API_KEY` exported there still outranks the account, and Verify — which asks from outside your shell — will not see it.
