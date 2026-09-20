@@ -471,6 +471,79 @@ pub fn remove_root(runtime: Runtime, account_id: &str) -> Result<(), String> {
     remove_tree_without_following(&root)
 }
 
+/// Delete every root under a runtime that no account claims, returning the ids removed.
+///
+/// **Removing an account does not stop the sessions already running under it.** A `claude`
+/// process holds its `CLAUDE_CONFIG_DIR` for its whole life, so after `remove_root` deletes the
+/// tree the next periodic write from that process *recreates* it — as a bare real directory, no
+/// symlink farm — and maiTerm has already forgotten the account, so nothing will ever clean it
+/// up. Observed 2026-09-20: a root resurrected 30 minutes after "Clear setup", holding a session
+/// sidecar, still on disk after a second clear. Roots accumulate that way, and a credential
+/// refresh from such a session re-mints a Keychain item keyed by the deleted path — an account
+/// the user believes is gone, under a uuid nothing tracks.
+///
+/// Called at startup, where `keep` comes from the preferences this process just loaded, so there
+/// is no window in which an empty list means "not loaded yet" rather than "no accounts". Anything
+/// resurrected after the sweep is caught by the next launch, by which time the process that did
+/// it is gone.
+pub fn prune_orphan_roots(runtime: Runtime, keep: &[String]) -> Result<Vec<String>, String> {
+    let Some(dir) = accounts_dir().map(|d| d.join(runtime.slug())) else {
+        return Ok(Vec::new());
+    };
+    prune_orphan_roots_at(&dir, keep)
+}
+
+/// `prune_orphan_roots` against an explicit runtime directory, so it can be tested without
+/// reaching for the real data dir.
+fn prune_orphan_roots_at(dir: &Path, keep: &[String]) -> Result<Vec<String>, String> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut removed = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))? {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if keep.iter().any(|k| k == &id) {
+            continue;
+        }
+        // The same simple-name test `remove_root` applies. `read_dir` cannot hand back `..`, but
+        // this function's whole job is deleting directories it was not given by name, so it does
+        // not rely on that.
+        let simple = {
+            let mut comps = Path::new(&id).components();
+            matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+        };
+        if !simple {
+            log::warn!("accounts: refusing to prune {id:?}: not a simple name");
+            continue;
+        }
+        let path = dir.join(&id);
+        // Never follow: a root abandoned mid-reconcile still holds links pointing at the user's
+        // real transcripts and project state.
+        match fs::symlink_metadata(&path) {
+            // A stray symlink where a root should be — unlink it, do not walk it.
+            Ok(m) if m.file_type().is_symlink() => {
+                if let Err(e) = fs::remove_file(&path).or_else(|_| fs::remove_dir(&path)) {
+                    log::warn!("accounts: unlinking stray {id}: {e}");
+                    continue;
+                }
+                removed.push(id);
+            }
+            Ok(m) if m.is_dir() => match remove_tree_without_following(&path) {
+                Ok(()) => removed.push(id),
+                // One unreadable entry must not strand the rest of the sweep.
+                Err(e) => log::warn!("accounts: pruning orphan root {id}: {e}"),
+            },
+            // A loose file in here is not ours to delete.
+            Ok(_) => log::warn!("accounts: ignoring non-directory entry {id}"),
+            Err(e) => log::warn!("accounts: stat {id}: {e}"),
+        }
+    }
+    Ok(removed)
+}
+
 fn remove_tree_without_following(dir: &Path) -> Result<(), String> {
     for entry in fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("reading {}: {e}", dir.display()))?;
@@ -908,6 +981,59 @@ mod tests {
         assert_eq!(src["userID"], "u1");
 
         fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn pruning_removes_roots_no_account_claims() {
+        let base = tmp();
+        let dir = base.join("claude");
+        for id in ["keep-me", "orphan-a", "orphan-b"] {
+            fs::create_dir_all(dir.join(id).join("projects")).unwrap();
+            fs::write(dir.join(id).join("projects").join("s.jsonl"), "x").unwrap();
+        }
+
+        let mut removed =
+            prune_orphan_roots_at(&dir, &["keep-me".to_string()]).unwrap();
+        removed.sort();
+        assert_eq!(removed, vec!["orphan-a".to_string(), "orphan-b".to_string()]);
+        assert!(dir.join("keep-me").exists());
+        assert!(!dir.join("orphan-a").exists());
+        assert!(!dir.join("orphan-b").exists());
+    }
+
+    #[test]
+    fn pruning_never_follows_a_link_out_of_the_root() {
+        // The resurrection case is a bare directory, but a root abandoned mid-reconcile still
+        // holds links aimed at the user's real transcripts. Pruning must unlink, never traverse.
+        let base = tmp();
+        let home = fake_home(&base);
+        let dir = base.join("claude");
+        let root = dir.join("orphan");
+        reconcile_at(&CLAUDE, &root, &home).unwrap();
+        let transcript = home.join(".claude").join("projects").join("session.jsonl");
+        fs::write(&transcript, "irreplaceable").unwrap();
+
+        assert_eq!(prune_orphan_roots_at(&dir, &[]).unwrap(), vec!["orphan".to_string()]);
+        assert!(!root.exists());
+        assert_eq!(fs::read_to_string(&transcript).unwrap(), "irreplaceable");
+    }
+
+    #[test]
+    fn pruning_keeps_everything_when_every_id_is_claimed() {
+        let base = tmp();
+        let dir = base.join("claude");
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::create_dir_all(dir.join("b")).unwrap();
+
+        let keep = vec!["a".to_string(), "b".to_string()];
+        assert!(prune_orphan_roots_at(&dir, &keep).unwrap().is_empty());
+        assert!(dir.join("a").exists() && dir.join("b").exists());
+    }
+
+    #[test]
+    fn pruning_a_missing_directory_is_not_an_error() {
+        let base = tmp();
+        assert!(prune_orphan_roots_at(&base.join("never-created"), &[]).unwrap().is_empty());
     }
 
     #[test]

@@ -180,6 +180,33 @@ pub fn run() {
             Err(e) => log::warn!("Startup scrollback prune failed: {}", e),
         }
 
+        // The same backstop for account config roots (docs/login.md §10). Removing an account
+        // deletes its root, but a runtime process launched under it holds CLAUDE_CONFIG_DIR for
+        // its whole life and RECREATES the directory on its next write — by which point maiTerm
+        // has forgotten the account, so no other path would ever clean it up. Startup is the
+        // right moment: preferences are already loaded here, so an empty list means "no
+        // accounts", never "not loaded yet", and the process that resurrected the root is gone.
+        for rt in accounts::ALL_RUNTIMES.iter().copied() {
+            let keep: Vec<String> = data
+                .preferences
+                .managed_accounts
+                .iter()
+                .filter(|a| a.runtime == rt.slug())
+                .map(|a| a.id.clone())
+                .collect();
+            match accounts::prune_orphan_roots(rt, &keep) {
+                Ok(ids) if !ids.is_empty() => log::info!(
+                    "Pruned {} orphan {} account root(s) at startup",
+                    ids.len(),
+                    rt.slug()
+                ),
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!("Startup account root prune failed for {}: {}", rt.slug(), e)
+                }
+            }
+        }
+
         // Seed memory trend ring buffer from disk so post-mortem analysis
         // after a crash/restart still has the RSS history leading up to it.
         let persisted_trend = load_memory_trend();
