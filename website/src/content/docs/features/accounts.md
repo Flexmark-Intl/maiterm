@@ -3,7 +3,7 @@ title: Agent Accounts
 description: Hold more than one Claude Code login and run them side by side — a client's account in one tab, your own in the next, with no signing out.
 ---
 
-Claude Code has a single login slot. The credential is global to the machine, so working across two organisations means `/logout`, `/login`, a browser round trip — and it takes every tab with it. The agent offers no way to switch, and no way to be two identities at once.
+Claude Code has a single login slot. One credential, shared by every terminal you open, so working across two organisations means `/logout`, `/login`, a browser round trip — and it takes every tab with it. The agent offers no way to switch, and no way to be two identities at once.
 
 **Preferences → Accounts** holds as many logins as you need and hands each tab the right one as it starts. A client's account runs in the client's workspace while your own runs in the tab beside it, at the same time.
 
@@ -11,9 +11,9 @@ Claude Code has a single login slot. The credential is global to the machine, so
 
 Nothing, is the short answer — and this is the load-bearing distinction in the whole feature.
 
-Each account is its own **configuration directory**. maiTerm creates the directory, tells the agent to use it, and stops there: the agent runs its own sign-in, stores the credential its own way, refreshes it on its own timer and signs out of it on its own. maiTerm never reads, writes or parses a login, and never touches the keychain item one lives in.
+Each account is its own **configuration directory**. maiTerm creates the directory, links your existing setup into it and tells the agent to use it — and stops at the credential: the agent runs its own sign-in, stores it its own way, refreshes it on its own timer and signs out of it on its own. maiTerm never reads, writes or parses a login, and never touches the keychain item one lives in.
 
-That means there is nothing for maiTerm to get wrong when the credential format changes, nothing of yours in `aiterm-state.json`, and nothing an agent can reach over MCP.
+That means there is nothing for maiTerm to get wrong when the credential format changes, and nothing an agent can reach over MCP. What it does keep is what the agent reported back after sign-in — the account's label, plan and organisation, so the list has something to show. Never a token.
 
 ## Turning it on
 
@@ -51,9 +51,11 @@ Each row is one login, grouped by runtime, showing its plan and organisation. Th
 
 ## Verify, and why "signed in" isn't the answer
 
-Credential resolution is a fall-through. A cloud-provider variable, an `ANTHROPIC_AUTH_TOKEN`, an `ANTHROPIC_API_KEY` or an `apiKeyHelper` all rank *above* a subscription login — so a stray key exported in a shell profile quietly answers instead, while everything still reports itself as signed in.
+Credential resolution is a fall-through. A cloud-provider variable, an `ANTHROPIC_AUTH_TOKEN`, an `ANTHROPIC_API_KEY`, a long-lived OAuth token or an `apiKeyHelper` all rank *above* a subscription login — and every one of them answers with no account attached at all. So "signed in" stays true while the account you picked is not the one doing the work.
 
-**Verify** therefore reports the identity that genuinely resolved, not a green light. It says so out loud when all is well, and when it is not, it distinguishes the two cases that need different fixes: an account that is **signed out**, and one that is **resolving as something else** — naming what answered instead.
+maiTerm strips every one of those variables out of the environment it hands a tab, so nothing a tab inherits can quietly outrank the account it was started as. The one rung it cannot strip is `apiKeyHelper`, which is a key in a settings file rather than a variable.
+
+**Verify** is what tells you. It asks the agent — in the same environment a tab gets — who it actually resolves to, so it reports an identity rather than a green light. It says so out loud when all is well, and when it is not, it distinguishes the two cases that need different fixes: an account that is **signed out**, and one that is **resolving as something else** — naming what answered instead.
 
 ## Which account a tab uses
 
@@ -72,5 +74,6 @@ It doesn't. Those are shared into every account, so a tab running as one behaves
 ## Limits worth knowing
 
 - **This computer only.** Accounts apply to tabs on your own machine. Signing your SSH hosts in is a separate job that is not built yet — it carries a trade-off this does not, so it will be opt-in per host and explained there.
-- **Claude Code today.** The other runtimes are listed in the sign-in dialog and decline rather than half-work.
+- **Claude Code today.** The other runtimes are named in the sign-in dialog as not yet available, rather than half-wired.
+- **A key your own shell exports is still a key.** maiTerm cleans the environment it starts a tab in, but your shell profile runs afterwards, inside the tab. An `ANTHROPIC_API_KEY` exported there still outranks the account, and Verify — which asks from outside your shell — will not see it.
 - **Not for managed machines.** This is a solo and small-team feature. Where an administrator has set a login policy, working around it is not something maiTerm should automate.

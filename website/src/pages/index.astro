@@ -160,8 +160,8 @@ const EVERYTHING = [
         It does that without ever holding your credentials. Each account is a
         <strong>separate configuration directory</strong>, and the agent signs in to it, refreshes
         it and signs out of it exactly as it always has. maiTerm never reads, writes or parses a
-        login, and never touches the keychain item it lives in — it owns the folder, not what is
-        inside.
+        login, and never touches the keychain item it lives in — it owns the folder, never the
+        credential in it.
       </p>
 
       <div class="ln-cards">
@@ -184,9 +184,10 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>It says who is actually answering</h3>
           <p>
-            A stray <code>ANTHROPIC_API_KEY</code> in a shell profile outranks a subscription
-            login and still reports itself as signed in. <strong>Verify</strong> reads back the
-            identity that genuinely resolved, and says so when it is not the one on the row.
+            An <code>ANTHROPIC_API_KEY</code> or a cloud-provider variable outranks a
+            subscription login while still reporting itself as signed in. maiTerm strips those
+            out of every tab it starts, and <strong>Verify</strong> reads back the identity that
+            genuinely resolved — not a green light.
           </p>
         </div>
       </div>
