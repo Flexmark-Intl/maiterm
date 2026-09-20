@@ -1426,6 +1426,48 @@ export interface AccountLoginUrl {
   open_error: string | null;
 }
 
+/** A workspace that has tabs still running under the previous account. */
+export interface AccountReloadWorkspace {
+  id: string;
+  name: string;
+  /** Tabs with a live PTY — the only ones worth reloading. A suspended or never-opened tab
+   *  picks the new account up whenever it next starts. */
+  live_tabs: number;
+}
+
+/** A window, for the offer made after switching accounts. */
+export interface AccountReloadWindow {
+  window_id: string;
+  /** The Tauri label — what {@link requestAccountReload} addresses. */
+  label: string;
+  name: string | null;
+  workspaces: AccountReloadWorkspace[];
+}
+
+/** Emitted to ONE window, asking it to reload tabs still on the previous account. */
+export const ACCOUNT_RELOAD_TABS_EVENT = 'accounts-reload-tabs';
+
+export interface AccountReloadRequest {
+  /** `null` means every workspace in the window. */
+  workspace_ids: string[] | null;
+}
+
+/** Which windows and workspaces still have tabs running under the previous account.
+ *
+ *  Switching accounts cannot move a running tab: the config dir is in the environment its shell
+ *  was exec'd with. This is what lets the UI offer the only real remedy — respawning them. */
+export async function accountReloadTargets(): Promise<AccountReloadWindow[]> {
+  return invoke('account_reload_targets', {});
+}
+
+/** Ask one window to reload its running tabs so they come back under the active account.
+ *
+ *  Addressed by window label, never broadcast — every window would otherwise reload its own
+ *  tabs, turning "reload this workspace" into "reload everything". */
+export async function requestAccountReload(label: string, workspaceIds?: string[]): Promise<void> {
+  return invoke('request_account_reload', { label, workspaceIds: workspaceIds ?? null });
+}
+
 /** A browser on this machine that can be told to open a private window. */
 export interface PrivateBrowserInfo {
   id: string;

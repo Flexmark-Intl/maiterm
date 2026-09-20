@@ -383,6 +383,33 @@
       }
     }, { target: appWindow.label }).then(unlisten => { unlistenReloadTab = unlisten; });
 
+    // The Accounts pane switched the active account and the user asked to bring running tabs
+    // across. An account is chosen when a tab's shell is exec'd, so the only way to move one is
+    // to respawn it — which is what reloadTab does, keeping the tab, its name, cwd and
+    // scrollback.
+    //
+    // Targeted at this window's label: a broadcast would make EVERY window reload its own tabs,
+    // so "reload this workspace" would quietly become "reload everything".
+    //
+    // Only tabs with a live terminal are touched. A suspended or never-opened tab already starts
+    // under the active account, so reloading it would spawn shells nobody asked for — and a
+    // stack service tab is skipped outright, since restarting the user's dev server has nothing
+    // to do with which account is active.
+    let unlistenAccountReload: (() => void) | undefined;
+    listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, (event) => {
+      const wanted = event.payload.workspace_ids;
+      for (const ws of workspacesStore.workspaces) {
+        if (wanted && !wanted.includes(ws.id)) continue;
+        for (const pane of ws.panes) {
+          for (const tab of pane.tabs) {
+            if (tab.service_id) continue;
+            if (!terminalsStore.get(tab.id)) continue;
+            workspacesStore.reloadTab(ws.id, pane.id, tab.id);
+          }
+        }
+      }
+    }, { target: appWindow.label }).then(unlisten => { unlistenAccountReload = unlisten; });
+
     // A maiLink phone renamed a tab — the backend already persisted it; sync the store so the
     // live tab strip reflects the new title without a reload.
     let unlistenTabRenamed: (() => void) | undefined;
@@ -1168,6 +1195,7 @@
       unlistenQuit?.();
       unlistenDuplicateWindow?.();
       unlistenReloadTab?.();
+      unlistenAccountReload?.();
       unlistenTabRenamed?.();
       unlistenResumeWorkspace?.();
       unlistenMeshInit?.();

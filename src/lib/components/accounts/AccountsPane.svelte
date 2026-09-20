@@ -12,6 +12,7 @@
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import AccountsSetupModal from './AccountsSetupModal.svelte';
+  import AccountSwitchModal from './AccountSwitchModal.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import * as commands from '$lib/tauri/commands';
   import type { AccountRuntimeInfo, AccountIdentity, NewAccount } from '$lib/tauri/commands';
@@ -27,6 +28,8 @@
   let notice = $state<string | null>(null);
   /** Inline confirm — `window.confirm()` does not work in Tauri webviews. */
   let confirmingClear = $state(false);
+  /** Label of the account just switched to, which opens the post-switch modal. */
+  let switchedTo = $state<string | null>(null);
   /** Last identity read per account id, for the resolved-source row. */
   let identities = $state<Record<string, AccountIdentity>>({});
 
@@ -196,9 +199,10 @@
     error = null;
     try {
       await preferencesStore.setActiveAccount(account.runtime, account.id);
-      notice =
-        `${account.label} is active. Tabs you open from now on run as this account — ` +
-        `tabs already open keep the one they started with.`;
+      // A modal, not a notice: this is the one control here that does not take effect
+      // immediately, and the follow-up question — "so how do I move the tabs I have open?" —
+      // needs an answer, not a statement. A line under the table was too quiet for both.
+      switchedTo = account.label;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -443,6 +447,10 @@
     </p>
   </section>
 </div>
+
+{#if switchedTo}
+  <AccountSwitchModal accountLabel={switchedTo} onclose={() => (switchedTo = null)} />
+{/if}
 
 {#if showSetup}
   <AccountsSetupModal

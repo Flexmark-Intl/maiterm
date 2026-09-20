@@ -826,6 +826,103 @@ pub async fn open_private_window(browser_id: String, url: String) -> Result<(), 
     .map_err(|e| format!("browser launch failed: {e}"))?
 }
 
+/// One workspace a user could reload after switching accounts.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReloadWorkspace {
+    pub id: String,
+    pub name: String,
+    /// Tabs with a **live PTY**. Only these are worth reloading: a suspended or never-opened tab
+    /// picks the new account up whenever it next starts, so offering to reload it would spawn
+    /// shells the user never asked for.
+    pub live_tabs: usize,
+}
+
+/// One window, for the post-switch reload offer.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReloadWindow {
+    pub window_id: String,
+    /// The Tauri label — what `request_account_reload` addresses the event to.
+    pub label: String,
+    pub name: Option<String>,
+    pub workspaces: Vec<ReloadWorkspace>,
+}
+
+/// Emitted to ONE window, asking it to reload the tabs running under the old account.
+pub const RELOAD_TABS_EVENT: &str = "accounts-reload-tabs";
+
+#[derive(Debug, Clone, Serialize)]
+struct ReloadTabsEvent {
+    /// `None` means every workspace in the window.
+    workspace_ids: Option<Vec<String>>,
+}
+
+/// Which windows and workspaces have tabs still running under the previous account.
+///
+/// Switching accounts cannot move a running tab — the config dir is in the environment the shell
+/// was exec'd with. This is what lets the UI offer the only real remedy (respawn the shell)
+/// without the user hunting for affected tabs by hand.
+///
+/// Counts only live terminal tabs, and never a stack service tab: reloading one of those would
+/// restart the user's dev server, which has nothing to do with which account is active.
+#[tauri::command]
+pub async fn account_reload_targets(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+) -> Result<Vec<ReloadWindow>, String> {
+    let tab_pty = state.tab_pty_map.read();
+    let ptys = state.pty_registry.read();
+    let app_data = state.app_data.read();
+
+    Ok(app_data
+        .windows
+        .iter()
+        .filter(|w| w.label != "preferences" && w.label != "help")
+        .map(|w| {
+            let workspaces = w
+                .workspaces
+                .iter()
+                .map(|ws| {
+                    let live_tabs = ws
+                        .panes
+                        .iter()
+                        .flat_map(|p| p.tabs.iter())
+                        .filter(|t| {
+                            t.service_id.is_none()
+                                && tab_pty
+                                    .get(&t.id)
+                                    .is_some_and(|pty_id| ptys.contains_key(pty_id))
+                        })
+                        .count();
+                    ReloadWorkspace {
+                        id: ws.id.clone(),
+                        name: ws.name.clone(),
+                        live_tabs,
+                    }
+                })
+                .collect();
+            ReloadWindow {
+                window_id: w.id.clone(),
+                label: w.label.clone(),
+                name: w.name.clone(),
+                workspaces,
+            }
+        })
+        .collect())
+}
+
+/// Ask one window to reload its running tabs, so they come back under the active account.
+///
+/// Addressed with `emit_to` rather than broadcast: a plain `emit` reaches every window, and each
+/// one would reload its own tabs — turning "reload this workspace" into "reload everything".
+#[tauri::command]
+pub async fn request_account_reload(
+    app: tauri::AppHandle,
+    label: String,
+    workspace_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    app.emit_to(&label, RELOAD_TABS_EVENT, ReloadTabsEvent { workspace_ids })
+        .map_err(|e| format!("asking {label} to reload: {e}"))
+}
+
 /// The environment a tab spawning under this account needs: variables to set, and variables to
 /// REMOVE. The removals are not optional — see `read_account_identity` for what a leftover
 /// override does.
