@@ -231,7 +231,7 @@ pub fn open_private_window(browser_id: &str, url: &str) -> Result<(), String> {
         .map_err(|e| format!("opening {}: {e}", browser.label))
 }
 
-/// A directory holding a no-op `open`/`xdg-open`, to be put FIRST on a child's `PATH`.
+/// A directory holding a stand-in `open`/`xdg-open`, to be put FIRST on a child's `PATH`.
 ///
 /// Deletes itself on drop. The caller must keep it alive for the whole life of the child.
 pub struct BrowserSuppressor {
@@ -242,7 +242,25 @@ impl BrowserSuppressor {
     pub fn path_entry(&self) -> &Path {
         &self.dir
     }
+
+    /// The arguments the runtime tried to open, once it has tried.
+    ///
+    /// **This is the only way to get the URL that actually works.** The runtime hands the
+    /// browser one URL and *prints* a different one: the printed line carries
+    /// `redirect_uri=https://platform.claude.com/oauth/code/callback`, which renders a code for
+    /// the user to paste, while the browser gets `redirect_uri=http://localhost:<port>/callback`,
+    /// which completes on its own. Scraping stdout therefore hands a private window the
+    /// paste-code branch — observed 2026-09-20, and the reason this exists.
+    ///
+    /// Returns the file's contents; the caller extracts the URL with the same parser it uses on
+    /// the transcript, so an `open -a Foo --args <url>` shape costs nothing.
+    pub fn captured(&self) -> Option<String> {
+        fs::read_to_string(self.dir.join(CAPTURE_FILE)).ok().filter(|s| !s.trim().is_empty())
+    }
 }
+
+/// Where the shim records what it was asked to open. Inside the 0700 directory.
+const CAPTURE_FILE: &str = "opened";
 
 impl Drop for BrowserSuppressor {
     fn drop(&mut self) {
@@ -292,9 +310,17 @@ pub fn suppress_default_browser() -> Option<BrowserSuppressor> {
     }
     for name in names {
         let path = dir.join(name);
-        // Exit 0: the runtime treats a failed launch as worth reporting, and we are not trying to
-        // tell it anything — only to stop it painting over our private window.
-        if fs::write(&path, "#!/bin/sh\nexit 0\n").is_err() {
+        // Records what it was asked to open, then exits 0. Exit 0 because the runtime treats a
+        // failed launch as worth reporting, and we are not trying to tell it anything — only to
+        // take over where the link opens.
+        //
+        // `> "$d/f"` truncates, so a second call replaces rather than appends: the last URL the
+        // runtime tried is the live one. Writing to a fixed name inside our own 0700 directory,
+        // never a path derived from the arguments.
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/{CAPTURE_FILE}\"\nexit 0\n"
+        );
+        if fs::write(&path, script).is_err() {
             let _ = fs::remove_dir_all(&dir);
             return None;
         }
@@ -308,6 +334,35 @@ pub fn suppress_default_browser() -> Option<BrowserSuppressor> {
         }
     }
     Some(BrowserSuppressor { dir })
+}
+
+/// Open `url` in the user's normal default browser.
+///
+/// Needed because suppressing the runtime's own launcher makes maiTerm responsible for every
+/// destination, including the ordinary one. Uses an absolute `/usr/bin/open` on macOS rather
+/// than a `PATH` lookup, so it cannot find the shim we just installed.
+pub fn open_default(url: &str) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("refusing to open a non-https link".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    #[cfg(target_os = "linux")]
+    let mut cmd = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        // `start` treats its first quoted argument as a window title, hence the empty one.
+        c.args(["/C", "start", ""]);
+        c
+    };
+    cmd.arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("opening the default browser: {e}"))
 }
 
 #[cfg(test)]

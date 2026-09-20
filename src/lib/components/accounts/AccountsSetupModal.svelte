@@ -98,8 +98,10 @@
         // window running its own sign-in would otherwise overwrite this one's link.
         if (e.payload.account_id !== pendingId) return;
         loginUrl = e.payload.url;
+        // Only the clipboard is handled here — Rust does the opening, since it is holding the
+        // URL that actually completes. `openedPrivately` reflects what it was asked to do.
         if (onUrl === 'copy') void copyLink();
-        else if (onUrl === 'private') void openPrivately();
+        else if (onUrl === 'private') openedPrivately = true;
       });
       if (dead) void fn();
       else unlisten = fn;
@@ -151,11 +153,11 @@
     const id = crypto.randomUUID();
     pendingId = id;
     try {
-      // Suppress the runtime's own browser whenever WE are handling where the link opens.
-      // Otherwise "Sign in privately" produced two windows: a normal one already signed in to
-      // the account being avoided, with Authorize one click away, and then the private one.
+      // Rust opens the link, because only Rust can see the URL that works — the runtime prints
+      // a different one, pointing at a hosted page that asks for a code to paste.
       const account = await commands.beginAccountLogin(runtime, id, {
-        suppressBrowser: then !== 'none',
+        openWith:
+          then === 'private' ? (browser?.id ?? 'default') : then === 'copy' ? undefined : 'default',
       });
       // The browser took focus to authorize and does not give it back — this window ends up
       // behind the main one, which reads as "preferences closed itself". Whatever the outcome,

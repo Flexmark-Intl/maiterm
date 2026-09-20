@@ -1383,17 +1383,23 @@ export async function beginAccountLogin(
   accountId: string,
   opts?: {
     timeoutSecs?: number;
-    /** Stop the runtime opening the default browser. Set it when you are opening a window
-     *  yourself, or deliberately opening none — otherwise the user gets a normal-browser tab,
-     *  already signed in to the account they are trying not to reuse, next to the private one. */
-    suppressBrowser?: boolean;
+    /** Where the sign-in link opens: `'default'` for the normal browser, a
+     *  {@link PrivateBrowserInfo} id for a private window, or omitted to open nothing (the
+     *  copy-to-clipboard path).
+     *
+     *  **maiTerm always decides this, never the runtime.** Its own launcher is shadowed either
+     *  way — partly so a private sign-in does not also get a window signed in to the account
+     *  being avoided, and partly because shadowing it is the only way to see the URL it really
+     *  uses. The URL it *prints* redirects to a hosted page that shows a code to paste, which is
+     *  a dead end when the child has no stdin. */
+    openWith?: string;
   },
 ): Promise<NewAccount> {
   return invoke('begin_account_login', {
     runtime,
     accountId,
     timeoutSecs: opts?.timeoutSecs ?? null,
-    suppressBrowser: opts?.suppressBrowser ?? null,
+    openWith: opts?.openWith ?? null,
   });
 }
 

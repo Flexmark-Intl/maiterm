@@ -443,18 +443,19 @@ pub struct NewAccount {
 /// not prevented here — the §5.1 duplicate check on the returned identity is what catches it.
 /// The in-app incognito webview that avoids it is a later upgrade to this same command.
 ///
-/// `suppress_browser` stops the runtime opening the default browser at all, and belongs to the
-/// callers that handle the link themselves — §5.2.1's private window, or copy-to-clipboard.
-/// Without it those paths produce a second window signed in to the very account being avoided,
-/// with an Authorize button one click from the duplicate. See
-/// `accounts::browser::suppress_default_browser`.
+/// **maiTerm decides where the link opens, not the runtime.** `open_with` is `"default"` for the
+/// ordinary browser, a browser id for a private window (§5.2.1), or `None` to open nothing —
+/// the copy-to-clipboard path. The runtime's own launcher is shadowed either way, for two
+/// reasons: it would otherwise put a window signed in to the very account being avoided next to
+/// the private one, with Authorize a click away; and shadowing it is the only way to see the URL
+/// it actually uses, which is NOT the one it prints. See `accounts::browser`.
 #[tauri::command]
 pub async fn begin_account_login(
     app: tauri::AppHandle,
     runtime: String,
     account_id: String,
     timeout_secs: Option<u64>,
-    suppress_browser: Option<bool>,
+    open_with: Option<String>,
 ) -> Result<NewAccount, String> {
     let rt = runtime_from_slug(&runtime)?;
     let profile = rt.profile();
@@ -482,14 +483,7 @@ pub async fn begin_account_login(
     // for anyone whose `claude` lives somewhere resolve_cli does not look), a join error, and a
     // failed identity read AFTER a successful login, which strands a root holding a live
     // credential that no UI can reach.
-    let outcome = login_into_root(
-        &app,
-        rt,
-        &account_id,
-        timeout_secs,
-        suppress_browser.unwrap_or(false),
-    )
-    .await;
+    let outcome = login_into_root(&app, rt, &account_id, timeout_secs, open_with).await;
     match outcome {
         Ok(identity) => Ok(NewAccount { account_id, identity }),
         Err(e) => {
@@ -508,7 +502,7 @@ async fn login_into_root(
     rt: Runtime,
     account_id: &str,
     timeout_secs: Option<u64>,
-    suppress_browser: bool,
+    open_with: Option<String>,
 ) -> Result<AccountIdentity, String> {
     let profile = rt.profile();
     let account_id = account_id.to_string();
@@ -532,12 +526,12 @@ async fn login_into_root(
             cmd.env_remove(var);
         }
 
-        // Kept alive for the child's whole life — dropping it deletes the shim, and a child that
-        // reaches a PATH entry which no longer exists falls through to the real `open`.
-        let _suppressor = suppress_browser
-            .then(accounts::browser::suppress_default_browser)
-            .flatten();
-        if let Some(s) = &_suppressor {
+        // Always, not just for the private-window path: this is also how we learn the URL the
+        // runtime really uses. Kept alive for the child's whole life — dropping it deletes the
+        // shim, and a child reaching a PATH entry that no longer exists falls through to the
+        // real `open`.
+        let suppressor = accounts::browser::suppress_default_browser();
+        if let Some(s) = &suppressor {
             let mut entries = vec![s.path_entry().to_path_buf()];
             entries.extend(std::env::split_paths(
                 &std::env::var_os("PATH").unwrap_or_default(),
@@ -570,6 +564,12 @@ async fn login_into_root(
         // rather than only reporting it in the timeout message. That is what makes "copy the
         // link and finish in a private window" possible WHILE the sign-in is still waiting —
         // after it has timed out is too late, because the link has expired with it.
+        //
+        // **The stdout URL is the FALLBACK, used only when the shim could not be installed.**
+        // The printed line carries `redirect_uri=https://platform.claude.com/oauth/code/callback`
+        // — the branch that shows a code to paste, which is a dead end here because stdin is
+        // null. The browser gets `redirect_uri=http://localhost:<port>/callback`, which completes
+        // by itself. The poll loop below prefers what the shim captured for exactly that reason.
         let transcript = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
         // Shared, not per-thread: two drains each holding their own "have I announced?" would
         // both fire if the URL landed on both streams.
@@ -613,6 +613,44 @@ async fn login_into_root(
         register_login(&id_for_task, child.clone());
         let start = std::time::Instant::now();
         let result = loop {
+            // Did the runtime try to open a browser? If so that argv holds the REAL URL, which
+            // takes precedence over anything the drains scraped, and it is maiTerm's job to open
+            // it now that the runtime's own launcher is shadowed.
+            if let Some(s) = &suppressor {
+                if !announced.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(url) =
+                        s.captured().as_deref().and_then(|c| extract_login_url(c, false))
+                    {
+                        if !announced.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            let _ = app.emit(
+                                LOGIN_URL_EVENT,
+                                LoginUrlEvent {
+                                    account_id: id_for_task.clone(),
+                                    url: url.clone(),
+                                },
+                            );
+                            // Best effort. A failure here still leaves the link on screen with
+                            // Copy beside it, which is why none of these abort the sign-in.
+                            match open_with.as_deref() {
+                                Some("default") => {
+                                    if let Err(e) = accounts::browser::open_default(&url) {
+                                        log::warn!("accounts: opening default browser: {e}");
+                                    }
+                                }
+                                Some(id) => {
+                                    if let Err(e) =
+                                        accounts::browser::open_private_window(id, &url)
+                                    {
+                                        log::warn!("accounts: opening private window: {e}");
+                                    }
+                                }
+                                // Copy-to-clipboard: deliberately opens nothing.
+                                None => {}
+                            }
+                        }
+                    }
+                }
+            }
             let status = child.lock().try_wait();
             match status {
                 Ok(Some(status)) if status.success() => break Ok(()),
