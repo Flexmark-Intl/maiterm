@@ -541,6 +541,27 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    /** Apply several account fields in ONE persist.
+     *
+     *  Every setter writes the WHOLE preferences object through a sync command that clones all
+     *  app data, so a four-setter change was four full clone-serialise-write cycles over a
+     *  multi-megabyte file. Worse, it was observable half-way: the sequence persisted an account
+     *  row while `accounts_setup_complete` was still false, and an interruption there left the
+     *  pane showing "Not set up" with a live account root that none of its controls could reach,
+     *  because they all live inside the set-up branch. */
+    async setAccountsState(patch: {
+      setupComplete?: boolean;
+      enabled?: boolean;
+      accounts?: ManagedAccount[];
+      activeIds?: Record<string, string>;
+    }) {
+      if (patch.setupComplete !== undefined) accountsSetupComplete = patch.setupComplete;
+      if (patch.enabled !== undefined) accountsEnabled = patch.enabled;
+      if (patch.accounts !== undefined) managedAccounts = patch.accounts;
+      if (patch.activeIds !== undefined) activeAccountIds = patch.activeIds;
+      await this.save();
+    },
+
     /** The reversible half of §10: leaves accounts intact, injects nothing. */
     async setAccountsEnabled(value: boolean) {
       accountsEnabled = value;

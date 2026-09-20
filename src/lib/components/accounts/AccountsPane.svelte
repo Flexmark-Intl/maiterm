@@ -111,12 +111,15 @@
       last_verified_at: Math.floor(Date.now() / 1000),
     };
     identities = { ...identities, [account_id]: identity };
-    await preferencesStore.setManagedAccounts([...accounts, row]);
-    if (!activeIdFor(runtime)) await preferencesStore.setActiveAccount(runtime, account_id);
-    if (!setupComplete) {
-      await preferencesStore.setAccountsSetupComplete(true);
-      await preferencesStore.setAccountsEnabled(true);
-    }
+    // One write, not four. A half-applied sequence could persist the account row while setup
+    // was still false, which the pane renders as "Not set up" with the account unreachable.
+    const activeIds = { ...preferencesStore.activeAccountIds };
+    if (!activeIds[runtime]) activeIds[runtime] = account_id;
+    await preferencesStore.setAccountsState({
+      accounts: [...accounts, row],
+      activeIds,
+      ...(setupComplete ? {} : { setupComplete: true, enabled: true }),
+    });
     notice = `Added ${row.label}.`;
     error = null;
   }
@@ -144,11 +147,14 @@
     error = null;
     try {
       await commands.discardAccountRoot(account.runtime, account.id);
-      await preferencesStore.setManagedAccounts(accounts.filter(a => a.id !== account.id));
-      // Drop the active pointer with the account, so nothing holds an id for a row that is gone.
-      if (activeIdFor(account.runtime) === account.id) {
-        await preferencesStore.setActiveAccount(account.runtime, null);
-      }
+      // Drop the active pointer with the account in the SAME write, so no persisted state ever
+      // names a row that is gone.
+      const activeIds = { ...preferencesStore.activeAccountIds };
+      if (activeIds[account.runtime] === account.id) delete activeIds[account.runtime];
+      await preferencesStore.setAccountsState({
+        accounts: accounts.filter(a => a.id !== account.id),
+        activeIds,
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -170,12 +176,14 @@
           console.warn('discarding account root failed', a.id, e);
         }
       }
-      await preferencesStore.setManagedAccounts([]);
-      for (const slug of Object.keys(preferencesStore.activeAccountIds)) {
-        await preferencesStore.setActiveAccount(slug, null);
-      }
-      await preferencesStore.setAccountsEnabled(false);
-      await preferencesStore.setAccountsSetupComplete(false);
+      // One write. Everything this feature owns is reset here, so a field added later cannot be
+      // forgotten in a second reset path.
+      await preferencesStore.setAccountsState({
+        accounts: [],
+        activeIds: {},
+        enabled: false,
+        setupComplete: false,
+      });
       identities = {};
       notice = 'Setup cleared.';
       confirmingClear = false;
