@@ -89,6 +89,12 @@ static output, not at the dev server. `dev` runs Astro's dev pipeline, and `prev
 own serves whatever `dist/` happens to hold, which after an edit is the *previous* build.
 Only `review` guarantees the page in the browser is the page that would go live.
 
+**Stop `website:dev` first — they both want :4321.** This repo runs `website:dev` as a
+workspace stack service, so the port is usually already taken. Astro does not fail on that;
+it moves `review` to :4322 and says so in a line you have probably scrolled past, leaving
+`localhost:4321` serving the *dev* pipeline. Go there out of habit and you have reviewed
+the one thing this command exists to stop you reviewing.
+
 HTML is served with `cache-control: max-age=600`, so a browser can show the pre-deploy page
 for ten minutes after a successful deploy. Cache-bust with a query string before concluding
 a fix didn't land.
