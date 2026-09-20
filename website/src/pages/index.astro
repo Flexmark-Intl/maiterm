@@ -18,6 +18,27 @@ const title = 'maiTerm — keep a window full of coding agents on track';
 const description =
   'A terminal for running Claude Code, Codex and your shells side by side: a kanban board shared with your agents, a rules-driven supervisor watching the window, and every tab back exactly as it was after a restart.';
 
+/**
+ * The newest headline feature, given a fixed home in the hero.
+ *
+ * This is a SLOT, not a one-off: each release that ships something worth leading
+ * with replaces the entry below and moves on. Keep it to one, two at the outside —
+ * three is a feature list, and a hero that lists features has stopped having a
+ * headline. `href` points at the band further down that carries the detail, so
+ * nothing here has to explain itself.
+ *
+ * `tag` is deliberately not a version number. Nobody tracks ours, and a stale
+ * "New in 2.4" is worse than no label at all.
+ */
+const WHATS_NEW = [
+  {
+    tag: 'New',
+    title: 'Two agent logins at once',
+    body: 'Claude Code has one login slot. Keep an account per client and run them in different tabs, side by side.',
+    href: '#accounts',
+  },
+];
+
 const EVERYTHING = [
   {
     title: 'Restart without losing anything',
@@ -79,6 +100,23 @@ const EVERYTHING = [
         <li><strong>Source published</strong></li>
       </ul>
       <p class="ln-note hero-note">macOS, Windows and Linux.</p>
+
+      {/* The newest thing we shipped, in the fold. Without this it waits nine bands
+          down for someone who already decided to keep scrolling — which is exactly
+          the visitor who did not need convincing. */}
+      <div class="whats-new">
+        {
+          WHATS_NEW.map((f) => (
+            <a class="whats-new-item" href={f.href}>
+              <span class="whats-new-tag">{f.tag}</span>
+              <span class="whats-new-body">
+                <strong>{f.title}</strong>
+                <span>{f.body}</span>
+              </span>
+            </a>
+          ))
+        }
+      </div>
     </div>
 
     <div class="hero-shot">
@@ -91,6 +129,73 @@ const EVERYTHING = [
           fetchpriority="high"
         />
       </div>
+    </div>
+  </section>
+
+  {/* ------------------------------------------------------------ Accounts */}
+  {/* Sits first because the hero links straight into it, and because it is the
+      one band on this page that solves a problem the visitor had this morning —
+      no agent orchestration required to care about it.
+
+      No screenshot on purpose: the Accounts pane is a list of real email
+      addresses and organisation names. Every honest shot of it leaks an identity,
+      and a staged one would be a fake account list. */}
+  <section class="ln-band" id="accounts">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Agent accounts</p>
+      <h2 class="ln-h2 ln-h2--wide">Claude Code has one login slot. Your week does not.</h2>
+      <p class="ln-lead">
+        Two clients, or a personal subscription and your employer's — and one place to be
+        signed in. Moving between them means <code>/logout</code>, <code>/login</code>, the
+        browser, again; and it takes every tab with it, because that login is global to the
+        machine. The agent itself offers no way to switch.
+      </p>
+      <p class="ln-lead">
+        maiTerm holds <strong>as many logins as you need</strong> and hands each tab the right
+        one as it starts. The client's account works in the client's workspace while your own
+        runs in the next tab over — <strong>at the same time</strong>, no signing out, nothing
+        to redo when you switch back.
+      </p>
+      <p class="ln-lead">
+        It does that without ever holding your credentials. Each account is a
+        <strong>separate configuration directory</strong>, and the agent signs in to it, refreshes
+        it and signs out of it exactly as it always has. maiTerm never reads, writes or parses a
+        login, and never touches the keychain item it lives in — it owns the folder, not what is
+        inside.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Nothing else changes</h3>
+          <p>
+            Your hooks, skills, commands, permissions and MCP servers are shared into every
+            account, so a tab running as one behaves exactly like a tab that isn't. It is a
+            different login, not a different setup.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Chosen when a tab starts</h3>
+          <p>
+            Switching decides what <em>new</em> tabs use; the ones already open keep working as
+            whoever they started as. An account is handed to a shell at launch, so nothing can
+            change it underneath a running agent — reload the tab to move it across.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>It says who is actually answering</h3>
+          <p>
+            A stray <code>ANTHROPIC_API_KEY</code> in a shell profile outranks a subscription
+            login and still reports itself as signed in. <strong>Verify</strong> reads back the
+            identity that genuinely resolved, and says so when it is not the one on the row.
+          </p>
+        </div>
+      </div>
+      <p class="ln-note accounts-note">
+        Off until you turn it on, and it applies to tabs on this computer — signing your SSH
+        hosts in is not built yet. Claude Code today; the other runtimes are listed and decline
+        rather than half-work.
+      </p>
+      <a class="ln-cta-link" href="/features/accounts/">How accounts work</a>
     </div>
   </section>
 
@@ -632,6 +737,85 @@ const EVERYTHING = [
 
   .hero-note {
     margin-top: 0.85rem;
+  }
+
+  /* --- What's new -------------------------------------------------------
+     A banner would compete with the h1; a line of text would be missed. This
+     is a card that reads as an aside — left-aligned inside a centred hero on
+     purpose, because two lines of centred body copy are hard to read and it is
+     the one block here that is a sentence rather than a slogan.
+  ---------------------------------------------------------------------- */
+
+  .whats-new {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: clamp(2rem, 3.5vw, 2.75rem);
+  }
+
+  .whats-new-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+    max-width: 34rem;
+    padding: 0.8rem 1.1rem;
+    text-align: start;
+    text-decoration: none;
+    color: inherit;
+    border: 1px solid color-mix(in srgb, var(--ln-accent) 35%, var(--ln-border));
+    border-radius: 0.65rem;
+    background: color-mix(in srgb, var(--ln-accent) 7%, transparent);
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+  .whats-new-item:hover {
+    border-color: color-mix(in srgb, var(--ln-accent) 60%, transparent);
+    background: color-mix(in srgb, var(--ln-accent) 12%, transparent);
+  }
+
+  .whats-new-tag {
+    flex-shrink: 0;
+    padding: 0.15rem 0.5rem;
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--ln-accent) 22%, transparent);
+    color: var(--ln-accent-soft);
+    font-size: 0.75rem;
+    font-weight: 650;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .whats-new-body {
+    display: block;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--ln-fg-dim);
+    text-wrap: pretty;
+  }
+  .whats-new-body strong {
+    color: var(--ln-fg);
+    font-weight: 640;
+  }
+  /* The arrow belongs to the last word, not to a floated span: it must wrap with
+     the text rather than stranding itself on a line of its own. */
+  .whats-new-body strong::after {
+    content: ' →';
+    color: var(--ln-accent);
+    font-weight: 500;
+  }
+  .whats-new-body span {
+    display: block;
+    margin-top: 0.15rem;
+  }
+
+  /* --- Accounts ---------------------------------------------------------- */
+
+  .accounts-note {
+    margin-top: 1.75rem;
+    max-width: 62ch;
+    line-height: 1.55;
   }
 
   /* The shot is cropped by the fold on purpose: it reads as a running app you

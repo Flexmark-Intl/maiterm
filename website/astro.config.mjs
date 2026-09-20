@@ -43,6 +43,7 @@ export default defineConfig({
             { label: 'Workspace Stack', slug: 'features/stack' },
             { label: 'Code Editor', slug: 'features/editor' },
             { label: 'Agent Integration', slug: 'features/agents' },
+            { label: 'Agent Accounts', slug: 'features/accounts' },
             { label: 'Deshittification', slug: 'features/deshittification' },
             { label: 'Tasks', slug: 'features/tasks' },
             { label: 'Overlord', slug: 'features/overlord' },

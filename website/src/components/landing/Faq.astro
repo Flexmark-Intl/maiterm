@@ -20,6 +20,10 @@ const FAQS = [
     a: 'No. maiTerm launches the agent CLIs already installed on your machine and they keep using their own accounts, authentication and configuration. Your conversations go from that local CLI to its provider. maiTerm is not a model gateway and never asks you for a provider key.',
   },
   {
+    q: 'Can I be signed in to two Claude accounts at once?',
+    a: 'Yes, and Claude Code on its own cannot — it has a single login slot that is global to the machine. maiTerm gives each account its own configuration directory and hands a tab the right one as it starts, so a client\'s account runs in one tab while your own runs in the next. It still never holds the credential: the agent does its own sign-in, refresh and sign-out, and maiTerm owns only the folder. Off by default, and it covers tabs on your own machine — SSH hosts keep their own logins.',
+  },
+  {
     q: 'Which coding agents does it support?',
     a: 'Claude Code and OpenAI Codex, through one runtime-neutral pipeline — you pick which ones maiTerm wires up in Preferences. Any other CLI still runs in a tab like it would in any terminal; it just does not get the agent-aware features.',
   },
