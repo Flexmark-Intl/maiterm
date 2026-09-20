@@ -1,4 +1,4 @@
-import type { CursorStyle, OverlordRule, Preferences, Trigger } from '$lib/tauri/types';
+import type { CursorStyle, ManagedAccount, OverlordRule, Preferences, Trigger } from '$lib/tauri/types';
 import type { Theme } from '$lib/themes';
 import { builtinThemes } from '$lib/themes';
 import * as commands from '$lib/tauri/commands';
@@ -55,6 +55,12 @@ function createPreferencesStore() {
   let claudeTriggersPrompted = $state(false);
   let tasksEnabled = $state(true);
   let stackEnabled = $state(true);
+  // Managed agent accounts (docs/login.md). Setup is separate from the toggle: §10's four
+  // states exist because turning this on the first time has to teach and authenticate first.
+  let accountsSetupComplete = $state(false);
+  let accountsEnabled = $state(false);
+  let managedAccounts = $state<ManagedAccount[]>([]);
+  let activeAccountIds = $state<Record<string, string>>({});
   let tasksBacklogVocabularyMigrated = $state(false);
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
@@ -146,6 +152,19 @@ function createPreferencesStore() {
     get claudeTriggersPrompted() { return claudeTriggersPrompted; },
     get tasksEnabled() { return tasksEnabled; },
     get stackEnabled() { return stackEnabled; },
+    get accountsSetupComplete() { return accountsSetupComplete; },
+    get accountsEnabled() { return accountsEnabled; },
+    get managedAccounts() { return managedAccounts; },
+    get activeAccountIds() { return activeAccountIds; },
+    /** The account a tab of this runtime should spawn under, or null for unmanaged.
+     *  Returns null unless setup is complete AND the feature is enabled — a configured but
+     *  disabled state must inject nothing. */
+    activeAccountFor(runtime: string): ManagedAccount | null {
+      if (!accountsSetupComplete || !accountsEnabled) return null;
+      const id = activeAccountIds[runtime];
+      if (!id) return null;
+      return managedAccounts.find(a => a.id === id) ?? null;
+    },
     get overlordEnabled() { return overlordEnabled; },
     get overlordProposeMode() { return overlordProposeMode; },
     get overlordRules() { return overlordRules; },
@@ -246,6 +265,10 @@ function createPreferencesStore() {
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
       tasksEnabled = prefs.tasks_enabled ?? true;
       stackEnabled = prefs.stack_enabled ?? true;
+      accountsSetupComplete = prefs.accounts_setup_complete ?? false;
+      accountsEnabled = prefs.accounts_enabled ?? false;
+      managedAccounts = prefs.managed_accounts ?? [];
+      activeAccountIds = prefs.active_account_ids ?? {};
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
@@ -515,6 +538,32 @@ function createPreferencesStore() {
 
     async setStackEnabled(value: boolean) {
       stackEnabled = value;
+      await this.save();
+    },
+
+    /** The reversible half of §10: leaves accounts intact, injects nothing. */
+    async setAccountsEnabled(value: boolean) {
+      accountsEnabled = value;
+      await this.save();
+    },
+
+    async setAccountsSetupComplete(value: boolean) {
+      accountsSetupComplete = value;
+      await this.save();
+    },
+
+    async setManagedAccounts(value: ManagedAccount[]) {
+      managedAccounts = value;
+      await this.save();
+    },
+
+    /** Switch which account a runtime spawns under. Per-runtime, so setting Claude's active
+     *  account leaves Codex's alone. Only affects NEW tabs — a running agent holds its
+     *  credential in memory. */
+    async setActiveAccount(runtime: string, accountId: string | null) {
+      const next = { ...activeAccountIds };
+      if (accountId) next[runtime] = accountId; else delete next[runtime];
+      activeAccountIds = next;
       await this.save();
     },
 
@@ -790,6 +839,10 @@ function createPreferencesStore() {
       claudeTriggersPrompted = prefs.claude_triggers_prompted ?? false;
       tasksEnabled = prefs.tasks_enabled ?? true;
       stackEnabled = prefs.stack_enabled ?? true;
+      accountsSetupComplete = prefs.accounts_setup_complete ?? false;
+      accountsEnabled = prefs.accounts_enabled ?? false;
+      managedAccounts = prefs.managed_accounts ?? [];
+      activeAccountIds = prefs.active_account_ids ?? {};
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
@@ -882,6 +935,10 @@ function createPreferencesStore() {
         claude_triggers_prompted: claudeTriggersPrompted,
         tasks_enabled: tasksEnabled,
         stack_enabled: stackEnabled,
+        accounts_setup_complete: accountsSetupComplete,
+        accounts_enabled: accountsEnabled,
+        managed_accounts: managedAccounts,
+        active_account_ids: activeAccountIds,
         // Round-tripped, never set here: Rust owns this one-time flip.
         tasks_backlog_vocabulary_migrated: tasksBacklogVocabularyMigrated,
         overlord_enabled: overlordEnabled,

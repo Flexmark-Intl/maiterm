@@ -214,6 +214,45 @@ export type ServiceOrigin = 'human' | 'agent' | 'suggested';
  *
  *  No `tab_id`: which tab runs it is derived from `Tab.service_id`. No status: that is
  *  runtime state in the stack store, never persisted. */
+/** Agent runtimes maiTerm can hold accounts for. Only `claude` is implemented — the Rust
+ *  registry refuses the rest rather than half-wiring them (docs/login.md §5.4). */
+export type AccountRuntime = 'claude' | 'codex' | 'gemini' | 'grok';
+
+/** One managed agent account (docs/login.md).
+ *
+ *  **Carries no credential material.** Tokens live in the OS keychain under maiTerm's own
+ *  service name; a `/login` credential is never ours to hold — it sits in the account's config
+ *  root, which the runtime owns. This is metadata, and it is persisted to `aiterm-state.json`,
+ *  which is plaintext.
+ *
+ *  Optional fields are `skip_serializing_if` in Rust, so they arrive as `undefined` rather than
+ *  `null` — compare field-by-field with `?? null`, never `JSON.stringify`. */
+export interface ManagedAccount {
+  id: string;
+  /** Widened to `string` because persisted state may name a runtime this build doesn't know;
+   *  the Rust registry decides what is actually supported. */
+  runtime: AccountRuntime | string;
+  /** User-facing name. Defaults to the email or org read back after login. */
+  label: string;
+  /** `email` + `org_id` are the duplicate-detection key (§5.1): the browser reuses its
+   *  claude.ai session, so "add a second account" can silently return the first. */
+  email?: string;
+  org_id?: string;
+  org_name?: string;
+  /** Plan as the runtime reports it ("max", "pro"). Display only. */
+  plan?: string;
+  /** Unix seconds. */
+  created_at: number;
+  /** Last time this root was confirmed to still resolve to THIS identity (§6.1) — a missing
+   *  token falls through to whatever login exists on the host, so `loggedIn` is never
+   *  treated as confirmation. */
+  last_verified_at?: number;
+  /** Hosts the remote token is enabled for (§6). Explicit, never inferred. */
+  remote_hosts?: string[];
+  /** Unix seconds. Expiry is DERIVED from this + 1 year, never parsed from a credential. */
+  token_minted_at?: number;
+}
+
 export interface Service {
   id: string;
   /** The handle agents use — "web", "api". */
@@ -490,6 +529,17 @@ export interface Preferences {
   /** Workspace stack (docs/stack.md) — gates the stack MCP tools and the priming line. */
   stack_enabled: boolean;
   tasks_backlog_vocabulary_migrated: boolean;
+  /** Managed agent accounts (docs/login.md). Four states, not two (§10): setup is separate
+   *  from the toggle. `accounts_setup_complete` false → the pane shows "Set up…";
+   *  true with `accounts_enabled` false → configured but injecting nothing, one click to
+   *  re-enable; clearing setup revokes and returns to false. */
+  accounts_setup_complete: boolean;
+  accounts_enabled: boolean;
+  /** Metadata only — never credential material (§9.1). Omitted by Rust when empty. */
+  managed_accounts?: ManagedAccount[];
+  /** Runtime slug → account id. One active account per runtime, so Claude and Codex can be
+   *  live at the same time. Omitted by Rust when empty. */
+  active_account_ids?: Record<string, string>;
   overlord_enabled: boolean;
   /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */
   overlord_propose_mode: boolean;

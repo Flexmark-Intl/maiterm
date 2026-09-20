@@ -1257,6 +1257,52 @@ pub struct OverlordRule {
     pub supersedes: Option<Vec<String>>,
 }
 
+/// One managed agent account — see `docs/login.md`.
+///
+/// **Carries no credential material, ever** (§9.1). Tokens live in the OS keychain under
+/// maiTerm's own service name; a `/login` credential is never ours to hold at all — it sits in
+/// the account's config root, which Claude Code owns. This struct is metadata only, and it is
+/// persisted to `aiterm-state.json`, which is plaintext and the file we tell people to inspect
+/// when debugging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ManagedAccount {
+    pub id: String,
+    /// Runtime slug — "claude", "codex", "gemini", "grok". Matches `accounts::Runtime::slug`.
+    /// A string rather than an enum so an unknown runtime in persisted state loads instead of
+    /// failing the whole file; the registry decides what is actually supported.
+    pub runtime: String,
+    /// User-facing name. Defaults to the email or org read back after login.
+    pub label: String,
+    /// Read back from the runtime after login. `email` + `org_id` are also the duplicate
+    /// detection key (§5.1): the browser reuses its session, so "add a second account" can
+    /// silently return the first, and an account list may never hold two rows for one account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+    /// Plan as the runtime reports it ("max", "pro"…). Display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Unix seconds.
+    #[serde(default)]
+    pub created_at: u64,
+    /// Last time this root was confirmed to still resolve to THIS identity (§6.1). Absence of
+    /// a token falls through the precedence list to whatever login exists on the host, so
+    /// identity is verified positively and `loggedIn` is never treated as confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_verified_at: Option<u64>,
+    /// Hosts this account's remote token is enabled for (§6). Explicit, never inferred — a
+    /// token is a standing one-year credential.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_hosts: Vec<String>,
+    /// When the remote token was minted, unix seconds. Expiry is DERIVED from this
+    /// (`minted_at` + 1 year), never parsed out of a credential blob (§7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_minted_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CursorStyle {
@@ -1406,6 +1452,25 @@ pub struct Preferences {
     /// shouldn't carry eleven tool schemas for it.
     #[serde(default = "default_true")]
     pub stack_enabled: bool,
+    /// Managed agent accounts (docs/login.md). **Four states, not two** (§10): setup is a
+    /// separate artifact from the toggle, because turning this on the first time has to teach
+    /// and authenticate before it can mean anything. `accounts_setup_complete` false = "Set
+    /// up…"; true + `accounts_enabled` false = configured but injecting nothing, reversible in
+    /// one click; clearing setup revokes and drops back to false.
+    #[serde(default)]
+    pub accounts_setup_complete: bool,
+    /// Off by default. maiTerm holding logins is opt-in, and is refused outright on a machine
+    /// carrying managed settings (§3.4).
+    #[serde(default)]
+    pub accounts_enabled: bool,
+    /// The accounts themselves — metadata only, never credential material (§9.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_accounts: Vec<ManagedAccount>,
+    /// Runtime slug -> account id. One active account *per runtime*, so a Claude account and a
+    /// Codex account can be live at once. A map rather than an `active` flag on the account,
+    /// which would invite two rows both claiming it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub active_account_ids: std::collections::BTreeMap<String, String>,
     /// Overlord master switch (docs/overlord.md). Off by default — the per-window engine
     /// only ticks when enabled.
     #[serde(default)]
@@ -1726,6 +1791,10 @@ impl Default for Preferences {
             tasks_backlog_vocabulary_migrated: false,
             tasks_enabled: true,
             stack_enabled: true,
+            accounts_setup_complete: false,
+            accounts_enabled: false,
+            managed_accounts: Vec::new(),
+            active_account_ids: std::collections::BTreeMap::new(),
             overlord_enabled: false,
             overlord_propose_mode: true,
             overlord_rules: Vec::new(),
