@@ -27,6 +27,11 @@ the constraint; Starlight was.** Don't propose migrating off Astro — the split
   1180px every child silently insets by a full gutter. Invisible at 1024, obvious at 1440.
   This has been got wrong in both directions: once inset the nav, once made a shot render
   *narrower* than the column its `max-width` says it overhangs.
+- **Landing bands alternate `ln-band` / `ln-band--raised`, so inserting one flips every
+  band below it.** The parity is only reset by a `--sunken` band. There are exactly three
+  places a new band lands with no churn: directly after the hero (which is `--flush`),
+  and either side of the compatibility strip. Anywhere else, either re-flip the rest of
+  the page or accept two same-shade bands meeting.
 - **Both halves share the theme contract**: `data-theme` on `<html>`, persisted under the
   `starlight-theme` localStorage key. Starlight stores "auto" as an **empty string**, not
   `'auto'`. A toggle on one half must carry to the other.
