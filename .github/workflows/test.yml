@@ -1,0 +1,92 @@
+# Rust tests, on Windows above all.
+#
+# Until 2026-09-20 NO workflow in this repo ran a test on any platform — the two build
+# workflows only build, and only on a `v*` tag, which is far too late to learn anything.
+# The gap this closes is specific: the managed-accounts code is full of filesystem work
+# (symlink farms, `remove_tree_without_following`, path-prefix guards) whose behaviour is
+# genuinely different on NTFS, and every one of those tests had only ever run on macOS.
+#
+# Windows-first on purpose. A Linux job would need the whole webkit2gtk apt block from
+# build-linux.yml before `cargo test` could even link, and Linux shares Unix semantics with
+# the machine this is developed on, so it would mostly re-run tests that already pass. Add it
+# when that stops being true.
+#
+# KNOWN BLIND SPOT: GitHub's windows runner is an administrator, so `symlink_dir` succeeds
+# there. It therefore CANNOT catch the Developer Mode / elevation problem that stops
+# `reconcile` working on a normal Windows user's machine. Anything about symlink privilege
+# has to be checked on a real box; this job covers everything else.
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/test.yml"
+  pull_request:
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/test.yml"
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # tauri-build validates the config at compile time and wants frontendDist to exist, so
+      # the frontend has to be built before anything in src-tauri will link — even for a test.
+      - name: Build frontend
+        run: npm run build
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      # Not a test — a probe, printed for a human to read. These are the two unknowns that
+      # decide how Windows support gets written (see `RuntimeProfile::supported`), and both
+      # are cheap to ask here instead of guessing from documentation.
+      #
+      #   1. How is an npm-installed CLI actually laid down? If it is `claude.cmd`, then
+      #      `resolve_cli` joining a bare name and `Command::new` appending only `.exe` will
+      #      never find it, and every auth call fails before it starts.
+      #   2. Does a plain `std::fs` directory symlink succeed? On this runner it should,
+      #      because the runner is admin — a FAILURE here would mean the problem is worse
+      #      than a privilege one.
+      - name: Probe Windows CLI and symlink behaviour
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "--- PATHEXT ---"
+          $env:PATHEXT
+          Write-Host "--- how npm lays down a bin shim ---"
+          npm i -g @anthropic-ai/claude-code 2>&1 | Select-Object -Last 5
+          Get-ChildItem (npm prefix -g) -Filter "claude*" | Select-Object Name, Length
+          Write-Host "--- can Rust's Command::new find it bare? ---"
+          try { & claude --version } catch { Write-Host "BARE INVOKE FAILED: $_" }
+          Write-Host "--- directory symlink as this user ---"
+          $src = Join-Path $env:TEMP "probe-src"; $lnk = Join-Path $env:TEMP "probe-lnk"
+          New-Item -ItemType Directory -Force -Path $src | Out-Null
+          try {
+            New-Item -ItemType SymbolicLink -Path $lnk -Target $src -ErrorAction Stop | Out-Null
+            Write-Host "SYMLINK OK (runner is admin — says nothing about a normal user)"
+          } catch { Write-Host "SYMLINK FAILED: $_" }

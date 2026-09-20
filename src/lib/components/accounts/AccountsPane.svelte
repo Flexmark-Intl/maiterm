@@ -355,7 +355,20 @@
     does not touch your sign-in unless you turn this on.
   </p>
 
-  {#if !setupComplete}
+  {#if runtimes.length > 0 && !runtimes.some(r => r.supported)}
+    <!-- Nothing here can work on this platform, so offer nothing that looks like it can.
+         `supported` is the single flag every consumer asks — the setup picker, the Rust
+         sign-in, the spawn path — so this cannot drift out of step with what actually runs.
+         Until 2026-09-20 there was no such branch and Windows users could complete setup and
+         watch a row go green while every tab kept using their normal login. -->
+    <div class="empty">
+      <p>
+        Not available on this system yet. maiTerm can hold agent logins on macOS and Linux; the
+        Windows build cannot locate the agent CLI or create an account directory without
+        elevation, so the feature stays off rather than half-work.
+      </p>
+    </div>
+  {:else if !setupComplete}
     <div class="empty">
       <p>
         Not set up. What this does and does not do with your logins is below — setup signs you in

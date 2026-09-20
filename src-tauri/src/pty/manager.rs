@@ -183,21 +183,6 @@ pub fn spawn_pty(
             cmd.env("MAITERM_AUTH", auth);
         }
 
-        // Managed accounts (docs/login.md §5). This is what makes "launch under the active
-        // account" true: the runtime's config-dir variable points at that account's root, and
-        // every variable that could answer INSTEAD of its login is removed — otherwise a tab
-        // silently runs as whoever a leftover ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
-        // resolves to, while the UI claims the selected account (§6.1).
-        {
-            let (set, unset) = crate::accounts::spawn_env_for(&state.app_data.read().preferences);
-            for (k, v) in set {
-                cmd.env(k, v);
-            }
-            for k in unset {
-                cmd.env_remove(k);
-            }
-        }
-
         // Most shells use -l for login, fish uses --login
         match shell_name {
             "fish" => { cmd.arg("--login"); }
@@ -332,6 +317,31 @@ pub fn spawn_pty(
     };
 
     // --- Cross-platform environment setup ---
+
+    // Managed accounts (docs/login.md §5). This is what makes "launch under the active
+    // account" true: the runtime's config-dir variable points at that account's root, and
+    // every variable that could answer INSTEAD of its login is removed — otherwise a tab
+    // silently runs as whoever a leftover ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+    // resolves to, while the UI claims the selected account (§6.1).
+    //
+    // **This block lived inside the `#[cfg(unix)]` builder above until 2026-09-20, which made
+    // the whole feature inert on Windows** — setup completed, the row showed Active with a green
+    // dot, and every tab still launched under the normal login, silently. It belongs here: there
+    // is nothing platform-specific in it, `CommandBuilder::env`/`env_remove` are portable-pty's
+    // own API, and `spawn_env_for` already returns nothing at all unless the feature is set up
+    // and enabled with a known active account. Anything that reads "what account is this tab" is
+    // a cross-platform question and must be answered in this section, not in one of the two
+    // shell-detection arms.
+    {
+        let (set, unset) = crate::accounts::spawn_env_for(&state.app_data.read().preferences);
+        for (k, v) in set {
+            cmd.env(k, v);
+        }
+        for k in unset {
+            cmd.env_remove(k);
+        }
+    }
+
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERM_PROGRAM", "aiterm");

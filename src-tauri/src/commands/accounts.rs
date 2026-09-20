@@ -598,6 +598,8 @@ async fn login_into_root(
             let app = app.clone();
             let id = id_for_task.clone();
             let announced = announced.clone();
+            // What the caller asked for, so the no-shim path can explain why it did not happen.
+            let ow = open_with.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 4096];
                 while let Ok(n) = reader.read(&mut buf) {
@@ -621,11 +623,30 @@ async fn login_into_root(
                                 LOGIN_URL_EVENT,
                                 // The no-shim fallback: the runtime opened its own browser, so
                                 // maiTerm opened nothing and must not claim otherwise.
+                                //
+                                // **And it must not open this URL either, however much the user
+                                // asked for a private window.** Without the shim the only link
+                                // maiTerm can see is the one on stdout, and that is the
+                                // paste-code variant — `redirect_uri` pointing at
+                                // platform.claude.com rather than the localhost callback the
+                                // runtime actually opened. It cannot complete: finishing it
+                                // means typing a code back into a child whose stdin is null.
+                                // Opening it privately would therefore look like it worked and
+                                // strand the user on a page that goes nowhere, which is worse
+                                // than opening nothing. Say so instead: a shortcut that
+                                // silently does nothing is the thing to avoid here, not the
+                                // missing window.
                                 LoginUrlEvent {
                                     account_id: id.clone(),
                                     url,
                                     opened: false,
-                                    open_error: None,
+                                    open_error: ow.as_deref().filter(|w| *w != "default").map(|_| {
+                                        "maiTerm could not take over the browser launch on this \
+                                         system, so the agent opened its own window — finish \
+                                         signing in there. The link below is the paste-code \
+                                         variant and will not complete on its own."
+                                            .to_string()
+                                    }),
                                 },
                             );
                         }

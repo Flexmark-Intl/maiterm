@@ -138,8 +138,25 @@ pub struct RuntimeProfile {
     /// file* key and cannot be scrubbed from the environment at all; `AccountIdentity` handles
     /// that by reporting what answered rather than pretending it is an identity.
     pub shadowing_env: &'static [&'static str],
-    /// False until this runtime has had the §5.4 verification Claude has had. An unsupported
-    /// runtime is shown in the UI as not yet available, never silently half-wired.
+    /// Can maiTerm manage accounts for this runtime, **on this platform**, today?
+    ///
+    /// Two reasons it can be false, and they are deliberately one flag rather than two: every
+    /// consumer — the setup modal's picker, `begin_account_login`'s refusal, the pane — already
+    /// asks this one question, and a second flag they would each have to remember to check is
+    /// the shape of bug this module keeps finding.
+    ///
+    /// 1. **The runtime has not had the §5.4 verification Claude has had** (Codex, Gemini, Grok).
+    /// 2. **The platform cannot run it yet.** Windows: `resolve_cli` is Unix-shaped — it joins a
+    ///    bare `claude` and `is_executable` says so itself ("Windows would need the PATHEXT
+    ///    dance") — while an npm install puts `claude.cmd` on PATH, which `Command::new` never
+    ///    finds because it only ever appends `.exe`. So no sign-in, no verify, no sign-out. On
+    ///    top of that `reconcile`'s symlink farm needs Developer Mode or elevation there, and
+    ///    `browser::suppress_default_browser` cannot shim a PowerShell launch.
+    ///
+    /// An unsupported runtime is shown in the UI as not yet available, never silently
+    /// half-wired. That is the whole point: until 2026-09-20 the env injection sat inside the
+    /// `#[cfg(unix)]` PTY builder, so a Windows user could complete setup and watch the row go
+    /// green while every tab kept using their normal login.
     pub supported: bool,
 }
 
@@ -194,7 +211,10 @@ static CLAUDE: RuntimeProfile = RuntimeProfile {
         // every account onto one login
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     ],
-    supported: true,
+    // Verified on macOS; Linux is written but unrun. NOT Windows — see `supported`'s docs for
+    // the three things that have to land first. `cfg!` is const-evaluable, so the gate lives
+    // here beside the profile rather than in every caller.
+    supported: cfg!(unix),
 };
 
 /// Shape taken from a real `~/.codex` and `codex --help`; **not yet verified**.
@@ -1207,9 +1227,18 @@ mod tests {
 
     #[test]
     fn claude_spawn_env_sets_the_root_and_scrubs_every_shadowing_var() {
-        let (set, scrub) = spawn_env(Runtime::Claude, "acct-1").unwrap();
+        let Some((set, scrub)) = spawn_env(Runtime::Claude, "acct-1") else {
+            // Windows: `CLAUDE.supported` is `cfg!(unix)` until `resolve_cli` learns PATHEXT and
+            // the symlink farm stops needing elevation, so "no env at all" is the CORRECT answer
+            // — it is what stops the pane promising a tab an account it cannot deliver. Assert
+            // the gate rather than skipping, so this test still means something on Windows CI.
+            assert!(!cfg!(unix), "Claude spawn env is missing on a platform that supports it");
+            assert!(!CLAUDE.supported);
+            return;
+        };
         assert_eq!(set[0].0, "CLAUDE_CONFIG_DIR");
-        assert!(set[0].1.ends_with("accounts/claude/acct-1"));
+        // Compare as a Path, not a string: `ends_with` on a str wants `/` and NTFS writes `\`.
+        assert!(Path::new(&set[0].1).ends_with(Path::new("accounts/claude/acct-1")));
 
         // The spawn scrub and the verifier's scrub must be the SAME list. If they diverge, the
         // pane reports the identity the root holds while the tab runs as whatever a leftover
@@ -1262,9 +1291,16 @@ mod tests {
     #[test]
     fn spawn_env_sets_the_root_and_scrubs_for_an_active_account() {
         let (set, unset) = spawn_env_for(&prefs_with(Some("a1"), true, true));
+        if !CLAUDE.supported {
+            // Windows, for now. The gate has to reach all the way to the spawn path, not just
+            // to the UI — a platform where the pane is hidden but the env still went out would
+            // be the same class of bug in the other direction.
+            assert!(set.is_empty() && unset.is_empty());
+            return;
+        }
         assert_eq!(set.len(), 1);
         assert_eq!(set[0].0, "CLAUDE_CONFIG_DIR");
-        assert!(set[0].1.ends_with("accounts/claude/a1"));
+        assert!(Path::new(&set[0].1).ends_with(Path::new("accounts/claude/a1")));
         assert!(unset.contains(&"ANTHROPIC_API_KEY".to_string()));
         assert!(unset.contains(&"CLAUDE_CODE_OAUTH_TOKEN".to_string()));
     }
