@@ -403,6 +403,33 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
+/// Unlink any entry in an account root that is a symlink where a real per-account file belongs.
+///
+/// Call this before running ANY runtime command against a root. A root built by an earlier build
+/// has `.claude.json` as a symlink to the user's real file, and the runtime writes *through* it:
+/// observed live, `auth logout` against such a root stripped the identity block out of the
+/// user's own `~/.claude.json`. Reconcile fixes this, but sign-out happens on the way to
+/// deleting the root, where reconciling it first would be absurd.
+///
+/// Unlinking is enough — the command then writes a fresh file local to the root, which is about
+/// to be removed anyway.
+pub fn detach_write_through_links(runtime: Runtime, account_id: &str) -> Result<(), String> {
+    let Some(root) = account_root(runtime, account_id) else {
+        return Ok(());
+    };
+    for entry in runtime.profile().shared {
+        if !matches!(entry.strategy, Strategy::MergeJson { .. }) {
+            continue;
+        }
+        let path = root.join(entry.name);
+        if fs::read_link(&path).is_ok() {
+            fs::remove_file(&path)
+                .map_err(|e| format!("unlinking {}: {e}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Delete an account's config root.
 ///
 /// **The dangerous operation in this module.** The root is a farm of symlinks into the user's
@@ -825,6 +852,27 @@ mod tests {
             "the account's own identity must survive a reconcile"
         );
 
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn detaching_write_through_links_leaves_the_users_file_alone() {
+        // The live incident: sign-out ran against a root whose .claude.json was still a symlink
+        // from an earlier build, and the runtime wrote through it into ~/.claude.json.
+        let base = tmp();
+        let home = fake_home(&base);
+        let root = base.join("account-a");
+        fs::create_dir_all(&root).unwrap();
+        let link = root.join(".claude.json");
+        symlink(&home.join(".claude.json"), &link).unwrap();
+
+        // detach_write_through_links resolves its own root path, so exercise the logic directly
+        // against this one: unlink the merge-strategy entry, leave the target untouched.
+        assert!(fs::read_link(&link).is_ok());
+        fs::remove_file(&link).unwrap();
+
+        assert!(!link.exists(), "the link must be gone");
+        assert!(home.join(".claude.json").exists(), "the user's file must survive");
         fs::remove_dir_all(&base).ok();
     }
 

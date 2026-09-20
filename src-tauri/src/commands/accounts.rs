@@ -428,6 +428,12 @@ pub async fn discard_account_root(runtime: String, account_id: String) -> Result
         accounts::account_root(rt, &account_id),
     ) {
         if root.exists() {
+            // Before running anything against this root: a root built by an earlier build has
+            // `.claude.json` as a symlink, and the runtime writes THROUGH it — observed live,
+            // sign-out stripped the identity block out of the user's own ~/.claude.json.
+            if let Err(e) = accounts::detach_write_through_links(rt, &account_id) {
+                log::warn!("accounts: detaching write-through links for {account_id}: {e}");
+            }
             let config_env = profile.config_env.to_string();
             let scrub: Vec<String> =
                 profile.shadowing_env.iter().map(|s| s.to_string()).collect();
