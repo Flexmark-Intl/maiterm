@@ -76,8 +76,18 @@ may have moved since.
 ```bash
 npm run dev      # dev server
 npm run build    # static build into dist/
-npm run preview  # serve dist/ on :4321
+npm run preview  # serve dist/ on :4321 — WITHOUT building it first
+npm run review   # build, then serve dist/ on :4321
 ```
+
+From the repo root, without changing directory: `npm run website:dev` and
+`npm run website:review`.
+
+**`review` is the one to use before pushing.** There is no staging step — a push of
+`website/**` to `main` is the publish — so the last look at the site has to be at the real
+static output, not at the dev server. `dev` runs Astro's dev pipeline, and `preview` on its
+own serves whatever `dist/` happens to hold, which after an edit is the *previous* build.
+Only `review` guarantees the page in the browser is the page that would go live.
 
 HTML is served with `cache-control: max-age=600`, so a browser can show the pre-deploy page
 for ten minutes after a successful deploy. Cache-bust with a query string before concluding
