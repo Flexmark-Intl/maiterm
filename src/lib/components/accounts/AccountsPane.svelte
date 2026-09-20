@@ -141,22 +141,68 @@
     error = null;
   }
 
+  /** Check an account still resolves to the identity we recorded.
+   *
+   *  **Reports success out loud.** It used to say nothing at all when everything was fine, which
+   *  is indistinguishable from a dead button — and the one case it did report, a changed email,
+   *  is rare enough that the button looked broken to everyone. A check whose "all good" is
+   *  silence is not a check the user can trust. */
   async function verify(account: ManagedAccount) {
     busy = true;
     error = null;
+    notice = null;
     try {
       const identity = await commands.readAccountIdentity(account.runtime, account.id);
       identities = { ...identities, [account.id]: identity };
-      if (identity.is_account_login && identity.email !== (account.email ?? null)) {
+
+      // Branch on is_account_login, never on logged_in: precedence is a fall-through, so some
+      // other rung answering reports logged_in with no email at all.
+      if (!identity.is_account_login) {
+        error = identity.logged_in
+          ? `${account.label} is signed in, but as ` +
+            `${identity.shadowed_by ?? 'something else'} rather than this account. ` +
+            `Remove it and add it again.`
+          : `${account.label} is signed out. Remove it and add it again to sign back in.`;
+        return;
+      }
+      if (identity.email !== (account.email ?? null)) {
         error =
           `${account.label} now reports ${identity.email ?? 'a different account'}. ` +
           `Its sign-in may have been replaced.`;
+        return;
       }
+
+      const now = Math.floor(Date.now() / 1000);
+      await preferencesStore.setAccountsState({
+        accounts: accounts.map(a => (a.id === account.id ? { ...a, last_verified_at: now } : a)),
+      });
+      notice = `${account.label} is still signed in${identity.plan ? ` on ${identity.plan}` : ''}.`;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
     }
+  }
+
+  /** What the status dot means, in words. A coloured dot with no legend is a puzzle, and this
+   *  one has three states rather than the two its colour suggests. */
+  function statusTooltip(isActive: boolean, on: boolean): string {
+    if (!isActive) return 'Not active — use “Use” to run new tabs as this account';
+    return on
+      ? 'Active — new tabs launch under this account'
+      : 'Active, but management is off — new tabs use your normal login';
+  }
+
+  /** "3 minutes ago", for the last successful Verify. */
+  function agoLabel(unixSecs: number): string {
+    const secs = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+    if (secs < 60) return 'just now';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
   }
 
   async function removeAccount(account: ManagedAccount) {
@@ -260,14 +306,22 @@
           <div class="row" class:active={isActive}>
             <div class="row-main">
               <div class="row-title">
-                <StatusDot
-                  color={isActive && enabled ? 'green' : 'dim'}
-                  tooltip={isActive ? 'Active for this runtime' : 'Not active'}
-                />
+                <!-- The tooltip goes on a padded wrapper, not the dot: the dot is 6px, which is
+                     a hover target most people never hit, so the explanation may as well not
+                     exist. StatusDot gets no `tooltip` prop here — that would nest two. -->
+                <Tooltip text={statusTooltip(isActive, enabled)}>
+                  <span class="dot-hit">
+                    <StatusDot color={isActive && enabled ? 'green' : 'dim'} />
+                  </span>
+                </Tooltip>
                 <span class="name">{account.label}</span>
                 {#if account.plan}<span class="pill">{account.plan}</span>{/if}
+                {#if isActive}<span class="pill active-pill">Active</span>{/if}
               </div>
               {#if account.org_name}<div class="meta">{account.org_name}</div>{/if}
+              {#if account.last_verified_at}
+                <div class="meta">Verified {agoLabel(account.last_verified_at)}</div>
+              {/if}
               {#if identity && !identity.is_account_login}
                 <div class="meta warn">
                   {#if !identity.logged_in}
@@ -532,6 +586,19 @@
     font-size: 0.7rem;
     padding: 1px 5px;
     text-transform: uppercase;
+  }
+
+  .active-pill {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    color: var(--accent);
+  }
+
+  /* Enlarges the dot's hover target without moving it: negative margin cancels the padding. */
+  .dot-hit {
+    align-items: center;
+    display: inline-flex;
+    margin: -6px;
+    padding: 6px;
   }
 
   .meta {
