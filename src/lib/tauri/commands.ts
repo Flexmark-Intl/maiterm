@@ -1450,6 +1450,31 @@ export const ACCOUNT_RELOAD_TABS_EVENT = 'accounts-reload-tabs';
 export interface AccountReloadRequest {
   /** `null` means every workspace in the window. */
   workspace_ids: string[] | null;
+  /** Window label to report completion to. */
+  reply_to: string;
+  /** Echoed back, so a caller with several requests in flight knows which finished. */
+  request_id: string;
+}
+
+/** Emitted back to the requester once a window has finished reloading. */
+export const ACCOUNT_RELOAD_DONE_EVENT = 'accounts-reload-done';
+
+export interface AccountReloadDone {
+  request_id: string;
+  reloaded: number;
+}
+
+/** Report that this window finished reloading.
+ *
+ *  There is no other completion signal: the request is one-way, and the live tab counts look
+ *  identical afterwards because the replacements are live too. Without this the dialog claims
+ *  "Reloading…" forever. */
+export async function reportAccountReloadDone(
+  replyTo: string,
+  requestId: string,
+  reloaded: number,
+): Promise<void> {
+  return invoke('report_account_reload_done', { replyTo, requestId, reloaded });
 }
 
 /** Which windows and workspaces still have tabs running under the previous account.
@@ -1464,8 +1489,18 @@ export async function accountReloadTargets(): Promise<AccountReloadWindow[]> {
  *
  *  Addressed by window label, never broadcast — every window would otherwise reload its own
  *  tabs, turning "reload this workspace" into "reload everything". */
-export async function requestAccountReload(label: string, workspaceIds?: string[]): Promise<void> {
-  return invoke('request_account_reload', { label, workspaceIds: workspaceIds ?? null });
+export async function requestAccountReload(
+  label: string,
+  workspaceIds: string[] | undefined,
+  replyTo: string,
+  requestId: string,
+): Promise<void> {
+  return invoke('request_account_reload', {
+    label,
+    workspaceIds: workspaceIds ?? null,
+    replyTo,
+    requestId,
+  });
 }
 
 /** A browser on this machine that can be told to open a private window. */

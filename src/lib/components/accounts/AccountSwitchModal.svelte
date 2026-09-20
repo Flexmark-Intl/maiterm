@@ -14,9 +14,11 @@
    *
    *  Only tabs with a live PTY are counted or touched. A suspended or never-opened tab already
    *  starts under the active account, so reloading it would spawn shells nobody asked for. */
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
-  import type { AccountReloadWindow } from '$lib/tauri/commands';
+  import type { AccountReloadWindow, AccountReloadDone } from '$lib/tauri/commands';
 
   interface Props {
     /** The account just made active, for the headline. */
@@ -29,8 +31,34 @@
   let windows = $state<AccountReloadWindow[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let done = $state<string[]>([]);
   let panelEl = $state<HTMLDivElement | null>(null);
+
+  /** Per-target progress, keyed by window id or workspace id. `pending` until the window that
+   *  did the work reports back — there is no other completion signal, because the live tab
+   *  counts look identical afterwards (the replacements are live too). */
+  type Progress = { state: 'pending'; requestId: string } | { state: 'done'; reloaded: number };
+  let progress = $state<Record<string, Progress>>({});
+
+  $effect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let dead = false;
+    void (async () => {
+      const fn = await listen<AccountReloadDone>(commands.ACCOUNT_RELOAD_DONE_EVENT, e => {
+        const { request_id, reloaded } = e.payload;
+        for (const [key, p] of Object.entries(progress)) {
+          if (p.state === 'pending' && p.requestId === request_id) {
+            progress = { ...progress, [key]: { state: 'done', reloaded } };
+          }
+        }
+      });
+      if (dead) void fn();
+      else unlisten = fn;
+    })();
+    return () => {
+      dead = true;
+      void unlisten?.();
+    };
+  });
 
   $effect(() => {
     const id = requestAnimationFrame(() => panelEl?.focus());
@@ -65,13 +93,22 @@
     return w.name ?? (w.label === 'main' ? 'Main window' : w.label);
   }
 
-  async function reload(w: AccountReloadWindow, workspaceIds?: string[], key?: string) {
+  async function reload(w: AccountReloadWindow, workspaceIds: string[] | undefined, key: string) {
     error = null;
+    const requestId = crypto.randomUUID();
+    progress = { ...progress, [key]: { state: 'pending', requestId } };
     try {
-      await commands.requestAccountReload(w.label, workspaceIds);
-      if (key) done = [...done, key];
+      await commands.requestAccountReload(
+        w.label,
+        workspaceIds,
+        getCurrentWindow().label,
+        requestId,
+      );
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+      // Drop the pending marker, or the row claims work that was never started.
+      const { [key]: _dropped, ...rest } = progress;
+      progress = rest;
     }
   }
 
@@ -79,6 +116,11 @@
     for (const w of live) {
       await reload(w, undefined, `w:${w.window_id}`);
     }
+  }
+
+  /** A workspace row follows its own request, or its window's if that is what was asked. */
+  function rowProgress(wKey: string, wsKey: string): Progress | null {
+    return progress[wsKey] ?? progress[wKey] ?? null;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -149,8 +191,10 @@
             <div class="win">
               <div class="win-head">
                 <span class="win-name">{windowTitle(w)}</span>
-                {#if done.includes(wKey)}
+                {#if progress[wKey]?.state === 'pending'}
                   <span class="done">Reloading…</span>
+                {:else if progress[wKey]?.state === 'done'}
+                  <span class="done">Reloaded</span>
                 {:else}
                   <Button variant="ghost" onclick={() => reload(w, undefined, wKey)}>
                     Reload window
@@ -159,6 +203,7 @@
               </div>
               {#each w.workspaces as ws (ws.id)}
                 {@const wsKey = `ws:${ws.id}`}
+                {@const p = rowProgress(wKey, wsKey)}
                 <div class="ws">
                   <span class="ws-name">
                     {ws.name}
@@ -166,8 +211,11 @@
                       {ws.live_tabs} tab{ws.live_tabs === 1 ? '' : 's'}
                     </span>
                   </span>
-                  {#if done.includes(wsKey) || done.includes(wKey)}
+                  {#if p?.state === 'pending'}
                     <span class="done">Reloading…</span>
+                  {:else if p?.state === 'done'}
+                    <!-- The count is what the window actually reloaded, not what we asked for. -->
+                    <span class="done">Reloaded {p.reloaded}</span>
                   {:else}
                     <Button variant="ghost" onclick={() => reload(w, [ws.id], wsKey)}>
                       Reload

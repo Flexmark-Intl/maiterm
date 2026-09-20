@@ -850,10 +850,23 @@ pub struct ReloadWindow {
 /// Emitted to ONE window, asking it to reload the tabs running under the old account.
 pub const RELOAD_TABS_EVENT: &str = "accounts-reload-tabs";
 
+/// Emitted back to whoever asked, once that window has finished.
+pub const RELOAD_DONE_EVENT: &str = "accounts-reload-done";
+
 #[derive(Debug, Clone, Serialize)]
 struct ReloadTabsEvent {
     /// `None` means every workspace in the window.
     workspace_ids: Option<Vec<String>>,
+    /// Window label to report completion to.
+    reply_to: String,
+    /// Echoed back, so a caller with several requests in flight knows which one finished.
+    request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReloadDoneEvent {
+    request_id: String,
+    reloaded: usize,
 }
 
 /// Which windows and workspaces have tabs still running under the previous account.
@@ -918,9 +931,29 @@ pub async fn request_account_reload(
     app: tauri::AppHandle,
     label: String,
     workspace_ids: Option<Vec<String>>,
+    reply_to: String,
+    request_id: String,
 ) -> Result<(), String> {
-    app.emit_to(&label, RELOAD_TABS_EVENT, ReloadTabsEvent { workspace_ids })
-        .map_err(|e| format!("asking {label} to reload: {e}"))
+    app.emit_to(
+        &label,
+        RELOAD_TABS_EVENT,
+        ReloadTabsEvent { workspace_ids, reply_to, request_id },
+    )
+    .map_err(|e| format!("asking {label} to reload: {e}"))
+}
+
+/// Report that a window has finished reloading, so the dialog that asked can stop claiming it is
+/// still in progress. Without this there is no completion signal at all: the request is one-way,
+/// and the tab counts look identical afterwards because the replacements are live too.
+#[tauri::command]
+pub async fn report_account_reload_done(
+    app: tauri::AppHandle,
+    reply_to: String,
+    request_id: String,
+    reloaded: usize,
+) -> Result<(), String> {
+    app.emit_to(&reply_to, RELOAD_DONE_EVENT, ReloadDoneEvent { request_id, reloaded })
+        .map_err(|e| format!("reporting reload completion to {reply_to}: {e}"))
 }
 
 /// The environment a tab spawning under this account needs: variables to set, and variables to

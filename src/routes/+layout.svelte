@@ -396,17 +396,52 @@
     // stack service tab is skipped outright, since restarting the user's dev server has nothing
     // to do with which account is active.
     let unlistenAccountReload: (() => void) | undefined;
-    listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, (event) => {
+    listen<commands.AccountReloadRequest>(commands.ACCOUNT_RELOAD_TABS_EVENT, async (event) => {
       const wanted = event.payload.workspace_ids;
+
+      // SNAPSHOT the ids first, then reload them ONE AT A TIME.
+      //
+      // Both halves are load-bearing, and getting either wrong destroys tabs. `reloadTab` is
+      // index-based: it duplicates the tab, re-reads window data, and takes
+      // `freshPane.tabs[sourceIndex + 1]` as the replacement. Fired concurrently, the indices
+      // shift under each other, so it carries the old tab's state onto the WRONG replacement
+      // and then deletes the original — observed losing two of three tabs in a workspace.
+      // Iterating the live arrays is the same bug from the other end, since each reload
+      // reorders the very list being walked.
+      const targets: { wsId: string; paneId: string; tabId: string }[] = [];
       for (const ws of workspacesStore.workspaces) {
         if (wanted && !wanted.includes(ws.id)) continue;
         for (const pane of ws.panes) {
           for (const tab of pane.tabs) {
+            // A service tab runs the user's dev server, not an agent — restarting it has
+            // nothing to do with which account is active.
             if (tab.service_id) continue;
+            // Only live shells need moving. Anything else already starts under the active
+            // account, so reloading it would spawn a shell nobody asked for.
             if (!terminalsStore.get(tab.id)) continue;
-            workspacesStore.reloadTab(ws.id, pane.id, tab.id);
+            targets.push({ wsId: ws.id, paneId: pane.id, tabId: tab.id });
           }
         }
+      }
+
+      let reloaded = 0;
+      for (const t of targets) {
+        try {
+          await workspacesStore.reloadTab(t.wsId, t.paneId, t.tabId);
+          reloaded++;
+        } catch (e) {
+          // One failure must not strand the rest, nor the completion report.
+          console.warn('account reload failed for tab', t.tabId, e);
+        }
+      }
+      try {
+        await commands.reportAccountReloadDone(
+          event.payload.reply_to,
+          event.payload.request_id,
+          reloaded,
+        );
+      } catch (e) {
+        console.warn('reporting account reload completion failed', e);
       }
     }, { target: appWindow.label }).then(unlisten => { unlistenAccountReload = unlisten; });
 
