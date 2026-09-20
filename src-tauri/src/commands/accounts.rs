@@ -310,14 +310,60 @@ async fn login_into_root(
     read_account_identity(rt.slug().to_string(), account_id).await
 }
 
-/// Delete an account's config root. Used for a §5.1 duplicate, a cancelled sign-in, and
-/// "Clear setup".
+/// Sign an account out and delete its config root. Used for a §5.1 duplicate, a cancelled
+/// sign-in, "Remove" and "Clear setup".
 ///
-/// Unlinks symlinks without following them — the root points at the user's real transcripts and
-/// project state, which are not ours to delete.
+/// **Signs out first, and that is not optional.** Deleting the directory does not touch the
+/// credential: on macOS it lives in a Keychain item keyed by a hash of the config-dir path, so
+/// removing the root orphans a credential that stays valid server-side, under a uuid that is
+/// never reused. Every caller of this promises the user the account is gone — "Clear setup"
+/// says so in its confirm text — so revocation belongs here rather than in each caller.
+///
+/// Sign-out is best effort: an account that was never signed in, or whose CLI has gone missing,
+/// must still be removable. A failure is logged, not returned, because leaving the root behind
+/// as well would be strictly worse.
+///
+/// The directory delete unlinks symlinks without following them — the root points at the user's
+/// real transcripts and project state, which are not ours to delete.
 #[tauri::command]
 pub async fn discard_account_root(runtime: String, account_id: String) -> Result<(), String> {
     let rt = runtime_from_slug(&runtime)?;
+    let profile = rt.profile();
+
+    if let (Some(cli), Some(root)) = (
+        accounts::resolve_cli(profile),
+        accounts::account_root(rt, &account_id),
+    ) {
+        if root.exists() {
+            let config_env = profile.config_env.to_string();
+            let scrub: Vec<String> =
+                profile.shadowing_env.iter().map(|s| s.to_string()).collect();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let mut cmd = Command::new(&cli);
+                cmd.args(["auth", "logout"]);
+                cmd.env(&config_env, &root);
+                // Same scrub as everywhere else: sign out THIS root's credential, not whatever
+                // a leftover variable would have answered with.
+                for var in &scrub {
+                    cmd.env_remove(var);
+                }
+                cmd.stdin(std::process::Stdio::null());
+                cmd.output()
+            })
+            .await;
+            match result {
+                Ok(Ok(out)) if !out.status.success() => log::warn!(
+                    "accounts: sign-out for {account_id} exited {}: {}",
+                    out.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => log::warn!("accounts: sign-out task for {account_id} failed: {e}"),
+                Ok(Err(e)) => log::warn!("accounts: sign-out for {account_id} failed: {e}"),
+                Ok(Ok(_)) => {}
+            }
+        }
+    }
+
     tauri::async_runtime::spawn_blocking(move || accounts::remove_root(rt, &account_id))
         .await
         .map_err(|e| format!("discard task failed: {e}"))?

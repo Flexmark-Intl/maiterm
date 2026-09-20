@@ -1382,7 +1382,14 @@ export async function beginAccountLogin(runtime: string, timeoutSecs?: number): 
   return invoke('begin_account_login', { runtime, timeoutSecs: timeoutSecs ?? null });
 }
 
-/** Delete an account's config root — duplicate, cancelled sign-in, or "Clear setup".
+/** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or
+ *  "Clear setup".
+ *
+ *  The sign-out is not optional: deleting the directory does not touch the credential, which
+ *  lives in a Keychain item keyed by the config-dir path, so without it every "removed" account
+ *  leaves a valid credential behind. Best effort — a failure to sign out still removes the root,
+ *  because leaving that behind as well would be worse.
+ *
  *  Unlinks symlinks without following them; the root points at the user's real transcripts. */
 export async function discardAccountRoot(runtime: string, accountId: string): Promise<void> {
   return invoke('discard_account_root', { runtime, accountId });
