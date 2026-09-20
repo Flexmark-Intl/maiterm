@@ -76,6 +76,11 @@ jobs:
         shell: pwsh
         continue-on-error: true
         run: |
+          # GitHub sets $ErrorActionPreference='stop' for pwsh steps, which turns any native
+          # command writing to stderr into a terminating NativeCommandError. `npm i -g` does
+          # that routinely, and it would abort this script before the symlink probe — the half
+          # of it that matters most — ever printed.
+          $ErrorActionPreference = 'continue'
           Write-Host "--- PATHEXT ---"
           $env:PATHEXT
           Write-Host "--- how npm lays down a bin shim ---"

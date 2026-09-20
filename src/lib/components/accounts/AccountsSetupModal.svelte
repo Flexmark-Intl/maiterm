@@ -66,6 +66,10 @@
   let onUrl = $state<'none' | 'copy' | 'private'>('none');
   let copied = $state(false);
   let openedPrivately = $state(false);
+  /** The link we were given is the runtime's printed, paste-a-code one rather than the
+   *  localhost callback it actually opened — so it cannot complete, and must not be offered
+   *  as something to open. Comes from the event as a fact; never inferred from `error`. */
+  let pasteCode = $state(false);
 
   /** Browsers that can be told to open a private window. **Empty is a normal answer** — Safari
    *  has no such switch — so nothing here may be the only way through; the link and its Copy
@@ -99,6 +103,7 @@
         // window running its own sign-in would otherwise overwrite this one's link.
         if (e.payload.account_id !== pendingId) return;
         loginUrl = e.payload.url;
+        pasteCode = e.payload.paste_code;
         // Only the clipboard is handled here — Rust does the opening, since it is holding the
         // URL that actually completes. Report what it DID, not what it was asked to do.
         openedPrivately = e.payload.opened && onUrl === 'private';
@@ -338,7 +343,13 @@
               {:else}Sign-in link{/if}
             </h4>
             <p class="hint">
-              {#if openedPrivately}
+              {#if pasteCode}
+                <!-- This is the link the runtime PRINTED, not the one it opened. It ends in
+                     "paste this code", and there is nowhere to paste it — the CLI's stdin is
+                     null. Say what it is for rather than implying it can be used to sign in. -->
+                This is the agent's own fallback link and cannot finish the sign-in by itself —
+                the window it opened can. It is here so you can see where it was sending you.
+              {:else if openedPrivately}
                 Finish signing in there. If that window was not private, close it and use Copy.
               {:else if copied}
                 On your clipboard. Nothing else was opened — paste it into a private/incognito
@@ -349,7 +360,10 @@
             </p>
             <div class="link-row">
               <code class="url">{loginUrl}</code>
-              {#if browser}
+              <!-- No "Open in …" on a paste-code link. The Rust side refuses to open it for
+                   exactly this reason; offering the button here would hand the user the dead
+                   end anyway, one click away, under a label that promises it works. -->
+              {#if browser && !pasteCode}
                 <Button variant="secondary" onclick={openPrivately}>Open in {browser.label}</Button>
               {/if}
               <Button variant="ghost" onclick={copyLink}>{copied ? 'Copy again' : 'Copy'}</Button>

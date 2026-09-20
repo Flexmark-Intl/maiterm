@@ -1424,6 +1424,10 @@ export interface AccountLoginUrl {
    *  failure from a deliberate no-op; the UI must not claim a window opened on either. */
   opened: boolean;
   open_error: string | null;
+  /** True when this is the link the runtime PRINTED rather than the one it opened — the
+   *  paste-a-code variant, which cannot complete because the CLI's stdin is null. The UI must
+   *  not offer to open it: doing so walks the user into a dead end that looks like success. */
+  paste_code: boolean;
 }
 
 /** A workspace that has tabs still running under the previous account. */

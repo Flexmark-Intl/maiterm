@@ -1193,6 +1193,10 @@ mod session_start_hook_tests {
     /// a `{ ...; }` group and a `&&`/`||` chain — every past break here has been a quoting
     /// slip, and a broken hook fails silently at session start (the agent just never gets
     /// its context). Parse it with the real shell rather than trusting the format string.
+    // POSIX-shell only: this parses the hook one-liner with `sh -n`, and `.expect()` PANICS
+    // rather than skipping when there is no `sh`. Gated so the Windows CI job stays red only
+    // for real defects — a job that is red by default is one nobody reads.
+    #[cfg(unix)]
     #[test]
     fn session_start_command_is_valid_shell() {
         let cmd = session_start_command(51234, "AUTHTOK");
@@ -1217,6 +1221,10 @@ mod session_start_hook_tests {
             .to_string()
     }
 
+    // POSIX-shell only: this parses the hook one-liner with `sh -n`, and `.expect()` PANICS
+    // rather than skipping when there is no `sh`. Gated so the Windows CI job stays red only
+    // for real defects — a job that is red by default is one nobody reads.
+    #[cfg(unix)]
     #[test]
     fn session_end_command_is_valid_shell_and_names_its_tab() {
         let cmd = session_end_command(51234, "AUTHTOK");

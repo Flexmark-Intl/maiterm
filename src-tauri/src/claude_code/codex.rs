@@ -841,6 +841,8 @@ mod tests {
     }
 
     /// Run the shipped shim with a payload and return its stdout.
+    /// Gated with its only caller — otherwise this is dead code on Windows.
+    #[cfg(unix)]
     fn run_shim(payload: &str, env: &[(&str, &str)]) -> Option<String> {
         use std::io::Write;
         use std::process::{Command, Stdio};
@@ -865,6 +867,10 @@ mod tests {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
+    // Actually EXECUTES the shipped bash shim (which then shells out to `curl`), so it needs a
+    // POSIX environment, not just a compiler. Gated for the same reason as the `sh -n` tests in
+    // lockfile.rs: the Windows CI job is only useful if a red run means a real defect.
+    #[cfg(unix)]
     #[test]
     fn shim_always_emits_valid_json_even_with_nothing_to_talk_to() {
         // The fail-safe that matters: a hook printing anything but JSON is a hook error in the

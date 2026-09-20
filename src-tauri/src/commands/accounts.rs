@@ -234,6 +234,20 @@ pub const LOGIN_URL_EVENT: &str = "account-login-url";
 /// still better than a dialog waiting forever for one that never comes.
 const SHIM_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Shown whenever the only link maiTerm could get hold of is the one the runtime PRINTED.
+///
+/// That link is not the one the runtime opened. It carries
+/// `redirect_uri=https://platform.claude.com/oauth/code/callback`, so completing it means
+/// pasting a code back into the CLI — and the child's stdin is `Stdio::null()`, so there is
+/// nowhere to paste it. maiTerm therefore refuses to open it, however explicitly the user asked
+/// for a private window: a dead end that reports success is worse than a shortcut that says it
+/// could not run. **Both** announce paths (the no-shim drain and the poll loop's grace-period
+/// fallback) share this string so they cannot drift into telling different stories.
+const PASTE_CODE_LINK_NOTE: &str =
+    "maiTerm could not take over the browser launch, so the agent opened its own window — \
+     finish signing in there. The link below is the paste-code variant and will not complete \
+     on its own.";
+
 #[derive(Debug, Clone, Serialize)]
 struct LoginUrlEvent {
     account_id: String,
@@ -243,6 +257,14 @@ struct LoginUrlEvent {
     /// them, and the UI must not claim a window opened on either.
     opened: bool,
     open_error: Option<String>,
+    /// True when this link is the one the runtime PRINTED rather than the one it opened — the
+    /// `platform.claude.com/oauth/code/callback` variant, which ends in "paste this code" and
+    /// so cannot complete against a child with null stdin.
+    ///
+    /// The UI needs this as a fact, not as a string match on `open_error`: it decides whether
+    /// to offer "Open in <browser>" at all. Offering it on a paste-code link invites the user
+    /// to walk into the dead end that the Rust side just declined to walk them into.
+    paste_code: bool,
 }
 
 /// Pull the authorization URL out of a runtime's sign-in output.
@@ -640,13 +662,13 @@ async fn login_into_root(
                                     account_id: id.clone(),
                                     url,
                                     opened: false,
-                                    open_error: ow.as_deref().filter(|w| *w != "default").map(|_| {
-                                        "maiTerm could not take over the browser launch on this \
-                                         system, so the agent opened its own window — finish \
-                                         signing in there. The link below is the paste-code \
-                                         variant and will not complete on its own."
-                                            .to_string()
-                                    }),
+                                    open_error: ow
+                                        .as_deref()
+                                        .filter(|w| *w != "default")
+                                        .map(|_| PASTE_CODE_LINK_NOTE.to_string()),
+                                    // Always: this branch only ever runs with no shim, so the
+                                    // only link it can see is the printed one.
+                                    paste_code: true,
                                 },
                             );
                         }
@@ -673,6 +695,18 @@ async fn login_into_root(
                     // a poor link; no link is worse.
                     let captured =
                         s.captured().as_deref().and_then(|c| extract_login_url(c, false));
+                    // **Where the URL came from decides whether maiTerm may OPEN it**, not just
+                    // whether it can show it. The shim's capture is the argv the runtime handed
+                    // to `open`: the real `redirect_uri=http://localhost:<port>/callback` link,
+                    // which completes on its own. The transcript fallback is the link the
+                    // runtime PRINTED, and that is the paste-code variant — finishing it means
+                    // typing a code back into a child whose stdin is null, so it cannot
+                    // complete at all. Opening that in a private window would look like it
+                    // worked and strand the user on a dead end; the no-shim drain path already
+                    // refuses to do exactly that, and this branch must follow the same rule.
+                    // (Reachable whenever the shim is on PATH but never fires — a `join_paths`
+                    // failure, or a runtime that stops shelling out to `open`.)
+                    let from_shim = captured.is_some();
                     let url = captured.or_else(|| {
                         (start.elapsed() > SHIM_GRACE)
                             .then(|| extract_login_url(&transcript.lock(), true))
@@ -686,11 +720,23 @@ async fn login_into_root(
                             // it cannot know unless we tell it. Best effort either way: the
                             // link and its Copy button stay on screen, so none of this aborts
                             // the sign-in.
-                            let open_error = match open_with.as_deref() {
-                                Some("default") => accounts::browser::open_default(&url).err(),
-                                Some(id) => accounts::browser::open_private_window(id, &url).err(),
-                                // Copy-to-clipboard: deliberately opens nothing.
-                                None => None,
+                            let open_error = if !from_shim {
+                                // Nothing to open. `default` gets no complaint: the runtime's
+                                // own launcher was never shadowed in this case, so it has
+                                // already opened the window that user asked for.
+                                open_with
+                                    .as_deref()
+                                    .filter(|w| *w != "default")
+                                    .map(|_| PASTE_CODE_LINK_NOTE.to_string())
+                            } else {
+                                match open_with.as_deref() {
+                                    Some("default") => accounts::browser::open_default(&url).err(),
+                                    Some(id) => {
+                                        accounts::browser::open_private_window(id, &url).err()
+                                    }
+                                    // Copy-to-clipboard: deliberately opens nothing.
+                                    None => None,
+                                }
                             };
                             if let Some(e) = &open_error {
                                 log::warn!("accounts: opening the sign-in link: {e}");
@@ -700,8 +746,16 @@ async fn login_into_root(
                                 LoginUrlEvent {
                                     account_id: id_for_task.clone(),
                                     url: url.clone(),
-                                    opened: open_with.is_some() && open_error.is_none(),
+                                    // `from_shim` has to be in here too. Without it a
+                                    // transcript URL with `open_with: Some("default")` reports
+                                    // `opened: true` having opened nothing, and the dialog
+                                    // tells the user to go and finish in a window that is not
+                                    // the one the runtime actually opened.
+                                    opened: from_shim
+                                        && open_with.is_some()
+                                        && open_error.is_none(),
                                     open_error,
+                                    paste_code: !from_shim,
                                 },
                             );
                         }
