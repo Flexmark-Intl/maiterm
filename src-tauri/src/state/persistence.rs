@@ -10,6 +10,18 @@ use super::workspace::{AppData, Layout, SplitDirection, SplitNode, TabType, Task
 /// known-good backup from being clobbered by a default/empty state.
 static LOADED_SUCCESSFULLY: AtomicBool = AtomicBool::new(false);
 
+/// Did the last `load_state()` parse a real state file?
+///
+/// **False does NOT mean "the user has nothing".** It means the state file was missing,
+/// unreadable or unparseable and `AppData::default()` was returned instead — so every collection
+/// on it is empty for a reason that has nothing to do with the user's data. Anything that would
+/// DELETE user data because a list came back empty has to ask this first. See
+/// `accounts::prune_orphan_roots`, which would otherwise erase every account root after one
+/// corrupt launch, at the exact moment `preserve_corrupt` is saving the file for recovery.
+pub fn state_loaded_successfully() -> bool {
+    LOADED_SUCCESSFULLY.load(Ordering::Relaxed)
+}
+
 /// Last mtime we observed on the main state file (millis since epoch).
 /// Updated on successful load and after every successful save. Used by save_state()
 /// to detect when another process has written to the file since we last touched it

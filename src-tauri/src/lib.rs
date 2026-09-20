@@ -263,13 +263,25 @@ pub fn run() {
             // for its whole life and RECREATES the directory on its next write — by which point
             // maiTerm has forgotten the account, so no other path reaches it again.
             //
-            // Startup is the right moment: preferences are loaded by now, so an empty keep-list
-            // means "no accounts" rather than "not loaded yet" — the reading that would make
-            // this delete every account — and the process that resurrected a root has exited.
-            // It sits in `setup` rather than beside the load, next to the identical scrollback
-            // prune, because tauri-plugin-log is only active here and a sweep that deletes
-            // directories has to leave a record.
-            {
+            // Startup is the right moment: the process that resurrected a root has exited, and
+            // preferences are loaded. It sits in `setup` rather than beside the load, next to
+            // the identical scrollback prune, because tauri-plugin-log is only active here and
+            // a sweep that deletes directories has to leave a record.
+            //
+            // **Gated on the state file actually having loaded.** "Preferences are loaded by
+            // now" was not the safety property this needed: `load_state()` returns
+            // `AppData::default()` when the file is missing, unreadable or unparseable, and an
+            // empty `managed_accounts` from THAT is not "no accounts" — it is "no idea". Without
+            // this gate, one corrupt launch deleted every account root, permanently, in the same
+            // second `preserve_corrupt` was saving the file so the user could recover. Same
+            // reasoning as `save_state`'s backup guard, which uses the same flag; the difference
+            // is that a clobbered backup is recoverable and a deleted config root is not.
+            if !state::state_loaded_successfully() {
+                log::warn!(
+                    "Skipping account root prune: state did not load, so an empty account \
+                     list would mean 'unknown', not 'none'"
+                );
+            } else {
                 let data = app_state.app_data.read();
                 for rt in accounts::ALL_RUNTIMES.iter().copied() {
                     let keep: Vec<String> = data

@@ -555,11 +555,30 @@ function createPreferencesStore() {
       accounts?: ManagedAccount[];
       activeIds?: Record<string, string>;
     }) {
+      // Rolled back if the save is refused. `save()` genuinely can fail — the two-instance
+      // conflict guard aborts rather than clobber a newer state file — and an account that is
+      // live in the UI but absent from disk is not a cosmetic mismatch: the next launch's
+      // orphan sweep sees a root no account claims and deletes it, while the pane still shows
+      // the row. Fail visibly instead.
+      const prev = {
+        setupComplete: accountsSetupComplete,
+        enabled: accountsEnabled,
+        accounts: managedAccounts,
+        activeIds: activeAccountIds,
+      };
       if (patch.setupComplete !== undefined) accountsSetupComplete = patch.setupComplete;
       if (patch.enabled !== undefined) accountsEnabled = patch.enabled;
       if (patch.accounts !== undefined) managedAccounts = patch.accounts;
       if (patch.activeIds !== undefined) activeAccountIds = patch.activeIds;
-      await this.save();
+      try {
+        await this.save();
+      } catch (e) {
+        accountsSetupComplete = prev.setupComplete;
+        accountsEnabled = prev.enabled;
+        managedAccounts = prev.accounts;
+        activeAccountIds = prev.activeIds;
+        throw e;
+      }
     },
 
     /** The reversible half of §10: leaves accounts intact, injects nothing. */

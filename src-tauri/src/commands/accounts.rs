@@ -384,8 +384,21 @@ mod tests {
         let t = format!("\u{1b}[31mLogin failed: {}\u{1b}[0m\n", "x".repeat(600));
         let tail = transcript_tail(&t).expect("a tail");
         assert!(!tail.contains('\u{1b}'), "control bytes survived: {tail:?}");
-        assert!(tail.len() <= 400, "unbounded tail: {}", tail.len());
+        // CHARS, not bytes — `take(400)` runs on a `chars()` iterator. Asserting `len()` here
+        // passed only because this fixture is ASCII, and would have said nothing at all about
+        // the multi-byte case below.
+        assert!(tail.chars().count() <= 400, "unbounded tail: {}", tail.chars().count());
         assert!(tail.starts_with("[31mLogin failed: "));
+    }
+
+    #[test]
+    fn tail_is_bounded_in_chars_even_when_they_are_wide() {
+        // 400 emoji is ~1.6KB. Fine for a message box, but the bound is a character count and
+        // the test above must not be read as promising a byte count.
+        let t = format!("Login failed: {}", "🙂".repeat(600));
+        let tail = transcript_tail(&t).expect("a tail");
+        assert_eq!(tail.chars().count(), 400);
+        assert!(tail.len() > 400, "expected wide chars to exceed the char bound in bytes");
     }
 
     #[test]
