@@ -652,8 +652,14 @@ has to *teach* and *authenticate* before it can mean anything.
    and keeps your SSH hosts signed in.
 2. **What it does not do** — never parses or stores your local login; local identities are
    directories Claude Code owns (§5).
-3. **What it costs** — the §8 table, stated plainly, with the remote/local asymmetry
-   spelled out.
+3. **What it costs** — on this machine, nothing: §8's losses belong to §6 remote propagation,
+   and local accounts are full `/login` credentials that lose none of it.
+
+> **Disclose at the point of action, not in advance.** An earlier draft put §8's table here.
+> That is wrong while §6 does not exist: it asks the user to weigh a tradeoff they cannot make,
+> and by the time they can — a different session, months later — nobody remembers a modal they
+> clicked through once. The §8 warning belongs on the control that enables a host, where it is
+> true and actionable. Setup says only that accounts are local-only today.
 4. **Where credentials live** — OS keychain, never `aiterm-state.json`, never reachable by
    agents over MCP (§9.3).
 5. **Remote hosts are opt-in** — a one-year standing credential, enabled per host, never

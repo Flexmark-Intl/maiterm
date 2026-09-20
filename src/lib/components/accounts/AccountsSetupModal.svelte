@@ -102,29 +102,26 @@
       <section>
         <h4>What it costs</h4>
         <p>
-          Your hooks, skills, commands, permissions and MCP servers are shared into every
-          account, so a managed tab behaves like an unmanaged one.
-        </p>
-        <p class="warn">
-          Signing a <em>remote</em> host in later uses a long-lived token, and those sessions
-          cannot use Remote Control or claude.ai connectors. Locally-configured MCP servers
-          still work. If you rely on Remote Control, leave remote hosts switched off.
+          Nothing, on this machine. Your hooks, skills, commands, permissions and MCP servers
+          are shared into every account, so a managed tab behaves exactly like an unmanaged one
+          and signs in the same way.
         </p>
       </section>
 
       <section>
         <h4>Where credentials live</h4>
         <p>
-          Tokens maiTerm holds go in your OS keychain under maiTerm's own entry — never in
+          Anything maiTerm holds goes in your OS keychain under maiTerm's own entry — never in
           <code>aiterm-state.json</code>, and never reachable by an agent over MCP.
         </p>
       </section>
 
       <section>
-        <h4>Remote hosts are opt-in</h4>
+        <h4>This machine only</h4>
         <p>
-          No host is signed in unless you enable it by name. A remote token is a standing
-          credential that lasts a year.
+          Accounts apply to tabs on this computer. Signing SSH hosts in is not built yet; when
+          it is, it will be opt-in per host and explained there, because it carries a tradeoff
+          this does not.
         </p>
       </section>
 
