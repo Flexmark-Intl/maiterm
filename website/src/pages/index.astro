@@ -30,11 +30,17 @@ const description =
  * `tag` is deliberately not a version number. Nobody tracks ours, and a stale
  * "New in 2.4" is worse than no label at all.
  */
+/*
+ * Name the runtime, not "agent". Everywhere else on this site an agent IS a CLI —
+ * Claude Code, Codex — so "two agent logins" reads as two different agents signed
+ * in, which is the one thing this does not do. It is two accounts for the same
+ * agent, and Claude Code is the only one wired up.
+ */
 const WHATS_NEW = [
   {
     tag: 'New',
-    title: 'Two agent logins at once',
-    body: 'Claude Code has one login slot. Keep an account per client and run them in different tabs, side by side.',
+    title: 'Two Claude Code accounts at once',
+    body: 'Claude Code has one login slot, shared by every terminal you open. Keep an account per client and run them in different tabs, side by side.',
     href: '#accounts',
   },
 ];
