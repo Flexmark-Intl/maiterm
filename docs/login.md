@@ -114,8 +114,34 @@ hypothetical. Any status UI must show the *resolved* source, never a green "logg
 
 ### 2.4 `claude setup-token`
 
-- Opens the same browser flow as `/login`; prints an `sk-ant-oat01-…` token to the terminal
-  and **saves it nowhere**. Whoever runs it must capture stdout.
+> **It is NOT "the same flow as `/login`", and assuming it was cost this feature a rebuild.**
+> Measured against 2.1.278 on 2026-09-21, after the first real mint attempt hung:
+>
+> | | `auth login` | `setup-token` |
+> |---|---|---|
+> | Browser URL | `redirect_uri=http://localhost:<port>/callback` | `…/oauth/authorize?**code=true**` |
+> | Listening sockets | yes — its own callback server | **zero** |
+> | Completes by itself | yes | **no** — the browser shows a code to type back |
+> | Output with piped stdio | a URL and progress lines | **nothing at all** |
+>
+> Two consequences, and both are structural:
+>
+> 1. **There is no callback to wait for.** The only way it finishes is a human bringing a code
+>    back, so anything driving it needs somewhere to put that code.
+> 2. **It is an ink TUI and needs a tty to say anything.** With pipes it emits zero bytes — no
+>    URL, no prompt, no error — so there is nothing to scrape and nothing to show, and a failure
+>    is indistinguishable from a hang. Under `script -q /dev/null` it renders a banner, a
+>    spinner, and its own "Browser didn't open?" link as an OSC 8 hyperlink.
+>
+> maiTerm therefore runs it on a **PTY** (`run_mint_on_pty`), takes the link from the browser
+> shim rather than the output, and hands the code back through `submit_account_code`. The first
+> version gave it `Stdio::null()` and pipes; it could never have worked, in any environment.
+>
+> It also has **no flags at all** — `--help` lists only `-h`. There is no account selector, no
+> output path, and no non-interactive mode.
+
+- Opens a browser flow; prints an `sk-ant-oat01-…` token to the terminal
+  and **saves it nowhere**. Whoever runs it must capture that output.
 - **Valid one year. Does not rotate.**
 - Requires a Pro / Max / Team / Enterprise plan; authenticates against the subscription.
 - Consumed as `CLAUDE_CODE_OAUTH_TOKEN`. A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`
@@ -1004,6 +1030,17 @@ included.
    list and catch-all, and `remote_account_for_host`. Step 2: `accounts/remote.rs` plus
    `prepare_remote_account_token`, wired into every path that starts a remote session.
 
+   **Step 1 was rebuilt on 2026-09-21 after the first real attempt.** The mint had never been
+   capable of succeeding: `setup-token` is a paste-code TUI with no localhost callback (§2.4),
+   and it was being run with `Stdio::null()` and pipes. It now runs on a PTY, the dialog asks
+   for the code, and `submit_account_code` types it in. Three things that version got wrong and
+   this one has to keep right: the PTY is **400 columns** (a wrapped token has a newline in the
+   middle of it, and extraction stops at the first control character — storing a truncated
+   credential that passes every shape check and resolves as nobody); extraction requires a
+   **terminator** while the stream is live (a PTY read splits tokens); and the child is **killed
+   on every exit path** (it does not exit after printing, and two orphans were found holding
+   PTYs and open connections, one of them two days old).
+
    **How the token travels, and why it is the only shape that works.** Rust reads the vault and
    pushes `export CLAUDE_CODE_OAUTH_TOKEN='…'` on the **stdin of an ssh connection of its own**
    into a per-tab `~/.maiterm/tokens/tok-<tabid>` (0600); the remote shell *sources* that file
@@ -1052,7 +1089,8 @@ account was removed.
 **Not verified:** anything on a second machine, any runtime but Claude, whether a `setup-token`
 survives `auth logout` (Q1 — no longer gating, see §9.4), and **the whole of §6 against a real
 mint**: the vault round-trips against the real Keychain in a test, but no token has been minted,
-no host has received one, and Q3 (does `setup-token` respect `CLAUDE_CONFIG_DIR`?) is answered by
+no host has received one — the mint itself was only made *capable* of succeeding on 2026-09-21
+(§2.4) and has not run since — and Q3 (does `setup-token` respect `CLAUDE_CONFIG_DIR`?) is answered by
 the first real mint rather than by anything built so far.
 
 > **The §6 test is easy to pass by accident**, and §6.1 is why: a remote session with no token
