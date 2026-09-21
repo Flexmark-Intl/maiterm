@@ -1,8 +1,9 @@
 # maiTerm Login — managed Claude Code identities, local and remote
 
-> Status: **§5 local built and verified on macOS; §6 remote built but INERT** — 2026-09-21
-> (spec'd 09-19). Owner: Darryl. §13 has the detail. Nothing injects a token into an SSH tab
-> yet, and no token has been minted for real, so §6 currently has no observable effect.
+> Status: **§5 local built and verified on macOS; §6 remote built, NEVER RUN** — 2026-09-21
+> (spec'd 09-19). Owner: Darryl. §13 has the detail. §6 is now complete end to end in code —
+> mint, vault, host policy and injection — but **no token has ever been minted for real**, so
+> none of it has been exercised against a host. Treat every §6 claim as untested.
 > Code: `src-tauri/src/accounts/`, `src-tauri/src/commands/accounts.rs`,
 > `src/lib/components/accounts/`.
 > Scope: maiTerm optionally holds N Claude subscription identities, runs the auth flow
@@ -997,14 +998,33 @@ included.
    copy-link paths, the post-change reload offer, and the orphan-root sweep. Two gaps remain:
    §5.2's in-app incognito webview (sign-in still uses the system browser) and §3.4's
    managed-settings refusal (no detector).
-4. 🟡 **Remote propagation (§6).** Step 1 built, step 2 not started, **no longer gated on Q1**
-   (§9.4 — we build as if `auth logout` does not revoke). Done: the keychain vault
+4. 🟡 **Remote propagation (§6).** Both steps built, **never run against a host**. No longer
+   gated on Q1 (§9.4 — we build as if `auth logout` does not revoke). Step 1: the keychain vault
    (`accounts/vault.rs`), `mint_account_token` with verify-before-store, the per-account host
-   list and catch-all, and `remote_account_for_host`. Not done: **the injection itself** — no
-   SSH tab reads any of this yet, so minting and enabling a host currently has no effect on a
-   remote session. When it lands, the token must ride the per-tab ssh environment rather than
-   the shared `~/.aiterm`, and the caller must pass an *extracted* ssh target (the stored value
-   can carry flags like `-A ews@nova`, which no host entry will ever match).
+   list and catch-all, and `remote_account_for_host`. Step 2: `accounts/remote.rs` plus
+   `prepare_remote_account_token`, wired into every path that starts a remote session.
+
+   **How the token travels, and why it is the only shape that works.** Rust reads the vault and
+   pushes the token on the **stdin of an ssh connection of its own** into a per-tab
+   `~/.maiterm/tokens/tok-<tabid>` (0600); the remote shell `cat`s that file into
+   `CLAUDE_CODE_OAUTH_TOKEN` and `rm`s it, so it is read once. What crosses back to the frontend
+   is a shell fragment naming a **path**. Four constraints leave no other option:
+
+   - the ssh command maiTerm builds is **typed into the user's local shell**, so anything in its
+     argv lands in local scrollback (and thence `aiterm-state.json`), local shell history, and
+     `ps` on both machines;
+   - the tty echoes whatever is written to it, so the token cannot be typed at the remote prompt
+     the way `MAITERM_TAB_ID` is;
+   - it must be per-tab, never the shared `~/.aiterm`, or it would not follow a switch;
+   - §9.3 — the webview is reachable by agents, so the frontend must never hold the bytes.
+
+   The caller passes an *extracted* ssh target: the stored value can carry flags (`-A ews@nova`,
+   `ews@nova -p 2222`) that no host entry would ever match. `port_book_key` does the extraction,
+   being the one parser here that understands `-p2222` and `-oKey=Val` inline.
+
+   A host the active account does not cover resolves **without opening a connection**. A missing
+   vault entry or a failed push injects nothing *and says so* — per §6.1 that state is otherwise
+   indistinguishable from success.
 
 **Verified end to end with two real accounts, 2026-09-20.** Two orgs side by side in one window;
 distinct account *and* org UUIDs on disk; each root resolving its own identity through the
@@ -1019,6 +1039,12 @@ survives `auth logout` (Q1 — no longer gating, see §9.4), and **the whole of 
 mint**: the vault round-trips against the real Keychain in a test, but no token has been minted,
 no host has received one, and Q3 (does `setup-token` respect `CLAUDE_CONFIG_DIR`?) is answered by
 the first real mint rather than by anything built so far.
+
+> **The §6 test is easy to pass by accident**, and §6.1 is why: a remote session with no token
+> still reports `loggedIn: true`. "The tab came up and `claude` works" proves nothing. Read the
+> **email and orgId** back from `claude auth status --json` on the host and compare them to the
+> account you chose. Until something on the tab does that automatically, that comparison *is* the
+> feature's only proof.
 
 ## 14. Sources
 
