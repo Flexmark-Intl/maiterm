@@ -796,8 +796,14 @@ revoke).
 
 Assuming the worse answer is what produces the revoke story, rather than what postpones it:
 
-- **The per-host list is the inventory.** It is the only record of where a standing one-year
-  credential has been placed, so it is explicit, per host, and never inferred (§6).
+- **The per-host list is the inventory — unless the catch-all is on, and then there isn't one.**
+  Where hosts are named, that list is the only record of where a standing one-year credential
+  has been placed. `remote_all_hosts` (§6) trades that away deliberately: with it on,
+  `remote_hosts` is empty and maiTerm has **no record of which hosts received the token**, so a
+  user who runs that way for a month has nowhere to look when they want to know. The mint dialog
+  has to say so, and the honest fix when step 2 lands is to record the hosts actually injected
+  into rather than to infer them — an inventory derived from what happened, not from what was
+  configured.
 - **Remove and Clear setup must say what they do not do.** They delete the root and the vault
   entry, which stops *maiTerm* handing the token out; they do not promise the token is dead on
   a host that already has it. Saying otherwise would be the `absence-read-as-a-claim` mistake
@@ -989,7 +995,14 @@ included.
    copy-link paths, the post-change reload offer, and the orphan-root sweep. Two gaps remain:
    §5.2's in-app incognito webview (sign-in still uses the system browser) and §3.4's
    managed-settings refusal (no detector).
-4. ⬜ **Remote propagation (§6).** Not started, still gated on Q1.
+4. 🟡 **Remote propagation (§6).** Step 1 built, step 2 not started, **no longer gated on Q1**
+   (§9.4 — we build as if `auth logout` does not revoke). Done: the keychain vault
+   (`accounts/vault.rs`), `mint_account_token` with verify-before-store, the per-account host
+   list and catch-all, and `remote_account_for_host`. Not done: **the injection itself** — no
+   SSH tab reads any of this yet, so minting and enabling a host currently has no effect on a
+   remote session. When it lands, the token must ride the per-tab ssh environment rather than
+   the shared `~/.aiterm`, and the caller must pass an *extracted* ssh target (the stored value
+   can carry flags like `-A ews@nova`, which no host entry will ever match).
 
 **Verified end to end with two real accounts, 2026-09-20.** Two orgs side by side in one window;
 distinct account *and* org UUIDs on disk; each root resolving its own identity through the
@@ -999,8 +1012,11 @@ to the unmanaged login; removal and "Clear setup" leaving no roots and — confi
 no orphaned credentials. The startup sweep collected a root a session had resurrected after its
 account was removed.
 
-**Not verified:** anything on a second machine, any runtime but Claude, and whether a `setup-token`
-survives `auth logout` (Q1, which gates §6).
+**Not verified:** anything on a second machine, any runtime but Claude, whether a `setup-token`
+survives `auth logout` (Q1 — no longer gating, see §9.4), and **the whole of §6 against a real
+mint**: the vault round-trips against the real Keychain in a test, but no token has been minted,
+no host has received one, and Q3 (does `setup-token` respect `CLAUDE_CONFIG_DIR`?) is answered by
+the first real mint rather than by anything built so far.
 
 ## 14. Sources
 

@@ -256,8 +256,14 @@
       // local-only claim and the SSH tabs quietly changing identity on their next spawn is a
       // surprise. Only mentioned when this account can actually reach a host: promising a
       // remote switch that cannot happen is worse than saying nothing.
+      // **Keyed on `token_minted_at`, because that is what `remote_account_for_host` keys
+      // on** — not on `hasToken`, which is vault truth. The two genuinely diverge: a mint whose
+      // metadata write failed leaves a token in the keychain that Rust will refuse to
+      // propagate, and promising a remote switch that cannot happen is the thing this message
+      // exists to avoid. The strip still shows that orphan (so it can be removed); it just must
+      // not be counted as working.
       const reachesRemotes =
-        (hasToken[account.id] ?? !!account.token_minted_at) &&
+        !!account.token_minted_at &&
         (account.remote_all_hosts || (account.remote_hosts ?? []).length > 0);
       // A modal, not a notice: this is the one control here that does not take effect
       // immediately, and the follow-up question — "so how do I move the tabs I have open?" —
@@ -369,8 +375,10 @@
     try {
       await patchAccount(account.id, { remote_hosts: [...hosts, host] });
       hostDraft = { ...hostDraft, [account.id]: '' };
-      notice =
-        activeIdFor(account.runtime) === account.id
+      notice = !account.token_minted_at
+        ? `${host} added, but this account's token was never recorded — remove it and mint ` +
+          `again before SSH tabs will use it.`
+        : activeIdFor(account.runtime) === account.id
           ? `New SSH tabs to ${host} will use ${account.label}.`
           : `${host} will use ${account.label} whenever it is the active account.`;
     } catch (e) {
@@ -449,7 +457,14 @@
       // retry works. (`removeAccount` persists first for the opposite reason — there a rolled
       // back save would restore a row whose config root is already gone.)
       await commands.forgetAccountToken(account.id);
-      await patchAccount(account.id, { token_minted_at: undefined, remote_hosts: [] });
+      // The catch-all goes too. Clearing only the host list left `remote_all_hosts` armed, so
+      // a later re-mint silently resumed propagating to EVERY host without the user asking for
+      // it again — the one setting where a surprise "on" is other people's money.
+      await patchAccount(account.id, {
+        token_minted_at: undefined,
+        remote_hosts: [],
+        remote_all_hosts: false,
+      });
       hasToken = { ...hasToken, [account.id]: false };
       notice =
         `Removed the remote token for ${account.label}. Hosts that already have it keep ` +
@@ -684,7 +699,12 @@
                   <!-- A token in the keychain that state never recorded. Say so plainly rather
                        than show a blank: this is the leftover of an interrupted mint, and the
                        useful action is to remove it and start again. -->
-                  <span class="meta warn">Token present, but this mint was never recorded</span>
+                  <!-- Vault holds a token, state does not. Rust keys propagation on the
+                       metadata, so this token is inert — say that, or the hosts below read as
+                       working. -->
+                  <span class="meta warn">
+                    Token present but never recorded — not in use. Remove it and mint again.
+                  </span>
                 {/if}
                 <Button variant="ghost" disabled={busy} onclick={() => forgetToken(account)}>
                   Remove token
@@ -746,7 +766,7 @@
               >
                 <input
                   type="text"
-                  placeholder="user@host"
+                  placeholder="hostname or ssh alias"
                   disabled={busy}
                   bind:value={
                     () => hostDraft[account.id] ?? '',

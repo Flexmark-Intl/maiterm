@@ -1293,23 +1293,34 @@ pub struct ManagedAccount {
     /// identity is verified positively and `loggedIn` is never treated as confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_verified_at: Option<u64>,
-    /// Hosts this account's remote token is enabled for (§6). Explicit, and they WIN over
-    /// `remote_all_hosts` — naming a host is how you override the catch-all for that one box.
+    /// SSH hosts this account's remote token may be sent to (§6).
+    ///
+    /// **This answers *whether* to propagate, never *which* account.** Only the ACTIVE account
+    /// is ever consulted (`accounts::remote_account_for_host`), so an entry here on an inactive
+    /// account reaches nothing — there is no precedence between accounts because there is never
+    /// more than one in the question.
+    ///
+    /// A bare `nova` covers every user on that host; `ews@nova` covers only that pairing. Note
+    /// the direction that does NOT hold: an `ews@nova` entry does not match a bare `nova`
+    /// target, so an entry has to match the form tabs actually connect with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_hosts: Vec<String>,
-    /// Use this account on every SSH host that no other account has claimed by name.
+    /// Send this account's token to every SSH host, while it is the active account.
     ///
     /// §6 originally said enablement is "per host, explicit, and never inferred", on the
     /// grounds that a standing one-year credential should not land somewhere maiTerm chose.
-    /// That is still the right default and the right warning, but it made the common case —
-    /// one person, one account, boxes they own — a typing exercise, so it is now a choice the
-    /// user makes once with the trade stated rather than a rule the app enforces.
+    /// That is still the right warning, but it made the common case — one person, one account,
+    /// boxes they own — a typing exercise, so it is now a choice made once with the trade
+    /// stated rather than a rule the app enforces.
     ///
-    /// **At most one account may hold this.** Two accounts each claiming every host is not a
-    /// conflict to resolve at spawn time, it is a question with no answer, so the pane turns it
-    /// off elsewhere when it is turned on here. Resolution is: a name in some account's
-    /// `remote_hosts` wins; otherwise the account with this flag; otherwise no token at all and
-    /// the host uses whatever login it already has.
+    /// **Several accounts may hold this at once, and that is not a conflict.** An earlier
+    /// version claimed at most one could, and had the pane enforce it; that was solving a
+    /// problem created by resolving across all accounts. Since only the active account is
+    /// consulted, two accounts each saying "cover everything when I am in use" cannot contend.
+    ///
+    /// **It trades away the inventory.** With this on, `remote_hosts` is empty and nothing
+    /// records where the token actually went — see `docs/login.md` §9.4, whose revocation story
+    /// otherwise rests on that list being the only such record.
     #[serde(default)]
     pub remote_all_hosts: bool,
     /// When the remote token was minted, unix seconds. Expiry is DERIVED from this

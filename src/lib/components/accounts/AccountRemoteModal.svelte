@@ -233,6 +233,11 @@
             user's environment can read the token — the same exposure as any credential in a
             shell profile there.
           </li>
+          <li>
+            <strong>Naming hosts keeps a record; “every SSH host” does not.</strong> Since
+            nothing revokes these, the list of hosts you named is the only note of where the
+            token went. Turn on the catch-all and there is no such list to consult later.
+          </li>
         </ul>
         <p class="aside">
           None of this applies to your local tabs — those use full sign-ins and lose nothing.
