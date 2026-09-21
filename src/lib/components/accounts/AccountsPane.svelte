@@ -14,6 +14,7 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import AccountsSetupModal from './AccountsSetupModal.svelte';
   import AccountSwitchModal from './AccountSwitchModal.svelte';
+  import AccountRemoteModal from './AccountRemoteModal.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import * as commands from '$lib/tauri/commands';
   import type { AccountRuntimeInfo, AccountIdentity, NewAccount } from '$lib/tauri/commands';
@@ -35,6 +36,26 @@
   let announce = $state<{ title: string; subtitle: string; destination: string } | null>(null);
   /** Last identity read per account id, for the resolved-source row. */
   let identities = $state<Record<string, AccountIdentity>>({});
+  /** The account whose remote-token dialog is open, if any (§6). */
+  let minting = $state<ManagedAccount | null>(null);
+  /** Per-account draft in the "add a host" field. Keyed by id so two rows do not share one. */
+  let hostDraft = $state<Record<string, string>>({});
+
+  /** A token is one year old at most (§2.4), and §7 forbids reading expiry out of the
+   *  credential — it is a private format the CLI does not expose — so it is derived from our own
+   *  mint record and nothing else. */
+  const TOKEN_LIFETIME_SECS = 365 * 24 * 60 * 60;
+
+  function tokenExpiry(mintedAt: number): { label: string; warn: boolean } {
+    const secsLeft = mintedAt + TOKEN_LIFETIME_SECS - Math.floor(Date.now() / 1000);
+    const days = Math.floor(secsLeft / 86400);
+    if (days < 0) return { label: 'Token expired', warn: true };
+    if (days === 0) return { label: 'Token expires today', warn: true };
+    // §7 warns at T-30d: this is the silent-failure case the whole feature exists for — a
+    // one-year token dies around month eleven on a box nobody is watching, and per §6.1 the
+    // tab does not fail, it comes up as whoever else that host is signed in to.
+    return { label: `Token expires in ${days} day${days === 1 ? '' : 's'}`, warn: days <= 30 };
+  }
 
   $effect(() => {
     void (async () => {
@@ -268,6 +289,81 @@
     return `${days} day${days === 1 ? '' : 's'} ago`;
   }
 
+  /** Write one account's row back, leaving every other field alone. */
+  async function patchAccount(id: string, patch: Partial<ManagedAccount>) {
+    await preferencesStore.setAccountsState({
+      accounts: accounts.map(a => (a.id === id ? { ...a, ...patch } : a)),
+    });
+  }
+
+  /** Enable a host for this account — §6: "per host, explicit, and never inferred".
+   *
+   *  Typed in rather than picked from the tabs that happen to be open, which is the whole
+   *  point: a standing one-year credential belongs on a box the user names on purpose, not on
+   *  whatever they last SSH'd into. */
+  async function addHost(account: ManagedAccount) {
+    const host = (hostDraft[account.id] ?? '').trim();
+    if (!host) return;
+    const hosts = account.remote_hosts ?? [];
+    if (hosts.includes(host)) {
+      hostDraft = { ...hostDraft, [account.id]: '' };
+      return;
+    }
+    busy = true;
+    error = null;
+    try {
+      await patchAccount(account.id, { remote_hosts: [...hosts, host] });
+      hostDraft = { ...hostDraft, [account.id]: '' };
+      notice = `${host} will use ${account.label} for new SSH tabs.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeHost(account: ManagedAccount, host: string) {
+    busy = true;
+    error = null;
+    try {
+      await patchAccount(account.id, {
+        remote_hosts: (account.remote_hosts ?? []).filter(h => h !== host),
+      });
+      // Says what it does NOT do. §9.4: nothing local revokes these, so a host that already
+      // holds the token keeps working — claiming otherwise here would be the one place this
+      // feature lies about security.
+      notice =
+        `New SSH tabs to ${host} will no longer use ${account.label}. Sessions already open ` +
+        `there, and the token already on that host, are unaffected.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Forget the token and every host that depended on it, in one write.
+   *
+   *  Hosts go with it deliberately: a host list with no token behind it is a promise the
+   *  feature cannot keep, and per §6.1 the failure is silent — the tab comes up as whoever that
+   *  host was already signed in to rather than erroring. */
+  async function forgetToken(account: ManagedAccount) {
+    busy = true;
+    error = null;
+    notice = null;
+    try {
+      await patchAccount(account.id, { token_minted_at: undefined, remote_hosts: [] });
+      await commands.forgetAccountToken(account.id);
+      notice =
+        `Removed the remote token for ${account.label}. Hosts that already have it keep ` +
+        `working until it expires — revoke it in your Anthropic account settings to cut it off.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function removeAccount(account: ManagedAccount) {
     busy = true;
     error = null;
@@ -462,6 +558,72 @@
               <Button variant="ghost" disabled={busy} onclick={() => removeAccount(account)}>Remove</Button>
             </div>
           </div>
+
+          <!-- §6. Its own strip under the row rather than more buttons in it: this is the one
+               part of the feature where maiTerm holds a real credential, and it should not read
+               as another action alongside Use and Verify. -->
+          <div class="remote">
+            {#if !account.token_minted_at}
+              <div class="remote-head">
+                <span class="remote-label">Remote hosts</span>
+                <Button variant="ghost" disabled={busy} onclick={() => (minting = account)}>
+                  Set up…
+                </Button>
+              </div>
+              <p class="remote-hint">
+                Not set up. SSH tabs use whatever login each host already has.
+              </p>
+            {:else}
+              {@const exp = tokenExpiry(account.token_minted_at)}
+              <div class="remote-head">
+                <span class="remote-label">Remote hosts</span>
+                <span class="meta" class:warn={exp.warn}>{exp.label}</span>
+                <Button variant="ghost" disabled={busy} onclick={() => forgetToken(account)}>
+                  Remove token
+                </Button>
+              </div>
+
+              {#if (account.remote_hosts ?? []).length}
+                <div class="hosts">
+                  {#each account.remote_hosts ?? [] as host (host)}
+                    <span class="host">
+                      {host}
+                      <button
+                        type="button"
+                        class="host-x"
+                        disabled={busy}
+                        aria-label={`Stop using ${account.label} on ${host}`}
+                        onclick={() => removeHost(account, host)}>×</button
+                      >
+                    </span>
+                  {/each}
+                </div>
+              {:else}
+                <p class="remote-hint">
+                  Token ready. Add a host below — nothing is sent anywhere until you do.
+                </p>
+              {/if}
+
+              <form
+                class="host-add"
+                onsubmit={e => {
+                  e.preventDefault();
+                  void addHost(account);
+                }}
+              >
+                <input
+                  type="text"
+                  placeholder="user@host"
+                  disabled={busy}
+                  bind:value={
+                    () => hostDraft[account.id] ?? '',
+                    v => (hostDraft = { ...hostDraft, [account.id]: v })
+                  }
+                />
+                <Button variant="ghost" disabled={busy}>Add host</Button>
+              </form>
+            {/if}
+          </div>
         {/each}
       </div>
     {/each}
@@ -539,6 +701,31 @@
     subtitle={announce.subtitle}
     destination={announce.destination}
     onclose={() => (announce = null)}
+  />
+{/if}
+
+{#if minting}
+  <AccountRemoteModal
+    account={minting}
+    oncomplete={async mint => {
+      // Record the mint BEFORE closing, same reason as the setup modal: closing first destroys
+      // the component that owns the in-flight promise, so a failed save would have nowhere to
+      // report — and the token would be in the keychain with nothing in state pointing at it.
+      const acct = minting!;
+      try {
+        await patchAccount(acct.id, { token_minted_at: mint.minted_at });
+        notice =
+          `Remote token ready for ${acct.label}` +
+          (mint.identity.email && mint.identity.email !== acct.email
+            ? ` — note it resolved as ${mint.identity.email}`
+            : '') +
+          `. Add a host to start using it.`;
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+      }
+      minting = null;
+    }}
+    oncancel={() => (minting = null)}
   />
 {/if}
 
@@ -750,6 +937,99 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+
+  /* --- Remote hosts (§6) --- */
+
+  .remote {
+    background: var(--bg-dark);
+    border-top: 1px solid var(--bg-light);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px 10px;
+  }
+
+  .remote-head {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .remote-label {
+    color: var(--fg-dim);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    margin-right: auto;
+    text-transform: uppercase;
+  }
+
+  .remote-hint {
+    color: var(--fg-dim);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    margin: 0;
+  }
+
+  .hosts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .host {
+    align-items: center;
+    background: var(--bg-medium);
+    border-radius: 3px;
+    color: var(--fg);
+    display: inline-flex;
+    font-size: 0.75rem;
+    gap: 4px;
+    /* These are user@host strings in a 200-320px pane. Wrapping beats a tooltip nobody hovers,
+       and beats two hosts clipping to the same visible text. */
+    overflow-wrap: anywhere;
+    padding: 2px 4px 2px 7px;
+  }
+
+  .host-x {
+    background: none;
+    border: none;
+    color: var(--fg-dim);
+    cursor: pointer;
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 0 3px;
+  }
+
+  .host-x:hover:not(:disabled) {
+    color: #e06c75;
+  }
+
+  .host-x:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .host-add {
+    display: flex;
+    gap: 4px;
+  }
+
+  .host-add input {
+    background: var(--bg-medium);
+    border: 1px solid var(--bg-light);
+    border-radius: 4px;
+    color: var(--fg);
+    flex: 1;
+    font-size: 0.75rem;
+    min-width: 0;
+    padding: 4px 7px;
+  }
+
+  .host-add input:focus {
+    border-color: var(--accent);
+    outline: none;
   }
 
   .actions {
