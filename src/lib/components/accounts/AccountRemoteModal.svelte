@@ -9,9 +9,11 @@
    *
    *  The browser picker is here for the same reason it is on sign-in and it matters MORE here:
    *  `setup-token` runs the same browser flow, so a browser already signed in to another
-   *  account can hand back a token for THAT account. maiTerm verifies what it minted before
-   *  storing it (§6.1), so the failure is caught — but catching it after a round trip is worse
-   *  than avoiding it. */
+   *  account can hand back a token for THAT account — and **maiTerm cannot detect that**.
+   *  `auth status --json` gives a token no email, org or plan whatever it is worth (§2.4), so
+   *  there is nothing to compare. The mint proves the token WORKS and stops there. The browser
+   *  picker is therefore not a convenience here, it is the only control over which account the
+   *  token belongs to. */
   import { error as logError } from '@tauri-apps/plugin-log';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -291,9 +293,10 @@
           <p>
             Your browser may already be signed in to a different account — the token would then
             be minted for <em>that</em> one. <strong>Mint privately</strong> opens a fresh
-            {browser?.label ?? 'private'} window with no session to reuse. maiTerm checks which
-            account the token actually belongs to before keeping it, so a mismatch is caught
-            either way.
+            {browser?.label ?? 'private'} window with no session to reuse. <strong>maiTerm
+            cannot tell you afterwards which account a token belongs to</strong> — a token carries
+            no profile, so the runtime reports no email for it. Which window you sign in with is
+            the only control there is.
           </p>
           {#if browsers.length > 1}
             <div class="segments" role="radiogroup" aria-label="Private window">
@@ -316,8 +319,9 @@
           <p>
             Your browser may already be signed in to a different account — the token would then
             be minted for <em>that</em> one. Use <strong>Mint and copy link</strong> and paste it
-            into a private window. maiTerm checks which account the token actually belongs to
-            before keeping it.
+            into a private window. <strong>maiTerm cannot tell you afterwards which account a
+            token belongs to</strong> — a token carries no profile, so the runtime reports no
+            email for it. Which window you sign in with is the only control there is.
           </p>
         </section>
       {/if}
@@ -358,7 +362,7 @@
               <h4>{codeSent ? 'Finishing…' : 'Paste the code'}</h4>
               <p class="hint">
                 {#if codeSent}
-                  Exchanging it for a token, then checking which account it actually belongs to.
+                  Exchanging it for a token, then checking that the token works.
                 {:else}
                   Approving in the browser gives you a code rather than finishing by itself.
                   Copy it and paste it here.

@@ -1314,14 +1314,31 @@ async fn run_mint_on_pty(
     .map_err(|e| format!("token mint task failed: {e}"))?
 }
 
-/// Ask the runtime who a *token* resolves as, in a config root that holds nothing else.
+/// Prove a freshly minted token actually works, in a config root that holds nothing else.
 ///
-/// This is §6.1's positive verification, run at mint time instead of six weeks later on a
-/// remote host. The temp root is the point: with an empty config dir the ONLY rung that can
-/// answer is the token we inject, so what comes back is what the token is worth — not what the
-/// account root happened to have. It also answers Q3 empirically, because a `setup-token` that
-/// ignored `CLAUDE_CONFIG_DIR` and minted against whatever the browser session held shows up
-/// here as the wrong email.
+/// **This cannot check WHO the token is, and the first version wrongly assumed it could.**
+/// `auth status --json` answers a `setup-token` with `authMethod: "oauth_token"` and *nothing
+/// else* — no `email`, no `orgId`, no `subscriptionType`. Measured 2026-09-21: the same five
+/// fields come back for a token made of the word DEFINITELYNOTAREALTOKEN. That is consistent
+/// with §8 — the token's scope is `user:inference`, so there is no profile to report — but it
+/// meant the mint's own guard (`email.is_none()` ⇒ discard) could never pass, and a perfectly
+/// good one-year credential was minted and thrown away. A textbook `absence-read-as-a-claim`,
+/// in the code written to prevent exactly that.
+///
+/// `loggedIn: true` is worth even less here than §6.1 already says: it is true for a garbage
+/// token, because it reports only that the variable is set.
+///
+/// So the check that is possible is **validity, not identity** — spend one round trip and see
+/// whether the token authenticates. A bad one fails in about a second with
+/// `API Error: 401 OAuth access token is invalid`. That is the failure worth catching: a
+/// truncated or corrupt token passes every shape test there is, and on a remote host it does not
+/// error, it falls through to whatever login that box already had (§6.1).
+///
+/// The temp root is still the point: with an empty config dir the only rung that can answer is
+/// the token we inject, so nothing the account root happens to hold can answer in its place.
+///
+/// The returned `AccountIdentity` therefore carries no email by design, and `logged_in` means
+/// **"we proved this token authenticates"**, not "the runtime said loggedIn".
 fn verify_token_identity(profile: &accounts::RuntimeProfile, token: &accounts::vault::Secret) -> Result<AccountIdentity, String> {
     let cli = accounts::resolve_cli(profile)
         .ok_or_else(|| format!("could not find the `{}` command", profile.cli))?;
@@ -1333,43 +1350,71 @@ fn verify_token_identity(profile: &accounts::RuntimeProfile, token: &accounts::v
         let _ = std::fs::set_permissions(&probe_root, std::fs::Permissions::from_mode(0o700));
     }
 
-    let mut cmd = Command::new(&cli);
-    cmd.args(["auth", "status", "--json"]);
-    cmd.env(profile.config_env, &probe_root);
-    // Scrub every shadowing rung EXCEPT the one being tested — otherwise an inherited
-    // ANTHROPIC_API_KEY outranks the token (§2.2 rung 3 beats rung 5) and this reports the key's
-    // identity as the token's, which is the precise confusion §6.1 exists to prevent.
-    for var in profile.shadowing_env.iter().filter(|v| **v != TOKEN_ENV) {
-        cmd.env_remove(var);
-    }
-    cmd.env(TOKEN_ENV, token.expose());
-    cmd.stdin(std::process::Stdio::null());
-    let out = cmd.output().map_err(|e| format!("checking the token: {e}"));
+    // Shared by both probes below. Scrubs every shadowing rung EXCEPT the one being tested —
+    // otherwise an inherited ANTHROPIC_API_KEY outranks the token (§2.2 rung 3 beats rung 5) and
+    // the answer describes the key rather than the token, which is the precise confusion §6.1
+    // exists to prevent.
+    let probe = |args: &[&str]| {
+        let mut cmd = Command::new(&cli);
+        cmd.args(args);
+        cmd.env(profile.config_env, &probe_root);
+        for var in profile.shadowing_env.iter().filter(|v| **v != TOKEN_ENV) {
+            cmd.env_remove(var);
+        }
+        cmd.env(TOKEN_ENV, token.expose());
+        cmd.stdin(std::process::Stdio::null());
+        cmd.output()
+    };
+
+    let status = probe(&["auth", "status", "--json"]).map_err(|e| format!("checking the token: {e}"));
+    // One real request. This is the only thing that separates a live token from a truncated one,
+    // and a truncated one is the §6.1 nightmare: it passes every shape check, and on a remote
+    // host it does not error, it silently resolves as whoever else is logged in there.
+    // `--max-turns 1` on a two-word prompt keeps the cost to about nothing.
+    let live = probe(&["-p", "ok", "--max-turns", "1"]);
 
     // Before anything can return: the probe root is a directory the runtime just wrote into.
     let _ = std::fs::remove_dir_all(&probe_root);
-    let out = out?;
 
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+    let live = live.map_err(|e| format!("checking the token: {e}"))?;
+    if !live.status.success() {
+        // `Failed to authenticate. API Error: 401 OAuth access token is invalid.` is what a bad
+        // one says, and it says it in about a second. Redacted, because the runtime is perfectly
+        // capable of echoing what it was given back at us.
+        let why = String::from_utf8_lossy(&live.stderr);
+        let why = if why.trim().is_empty() {
+            String::from_utf8_lossy(&live.stdout).trim().to_string()
+        } else {
+            why.trim().to_string()
+        };
+        return Err(format!(
+            "the minted token did not work: {}",
+            redact_secrets(&why.chars().take(200).collect::<String>())
+        ));
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(&status?.stdout)
         .map_err(|_| "the runtime gave no usable answer when checking the token".to_string())?;
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
-    let logged_in = v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false);
     let auth_method = s("authMethod");
-    let email = s("email");
     Ok(AccountIdentity {
         // A token answers as `oauth_token`, not `claude.ai` — so `is_account_login` is about
-        // whether THIS root's own interactive login answered, and is false here by
-        // construction. What matters for a token is that it carried an identity at all.
+        // whether THIS root's own interactive login answered, and is false here by construction.
         is_account_login: false,
         shadowed_by: auth_method.clone(),
-        logged_in,
+        // **Proved, not reported.** The runtime's own `loggedIn` is true for a token made of
+        // nonsense — it only says the variable is set — so it is deliberately not read here.
+        logged_in: true,
         auth_method,
         api_key_source: s("apiKeySource"),
         api_provider: s("apiProvider"),
-        email,
-        org_id: s("orgId"),
-        org_name: s("orgName"),
-        plan: s("subscriptionType"),
+        // Absent for every `oauth_token`, valid or not: the scope is `user:inference` (§8), so
+        // there is no profile to report. Do not reintroduce a check on these — that is what
+        // discarded a good token.
+        email: None,
+        org_id: None,
+        org_name: None,
+        plan: None,
     })
 }
 
@@ -1431,20 +1476,19 @@ pub async fn mint_account_token(
 
     let token = run_mint_on_pty(&app, rt, &account_id, timeout_secs, open_with).await?;
 
-    // Step 2: what is this token actually worth?
+    // Step 2: does this token actually work?
+    //
+    // **Not "who is it" — that is not answerable.** `auth status --json` gives a token no email,
+    // no org and no plan whatever it is worth, so the previous version's `email.is_none()` guard
+    // could never pass: it minted real one-year credentials and threw every one of them away.
+    // `verify_token_identity` now returns an error with the runtime's own reason when the token
+    // does not authenticate, so there is nothing left to re-test here.
     let identity = {
         let token = token.clone();
         tauri::async_runtime::spawn_blocking(move || verify_token_identity(rt.profile(), &token))
             .await
             .map_err(|e| format!("token check task failed: {e}"))??
     };
-    if !identity.logged_in || identity.email.is_none() {
-        return Err(
-            "the minted token did not resolve to an account, so it was discarded rather than \
-             stored. Try again, and make sure the browser finished the flow."
-                .to_string(),
-        );
-    }
 
     // Step 3.
     let id_for_store = account_id.clone();
