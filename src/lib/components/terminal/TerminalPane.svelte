@@ -889,8 +889,16 @@
         // correct the shell if the tunnel lands elsewhere — safe here, and only here, because
         // the poll below awaits the bridge before the agent is started.
         let bakedPort: number | undefined;
-        // Send SSH command first — small delay for local shell to initialize
-        setTimeout(async () => {
+        // Send SSH command first — small delay for local shell to initialize.
+        //
+        // Held as a promise the poll below awaits, rather than fired and forgotten. The poll runs
+        // a fixed 15s budget, and this body now contains a network round trip (the §6 token
+        // push), so on a host that is slow to authenticate the budget could expire before the
+        // ssh command had even been typed — leaving the tab at a bare remote shell with no
+        // bridge and no auto-resume. The budget always meant "15s for ssh to connect"; awaiting
+        // this is what makes it mean that again.
+        const sshSent = (async () => {
+          await new Promise(r => setTimeout(r, 500));
           try {
             const bridgeEnv = await getRemoteBridgeEnv(ctx.sshCommand!);
             bakedPort = bridgeEnv?.port;
@@ -901,12 +909,15 @@
           } catch (e) {
             logError(`Failed to replay SSH command: ${e}`);
           }
-        }, 500);
+        })();
 
         // Poll for SSH connection, then enable bridge + auto-resume.
         // getPtyInfo shows the SSH process as foreground_command once connected.
         if (ctx.sshCommand) {
           const pollForSsh = async () => {
+            // Start counting when the command has actually been typed, not when the tab opened.
+            await sshSent;
+            if (destroyed) return;
             const maxAttempts = 30; // 15s max
             for (let i = 0; i < maxAttempts; i++) {
               if (destroyed) return;

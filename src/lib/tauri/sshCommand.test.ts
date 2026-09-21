@@ -4,8 +4,8 @@ import { buildSshCommand, cleanSshCommand } from './commands';
 const TAB = 'a1b2c3d4-5e6f-7788-99aa-bbccddeeff00';
 /** Verbatim what `accounts::remote::export_fragment` produces — keep the two in step. */
 const ACCT =
-  `__mt_oat=$(cat ~/.maiterm/tokens/tok-${TAB} 2>/dev/null); rm -f ~/.maiterm/tokens/tok-${TAB} 2>/dev/null; ` +
-  `[ -n "$__mt_oat" ] && export CLAUDE_CODE_OAUTH_TOKEN="$__mt_oat"; unset __mt_oat`;
+  `[ -r ~/.maiterm/tokens/tok-${TAB} ] && . ~/.maiterm/tokens/tok-${TAB}; ` +
+  `rm -f ~/.maiterm/tokens/tok-${TAB}`;
 
 describe('buildSshCommand', () => {
   it('bakes the tab id into the remote command so shared hosts get a per-tab identity', () => {
@@ -52,6 +52,15 @@ describe('buildSshCommand', () => {
     const cmd = buildSshCommand('ews@nova', '/srv/app', TAB, null, ACCT);
     expect(cmd).toContain(`export MAITERM_TAB_ID=${TAB}; ${ACCT}; cd '/srv/app'`);
     expect(cmd).not.toContain('sk-ant');
+  });
+
+  // csh and tcsh abort the WHOLE statement list on a parse error, `exec $SHELL -l` included —
+  // so a `$(…)` here would not degrade the session, it would end it, and on the auto-resume path
+  // the agent's resume command would then run on the local machine. See accounts::remote.
+  it('carries nothing a non-POSIX login shell would choke on at parse time', () => {
+    const cmd = buildSshCommand('ews@nova', '/srv/app', TAB, { port: 1, auth: 'a' }, ACCT);
+    expect(cmd).not.toContain('$(');
+    expect(cmd).not.toContain('2>');
   });
 
   it('carries the account fragment with no bridge and no cwd', () => {

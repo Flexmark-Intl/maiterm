@@ -15,7 +15,7 @@ import { dispatch } from '$lib/stores/notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable } from '$lib/stores/triggers.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
-import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
+import * as remoteAccount from '$lib/utils/remoteAccountToken';
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -674,7 +674,12 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
   // its own ssh command (buildSshCommand) and has consumed the file, so asking again would push a
   // second copy for nothing — and the env of a shell that is already running cannot be changed
   // from out here anyway. A host this account does not cover resolves without connecting at all.
-  const accountExport = ptyId && freshSsh ? remoteAccountExport(tabId, sshArgs) : null;
+  //
+  // A HANDOFF, not a promise of a string, because starting it places a standing one-year
+  // credential on that host before any of the guards below have run. Every path that ends up not
+  // typing it must `abandon()` — otherwise the only thing that would ever remove the file is the
+  // sweep inside the next push to the same host, which for a host nobody opens again is never.
+  const account = ptyId && freshSsh ? remoteAccount.beginRemoteAccount(tabId, sshArgs) : null;
 
   try {
     // Inside the try: these can REJECT, not just return null, and a throw before the
@@ -686,6 +691,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       logError('Cannot enable SSH MCP bridge: MCP server not running');
       bridgeStates.delete(tabId);
       bridgeStates = new Map(bridgeStates);
+      await account?.abandon('maiTerm’s own MCP server is not running');
       return false;
     }
 
@@ -736,6 +742,9 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       // the shell. Re-injecting on every failed-setup retry would spam the user's
       // interactive session with `export MAITERM_TAB_ID=…` lines, once per prompt.
       logInfo("SSH MCP bridge: env vars already injected for tab " + tabId + " — skipping re-injection");
+      // The earlier injection already carried the account, so this one has nothing to add — but
+      // a second file was pushed when this attempt started, and it has to come back.
+      await account?.abandon('this shell already had its environment set');
     } else if (ptyId && !freshSsh && !bakedIsStale) {
       // Not a shell we watched connect, so we cannot know what owns the remote end now. The
       // live-agent check below is negative evidence, and it is blindest exactly when it
@@ -752,6 +761,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       try {
         if (!(await isRemoteShellForeground(ptyId))) {
           logInfo("SSH MCP bridge: skipping env-var injection — ssh no longer foreground for tab " + tabId);
+          await account?.abandon('the ssh session ended before its environment could be set');
         } else if (agentStateStore.getState(tabId)) {
           // An agent session is already live in this tab, so the PTY belongs to its
           // prompt, not a shell: the write would be typed into the agent as a message
@@ -773,11 +783,14 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           // other end is an MCP server that will not connect for the session's whole life.
           logInfo("SSH MCP bridge: skipping env-var injection — an agent session owns tab " + tabId
             + (bakedIsStale ? " (its MAITERM_PORT is stale; the agent must be restarted to pick up " + tunnelInfo.remote_port + ")" : ""));
+          // This one the user needs told. The agent in this tab is running right now, under
+          // whatever login the host already had, and no export can move a process that has
+          // already started — so unlike the cases above, there is no later attempt that fixes it.
+          await account?.abandon('an agent was already running in it when the account was applied');
         } else {
-          // Awaited only now, at the point of writing. Every guard above is a reason not to
-          // type anything at all, and the token must not be placed on a host whose shell we
-          // then decide not to speak to.
-          const acct = accountExport ? await accountExport : null;
+          // Taken only now, at the point of writing. Every guard above is a reason not to type
+          // anything at all, and each of them hands the file back rather than leaving it.
+          const acct = account ? await account.take() : null;
           let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
             + " MAITERM_AUTH=" + authToken;
           // Refused rather than escaped if it could break out — see buildSshCommand. Here it
@@ -791,7 +804,12 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
         }
       } catch (e) {
         logError("SSH MCP bridge: failed to inject env vars: " + e);
+        await account?.abandon('its environment could not be written (' + e + ')');
       }
+    } else {
+      // No PTY to write into at all — a re-bridge from the scheduler, say. Nothing was pushed
+      // (the handoff is only started when there is a ptyId), so this is belt and braces.
+      await account?.abandon('there was no live shell to set it in');
     }
 
     // Now kick off remote setup(s) — these gate the 'connected' status flip but
@@ -851,6 +869,13 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
   } catch (e) {
     const errMsg = String(e);
     logError(`SSH MCP bridge failed for ${hostKey}: ${errMsg}`);
+
+    // The tunnel or the remote setup failed, so the injection never ran — but the token was
+    // pushed the moment this attempt started. The user's own ssh session is usually fine here;
+    // only maiTerm's separate connection failed. Left alone, a one-year credential stays on that
+    // host and the session quietly runs as whatever login it already had (§6.1). The "MCP Bridge
+    // Failed" toast below says nothing about identity, which is why abandon() speaks for itself.
+    void account?.abandon('maiTerm could not finish setting the session up (' + errMsg + ')');
 
     bridgeStates = new Map(bridgeStates.set(tabId, {
       hostKey,

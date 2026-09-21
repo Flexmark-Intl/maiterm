@@ -1321,9 +1321,24 @@ pub async fn prepare_remote_account_token(
         }
     };
 
+    // A last shape check before a credential leaves this machine. Nothing should be able to put
+    // something else in the vault, but this is the one place where being wrong writes a file to
+    // a computer we do not own.
+    if !token.looks_like_setup_token() {
+        log::warn!("accounts: the vault entry for {account_id} is not a setup-token — not sending it");
+        return Ok(RemoteTokenPrep {
+            status: "missing_credential",
+            export: None,
+            account_label: Some(label),
+            host: Some(target),
+            detail: Some("its stored remote token is not in the expected form — mint it again".into()),
+        });
+    }
+
     let script = accounts::remote::stage_script(&tab_id)
         .ok_or_else(|| "unusable tab id".to_string())?;
-    if let Err(e) = push_token(&ssh_args, &script, token.expose()).await {
+    let contents = accounts::remote::stage_contents(token.expose());
+    if let Err(e) = run_ssh(&ssh_args, &script, Some(&contents)).await {
         log::warn!("accounts: could not place the token on {target}: {e}");
         return Ok(RemoteTokenPrep {
             status: "failed",
@@ -1343,16 +1358,49 @@ pub async fn prepare_remote_account_token(
     })
 }
 
-/// Write the token to the remote over a connection of its own, on **stdin**.
+/// Take back a handoff file that is not going to be used.
+///
+/// The push runs in parallel with the decision about whether to inject — that is what keeps it
+/// off the critical path — so by the time a caller decides not to write into a shell, the
+/// credential is already on that host. Without this, the only thing that would ever remove it is
+/// the sweep inside the next push to the same host, which for a host nobody opens again is
+/// never. A one-year credential that nothing local can revoke (§9.4) must not be left behind
+/// because a tunnel failed to come up.
+///
+/// Best effort and quiet: this runs on paths that have already gone wrong, and the file will be
+/// swept eventually. Only the path is on the command line.
+#[tauri::command]
+pub async fn discard_remote_account_token(tab_id: String, ssh_args: String) -> Result<(), String> {
+    let Some(script) = accounts::remote::discard_script(&tab_id) else {
+        return Ok(());
+    };
+    match run_ssh(&ssh_args, &script, None).await {
+        Ok(()) => {
+            log::info!("accounts: removed the unused handoff file for tab {tab_id}");
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("accounts: could not remove the unused handoff file for tab {tab_id}: {e}");
+            Ok(())
+        }
+    }
+}
+
+/// Run one short script on the remote over a connection of its own, optionally feeding it
+/// something on **stdin**.
 ///
 /// Not `ssh_run_setup`, which passes its script as an argv entry: that is fine for the config
 /// it writes and fatal for a credential, which would then be visible in `ps` on this machine
-/// and in the remote's process list. Here argv carries only the staging script — `mkdir`,
-/// `chmod`, a sweep and `cat >` — and the bytes arrive out of band.
+/// and in the remote's process list. Here argv carries only the script — `mkdir`, `chmod`, a
+/// sweep and `cat >` — and the bytes arrive out of band.
 ///
 /// Fully independent of the user's ControlMaster socket, for the reason `start_ssh_tunnel`
 /// documents: a maiTerm connection owning that socket once broke the user's own `ssh <host>`.
-async fn push_token(ssh_args: &str, script: &str, token: &str) -> Result<(), String> {
+///
+/// Timeouts are deliberately tighter than `ssh_run_setup`'s 30s: this one sits in front of a tab
+/// opening, and a host that is slow to authenticate must not be able to hold a spawn for half a
+/// minute.
+async fn run_ssh(ssh_args: &str, script: &str, stdin_data: Option<&str>) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
     let mut args: Vec<String> = vec![
@@ -1364,7 +1412,7 @@ async fn push_token(ssh_args: &str, script: &str, token: &str) -> Result<(), Str
         "-o".into(),
         "BatchMode=yes".into(),
         "-o".into(),
-        "ConnectTimeout=10".into(),
+        "ConnectTimeout=8".into(),
         // No tty: nothing about this is interactive, and a tty would echo stdin back at us.
         "-T".into(),
     ];
@@ -1384,18 +1432,19 @@ async fn push_token(ssh_args: &str, script: &str, token: &str) -> Result<(), Str
         .spawn()
         .map_err(|e| format!("could not run ssh: {e}"))?;
 
-    // Written without a trailing newline: `$(cat …)` strips those anyway, but `Secret` is
-    // normalized at construction precisely so that what is stored is what is meant, and a
-    // `CLAUDE_CODE_OAUTH_TOKEN` with a stray newline in it is a §6.1 fall-through.
+    // Closed either way. A script reading stdin (`cat >`) would otherwise wait on a pipe nobody
+    // is going to write to, and the timeout below would be the only thing that ended it.
     {
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "ssh gave us no stdin".to_string())?;
-        stdin
-            .write_all(token.as_bytes())
-            .await
-            .map_err(|e| format!("could not hand the token to ssh: {e}"))?;
+        if let Some(data) = stdin_data {
+            stdin
+                .write_all(data.as_bytes())
+                .await
+                .map_err(|e| format!("could not hand the token to ssh: {e}"))?;
+        }
         stdin
             .shutdown()
             .await
@@ -1403,11 +1452,11 @@ async fn push_token(ssh_args: &str, script: &str, token: &str) -> Result<(), Str
     }
 
     let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(20),
+        tokio::time::Duration::from_secs(15),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| "the host did not answer within 20s".to_string())?
+    .map_err(|_| "the host did not answer within 15s".to_string())?
     .map_err(|e| format!("ssh failed: {e}"))?;
 
     if !output.status.success() {

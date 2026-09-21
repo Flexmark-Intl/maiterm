@@ -40,14 +40,14 @@ export function cleanSshCommand(cmd: string): string {
   // one of the three things maiTerm itself starts that command with, so the `.*` cannot run
   // backwards over a user's own flags.
   let cleaned = cmd.replace(
-    /\s+'(?:export\s+MAITERM_TAB_ID=|__mt_oat=|cd\s).*exec\s+\$?SHELL\s+-l'\s*$/,
+    /\s+'(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/|cd\s).*exec\s+\$?SHELL\s+-l'\s*$/,
     '',
   );
   // `ps` reports argv joined by spaces, so the same command comes back from the process table
   // with its quotes gone. Anchored on our own export so a greedy `.*` cannot eat a user's flags.
-  // `__mt_oat=` is the first token of the §6 account fragment (`accounts::remote`), listed here
-  // as well as the export because the two are independently optional.
-  cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|__mt_oat=).*exec\s+\$?SHELL\s+-l\s*$/, '');
+  // `[ -r ~/.maiterm/` opens the §6 account fragment (`accounts::remote`), listed here as well
+  // as the export because the two are independently optional.
+  cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|\[ -r ~\/\.maiterm\/).*exec\s+\$?SHELL\s+-l\s*$/, '');
   // Pre-export form (stored commands from earlier builds, and ps output for them).
   cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
   // Remove only flags that buildSshCommand re-injects
@@ -1649,6 +1649,15 @@ export async function prepareRemoteAccountToken(
   sshArgs: string,
 ): Promise<RemoteTokenPrep> {
   return invoke('prepare_remote_account_token', { tabId, sshArgs });
+}
+
+/** Take back a handoff file that is not going to be used.
+ *
+ *  The push runs in parallel with the decision about whether to inject, so a caller that changes
+ *  its mind has already put a standing one-year credential on that host — and nothing local
+ *  revokes it (§9.4). Prefer `beginRemoteAccount`, which pairs this with the announcement. */
+export async function discardRemoteAccountToken(tabId: string, sshArgs: string): Promise<void> {
+  return invoke('discard_remote_account_token', { tabId, sshArgs });
 }
 
 /** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or

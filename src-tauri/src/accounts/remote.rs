@@ -21,20 +21,28 @@
 //! IPC payload: Rust reads the vault, pushes the bytes, and hands the frontend back only a
 //! shell fragment naming a *path*.
 //!
-//! The file is consumed on read — `cat` then `rm` in the same expression — so the window in
-//! which a standing credential sits on someone else's disk is the few seconds between the push
-//! and the shell starting. A push whose ssh never followed is swept by the next one.
+//! The file is consumed on read — sourced then removed in the same expression — so in the normal
+//! case a standing credential sits on someone else's disk for the few seconds between the push
+//! and the shell starting.
+//!
+//! **That is the normal case, not a bound**, and the difference matters for a credential nothing
+//! local can revoke (§9.4). The push runs in parallel with the decision about whether to inject,
+//! so a caller that changes its mind has already placed the file; `discard_script` is how it
+//! takes it back, and every such path calls it. What remains uncovered is a push whose ssh
+//! session never started at all — for that there is the sweep in `stage_script`, which fires on
+//! the next push to the same host and so is a bound only for hosts still in use.
 
 /// Where handoff files live on the remote. A directory of our own rather than a file beside
 /// `~/.aiterm`, so the sweep below can be a blunt `find … -delete` without ever being pointed
 /// at something we did not write.
 const REMOTE_DIR: &str = "~/.maiterm/tokens";
 
-/// Minutes after which an unconsumed handoff file is swept.
+/// Minutes after which an unconsumed handoff file is swept **by the next push to that host**.
 ///
 /// A file is normally read within seconds of being written. Anything older is from a push whose
-/// ssh never connected, and leaving a live credential on disk for a session that never happened
-/// is the failure this bounds.
+/// ssh never connected. Note what this does and does not promise: it is a bound on hosts that
+/// are still being used, and nothing at all on a host nobody opens again. The precise mechanism
+/// is `discard_script`; this is the backstop for the case no caller knows about.
 const STALE_AFTER_MINUTES: u32 = 10;
 
 /// Is this safe to interpolate into a shell command unquoted?
@@ -54,8 +62,8 @@ pub fn token_path(tab_id: &str) -> Option<String> {
     is_safe_handle(tab_id).then(|| format!("{REMOTE_DIR}/tok-{tab_id}"))
 }
 
-/// The script the push connection runs. **Carries no credential** — the token arrives on this
-/// command's stdin, which is why the whole approach works.
+/// The script the push connection runs. **Carries no credential** — the file's contents arrive
+/// on this command's stdin, which is why the whole approach works.
 ///
 /// `umask 077` covers the create; the explicit `chmod` covers a directory that already existed
 /// with looser permissions, which `mkdir -p` would leave alone.
@@ -68,27 +76,65 @@ pub fn stage_script(tab_id: &str) -> Option<String> {
     ))
 }
 
+/// What goes into the handoff file: a shell snippet, not the bare token.
+///
+/// The file is *sourced* rather than read, and that indirection is what keeps the fragment below
+/// parseable by shells that are not POSIX — see `export_fragment`.
+///
+/// The token is single-quoted and the quote-escape applied anyway. A `setup-token` is
+/// `sk-ant-oat01-` plus URL-safe base64 and `Secret::looks_like_setup_token` refuses whitespace,
+/// so there is nothing here to escape today; this is for the day the format moves.
+pub fn stage_contents(token: &str) -> String {
+    format!(
+        "export CLAUDE_CODE_OAUTH_TOKEN='{}'\n",
+        token.replace('\'', r"'\''")
+    )
+}
+
 /// The fragment the remote shell runs to pick the token up. Safe to put on a command line: it
 /// names a path, not a secret.
+///
+/// **Sources the file instead of reading it, because the remote's login shell may not be a
+/// POSIX one and this fragment has to survive that.** The obvious form,
+/// `VAR=$(cat file)`, is a *parse-time* error in csh and tcsh ("Illegal variable name"), and a
+/// parse error takes the whole statement list with it — including the `exec $SHELL -l` that is
+/// the point of the remote command. The session then dies within a second, and on the
+/// auto-resume path (where the ssh line and the agent's resume command are typed as one payload)
+/// the local shell goes on to run `claude --resume` **on the user's own machine**. Verified
+/// against tcsh: `VAR=$(…)` aborts, `[ -r f ] && . f` merely complains and carries on, with the
+/// `rm` still reached. csh could never use maiTerm's exports anyway; what it must not do is fail
+/// worse than it did before §6 existed.
 ///
 /// **Only exports when there is something to export.** An empty `CLAUDE_CODE_OAUTH_TOKEN` would
 /// be the §6.1 trap in its purest form — the variable present and the resolution falling through
 /// past it to whatever login the host already has, `loggedIn: true`, no error, wrong identity.
-/// Leaving it unset at least fails the same way as never having tried.
+/// `[ -r … ]` and an absent file both leave it unset, which at least fails the way never having
+/// tried does.
+///
+/// No `2>/dev/null` anywhere: csh spells redirection differently and an "Ambiguous output
+/// redirect" would put us back where we started.
 ///
 /// Contains no single quote, by construction and by test: `buildSshCommand` splices it into a
 /// single-quoted ssh argument.
 ///
-/// **`__mt_oat=` is a contract, not an implementation detail.** `cleanSshCommand` strips this
-/// fragment back out when a stored ssh value is rebuilt from `ps` output, and it recognises the
-/// fragment by that leading token. Renaming the variable without changing the regex there makes
-/// the whole remote command accumulate into the host string on every round trip.
+/// **`[ -r ~/.maiterm/tokens/` is a contract, not an implementation detail.** `cleanSshCommand`
+/// strips this fragment back out when a stored ssh value is rebuilt from `ps` output, and it
+/// recognises the fragment by that leading token. Changing the shape without changing the regex
+/// there makes the whole remote command accumulate into the host string on every round trip.
 pub fn export_fragment(tab_id: &str) -> Option<String> {
     let path = token_path(tab_id)?;
-    Some(format!(
-        "__mt_oat=$(cat {path} 2>/dev/null); rm -f {path} 2>/dev/null; \
-         [ -n \"$__mt_oat\" ] && export CLAUDE_CODE_OAUTH_TOKEN=\"$__mt_oat\"; unset __mt_oat"
-    ))
+    Some(format!("[ -r {path} ] && . {path}; rm -f {path}"))
+}
+
+/// Remove a handoff file we placed but are not going to use.
+///
+/// Needed because the push happens in parallel with the decision about whether to inject: by the
+/// time a guard says "do not write into this shell", a one-year credential is already on that
+/// host's disk. The sweep in `stage_script` only runs on the *next* push to the same host, which
+/// may never happen.
+pub fn discard_script(tab_id: &str) -> Option<String> {
+    let path = token_path(tab_id)?;
+    Some(format!("rm -f {path}"))
 }
 
 #[cfg(test)]
@@ -108,6 +154,29 @@ mod tests {
         assert!(token_path("a'b").is_none());
         assert!(stage_script("a'b").is_none());
         assert!(export_fragment("a'b").is_none());
+        assert!(discard_script("a'b").is_none());
+    }
+
+    /// The one that bit: `VAR=$(…)` is a PARSE error in csh/tcsh, and a parse error takes the
+    /// whole statement list with it — `exec $SHELL -l` included. Sourcing degrades to a runtime
+    /// complaint instead, so the session still comes up.
+    #[test]
+    fn the_fragment_avoids_what_csh_cannot_parse() {
+        let f = export_fragment("tab-1").unwrap();
+        assert!(!f.contains("$("), "command substitution aborts csh at parse time: {f}");
+        assert!(!f.contains("2>"), "csh spells redirection differently: {f}");
+        assert!(f.contains("] && . "), "must source, not read: {f}");
+    }
+
+    #[test]
+    fn the_staged_contents_are_a_shell_snippet_with_the_token_quoted() {
+        assert_eq!(
+            stage_contents("sk-ant-oat01-abc"),
+            "export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-abc'\n"
+        );
+        // Nothing can close the quoting from inside the file either.
+        let escaped = stage_contents("a'b");
+        assert_eq!(escaped, "export CLAUDE_CODE_OAUTH_TOKEN='a'\\''b'\n");
     }
 
     /// The fragment is spliced into `ssh host '<fragment>…'`. One apostrophe in it and the rest
@@ -135,8 +204,9 @@ mod tests {
         let f = export_fragment("tab-1").unwrap();
         assert!(f.contains("rm -f "), "read-once: {f}");
         assert!(
-            f.contains("[ -n \"$__mt_oat\" ] && export"),
-            "an empty token must not be exported — that is the §6.1 fall-through: {f}"
+            f.starts_with("[ -r "),
+            "an unreadable or absent file must leave the variable UNSET rather than empty — an \
+             empty one is the §6.1 fall-through with a variable in front of it: {f}"
         );
     }
 
@@ -147,9 +217,8 @@ mod tests {
     fn the_fragment_is_what_the_frontend_test_expects() {
         assert_eq!(
             export_fragment("TAB").unwrap(),
-            "__mt_oat=$(cat ~/.maiterm/tokens/tok-TAB 2>/dev/null); \
-             rm -f ~/.maiterm/tokens/tok-TAB 2>/dev/null; \
-             [ -n \"$__mt_oat\" ] && export CLAUDE_CODE_OAUTH_TOKEN=\"$__mt_oat\"; unset __mt_oat"
+            "[ -r ~/.maiterm/tokens/tok-TAB ] && . ~/.maiterm/tokens/tok-TAB; \
+             rm -f ~/.maiterm/tokens/tok-TAB"
         );
     }
 
@@ -160,5 +229,6 @@ mod tests {
         let path = token_path("tab-1").unwrap();
         assert!(stage_script("tab-1").unwrap().contains(&path));
         assert!(export_fragment("tab-1").unwrap().contains(&path));
+        assert!(discard_script("tab-1").unwrap().contains(&path));
     }
 }
