@@ -334,16 +334,79 @@ fn transcript_tail(transcript: &str) -> Option<String> {
 /// Turn a stuck sign-in into something a user can act on. The runtime prints the authorization
 /// URL on stdout; when the browser did not open, that line is the whole difference between
 /// "try again" and "there is nothing I can do".
-fn timeout_message(transcript: &str) -> String {
+fn timeout_message(transcript: &str, flow: &BrowserFlow) -> String {
+    // The URL is safe to show even for a secret flow: it is the START of an OAuth exchange, and
+    // whoever opens it still has to authenticate. The TOKEN would not be, but it only exists
+    // once the flow has succeeded, and this message is only built when it has not.
     match extract_login_url(transcript, false) {
-        Some(u) => format!("Sign-in timed out. If the browser did not open, visit: {u}"),
-        None => "Sign-in timed out before the browser flow completed.".to_string(),
+        Some(u) => format!(
+            "{} timed out. If the browser did not open, visit: {u}",
+            flow.label
+        ),
+        None => format!("{} timed out before the browser flow completed.", flow.label),
     }
+}
+
+/// Blank anything shaped like an Anthropic secret.
+///
+/// Belt, not braces: the real guard is that a secret transcript never reaches an error or an
+/// event in the first place. This exists because `setup-token`'s output IS a credential, error
+/// paths are the ones nobody exercises, and a token that escapes is valid for a year.
+fn redact_secrets(text: &str) -> String {
+    const MARK: &str = "sk-ant-";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(MARK) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        // To the first whitespace/control char — the same boundary `extract_login_url` uses, and
+        // the same reason: a token is not whitespace-terminated when output is decorated.
+        let end = after
+            .char_indices()
+            .find(|(n, c)| *n > 0 && (c.is_whitespace() || c.is_control()))
+            .map(|(n, _)| n)
+            .unwrap_or(after.len());
+        out.push_str("sk-ant-<redacted>");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_login_url, transcript_tail};
+    use super::{extract_login_url, redact_secrets, transcript_tail};
+
+    #[test]
+    fn redaction_blanks_a_token_but_keeps_the_message_around_it() {
+        // The shape of a real `setup-token` failure tail: useful prose either side of the one
+        // thing that must not survive.
+        let t = "Created token sk-ant-oat01-abcdefghijklmnop0123456789 for you · done";
+        let r = redact_secrets(t);
+        assert!(!r.contains("abcdefghijklmnop"), "the token survived: {r}");
+        assert!(r.contains("Created token"), "lost the diagnostic: {r}");
+        assert!(r.contains("for you · done"), "lost the diagnostic: {r}");
+        assert!(r.contains("sk-ant-<redacted>"));
+    }
+
+    #[test]
+    fn redaction_handles_the_awkward_positions() {
+        // End of input with no trailing whitespace — the `unwrap_or(after.len())` arm.
+        assert_eq!(
+            redact_secrets("token: sk-ant-oat01-zzzz"),
+            "token: sk-ant-<redacted>"
+        );
+        // Several on one line, which a retry loop produces.
+        let two = redact_secrets("sk-ant-oat01-aaaa and sk-ant-api03-bbbb");
+        assert_eq!(two, "sk-ant-<redacted> and sk-ant-<redacted>");
+        assert!(!two.contains("aaaa") && !two.contains("bbbb"));
+        // Nothing to do, and nothing damaged.
+        assert_eq!(redact_secrets("all fine here"), "all fine here");
+        // The marker itself with nothing after it must terminate rather than spin — the scan
+        // advances past the marker because the boundary search skips index 0.
+        assert_eq!(redact_secrets("sk-ant-"), "sk-ant-<redacted>");
+        assert_eq!(redact_secrets("sk-ant- x"), "sk-ant-<redacted> x");
+    }
 
     #[test]
     fn finds_a_plain_url() {
@@ -528,15 +591,50 @@ pub async fn begin_account_login(
     }
 }
 
-/// The part of `begin_account_login` that runs once the root exists. Split out so its caller can
-/// clean up on any error without every early return having to remember.
-async fn login_into_root(
+/// A runtime subcommand that authenticates through a browser.
+///
+/// Two of them exist — `auth login` (§5) and `setup-token` (§6) — and they need identical
+/// plumbing: the same config-dir env, the same scrub of every shadowing variable, the same
+/// shadowed browser opener, the same drain-and-poll. **One copy of that plumbing, not two.**
+/// It took several rounds to get right (the shim/drain race, the two-URL problem), a review
+/// found a defect in it after that, and a second copy would be a second place for the next one
+/// to hide.
+struct BrowserFlow {
+    /// Argv after the CLI name.
+    args: &'static [&'static str],
+    /// Sentence-initial, for error text: "Sign-in failed…", "Token mint failed…".
+    label: &'static str,
+    /// True when the child's OUTPUT is itself credential material.
+    ///
+    /// `setup-token` prints an `sk-ant-oat01-…` token as its last line, and `transcript_tail`
+    /// takes the last three lines — so without this the ordinary failure path would put a live
+    /// one-year credential into a user-visible error string. Set it and errors are built from a
+    /// redacted tail instead.
+    output_is_secret: bool,
+}
+
+/// `auth login` — §5. Output is a URL and progress chatter, never a credential.
+static LOGIN_FLOW: BrowserFlow = BrowserFlow {
+    args: &["auth", "login"],
+    label: "Sign-in",
+    output_is_secret: false,
+};
+
+/// Run a browser flow against an account root and hand back the child's combined output.
+///
+/// **The returned transcript is credential material when `flow.output_is_secret`.** It belongs
+/// to the caller: do not log it, do not put it in an event, do not return it to the frontend.
+///
+/// Split out of `begin_account_login` so that caller can clean the root up on any error without
+/// every early return having to remember.
+async fn run_browser_flow(
     app: &tauri::AppHandle,
     rt: Runtime,
     account_id: &str,
     timeout_secs: Option<u64>,
     open_with: Option<String>,
-) -> Result<AccountIdentity, String> {
+    flow: &'static BrowserFlow,
+) -> Result<String, String> {
     let profile = rt.profile();
     let account_id = account_id.to_string();
     let root = accounts::account_root(rt, &account_id)
@@ -550,10 +648,14 @@ async fn login_into_root(
     let deadline = std::time::Duration::from_secs(timeout_secs.unwrap_or(300).clamp(30, 900));
 
     let id_for_task = account_id.clone();
+    // Created OUT here, not inside the closure, because the caller needs the output after the
+    // child exits — a mint's whole result is in it. The closure gets a clone.
+    let transcript_out = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+    let transcript = transcript_out.clone();
     let app = app.clone();
     let login = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut cmd = Command::new(&cli);
-        cmd.args(["auth", "login"]);
+        cmd.args(flow.args);
         cmd.env(&config_env, &root);
         for var in &scrub {
             cmd.env_remove(var);
@@ -588,7 +690,9 @@ async fn login_into_root(
         // drained into one transcript instead of betting on stdout.
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("starting sign-in: {e}"))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("starting {}: {e}", flow.label.to_lowercase()))?;
 
         // Drain on their own threads: a full pipe would otherwise block the child forever while
         // we poll it, which is a deadlock rather than a slow sign-in.
@@ -603,7 +707,7 @@ async fn login_into_root(
         // — the branch that shows a code to paste, which is a dead end here because stdin is
         // null. The browser gets `redirect_uri=http://localhost:<port>/callback`, which completes
         // by itself. The poll loop below prefers what the shim captured for exactly that reason.
-        let transcript = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+        // Moved in from the caller (see above); the drains fill it and the caller reads it.
         // Shared, not per-thread: two drains each holding their own "have I announced?" would
         // both fire if the URL landed on both streams.
         let announced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -773,16 +877,22 @@ async fn login_into_root(
                     // death has no exit code. A user who deliberately cancelled was being told
                     // "sign-in exited -1".
                     if cancelled(&id_for_task) {
-                        break Err("sign-in cancelled".to_string());
+                        break Err(format!("{} cancelled", flow.label));
                     }
                     // Not the logged-out case this time: a failed *login* really is an error —
                     // and the runtime has already explained it on stderr ("Login failed: …"),
                     // which is now in the transcript. Without that the user gets an exit code
                     // and nothing to act on, which is the same as nothing.
                     let code = status.code().unwrap_or(-1);
+                    // A redacted tail when the output is secret: `setup-token` prints the
+                    // token on its LAST line and `transcript_tail` takes the last three, so the
+                    // ordinary failure path is exactly where a live credential would escape.
                     break Err(match transcript_tail(&transcript.lock()) {
-                        Some(tail) => format!("Sign-in failed: {tail}"),
-                        None => format!("Sign-in failed (exited {code})"),
+                        Some(tail) if flow.output_is_secret => {
+                            format!("{} failed: {}", flow.label, redact_secrets(&tail))
+                        }
+                        Some(tail) => format!("{} failed: {tail}", flow.label),
+                        None => format!("{} failed (exited {code})", flow.label),
                     });
                 }
                 Ok(None) => {
@@ -790,27 +900,44 @@ async fn login_into_root(
                         let mut c = child.lock();
                         let _ = c.kill();
                         let _ = c.wait();
-                        break Err("sign-in cancelled".to_string());
+                        break Err(format!("{} cancelled", flow.label));
                     }
                     if start.elapsed() > deadline {
                         let mut c = child.lock();
                         let _ = c.kill();
                         let _ = c.wait();
-                        break Err(timeout_message(&transcript.lock()));
+                        break Err(timeout_message(&transcript.lock(), flow));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
-                Err(e) => break Err(format!("waiting on sign-in: {e}")),
+                Err(e) => break Err(format!("waiting on {}: {e}", flow.label.to_lowercase())),
             }
         };
         unregister_login(&id_for_task);
         result
     })
     .await
-    .map_err(|e| format!("sign-in task failed: {e}"))?;
+    .map_err(|e| format!("{} task failed: {e}", flow.label.to_lowercase()))?;
     login?;
 
-    read_account_identity(rt.slug().to_string(), account_id).await
+    // The child is gone and every drain thread has closed its pipe, so this is the complete
+    // output. Ownership moves to the caller, which is what makes the secret case its problem
+    // and not this function's.
+    Ok(std::sync::Arc::try_unwrap(transcript_out)
+        .map(|m| m.into_inner())
+        .unwrap_or_else(|arc| arc.lock().clone()))
+}
+
+/// The part of `begin_account_login` that runs once the root exists.
+async fn login_into_root(
+    app: &tauri::AppHandle,
+    rt: Runtime,
+    account_id: &str,
+    timeout_secs: Option<u64>,
+    open_with: Option<String>,
+) -> Result<AccountIdentity, String> {
+    run_browser_flow(app, rt, account_id, timeout_secs, open_with, &LOGIN_FLOW).await?;
+    read_account_identity(rt.slug().to_string(), account_id.to_string()).await
 }
 
 /// Sign an account out and delete its config root. Used for a §5.1 duplicate, a cancelled
