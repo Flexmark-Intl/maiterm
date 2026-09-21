@@ -379,7 +379,7 @@ turn end — and would false-fire on the same long turn. It now measures from
 
 Deliberately *not* "never fire while active", which was the first proposal. A directive
 swallowed by a mid-turn paste leaves the tab active on something else entirely, and that is a
-live failure class here (`reinit_unbound_agent` is instrumented, not cured). Measuring idle
+live failure class here (a swallowed paste is instrumented, not cured). Measuring idle
 time still surfaces a swallowed directive once the tab goes quiet; suppressing on `active`
 would lose it permanently. The message reports both durations, since "sent 40 min ago" and
 "not working for the last 11 of them" are different facts and only the second fired it.
@@ -1040,10 +1040,23 @@ see the mesh readiness pinwheel), and `agent_unready` fires **only on `unbound`*
 Narrowing it matters: on a `stopped` tab, `/maiterm init` types a slash command into
 bash — noise in the user's terminal, and no closer to recovery.
 
-`unbound` is handled automatically by the `reinit_unbound_agent` default rule (still
-subject to propose-mode). `stopped` is never automatic — relaunching an agent is a
-bigger action than re-binding one — but the triage deck offers it as one click, and
-resumes the tab's own session rather than starting a fresh one.
+`unbound` used to be handled automatically, by a `reinit_unbound_agent` default rule.
+**That default was removed 2026-09-21** and nothing types `/maiterm init` on its own
+initiative any more: the SessionStart hook carries the tab id and session id, and every
+request carries `x-maiterm-tab`, so a live agent is bound from its first breath and
+`initSession` is REPAIR only (see `docs/tasks.md` on tab identity). A rule firing an
+obsolete command up to 3×/hour at a condition that should no longer arise was spending
+somebody's terminal on it.
+
+Neither the event nor the remedy went with it. `agent_unready` is still a selectable
+condition and still in the `proposeRuleChanges` schema — the engine machinery below keys
+on the event, or on the text typed, never on that rule's id — and `recoverTab` plus the
+triage re-bind sweep still type the same line when a human or the Overlord agent asks for
+a repair. What is gone is maiTerm volunteering it.
+
+`stopped` is never automatic either — relaunching an agent is a bigger action than
+re-binding one — but the triage deck offers it as one click, and resumes the tab's own
+session rather than starting a fresh one.
 
 **The deck must never print advice it could act on.** It used to say "resume it or run
 `/maiterm init`" and leave the human to do it, on every dormant tab, forever — which is
@@ -1089,10 +1102,11 @@ Three changes close it: `recoverTab` returns `verified: false` and says so in it
 **`rebind_failed`** escalation naming the tab and the next remedy (call `recoverTab`
 again — it now reads `stopped`, so it resumes the agent rather than re-typing an init
 already shown not to work); and the **rule** path arms `rebindWatch` too. That last one
-matters for the same reason the rest of §2 does: `reinit_unbound_agent` types the identical
+matters for the same reason the rest of §2 does: an `agent_unready` rule types the identical
 line at the identical tab for the identical reason, and it was the one path not watching —
-its failures ended at a silent `timed_out`, since its `on_timeout` is `continue`. One
-injection, one verdict.
+its failures ended at a silent `timed_out`, since `on_timeout: 'continue'` swallows one. One
+injection, one verdict. (The default that did this is gone; the event is still selectable, so
+a hand-written or agent-proposed rule reaches this code the same way.)
 
 Two things the rule-path watch must not do, both caught in review before they shipped:
 
@@ -1101,12 +1115,12 @@ Two things the rule-path watch must not do, both caught in review before they sh
   `agent_unready` is a selectable event with a free-text sequence, so any rule saying
   something other than `/maiterm init` would have been watched for a binding it could not
   produce and then declared failed. That verdict is not cosmetic: `rebindFailed` pins the
-  tab to `stopped`, which is precisely the state that stops `reinit_unbound_agent` firing
+  tab to `stopped`, which is precisely the state that stops an `agent_unready` rule firing
   there ever again, drops it out of *Run all* and *Re-bind all*, and leaves the card
   offering **Restart agent** — a resume command typed at an agent that was alive the whole
   time. A rule could permanently disable the remedy for the problem it was written to fix.
-- **Arm after the step's gate, not at injection.** `REBIND_VERIFY_MS` is 45s;
-  `reinit_unbound_agent` gives its step 120s. Two numbers governing one injection, and the
+- **Arm after the step's gate, not at injection.** `REBIND_VERIFY_MS` is 45s; the default
+  that shipped this gave its step 120s. Two numbers governing one injection, and the
   shorter one was rendering the verdict first — so an init turn slow to reach its
   `initSession` call (rate-limit backoff, a remote agent still replaying its transcript)
   was declared failed while the ritual was still inside its own budget and about to
@@ -1926,9 +1940,9 @@ cards correcting themselves. It now says what it knows ("sent … — any that d
 answer come back as needing a restart") rather than claiming it re-bound them.
 
 One worklist function (`triageJobs`) backs both the button's label and the run, so the
-label cannot promise work the run then skips. It also resolves a collision: the default
-`reinit_unbound_agent` rule fires on the same `agent_unready` signal the re-bind reads, so
-every unbound tab yields BOTH a re-bind job and a proposal whose sequence is the identical
+label cannot promise work the run then skips. It also resolves a collision: an
+`agent_unready` rule fires on the same signal the re-bind reads, so an unbound tab yields
+BOTH a re-bind job and a proposal whose sequence is very likely the identical
 `/maiterm init`. Running both types it twice — or, once the re-bind lands and the tab is no
 longer unready, leaves `waitInjectable` spinning for its full 5-minute cap while holding
 the tab's ritual lock, blocking every `only_if_no_outstanding` rule and stalling the run's

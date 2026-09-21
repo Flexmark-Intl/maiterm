@@ -76,30 +76,22 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     ],
   },
 
-  reinit_unbound_agent: {
-    name: 'Re-bind a running agent',
-    description:
-      'A tab whose agent is running but not bound to maiTerm gets a /maiterm init, which restores tool routing and reply delivery. Only fires when the agent process is confirmed alive — a tab sitting at a shell is left alone.',
-    cooldown: 900,
-    when: { event: 'agent_unready' },
-    guards: {
-      // There is no live REPL binding by definition — that IS the condition. Requiring
-      // one would make this rule unfireable, which is how it stayed advice-only.
-      require_live_repl: false,
-      min_quiet_ms: 3000,
-      max_per_hour: 3,
-      only_if_no_outstanding: true,
-    },
-    sequence: [
-      {
-        kind: 'slash',
-        text: '/maiterm init',
-        await: { until: 'turn_end' },
-        timeout_seconds: 120,
-        on_timeout: 'continue',
-      },
-    ],
-  },
+  // `reinit_unbound_agent` lived here and is GONE (2026-09-21). It typed `/maiterm init`
+  // at any tab whose agent was running but unbound, up to 3×/hour. Binding is no longer
+  // something a tab has to be told to do: the SessionStart hook carries the tab id and
+  // session id, and every request carries `x-maiterm-tab`, so a live agent is bound from
+  // its first breath and `initSession` is REPAIR only. The rule was firing an obsolete
+  // command at a condition that should no longer arise, and when it misfired it typed a
+  // slash command into somebody's session.
+  //
+  // What did NOT go with it, deliberately:
+  //   - the `agent_unready` EVENT, still selectable in the rules editor and still in the
+  //     proposeRuleChanges schema — a user or agent can still build a rule on it, and all
+  //     the engine machinery below is keyed on the event (or on the text typed), never on
+  //     this rule's id, so it stays correct for one;
+  //   - `recoverTab` and the triage re-bind sweep, which type the same line on PURPOSE
+  //     when a human or the Overlord agent asks for a repair. Removing the automatic rule
+  //     is not removing the remedy; it removes maiTerm volunteering it.
 
   todo_hygiene: {
     name: 'Keep a task list',

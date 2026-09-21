@@ -1814,14 +1814,14 @@ function createOverlordStore() {
         // A rule re-binding an unready tab gets the same verification `recoverTab` gets:
         // both type the identical line at the identical tab for the identical reason, and
         // only one of them was watching, so a rule-driven re-bind that never took ended at
-        // a silent `timed_out` (`reinit_unbound_agent`'s `on_timeout` is `continue`).
+        // a silent `timed_out` (an `on_timeout: 'continue'` step swallows it).
         //
         // Two things this must NOT do, both found in review. It is keyed on the text typed,
         // not on `run.targetsUnready` — that flag is the rule's EVENT and says nothing about
         // the step, so a custom agent_unready rule with any other prose would have been
         // watched for a binding it could never produce, then declared failed. That verdict
         // is not cosmetic: `rebindFailed` pins the tab to `stopped`, which is the one state
-        // that stops `reinit_unbound_agent` from ever firing there again and turns the card's
+        // that stops any `agent_unready` rule from firing there again and turns the card's
         // only remaining action into a resume typed at a live agent.
         //
         // And it arms AFTER this step's gate rather than at injection, so the rule's own
@@ -2441,10 +2441,12 @@ function createOverlordStore() {
   /**
    * The triage worklist, shared by the run-all button's label and the run itself.
    *
-   * `superseded` is the collision that made this a shared function: the default
-   * `reinit_unbound_agent` rule fires on the same `agent_unready` signal the re-bind reads,
-   * so every unbound tab produces BOTH a re-bind job and a proposal whose sequence is the
-   * identical `/maiterm init`. Running both types it twice — or, once the re-bind lands and
+   * `superseded` is the collision that made this a shared function: an `agent_unready` rule
+   * fires on the same signal the re-bind reads, so an unbound tab produces BOTH a re-bind job
+   * and a proposal whose sequence is very likely the identical `/maiterm init`. (The default
+   * that did this shipped until 2026-09-21 — see `defaults.ts`. The event is still selectable,
+   * so a hand-written or agent-proposed rule collides the same way and this still earns its
+   * keep.) Running both types it twice — or, once the re-bind lands and
    * the tab is no longer unready, leaves `waitInjectable` spinning for its full five-minute
    * cap while holding the tab's ritual lock, blocking every `only_if_no_outstanding` rule
    * and stalling the run's own drain check on rituals that will never inject.
@@ -2838,9 +2840,9 @@ function createOverlordStore() {
           // - **The clock only runs while the tab isn't working** (`lastActiveAt` above),
           //   OR the directive has been outstanding past the absolute ceiling. Not "never
           //   while active": a directive swallowed by a mid-turn paste leaves a tab active
-          //   on something else entirely, and that is a live failure class here
-          //   (`reinit_unbound_agent` is instrumented, not cured). Measuring idle time still
-          //   surfaces it once the tab goes quiet, instead of never.
+          //   on something else entirely, and that is a live failure class here (a swallowed
+          //   paste is instrumented, not cured). Measuring idle time still surfaces it once
+          //   the tab goes quiet, instead of never.
           //
           //   The ceiling is not belt-and-braces, it is the other half. Review found that
           //   the idle clock alone can be pinned at zero for the life of a tab — see
