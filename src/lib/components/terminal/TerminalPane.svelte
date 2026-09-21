@@ -1981,8 +1981,16 @@
               const bridge = getBridgeInfo(tabId);
               const auth = await getMcpAuth();
               if (bridge?.remotePort && auth) {
-                const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort
-                  + " MAITERM_AUTH=" + auth + "\n";
+                // The §6 account fragment rides along, because this action exists for the
+                // shells the automatic paths could not reach — a tmux pane, a re-attached
+                // session — and those are exactly the shells that would otherwise come up
+                // under the host's own login with nothing saying so (§6.1). It names a file,
+                // not a credential; refused rather than escaped if it could break out.
+                const acct = await remoteAccountExport(tabId, bridge.hostKey);
+                let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort
+                  + " MAITERM_AUTH=" + auth;
+                if (acct && !acct.includes("'")) envCmd += "; " + acct;
+                envCmd += "\n";
                 const bytes = Array.from(new TextEncoder().encode(envCmd));
                 await writeTerminal(ptyId, bytes);
               }
