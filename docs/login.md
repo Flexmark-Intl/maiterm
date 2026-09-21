@@ -1005,10 +1005,10 @@ included.
    `prepare_remote_account_token`, wired into every path that starts a remote session.
 
    **How the token travels, and why it is the only shape that works.** Rust reads the vault and
-   pushes the token on the **stdin of an ssh connection of its own** into a per-tab
-   `~/.maiterm/tokens/tok-<tabid>` (0600); the remote shell `cat`s that file into
-   `CLAUDE_CODE_OAUTH_TOKEN` and `rm`s it, so it is read once. What crosses back to the frontend
-   is a shell fragment naming a **path**. Four constraints leave no other option:
+   pushes `export CLAUDE_CODE_OAUTH_TOKEN='…'` on the **stdin of an ssh connection of its own**
+   into a per-tab `~/.maiterm/tokens/tok-<tabid>` (0600); the remote shell *sources* that file
+   and `rm`s it, so it is read once. What crosses back to the frontend is a shell fragment naming
+   a **path**. Four constraints leave no other option:
 
    - the ssh command maiTerm builds is **typed into the user's local shell**, so anything in its
      argv lands in local scrollback (and thence `aiterm-state.json`), local shell history, and
@@ -1025,6 +1025,21 @@ included.
    A host the active account does not cover resolves **without opening a connection**. A missing
    vault entry or a failed push injects nothing *and says so* — per §6.1 that state is otherwise
    indistinguishable from success.
+
+   > **The fragment sources the file rather than reading it, and that is load-bearing.** The
+   > obvious `VAR=$(cat file)` is a *parse-time* error in csh and tcsh, and a parse error takes
+   > the whole statement list with it — `exec $SHELL -l` included. The session then died within a
+   > second, and on the auto-resume path (ssh line and agent resume typed as one payload) the
+   > local shell went on to run `claude --resume` **on the user's own machine**. `[ -r f ] && . f`
+   > merely complains under csh and carries on. Verified against tcsh, csh, sh, bash, zsh, dash
+   > and ksh. Anything added to this fragment must clear the same bar: no `$( )`, no `2>`.
+
+   > **Placing the token and using it are separate events.** The push runs in parallel with the
+   > decision about whether to inject, to keep an ssh round trip off the tab-spawn path — so a
+   > caller that changes its mind has already put a standing one-year credential on that host.
+   > Every such path calls `discard_remote_account_token`. This matters more here than it sounds:
+   > §9.4 says nothing local revokes these, so a file left behind because a tunnel failed to come
+   > up is permanent.
 
 **Verified end to end with two real accounts, 2026-09-20.** Two orgs side by side in one window;
 distinct account *and* org UUIDs on disk; each root resolving its own identity through the
