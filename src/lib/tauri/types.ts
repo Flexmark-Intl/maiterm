@@ -245,6 +245,12 @@ export interface ManagedAccount {
   last_verified_at?: number;
   /** Hosts the remote token is enabled for (§6). Explicit, never inferred. */
   remote_hosts?: string[];
+  /** Use this account on every SSH host no other account claims by name (§6).
+   *
+   *  At most one account per runtime holds this — two accounts each claiming every host is a
+   *  question with no answer, and per §6.1 the wrong answer is invisible. Named hosts win over
+   *  it, which is how one box is split off from the catch-all. */
+  remote_all_hosts?: boolean;
   /** Unix seconds. Expiry is DERIVED from this + 1 year, never parsed from a credential. */
   token_minted_at?: number;
 }

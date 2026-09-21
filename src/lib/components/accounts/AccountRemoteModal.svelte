@@ -14,6 +14,7 @@
    *  than avoiding it. */
   import { error as logError } from '@tauri-apps/plugin-log';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
   import Button from '$lib/components/ui/Button.svelte';
   import * as commands from '$lib/tauri/commands';
@@ -22,10 +23,29 @@
 
   interface Props {
     account: ManagedAccount;
-    oncomplete: (mint: TokenMint) => void | Promise<void>;
+    /** Carries the account BACK. The parent must not re-read its own `minting` state when this
+     *  resolves: the pane's rows stay in the tab order behind this dialog, so a second row's
+     *  "Set up…" can swap `minting` while a mint is in flight, and the result would then be
+     *  recorded against the wrong account — giving one row a token it does not own and leaving
+     *  the real one with a live credential and no metadata. */
+    oncomplete: (account: ManagedAccount, mint: TokenMint) => void | Promise<void>;
     oncancel: () => void;
   }
   let { account, oncomplete, oncancel }: Props = $props();
+
+  /** The account this dialog opened for, frozen at mount. `account` is a prop and can be
+   *  swapped underneath an in-flight mint; this cannot. */
+  const target = account;
+
+  let panelEl = $state<HTMLDivElement | null>(null);
+  // Svelte's `autofocus` is not focus — it compiles to a microtask that only acts when
+  // activeElement is body, which is false when a keyboard opened this and false in WebKit when
+  // a mouse clicked the opener button. Without this the backdrop's key handler never fires and
+  // Escape reaches the window handler, which closes Preferences outright.
+  $effect(() => {
+    const id = requestAnimationFrame(() => panelEl?.focus());
+    return () => cancelAnimationFrame(id);
+  });
 
   let phase = $state<'explain' | 'minting'>('explain');
   let error = $state<string | null>(null);
@@ -59,7 +79,7 @@
     let dead = false;
     void (async () => {
       const fn = await listen<AccountLoginUrl>(commands.ACCOUNT_LOGIN_URL_EVENT, e => {
-        if (e.payload.account_id !== account.id) return;
+        if (e.payload.account_id !== target.id) return;
         loginUrl = e.payload.url;
         pasteCode = e.payload.paste_code;
         openedPrivately = e.payload.opened && onUrl === 'private';
@@ -91,27 +111,82 @@
     error = null;
     try {
       const openWith = then === 'private' ? (browser?.id ?? null) : then === 'copy' ? null : 'default';
-      const result = await commands.mintAccountToken('claude', account.id, { openWith });
-      await oncomplete(result);
+      // The row's OWN runtime, not a literal. Only Claude can mint today, but a hardcoded slug
+      // would mint a Claude token against a Codex account's id the moment another runtime is
+      // supported — and it would bypass the Rust guard, which only ever sees what we send.
+      const result = await commands.mintAccountToken(target.runtime, target.id, { openWith });
+      // The browser took focus; without this the result lands in a window behind it and reads
+      // as "Preferences closed itself".
+      await focusThisWindow();
+      await oncomplete(target, result);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       phase = 'explain';
+      await focusThisWindow();
     }
+  }
+
+  /** Abort a mint that is still running.
+   *
+   *  The child is killed, so the browser flow cannot complete later and store a token the user
+   *  walked away from. `cancel_account_login` is keyed by account id and `run_browser_flow`
+   *  registers the mint the same way a sign-in registers, so this genuinely reaches it. */
+  async function cancelMint() {
+    try {
+      await commands.cancelAccountLogin(target.id);
+    } catch (e) {
+      logError(`[accounts] cancelling the mint failed: ${e}`);
+    }
+    oncancel();
+  }
+
+  async function focusThisWindow() {
+    try {
+      const win = getCurrentWindow();
+      if (await win.isMinimized()) await win.unminimize();
+      await win.setFocus();
+    } catch {
+      // Focus is a courtesy. Never let it swallow the mint result.
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    const closeKey =
+      e.key === 'Escape' || (e.key.toLowerCase() === 'w' && (e.metaKey || e.ctrlKey));
+    if (!closeKey) return;
+    // **Swallow these unconditionally.** Preferences is its own window and closes itself on
+    // Escape and Cmd+W, and the mint child does NOT stop when it does — so pressing Escape at
+    // "Minting…" (the reflex) closed the window while the flow ran to completion and stored a
+    // live one-year token that no UI could then reach, because the strip keys off metadata the
+    // destroyed webview never got to write.
+    e.stopPropagation();
+    e.preventDefault();
+    // Unlike the sign-in modal, this one CAN cancel while busy, so Escape does the right thing
+    // rather than merely refusing to make things worse.
+    if (busy) void cancelMint();
+    else oncancel();
   }
 </script>
 
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div
   class="backdrop"
   role="presentation"
+  tabindex="-1"
   onclick={e => {
     if (e.target === e.currentTarget && !busy) oncancel();
   }}
-  onkeydown={e => {
-    if (e.key === 'Escape' && !busy) oncancel();
-  }}
+  onkeydown={handleKeydown}
 >
-  <div class="modal" role="dialog" aria-modal="true" aria-label="Set up remote logins">
-    <h3>Use {account.label} on remote hosts</h3>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Set up remote logins"
+    bind:this={panelEl}
+    tabindex="-1"
+  >
+    <h3>Use {target.label} on remote hosts</h3>
 
     <div class="body">
       <section>
@@ -119,7 +194,7 @@
         <p>
           A <strong>separate long-lived token</strong> for this account, minted by the agent in
           your browser. maiTerm keeps it in your OS keychain and hands it to SSH tabs on hosts
-          you choose — so a remote agent runs as {account.label} instead of as whatever that
+          you choose — so a remote agent runs as {target.label} instead of as whatever that
           host happens to be signed in to.
         </p>
       </section>
@@ -134,7 +209,7 @@
         <ul>
           <li>
             <strong>It uses your subscription, not API credits.</strong> The token authenticates
-            against the same {account.plan ? account.plan.toUpperCase() : 'Pro/Max/Team'} plan
+            against the same {target.plan ? target.plan.toUpperCase() : 'Pro/Max/Team'} plan
             this account already has. Remote usage is billed exactly as local usage is.
           </li>
           <li>
@@ -236,7 +311,12 @@
     </div>
 
     <div class="footer">
-      <Button variant="ghost" onclick={oncancel} disabled={busy}>Cancel</Button>
+      <!-- Enabled WHILE minting: the common reason to abort is seeing the browser open
+           signed in to the wrong account, and without this the only escape was a key that
+           closed the window and left the flow running to completion. -->
+      <Button variant="ghost" onclick={() => (busy ? cancelMint() : oncancel())}>
+        {busy ? 'Cancel mint' : 'Cancel'}
+      </Button>
       {#if browser}
         <Button variant="secondary" disabled={busy} onclick={() => mint('private')}>
           Mint privately

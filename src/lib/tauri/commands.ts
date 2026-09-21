@@ -1579,6 +1579,17 @@ export async function forgetAccountToken(accountId: string): Promise<void> {
   return invoke('forget_account_token', { accountId });
 }
 
+/** Does the keychain actually hold a token for this account?
+ *
+ *  **Ask this rather than trusting `token_minted_at`.** Rust stores the token before the
+ *  frontend records the metadata, so every way that second step can fail — the two-instance
+ *  save guard refusing, the window closing mid-mint, a reply landing in a destroyed webview —
+ *  leaves a live one-year credential with nothing in state pointing at it. A UI keyed on the
+ *  metadata then hides the only control that could remove it. */
+export async function hasAccountToken(accountId: string): Promise<boolean> {
+  return invoke('has_account_token', { accountId });
+}
+
 /** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or
  *  "Clear setup".
  *

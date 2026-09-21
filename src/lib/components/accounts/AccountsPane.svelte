@@ -38,6 +38,35 @@
   let identities = $state<Record<string, AccountIdentity>>({});
   /** The account whose remote-token dialog is open, if any (§6). */
   let minting = $state<ManagedAccount | null>(null);
+  /** Whether the VAULT holds a token per account id — not whether state says so.
+   *
+   *  Rust stores the token before the frontend records `token_minted_at`, so every way that
+   *  second step can fail (a refused save, the window closing mid-mint, a reply landing in a
+   *  destroyed webview) leaves a live one-year credential with no metadata pointing at it. Keyed
+   *  on metadata, the strip would show "not set up" and hide the only control that removes it. */
+  let hasToken = $state<Record<string, boolean>>({});
+
+  async function refreshTokenPresence() {
+    const seen: Record<string, boolean> = {};
+    for (const a of accounts) {
+      try {
+        seen[a.id] = await commands.hasAccountToken(a.id);
+      } catch (e) {
+        // Unreadable keychain counts as "might have one" — the recovery affordance is the
+        // thing that must not disappear.
+        logError(`[accounts] token presence check failed for ${a.id}: ${e}`);
+        seen[a.id] = !!a.token_minted_at;
+      }
+    }
+    hasToken = seen;
+  }
+
+  $effect(() => {
+    // Re-run whenever the account list changes identity-wise.
+    const ids = accounts.map(a => a.id).join(',');
+    void ids;
+    void refreshTokenPresence();
+  });
   /** Per-account draft in the "add a host" field. Keyed by id so two rows do not share one. */
   let hostDraft = $state<Record<string, string>>({});
 
@@ -301,9 +330,26 @@
    *  Typed in rather than picked from the tabs that happen to be open, which is the whole
    *  point: a standing one-year credential belongs on a box the user names on purpose, not on
    *  whatever they last SSH'd into. */
+  /** `user@host`, `host`, or an ssh alias. Deliberately narrow.
+   *
+   *  This string is compared against a tab's ssh target and will end up near a command line
+   *  that `buildSshCommand` builds, which already applies exactly this discipline to the two
+   *  values it interpolates. A quote or a `$(…)` in here is an injection surface the moment
+   *  anything interpolates rather than compares — and per §6.1 a host that merely never matches
+   *  fails SILENTLY, billing a remote tab to the wrong account. */
+  const HOST_SHAPE = /^[A-Za-z0-9._@-]+$/;
+
   async function addHost(account: ManagedAccount) {
-    const host = (hostDraft[account.id] ?? '').trim();
+    // Hostnames are case-insensitive, so normalize rather than let `nova` and `Nova` sit in the
+    // list as two entries that behave identically and look like a bug.
+    const host = (hostDraft[account.id] ?? '').trim().toLowerCase();
     if (!host) return;
+    if (!HOST_SHAPE.test(host)) {
+      error =
+        `"${host}" does not look like a host. Use a hostname, an ssh alias, or user@host — ` +
+        `letters, digits, dot, dash, underscore and @ only.`;
+      return;
+    }
     const hosts = account.remote_hosts ?? [];
     if (hosts.includes(host)) {
       hostDraft = { ...hostDraft, [account.id]: '' };
@@ -315,6 +361,46 @@
       await patchAccount(account.id, { remote_hosts: [...hosts, host] });
       hostDraft = { ...hostDraft, [account.id]: '' };
       notice = `${host} will use ${account.label} for new SSH tabs.`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** "Use on every SSH host" — the catch-all.
+   *
+   *  §6 originally required each host to be named, on the grounds that a standing one-year
+   *  credential should not land somewhere maiTerm chose. That is still the right warning, but
+   *  it made the common case — one person, one account, boxes they own — a typing exercise. So
+   *  it is a choice made once with the trade stated, rather than a rule the app enforces.
+   *
+   *  **Turning it on turns it off everywhere else, in the same write.** Two accounts each
+   *  claiming every host is not a conflict to resolve at spawn time, it is a question with no
+   *  answer — and per §6.1 the wrong answer is invisible, so there must not be one to get
+   *  wrong. Named hosts still win, which is how one box gets split off from the catch-all. */
+  async function setAllHosts(account: ManagedAccount, value: boolean) {
+    busy = true;
+    error = null;
+    try {
+      await preferencesStore.setAccountsState({
+        accounts: accounts.map(a =>
+          a.id === account.id
+            ? { ...a, remote_all_hosts: value }
+            : value && a.runtime === account.runtime
+              ? { ...a, remote_all_hosts: false }
+              : a,
+        ),
+      });
+      const displaced = value
+        ? accounts.find(
+            a => a.id !== account.id && a.runtime === account.runtime && a.remote_all_hosts,
+          )
+        : null;
+      notice = value
+        ? `New SSH tabs will use ${account.label} unless the host is named on another account.` +
+          (displaced ? ` ${displaced.label} no longer covers every host.` : '')
+        : `${account.label} now covers only the hosts named below.`;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -352,8 +438,22 @@
     error = null;
     notice = null;
     try {
-      await patchAccount(account.id, { token_minted_at: undefined, remote_hosts: [] });
+      // **Keychain FIRST, state second — the opposite of `removeAccount` below, and for a
+      // reason specific to this pair rather than a contradiction of it.**
+      //
+      // `vault::delete` can genuinely be refused: Deny on a keychain prompt, a locked login
+      // keychain, no UI session — and a dev build provokes that prompt on every rebuild because
+      // ad-hoc signing changes the binary hash. With state written first, a refusal left a live
+      // one-year token in the keychain while the strip had already re-rendered to "Not set up",
+      // hiding the control that would retry. Silent and unreachable.
+      //
+      // This order fails loudly and recoverably instead: the delete throws, state still says
+      // there is a token, the button is still there, and `vault::delete` is idempotent so the
+      // retry works. (`removeAccount` persists first for the opposite reason — there a rolled
+      // back save would restore a row whose config root is already gone.)
       await commands.forgetAccountToken(account.id);
+      await patchAccount(account.id, { token_minted_at: undefined, remote_hosts: [] });
+      hasToken = { ...hasToken, [account.id]: false };
       notice =
         `Removed the remote token for ${account.label}. Hosts that already have it keep ` +
         `working until it expires — revoke it in your Anthropic account settings to cut it off.`;
@@ -511,6 +611,10 @@
         {#each group.rows as account (account.id)}
           {@const identity = identities[account.id]}
           {@const isActive = activeIdFor(group.slug) === account.id}
+          <!-- Keyed on what the VAULT holds, not on `token_minted_at`. A token can exist with no
+               metadata — a refused save, a window closed mid-mint — and keying on metadata hid
+               the only control that removes it. -->
+          {@const tokenPresent = hasToken[account.id] ?? !!account.token_minted_at}
           <div class="row" class:active={isActive}>
             <div class="row-main">
               <div class="row-title">
@@ -563,7 +667,7 @@
                part of the feature where maiTerm holds a real credential, and it should not read
                as another action alongside Use and Verify. -->
           <div class="remote">
-            {#if !account.token_minted_at}
+            {#if !tokenPresent}
               <div class="remote-head">
                 <span class="remote-label">Remote hosts</span>
                 <Button variant="ghost" disabled={busy} onclick={() => (minting = account)}>
@@ -574,14 +678,45 @@
                 Not set up. SSH tabs use whatever login each host already has.
               </p>
             {:else}
-              {@const exp = tokenExpiry(account.token_minted_at)}
               <div class="remote-head">
                 <span class="remote-label">Remote hosts</span>
-                <span class="meta" class:warn={exp.warn}>{exp.label}</span>
+                {#if account.token_minted_at}
+                  {@const exp = tokenExpiry(account.token_minted_at)}
+                  <span class="meta" class:warn={exp.warn}>{exp.label}</span>
+                {:else}
+                  <!-- A token in the keychain that state never recorded. Say so plainly rather
+                       than show a blank: this is the leftover of an interrupted mint, and the
+                       useful action is to remove it and start again. -->
+                  <span class="meta warn">Token present, but this mint was never recorded</span>
+                {/if}
                 <Button variant="ghost" disabled={busy} onclick={() => forgetToken(account)}>
                   Remove token
                 </Button>
               </div>
+
+              <!-- The catch-all. A switch rather than a checkbox, per app standard. -->
+              <div class="all-hosts">
+                <span class="setting-label" id={`all-hosts-${account.id}`}>
+                  Use on every SSH host
+                </span>
+                <button
+                  class="toggle small"
+                  class:active={account.remote_all_hosts}
+                  disabled={busy}
+                  aria-pressed={!!account.remote_all_hosts}
+                  aria-labelledby={`all-hosts-${account.id}`}
+                  onclick={() => setAllHosts(account, !account.remote_all_hosts)}
+                >
+                  <span class="toggle-knob"></span>
+                </button>
+              </div>
+              {#if account.remote_all_hosts}
+                <p class="remote-hint">
+                  Every SSH tab uses this account unless the host is named on another one. Hosts
+                  you add below are unaffected — naming a host is how you override this for that
+                  box.
+                </p>
+              {/if}
 
               {#if (account.remote_hosts ?? []).length}
                 <div class="hosts">
@@ -598,9 +733,11 @@
                     </span>
                   {/each}
                 </div>
-              {:else}
+              {:else if !account.remote_all_hosts}
+                <!-- Only when the catch-all is off, or this contradicts the line above it. -->
                 <p class="remote-hint">
-                  Token ready. Add a host below — nothing is sent anywhere until you do.
+                  Token ready. Turn on “Use on every SSH host”, or add hosts one at a time —
+                  nothing is sent anywhere until you do.
                 </p>
               {/if}
 
@@ -707,11 +844,15 @@
 {#if minting}
   <AccountRemoteModal
     account={minting}
-    oncomplete={async mint => {
-      // Record the mint BEFORE closing, same reason as the setup modal: closing first destroys
-      // the component that owns the in-flight promise, so a failed save would have nowhere to
-      // report — and the token would be in the keychain with nothing in state pointing at it.
-      const acct = minting!;
+    oncomplete={async (acct, mint) => {
+      // **`acct` comes from the dialog, not from `minting`.** The pane's rows stay in the tab
+      // order behind the modal, so a second row's "Set up…" could swap `minting` mid-flight and
+      // this would record the token against the wrong account — giving that row an expiry and a
+      // host form for a token it does not own, while the real one is left with a live credential
+      // and no metadata. Both halves of that are silent (§6.1).
+      //
+      // Record BEFORE closing, same reason as the setup modal: closing destroys the component
+      // that owns the promise, so a failure would have nowhere to report.
       try {
         await patchAccount(acct.id, { token_minted_at: mint.minted_at });
         notice =
@@ -719,10 +860,16 @@
           (mint.identity.email && mint.identity.email !== acct.email
             ? ` — note it resolved as ${mint.identity.email}`
             : '') +
-          `. Add a host to start using it.`;
+          `. Turn on “Use on every SSH host”, or add hosts one at a time.`;
       } catch (e) {
-        error = e instanceof Error ? e.message : String(e);
+        // The token IS in the keychain — Rust stores before it returns — so this failure means
+        // a live credential with no metadata. Say that, and rely on the strip keying off the
+        // vault rather than off state so "Remove token" is still there to clean it up.
+        error =
+          `${e instanceof Error ? e.message : String(e)} — the token was minted and is in your ` +
+          `keychain, but could not be recorded. Use “Remove token” and try again.`;
       }
+      await refreshTokenPresence();
       minting = null;
     }}
     oncancel={() => (minting = null)}
@@ -970,6 +1117,32 @@
     font-size: 0.75rem;
     line-height: 1.4;
     margin: 0;
+  }
+
+  .all-hosts {
+    align-items: center;
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+  }
+
+  .all-hosts .setting-label {
+    font-size: 0.8rem;
+  }
+
+  /* Same switch as the pane's main toggle, scaled for a nested row. */
+  .toggle.small {
+    height: 18px;
+    width: 32px;
+  }
+
+  .toggle.small .toggle-knob {
+    height: 14px;
+    width: 14px;
+  }
+
+  .toggle.small.active .toggle-knob {
+    transform: translateX(14px);
   }
 
   .hosts {

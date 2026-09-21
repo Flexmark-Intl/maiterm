@@ -1293,10 +1293,25 @@ pub struct ManagedAccount {
     /// identity is verified positively and `loggedIn` is never treated as confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_verified_at: Option<u64>,
-    /// Hosts this account's remote token is enabled for (§6). Explicit, never inferred — a
-    /// token is a standing one-year credential.
+    /// Hosts this account's remote token is enabled for (§6). Explicit, and they WIN over
+    /// `remote_all_hosts` — naming a host is how you override the catch-all for that one box.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_hosts: Vec<String>,
+    /// Use this account on every SSH host that no other account has claimed by name.
+    ///
+    /// §6 originally said enablement is "per host, explicit, and never inferred", on the
+    /// grounds that a standing one-year credential should not land somewhere maiTerm chose.
+    /// That is still the right default and the right warning, but it made the common case —
+    /// one person, one account, boxes they own — a typing exercise, so it is now a choice the
+    /// user makes once with the trade stated rather than a rule the app enforces.
+    ///
+    /// **At most one account may hold this.** Two accounts each claiming every host is not a
+    /// conflict to resolve at spawn time, it is a question with no answer, so the pane turns it
+    /// off elsewhere when it is turned on here. Resolution is: a name in some account's
+    /// `remote_hosts` wins; otherwise the account with this flag; otherwise no token at all and
+    /// the host uses whatever login it already has.
+    #[serde(default)]
+    pub remote_all_hosts: bool,
     /// When the remote token was minted, unix seconds. Expiry is DERIVED from this
     /// (`minted_at` + 1 year), never parsed out of a credential blob (§7).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -618,8 +618,30 @@ is exactly the property §3.2 lacks.
 > being a JSON file on Linux (and on macOS over SSH, where the Keychain is locked) does not
 > make it a thing we can write.
 
-Host enablement is **per host, explicit, and never inferred**. A token is a standing
-one-year credential; `nova` is fine, a shared build box is not our call to make.
+Host enablement was originally **per host, explicit, and never inferred** — a token is a
+standing one-year credential, and `nova` is fine where a shared build box is not our call to
+make.
+
+> **Revised 2026-09-21: a catch-all is allowed, because the rule taxed the common case.**
+> One person, one account, boxes they own is the normal shape of this, and making them retype
+> every host bought nothing — they would have listed all of them anyway, just slower and with
+> one forgotten. So `remote_all_hosts` exists, the warning it replaces is stated at the moment
+> it is switched on, and the judgement moves from the app to the user.
+>
+> **Resolution order, and it is load-bearing:**
+> 1. an account naming the host in `remote_hosts` — naming a box is the override, so it must
+>    beat the catch-all or it would be a control with no effect;
+> 2. otherwise the account holding `remote_all_hosts`;
+> 3. otherwise **no token at all**, and the host keeps the login it already has.
+>
+> **At most one account may hold the catch-all.** Two accounts each claiming every host is not
+> a conflict to resolve at spawn time, it is a question with no answer — and §6.1 means the
+> wrong answer is invisible, so the pane turns it off elsewhere when it is turned on.
+>
+> A bare `nova` matches every user on that host; `ews@nova` matches only that pairing, which is
+> what lets one box be split between two identities. `remote_account_for_host` implements this
+> and is tested; a host with no token behind it resolves to nothing rather than to an account,
+> because a list outliving its token is a promise that fails silently.
 
 ### 6.1 A missing token silently becomes the wrong identity
 

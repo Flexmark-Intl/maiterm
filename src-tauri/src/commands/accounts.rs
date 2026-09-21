@@ -1169,6 +1169,28 @@ pub async fn mint_account_token(
     })
 }
 
+/// Does the vault actually hold a token for this account?
+///
+/// **The pane asks this instead of trusting `token_minted_at`**, and that is not belt-and-braces.
+/// The token is stored by Rust before the frontend records the metadata, and every way that
+/// second step can fail — the two-instance save guard refusing, the window being closed
+/// mid-mint, a mint whose reply lands in a destroyed webview — leaves a live one-year credential
+/// with no metadata pointing at it. A UI keyed on the metadata then shows "not set up" and hides
+/// the only control that could remove it. Keyed on this, the token is visible because it exists.
+///
+/// Errors are reported as "no token": a keychain that cannot be read is a reason to show the
+/// recovery affordance, not to hide it.
+#[tauri::command]
+pub async fn has_account_token(account_id: String) -> Result<bool, String> {
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || accounts::vault::read(&account_id))
+            .await
+            .map_err(|e| format!("vault task failed: {e}"))?
+            .map(|t| t.is_some())
+            .unwrap_or(false),
+    )
+}
+
 /// Forget an account's remote token.
 ///
 /// **This does not revoke it** (§9.4 — we build as if `auth logout` does not reach these). It

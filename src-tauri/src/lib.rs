@@ -720,6 +720,7 @@ pub fn run() {
             commands::accounts::cancel_account_login,
             commands::accounts::mint_account_token,
             commands::accounts::forget_account_token,
+            commands::accounts::has_account_token,
             commands::accounts::discard_account_root,
             commands::accounts::list_private_browsers,
             commands::accounts::open_private_window,
