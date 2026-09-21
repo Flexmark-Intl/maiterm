@@ -743,12 +743,35 @@ would be a neat bypass of exactly the protection the runtime is providing.
 > host is authed, when it expires. No tool returns, accepts, or logs token material, and
 > `switchIdentity` (if we ship it at all) names an identity by id, never a credential.
 
-### 9.4 Revocation — open
+### 9.4 Revocation — assumed absent (2026-09-21)
 
 `claude auth logout` with the identity's `CLAUDE_CONFIG_DIR` revokes that `/login`
 credential. Whether it also revokes outstanding `setup-token` tokens minted from it is
-**unverified** (setup-token saves nothing locally, so there may be nothing for logout to
-revoke). See §12 — this gates §6 shipping.
+**still unverified** (setup-token saves nothing locally, so there may be nothing for logout to
+revoke).
+
+> **Decision: build as if it does not revoke.** This no longer gates §6. The CLI offers no
+> revoke of its own — `claude setup-token` has no flags at all and there is no `claude auth
+> revoke` — so if logout does not reach these tokens, nothing local does, and a design that
+> assumes it might is a design that quietly relies on something we never tested.
+
+Assuming the worse answer is what produces the revoke story, rather than what postpones it:
+
+- **The per-host list is the inventory.** It is the only record of where a standing one-year
+  credential has been placed, so it is explicit, per host, and never inferred (§6).
+- **Remove and Clear setup must say what they do not do.** They delete the root and the vault
+  entry, which stops *maiTerm* handing the token out; they do not promise the token is dead on
+  a host that already has it. Saying otherwise would be the `absence-read-as-a-claim` mistake
+  again, in the one place where the claim is about security.
+- **Expiry carries real weight** (§7). If nothing revokes, `minted_at + 1 year` is the main way
+  a token stops working, which makes the T-30d warning part of the security posture and not a
+  convenience.
+- **Out-of-band revocation is the user's, and we should point at it** rather than pretend it is
+  ours.
+
+If Q1 later resolves to "yes, logout revokes", nothing here breaks — maiTerm simply carries
+disclosure more conservative than it needed. That asymmetry is the whole reason to assume the
+worse answer instead of waiting on the experiment.
 
 ## 10. Lifecycle: setup / enable / disable / clear
 
@@ -901,7 +924,7 @@ included.
 
 | # | Question | Gates |
 |---|---|---|
-| 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | §6 — do not ship remote propagation without a revoke story |
+| 1 | Does `claude auth logout` revoke outstanding `setup-token` tokens? If not, what does? | **No longer gates §6** (2026-09-21). Building as if it does not — see §9.4. Verify opportunistically the first time a token is minted for real. |
 | 2 | Does `apiKeyHelper` really foreclose subscription auth, empirically? | §3.3 — a 10-minute test; if wrong, the pull model is strictly better |
 | 3 | Does `claude setup-token` respect `CLAUDE_CONFIG_DIR` for *which* account it mints against, or does it always re-prompt? | §6 step 1 |
 | 6 | Does federated sign-in (Google SSO, passkeys) work inside the incognito webview, and do two sequential incognito windows get separate cookie stores? | §5.2 — decides how often the system-browser fallback runs, and §5.2 is not built yet. §5.2.1 lowers the stakes: an external private window is a real browser, so SSO and passkeys work there today. |
