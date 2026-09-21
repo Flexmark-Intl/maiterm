@@ -35,8 +35,19 @@ use crate::state::persistence::app_data_slug;
 pub struct Secret(String);
 
 impl Secret {
+    /// **Normalizes at construction, and that is load-bearing.** The token arrives off
+    /// `claude setup-token`'s stdout with a trailing newline, and the first version of this
+    /// validated `self.0.trim()` while `store` persisted `self.0` — so the vault checked one
+    /// string and saved a different one. The Keychain preserves whitespace byte-for-byte
+    /// (verified), so `CLAUDE_CODE_OAUTH_TOKEN` would have gone out to a remote host with a
+    /// newline glued on, and §6.1 means that does not fail: it falls through to whatever login
+    /// the host already had, `loggedIn: true`, work billed to the wrong account.
+    ///
+    /// Trimming here rather than in `store` makes the validator and the stored value agree by
+    /// construction, so no future caller can reintroduce the gap.
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        let v: String = value.into();
+        Self(v.trim().to_string())
     }
 
     /// Hand over the raw token. Every call site is a place the secret can escape — the only
@@ -49,8 +60,11 @@ impl Secret {
     /// message or a truncated line fails at the vault rather than six weeks later on a remote
     /// host, as a fall-through to the wrong identity (§6.1).
     pub fn looks_like_setup_token(&self) -> bool {
-        let t = self.0.trim();
-        t.starts_with("sk-ant-oat01-") && t.len() > 30 && !t.contains(char::is_whitespace)
+        // Already trimmed by `new`, so any whitespace left is INTERIOR — a wrapped line, or
+        // stdout that caught a second line of output after the token.
+        self.0.starts_with("sk-ant-oat01-")
+            && self.0.len() > 30
+            && !self.0.contains(char::is_whitespace)
     }
 }
 
@@ -111,13 +125,31 @@ fn entry(account_id: &str) -> Result<keyring::Entry, VaultError> {
 ///
 /// `keyring::Error` carries only operation context, but this is the one funnel every error goes
 /// through, so it is the right place to be explicit about that rather than trusting it.
+/// The split that matters: `Unavailable` tells the caller to **hide** remote logins entirely,
+/// so only "this machine has no usable store" belongs there. Everything else is a failure of one
+/// operation, which the user can retry.
+///
+/// Getting this backwards is not cosmetic. The first version mapped `PlatformFailure` to
+/// `Unavailable`, and on macOS `PlatformFailure` is the store's **catch-all** arm — the
+/// `decode_error` table routes only six specific OSStatus values to `NoStorageAccess` and sends
+/// everything else, including `errSecAuthFailed` (the user pressed **Deny** on the keychain
+/// prompt), `errSecUserCanceled` (Cancel) and `errSecInteractionNotAllowed` (login keychain
+/// locked, or no UI session), into it. So one Deny on a prompt — which a dev build provokes
+/// routinely, since ad-hoc signing changes the binary hash on every rebuild and invalidates the
+/// item's ACL — would have told the user their machine has no keychain and switched the feature
+/// off, where a retry with Allow would have worked.
 fn map_err(op: &'static str) -> impl Fn(keyring::Error) -> VaultError {
     move |e| match e {
         keyring::Error::NoEntry => VaultError::NotFound,
-        // These mean "there is no working store here", which is a different answer for the
-        // caller than "the store said no" — one degrades the feature, the other is a bug.
+        // The store itself never initialized: no Secret Service on a headless Linux box, or no
+        // backend for this platform at all. `Entry::new` reports this for every call once the
+        // one-time init has failed, and it discards the underlying cause, so this IS the
+        // "no keychain here" signal rather than a detail of one operation.
+        keyring::Error::NoDefaultStore => VaultError::Unavailable(
+            "the platform credential store could not be initialized".into(),
+        ),
+        // The narrow, genuinely-unusable set: not available, read only, no such keychain.
         keyring::Error::NoStorageAccess(ref inner) => VaultError::Unavailable(inner.to_string()),
-        keyring::Error::PlatformFailure(ref inner) => VaultError::Unavailable(inner.to_string()),
         other => VaultError::Failed {
             op,
             detail: other.to_string(),
@@ -170,21 +202,17 @@ pub fn delete(account_id: &str) -> Result<(), VaultError> {
 
 /// Is a usable keychain present at all?
 ///
-/// Probes with a real round-trip on a reserved account id rather than trusting that
-/// constructing an `Entry` means anything — on most backends it does not touch the store. Used
-/// to decide whether to OFFER remote logins, so a wrong answer here is a control that appears
-/// and then fails, which §10 calls out as the thing not to ship.
+/// Asks the store whether it initialized, which is exactly the question — and asks it **without
+/// touching the store**. The first version wrote a probe entry and deleted it, which was worse
+/// in three ways: on macOS it can raise an access prompt at whatever moment the pane happens to
+/// render; a crash between the write and the delete strands a bogus item; and it answered
+/// `false` for a user who merely pressed Deny, hiding the feature over something retryable.
+///
+/// This gates whether remote logins are OFFERED, so it must mean "there is no store here" and
+/// nothing else. A store that exists and refuses one operation is a `Failed` at the call site,
+/// where the user can see it and retry — not a missing control with no explanation.
 pub fn available() -> bool {
-    // Not a real account id (those are uuids), so it can never collide with a stored token.
-    const PROBE: &str = "__maiterm_probe__";
-    let probe = Secret::new("sk-ant-oat01-probe-not-a-real-token-0000000000");
-    match store(PROBE, &probe) {
-        Ok(()) => {
-            let _ = delete(PROBE);
-            true
-        }
-        Err(_) => false,
-    }
+    keyring::Entry::store_status().is_ok()
 }
 
 #[cfg(test)]
@@ -230,6 +258,22 @@ mod tests {
             Secret::new("  sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789\n")
                 .looks_like_setup_token()
         );
+    }
+
+    #[test]
+    fn what_is_validated_is_what_gets_stored() {
+        // The original defect: `looks_like_setup_token` trimmed, `store` wrote `self.0` raw,
+        // and the Keychain preserves whitespace byte-for-byte — so a token captured off stdout
+        // went to the remote host with a newline on it. Per §6.1 that does not error; it falls
+        // through to the host's own login and bills the work to the wrong account.
+        //
+        // Asserting on `expose()` is the point: it is the exact value `store` persists and the
+        // exact value that becomes CLAUDE_CODE_OAUTH_TOKEN.
+        let raw = "  sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789\n";
+        let s = Secret::new(raw);
+        assert_eq!(s.expose(), "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(!s.expose().contains(char::is_whitespace), "would be injected verbatim");
+        assert!(s.looks_like_setup_token());
     }
 
     #[test]

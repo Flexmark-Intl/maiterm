@@ -61,38 +61,20 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 ignore = "0.4"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-
-# The credential vault for managed-account tokens (docs/login.md §9.1 — "tokens go in the OS
-# keychain under maiTerm's OWN service name"). One native store per platform, named explicitly
-# rather than taking the crate's defaults, which enable the Linux Secret Service backend on
-# every target and drag zbus into the macOS build for nothing. `v1` is the API surface; without
-# it keyring refuses to compile at all.
-[target.'cfg(target_os = "macos")'.dependencies]
-# `keychain`, not `protected`: the Data Protection Keychain needs a keychain-access-group
-# entitlement, which a `cargo run` dev build does not carry — so `protected` would work in the
-# signed bundle and fail on every developer machine, which is the worst of both.
-#
-# keyring does not re-export its stores' own features, so the store is ALSO named directly below
-# purely so `keychain` gets switched on; cargo's feature unification applies it to keyring's
-# copy. Nothing in this crate imports it — remove that line and the build fails inside keyring.
-keyring = { version = "4", default-features = false, features = ["v1", "apple-native-keyring-store"] }
-apple-native-keyring-store = { version = "1", default-features = false, features = ["keychain"] }
+# The credential vault for managed-account setup-tokens (docs/login.md §9.1 — "tokens go in the
+# OS keychain under maiTerm's OWN service name"). The default `v1` feature already selects one
+# native store per platform — Apple keychain, Secret Service via zbus (pure Rust, no libdbus at
+# build time), Windows credential manager — so there is nothing to configure per target. An
+# earlier version of this spelled all three out by hand and added a direct dependency on the
+# Apple store "so the keychain feature gets enabled"; `v1` was already doing that, and the
+# whole block was removed after a review checked keyring's manifest rather than believing it.
+keyring = "4"
 
 # Window/webview base colour (commands::window::set_window_background). Same versions
 # wry already pulls in; default features off so only the two bindings we call land.
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSColor"] }
 objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "WKWebView", "objc2-app-kit"] }
-
-# Secret Service rather than linux-keyutils: keyutils is a kernel keyring that does not survive
-# a reboot, and a one-year token that silently vanishes on restart is the exact failure this
-# feature exists to remove. The zbus backend is pure Rust, so it needs no libdbus at build time.
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "4", default-features = false, features = ["v1", "zbus-secret-service-keyring-store"] }
-
-# Windows is gated off for accounts (`RuntimeProfile::supported` is `cfg!(unix)`), but the vault
-# still has to COMPILE there — the Windows CI job builds the whole crate.
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "4", default-features = false, features = ["v1", "windows-native-keyring-store"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` — drives the maiLink router in-process (no TLS, no listener).

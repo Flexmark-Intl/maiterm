@@ -56,7 +56,6 @@ name = "aiterm"
 version = "2.5.0"
 dependencies = [
  "alacritty_terminal",
- "apple-native-keyring-store",
  "axum",
  "axum-server",
  "base64 0.22.1",
