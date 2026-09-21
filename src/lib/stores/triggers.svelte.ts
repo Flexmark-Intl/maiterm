@@ -3,6 +3,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, getRemoteBridgeEnv, shellEscapePath, countSessionIdClaimants } from '$lib/tauri/commands';
+import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
 import { stripAnsi } from '$lib/utils/ansi';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
@@ -474,7 +475,16 @@ export async function replayAutoResume(tabId: string) {
       // Baked without asking for a correction later, and that is deliberate: the ssh command
       // and the agent's resume command go out as ONE payload below, so the remote end is a
       // running agent within seconds and there is no shell left to correct. See enableBridge.
-      const ssh = buildSshCommand(sshCmd, remoteCwd, tabId, await getRemoteBridgeEnv(sshCmd));
+      // The account fragment matters most on this path: ssh and the agent's resume command go
+      // out together, so the agent starts seconds later and reads its identity out of the
+      // environment this one line sets. There is no later injection that could correct it.
+      const ssh = buildSshCommand(
+        sshCmd,
+        remoteCwd,
+        tabId,
+        await getRemoteBridgeEnv(sshCmd),
+        await remoteAccountExport(tabId, sshCmd),
+      );
       let payload = ssh + '\n';
       if (cmd) {
         payload += interpolateVariables(tabId, cmd, true) + '\n';

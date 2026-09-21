@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { buildSshCommand, cleanSshCommand } from './commands';
 
 const TAB = 'a1b2c3d4-5e6f-7788-99aa-bbccddeeff00';
+/** Verbatim what `accounts::remote::export_fragment` produces — keep the two in step. */
+const ACCT =
+  `__mt_oat=$(cat ~/.maiterm/tokens/tok-${TAB} 2>/dev/null); rm -f ~/.maiterm/tokens/tok-${TAB} 2>/dev/null; ` +
+  `[ -n "$__mt_oat" ] && export CLAUDE_CODE_OAUTH_TOKEN="$__mt_oat"; unset __mt_oat`;
 
 describe('buildSshCommand', () => {
   it('bakes the tab id into the remote command so shared hosts get a per-tab identity', () => {
@@ -40,6 +44,25 @@ describe('buildSshCommand', () => {
     expect(cmd).not.toContain('rm -rf');
     expect(cmd).not.toContain('MAITERM_PORT');
     expect(cmd).toContain(`export MAITERM_TAB_ID=${TAB};`);
+  });
+
+  // §6. The fragment names a file Rust already pushed over its own connection; the token itself
+  // must never be here, because this whole string is typed into the user's local shell.
+  it('carries the account fragment as its own statement, ahead of the cd', () => {
+    const cmd = buildSshCommand('ews@nova', '/srv/app', TAB, null, ACCT);
+    expect(cmd).toContain(`export MAITERM_TAB_ID=${TAB}; ${ACCT}; cd '/srv/app'`);
+    expect(cmd).not.toContain('sk-ant');
+  });
+
+  it('carries the account fragment with no bridge and no cwd', () => {
+    expect(buildSshCommand('ews@nova', null, TAB, null, ACCT))
+      .toBe(`ssh -t -o ControlMaster=no ews@nova 'export MAITERM_TAB_ID=${TAB}; ${ACCT}; exec $SHELL -l'`);
+  });
+
+  it('refuses an account fragment that would break out of the quoting', () => {
+    const cmd = buildSshCommand('ews@nova', null, TAB, null, "x'; rm -rf /; echo '");
+    expect(cmd).not.toContain('rm -rf');
+    expect(cmd).toBe(`ssh -t -o ControlMaster=no ews@nova 'export MAITERM_TAB_ID=${TAB}; exec $SHELL -l'`);
   });
 });
 
@@ -85,5 +108,27 @@ describe('cleanSshCommand round-trip', () => {
     expect(cleanSshCommand(
       `ssh -t ews@nova export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123; cd /srv/app && exec $SHELL -l`,
     )).toBe('ews@nova');
+  });
+
+  // §6 added a second statement between the export and the `cd`. A pattern that enumerates what
+  // may appear there stops recognising the command, and the dangling remainder — which now names
+  // a credential handoff path — accumulates into the stored host string on every round trip.
+  it('strips the account fragment too, quoted and unquoted', () => {
+    const bridge = { port: 28123, auth: 'tok-123' };
+    for (const cwd of ['/srv/app', null]) {
+      expect(cleanSshCommand(buildSshCommand('-x -C ews@nova', cwd, TAB, bridge, ACCT)))
+        .toBe('-x -C ews@nova');
+    }
+    expect(cleanSshCommand(
+      `ssh -t ews@nova export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123; ${ACCT}; cd /srv/app && exec $SHELL -l`,
+    )).toBe('ews@nova');
+  });
+
+  it('stays idempotent with the account fragment in play', () => {
+    let stored = '-x -C ews@nova';
+    for (let i = 0; i < 3; i++) {
+      stored = cleanSshCommand(buildSshCommand(stored, '/srv/app', TAB, { port: 1, auth: 'a' }, ACCT));
+    }
+    expect(stored).toBe('-x -C ews@nova');
   });
 });

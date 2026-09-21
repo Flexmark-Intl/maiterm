@@ -15,6 +15,7 @@ import { dispatch } from '$lib/stores/notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { setVariable } from '$lib/stores/triggers.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
+import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
 import { countedListen as listen } from '$lib/utils/listenCounter';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
@@ -664,6 +665,17 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
   // decremented), and that resurrected state then blocks the next bridge attempt.
   const epoch = bridgeEpoch.get(tabId) ?? 0;
 
+  // §6: place the active account's remote token, if this host is one it covers. Started HERE,
+  // before the tunnel, and awaited far below — it needs an ssh round trip of its own, and the
+  // injection it feeds is on a keystroke race the comments below take some trouble to win.
+  // Run in parallel it costs that race nothing; run inline it would cost it everything.
+  //
+  // Only for a session we watched start. A maiTerm-initiated one already carries the fragment in
+  // its own ssh command (buildSshCommand) and has consumed the file, so asking again would push a
+  // second copy for nothing — and the env of a shell that is already running cannot be changed
+  // from out here anyway. A host this account does not cover resolves without connecting at all.
+  const accountExport = ptyId && freshSsh ? remoteAccountExport(tabId, sshArgs) : null;
+
   try {
     // Inside the try: these can REJECT, not just return null, and a throw before the
     // catch would strand the 'pending' status above forever — permanently blocking
@@ -762,8 +774,16 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           logInfo("SSH MCP bridge: skipping env-var injection — an agent session owns tab " + tabId
             + (bakedIsStale ? " (its MAITERM_PORT is stale; the agent must be restarted to pick up " + tunnelInfo.remote_port + ")" : ""));
         } else {
-          const envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
-            + " MAITERM_AUTH=" + authToken + "\n";
+          // Awaited only now, at the point of writing. Every guard above is a reason not to
+          // type anything at all, and the token must not be placed on a host whose shell we
+          // then decide not to speak to.
+          const acct = accountExport ? await accountExport : null;
+          let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
+            + " MAITERM_AUTH=" + authToken;
+          // Refused rather than escaped if it could break out — see buildSshCommand. Here it
+          // would be worse: this string is typed straight at a live remote shell.
+          if (acct && !acct.includes("'")) envCmd += "; " + acct;
+          envCmd += "\n";
           const bytes = Array.from(new TextEncoder().encode(envCmd));
           await commands.writeTerminal(ptyId, bytes);
           injectedEnvPort.set(tabId, tunnelInfo.remote_port);

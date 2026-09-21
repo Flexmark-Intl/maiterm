@@ -1204,6 +1204,225 @@ pub async fn forget_account_token(account_id: String) -> Result<(), String> {
         .map_err(|e| format!("could not remove the token: {e}"))
 }
 
+/// What a caller should do about this tab's remote identity. **No field ever carries the
+/// token** — `export` names a file, and Rust is the only thing that ever holds the bytes.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteTokenPrep {
+    /// `not_applicable` | `ready` | `missing_credential` | `failed`
+    pub status: &'static str,
+    /// The shell fragment to splice into the remote command, when `status == "ready"`.
+    pub export: Option<String>,
+    /// Who this is about, for a message the user can act on.
+    pub account_label: Option<String>,
+    pub host: Option<String>,
+    /// Why nothing is being injected, for the states that need saying out loud.
+    pub detail: Option<String>,
+}
+
+impl RemoteTokenPrep {
+    /// This host is not covered, the feature is off, or there is no active account with a
+    /// token. The overwhelmingly common answer, and a silent one: a host that was never opted
+    /// in is not a problem to report.
+    fn not_applicable() -> Self {
+        Self {
+            status: "not_applicable",
+            export: None,
+            account_label: None,
+            host: None,
+            detail: None,
+        }
+    }
+}
+
+/// Place the active account's remote token on an ssh host, for one tab.
+///
+/// Answers the question a tab asks as it opens an ssh session: *should this session run as one
+/// of my managed accounts, and if so, how does it pick the credential up?* The two halves are
+/// deliberately separate — `accounts::remote_account_for_host` is policy, `accounts::remote` is
+/// mechanism — and both are in Rust because the answer to the second is a credential.
+///
+/// **The token never crosses this boundary.** It is read from the vault here, written to the
+/// push connection's stdin here, and what the caller gets back is a shell fragment naming a
+/// path. §9.3 exists because agents can reach the frontend; this keeps there being nothing
+/// there to reach.
+///
+/// A host that is not covered gets `not_applicable` **without opening any connection** — this
+/// runs on the tab-spawn path, so the cost of the feature being off, or of this host not being
+/// one of the enabled ones, has to be zero.
+///
+/// Every other non-ready answer is reported rather than swallowed, and that is §6.1: injecting
+/// nothing is not an error condition on the remote, it is the host's own login answering
+/// instead, with `loggedIn: true` and the work billed to whoever last signed in there. Silence
+/// would be indistinguishable from success.
+#[tauri::command]
+pub async fn prepare_remote_account_token(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    tab_id: String,
+    ssh_args: String,
+) -> Result<RemoteTokenPrep, String> {
+    // A tab id is a UUID everywhere it is minted. Anything else is not ours to name a file
+    // after, let alone interpolate into a remote shell command.
+    if !accounts::remote::is_safe_handle(&tab_id) {
+        return Ok(RemoteTokenPrep::not_applicable());
+    }
+
+    // The stored ssh value is free-form and routinely carries flags (`-x -C ews@nova`,
+    // `ews@nova -p 2222`). Matching the raw string against the user's host list would fail on
+    // every one of those, and per §6.1 the failure is invisible — the tab simply comes up as
+    // the host's own login. `port_book_key` is the codebase's most careful ssh-target
+    // extractor (it understands `-p2222` and `-oKey=Val` inline), and it is already the thing
+    // that makes the bridge and a tab's replay agree on what host they are talking about.
+    let target = crate::commands::ssh_tunnel::port_book_key(ssh_args.trim_start_matches("ssh "));
+
+    let (account_id, label) = {
+        let prefs = &state.app_data.read().preferences;
+        match accounts::remote_account_for_host(prefs, &target) {
+            Some(a) => (a.id.clone(), a.label.clone()),
+            None => return Ok(RemoteTokenPrep::not_applicable()),
+        }
+    };
+
+    // Metadata said yes; the vault is the one that actually has to. The two diverge in states
+    // the UI renders — a `forgetToken` interrupted between its two awaits, an item removed in
+    // Keychain Access — and `remote_account_for_host` keys on metadata, so it can answer
+    // "propagate" for an account whose credential is gone.
+    let vault_id = account_id.clone();
+    let token = match tauri::async_runtime::spawn_blocking(move || accounts::vault::read(&vault_id))
+        .await
+        .map_err(|e| format!("vault task failed: {e}"))?
+    {
+        Ok(Some(secret)) => secret,
+        Ok(None) => {
+            log::warn!(
+                "accounts: {target} is enabled for account {account_id} but its token is not in \
+                 the vault — injecting nothing, so the host keeps its own login"
+            );
+            return Ok(RemoteTokenPrep {
+                status: "missing_credential",
+                export: None,
+                account_label: Some(label),
+                host: Some(target),
+                detail: Some(
+                    "its remote token is no longer in the keychain — mint it again in \
+                     Preferences → Accounts"
+                        .into(),
+                ),
+            });
+        }
+        Err(e) => {
+            log::warn!("accounts: could not read the token for {account_id}: {e}");
+            return Ok(RemoteTokenPrep {
+                status: "failed",
+                export: None,
+                account_label: Some(label),
+                host: Some(target),
+                detail: Some(format!("the keychain could not be read ({e})")),
+            });
+        }
+    };
+
+    let script = accounts::remote::stage_script(&tab_id)
+        .ok_or_else(|| "unusable tab id".to_string())?;
+    if let Err(e) = push_token(&ssh_args, &script, token.expose()).await {
+        log::warn!("accounts: could not place the token on {target}: {e}");
+        return Ok(RemoteTokenPrep {
+            status: "failed",
+            export: None,
+            account_label: Some(label),
+            host: Some(target),
+            detail: Some(e),
+        });
+    }
+
+    Ok(RemoteTokenPrep {
+        status: "ready",
+        export: accounts::remote::export_fragment(&tab_id),
+        account_label: Some(label),
+        host: Some(target),
+        detail: None,
+    })
+}
+
+/// Write the token to the remote over a connection of its own, on **stdin**.
+///
+/// Not `ssh_run_setup`, which passes its script as an argv entry: that is fine for the config
+/// it writes and fatal for a credential, which would then be visible in `ps` on this machine
+/// and in the remote's process list. Here argv carries only the staging script — `mkdir`,
+/// `chmod`, a sweep and `cat >` — and the bytes arrive out of band.
+///
+/// Fully independent of the user's ControlMaster socket, for the reason `start_ssh_tunnel`
+/// documents: a maiTerm connection owning that socket once broke the user's own `ssh <host>`.
+async fn push_token(ssh_args: &str, script: &str, token: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut args: Vec<String> = vec![
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
+        // No interactive prompt is possible here, and hanging on one would stall a tab opening.
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        // No tty: nothing about this is interactive, and a tty would echo stdin back at us.
+        "-T".into(),
+    ];
+    args.extend(
+        ssh_args
+            .trim_start_matches("ssh ")
+            .split_whitespace()
+            .map(str::to_string),
+    );
+    args.push(script.to_string());
+
+    let mut child = tokio::process::Command::new("ssh")
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run ssh: {e}"))?;
+
+    // Written without a trailing newline: `$(cat …)` strips those anyway, but `Secret` is
+    // normalized at construction precisely so that what is stored is what is meant, and a
+    // `CLAUDE_CODE_OAUTH_TOKEN` with a stray newline in it is a §6.1 fall-through.
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "ssh gave us no stdin".to_string())?;
+        stdin
+            .write_all(token.as_bytes())
+            .await
+            .map_err(|e| format!("could not hand the token to ssh: {e}"))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| format!("could not close the handoff: {e}"))?;
+    }
+
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "the host did not answer within 20s".to_string())?
+    .map_err(|e| format!("ssh failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(if stderr.is_empty() {
+            format!("ssh exited {}", output.status.code().unwrap_or(-1))
+        } else {
+            // Bounded: this reaches a toast, and ssh is capable of paragraphs.
+            stderr.chars().take(200).collect()
+        });
+    }
+    Ok(())
+}
+
 /// Sign an account out and delete its config root. Used for a §5.1 duplicate, a cancelled
 /// sign-in, "Remove" and "Clear setup".
 ///

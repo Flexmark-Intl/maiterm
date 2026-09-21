@@ -12,6 +12,7 @@
   import '@xterm/xterm/css/xterm.css';
   import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText } from '$lib/tauri/commands';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
+  import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
   import { readText as clipboardReadText, writeText as clipboardWriteText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
@@ -893,7 +894,8 @@
           try {
             const bridgeEnv = await getRemoteBridgeEnv(ctx.sshCommand!);
             bakedPort = bridgeEnv?.port;
-            const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd, tabId, bridgeEnv);
+            const accountExport = await remoteAccountExport(tabId, ctx.sshCommand!);
+            const cmd = buildSshCommand(ctx.sshCommand, ctx.remoteCwd, tabId, bridgeEnv, accountExport);
             const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
             await writeTerminal(ptyId, bytes);
           } catch (e) {
@@ -1688,7 +1690,11 @@
     try {
       const bridgeEnv = await getRemoteBridgeEnv(sshCommand);
       bakedPort = bridgeEnv?.port;
-      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, bridgeEnv);
+      // Re-asked on every reconnect rather than remembered from the first connect: the handoff
+      // file is consumed by the shell that read it, and the active account may have changed
+      // while this tab was down.
+      const accountExport = await remoteAccountExport(tabId, sshCommand);
+      const cmd = buildSshCommand(sshCommand, remoteCwd, tabId, bridgeEnv, accountExport);
       await writeTerminal(ptyId, Array.from(new TextEncoder().encode(cmd + '\n')));
     } catch (e) {
       logError(`reconnectSsh: failed to write ssh command: ${e}`);

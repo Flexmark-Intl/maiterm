@@ -29,6 +29,7 @@
 //! verification Claude got (§5.4) has been done for them — see `RuntimeProfile::supported`.
 
 pub mod browser;
+pub mod remote;
 pub mod vault;
 
 use std::fs;

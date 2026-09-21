@@ -292,7 +292,7 @@ const SSH_FLAGS_WITH_ARG: &[&str] = &[
 /// Keyed on the raw string, a host that had to move off the instance port would be looked up
 /// under one spelling and recorded under the other, so the ssh command would predict the
 /// wrong port on that host forever.
-fn port_book_key(host_key: &str) -> String {
+pub(crate) fn port_book_key(host_key: &str) -> String {
     let mut tokens = host_key.split_whitespace().peekable();
     while let Some(token) = tokens.next() {
         if token.starts_with('-') {

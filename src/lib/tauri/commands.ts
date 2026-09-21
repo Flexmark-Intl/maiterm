@@ -27,11 +27,29 @@ export function cleanSshCommand(cmd: string): string {
   // Match to the `;` rather than to the first whitespace: the export carries several
   // variables now (MAITERM_PORT, MAITERM_AUTH), so a `\S+?` stops at the first space and
   // recognises nothing.
-  let cleaned = cmd.replace(/\s+'export\s+MAITERM_TAB_ID=[^';]*;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l'\s*$/, '');
-  cleaned = cleaned.replace(/\s+export\s+MAITERM_TAB_ID=[^';]*;\s+(?:cd\s+.*?&&\s+)?exec\s+\$?SHELL\s+-l\s*$/, '');
-  // Pre-export forms (stored commands from earlier builds, and ps output for them).
+  //
+  // Matched by the SHAPE of the remote command — a trailing `exec $SHELL -l` — rather than by
+  // enumerating what precedes it. The enumerating version broke the moment §6 added a second
+  // statement between the export and the `cd`: each new clause needed its own alternative here,
+  // and forgetting one does not fail loudly, it silently stores the whole remote command as part
+  // of the host string and accumulates it on every round trip.
+  //
+  // Greedy to the LAST `exec $SHELL -l'`, not lazy to the first quote: `shellEscapePath` quotes
+  // the cwd, so the remote command legitimately contains single quotes in the middle
+  // (`'…; cd '/srv/app' && exec $SHELL -l'` relies on adjacent-quote concatenation). Anchored on
+  // one of the three things maiTerm itself starts that command with, so the `.*` cannot run
+  // backwards over a user's own flags.
+  let cleaned = cmd.replace(
+    /\s+'(?:export\s+MAITERM_TAB_ID=|__mt_oat=|cd\s).*exec\s+\$?SHELL\s+-l'\s*$/,
+    '',
+  );
+  // `ps` reports argv joined by spaces, so the same command comes back from the process table
+  // with its quotes gone. Anchored on our own export so a greedy `.*` cannot eat a user's flags.
+  // `__mt_oat=` is the first token of the §6 account fragment (`accounts::remote`), listed here
+  // as well as the export because the two are independently optional.
+  cleaned = cleaned.replace(/\s+(?:export\s+MAITERM_TAB_ID=|__mt_oat=).*exec\s+\$?SHELL\s+-l\s*$/, '');
+  // Pre-export form (stored commands from earlier builds, and ps output for them).
   cleaned = cleaned.replace(/\s+cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l\s*$/, '');
-  cleaned = cleaned.replace(/\s+'cd\s+.*?&&\s+exec\s+\$?SHELL\s+-l'\s*$/, '');
   // Remove only flags that buildSshCommand re-injects
   cleaned = cleaned.replace(/\s+-t(?=\s|$)/g, '');
   cleaned = cleaned.replace(/\s+-o\s+ControlMaster=\S+/g, '');
@@ -89,12 +107,22 @@ export function shellEscapePath(path: string): string {
  * per-tab and nobody can overwrite it. The port is a PREDICTION (see get_remote_bridge_env) —
  * this maiTerm's usual port on that host, which is wrong only if a collision has moved it
  * since, and self-corrects on the bridge's own env injection.
+ *
+ * `accountExport` is the §6 managed-account fragment from `remoteAccountExport` — a statement of
+ * its own rather than another `NAME=value`, because it does not carry a value. **The token is
+ * deliberately not here**: this whole string is typed into the user's local shell, so it lands in
+ * their scrollback (and from there in `aiterm-state.json`), their history and `ps` on both
+ * machines. What rides here is the expression that reads a file Rust already pushed over its own
+ * connection; see `accounts::remote`. Pass it through verbatim — it must not be quoted or
+ * escaped, and it contains no apostrophe so the single quotes below still close where they look
+ * like they do.
  */
 export function buildSshCommand(
   sshCmd: string | null,
   remoteCwd: string | null,
   tabId?: string | null,
   bridge?: { port: number; auth: string } | null,
+  accountExport?: string | null,
 ): string {
   if (!sshCmd) return '';
   const fullCmd = sshCmd.match(/^ssh\s/) ? sshCmd : `ssh ${sshCmd}`;
@@ -106,16 +134,20 @@ export function buildSshCommand(
   if (bridge && bridge.port > 0 && /^[A-Za-z0-9._-]+$/.test(bridge.auth)) {
     exports.push(`MAITERM_PORT=${bridge.port}`, `MAITERM_AUTH=${bridge.auth}`);
   }
-  const exportPrefix = exports.length ? `export ${exports.join(' ')}; ` : '';
+  let prelude = exports.length ? `export ${exports.join(' ')}; ` : '';
+  // Refused rather than escaped if it could break out of the quoting below. Rust builds this
+  // from a validated tab id and nothing else, so a quote here means something is wrong upstream
+  // and the right answer is to send no token, not to send a repaired one.
+  if (accountExport && !accountExport.includes("'")) prelude += `${accountExport}; `;
   const rest = fullCmd.replace(/^ssh\s+/, '');
   if (!remoteCwd) {
-    if (!exportPrefix) {
+    if (!prelude) {
       return fullCmd.replace(/^ssh\s+/, 'ssh -o ControlMaster=no ');
     }
-    return `ssh -t -o ControlMaster=no ${rest} '${exportPrefix}exec $SHELL -l'`;
+    return `ssh -t -o ControlMaster=no ${rest} '${prelude}exec $SHELL -l'`;
   }
   const cdPath = shellEscapePath(remoteCwd);
-  return `ssh -t -o ControlMaster=no ${rest} '${exportPrefix}cd ${cdPath} && exec $SHELL -l'`;
+  return `ssh -t -o ControlMaster=no ${rest} '${prelude}cd ${cdPath} && exec $SHELL -l'`;
 }
 
 export function normalizeSshInput(input: string): string {
@@ -1588,6 +1620,35 @@ export async function forgetAccountToken(accountId: string): Promise<void> {
  *  metadata then hides the only control that could remove it. */
 export async function hasAccountToken(accountId: string): Promise<boolean> {
   return invoke('has_account_token', { accountId });
+}
+
+/** What `prepareRemoteAccountToken` decided about one tab's ssh session.
+ *
+ *  **`export` is a shell fragment naming a path, never a credential.** Rust reads the vault,
+ *  pushes the token to the host on the stdin of its own ssh connection, and hands back only the
+ *  expression the remote shell runs to pick it up. Nothing here has ever held token bytes, which
+ *  is what keeps §9.3 true — agents can reach the frontend. */
+export interface RemoteTokenPrep {
+  status: 'not_applicable' | 'ready' | 'missing_credential' | 'failed';
+  export: string | null;
+  account_label: string | null;
+  host: string | null;
+  detail: string | null;
+}
+
+/** Put the active account's remote token on this tab's ssh host, if that host is covered.
+ *
+ *  Returns `not_applicable` **without opening a connection** when the feature is off, no account
+ *  is active, it has no token, or this host is not one it may reach — so the cost on the spawn
+ *  path of not using this feature is a state read.
+ *
+ *  Callers should prefer `remoteAccountExport`, which also reports the states that need saying
+ *  out loud. */
+export async function prepareRemoteAccountToken(
+  tabId: string,
+  sshArgs: string,
+): Promise<RemoteTokenPrep> {
+  return invoke('prepare_remote_account_token', { tabId, sshArgs });
 }
 
 /** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or
