@@ -140,6 +140,25 @@ function stableStringify(v: unknown): string {
  * NOTE: assumes ONE rule per default_id (`list.find`) — a workspace-scoped override of
  * a default must be its own rule with default_id null + supersedes (docs/overlord.md §6).
  */
+/**
+ * Hidden-default ids whose template no longer exists, pruned — or null if all still resolve.
+ *
+ * `hidden_default_overlord_rules` records defaults the human deleted, so the seeder stops
+ * putting them back. When a default is retired from the map its id is stranded there, and an
+ * id pointing at nothing makes the Ruleset bar lie: "Restore defaults" renders on
+ * `length > 0`, so it shows forever, and clicking it clears the list, finds every remaining
+ * template already present and identical, and restores nothing. That is the live state for
+ * anyone who had deleted `reinit_unbound_agent` before it was retired.
+ *
+ * Separate from the seeder because they write different preferences — this one has no rules
+ * to return, and folding it in would have `seedDefaultOverlordRules` report "changed" for a
+ * list it does not own.
+ */
+export function pruneHiddenDefaultOverlordRules(hiddenIds: string[]): string[] | null {
+  const kept = hiddenIds.filter((id) => id in DEFAULT_OVERLORD_RULES);
+  return kept.length === hiddenIds.length ? null : kept;
+}
+
 export function seedDefaultOverlordRules(
   existing: OverlordRule[],
   hiddenIds: string[],

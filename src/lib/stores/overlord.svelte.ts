@@ -20,7 +20,7 @@ import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelt
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
-import { seedDefaultOverlordRules } from '$lib/overlord/defaults';
+import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
@@ -311,8 +311,20 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *  whole reason v7 exists — so this is a contract change however much it looks like wording.
  *  v8 adds exemption: an agent on v7 sees `overlordExempt` tabs in listWorkspaces with no
  *  rule about them and will try to drive one — refused, but it will then raise the refusal to
- *  the human, which is the opposite of what exempting the tab asked for. */
-const DOCTRINE_VERSION = '8';
+ *  the human, which is the opposite of what exempting the tab asked for.
+ *
+ *  v9 is the RULESET's contents, and it counts for the same reason v7 does. The doctrine
+ *  renders the enabled rules under "THE ENGINE RUNS THESE RULES ITSELF … Never hand-drive a
+ *  sequence a rule below already owns". Removing `reinit_unbound_agent` (2026-09-21) makes
+ *  that assertion false for an agent still primed on v8: it holds a line saying the engine
+ *  re-binds unbound tabs automatically, and a standing instruction not to do it itself —
+ *  while `recoverTab` is now the only remedy there is. Two lines of its own doctrine then
+ *  disagree, on exactly the tab it is supposed to rescue.
+ *
+ *  So: when maiTerm SHIPS a change to the default ruleset, bump. A user editing their own
+ *  rules leaves primed agents equally stale and nothing re-primes them — a real gap, but a
+ *  pre-existing one, and not one this constant can close. */
+const DOCTRINE_VERSION = '9';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -2960,6 +2972,10 @@ function createOverlordStore() {
         preferencesStore.hiddenDefaultOverlordRules,
       );
       if (seeded) await preferencesStore.setOverlordRules(seeded);
+      // Drop hidden-default ids whose template has since been retired — they can only make
+      // the editor's "Restore defaults" offer a no-op (see pruneHiddenDefaultOverlordRules).
+      const prunedHidden = pruneHiddenDefaultOverlordRules(preferencesStore.hiddenDefaultOverlordRules);
+      if (prunedHidden) await preferencesStore.setHiddenDefaultOverlordRules(prunedHidden);
       // Board rows live in the tasks store now — hydrate it if nothing else has yet
       // (the engine can start before any panel has mounted).
       if (!tasksStore.loaded) await tasksStore.rehydrate();

@@ -1041,8 +1041,8 @@ Narrowing it matters: on a `stopped` tab, `/maiterm init` types a slash command 
 bash — noise in the user's terminal, and no closer to recovery.
 
 `unbound` used to be handled automatically, by a `reinit_unbound_agent` default rule.
-**That default was removed 2026-09-21** and nothing types `/maiterm init` on its own
-initiative any more: the SessionStart hook carries the tab id and session id, and every
+**That default was removed 2026-09-21** and no *rule* types `/maiterm init` on a timer any
+more: the SessionStart hook carries the tab id and session id, and every
 request carries `x-maiterm-tab`, so a live agent is bound from its first breath and
 `initSession` is REPAIR only (see `docs/tasks.md` on tab identity). A rule firing an
 obsolete command up to 3×/hour at a condition that should no longer arise was spending
@@ -1050,9 +1050,17 @@ somebody's terminal on it.
 
 Neither the event nor the remedy went with it. `agent_unready` is still a selectable
 condition and still in the `proposeRuleChanges` schema — the engine machinery below keys
-on the event, or on the text typed, never on that rule's id — and `recoverTab` plus the
-triage re-bind sweep still type the same line when a human or the Overlord agent asks for
-a repair. What is gone is maiTerm volunteering it.
+on the event, or on the text typed, never on that rule's id — and three paths still type
+the line on demand: `recoverTab`, the triage deck's re-bind sweep, and `driveTab`, which
+sends it itself when asked to drive an unbound tab (§4). What is gone is the engine doing
+it unprompted, on a cooldown, at a tab nobody asked about.
+
+Removing it bumped `DOCTRINE_VERSION` to 9, and that is the rule for this kind of change:
+the doctrine renders the enabled ruleset under *"THE ENGINE RUNS THESE RULES ITSELF …
+Never hand-drive a sequence a rule below already owns."* An agent still primed on 8 holds
+a line promising the engine re-binds unbound tabs, plus an instruction not to do it
+itself — while `recoverTab` is now the only remedy there is. **When maiTerm ships a change
+to the default ruleset, the doctrine version moves with it.**
 
 `stopped` is never automatic either — relaunching an agent is a bigger action than
 re-binding one — but the triage deck offers it as one click, and resumes the tab's own
