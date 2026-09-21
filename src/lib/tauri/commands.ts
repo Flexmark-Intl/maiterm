@@ -1536,6 +1536,49 @@ export async function cancelAccountLogin(accountId: string): Promise<void> {
   return invoke('cancel_account_login', { accountId });
 }
 
+/** What a mint reports back. **Never the token** — docs/login.md §9.3 makes the surface
+ *  status-only, and a token that crossed IPC would be one webview bug from a log file. */
+export interface TokenMint {
+  /** Unix seconds. Expiry is `minted_at + 1 year` and is derived from this alone — §7 forbids
+   *  parsing the credential, which is a private format `auth status` does not expose anyway. */
+  minted_at: number;
+  /** Who the token ACTUALLY resolved as, read back before it was stored. Shown so the user can
+   *  see the mint landed on the account they picked — the browser-session trap (§5.1) applies
+   *  to minting exactly as it does to signing in. */
+  identity: AccountIdentity;
+}
+
+/** Mint a long-lived `setup-token` for an account and keep it in the OS keychain (§6 step 1).
+ *
+ *  Opens a browser, same as a sign-in, and takes the same `openWith` — so the private-window
+ *  and copy-link paths work here too. They matter MORE here: if the browser is still signed in
+ *  to another account, the mint can land on that one instead.
+ *
+ *  Verified before it is stored: maiTerm asks what the token resolves to in an empty config
+ *  root, where nothing else can answer. A token that came back as the wrong account, or as no
+ *  account, is discarded rather than stored. */
+export async function mintAccountToken(
+  runtime: string,
+  accountId: string,
+  opts?: { timeoutSecs?: number; openWith?: string | null },
+): Promise<TokenMint> {
+  return invoke('mint_account_token', {
+    runtime,
+    accountId,
+    timeoutSecs: opts?.timeoutSecs ?? null,
+    openWith: opts?.openWith ?? null,
+  });
+}
+
+/** Forget an account's remote token.
+ *
+ *  **This does not revoke it.** It stops maiTerm handing the token out; a host that already has
+ *  it keeps working until the token expires (§9.4 — we build as if `auth logout` does not reach
+ *  these, because nothing local does). Any UI calling this has to say so. */
+export async function forgetAccountToken(accountId: string): Promise<void> {
+  return invoke('forget_account_token', { accountId });
+}
+
 /** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or
  *  "Clear setup".
  *

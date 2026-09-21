@@ -378,6 +378,41 @@ mod tests {
     use super::{extract_login_url, redact_secrets, transcript_tail};
 
     #[test]
+    fn finds_the_token_wherever_the_runtime_prints_it() {
+        use super::extract_setup_token;
+        let tok = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789";
+
+        // Not the last line — the runtime is free to print a hint after it, and betting on
+        // position is how the URL scraper got this wrong before (§5.2.2).
+        let t = format!("Authorized.\n{tok}\nThis is saved nowhere. Copy it now.\n");
+        let got = extract_setup_token(&t).expect("found");
+        assert_eq!(got.expose(), tok);
+        assert!(got.looks_like_setup_token());
+
+        // Trailing newline only — the ordinary case. `Secret::new` trims, so what comes out is
+        // what gets stored and injected.
+        assert_eq!(
+            extract_setup_token(&format!("{tok}\n")).unwrap().expose(),
+            tok
+        );
+
+        // Nothing there: a flow that succeeded but printed no token must be an error, not an
+        // empty Secret that the vault would then have to catch.
+        assert!(extract_setup_token("Authorized.\nAll done.\n").is_none());
+        assert!(extract_setup_token("").is_none());
+    }
+
+    #[test]
+    fn a_truncated_token_is_found_but_refused_by_the_vault() {
+        use super::extract_setup_token;
+        // Extraction is deliberately permissive — it finds the marker — and the SHAPE check
+        // lives in the vault, so there is one gate rather than two that can disagree. This is
+        // the pairing that matters: found here, rejected there, never stored.
+        let got = extract_setup_token("sk-ant-oat01-short\n").expect("found the marker");
+        assert!(!got.looks_like_setup_token(), "must not pass the vault's check");
+    }
+
+    #[test]
     fn redaction_blanks_a_token_but_keeps_the_message_around_it() {
         // The shape of a real `setup-token` failure tail: useful prose either side of the one
         // thing that must not survive.
@@ -940,6 +975,213 @@ async fn login_into_root(
     read_account_identity(rt.slug().to_string(), account_id.to_string()).await
 }
 
+/// `setup-token` — §6. **Its output is the credential**, hence `output_is_secret`.
+static MINT_FLOW: BrowserFlow = BrowserFlow {
+    args: &["setup-token"],
+    label: "Token mint",
+    output_is_secret: true,
+};
+
+/// What the frontend learns about a mint. **Never the token.**
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenMint {
+    /// Unix seconds, for `ManagedAccount.token_minted_at`. Expiry is derived from this and
+    /// nothing else — §7 forbids parsing the credential, which is an undocumented private
+    /// format `auth status --json` does not expose anyway.
+    pub minted_at: u64,
+    /// The identity the token ACTUALLY resolved to, read back before storing it. Displayed so
+    /// the user can see the mint landed on the account they picked.
+    pub identity: AccountIdentity,
+}
+
+/// Find the `sk-ant-oat01-…` token in a mint's output.
+///
+/// Scans for the marker rather than taking the last line: the runtime is free to print a
+/// trailing blank line or a "saved nowhere, copy this" hint after it, and betting on position
+/// is how the URL scraper got this wrong before (§5.2.2).
+fn extract_setup_token(transcript: &str) -> Option<accounts::vault::Secret> {
+    let i = transcript.find("sk-ant-oat01-")?;
+    let after = &transcript[i..];
+    let end = after
+        .char_indices()
+        .find(|(_, c)| c.is_whitespace() || c.is_control())
+        .map(|(n, _)| n)
+        .unwrap_or(after.len());
+    // `Secret::new` trims; the vault validates the shape before it stores anything.
+    Some(accounts::vault::Secret::new(&after[..end]))
+}
+
+/// Ask the runtime who a *token* resolves as, in a config root that holds nothing else.
+///
+/// This is §6.1's positive verification, run at mint time instead of six weeks later on a
+/// remote host. The temp root is the point: with an empty config dir the ONLY rung that can
+/// answer is the token we inject, so what comes back is what the token is worth — not what the
+/// account root happened to have. It also answers Q3 empirically, because a `setup-token` that
+/// ignored `CLAUDE_CONFIG_DIR` and minted against whatever the browser session held shows up
+/// here as the wrong email.
+fn verify_token_identity(profile: &accounts::RuntimeProfile, token: &accounts::vault::Secret) -> Result<AccountIdentity, String> {
+    let cli = accounts::resolve_cli(profile)
+        .ok_or_else(|| format!("could not find the `{}` command", profile.cli))?;
+    let probe_root = std::env::temp_dir().join(format!("maiterm-tokcheck-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&probe_root).map_err(|e| format!("preparing the check: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&probe_root, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let mut cmd = Command::new(&cli);
+    cmd.args(["auth", "status", "--json"]);
+    cmd.env(profile.config_env, &probe_root);
+    // Scrub every shadowing rung EXCEPT the one being tested — otherwise an inherited
+    // ANTHROPIC_API_KEY outranks the token (§2.2 rung 3 beats rung 5) and this reports the key's
+    // identity as the token's, which is the precise confusion §6.1 exists to prevent.
+    for var in profile.shadowing_env.iter().filter(|v| **v != TOKEN_ENV) {
+        cmd.env_remove(var);
+    }
+    cmd.env(TOKEN_ENV, token.expose());
+    cmd.stdin(std::process::Stdio::null());
+    let out = cmd.output().map_err(|e| format!("checking the token: {e}"));
+
+    // Before anything can return: the probe root is a directory the runtime just wrote into.
+    let _ = std::fs::remove_dir_all(&probe_root);
+    let out = out?;
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| "the runtime gave no usable answer when checking the token".to_string())?;
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
+    let logged_in = v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false);
+    let auth_method = s("authMethod");
+    let email = s("email");
+    Ok(AccountIdentity {
+        // A token answers as `oauth_token`, not `claude.ai` — so `is_account_login` is about
+        // whether THIS root's own interactive login answered, and is false here by
+        // construction. What matters for a token is that it carried an identity at all.
+        is_account_login: false,
+        shadowed_by: auth_method.clone(),
+        logged_in,
+        auth_method,
+        api_key_source: s("apiKeySource"),
+        api_provider: s("apiProvider"),
+        email,
+        org_id: s("orgId"),
+        org_name: s("orgName"),
+        plan: s("subscriptionType"),
+    })
+}
+
+/// The variable a minted token is consumed through, here and on every remote (§6 step 2).
+const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// Mint a `setup-token` for an existing account and put it in the vault (§6 step 1).
+///
+/// Returns metadata only. **The token itself never crosses the IPC boundary** — §9.3 is explicit
+/// that the surface is status-only, and a token that reached the frontend would be one webview
+/// bug away from being a credential in a log.
+///
+/// Three things happen in an order that matters:
+///
+/// 1. **The vault is checked first.** Minting is a browser round trip and a standing one-year
+///    credential; discovering afterwards that there is nowhere to put it would mean a live token
+///    printed to a pipe and then dropped, unusable and unrevokable.
+/// 2. **The token is verified before it is stored** (§6.1), against a throwaway config root so
+///    only the token can answer. A mint that landed on the wrong account — the §5.1 browser-
+///    session trap applies to minting exactly as it does to signing in — is discarded here
+///    rather than shipped to a remote host where it would silently resolve as someone else.
+/// 3. **Only then is it stored.** A stored token the caller then fails to record is a leak the
+///    user cannot see; this order means the worst case is a vault entry with no metadata, which
+///    `remote_hosts` being empty already renders inert.
+#[tauri::command]
+pub async fn mint_account_token(
+    app: tauri::AppHandle,
+    runtime: String,
+    account_id: String,
+    timeout_secs: Option<u64>,
+    open_with: Option<String>,
+) -> Result<TokenMint, String> {
+    let rt = runtime_from_slug(&runtime)?;
+    let profile = rt.profile();
+    if !profile.supported {
+        return Err(format!("{} accounts are not supported yet", profile.label));
+    }
+    if rt != Runtime::Claude {
+        return Err(format!("{} token minting is not implemented yet", profile.label));
+    }
+    if uuid::Uuid::parse_str(&account_id).is_err() {
+        return Err("account id must be a UUID".to_string());
+    }
+    // Step 1: nowhere to put it means do not mint it.
+    if !accounts::vault::available() {
+        return Err(
+            "no OS keychain is available, so there is nowhere to keep a token — remote logins \
+             need one, and maiTerm will not write a credential to a plain file."
+                .to_string(),
+        );
+    }
+    // The root must already exist and hold this account's login; unlike a sign-in, a mint never
+    // creates one. Reconcile anyway — the user may have installed skills since.
+    let home = home_dir()?;
+    let id_for_reconcile = account_id.clone();
+    tauri::async_runtime::spawn_blocking(move || accounts::reconcile(rt, &id_for_reconcile, &home))
+        .await
+        .map_err(|e| format!("reconcile task failed: {e}"))??;
+
+    let transcript =
+        run_browser_flow(&app, rt, &account_id, timeout_secs, open_with, &MINT_FLOW).await?;
+
+    // From here `transcript` is credential material. It is never logged, never emitted, and
+    // never returned; the only thing taken out of it is the token.
+    let token = extract_setup_token(&transcript).ok_or_else(|| {
+        "the mint finished but printed no token. Nothing was stored.".to_string()
+    })?;
+    drop(transcript);
+
+    // Step 2: what is this token actually worth?
+    let identity = {
+        let token = token.clone();
+        tauri::async_runtime::spawn_blocking(move || verify_token_identity(rt.profile(), &token))
+            .await
+            .map_err(|e| format!("token check task failed: {e}"))??
+    };
+    if !identity.logged_in || identity.email.is_none() {
+        return Err(
+            "the minted token did not resolve to an account, so it was discarded rather than \
+             stored. Try again, and make sure the browser finished the flow."
+                .to_string(),
+        );
+    }
+
+    // Step 3.
+    let id_for_store = account_id.clone();
+    let stored = tauri::async_runtime::spawn_blocking(move || {
+        accounts::vault::store(&id_for_store, &token)
+    })
+    .await
+    .map_err(|e| format!("vault task failed: {e}"))?;
+    stored.map_err(|e| format!("could not store the token: {e}"))?;
+
+    Ok(TokenMint {
+        minted_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        identity,
+    })
+}
+
+/// Forget an account's remote token.
+///
+/// **This does not revoke it** (§9.4 — we build as if `auth logout` does not reach these). It
+/// stops maiTerm handing the token out; a host that already has it keeps working until the token
+/// expires. Callers must say so rather than implying the credential is dead.
+#[tauri::command]
+pub async fn forget_account_token(account_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || accounts::vault::delete(&account_id))
+        .await
+        .map_err(|e| format!("vault task failed: {e}"))?
+        .map_err(|e| format!("could not remove the token: {e}"))
+}
+
 /// Sign an account out and delete its config root. Used for a §5.1 duplicate, a cancelled
 /// sign-in, "Remove" and "Clear setup".
 ///
@@ -959,6 +1201,20 @@ async fn login_into_root(
 pub async fn discard_account_root(runtime: String, account_id: String) -> Result<(), String> {
     let rt = runtime_from_slug(&runtime)?;
     let profile = rt.profile();
+
+    // Drop any remote token with the account, in the same shared path as the sign-out and for
+    // the same reason: every caller of this promises the user the account is gone, and a vault
+    // entry outliving its account is a credential nothing in the UI can reach to remove.
+    //
+    // **It does not revoke the token** (§9.4). A host that already holds it keeps working until
+    // it expires — which is why the per-host list, not this call, is the revoke story, and why
+    // the removal copy has to say so.
+    //
+    // Best effort, like the sign-out below: a missing keychain must not make an account
+    // unremovable.
+    if let Err(e) = accounts::vault::delete(&account_id) {
+        log::warn!("accounts: could not remove the vault entry for {account_id}: {e}");
+    }
 
     if let (Some(cli), Some(root)) = (
         accounts::resolve_cli(profile),
