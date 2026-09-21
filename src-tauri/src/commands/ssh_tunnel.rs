@@ -165,6 +165,42 @@ const REMOTE_PORT_ATTEMPTS: usize = 4;
 /// Bounded well inside the 15s-per-candidate forward timeout this already tolerates.
 const RECLAIM_BACKOFF_SECS: &[u64] = &[2, 5, 10];
 
+/// What a dying tunnel leaves behind so the next connect knows what it has to win back.
+///
+/// The obvious source — the `ssh_tunnels` entry — is NOT available where it is needed. The
+/// monitor task removes that entry and only then emits `ssh-tunnel-down-{tab}`, and that emit
+/// is the sole trigger for the frontend's reconnect, which arrives ~5s later. So by the time
+/// `start_ssh_tunnel` runs, its own `remove()` returns `None` on every real reconnect: the
+/// entry is not merely stale, it is structurally guaranteed to be gone. A first version of the
+/// reclaim read the entry and was therefore dead code on exactly the path it was written for.
+struct DroppedTunnel {
+    remote_port: u16,
+    /// Tabs that were bridged on it — i.e. how many agents the port move would strand.
+    tab_count: usize,
+}
+
+fn dropped_tunnels() -> &'static parking_lot::Mutex<std::collections::HashMap<String, DroppedTunnel>>
+{
+    static DROPPED: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<String, DroppedTunnel>>,
+    > = std::sync::OnceLock::new();
+    DROPPED.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Called by the monitor task while it still holds the entry it is about to delete.
+fn note_tunnel_dropped(host_key: &str, remote_port: u16, tab_count: usize) {
+    dropped_tunnels()
+        .lock()
+        .insert(host_key.to_string(), DroppedTunnel { remote_port, tab_count });
+}
+
+/// Consumed by the next connect for that host. Taking rather than reading is the whole
+/// lifecycle: one drop earns one reclaim attempt, and a host that comes back — on the old port
+/// or a new one — starts clean, so a breadcrumb can never make a later unrelated connect wait.
+fn take_dropped_tunnel(host_key: &str) -> Option<DroppedTunnel> {
+    dropped_tunnels().lock().remove(host_key)
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct RemotePortBook {
     /// The port this install asks for on every host.
@@ -284,20 +320,28 @@ fn next_port_candidate(prev: u16) -> u16 {
 /// The ports to ask for, in order, each with the wait that precedes the attempt.
 /// `None` is the final `-R 0:` fallback that lets the remote choose.
 ///
-/// `reclaiming` says this is a reconnect for tabs that were bridged on `preferred` — the case
-/// where moving off it strands their running agents, so the same port is re-asked across the
-/// backoff before the walk begins.
-fn port_attempt_plan(preferred: u16, reclaiming: bool) -> Vec<(Option<u16>, u64)> {
-    let mut plan: Vec<(Option<u16>, u64)> = Vec::with_capacity(REMOTE_PORT_ATTEMPTS + 4);
-    plan.push((Some(preferred), 0));
-    if reclaiming {
+/// `reclaim` is the port a just-dropped tunnel held while tabs were riding on it. It is asked
+/// for first and re-asked across the backoff, because it — not `preferred` — is the number
+/// those tabs' running agents have baked in. The two usually agree; they come apart when the
+/// port book has been moved on by another tunnel to the same host under a different ssh-arg
+/// spelling (the book normalises `user@host`, `ssh_tunnels` does not), and in that case the
+/// stranded agents still need the port they actually hold, not the book's.
+fn port_attempt_plan(preferred: u16, reclaim: Option<u16>) -> Vec<(Option<u16>, u64)> {
+    let mut plan: Vec<(Option<u16>, u64)> =
+        Vec::with_capacity(REMOTE_PORT_ATTEMPTS + RECLAIM_BACKOFF_SECS.len() + 2);
+    if let Some(port) = reclaim {
+        plan.push((Some(port), 0));
         for wait in RECLAIM_BACKOFF_SECS {
-            plan.push((Some(preferred), *wait));
+            plan.push((Some(port), *wait));
         }
     }
-    let mut candidate = next_port_candidate(preferred);
-    for _ in 1..REMOTE_PORT_ATTEMPTS {
-        plan.push((Some(candidate), 0));
+    // The walk is unchanged: the same four candidates from `preferred`, then `-R 0:`. A
+    // candidate equal to the reclaim port is skipped rather than retried without its backoff.
+    let mut candidate = preferred;
+    for _ in 0..REMOTE_PORT_ATTEMPTS {
+        if Some(candidate) != reclaim {
+            plan.push((Some(candidate), 0));
+        }
         candidate = next_port_candidate(candidate);
     }
     plan.push((None, 0));
@@ -463,21 +507,32 @@ pub async fn start_ssh_tunnel(
     // ssh_args is already cleaned (e.g. "user@host" or "-p 2222 user@host").
     let preferred = preferred_remote_port(&host_key);
 
-    // Reclaim, not walk, when this is a reconnect for tabs that were already bridged on that
-    // exact port: their running agents cannot follow us anywhere else (see REMOTE_PORT_BASE).
-    // A first connect, or one with no tabs to strand, keeps the old fail-fast behaviour.
-    let reclaiming = !inherited_tab_ids.is_empty() && previous_port == Some(preferred);
+    // What we lost, if anything. The breadcrumb is the load-bearing source here — see
+    // `DroppedTunnel` for why the entry we just removed is almost always absent — but a
+    // surviving entry is authoritative when there is one.
+    let dropped = take_dropped_tunnel(&host_key);
+    let lost_port = previous_port.or_else(|| dropped.as_ref().map(|d| d.remote_port));
+    let stranded_tabs = if inherited_tab_ids.is_empty() {
+        dropped.as_ref().map_or(0, |d| d.tab_count)
+    } else {
+        inherited_tab_ids.len()
+    };
+
+    // Reclaim, not walk, when tabs were riding on the port we lost: their running agents
+    // cannot follow us anywhere else (see REMOTE_PORT_BASE). A first connect, or a drop with
+    // no tabs on it, has nothing to strand and keeps the old fail-fast behaviour.
+    let reclaim_port = lost_port.filter(|_| stranded_tabs > 0);
 
     let mut established: Option<(tokio::process::Child, u16)> = None;
-    for (listen, wait_secs) in port_attempt_plan(preferred, reclaiming) {
+    for (listen, wait_secs) in port_attempt_plan(preferred, reclaim_port) {
         if wait_secs > 0 {
             log::info!(
                 "SSH tunnel: remote port {} on {} is still held — waiting {}s for our dropped \
                  session to be reaped rather than moving off it ({} tab(s) would be stranded)",
-                preferred,
+                reclaim_port.unwrap_or(preferred),
                 host_key,
                 wait_secs,
-                inherited_tab_ids.len()
+                stranded_tabs
             );
             tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
         }
@@ -537,8 +592,8 @@ pub async fn start_ssh_tunnel(
     // Nothing downstream can see it — the tabs reconnect, the tunnel reports healthy, and the
     // only symptom is every agent on the host insisting maiTerm is down. Say it here, in the
     // one place that knows both numbers, so the next diagnosis starts from the answer.
-    if let Some(prev) = previous_port {
-        if prev != remote_port && !inherited_tab_ids.is_empty() {
+    if let Some(prev) = lost_port {
+        if prev != remote_port && stranded_tabs > 0 {
             log::warn!(
                 "SSH tunnel: {} came back on remote port {} instead of {} — {} tab(s) were \
                  bridged on {}, and any agent ALREADY RUNNING in them has that port baked into \
@@ -548,7 +603,7 @@ pub async fn start_ssh_tunnel(
                 host_key,
                 remote_port,
                 prev,
-                inherited_tab_ids.len(),
+                stranded_tabs,
                 prev,
                 prev
             );
@@ -601,7 +656,15 @@ pub async fn start_ssh_tunnel(
             let tab_ids: Vec<String> = {
                 let mut tunnels = state_clone.ssh_tunnels.write();
                 if let Some(tunnel) = tunnels.remove(&hk) {
-                    tunnel.tab_ids.into_iter().collect()
+                    let lost_port = tunnel.remote_port;
+                    let ids: Vec<String> = tunnel.tab_ids.into_iter().collect();
+                    // Leave the breadcrumb BEFORE this scope ends: the entry we are deleting is
+                    // the last record of which port these tabs' agents are pinned to, and the
+                    // reconnect this emit is about to trigger arrives long after it is gone.
+                    if !ids.is_empty() {
+                        note_tunnel_dropped(&hk, lost_port, ids.len());
+                    }
+                    ids
                 } else {
                     vec![]
                 }
@@ -1316,7 +1379,7 @@ mod tests {
     /// any other port is tried, while a first connect must still fail fast.
     #[test]
     fn a_reconnect_re_asks_for_the_port_it_lost_before_walking() {
-        let plan = port_attempt_plan(28623, true);
+        let plan = port_attempt_plan(28623, Some(28623));
 
         let reclaim: Vec<_> = plan
             .iter()
@@ -1353,13 +1416,51 @@ mod tests {
         );
 
         // A first connect (or one with no tabs to strand) keeps the original behaviour.
-        let cold = port_attempt_plan(28623, false);
+        let cold = port_attempt_plan(28623, None);
         assert_eq!(
             cold.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
             vec![Some(28623), Some(28624), Some(28625), Some(28626), None],
             "nothing is riding on the port yet, so there is nothing to wait for"
         );
         assert!(cold.iter().all(|(_, w)| *w == 0), "and it never sleeps");
+
+        // When the book has moved on (another ssh-arg spelling for the same user@host took a
+        // newer port), the agents are still pinned to the port we LOST, so that is what gets
+        // fought for — and the walk still offers its four distinct candidates plus `-R 0:`.
+        let diverged = port_attempt_plan(28700, Some(28623));
+        assert_eq!(
+            diverged.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            vec![
+                Some(28623),
+                Some(28623),
+                Some(28623),
+                Some(28623),
+                Some(28700),
+                Some(28701),
+                Some(28702),
+                Some(28703),
+                None
+            ],
+            "reclaim the stranded agents' port first, then walk from the book's: {diverged:?}"
+        );
+    }
+
+    /// The signal the reclaim runs on has to be one that still EXISTS when the reconnect
+    /// arrives. The first version read the `ssh_tunnels` entry, which the dying tunnel's own
+    /// monitor deletes before emitting the event that triggers the reconnect — so it was
+    /// always absent and the whole fix was inert. The breadcrumb is what survives that gap.
+    #[test]
+    fn the_dropped_tunnel_breadcrumb_survives_the_entry_it_replaces() {
+        let host = "-x -C ews@nova-breadcrumb-test";
+        assert!(take_dropped_tunnel(host).is_none(), "nothing dropped yet");
+
+        note_tunnel_dropped(host, 28623, 36);
+        let dropped = take_dropped_tunnel(host).expect("the drop is readable after the entry is gone");
+        assert_eq!((dropped.remote_port, dropped.tab_count), (28623, 36));
+
+        // Taken, not read: one drop buys one reclaim, so a later unrelated connect to the same
+        // host never inherits a stale wait.
+        assert!(take_dropped_tunnel(host).is_none(), "consumed by the reconnect that used it");
     }
 
     /// The regression that shipped in v2.1.0: the row parse, not the predicate.
