@@ -48,6 +48,10 @@ src/                          # Frontend (Svelte/TypeScript)
 src-tauri/src/                # Backend (Rust)
 ├── lib.rs                    # Tauri app setup, command registration
 ├── commands/                 # Tauri command handlers
+├── accounts/                 # Managed agent logins (docs/login.md): per-account config roots
+│   ├── mod.rs                # Runtime registry, the symlink farm + merged .claude.json, spawn env
+│   ├── vault.rs              # OS keychain, maiTerm's ONLY secret (the §6 remote setup-token)
+│   └── browser.rs            # Private-window opening, and the shim that shadows the runtime's
 ├── claude_code/              # Claude Code IDE integration (MCP server)
 ├── comms/                    # Comms integration (/maiterm resolve): Mattermost client + thread-reply watcher
 ├── mailink/                  # maiLink phone companion: LAN API + WS (docs/mailink-protocol.md)
@@ -78,6 +82,13 @@ src-tauri/src/                # Backend (Rust)
 - `docs/mailink-protocol.md` — the maiLink wire contract, shared with the phone app's own repo. §4 REST/WS, §5 replies and prompts, §6 the doorbell relay, §13 Overlord + task writes. **Read §13.1 before touching the mirror**: the Overlord engine is a frontend store, so the phone is served a published snapshot rather than a webview round trip. Every wire change bumps `protocolVersion` (§13.5), additive ones included
 - `docs/overlord.md` — Overlord per-window supervisor: engine/agent split, rule schema, checkpoint ritual, MCP tools (replyToOverlord/driveTab/listEscalations/proposeRuleChanges)
 - `website/CLAUDE.md` — maiterm.dev: the Starlight-docs / hand-authored-landing split, the shared theme contract, the gutter rule, and the copy that has to stay true (licence is source-available, the updater does count users). **Pushing `website/**` to main publishes the site**
+- `docs/login.md` — **Managed agent accounts.** maiTerm holds N Claude logins and hands each tab
+  the right one. §5 (local, per-tab `CLAUDE_CONFIG_DIR`) works; §6 (remote `setup-token`
+  propagation) is built but **inert — nothing injects into an SSH tab yet**. Read §6.1 before
+  touching anything here: **credential precedence is a fall-through, so a missing or wrong
+  credential does not error — the tab silently comes up as a different account and the work is
+  billed there.** That one fact shapes every design decision in the feature. §2.2 is the
+  precedence list, §5.4 the directory contract, §9 the security posture
 - `docs/stack.md` — Workspace Stack (v1 2026-09-11, console drawer 2026-09-15): a workspace's services (dev server, api, db…) as maiTerm-owned tabs that are **not in the tab strip** (§7 — they open in a drawer over the terminal area, and `pane.active_tab_id` is never one of them); a service is a tab whose shell stays up, the binding lives on `Tab.service_id` (never a `tab_id` on the service), status is never persisted (a Rust mirror serves the priming), every PTY write is behind `get_pty_foreground_job` (shell at prompt / recorded pid), agents are writers over MCP (`updateService` reports ports — no socket sniffing), `createService` with no args returns the suggester's list. Read §5 before adding lifecycle paths that copy a `Tab`
 
 ## Commands
@@ -197,6 +208,7 @@ Preferences
 ├── stack_enabled (gates the eleven stack MCP tools AND the live priming line), stack_console_height
 ├── overlord_enabled, overlord_propose_mode, overlord_rules, hidden_default_overlord_rules
 ├── comms_provider, comms_server_url, comms_bot_token, comms_authorized_users, comms_pickup_users, comms_instructions (Mattermost bot; token + user lists + instructions never in preference_meta)
+├── accounts_enabled, accounts_setup_complete, active_account_ids, managed_accounts (docs/login.md; **none of the four are in `preference_meta`, so no MCP tool can read them** — §9.3 makes that surface status-only. `managed_accounts` holds label/email/org/plan and `token_minted_at`, NEVER a credential: the remote token lives in the OS keychain via `accounts::vault`)
 └── (see state/workspace.rs for full list)
 ```
 

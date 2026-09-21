@@ -80,7 +80,7 @@ It doesn't. Those are shared into every account, so a tab running as one behaves
 ## Limits worth knowing
 
 - **macOS and Linux.** The Windows build does not hand a tab its account yet — the pane works and the accounts are kept, but tabs still launch under your normal login.
-- **This computer only.** Accounts apply to tabs on your own machine. Signing your SSH hosts in is a separate job that is not built yet — it carries a trade-off this does not, so it will be opt-in per host and explained there.
+- **This computer only.** Accounts apply to tabs on your own machine. Signing your SSH hosts in is a separate job that is not built yet — it carries a trade-off this one does not, so it will be opt-in and explained where you turn it on.
 - **Claude Code today.** The other runtimes are named in the sign-in dialog as not yet available, rather than half-wired.
 - **A key your own shell exports is still a key.** maiTerm cleans the environment it starts a tab in, but your shell profile runs afterwards, inside the tab. An `ANTHROPIC_API_KEY` exported there still outranks the account, and Verify — which asks from outside your shell — will not see it.
 - **Not for managed machines.** This is a solo and small-team feature. Where an administrator has set a login policy, working around it is not something maiTerm should automate.

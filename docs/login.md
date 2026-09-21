@@ -1,6 +1,8 @@
 # maiTerm Login — managed Claude Code identities, local and remote
 
-> Status: **partially built**, 2026-09-20 (spec'd 09-19). Owner: Darryl. §13 has what is done.
+> Status: **§5 local built and verified on macOS; §6 remote built but INERT** — 2026-09-21
+> (spec'd 09-19). Owner: Darryl. §13 has the detail. Nothing injects a token into an SSH tab
+> yet, and no token has been minted for real, so §6 currently has no observable effect.
 > Code: `src-tauri/src/accounts/`, `src-tauri/src/commands/accounts.rs`,
 > `src/lib/components/accounts/`.
 > Scope: maiTerm optionally holds N Claude subscription identities, runs the auth flow
