@@ -252,12 +252,21 @@
     error = null;
     try {
       await preferencesStore.setActiveAccount(account.runtime, account.id);
+      // Remote follows the active account, so say so — otherwise "now using X" reads as a
+      // local-only claim and the SSH tabs quietly changing identity on their next spawn is a
+      // surprise. Only mentioned when this account can actually reach a host: promising a
+      // remote switch that cannot happen is worse than saying nothing.
+      const reachesRemotes =
+        (hasToken[account.id] ?? !!account.token_minted_at) &&
+        (account.remote_all_hosts || (account.remote_hosts ?? []).length > 0);
       // A modal, not a notice: this is the one control here that does not take effect
       // immediately, and the follow-up question — "so how do I move the tabs I have open?" —
       // needs an answer, not a statement. A line under the table was too quiet for both.
       announce = {
         title: `Now using ${account.label}`,
-        subtitle: 'Tabs you open from now on run as this account.',
+        subtitle: reachesRemotes
+          ? 'Tabs you open from now on run as this account — including SSH tabs to the hosts it covers.'
+          : 'Tabs you open from now on run as this account.',
         destination: account.label,
       };
     } catch (e) {
@@ -360,7 +369,10 @@
     try {
       await patchAccount(account.id, { remote_hosts: [...hosts, host] });
       hostDraft = { ...hostDraft, [account.id]: '' };
-      notice = `${host} will use ${account.label} for new SSH tabs.`;
+      notice =
+        activeIdFor(account.runtime) === account.id
+          ? `New SSH tabs to ${host} will use ${account.label}.`
+          : `${host} will use ${account.label} whenever it is the active account.`;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -368,38 +380,23 @@
     }
   }
 
-  /** "Use on every SSH host" — the catch-all.
+  /** "Use on every SSH host" — the catch-all, scoped to this account being active.
    *
-   *  §6 originally required each host to be named, on the grounds that a standing one-year
-   *  credential should not land somewhere maiTerm chose. That is still the right warning, but
-   *  it made the common case — one person, one account, boxes they own — a typing exercise. So
-   *  it is a choice made once with the trade stated, rather than a rule the app enforces.
-   *
-   *  **Turning it on turns it off everywhere else, in the same write.** Two accounts each
-   *  claiming every host is not a conflict to resolve at spawn time, it is a question with no
-   *  answer — and per §6.1 the wrong answer is invisible, so there must not be one to get
-   *  wrong. Named hosts still win, which is how one box gets split off from the catch-all. */
+   *  **No mutual exclusion, and that is the point.** Only the ACTIVE account is ever propagated
+   *  (`remote_account_for_host`), so several accounts can each say "cover everything when I am
+   *  the one in use" without any of them contending. Switching accounts switches remotes with
+   *  it. An earlier version turned this off on other accounts because it thought two of them
+   *  could claim one host at once — they cannot, because the question is only ever asked of
+   *  one. */
   async function setAllHosts(account: ManagedAccount, value: boolean) {
     busy = true;
     error = null;
     try {
-      await preferencesStore.setAccountsState({
-        accounts: accounts.map(a =>
-          a.id === account.id
-            ? { ...a, remote_all_hosts: value }
-            : value && a.runtime === account.runtime
-              ? { ...a, remote_all_hosts: false }
-              : a,
-        ),
-      });
-      const displaced = value
-        ? accounts.find(
-            a => a.id !== account.id && a.runtime === account.runtime && a.remote_all_hosts,
-          )
-        : null;
+      await patchAccount(account.id, { remote_all_hosts: value });
+      const isActive = activeIdFor(account.runtime) === account.id;
       notice = value
-        ? `New SSH tabs will use ${account.label} unless the host is named on another account.` +
-          (displaced ? ` ${displaced.label} no longer covers every host.` : '')
+        ? `${account.label} will be used on every SSH host` +
+          (isActive ? '.' : ' while it is the active account.')
         : `${account.label} now covers only the hosts named below.`;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -712,9 +709,8 @@
               </div>
               {#if account.remote_all_hosts}
                 <p class="remote-hint">
-                  Every SSH tab uses this account unless the host is named on another one. Hosts
-                  you add below are unaffected — naming a host is how you override this for that
-                  box.
+                  While this is the active account, every SSH tab uses it. Switching accounts
+                  switches your remotes too.
                 </p>
               {/if}
 
@@ -736,7 +732,7 @@
               {:else if !account.remote_all_hosts}
                 <!-- Only when the catch-all is off, or this contradicts the line above it. -->
                 <p class="remote-hint">
-                  Token ready. Turn on “Use on every SSH host”, or add hosts one at a time —
+                  Token ready. Turn on “Use on every SSH host”, or name hosts one at a time —
                   nothing is sent anywhere until you do.
                 </p>
               {/if}

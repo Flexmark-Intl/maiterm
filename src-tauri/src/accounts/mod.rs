@@ -778,22 +778,29 @@ pub fn spawn_env_for(prefs: &crate::state::Preferences) -> (Vec<(String, String)
 
 /// Which account's remote token should a tab on `host` use? (§6)
 ///
-/// **Precedence, and the order is the whole design:**
+/// **Only ever the ACTIVE account.** This is the same `active_account_ids` pointer that decides
+/// what a local tab launches as, deliberately: one identity is current at a time, and it is
+/// current everywhere. Switching accounts switches local tabs and remote ones together, which
+/// is the behaviour people expect from a thing called "the active account" and is the only one
+/// that stays comprehensible once several hosts are in play.
 ///
-/// 1. An account that names this host in `remote_hosts`. Naming a box is how you say "this one
-///    is different", so it has to beat the catch-all or it would be a setting with no effect.
-/// 2. Otherwise the account with `remote_all_hosts`, of which there is at most one.
-/// 3. Otherwise **nothing** — the host keeps whatever login it already has. This is the answer
-///    that must stay possible: §6.1 means an unwanted token does not announce itself, it just
-///    quietly becomes the identity the remote agent runs as.
+/// It also dissolves a problem rather than solving it. An earlier version searched every
+/// account for one naming the host, which meant two accounts could both claim `nova` and
+/// something had to arbitrate — and per §6.1 a wrong arbitration is invisible, because the tab
+/// does not fail, it comes up as the other identity. With only the active account consulted
+/// there is nothing to arbitrate: `remote_hosts` answers *whether* to propagate, never *which*.
 ///
-/// A bare `host` matches `user@host` so enabling `nova` covers every account you ssh in as,
-/// while `ews@nova` matches only that user — which is what lets one box be split between two
-/// identities. Comparison is case-insensitive because hostnames are.
+/// So the question here is narrow: does the active account have a token, and is this host one
+/// it is allowed to reach?
 ///
-/// Returns `None` for an account with no minted token: a host list that outlived its token is
-/// a promise nothing can keep, and handing back an account whose vault entry is gone would
-/// produce exactly the silent fall-through this function exists to avoid.
+/// 1. The active account for the runtime, if it has a minted token.
+/// 2. …and the host is named in its `remote_hosts`, or it has `remote_all_hosts`.
+/// 3. Otherwise **nothing** — the host keeps whatever login it already has. That answer must
+///    stay reachable: an unwanted token does not announce itself, it quietly becomes the
+///    identity the remote agent runs as.
+///
+/// A bare `host` matches `user@host`, so `nova` covers every user you ssh in as, while
+/// `ews@nova` matches only that pairing. Comparison is case-insensitive, because hostnames are.
 pub fn remote_account_for_host<'a>(
     prefs: &'a crate::state::Preferences,
     host: &str,
@@ -805,20 +812,22 @@ pub fn remote_account_for_host<'a>(
     if host.is_empty() {
         return None;
     }
-    let usable = |a: &&crate::state::ManagedAccount| a.token_minted_at.is_some();
-
-    prefs
+    // Claude is the only runtime that can mint (§6), so the active Claude account is the one
+    // this asks about. When another runtime ships, this takes the runtime as an argument.
+    let active_id = prefs.active_account_ids.get(Runtime::Claude.slug())?;
+    let account = prefs
         .managed_accounts
         .iter()
-        .filter(usable)
-        .find(|a| a.remote_hosts.iter().any(|h| host_matches(h, host)))
-        .or_else(|| {
-            prefs
-                .managed_accounts
-                .iter()
-                .filter(usable)
-                .find(|a| a.remote_all_hosts)
-        })
+        .find(|a| &a.id == active_id && a.runtime == Runtime::Claude.slug())?;
+
+    // No token means no account, never "the account whose token is gone": a host list that
+    // outlived its token is a promise nothing can keep, and handing the account back would
+    // produce exactly the silent fall-through this function exists to avoid.
+    account.token_minted_at?;
+
+    let covered = account.remote_all_hosts
+        || account.remote_hosts.iter().any(|h| host_matches(h, host));
+    covered.then_some(account)
 }
 
 /// Does an enabled entry cover this ssh target?
@@ -1350,8 +1359,12 @@ mod tests {
         assert!(spawn_env_for(&prefs_with(None, true, true)).0.is_empty());
     }
 
-    /// Build a prefs with N accounts, each `(id, hosts, all_hosts, has_token)`.
-    fn prefs_with_remotes(rows: &[(&str, &[&str], bool, bool)]) -> crate::state::Preferences {
+    /// Build prefs with N accounts — `(id, hosts, all_hosts, has_token)` — and make `active` the
+    /// active Claude account.
+    fn prefs_with_remotes(
+        rows: &[(&str, &[&str], bool, bool)],
+        active: Option<&str>,
+    ) -> crate::state::Preferences {
         let mut p = crate::state::Preferences::default();
         p.accounts_setup_complete = true;
         p.accounts_enabled = true;
@@ -1371,43 +1384,75 @@ mod tests {
                 remote_all_hosts: *all,
             });
         }
+        if let Some(a) = active {
+            p.active_account_ids.insert("claude".into(), a.to_string());
+        }
         p
     }
 
     #[test]
-    fn a_named_host_beats_the_catch_all() {
-        // The whole point of naming a box: it is the override. If the catch-all won, listing a
-        // host would be a control with no effect.
-        let p = prefs_with_remotes(&[("work", &["ews@nova"], false, true), ("personal", &[], true, true)]);
-        assert_eq!(remote_account_for_host(&p, "ews@nova").unwrap().id, "work");
-        assert_eq!(remote_account_for_host(&p, "other").unwrap().id, "personal");
+    fn only_the_active_account_is_ever_propagated() {
+        // The point of the design: one identity is current at a time and it is current
+        // everywhere. An inactive account naming a host must NOT reach it, or switching
+        // accounts would leave remotes on the old one.
+        let rows: &[(&str, &[&str], bool, bool)] =
+            &[("work", &["nova"], false, true), ("personal", &["nova"], false, true)];
+
+        assert_eq!(remote_account_for_host(&prefs_with_remotes(rows, Some("work")), "nova").unwrap().id, "work");
+        // Same host, same two accounts, different active pointer — and no arbitration anywhere.
+        assert_eq!(remote_account_for_host(&prefs_with_remotes(rows, Some("personal")), "nova").unwrap().id, "personal");
+        // Nothing active: nothing propagates.
+        assert!(remote_account_for_host(&prefs_with_remotes(rows, None), "nova").is_none());
+    }
+
+    #[test]
+    fn a_host_the_active_account_does_not_cover_gets_nothing() {
+        // `remote_hosts` answers WHETHER to propagate, never WHICH account — so a host the
+        // active account has not been given keeps the login it already has, even when an
+        // inactive account lists it.
+        let rows: &[(&str, &[&str], bool, bool)] =
+            &[("work", &["nova"], false, true), ("personal", &["build-box"], false, true)];
+        let p = prefs_with_remotes(rows, Some("work"));
+        assert_eq!(remote_account_for_host(&p, "nova").unwrap().id, "work");
+        assert!(remote_account_for_host(&p, "build-box").is_none(), "inactive account must not reach its host");
+    }
+
+    #[test]
+    fn the_catch_all_covers_anything_the_active_account_has_not_named() {
+        let p = prefs_with_remotes(&[("a", &[], true, true)], Some("a"));
+        assert_eq!(remote_account_for_host(&p, "anything").unwrap().id, "a");
+        assert_eq!(remote_account_for_host(&p, "ews@nova").unwrap().id, "a");
+        // Two accounts may BOTH carry the catch-all now; only the active one is consulted, so
+        // there is no conflict to resolve and none to get wrong.
+        let both: &[(&str, &[&str], bool, bool)] = &[("a", &[], true, true), ("b", &[], true, true)];
+        assert_eq!(remote_account_for_host(&prefs_with_remotes(both, Some("b")), "x").unwrap().id, "b");
     }
 
     #[test]
     fn a_bare_host_covers_every_user_but_a_user_host_does_not_capture_its_neighbours() {
-        let p = prefs_with_remotes(&[("a", &["nova"], false, true)]);
+        let p = prefs_with_remotes(&[("a", &["nova"], false, true)], Some("a"));
         assert_eq!(remote_account_for_host(&p, "ews@nova").unwrap().id, "a");
         assert_eq!(remote_account_for_host(&p, "NOVA").unwrap().id, "a", "hostnames are case-insensitive");
 
         // `ews@nova` must NOT capture `root@nova` — a different account on the same box, and
         // quite possibly the reason someone listed one and not the other.
-        let p = prefs_with_remotes(&[("a", &["ews@nova"], false, true)]);
+        let p = prefs_with_remotes(&[("a", &["ews@nova"], false, true)], Some("a"));
         assert!(remote_account_for_host(&p, "root@nova").is_none());
         assert_eq!(remote_account_for_host(&p, "ews@nova").unwrap().id, "a");
     }
 
     #[test]
-    fn no_token_means_no_account_even_when_the_host_is_listed() {
+    fn no_token_means_no_account_even_when_the_host_is_covered() {
         // A host list outliving its token is a promise nothing can keep, and §6.1 means the
         // failure is silent — so the answer has to be "no token", not "this account".
-        let p = prefs_with_remotes(&[("a", &["nova"], true, false)]);
+        let p = prefs_with_remotes(&[("a", &["nova"], true, false)], Some("a"));
         assert!(remote_account_for_host(&p, "nova").is_none());
         assert!(remote_account_for_host(&p, "anything").is_none());
     }
 
     #[test]
     fn nothing_is_injected_when_the_feature_is_off_or_the_host_is_blank() {
-        let mut p = prefs_with_remotes(&[("a", &[], true, true)]);
+        let mut p = prefs_with_remotes(&[("a", &[], true, true)], Some("a"));
         assert!(remote_account_for_host(&p, "nova").is_some());
 
         p.accounts_enabled = false;
@@ -1420,6 +1465,13 @@ mod tests {
         // An empty target must never match a catch-all: "no host" is not "every host".
         assert!(remote_account_for_host(&p, "").is_none());
         assert!(remote_account_for_host(&p, "   ").is_none());
+    }
+
+    #[test]
+    fn a_dangling_active_pointer_propagates_nothing() {
+        let mut p = prefs_with_remotes(&[("a", &[], true, true)], Some("a"));
+        p.managed_accounts.clear();
+        assert!(remote_account_for_host(&p, "nova").is_none());
     }
 
     #[test]

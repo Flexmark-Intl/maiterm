@@ -622,26 +622,43 @@ Host enablement was originally **per host, explicit, and never inferred** — a 
 standing one-year credential, and `nova` is fine where a shared build box is not our call to
 make.
 
-> **Revised 2026-09-21: a catch-all is allowed, because the rule taxed the common case.**
-> One person, one account, boxes they own is the normal shape of this, and making them retype
-> every host bought nothing — they would have listed all of them anyway, just slower and with
-> one forgotten. So `remote_all_hosts` exists, the warning it replaces is stated at the moment
-> it is switched on, and the judgement moves from the app to the user.
+> **Revised 2026-09-21, twice.**
 >
-> **Resolution order, and it is load-bearing:**
-> 1. an account naming the host in `remote_hosts` — naming a box is the override, so it must
->    beat the catch-all or it would be a control with no effect;
-> 2. otherwise the account holding `remote_all_hosts`;
+> **(a) A catch-all is allowed, because the rule taxed the common case.** One person, one
+> account, boxes they own is the normal shape of this, and making them retype every host bought
+> nothing — they would have listed all of them anyway, just slower and with one forgotten. So
+> `remote_all_hosts` exists, the warning it replaces is stated where it is switched on, and the
+> judgement moves from the app to the user.
+>
+> **(b) Only the ACTIVE account is ever propagated, and that is the load-bearing decision.**
+> The same `active_account_ids` pointer that decides what a local tab launches as decides what
+> goes to a remote. One identity is current at a time and it is current *everywhere*; switching
+> accounts switches local tabs and remote ones together.
+>
+> This dissolves a problem rather than solving it. The first version searched every account for
+> one naming the host, so two accounts could both claim `nova` and something had to arbitrate —
+> and per §6.1 a wrong arbitration is invisible, because the tab does not fail, it comes up as
+> the other identity. With one account consulted there is nothing to arbitrate: **`remote_hosts`
+> answers *whether* to propagate, never *which***. Several accounts may each carry the catch-all
+> for that reason; they cannot contend.
+>
+> So the question at spawn is narrow: does the active account hold a token, and is this host one
+> it may reach?
+>
+> 1. the active account for the runtime, if it has a minted token;
+> 2. …and the host is named in its `remote_hosts`, or it has `remote_all_hosts`;
 > 3. otherwise **no token at all**, and the host keeps the login it already has.
 >
-> **At most one account may hold the catch-all.** Two accounts each claiming every host is not
-> a conflict to resolve at spawn time, it is a question with no answer — and §6.1 means the
-> wrong answer is invisible, so the pane turns it off elsewhere when it is turned on.
+> A bare `nova` matches every user on that host; `ews@nova` matches only that pairing.
+> `remote_account_for_host` implements this and is tested, including that a host with no token
+> behind it resolves to nothing rather than to an account — a list outliving its token is a
+> promise that fails silently.
 >
-> A bare `nova` matches every user on that host; `ews@nova` matches only that pairing, which is
-> what lets one box be split between two identities. `remote_account_for_host` implements this
-> and is tested; a host with no token behind it resolves to nothing rather than to an account,
-> because a list outliving its token is a promise that fails silently.
+> **Consequence for step 2:** the token must ride the per-tab ssh environment, never the shared
+> `~/.aiterm` on the host. That file is one per remote user and outlives a session, so a token
+> written there would not follow a switch — the thing this decision exists to guarantee. See
+> [[aiterm-file-cross-pollution]] for how the shared-file version of a per-tab value went last
+> time.
 
 ### 6.1 A missing token silently becomes the wrong identity
 
