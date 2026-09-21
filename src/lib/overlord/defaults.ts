@@ -166,12 +166,29 @@ export function seedDefaultOverlordRules(
   let list = [...existing];
   let changed = false;
 
-  const before = list.length;
-  list = list.filter(r => {
-    if (!r.default_id) return true; // user-created
-    return r.default_id in DEFAULT_OVERLORD_RULES; // stale default → remove
-  });
-  if (list.length !== before) changed = true;
+  // A retired template. **A retirement may delete maiTerm's work, never the human's.**
+  //
+  // An untouched copy is purely app-provided — every word in it is ours, so dropping it
+  // drops our own row and takes nothing from them. A copy they EDITED is theirs: it keeps
+  // its name, its text, its guards and its place in the list, and merely stops being a
+  // default. It is un-adoptable afterwards (`default_id: null`), which is what it already
+  // was in the only sense that mattered to them.
+  //
+  // `user_modified` is cleared with it, and that is load-bearing rather than tidiness: the
+  // editor renders an "edited" chip and enables **Reset to default** on that flag alone,
+  // without consulting `default_id`. Left set, a preserved rule would offer a reset button
+  // whose handler looks up a template that no longer exists and returns silently.
+  //
+  // The one case where a retirement may remove something of theirs is when they removed it
+  // too — a default the human deleted is not in this list at all, it is an id in
+  // `hiddenIds`, and `pruneHiddenDefaultOverlordRules` syncs that side. Agreement, not loss.
+  const kept: OverlordRule[] = [];
+  for (const r of list) {
+    if (!r.default_id || r.default_id in DEFAULT_OVERLORD_RULES) { kept.push(r); continue; }
+    changed = true;
+    if (r.user_modified) kept.push({ ...r, default_id: null, user_modified: false });
+  }
+  list = kept;
 
   for (const [defaultId, tmpl] of Object.entries(DEFAULT_OVERLORD_RULES)) {
     if (hiddenIds.includes(defaultId)) continue;

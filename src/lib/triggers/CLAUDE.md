@@ -48,8 +48,28 @@ Per-trigger per-tab, prevents rapid re-firing.
 `src/lib/triggers/defaults.ts`: `DEFAULT_TRIGGERS` is currently empty — all Claude-related triggers have been replaced by hooks integration (PreToolUse, PostToolUse, PreCompact, SessionStart, Stop, Notification).
 
 `seedDefaultTriggers()` runs at app startup (`+layout.svelte` onMount) and on Preferences page mount. It:
-1. Removes triggers whose `default_id` is not in `DEFAULT_TRIGGERS` (stale cleanup)
+1. Handles triggers whose `default_id` has left `DEFAULT_TRIGGERS` — see the retirement rule below
 2. Seeds any new defaults that don't exist yet
-3. Auto-updates unmodified defaults to latest template values
+3. Auto-updates **unmodified** defaults to latest template values (`user_modified` freezes one)
 
 Users can create custom triggers. Deleted defaults tracked in `hidden_default_triggers`.
+
+### Retiring a default: never delete the human's work
+
+**A retired template may delete maiTerm's work, never the user's.** Step 1 used to drop every
+trigger whose `default_id` had left the map, which silently destroyed a default the user had
+*edited* — no toast, no ledger, nothing in `hidden_default_triggers` to restore from. That was
+live, not theoretical: `DEFAULT_TRIGGERS` was emptied wholesale when hooks replaced it, so
+every default-linked trigger is stale and the filter took the lot on the next launch.
+
+Now:
+- **untouched copy** → dropped (every word in it is ours)
+- **`user_modified` copy** → kept, as a plain user trigger: `default_id` and `user_modified`
+  both cleared, everything else untouched. Clearing `user_modified` is required, not tidiness —
+  the preferences pane enables "Reset to default" on that flag alone, so leaving it set offers a
+  button whose handler looks up a template that no longer exists.
+- **already deleted by the user** → the ids agree, so `pruneHiddenDefaultTriggers` forgets the
+  deletion. A stale id also makes "Restore defaults" render forever and restore nothing.
+
+`src/lib/overlord/defaults.ts` carries the identical rule for Overlord rules; both are covered
+by `defaults.test.ts` next to each module.

@@ -10,7 +10,7 @@
   import { retryDownBridgesNow } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import Toast from '$lib/components/Toast.svelte';
-  import { seedDefaultTriggers } from '$lib/triggers/defaults';
+  import { pruneHiddenDefaultTriggers, seedDefaultTriggers } from '$lib/triggers/defaults';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { getTheme, applyUiTheme } from '$lib/themes';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -185,6 +185,10 @@
     preferencesStore.load().then(() => {
       const seeded = seedDefaultTriggers(preferencesStore.triggers, preferencesStore.hiddenDefaultTriggers);
       if (seeded) preferencesStore.setTriggers(seeded);
+      // Forget deletions of templates that have since been retired — they agree, and the
+      // record is what is stale now (see pruneHiddenDefaultTriggers).
+      const prunedHidden = pruneHiddenDefaultTriggers(preferencesStore.hiddenDefaultTriggers);
+      if (prunedHidden) preferencesStore.setHiddenDefaultTriggers(prunedHidden);
 
       // Auto-check for updates on startup (silent — only shows toast if update found)
       if (preferencesStore.autoCheckUpdates) {

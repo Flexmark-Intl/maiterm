@@ -9,6 +9,21 @@ export const DEFAULT_TRIGGERS: Record<string, Omit<Trigger, 'id' | 'enabled' | '
 };
 
 /**
+ * Hidden-default ids whose template no longer exists, pruned — or null if all still resolve.
+ *
+ * The other half of the retirement rule: when the human deleted a default and maiTerm then
+ * retired it, those agree, and the record of their deletion is what is now stale. An id
+ * pointing at nothing also makes the preferences pane lie — its "Restore defaults" control
+ * renders on `length > 0`, so it shows forever and restores nothing when clicked.
+ *
+ * Mirrors `pruneHiddenDefaultOverlordRules`.
+ */
+export function pruneHiddenDefaultTriggers(hiddenIds: string[]): string[] | null {
+  const kept = hiddenIds.filter((id) => id in DEFAULT_TRIGGERS);
+  return kept.length === hiddenIds.length ? null : kept;
+}
+
+/**
  * Seed default triggers into an existing trigger list.
  * Returns the updated list if changes were made, or null if no changes needed.
  */
@@ -20,14 +35,23 @@ export function seedDefaultTriggers(
   let list = [...existing];
   let changed = false;
 
-  // Remove triggers whose default_id no longer exists in DEFAULT_TRIGGERS
-  const before = list.length;
-  list = list.filter(t => {
-    if (!t.default_id) return true; // user-created
-    if (t.default_id in DEFAULT_TRIGGERS) return true; // still active
-    return false; // stale default — remove
-  });
-  if (list.length !== before) changed = true;
+  // A retired template. Same rule as the Overlord seeder, which carries the full reasoning:
+  // a retirement may delete maiTerm's work, never the human's. An untouched copy is entirely
+  // ours to drop; one they edited survives as a plain user trigger, with `user_modified`
+  // cleared so the preferences pane's "Reset to default" button is not left enabled over a
+  // template that is gone.
+  //
+  // This one is not hypothetical. `DEFAULT_TRIGGERS` was emptied wholesale when hooks
+  // replaced it, so EVERY default-linked trigger is stale now — the old filter deleted the
+  // lot on the next launch, edits and all, and would do it again to anyone restoring old
+  // state.
+  const kept: Trigger[] = [];
+  for (const t of list) {
+    if (!t.default_id || t.default_id in DEFAULT_TRIGGERS) { kept.push(t); continue; }
+    changed = true;
+    if (t.user_modified) kept.push({ ...t, default_id: null, user_modified: false });
+  }
+  list = kept;
 
   for (const [defaultId, tmpl] of Object.entries(DEFAULT_TRIGGERS)) {
     if (hiddenIds.includes(defaultId)) continue;
