@@ -124,11 +124,26 @@
         </p>
       </section>
 
-      <!-- The three things someone should know BEFORE agreeing, not after. Each of these is a
-           real property of the credential, not boilerplate. -->
+      <!-- The things someone should know BEFORE agreeing, not after. Each is a real property of
+           the credential, not boilerplate. The billing line leads because it is the first
+           question anyone asks about a long-lived token, and the answer is reassuring — but the
+           scope line has to sit right behind it, because §8 requires the trade to be stated
+           here rather than discovered on a host weeks later. -->
       <section>
         <h4>What you should know first</h4>
         <ul>
+          <li>
+            <strong>It uses your subscription, not API credits.</strong> The token authenticates
+            against the same {account.plan ? account.plan.toUpperCase() : 'Pro/Max/Team'} plan
+            this account already has. Remote usage is billed exactly as local usage is.
+          </li>
+          <li>
+            <strong>It is a narrower credential than a sign-in.</strong> On hosts using it,
+            model requests and your local MCP servers work normally — maiTerm's own bridge
+            included — but <em>Remote Control sessions</em> and <em>claude.ai connectors</em> are
+            unavailable, and <code>--bare</code> sessions ignore it. If you need those on a
+            remote host, sign that host in itself instead of enabling it here.
+          </li>
           <li>
             <strong>It lasts a year.</strong> It does not rotate, which is exactly why one token
             can serve several hosts at once — and also why it is worth protecting.
@@ -144,6 +159,9 @@
             shell profile there.
           </li>
         </ul>
+        <p class="aside">
+          None of this applies to your local tabs — those use full sign-ins and lose nothing.
+        </p>
       </section>
 
       <!-- Same trap as adding a second account, and worse here: the mint takes whichever
@@ -302,6 +320,18 @@
     background: var(--bg-medium);
     border-radius: 6px;
     padding: 10px 12px;
+  }
+
+  .aside {
+    color: var(--fg-faint, var(--fg-dim));
+    font-size: 0.75rem;
+    margin-top: 8px;
+  }
+
+  code {
+    background: var(--bg-dark);
+    border-radius: 3px;
+    padding: 1px 4px;
   }
 
   .segments {
