@@ -1460,6 +1460,22 @@ export interface AccountLoginUrl {
    *  paste-a-code variant, which cannot complete because the CLI's stdin is null. The UI must
    *  not offer to open it: doing so walks the user into a dead end that looks like success. */
   paste_code: boolean;
+  /** True for a mint: the browser ends on a code, and the dialog has to ask for it.
+   *
+   *  **Not the inverse of `paste_code`.** A sign-in's paste-code link is a dead end because
+   *  there is nowhere to put the code. A mint is *always* a paste-code flow — `setup-token` runs
+   *  no localhost callback at all — and always has somewhere to put it. One flag says "this link
+   *  cannot finish", the other says "this link finishes here". */
+  needs_code: boolean;
+}
+
+/** Hand a running mint the authorization code the browser showed.
+ *
+ *  `claude setup-token` cannot complete by itself: it opens `…?code=true`, runs no localhost
+ *  callback, and waits for the code to be typed back at it on a terminal. maiTerm runs it on a
+ *  PTY so there is something to type into — this is that. */
+export async function submitAccountCode(accountId: string, code: string): Promise<void> {
+  return invoke('submit_account_code', { accountId, code });
 }
 
 /** A workspace that has tabs still running under the previous account. */

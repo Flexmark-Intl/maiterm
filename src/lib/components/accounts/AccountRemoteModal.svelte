@@ -57,6 +57,13 @@
   let openedPrivately = $state(false);
   let onUrl = $state<'none' | 'copy' | 'private'>('none');
 
+  /** The mint is waiting for the code the browser showed. See `submitAccountCode`. */
+  let needsCode = $state(false);
+  let code = $state('');
+  let codeSent = $state(false);
+  let codeError = $state<string | null>(null);
+  let codeEl = $state<HTMLInputElement | null>(null);
+
   let browsers = $state<PrivateBrowserInfo[]>([]);
   let browserId = $state<string | null>(null);
   const browser = $derived(browsers.find(b => b.id === browserId) ?? browsers[0] ?? null);
@@ -80,11 +87,15 @@
     void (async () => {
       const fn = await listen<AccountLoginUrl>(commands.ACCOUNT_LOGIN_URL_EVENT, e => {
         if (e.payload.account_id !== target.id) return;
-        loginUrl = e.payload.url;
+        loginUrl = e.payload.url || null;
         pasteCode = e.payload.paste_code;
+        needsCode = e.payload.needs_code;
         openedPrivately = e.payload.opened && onUrl === 'private';
         if (e.payload.open_error) error = e.payload.open_error;
-        if (onUrl === 'copy') void copyLink();
+        if (onUrl === 'copy' && loginUrl) void copyLink();
+        // The browser has the user's attention; the field they have to come back to should
+        // already be waiting for a paste when they do.
+        if (needsCode) requestAnimationFrame(() => codeEl?.focus());
       });
       if (dead) void fn();
       else unlisten = fn;
@@ -94,6 +105,24 @@
       void unlisten?.();
     };
   });
+
+  /** Hand the code to the waiting mint.
+   *
+   *  Failure here is recoverable and must stay that way: a rejected code leaves the mint running
+   *  (Rust only latches `code_sent` on a code it accepted), so the field stays open for another
+   *  go rather than the dialog ending the attempt. */
+  async function sendCode() {
+    const value = code.trim();
+    if (!value || codeSent) return;
+    codeError = null;
+    try {
+      await commands.submitAccountCode(target.id, value);
+      codeSent = true;
+      code = '';
+    } catch (e) {
+      codeError = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   async function copyLink() {
     if (!loginUrl) return;
@@ -109,6 +138,16 @@
     onUrl = then;
     phase = 'minting';
     error = null;
+    // A retry is a NEW mint with a new link and a new code. Left standing, `codeSent` would hide
+    // the field the second attempt depends on, and the old link would sit above it looking
+    // current — this dialog is reachable again after any failure, so it has to be re-enterable.
+    loginUrl = null;
+    needsCode = false;
+    codeSent = false;
+    codeError = null;
+    code = '';
+    copied = false;
+    openedPrivately = false;
     try {
       const openWith = then === 'private' ? (browser?.id ?? null) : then === 'copy' ? null : 'default';
       // The row's OWN runtime, not a literal. Only Claude can mint today, but a hardcoded slug
@@ -129,8 +168,9 @@
   /** Abort a mint that is still running.
    *
    *  The child is killed, so the browser flow cannot complete later and store a token the user
-   *  walked away from. `cancel_account_login` is keyed by account id and `run_browser_flow`
-   *  registers the mint the same way a sign-in registers, so this genuinely reaches it. */
+   *  walked away from. `cancel_account_login` is keyed by account id and reaches a mint as well
+   *  as a sign-in: the mint runs on a PTY and is registered separately, and the same command
+   *  flags both — from here they are one action. */
   async function cancelMint() {
     try {
       await commands.cancelAccountLogin(target.id);
@@ -306,8 +346,46 @@
               <code class="url">{loginUrl}</code>
               <Button variant="ghost" onclick={copyLink}>{copied ? 'Copy again' : 'Copy'}</Button>
             </div>
-          {:else}
+          {:else if !needsCode}
             <p class="hint">Waiting for the agent to produce an authorization link…</p>
+          {/if}
+
+          <!-- The step that makes a mint different from a sign-in. `setup-token` runs no
+               localhost callback, so nothing completes on its own: approving in the browser
+               produces a CODE, and this is where it comes back. -->
+          {#if needsCode}
+            <div class="code-step">
+              <h4>{codeSent ? 'Finishing…' : 'Paste the code'}</h4>
+              <p class="hint">
+                {#if codeSent}
+                  Exchanging it for a token, then checking which account it actually belongs to.
+                {:else}
+                  Approving in the browser gives you a code rather than finishing by itself.
+                  Copy it and paste it here.
+                {/if}
+              </p>
+              {#if !codeSent}
+                <div class="link-row">
+                  <input
+                    bind:this={codeEl}
+                    class="code-input"
+                    type="text"
+                    spellcheck="false"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    placeholder="Code from the browser"
+                    bind:value={code}
+                    onkeydown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); void sendCode(); }
+                    }}
+                  />
+                  <Button variant="secondary" disabled={!code.trim()} onclick={sendCode}>
+                    Submit
+                  </Button>
+                </div>
+              {/if}
+              {#if codeError}<p class="error">{codeError}</p>{/if}
+            </div>
           {/if}
         </section>
       {/if}
@@ -475,6 +553,31 @@
   .hint {
     color: var(--fg-dim);
     font-size: 0.75rem;
+  }
+
+  /* Separated from the link above it because it is a second step, not more detail about the
+     first — the user leaves for the browser between them. */
+  .code-step {
+    border-top: 1px solid var(--bg-light);
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+
+  .code-input {
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light);
+    border-radius: 4px;
+    color: var(--fg);
+    flex: 1 1 14rem;
+    font-family: inherit;
+    font-size: 0.75rem;
+    min-width: 0;
+    padding: 6px 8px;
+  }
+
+  .code-input:focus {
+    border-color: var(--accent);
+    outline: none;
   }
 
   .error {

@@ -265,6 +265,13 @@ struct LoginUrlEvent {
     /// to offer "Open in <browser>" at all. Offering it on a paste-code link invites the user
     /// to walk into the dead end that the Rust side just declined to walk them into.
     paste_code: bool,
+    /// True for a mint: the browser will end on a code, and the dialog must ask for it.
+    ///
+    /// Note this is not the inverse of `paste_code`. A *sign-in*'s paste-code link is a dead end
+    /// because there is nowhere to put the code; a *mint* is always a paste-code flow and always
+    /// has somewhere to put it (`submit_account_code`). One says "this link cannot finish", the
+    /// other says "this link finishes here".
+    needs_code: bool,
 }
 
 /// Pull the authorization URL out of a runtime's sign-in output.
@@ -385,21 +392,39 @@ mod tests {
         // Not the last line — the runtime is free to print a hint after it, and betting on
         // position is how the URL scraper got this wrong before (§5.2.2).
         let t = format!("Authorized.\n{tok}\nThis is saved nowhere. Copy it now.\n");
-        let got = extract_setup_token(&t).expect("found");
+        let got = extract_setup_token(&t, false).expect("found");
         assert_eq!(got.expose(), tok);
         assert!(got.looks_like_setup_token());
 
         // Trailing newline only — the ordinary case. `Secret::new` trims, so what comes out is
         // what gets stored and injected.
         assert_eq!(
-            extract_setup_token(&format!("{tok}\n")).unwrap().expose(),
+            extract_setup_token(&format!("{tok}\n"), false).unwrap().expose(),
             tok
         );
 
         // Nothing there: a flow that succeeded but printed no token must be an error, not an
         // empty Secret that the vault would then have to catch.
-        assert!(extract_setup_token("Authorized.\nAll done.\n").is_none());
-        assert!(extract_setup_token("").is_none());
+        assert!(extract_setup_token("Authorized.\nAll done.\n", false).is_none());
+        assert!(extract_setup_token("", false).is_none());
+    }
+
+    /// The PTY read is incremental, so a token can be half-written when we look. Requiring a
+    /// terminator is what stops a partial read being stored as a whole credential — one that
+    /// passes every shape check there is and resolves as nobody.
+    #[test]
+    fn a_half_written_token_is_not_taken_while_the_mint_is_still_streaming() {
+        use super::extract_setup_token;
+        let partial = "…printing token…\n\u{1b}[32msk-ant-oat01-abcdefghijklmnop";
+        assert!(extract_setup_token(partial, true).is_none(), "still streaming");
+        // Once the child is gone nothing more is coming, so the tail is all there is.
+        assert!(extract_setup_token(partial, false).is_some());
+
+        // An ANSI sequence right after the token terminates it, which is what makes a styled
+        // TUI render readable at all.
+        let styled = "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789\u{1b}[0m rest";
+        let got = extract_setup_token(styled, true).expect("terminated by the escape");
+        assert_eq!(got.expose(), "sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789");
     }
 
     #[test]
@@ -408,7 +433,7 @@ mod tests {
         // Extraction is deliberately permissive — it finds the marker — and the SHAPE check
         // lives in the vault, so there is one gate rather than two that can disagree. This is
         // the pairing that matters: found here, rejected there, never stored.
-        let got = extract_setup_token("sk-ant-oat01-short\n").expect("found the marker");
+        let got = extract_setup_token("sk-ant-oat01-short\n", false).expect("found the marker");
         assert!(!got.looks_like_setup_token(), "must not pass the vault's check");
     }
 
@@ -543,6 +568,12 @@ mod tests {
 /// complete later and strand an authenticated root nobody knows about.
 #[tauri::command]
 pub async fn cancel_account_login(account_id: String) -> Result<(), String> {
+    // A mint is cancellable through the same control, because from the dialog it is the same
+    // action. Flagged rather than killed here: the mint's own loop owns the child and the PTY,
+    // and it is the only thing that can tear both down in the right order.
+    if let Some(handle) = ACTIVE_MINTS.lock().get_mut(&account_id) {
+        handle.cancelled = true;
+    }
     let mut guard = ACTIVE_LOGINS.lock();
     let Some(handle) = guard.get_mut(&account_id) else {
         // Already finished or never started. Nothing to stop, and not an error.
@@ -637,28 +668,22 @@ pub async fn begin_account_login(
 struct BrowserFlow {
     /// Argv after the CLI name.
     args: &'static [&'static str],
-    /// Sentence-initial, for error text: "Sign-in failed…", "Token mint failed…".
+    /// Sentence-initial, for error text: "Sign-in failed…".
     label: &'static str,
-    /// True when the child's OUTPUT is itself credential material.
-    ///
-    /// `setup-token` prints an `sk-ant-oat01-…` token as its last line, and `transcript_tail`
-    /// takes the last three lines — so without this the ordinary failure path would put a live
-    /// one-year credential into a user-visible error string. Set it and errors are built from a
-    /// redacted tail instead.
-    output_is_secret: bool,
 }
 
 /// `auth login` — §5. Output is a URL and progress chatter, never a credential.
+/// The only flow that runs here. The mint used to as well, until it turned out to need a PTY
+/// and a way to type into it — see `run_mint_on_pty`.
 static LOGIN_FLOW: BrowserFlow = BrowserFlow {
     args: &["auth", "login"],
     label: "Sign-in",
-    output_is_secret: false,
 };
 
 /// Run a browser flow against an account root and hand back the child's combined output.
 ///
-/// **The returned transcript is credential material when `flow.output_is_secret`.** It belongs
-/// to the caller: do not log it, do not put it in an event, do not return it to the frontend.
+/// The returned transcript is progress chatter and a URL — never a credential. The one flow
+/// whose output *was* the credential is the mint, and it no longer runs here.
 ///
 /// Split out of `begin_account_login` so that caller can clean the root up on any error without
 /// every early return having to remember.
@@ -808,6 +833,7 @@ async fn run_browser_flow(
                                     // Always: this branch only ever runs with no shim, so the
                                     // only link it can see is the printed one.
                                     paste_code: true,
+                                    needs_code: false,
                                 },
                             );
                         }
@@ -895,6 +921,7 @@ async fn run_browser_flow(
                                         && open_error.is_none(),
                                     open_error,
                                     paste_code: !from_shim,
+                                    needs_code: false,
                                 },
                             );
                         }
@@ -919,13 +946,7 @@ async fn run_browser_flow(
                     // which is now in the transcript. Without that the user gets an exit code
                     // and nothing to act on, which is the same as nothing.
                     let code = status.code().unwrap_or(-1);
-                    // A redacted tail when the output is secret: `setup-token` prints the
-                    // token on its LAST line and `transcript_tail` takes the last three, so the
-                    // ordinary failure path is exactly where a live credential would escape.
                     break Err(match transcript_tail(&transcript.lock()) {
-                        Some(tail) if flow.output_is_secret => {
-                            format!("{} failed: {}", flow.label, redact_secrets(&tail))
-                        }
                         Some(tail) => format!("{} failed: {tail}", flow.label),
                         None => format!("{} failed (exited {code})", flow.label),
                     });
@@ -975,12 +996,77 @@ async fn login_into_root(
     read_account_identity(rt.slug().to_string(), account_id.to_string()).await
 }
 
-/// `setup-token` — §6. **Its output is the credential**, hence `output_is_secret`.
-static MINT_FLOW: BrowserFlow = BrowserFlow {
-    args: &["setup-token"],
-    label: "Token mint",
-    output_is_secret: true,
-};
+/// Mints waiting for their authorization code, so `submit_account_code` can reach one.
+///
+/// Separate from `ACTIVE_LOGINS` because the two hold different things: a sign-in owns a
+/// `std::process::Child` and only ever needs killing, while a mint owns the write end of a PTY
+/// and exists precisely so something can be typed into it.
+static ACTIVE_MINTS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, MintHandle>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+struct MintHandle {
+    /// The PTY master's writer — how the code reaches the TUI.
+    writer: std::sync::Arc<parking_lot::Mutex<Box<dyn std::io::Write + Send>>>,
+    cancelled: bool,
+    /// Set once a code has been typed. A second submit is refused rather than sent: by then the
+    /// TUI has moved on, and a stray line goes to whatever prompt is showing now.
+    code_sent: bool,
+}
+
+/// How wide the mint's PTY is.
+///
+/// **Not cosmetic.** The token is printed by a TUI, and a TUI wraps at the terminal width — a
+/// token broken across two rows has a newline in the middle of it, which is a control character,
+/// which is where `extract_setup_token` stops. It would extract a truncated credential that
+/// looks entirely valid and resolves as nobody. Wide enough that nothing it prints can wrap.
+const MINT_PTY_COLS: u16 = 400;
+
+/// Hand a mint the authorization code the browser showed.
+///
+/// **This is the whole reason the mint runs on a PTY.** `claude setup-token` is not
+/// `claude auth login`: it opens `…/oauth/authorize?code=true` and runs **no localhost callback
+/// server** (verified against 2.1.278 — the live process holds zero listening sockets), so it
+/// cannot complete by itself. It waits for the user to type a code back. And it is an ink TUI:
+/// given piped stdio it prints *nothing at all* — no URL, no prompt, no error — and simply
+/// blocks. The first version of this feature gave it `Stdio::null()`, so it could never finish;
+/// the pane sat on "Minting…" until the deadline killed a child that had emitted zero bytes.
+///
+/// The code is not credential material on its own — it is one half of an exchange that also
+/// needs the PKCE verifier held by the child process — but it is treated as write-only anyway:
+/// never logged, never echoed back.
+#[tauri::command]
+pub async fn submit_account_code(account_id: String, code: String) -> Result<(), String> {
+    let code = code.trim().to_string();
+    if code.is_empty() {
+        return Err("no code to submit".to_string());
+    }
+    // Typed straight at a live TUI's stdin, so anything that is not a single printable line is
+    // refused rather than sanitised. A newline in the middle would submit half of it and leave
+    // the rest to be read as the answer to whatever comes next.
+    if code.len() > 512 || code.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("that does not look like an authorization code".to_string());
+    }
+
+    let writer = {
+        let mut guard = ACTIVE_MINTS.lock();
+        let Some(handle) = guard.get_mut(&account_id) else {
+            return Err("that mint is no longer running".to_string());
+        };
+        if handle.code_sent {
+            return Err("a code has already been submitted for this mint".to_string());
+        }
+        handle.code_sent = true;
+        handle.writer.clone()
+    };
+
+    // `\r`, not `\n`: the child is on a tty in raw mode, where Enter arrives as carriage return.
+    let mut w = writer.lock();
+    w.write_all(code.as_bytes())
+        .and_then(|_| w.write_all(b"\r"))
+        .and_then(|_| w.flush())
+        .map_err(|e| format!("could not hand the code to the mint: {e}"))
+}
 
 /// What the frontend learns about a mint. **Never the token.**
 #[derive(Debug, Clone, Serialize)]
@@ -999,16 +1085,233 @@ pub struct TokenMint {
 /// Scans for the marker rather than taking the last line: the runtime is free to print a
 /// trailing blank line or a "saved nowhere, copy this" hint after it, and betting on position
 /// is how the URL scraper got this wrong before (§5.2.2).
-fn extract_setup_token(transcript: &str) -> Option<accounts::vault::Secret> {
+///
+/// `require_terminated` decides what an unterminated match means. Reading a PTY, a token can be
+/// split across two reads, and the half already in the buffer is a perfectly plausible token —
+/// so while the mint is still streaming, only a match followed by whitespace or a control
+/// character (an ANSI sequence counts) is complete. Once the child has exited nothing more is
+/// coming, and the last thing in the buffer is the whole of what there is.
+fn extract_setup_token(transcript: &str, require_terminated: bool) -> Option<accounts::vault::Secret> {
     let i = transcript.find("sk-ant-oat01-")?;
     let after = &transcript[i..];
-    let end = after
+    let terminator = after
         .char_indices()
         .find(|(_, c)| c.is_whitespace() || c.is_control())
-        .map(|(n, _)| n)
-        .unwrap_or(after.len());
+        .map(|(n, _)| n);
+    if require_terminated && terminator.is_none() {
+        return None;
+    }
     // `Secret::new` trims; the vault validates the shape before it stores anything.
-    Some(accounts::vault::Secret::new(&after[..end]))
+    Some(accounts::vault::Secret::new(&after[..terminator.unwrap_or(after.len())]))
+}
+
+/// Drive `claude setup-token` to completion on a PTY, and hand back the token.
+///
+/// **A PTY, not pipes, and that is forced.** See `submit_account_code` for the measurements: the
+/// command runs no localhost callback, so it cannot complete itself; and it is an ink TUI, so
+/// with piped stdio it writes nothing whatsoever. Both halves of the flow — showing the user a
+/// link, and taking the code back — need a terminal on the other end.
+///
+/// **Everything this reads is credential material.** The token is printed into the same stream
+/// as the rest of the render, so the buffer is never logged, never emitted, and never returned;
+/// only the token comes out, and error text is built from a redacted tail.
+///
+/// The link still comes from the browser shim rather than from the output, for a reason that is
+/// now doubled: the TUI wraps its URL in an OSC 8 hyperlink and splits it across rows, and the
+/// buffer holding it is secret.
+async fn run_mint_on_pty(
+    app: &tauri::AppHandle,
+    rt: Runtime,
+    account_id: &str,
+    timeout_secs: Option<u64>,
+    open_with: Option<String>,
+) -> Result<accounts::vault::Secret, String> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    let profile = rt.profile();
+    let account_id = account_id.to_string();
+    let root = accounts::account_root(rt, &account_id)
+        .ok_or_else(|| "no data directory available".to_string())?;
+    let config_env = profile.config_env.to_string();
+    let scrub: Vec<String> = profile.shadowing_env.iter().map(|s| s.to_string()).collect();
+    let cli = accounts::resolve_cli(profile)
+        .ok_or_else(|| format!("could not find the `{}` command", profile.cli))?;
+    // Longer than a sign-in's: this flow has two human steps in it, not one — approve in the
+    // browser, then find the code and bring it back.
+    let deadline = std::time::Duration::from_secs(timeout_secs.unwrap_or(600).clamp(60, 1800));
+
+    let app = app.clone();
+    let id = account_id.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<accounts::vault::Secret, String> {
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 50, cols: MINT_PTY_COLS, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| format!("could not open a terminal for the mint: {e}"))?;
+
+        let mut cmd = CommandBuilder::new(&cli);
+        cmd.arg("setup-token");
+        cmd.env(&config_env, root.to_string_lossy().to_string());
+        for var in &scrub {
+            cmd.env_remove(var);
+        }
+        // The TUI renders with colour and OSC 8 links either way; saying so plainly beats
+        // letting it guess from an unset TERM.
+        cmd.env("TERM", "xterm-256color");
+
+        // Same shim as the sign-in, and for the same reason: it is how maiTerm learns the real
+        // URL and gets to open it where the user asked. Held for the child's whole life.
+        let suppressor = accounts::browser::suppress_default_browser();
+        if let Some(s) = &suppressor {
+            let mut entries = vec![s.path_entry().to_path_buf()];
+            entries.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            match std::env::join_paths(entries) {
+                Ok(p) => cmd.env("PATH", p),
+                Err(e) => log::warn!("accounts: could not shadow the browser opener: {e}"),
+            }
+        }
+
+        let mut child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| format!("starting the token mint: {e}"))?;
+        // Dropped so the master sees EOF when the child exits; holding it open makes the read
+        // below block forever on a process that has already gone.
+        drop(pair.slave);
+
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| format!("could not read the mint's terminal: {e}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| format!("could not write to the mint's terminal: {e}"))?;
+
+        ACTIVE_MINTS.lock().insert(
+            id.clone(),
+            MintHandle {
+                writer: std::sync::Arc::new(parking_lot::Mutex::new(writer)),
+                cancelled: false,
+                code_sent: false,
+            },
+        );
+
+        let buffer = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
+        {
+            let sink = buffer.clone();
+            let mut reader = reader;
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    sink.lock().push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            });
+        }
+
+        let start = std::time::Instant::now();
+        let mut announced = false;
+        let outcome = loop {
+            if ACTIVE_MINTS.lock().get(&id).map(|h| h.cancelled).unwrap_or(false) {
+                break Err("Token mint cancelled".to_string());
+            }
+
+            // Tell the UI where to send the user, and that a code is coming back. Emitted once,
+            // as soon as the shim fires — or, if it never does, after the grace period, because
+            // the runtime will have opened its own window and the code field is still the only
+            // way this finishes.
+            if !announced {
+                let captured = suppressor
+                    .as_ref()
+                    .and_then(|s| s.captured().as_deref().and_then(|c| extract_login_url(c, false)));
+                let grace_up = start.elapsed() > SHIM_GRACE;
+                if captured.is_some() || grace_up {
+                    announced = true;
+                    let from_shim = captured.is_some();
+                    let url = captured.unwrap_or_default();
+                    // Unlike a sign-in, this link is NOT a dead end when it came from the shim:
+                    // it is the paste-code link, and the code field below is what completes it.
+                    let open_error = if !from_shim {
+                        Some(
+                            "maiTerm could not take over the browser launch, so the agent opened \
+                             its own window — approve there, then bring the code back here."
+                                .to_string(),
+                        )
+                    } else {
+                        match open_with.as_deref() {
+                            Some("default") => accounts::browser::open_default(&url).err(),
+                            Some(id) => accounts::browser::open_private_window(id, &url).err(),
+                            None => None,
+                        }
+                    };
+                    if let Some(e) = &open_error {
+                        log::warn!("accounts: opening the mint link: {e}");
+                    }
+                    let _ = app.emit(
+                        LOGIN_URL_EVENT,
+                        LoginUrlEvent {
+                            account_id: id.clone(),
+                            url,
+                            opened: from_shim && open_with.is_some() && open_error.is_none(),
+                            open_error,
+                            // The mint's link always ends in a code, but maiTerm can take that
+                            // code — so this is not the "cannot complete" case the sign-in uses
+                            // this flag for.
+                            paste_code: false,
+                            needs_code: true,
+                        },
+                    );
+                }
+            }
+
+            // Finished? Two ways, and the token is the one that matters: the TUI can sit on a
+            // final frame after printing it.
+            if let Some(token) = extract_setup_token(&buffer.lock(), true) {
+                break Ok(token);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Nothing more is coming, so an unterminated tail is the whole of it.
+                    break match extract_setup_token(&buffer.lock(), false) {
+                        Some(token) => Ok(token),
+                        None => Err(match transcript_tail(&buffer.lock()) {
+                            Some(tail) => {
+                                format!("Token mint failed: {}", redact_secrets(&tail))
+                            }
+                            None => format!(
+                                "Token mint failed (exited {})",
+                                status.exit_code()
+                            ),
+                        }),
+                    };
+                }
+                Ok(None) => {}
+                Err(e) => break Err(format!("waiting on the token mint: {e}")),
+            }
+
+            if start.elapsed() > deadline {
+                break Err(
+                    "The mint timed out. Approve the link in the browser, then paste the code it \
+                     shows back here."
+                        .to_string(),
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
+
+        // Always, on every path: the TUI does not exit on its own once it has printed the token,
+        // and a leaked one holds a PTY and an open connection for the life of the app. The first
+        // version of this feature left two of them running for days.
+        let _ = child.kill();
+        let _ = child.wait();
+        ACTIVE_MINTS.lock().remove(&id);
+        outcome
+    })
+    .await
+    .map_err(|e| format!("token mint task failed: {e}"))?
 }
 
 /// Ask the runtime who a *token* resolves as, in a config root that holds nothing else.
@@ -1126,15 +1429,7 @@ pub async fn mint_account_token(
         .await
         .map_err(|e| format!("reconcile task failed: {e}"))??;
 
-    let transcript =
-        run_browser_flow(&app, rt, &account_id, timeout_secs, open_with, &MINT_FLOW).await?;
-
-    // From here `transcript` is credential material. It is never logged, never emitted, and
-    // never returned; the only thing taken out of it is the token.
-    let token = extract_setup_token(&transcript).ok_or_else(|| {
-        "the mint finished but printed no token. Nothing was stored.".to_string()
-    })?;
-    drop(transcript);
+    let token = run_mint_on_pty(&app, rt, &account_id, timeout_secs, open_with).await?;
 
     // Step 2: what is this token actually worth?
     let identity = {
