@@ -173,11 +173,22 @@ const RECLAIM_BACKOFF_SECS: &[u64] = &[2, 5, 10];
 /// `start_ssh_tunnel` runs, its own `remove()` returns `None` on every real reconnect: the
 /// entry is not merely stale, it is structurally guaranteed to be gone. A first version of the
 /// reclaim read the entry and was therefore dead code on exactly the path it was written for.
+#[derive(Clone, Copy)]
 struct DroppedTunnel {
     remote_port: u16,
     /// Tabs that were bridged on it — i.e. how many agents the port move would strand.
     tab_count: usize,
+    at: std::time::Instant,
 }
+
+/// How long a breadcrumb stays worth acting on. Generous on purpose: the agents it protects
+/// survive the outage (they sit in the tab's own ssh session, not the tunnel's), and a host can
+/// stay unreachable through several frontend backoff rounds — 36 of them were still running
+/// 15h after the 2026-09-20 drop. It exists only to retire a breadcrumb no reconnect ever came
+/// for, which happens when the tabs are torn down during the outage: the frontend then drops
+/// the host without calling in, and without this a connect days later would pay the backoff and
+/// report tabs stranded that no longer exist.
+const RECLAIM_BREADCRUMB_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 fn dropped_tunnels() -> &'static parking_lot::Mutex<std::collections::HashMap<String, DroppedTunnel>>
 {
@@ -189,16 +200,31 @@ fn dropped_tunnels() -> &'static parking_lot::Mutex<std::collections::HashMap<St
 
 /// Called by the monitor task while it still holds the entry it is about to delete.
 fn note_tunnel_dropped(host_key: &str, remote_port: u16, tab_count: usize) {
-    dropped_tunnels()
-        .lock()
-        .insert(host_key.to_string(), DroppedTunnel { remote_port, tab_count });
+    dropped_tunnels().lock().insert(
+        host_key.to_string(),
+        DroppedTunnel { remote_port, tab_count, at: std::time::Instant::now() },
+    );
 }
 
-/// Consumed by the next connect for that host. Taking rather than reading is the whole
-/// lifecycle: one drop earns one reclaim attempt, and a host that comes back — on the old port
-/// or a new one — starts clean, so a breadcrumb can never make a later unrelated connect wait.
-fn take_dropped_tunnel(host_key: &str) -> Option<DroppedTunnel> {
-    dropped_tunnels().lock().remove(host_key)
+/// Read by a connect that is about to bind. Deliberately a PEEK, not a take.
+///
+/// Consuming it here would hand the reclaim to whichever attempt happened to run first, and an
+/// attempt is not the same thing as a reconnection: `start_ssh_tunnel` can still fail after
+/// this point five ways (spawn, either pipe, the forward result, no bindable port), the
+/// frontend treats all of them as retryable, and the retry 10s later is the one that actually
+/// connects — into the reap window, with no breadcrumb left. That is how the first version of
+/// this got it wrong; `SSH process exited without allocating a port` shows up several times a
+/// week here, so it is the common case, not the corner. It is cleared on SUCCESS instead.
+fn peek_dropped_tunnel(host_key: &str) -> Option<DroppedTunnel> {
+    let dropped = dropped_tunnels().lock().get(host_key).copied()?;
+    (dropped.at.elapsed() < RECLAIM_BREADCRUMB_TTL).then_some(dropped)
+}
+
+/// Cleared once a tunnel is actually up for this host — on the reclaimed port or, having lost
+/// the fight, on another one. Either way the drop it described is now resolved, so a later
+/// unrelated connect starts clean.
+fn clear_dropped_tunnel(host_key: &str) {
+    dropped_tunnels().lock().remove(host_key);
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -510,7 +536,7 @@ pub async fn start_ssh_tunnel(
     // What we lost, if anything. The breadcrumb is the load-bearing source here — see
     // `DroppedTunnel` for why the entry we just removed is almost always absent — but a
     // surviving entry is authoritative when there is one.
-    let dropped = take_dropped_tunnel(&host_key);
+    let dropped = peek_dropped_tunnel(&host_key);
     let lost_port = previous_port.or_else(|| dropped.as_ref().map(|d| d.remote_port));
     let stranded_tabs = if inherited_tab_ids.is_empty() {
         dropped.as_ref().map_or(0, |d| d.tab_count)
@@ -585,6 +611,8 @@ pub async fn start_ssh_tunnel(
         established.ok_or_else(|| "SSH tunnel: no remote port could be bound".to_string())?;
     let pid = child.id().ok_or("Failed to get SSH tunnel PID")?;
     record_remote_port(&host_key, remote_port);
+    // The drop this attempt was answering is now resolved, whichever port we ended on.
+    clear_dropped_tunnel(&host_key);
 
     log::info!("SSH tunnel established: {} → remote port {}", host_key, remote_port);
 
@@ -1452,15 +1480,53 @@ mod tests {
     #[test]
     fn the_dropped_tunnel_breadcrumb_survives_the_entry_it_replaces() {
         let host = "-x -C ews@nova-breadcrumb-test";
-        assert!(take_dropped_tunnel(host).is_none(), "nothing dropped yet");
+        assert!(peek_dropped_tunnel(host).is_none(), "nothing dropped yet");
 
         note_tunnel_dropped(host, 28623, 36);
-        let dropped = take_dropped_tunnel(host).expect("the drop is readable after the entry is gone");
+        let dropped =
+            peek_dropped_tunnel(host).expect("the drop is readable after the entry is gone");
         assert_eq!((dropped.remote_port, dropped.tab_count), (28623, 36));
 
-        // Taken, not read: one drop buys one reclaim, so a later unrelated connect to the same
-        // host never inherits a stale wait.
-        assert!(take_dropped_tunnel(host).is_none(), "consumed by the reconnect that used it");
+        // The bug this shape exists to prevent: an attempt that FAILS must not consume the
+        // reclaim, because the frontend retries and the retry is the one that connects — into
+        // the reap window, which is precisely when the reclaim is needed.
+        assert!(
+            peek_dropped_tunnel(host).is_some(),
+            "a failed attempt leaves the breadcrumb for the retry that follows it"
+        );
+
+        // It is the tunnel actually coming up that resolves the drop.
+        clear_dropped_tunnel(host);
+        assert!(peek_dropped_tunnel(host).is_none(), "cleared once a tunnel is established");
+    }
+
+    /// A breadcrumb nobody ever came back for must not make an unrelated connect days later
+    /// wait, nor let the warning claim tabs were stranded when those tabs are long gone.
+    #[test]
+    fn a_breadcrumb_no_reconnect_claimed_expires() {
+        let host = "-x -C ews@nova-breadcrumb-ttl-test";
+        dropped_tunnels().lock().insert(
+            host.to_string(),
+            DroppedTunnel {
+                remote_port: 28623,
+                tab_count: 5,
+                at: std::time::Instant::now() - (RECLAIM_BREADCRUMB_TTL + std::time::Duration::from_secs(1)),
+            },
+        );
+        assert!(peek_dropped_tunnel(host).is_none(), "past the TTL, it is not acted on");
+
+        // Just inside the window is still live — the outage it describes can outlast several
+        // frontend backoff rounds, and its agents outlive it by hours.
+        dropped_tunnels().lock().insert(
+            host.to_string(),
+            DroppedTunnel {
+                remote_port: 28623,
+                tab_count: 5,
+                at: std::time::Instant::now() - (RECLAIM_BREADCRUMB_TTL - std::time::Duration::from_secs(60)),
+            },
+        );
+        assert!(peek_dropped_tunnel(host).is_some(), "a long outage still earns its reclaim");
+        clear_dropped_tunnel(host);
     }
 
     /// The regression that shipped in v2.1.0: the row parse, not the predicate.
