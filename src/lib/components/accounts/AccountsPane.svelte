@@ -840,10 +840,12 @@
       <code>aiterm-state.json</code>, and never reachable by an agent over MCP.
     </p>
 
-    <h4>This machine only</h4>
+    <h4>SSH hosts</h4>
     <p>
-      Accounts apply to tabs on this computer. Signing SSH hosts in is not built yet; when it is,
-      it will be opt-in per host and explained there, because it carries a tradeoff this does not.
+      An SSH tab runs as the active account only where you have switched that on — per host, or
+      everything. It needs a token of its own, which is minted separately and does not expire for
+      a year; the dialog that mints it explains what that costs. Hosts you have not enabled keep
+      whatever login they already have.
     </p>
   </section>
 </div>
