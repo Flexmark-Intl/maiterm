@@ -436,10 +436,45 @@ fn detect_agent(tab: &Tab, ctx: Option<&TabShareContext>) -> Option<(AgentRuntim
     }
     let rt = tab.runtime?;
     let cmd = tab.auto_resume_command.as_deref()?;
-    if tab.auto_resume_enabled && cmd.split_whitespace().next() == Some(runtime_binary(rt)) {
+    if tab.auto_resume_enabled && command_runtime(cmd) == Some(rt) {
         return Some((rt, "auto-resume starts it"));
     }
     None
+}
+
+/// Which agent a command line starts, reading past the ways people wrap one: `env` and
+/// `VAR=value` prefixes, a full path to the binary, and `npx`/`bunx`/`pnpx` of the package.
+/// A first-word test missed every hand-edited form, and each miss put an agent command in a
+/// tab exported as a plain shell.
+fn command_runtime(cmd: &str) -> Option<AgentRuntime> {
+    let mut words = cmd.split_whitespace().peekable();
+    while let Some(w) = words.peek() {
+        let is_assignment = w.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        if *w == "env" || w.starts_with('-') && *w != "-" || is_assignment {
+            words.next();
+        } else {
+            break;
+        }
+    }
+    let mut word = words.next()?;
+    if matches!(word.rsplit(['/', '\\']).next(), Some("npx" | "bunx" | "pnpx")) {
+        // Skip the runner's own flags (`npx -y @anthropic-ai/claude-code`).
+        word = words.find(|w| !w.starts_with('-'))?;
+        return if word.contains("claude-code") {
+            Some(AgentRuntime::Claude)
+        } else if word.contains("codex") {
+            Some(AgentRuntime::Codex)
+        } else if word.contains("gemini-cli") {
+            Some(AgentRuntime::Gemini)
+        } else {
+            None
+        };
+    }
+    let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    [AgentRuntime::Claude, AgentRuntime::Codex, AgentRuntime::Gemini]
+        .into_iter()
+        .find(|rt| runtime_binary(*rt) == base)
 }
 
 /// Where a terminal tab is, from the frontend's live context, then the persisted chains §2
@@ -643,11 +678,7 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
             // auto-resume command either: on the receiver `claude --resume %claudeSessionId`
             // interpolates to `claude --resume ` and opens the session picker in a tab the
             // sender marked "not an agent".
-            let launches_agent = |c: &str| {
-                let first = c.split_whitespace().next().unwrap_or("");
-                [AgentRuntime::Claude, AgentRuntime::Codex, AgentRuntime::Gemini].iter().any(|rt| runtime_binary(*rt) == first)
-            };
-            let keep_command = |c: &Option<String>| c.clone().filter(|c| agent.is_some() || for_preview || !launches_agent(c));
+            let keep_command = |c: &Option<String>| c.clone().filter(|c| agent.is_some() || for_preview || command_runtime(c).is_none());
             let auto_resume = if is_terminal
                 && (tab.auto_resume_command.is_some() || tab.auto_resume_cwd.is_some() || tab.auto_resume_ssh_command.is_some())
             {
@@ -1144,6 +1175,26 @@ mod tests {
         assert_eq!(remote.agent.as_ref().unwrap().session_id.as_deref(), Some("11111111-aaaa"));
         // The literal id in the command became the variable.
         assert_eq!(remote.auto_resume.as_ref().unwrap().command.as_deref(), Some("claude --resume %claudeSessionId"));
+    }
+
+    #[test]
+    fn agent_commands_are_recognised_through_their_wrappers() {
+        for (cmd, want) in [
+            ("claude --resume %claudeSessionId", Some(AgentRuntime::Claude)),
+            ("CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 claude --resume x", Some(AgentRuntime::Claude)),
+            ("env FOO=1 claude", Some(AgentRuntime::Claude)),
+            ("env -i FOO=1 codex resume x", Some(AgentRuntime::Codex)),
+            ("/opt/homebrew/bin/claude --resume x", Some(AgentRuntime::Claude)),
+            ("npx -y @anthropic-ai/claude-code", Some(AgentRuntime::Claude)),
+            ("npx @openai/codex", Some(AgentRuntime::Codex)),
+            ("C:\\tools\\codex.exe resume x", Some(AgentRuntime::Codex)),
+            ("npm run dev", None),
+            ("claude-monitor", None),
+            ("npx vite", None),
+            ("FOO=bar", None),
+        ] {
+            assert_eq!(command_runtime(cmd), want, "{cmd}");
+        }
     }
 
     #[test]

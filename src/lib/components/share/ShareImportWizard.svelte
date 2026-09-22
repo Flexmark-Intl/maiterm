@@ -176,21 +176,27 @@
    *  `~/proj` first, and the parent's clone then fails on a non-empty directory for good. In
    *  order, the parent lands first and the nested one clones into its (empty) directory. */
   async function startNextClone() {
-    if (cancelled || phase !== 'cloning') return;
-    const next = rows
-      .filter(r => r.verdict?.verdict === 'clone' && r.dest && r.clone === 'idle')
-      .sort((a, b) => a.dest!.length - b.dest!.length)[0];
-    if (!next) { maybeBuild(); return; }
-    // The previous clone may have created this destination (nested repos); re-apply the rule.
-    const v = await checkOne(next, next.dest!);
-    if (cancelled) return;
-    if (v.verdict === 'use') { next.clone = 'done'; await startNextClone(); return; }
-    if (v.verdict === 'reject') {
-      next.clone = 'failed';
-      next.cloneError = `${next.dest}: ${v.reason}`;
+    for (;;) {
+      if (cancelled || phase !== 'cloning') return;
+      const next = rows
+        .filter(r => r.verdict?.verdict === 'clone' && r.dest && r.clone === 'idle')
+        .sort((a, b) => a.dest!.length - b.dest!.length)[0];
+      if (!next) { maybeBuild(); return; }
+      // Claimed before the first await: two callers (a double-clicked Retry's two watchers)
+      // must not both pick the same idle row.
+      next.clone = 'running';
+      // The previous clone may have created this destination (nested repos); re-apply the rule.
+      const v = await checkOne(next, next.dest!);
+      if (cancelled) return;
+      if (v.verdict === 'use') { next.clone = 'done'; continue; }
+      if (v.verdict === 'reject') {
+        next.clone = 'failed';
+        next.cloneError = `${next.dest}: ${v.reason}`;
+        return;
+      }
+      await startClone(next, true);
       return;
     }
-    await startClone(next, true);
   }
 
   async function startClone(row: RootRow, withBranch: boolean) {
@@ -277,8 +283,12 @@
   }
 
   async function retry(row: RootRow) {
+    // Synchronously, before any await: a double-click must start one clone, not two.
+    if (row.clone !== 'failed') return;
+    row.clone = 'running';
     const v = await checkOne(row, row.dest!);
     if (v.verdict === 'reject') {
+      row.clone = 'failed';
       row.cloneError = `${row.dest}: ${v.reason}. Remove it, or cancel and choose another directory.`;
       return;
     }
