@@ -21,7 +21,7 @@ const FAQS = [
   },
   {
     q: 'Can I be signed in to two Claude accounts at once?',
-    a: 'Yes, and Claude Code on its own cannot — it has a single login slot, shared by every terminal you open. maiTerm gives each account its own configuration directory and starts each new tab under whichever account you have made active, so a client\'s account can be working in one tab while your own runs in the next. It still never holds the credential: the agent does its own sign-in, refresh and sign-out, and maiTerm owns only the folder. Off by default, macOS and Linux for now, and it covers tabs on your own machine — SSH hosts keep their own logins.',
+    a: 'Yes, and Claude Code on its own cannot — it has a single login slot, shared by every terminal you open. maiTerm gives each account its own configuration directory and starts each new tab under whichever account you have made active, so a client\'s account can be working in one tab while your own runs in the next. For those local tabs it never holds the credential: the agent does its own sign-in, refresh and sign-out, and maiTerm owns only the folder. SSH tabs can run as the active account too, on hosts you choose — that needs a long-lived token, which maiTerm keeps in your system keychain, so it is opt-in per account. Off by default, macOS and Linux for now.',
   },
   {
     q: 'Which coding agents does it support?',

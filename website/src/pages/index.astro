@@ -197,7 +197,7 @@ const EVERYTHING = [
         back.
       </p>
       <p class="ln-lead">
-        It does that without ever holding your credentials. Each account is a
+        On this computer it does that without ever holding your credentials. Each account is a
         <strong>separate configuration directory</strong>, and the agent signs in to it, refreshes
         it and signs out of it exactly as it always has. maiTerm never reads, writes or parses a
         login, and never touches the keychain entry or credentials file it lives in — it owns the
@@ -232,9 +232,10 @@ const EVERYTHING = [
         </div>
       </div>
       <p class="ln-note accounts-note">
-        Off until you turn it on. macOS and Linux for now, and it applies to tabs on this
-        computer — signing your SSH hosts in is not built yet. Claude Code today; the other
-        runtimes are named as not yet available rather than half-wired.
+        Off until you turn it on. macOS and Linux for now, and Claude Code today; the other
+        runtimes are named as not yet available rather than half-wired. SSH tabs can run as the
+        active account too, on the hosts you choose — the one place maiTerm does hold a token,
+        so it is opt-in per account and the trade-off is spelled out before one is made.
       </p>
       <a class="ln-cta-link" href="/features/accounts/">How accounts work</a>
     </div>
