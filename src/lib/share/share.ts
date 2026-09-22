@@ -7,6 +7,7 @@ import type { ShareAgentLaunch, ShareTabContext } from '$lib/tauri/commands';
 import { cleanSshCommand, getPtyInfo } from '$lib/tauri/commands';
 import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
+import { extractRemoteCwd } from '$lib/stores/workspaces.svelte';
 import { launchCommand } from '$lib/agents/descriptor';
 import { buildForkCommand } from '$lib/agents/resume';
 
@@ -30,7 +31,8 @@ export async function gatherShareContexts(ws: Workspace): Promise<ShareTabContex
             const osc = terminalsStore.getOsc(tab.id);
             const osc7 = osc?.cwd ?? null;
             // An OSC 7 equal to the local cwd is the local shell's, left over from before ssh.
-            remoteCwd = (osc7 && osc7 !== cwd ? osc7 : null) ?? osc?.promptCwd ?? null;
+            // Same chain duplicateWorkspace uses, prompt scan last.
+            remoteCwd = (osc7 && osc7 !== cwd ? osc7 : null) ?? osc?.promptCwd ?? (await extractRemoteCwd(inst.ptyId));
           }
         } catch { /* PTY gone — fall back to the persisted context below */ }
       }

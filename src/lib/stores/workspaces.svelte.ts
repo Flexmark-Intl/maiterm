@@ -36,7 +36,7 @@ const SIDEBAR_DEFAULT_WIDTH = 215;
 // Scan the last few lines for a prompt pattern. Reads Rust's grid, not xterm's
 // buffer: a hidden tab's xterm receives no frames and is frozen at whatever
 // was on screen when it was hidden.
-async function extractRemoteCwd(ptyId: string): Promise<string | null> {
+export async function extractRemoteCwd(ptyId: string): Promise<string | null> {
   const patterns = getCompiledPatterns(preferencesStore.promptPatterns);
   if (patterns.length === 0) return null;
 

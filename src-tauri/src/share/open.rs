@@ -49,7 +49,26 @@ pub fn deliver(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
             }
         }
     }
-    // Bring maiTerm forward — the user just double-clicked something of ours.
+    if let Some(label) = raise(app) {
+        // `emit_to` + a label-targeted listen, never `win.emit` (which broadcasts).
+        let _ = app.emit_to(label.as_str(), EVENT, ());
+    }
+}
+
+/// The single-instance callback: a second launch always raises the running maiTerm — that is
+/// all a Start-menu or launcher click meant — and hands over any share files it named. The
+/// plugin itself focuses nothing, so skipping this on an empty argv made a relaunch a no-op.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn second_launch(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        raise(app);
+    } else {
+        deliver(app, paths);
+    }
+}
+
+/// Unminimize and focus the terminal window the user is most likely looking for; its label.
+fn raise(app: &tauri::AppHandle) -> Option<String> {
     let windows: Vec<_> = app
         .webview_windows()
         .into_iter()
@@ -60,12 +79,10 @@ pub fn deliver(app: &tauri::AppHandle, paths: Vec<PathBuf>) {
         .find(|(_, w)| w.is_focused().unwrap_or(false))
         .or_else(|| windows.iter().find(|(l, _)| l == "main"))
         .or_else(|| windows.first());
-    if let Some((label, win)) = target {
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-        // `emit_to` + a label-targeted listen, never `win.emit` (which broadcasts).
-        let _ = app.emit_to(label.as_str(), EVENT, ());
-    }
+    let (label, win) = target?;
+    let _ = win.unminimize();
+    let _ = win.set_focus();
+    Some(label.clone())
 }
 
 /// Drain the queue. Whoever calls first gets the files; the rest get nothing, so two windows

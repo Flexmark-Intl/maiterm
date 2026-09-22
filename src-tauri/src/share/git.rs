@@ -33,7 +33,7 @@ pub fn toplevel(dir: &Path) -> Option<PathBuf> {
     if top.is_empty() {
         return None;
     }
-    std::fs::canonicalize(&top).ok().or(Some(PathBuf::from(top)))
+    Some(super::canon(Path::new(&top)))
 }
 
 /// name → fetch URL for every remote.
@@ -103,13 +103,22 @@ pub fn normalize_url(url: &str) -> String {
     let s = s.trim_end_matches('/');
     let s = s.strip_suffix(".git").unwrap_or(s);
     let (host, path) = s.split_once('/').unwrap_or((s, ""));
-    format!("{}/{}", host.to_lowercase(), path)
+    let host = host.to_lowercase();
+    // These hosts resolve owner/repo case-insensitively, so `DPrusak/aiTerm` and
+    // `dprusak/aiterm` are one repository. Anywhere else a path may be case-sensitive (a
+    // self-hosted server on a case-sensitive filesystem), so it is left alone.
+    let path = if CASE_INSENSITIVE_HOSTS.contains(&host.as_str()) { path.to_lowercase() } else { path.to_string() };
+    format!("{host}/{path}")
 }
 
+const CASE_INSENSITIVE_HOSTS: &[&str] = &["github.com", "gitlab.com", "bitbucket.org"];
+
 /// The directory name a clone of `url` gets: its last path segment, `.git` stripped.
+/// Read off the URL as written, not its normalized form, which may be lowercased.
 pub fn repo_name(url: &str) -> String {
-    let n = normalize_url(url);
-    n.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("repo").to_string()
+    let s = url.trim().trim_end_matches('/');
+    let s = s.strip_suffix(".git").unwrap_or(s);
+    s.rsplit(['/', ':', '\\']).next().filter(|s| !s.is_empty()).unwrap_or("repo").to_string()
 }
 
 /// Does any of `a` name the same repository as any of `b`? Any-against-any is what keeps a
@@ -159,7 +168,7 @@ pub fn classify_git_dir(dir: &Path, root_remotes: &BTreeMap<String, String>) -> 
     let Some(top) = toplevel(dir) else {
         return DirVerdict::Reject { reason: "it isn't empty and isn't a git repository".to_string() };
     };
-    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let canon = super::canon(dir);
     if top != canon {
         return DirVerdict::Reject {
             reason: format!("it is inside the repository at {}, not its top level", top.display()),
@@ -263,6 +272,8 @@ mod tests {
             assert_eq!(normalize_url(u), want, "{u}");
         }
         assert_eq!(normalize_url("ssh://git@host:2222/org/x.git"), "host/org/x");
+        assert_eq!(normalize_url("git@github.com:ORG/X.git"), want, "GitHub paths ignore case");
+        assert_ne!(normalize_url("git@git.corp:Org/X"), normalize_url("git@git.corp:org/x"), "elsewhere case may matter");
         assert_ne!(normalize_url("git@github.com:org/y.git"), want);
     }
 
@@ -270,6 +281,8 @@ mod tests {
     fn repo_name_is_the_last_segment() {
         assert_eq!(repo_name("git@github.com:org/maiterm.git"), "maiterm");
         assert_eq!(repo_name("https://gitlab.com/a/b/c/"), "c");
+        assert_eq!(repo_name("git@github.com:Org/aiTerm.git"), "aiTerm");
+        assert_eq!(repo_name("git@host:solo.git"), "solo");
     }
 
     #[test]

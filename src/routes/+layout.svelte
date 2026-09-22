@@ -54,7 +54,13 @@
   let { children }: Props = $props();
   let showImportPreview = $state(false);
   /** Shared workspace files waiting for the import wizard, one at a time (docs/workspace-share.md §4). */
-  let shareImportQueue = $state<string[]>([]);
+  /** Each entry gets its own id: the same file opened twice is two imports, and a `{#key}` on
+   *  the path alone would keep the finished wizard up for the second. */
+  let shareImportQueue = $state<{ id: number; path: string }[]>([]);
+  let shareImportSeq = 0;
+  const queueShareImports = (paths: string[]) => {
+    shareImportQueue = [...shareImportQueue, ...paths.map(path => ({ id: ++shareImportSeq, path }))];
+  };
   let importPreview = $state<ImportPreview | null>(null);
   let importFilePath = $state('');
   let showQuickOpen = $state(false);
@@ -585,7 +591,7 @@
     // queued its file before this listener existed (docs/workspace-share.md §7).
     const drainShareOpens = () => {
       commands.takePendingShareOpens()
-        .then(paths => { if (paths.length) shareImportQueue = [...shareImportQueue, ...paths]; })
+        .then(paths => { if (paths.length) queueShareImports(paths); })
         .catch(e => logError(`share: draining opened files failed: ${e}`));
     };
     let unlistenImportWorkspace: (() => void) | undefined;
@@ -595,7 +601,7 @@
           multiple: false,
           filters: [{ name: 'maiTerm Workspace', extensions: [SHARE_EXTENSION] }],
         });
-        if (typeof path === 'string') shareImportQueue = [...shareImportQueue, path];
+        if (typeof path === 'string') queueShareImports([path]);
       } catch (e) {
         logError(`Import shared workspace failed: ${e}`);
       }
@@ -1326,8 +1332,8 @@
   onimported={() => { showImportPreview = false; window.location.reload(); }}
 />
 {#if shareImportQueue.length > 0}
-  {#key shareImportQueue[0]}
-    <ShareImportWizard path={shareImportQueue[0]} onclose={() => { shareImportQueue = shareImportQueue.slice(1); }} />
+  {#key shareImportQueue[0].id}
+    <ShareImportWizard path={shareImportQueue[0].path} onclose={() => { shareImportQueue = shareImportQueue.slice(1); }} />
   {/key}
 {/if}
 <QuickOpen

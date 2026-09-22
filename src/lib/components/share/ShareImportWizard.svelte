@@ -1,6 +1,7 @@
 <script lang="ts">
   // Import a shared workspace (docs/workspace-share.md §4): map every root to a directory here,
   // probe access, clone what's missing in visible tabs, then build the workspace.
+  import { onDestroy } from 'svelte';
   import { open as dialogOpen } from '@tauri-apps/plugin-dialog';
   import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
   import Button from '$lib/components/ui/Button.svelte';
@@ -52,6 +53,11 @@
   $effect(() => {
     requestAnimationFrame(() => modalEl?.focus());
   });
+
+  /** Set when the wizard closes. Clone watchers are async loops that outlive the component;
+   *  without this a Cancel mid-clone still built the workspace when git finished. */
+  let cancelled = false;
+  onDestroy(() => { cancelled = true; });
 
   (async () => {
     try {
@@ -162,9 +168,29 @@
 
   async function startImport() {
     phase = 'cloning';
-    const toClone = rows.filter(r => r.verdict?.verdict === 'clone' && r.dest);
-    for (const row of toClone) await startClone(row, true);
-    maybeBuild();
+    await startNextClone();
+  }
+
+  /** One clone at a time, shallowest destination first. Run together, a repo nested inside
+   *  another (a submodule, `~/proj/sub` beside `~/proj`) makes `git clone … ~/proj/sub` create
+   *  `~/proj` first, and the parent's clone then fails on a non-empty directory for good. In
+   *  order, the parent lands first and the nested one clones into its (empty) directory. */
+  async function startNextClone() {
+    if (cancelled || phase !== 'cloning') return;
+    const next = rows
+      .filter(r => r.verdict?.verdict === 'clone' && r.dest && r.clone === 'idle')
+      .sort((a, b) => a.dest!.length - b.dest!.length)[0];
+    if (!next) { maybeBuild(); return; }
+    // The previous clone may have created this destination (nested repos); re-apply the rule.
+    const v = await checkOne(next, next.dest!);
+    if (cancelled) return;
+    if (v.verdict === 'use') { next.clone = 'done'; await startNextClone(); return; }
+    if (v.verdict === 'reject') {
+      next.clone = 'failed';
+      next.cloneError = `${next.dest}: ${v.reason}`;
+      return;
+    }
+    await startClone(next, true);
   }
 
   async function startClone(row: RootRow, withBranch: boolean) {
@@ -207,8 +233,9 @@
     const started = Date.now();
     let sawBusy = false;
     let unknownPolls = 0;
-    while (row.clone === 'running') {
+    while (row.clone === 'running' && !cancelled) {
       await new Promise(r => setTimeout(r, 1000));
+      if (cancelled) return;
       const inst = row.cloneTab ? terminalsStore.get(row.cloneTab.tabId) : undefined;
       if (!inst) {
         if (Date.now() - started > 15_000) { row.clone = 'failed'; row.cloneError = 'The clone tab was closed'; }
@@ -225,7 +252,7 @@
       if (!sawBusy && Date.now() - started < 6_000) continue;
       await finishClone(row);
     }
-    maybeBuild();
+    if (row.clone === 'done') await startNextClone();
   }
 
   async function finishClone(row: RootRow) {
@@ -245,7 +272,8 @@
   async function markManualDone(row: RootRow) {
     row.clone = 'running';
     await finishClone(row);
-    maybeBuild();
+    // finishClone moved it on; TS still sees the 'running' it narrowed to above.
+    if ((row.clone as CloneState) === 'done') await startNextClone();
   }
 
   async function retry(row: RootRow) {
@@ -261,7 +289,8 @@
   // ── Build (§4 step 3) ──────────────────────────────────────────────────────────
 
   function maybeBuild() {
-    if (phase !== 'cloning') return;
+    // A cancelled wizard is gone; an import finishing behind it would appear from nowhere.
+    if (cancelled || phase !== 'cloning') return;
     const pending = rows.filter(r => r.verdict?.verdict === 'clone' && r.clone !== 'done');
     if (pending.length === 0) build();
   }
@@ -367,7 +396,8 @@
                 {/if}
                 {#if phase === 'cloning' && r.verdict?.verdict === 'clone'}
                   <div class="sub">
-                    {#if r.clone === 'running'}<span class="dim">Cloning… (see its tab)</span>
+                    {#if r.clone === 'idle'}<span class="dim">Waiting for the clone before it…</span>
+                    {:else if r.clone === 'running'}<span class="dim">Cloning… (see its tab)</span>
                     {:else if r.clone === 'done'}<span class="ok">Cloned</span>
                     {:else if r.clone === 'manual'}
                       <span class="dim">maiTerm can't tell when the clone finishes here.</span>

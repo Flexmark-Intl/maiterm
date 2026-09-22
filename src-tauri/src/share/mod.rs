@@ -247,9 +247,25 @@ pub fn parse(text: &str) -> Result<ShareFile, String> {
 
 // ── Paths ────────────────────────────────────────────────────────────────────────────────
 
+/// `canonicalize`, minus Windows' verbatim prefix. On Windows it returns `\\?\C:\Users\bob`,
+/// which then lands in a typed `git clone` destination and every spawn cwd — and cmd.exe
+/// refuses a `\\?\` current directory outright. A UNC share (`\\?\UNC\…`) keeps it: there the
+/// prefix is load-bearing. Falls back to the input when the path doesn't exist.
+pub fn canon(p: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    strip_verbatim(c)
+}
+
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => p,
+    }
+}
+
 fn home() -> Option<PathBuf> {
-    let h = dirs::home_dir()?;
-    Some(std::fs::canonicalize(&h).unwrap_or(h))
+    Some(canon(&dirs::home_dir()?))
 }
 
 pub fn expand_tilde(path: &str) -> PathBuf {
@@ -359,7 +375,7 @@ impl RootTable {
     /// Where `dir` lives, as root + subpath. Git: the repo top level. Anything else: the
     /// directory itself, as a plain root.
     fn locate_dir(&mut self, dir: &Path) -> Loc {
-        let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let canon = canon(dir);
         let top = if canon.is_dir() { git::toplevel(&canon) } else { None };
         let (root_dir, kind) = match &top {
             Some(t) => (t.clone(), RootKind::Git),
@@ -402,7 +418,7 @@ impl RootTable {
     }
 
     fn locate_file(&mut self, file: &Path) -> Loc {
-        let canon = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        let canon = canon(file);
         let parent = canon.parent().map(Path::to_path_buf).unwrap_or_else(|| canon.clone());
         let mut loc = self.locate_dir(&parent);
         let name = canon.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -435,11 +451,15 @@ fn tab_place(tab: &Tab, ctx: Option<&TabShareContext>) -> (Option<String>, Optio
             .or(tab.restore_ssh_command.as_deref()),
     );
     if ssh.is_some() {
+        // NOT `last_cwd`: it is written from `osc.cwd ?? promptCwd`, and on a remote with no
+        // OSC 7 `osc.cwd` is still the LOCAL shell's — a sender path that makes the receiver's
+        // `cd … && exec $SHELL` fail and ssh exit. No remote cwd lands in the login directory,
+        // which is at least a working shell. The frontend's context applies the same
+        // stale-OSC-7 test the duplicate paths do.
         let remote = ctx
             .and_then(|c| c.remote_cwd.clone())
             .or_else(|| tab.auto_resume_remote_cwd.clone())
-            .or_else(|| tab.restore_remote_cwd.clone())
-            .or_else(|| tab.last_cwd.clone());
+            .or_else(|| tab.restore_remote_cwd.clone());
         return (ssh, remote, None);
     }
     let local = ctx
@@ -619,6 +639,15 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
                     session_id: if is_remote { session_of(rt) } else { None },
                 });
 
+            // A tab the sender did NOT export as an agent must not start one through its
+            // auto-resume command either: on the receiver `claude --resume %claudeSessionId`
+            // interpolates to `claude --resume ` and opens the session picker in a tab the
+            // sender marked "not an agent".
+            let launches_agent = |c: &str| {
+                let first = c.split_whitespace().next().unwrap_or("");
+                [AgentRuntime::Claude, AgentRuntime::Codex, AgentRuntime::Gemini].iter().any(|rt| runtime_binary(*rt) == first)
+            };
+            let keep_command = |c: &Option<String>| c.clone().filter(|c| agent.is_some() || for_preview || !launches_agent(c));
             let auto_resume = if is_terminal
                 && (tab.auto_resume_command.is_some() || tab.auto_resume_cwd.is_some() || tab.auto_resume_ssh_command.is_some())
             {
@@ -641,8 +670,8 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
                 Some(SharedAutoResume {
                     enabled: tab.auto_resume_enabled,
                     pinned: tab.auto_resume_pinned,
-                    command: scrub(&tab.auto_resume_command),
-                    remembered_command: scrub(&tab.auto_resume_remembered_command),
+                    command: keep_command(&scrub(&tab.auto_resume_command)),
+                    remembered_command: keep_command(&scrub(&tab.auto_resume_remembered_command)),
                 })
             } else {
                 None
@@ -1091,7 +1120,7 @@ mod tests {
         t.last_cwd = Some(std::env::temp_dir().to_string_lossy().to_string());
         let mut remote = Tab::new("nova".to_string());
         remote.restore_ssh_command = Some("ews@nova".to_string());
-        remote.last_cwd = Some("/home/ews/app".to_string());
+        remote.restore_remote_cwd = Some("/home/ews/app".to_string());
         remote.runtime = Some(AgentRuntime::Claude);
         remote.trigger_variables.insert("claudeSessionId".to_string(), "11111111-aaaa".to_string());
         remote.auto_resume_ssh_command = Some("ews@nova".to_string());
@@ -1115,6 +1144,33 @@ mod tests {
         assert_eq!(remote.agent.as_ref().unwrap().session_id.as_deref(), Some("11111111-aaaa"));
         // The literal id in the command became the variable.
         assert_eq!(remote.auto_resume.as_ref().unwrap().command.as_deref(), Some("claude --resume %claudeSessionId"));
+    }
+
+    #[test]
+    fn windows_verbatim_prefix_is_dropped_but_unc_keeps_it() {
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\C:\Users\bob")), PathBuf::from(r"C:\Users\bob"));
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\UNC\srv\share")), PathBuf::from(r"\\?\UNC\srv\share"));
+        assert_eq!(strip_verbatim(PathBuf::from("/Users/bob")), PathBuf::from("/Users/bob"));
+    }
+
+    #[test]
+    fn an_unticked_agent_tab_carries_no_agent_command() {
+        let ws = sample_ws();
+        let file = export_file(&ws, &[], &ExportOptions::default());
+        let remote = &file.workspace.panes[0].tabs[1];
+        assert!(remote.agent.is_none());
+        let ar = remote.auto_resume.as_ref().expect("the ssh context still travels");
+        assert_eq!(ar.command, None, "`claude --resume` would open a picker in a plain-shell tab");
+    }
+
+    #[test]
+    fn a_remote_cwd_never_falls_back_to_last_cwd() {
+        let mut ws = sample_ws();
+        // last_cwd is the stale LOCAL OSC 7 on a remote without shell integration.
+        ws.panes[0].tabs[1].last_cwd = Some("/Users/sender/proj".to_string());
+        ws.panes[0].tabs[1].restore_remote_cwd = None; // suspend nulls it
+        let file = export_file(&ws, &[], &ExportOptions::default());
+        assert_eq!(file.workspace.panes[0].tabs[1].kind, SharedTabKind::Remote { ssh_command: "ews@nova".to_string(), remote_cwd: None });
     }
 
     #[test]

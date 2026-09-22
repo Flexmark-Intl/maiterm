@@ -216,7 +216,7 @@ pub fn run() {
     // LaunchServices already keeps one instance and delivers files as `RunEvent::Opened`.
     #[cfg(all(not(target_os = "macos"), not(debug_assertions)))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-        share::open::deliver(app, share::open::paths_from_args(&argv, Some(std::path::Path::new(&cwd))));
+        share::open::second_launch(app, share::open::paths_from_args(&argv, Some(std::path::Path::new(&cwd))));
     }));
 
     let builder = builder
