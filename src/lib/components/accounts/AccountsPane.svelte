@@ -1288,10 +1288,20 @@
 
   .remote-hint {
     color: var(--fg-dim);
-    flex: 1 1 12rem;
     font-size: 0.75rem;
     line-height: 1.4;
     margin: 0;
+  }
+
+  /* Grows only inside a row. `.remote` is a COLUMN, so the same basis there is a HEIGHT —
+     12rem of empty box under a one-line hint. */
+  .remote-row .remote-hint {
+    flex: 1 1 12rem;
+  }
+
+  /* A ghost button's padding put its label 10px in from the edge every switch sits on. */
+  .remote-row :global(.btn.ghost) {
+    margin-right: -10px;
   }
 
   .token-line {
