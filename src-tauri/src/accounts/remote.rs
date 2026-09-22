@@ -76,6 +76,14 @@ pub fn stage_script(tab_id: &str) -> Option<String> {
     ))
 }
 
+/// The only plan values Claude Code understands, and the only ones we will write into a file
+/// that a remote shell **sources**.
+///
+/// A whitelist rather than an escape: the contents are executed, not read, so the safe move is to
+/// refuse anything unrecognised outright. These four are exactly what the runtime maps
+/// `organization_type` onto (`claude_max` → `max`, and so on).
+const KNOWN_PLANS: [&str; 4] = ["max", "pro", "team", "enterprise"];
+
 /// What goes into the handoff file: a shell snippet, not the bare token.
 ///
 /// The file is *sourced* rather than read, and that indirection is what keeps the fragment below
@@ -84,11 +92,31 @@ pub fn stage_script(tab_id: &str) -> Option<String> {
 /// The token is single-quoted and the quote-escape applied anyway. A `setup-token` is
 /// `sk-ant-oat01-` plus URL-safe base64 and `Secret::looks_like_setup_token` refuses whitespace,
 /// so there is nothing here to escape today; this is for the day the format moves.
-pub fn stage_contents(token: &str) -> String {
-    format!(
+///
+/// **`CLAUDE_CODE_SUBSCRIPTION_TYPE` rides along, and it is not cosmetic.** With only a token in
+/// the environment the runtime has no idea what plan the account is on: the credential it builds
+/// hardcodes `subscriptionType: env.CLAUDE_CODE_SUBSCRIPTION_TYPE || null`, and the
+/// `/api/oauth/profile` call that would otherwise fill it in is gated on a `user:profile` scope
+/// that a `setup-token` does not have (§8 — it is `user:inference` only). That one null decides
+/// **which model actually serves the request**, not just how the `/model` list is drawn: a Max
+/// account that resolves Opus locally resolves *Sonnet* on a token-authed remote, including for a
+/// non-interactive `claude -p`. Observed on the first working §6 session, then confirmed against
+/// the 2.1.278 bundle.
+///
+/// So the plan we already recorded at sign-in is passed through, and the remote behaves like the
+/// account it is. This is a **client-side hint only** — the server decides entitlement — so the
+/// worst a stale value can do is offer a model the account no longer has, which fails loudly
+/// instead of silently downgrading. Claude Code sets this variable on its own child sessions the
+/// same way.
+pub fn stage_contents(token: &str, plan: Option<&str>) -> String {
+    let mut out = format!(
         "export CLAUDE_CODE_OAUTH_TOKEN='{}'\n",
         token.replace('\'', r"'\''")
-    )
+    );
+    if let Some(plan) = plan.map(str::trim).filter(|p| KNOWN_PLANS.contains(p)) {
+        out.push_str(&format!("export CLAUDE_CODE_SUBSCRIPTION_TYPE='{plan}'\n"));
+    }
+    out
 }
 
 /// The fragment the remote shell runs to pick the token up. Safe to put on a command line: it
@@ -171,12 +199,32 @@ mod tests {
     #[test]
     fn the_staged_contents_are_a_shell_snippet_with_the_token_quoted() {
         assert_eq!(
-            stage_contents("sk-ant-oat01-abc"),
+            stage_contents("sk-ant-oat01-abc", None),
             "export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-abc'\n"
         );
         // Nothing can close the quoting from inside the file either.
-        let escaped = stage_contents("a'b");
+        let escaped = stage_contents("a'b", None);
         assert_eq!(escaped, "export CLAUDE_CODE_OAUTH_TOKEN='a'\\''b'\n");
+    }
+
+    /// Without this the remote cannot tell what the account is entitled to and resolves a
+    /// different model than the same account does locally — silently, and for `claude -p` too.
+    #[test]
+    fn a_known_plan_rides_along_and_anything_else_is_refused() {
+        assert!(stage_contents("t", Some("max"))
+            .contains("export CLAUDE_CODE_SUBSCRIPTION_TYPE='max'"));
+        assert!(stage_contents("t", Some(" pro "))
+            .contains("export CLAUDE_CODE_SUBSCRIPTION_TYPE='pro'"));
+        // A whitelist, not an escape: this file is SOURCED by the remote shell, so an
+        // unrecognised value is dropped rather than quoted around.
+        for bad in ["", "max; rm -rf ~", "'", "Max", "ultra"] {
+            let out = stage_contents("t", Some(bad));
+            assert!(
+                !out.contains("SUBSCRIPTION_TYPE"),
+                "must not write {bad:?} into a sourced file: {out}"
+            );
+        }
+        assert!(!stage_contents("t", None).contains("SUBSCRIPTION_TYPE"));
     }
 
     /// The fragment is spliced into `ssh host '<fragment>…'`. One apostrophe in it and the rest

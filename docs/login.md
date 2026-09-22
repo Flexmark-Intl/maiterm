@@ -754,6 +754,42 @@ connectors on remote hosts is acceptable — desirable, even — but it must be 
 in the setup modal (§10) rather than discovered. A user who wants those features should not
 enable remote propagation.
 
+### 8.1 The plan is invisible to a token, and that changes which model answers
+
+> **Found by using it.** The first working §6 session came up with `/model` defaulting to
+> **Sonnet** and the list in an unfamiliar order, on a **Max** account. Confirmed against the
+> 2.1.278 bundle: this is not cosmetic, and `claude -p` resolves through the same path.
+
+The runtime builds its credential from the environment when `CLAUDE_CODE_OAUTH_TOKEN` is set, and
+hardcodes `subscriptionType: env.CLAUDE_CODE_SUBSCRIPTION_TYPE || null`. The
+`/api/oauth/profile` call that would otherwise fill the plan in is gated on a `user:profile`
+scope a `setup-token` does not have — so **the plan is genuinely unknown**, which is also why
+`auth status --json` reports no `subscriptionType` for `authMethod: "oauth_token"` (§2.4).
+
+One null decides both the default model and the picker's ordering, through the same predicate:
+
+| | interactive `/login` (Max) | `CLAUDE_CODE_OAUTH_TOKEN`, plan unset |
+|---|---|---|
+| plan seen by the client | `max` | `null` |
+| default model | Opus (1M context) | **Sonnet** |
+| picker order | Default, Opus (1M), Sonnet, … | Default, Sonnet, …, Opus |
+
+> **Decision: pass the plan we already recorded.** maiTerm stores `plan` on the account at
+> sign-in — where the runtime *can* report it, because that root holds a full `/login` — so the
+> handoff file carries `CLAUDE_CODE_SUBSCRIPTION_TYPE` beside the token and the remote behaves
+> like the account it is. Claude Code sets the same variable on its own child sessions.
+>
+> **A client-side hint only.** The server decides entitlement, so a stale value cannot grant
+> anything: the worst case is offering a model the account no longer has, which fails loudly
+> rather than downgrading in silence. That direction is the right one for this feature.
+>
+> The value is **whitelisted, not escaped** (`max`/`pro`/`team`/`enterprise`). The handoff file
+> is *sourced* by the remote shell, so anything unrecognised is dropped rather than quoted.
+>
+> Not carried: `CLAUDE_CODE_RATE_LIMIT_TIER`, which `auth status` never reports, so maiTerm has
+> no honest value for it. It only matters for the Team 5x and enterprise-usage-based branches;
+> Max, Pro and plain Enterprise resolve correctly without it.
+
 Note the asymmetry: §5 local identities are full `/login` credentials and lose nothing.
 Only §6 remote propagation is scoped down.
 

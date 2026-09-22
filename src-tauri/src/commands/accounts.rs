@@ -1767,10 +1767,12 @@ pub async fn prepare_remote_account_token(
     // that makes the bridge and a tab's replay agree on what host they are talking about.
     let target = crate::commands::ssh_tunnel::port_book_key(ssh_args.trim_start_matches("ssh "));
 
-    let (account_id, label) = {
+    let (account_id, label, plan) = {
         let prefs = &state.app_data.read().preferences;
         match accounts::remote_account_for_host(prefs, &target) {
-            Some(a) => (a.id.clone(), a.label.clone()),
+            // The plan goes with the token: without it the remote cannot tell what the account is
+            // entitled to and silently resolves a different model. See `stage_contents`.
+            Some(a) => (a.id.clone(), a.label.clone(), a.plan.clone()),
             None => return Ok(RemoteTokenPrep::not_applicable()),
         }
     };
@@ -1830,7 +1832,7 @@ pub async fn prepare_remote_account_token(
 
     let script = accounts::remote::stage_script(&tab_id)
         .ok_or_else(|| "unusable tab id".to_string())?;
-    let contents = accounts::remote::stage_contents(token.expose());
+    let contents = accounts::remote::stage_contents(token.expose(), plan.as_deref());
     if let Err(e) = run_ssh(&ssh_args, &script, Some(&contents)).await {
         log::warn!("accounts: could not place the token on {target}: {e}");
         return Ok(RemoteTokenPrep {
