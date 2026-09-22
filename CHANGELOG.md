@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.6.0
+
+Be more than one Claude account at once, and hand a whole workspace to someone else.
+
+### Agent accounts
+
+Claude Code has one login slot. maiTerm can now hold several, in **Preferences → Accounts**.
+
+- **Every tab starts under the account you've made active.** Pick your client's account and open a tab, pick your own and open the next — both run side by side. Off until you set it up. Tested on macOS; on Linux it's new and untested, and it isn't on Windows yet.
+- **maiTerm never holds the login.** Each account is its own config directory, and Claude Code signs in, refreshes and signs out of it itself. Your hooks, skills, permissions and MCP servers are shared into every account, so a tab behaves the same whichever one it runs as.
+- **A second sign-in doesn't hand you back the first.** Your browser is still signed in, so the sign-in opens in a private window — or copies the link for you, on a Safari-only Mac.
+- **Verify tells you who is really answering.** A stray `ANTHROPIC_API_KEY` outranks a login and still looks signed in; Verify reports the identity that actually resolved.
+- **Switching doesn't move tabs already running.** maiTerm says so, and offers to reload them — everything, one window, or one workspace.
+- **SSH hosts, if you want them.** An account can mint a long-lived token that maiTerm hands to your SSH tabs — on every host, or the ones you name — so a remote agent runs as that account too. Those sessions can't use Remote Control or claude.ai connectors.
+
+### Share a workspace
+
+- **Right-click a workspace → Share workspace…** writes a `.maiterm-workspace` file: its layout, tabs, repos and services. Never your scrollback, sessions or preferences, and a service's environment values only if you tick them.
+- **Open it on another machine** — File → Import Shared Workspace…, or double-click the file — and maiTerm clones the repos that are missing, rebuilds the tabs and relaunches the agent tabs. New, so try it on something small first.
+
+### Five light themes
+
+Tokyo Night Day, Catppuccin Latte, Gruvbox Light, One Light and GitHub Light.
+
+### Fixes
+
+- **Agents on an SSH host survive the laptop sleeping.** A dropped link could reconnect on a different port, and every agent already running on that host lost maiTerm — its tools all answered "Unable to connect". The reconnect now reclaims the port it had.
+- **Overlord no longer types `/maiterm init` into your tabs.** Agents bind themselves now. If you'd edited that rule, your copy is kept as your own.
+- **A duplicated workspace's services no longer share status and restart timers with the originals.**
+
 ## v2.5.0
 
 Your services now tell maiTerm where they are, and maiTerm listens.
