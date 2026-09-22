@@ -144,8 +144,14 @@ A directory matches a root when:
 2. **any** of its remotes, normalised, equals **any** of the root's recorded remotes.
 
 Normalisation: strip `.git`, trailing `/`, `user@` and scheme; `host:path` → `host/path`;
-lowercase the host. So `git@github.com:org/x.git` ≡ `https://github.com/org/x`. "Any against
-any" is what keeps a fork (`origin` = fork, `upstream` = ours) valid.
+lowercase the host — and the path too on github.com, gitlab.com and bitbucket.org, which
+resolve owner/repo case-insensitively (elsewhere a path may be case-sensitive, so it's kept).
+So `git@github.com:Org/X.git` ≡ `https://github.com/org/x`. "Any against any" is what keeps a
+fork (`origin` = fork, `upstream` = ours) valid.
+
+Nested roots (a repo inside another's directory) clone **one at a time, shallowest first**,
+each destination re-checked just before its clone: in parallel, the child's clone creates the
+parent's directory and the parent's then fails on a non-empty directory.
 
 ## 5. Agent tabs
 
