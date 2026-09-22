@@ -1,6 +1,13 @@
 # Workspace Share
 
-Status: **spec, not built** (2026-09-22).
+Status: **built 2026-09-22** — backend `src-tauri/src/share/`, frontend `src/lib/share/` +
+`src/lib/components/share/`. Proven in dev: export, OS-open (via the dev-only
+`share_debug_open`), clone in a visible tab, build, local agent launch, service env fill-in.
+**Not yet proven:** a remote fork and its fallback on a real host, Codex fork, and OS
+file-open from a bundled build on each platform (dev builds never register the extension).
+
+Entry points: right-click a workspace → **Share workspace…**; File › **Import Shared
+Workspace…**; or open a `.maiterm-workspace` from the OS.
 
 A workspace exported so that **another user, on another computer**, can bootstrap it: the
 same tabs, in the same repos, with the same stack, cloning whatever they do not have yet.
@@ -69,12 +76,12 @@ Warnings, not blocks.
 **Service `env`.** `Service.env` often holds tokens, and the file's principle is structure,
 not identity. Variable **names** always travel; **values** are the sender's choice — all,
 some or none — via a per-variable checkbox with an all/none toggle per service, every value
-unticked by default. On import, a service with a dropped value asks for it before its
-first start. Output: `<workspace-name>.maiterm-workspace` (§6).
+unticked by default. The import wizard asks for every dropped value before the workspace is
+built; one left blank is stored empty. Output: `<workspace-name>.maiterm-workspace` (§6).
 
 ## 4. Import wizard
 
-Entry points: opening a `.maiterm-workspace` file from the OS (§7), or File › Import Workspace….
+Entry points: opening a `.maiterm-workspace` file from the OS (§7), or File › Import Shared Workspace….
 
 **Step 1 — resolve roots.** For each root, expand `~` and check the recorded path:
 
@@ -112,8 +119,17 @@ step 1, before anything is created. It runs non-interactively (`GIT_TERMINAL_PRO
 **Step 2 — clone.** Clones run in a **visible terminal tab**, one per root, never a hidden
 subprocess: a clone can ask for an SSH passphrase, a 2FA touch, or host-key trust, and a
 hidden one just hangs. `git clone --branch <recorded>`; if the branch does not exist on the
-remote, fall back to the default branch and say so. The wizard waits on each clone's exit
-status; a failure leaves that root unmapped with a retry.
+remote, fall back to the default branch and say so. The clone tab opens in the importing
+window's active pane, in the BACKGROUND — and a background tab has no TerminalPane until
+something mounts it, so the wizard dispatches `activate-tab` for it (and for every imported
+agent tab, which would otherwise wait unlaunched behind its pane's active tab).
+
+"Done" is not an exit code: the tab is a shell, and the wizard watches `get_pty_foreground_job`
+for the shell to go busy and come back to its prompt, then re-applies the rule to the
+destination — it must now **match**. (The rule alone can't say "done": a clone in progress
+already has `.git` and the remote.) Where the platform can't report the foreground job, the
+row asks the human to say "It's finished". A failure keeps the tab open, showing git's own
+error, with a retry that drops `--branch`.
 
 **Step 3 — build.** Workspace inserted after the active one in the window the import was
 started from (the OS-open path: the focused window). Tabs open at `mapped_root/subpath`. If a
@@ -157,11 +173,14 @@ unticked.
   `No conversation found with session ID: <id>` and exits 1 (Claude Code 2.1.280; Codex's
   equivalent is unverified).
 
-  **Detection is new work** — nothing in the codebase watches for this today. The fork is typed
-  into a visible shell, so the signal is the agent returning to the shell prompt (OSC 133) with
-  a non-zero status within a few seconds of launch; the message text is a secondary check,
-  never the only one. On failure the tab gets a fresh agent in the remote cwd with a note; it
-  never leaves a dead tab.
+  **Detection is an output match that names the session id** (`launchFallback`,
+  `src/lib/share/share.ts`), scanned for 60s after the fork is typed. Exit status was the plan,
+  but the fork runs in a REMOTE shell, and a remote shell emits OSC 133 only if the user
+  installed shell integration there — so it is not a signal maiTerm can count on. The message
+  alone is unsafe too: a forked session replays its transcript, and a transcript about this
+  very feature contains "No conversation found". Requiring the id in the same line closes that
+  (the echo of the typed command itself doesn't match — tested). On a match the tab gets a
+  fresh agent in the remote cwd; it never leaves a dead tab.
 
 The session id travels in the file for remote tabs only, extracted on its own: the rest of
 `trigger_variables` never travels. It is not a credential, but it names a conversation on a
@@ -203,7 +222,7 @@ maiTerm registers `.maiterm-workspace` in Tauri's `bundle.fileAssociations`
   the deb would not associate the file. The deb must also install its own
   `/usr/share/mime/packages/maiterm.xml` and run `update-mime-database` in postinst. The
   AppImage (the updater artifact, so every self-updating Linux user) does not register at
-  all: those users get File › Import Workspace…, documented rather than worked around. No rpm
+  all: those users get File › Import Shared Workspace…, documented rather than worked around. No rpm
   is shipped.
 
 Delivery differs per OS, and each needs code:
