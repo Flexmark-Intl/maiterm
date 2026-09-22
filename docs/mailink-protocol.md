@@ -2027,7 +2027,7 @@ unconditionally and let the status code decide.
 not a promise that nothing else is missing — and on a client where a render throw is unrecoverable,
 optional-with-a-fallback costs less than being right.
 
-## 14. v0.10 — Which account a chat is running as (DRAFT, 2026-09-22)
+## 14. v0.10 — Which account a chat is running as (shipped desktop-side 2026-09-22)
 
 The desktop can hold several Claude logins (`docs/login.md`). One account per runtime is
 *active*, a tab reads it **when its shell spawns**, and keeps it until it respawns — so two chats
@@ -2092,12 +2092,17 @@ type ChatAccount =
 account?: ChatAccount | null;   // absent = pre-0.10 desktop; null = known unmanaged
 ```
 
+**Which tabs count as SSH.** A tab whose PTY's foreground process is `ssh`/`mosh`, or that holds a
+bridge tunnel — not the tunnel alone, which a typed `ssh` with the bridge off never gets and would
+then be served the LOCAL shell's account. An SSH tab that never went through the handoff is
+`{ known: false }`.
+
 ### 14.3 Routes
 
 | Route | Answer |
 |---|---|
 | `GET /accounts` | `AccountsSnapshot` |
-| WS `accounts` | `AccountsSnapshot`, full replace, on any change to the list, the active ids, or `enabled` |
+| WS `accounts` | `{ type: "accounts", accounts: AccountsSnapshot, ts }`, full replace — sent on the first tick of every socket and on any change to the list, the active ids, or `enabled` |
 | `POST /accounts/active` `{ runtime, accountId }` | §13.4 `{ accepted, confirmed, result?, reason? }` |
 | `GET /models?tab=<tabId>` | `ModelOption[]` read from **that tab's** account (see 14.4). Without `tab`, the machine default as before |
 
@@ -2122,8 +2127,11 @@ result: { tabsStillOnPrevious: number }   // live tabs whose account is now `sta
 didn't push would leave it wrong in exactly the moments after the switch.
 
 Refusals (`accepted: false, confirmed: true`): `reason: 'disabled'` (feature off), `'unknown_account'`,
-`'runtime_mismatch'`. It is run by the desktop window that owns preferences, through the same
-webview round trip as the Overlord actions, so the desktop's own UI updates with it.
+`'runtime_mismatch'`, `'not_saved'` (the state file refused the write). **Run in Rust, not through the
+webview** — it is a preference write, which Rust performs directly (as MCP `setPreference` does) and
+broadcasts to every window. So `confirmed` is always `true`: a sleeping desktop screen cannot leave a
+switch "sent, not confirmed". The desktop's own switch dialog (with its reload offer) does not appear
+for a phone-initiated switch.
 
 ### 14.4 Why `/models` changed
 

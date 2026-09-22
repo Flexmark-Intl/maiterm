@@ -144,7 +144,11 @@ const BUILTIN: [(&str, &str, &str); 5] = [
 /// it. The label ages instead, which is the recoverable direction.
 fn from_account_cache() -> Vec<ModelOption> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
-    let Ok(raw) = std::fs::read(home.join(".claude.json")) else { return Vec::new() };
+    from_file(&home.join(".claude.json"))
+}
+
+fn from_file(path: &std::path::Path) -> Vec<ModelOption> {
+    let Ok(raw) = std::fs::read(path) else { return Vec::new() };
     let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&raw) else { return Vec::new() };
     entries_from(&doc)
 }
@@ -227,6 +231,25 @@ fn merge(account: Vec<ModelOption>) -> Vec<ModelOption> {
 /// Everything this machine can switch a Claude tab to.
 pub fn available() -> Vec<ModelOption> {
     merge(from_account_cache())
+}
+
+/// Whose `additionalModelOptionsCache` a list may be built from (maiLink §14.4).
+pub enum Cache {
+    /// `~/.claude.json` — right only when that file IS the tab's login (an unmanaged tab).
+    Home,
+    /// A managed account's own root.
+    At(std::path::PathBuf),
+    /// Not known whose cache would apply (an unknown or remote tab): builtins only. Never an
+    /// empty list — to the phone `[]` means a desktop that predates `/models`.
+    None,
+}
+
+pub fn available_from(cache: Cache) -> Vec<ModelOption> {
+    merge(match cache {
+        Cache::Home => from_account_cache(),
+        Cache::At(path) => from_file(&path),
+        Cache::None => Vec::new(),
+    })
 }
 
 #[cfg(test)]

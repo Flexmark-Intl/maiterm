@@ -33,6 +33,7 @@ use crate::state::app_state::AgentSessionState;
 use crate::state::workspace::TabType;
 use crate::state::{AgentRuntime, AppState, MailinkDevice};
 
+pub(crate) mod accounts;
 pub(crate) mod assets;
 pub(crate) mod mirror;
 pub(crate) mod models;
@@ -342,6 +343,8 @@ fn build_router(api: ApiState) -> Router {
     Router::new()
         .route("/mailink/v1/heartbeat", get(heartbeat))
         .route("/mailink/v1/models", get(models_list))
+        .route("/mailink/v1/accounts", get(accounts_get))
+        .route("/mailink/v1/accounts/active", post(post_accounts_active))
         // Files an agent sent, newest first across every tab — the phone's Files view. Static
         // segment, and `{asset_id}` is a uuid, so neither can shadow the other.
         .route("/mailink/v1/assets", get(assets_list))
@@ -485,7 +488,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.9";
+const PROTOCOL_VERSION: &str = "0.10";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -501,12 +504,67 @@ async fn chats_list(
 /// Exists so the phone stops hardcoding a list that goes stale on every Claude release. Each entry
 /// says where it came from (`source`), because the two sources are not equally trustworthy — see
 /// `models.rs`.
+#[derive(serde::Deserialize)]
+struct ModelsQuery {
+    tab: Option<String>,
+}
+
+/// `GET /models[?tab=]` — §14.4. With a tab, the list is THAT tab's: a managed local tab reads its
+/// own account root, and an unknown or remote tab gets builtins only, because pinned account rows
+/// guessed from someone else's cache are rule 2's mistake in another field.
 async fn models_list(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<ModelsQuery>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let Some(tab) = q.tab else {
+        return Ok(Json(json!(models::available())));
+    };
+    if !is_designated(&s.app, &tab) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let source = if accounts::tab_runs_remote(&s.app, &tab) {
+        models::Cache::None
+    } else {
+        match s.app.tab_accounts.read().get(&tab) {
+            None => models::Cache::None,
+            Some(r) => match r.local.get("claude") {
+                None => models::Cache::Home,
+                Some(a) => match crate::accounts::account_root(crate::accounts::Runtime::Claude, &a.id) {
+                    Some(root) => models::Cache::At(root.join(".claude.json")),
+                    None => models::Cache::None,
+                },
+            },
+        }
+    };
+    Ok(Json(json!(models::available_from(source))))
+}
+
+/// `GET /accounts` — §14.3 `AccountsSnapshot`.
+async fn accounts_get(
     State(s): State<ApiState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
-    Ok(Json(json!(models::available())))
+    Ok(Json(accounts::snapshot(&s.app)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveAccountBody {
+    runtime: String,
+    account_id: String,
+}
+
+/// `POST /accounts/active` — §14.3. Switches what NEW tabs launch as; respawns nothing.
+async fn post_accounts_active(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<ActiveAccountBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(accounts::set_active(&s.app, s.app_handle.as_ref(), &body.runtime, &body.account_id)))
 }
 
 /// `GET /tasks` — the maiTerm task board across every workspace (mailink/board.rs). Pure
@@ -2300,6 +2358,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // at "active", so it is the one diff the attention key structurally cannot cover — see
     // `state_frame_needed`.
     let mut tools: HashMap<String, String> = HashMap::new();
+    // §14: the served `account` per tab. A switch flips `stale` on tabs whose state did not move,
+    // and the phone has no predicate to recompute it — so a change here owes a frame on its own.
+    let mut account_keys: HashMap<String, String> = HashMap::new();
     // Streaming state (mailink-protocol §12): per-tab last-window msg_ids + transcript mtime, so the
     // message ticker diffs cheaply and emits only newly-appended turns.
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -2312,6 +2373,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // Overlord mirror versions this socket has been sent, per window — empty means the first
     // tick is the baseline (mailink/overlord.rs::changed_frames).
     let mut overlord_versions: HashMap<String, u64> = HashMap::new();
+    // §14.3 WS `accounts`: the last snapshot this socket was sent. None ⇒ send on the first tick,
+    // so a phone never has to GET before the frames start meaning anything. Full replace.
+    let mut accounts_sent: Option<String> = None;
     // Same discipline for the background-shell roster.
     let mut shell_keys: HashMap<String, u64> = HashMap::new();
     let mut subagent_stream = SubagentStream::default();
@@ -2419,6 +2483,15 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         return;
                     }
                 }
+                let snap = accounts::snapshot(&s.app);
+                let snap_key = snap.to_string();
+                if accounts_sent.as_deref() != Some(snap_key.as_str()) {
+                    let frame = json!({ "type": "accounts", "accounts": snap, "ts": now_ms() });
+                    if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        return;
+                    }
+                    accounts_sent = Some(snap_key);
+                }
                 // Summaries, not full chats: this fires forever at 1.5s, and the full build's
                 // scrollback + per-tab transcript reads were constant background lock pressure.
                 // The rare transitioning tab is enriched below.
@@ -2470,6 +2543,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     let tk = tool_key(c);
                     let tool_changed = prev.is_some() && tools.get(&tab) != Some(&tk);
                     tools.insert(tab.clone(), tk);
+                    let ak = c["account"].to_string();
+                    let account_changed = prev.is_some() && account_keys.get(&tab) != Some(&ak);
+                    account_keys.insert(tab.clone(), ak);
                     // `chats_changed` alone is a ROSTER signal — it says "re-GET /chats", which
                     // refreshes the inbox but not an already-open thread. Registration usually
                     // flips with the attention key UNCHANGED (the live-agent fallback already
@@ -2477,7 +2553,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     // without the `|| reg_changed` arm an open thread got no frame at all and
                     // the "Running but not registered" banner survived the very init that fixed
                     // it, until the user backed out and re-opened the thread.
-                    if state_frame_needed(prev.as_deref(), &key, reg_changed, tool_changed) {
+                    if state_frame_needed(prev.as_deref(), &key, reg_changed, tool_changed || account_changed) {
                         // Enrichment (lastActivityTs + meta) costs two transcript tail reads, and
                         // `build_chat_summaries` omits them precisely so they are paid only on real
                         // transitions. A tool change fires MANY times per turn, so paying it there
@@ -2512,7 +2588,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); registered.remove(&k); tools.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -2625,6 +2701,13 @@ fn chat_state_event(c: &Value) -> Value {
     // into the acting participant). Present only for Claude tabs with a resolvable transcript.
     if let Some(meta) = c.get("meta") {
         ev["meta"] = meta.clone();
+    }
+    // §14. Every producer of `c` sets it, so it is always here in practice — but carried only when
+    // present rather than defaulted, because its default would be `null`, which on this wire is a
+    // CLAIM ("known unmanaged"). An absent field makes the phone keep what it had; a fabricated
+    // null would tell it the tab has no account.
+    if let Some(account) = c.get("account") {
+        ev["account"] = account.clone();
     }
     ev
 }
@@ -4682,6 +4765,9 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
                 // changes far more often than `state` does. See `state_frame_needed`.
                 "tool": v.tool,
                 "detail": v.detail,
+                // §14 — diffed by the WS ticker, which is also how a switch reaches every tab
+                // whose `stale` it flipped: the field is recomputed here each tick.
+                "account": accounts::chat_account(app, &t.tab_id, t.runtime.as_key()),
             })
         })
         .collect()
@@ -4719,6 +4805,8 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 // Which window's Overlord governs this tab — the address of every
                 // `POST /overlord/{windowLabel}/…` the phone might make from this thread.
                 "windowLabel": t.window_label,
+                // §14: which account this chat runs as — recorded at spawn, never inferred.
+                "account": accounts::chat_account(app, &t.tab_id, t.runtime.as_key()),
                 // Surfaced so the phone shows "Resume workspace" instead of a dead-end Initialize.
                 "workspaceSuspended": t.workspace_suspended,
                 // Mesh Workspace flag — the phone badges the group and offers Initialize-all.
@@ -4819,6 +4907,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         "workspace": meta.workspace,
         "workspaceId": meta.workspace_id,
         "windowLabel": meta.window_label,
+        "account": accounts::chat_account(app, &meta.tab_id, meta.runtime.as_key()),
         "workspaceSuspended": meta.workspace_suspended,
         "mesh": meta.mesh,
         "runtime": runtime,
@@ -5106,9 +5195,9 @@ async fn doorbell_loop(app: Arc<AppState>) {
         // attention edge below. `kind:"escalation"` is new to the relay: it falls back to
         // "Needs you" at time-sensitive until the relay's copy table learns the word, which is
         // the fallback direction that made adding a kind before a relay deploy safe.
-        for (tab_id, title) in overlord::take_pending_rings(&app) {
+        for (tab_id, title, kind) in overlord::take_pending_rings(&app) {
             if !covered {
-                ring_devices(&client, &app, &relay_url, &tab_id, &title, "escalation").await;
+                ring_devices(&client, &app, &relay_url, &tab_id, &title, kind).await;
             }
         }
 

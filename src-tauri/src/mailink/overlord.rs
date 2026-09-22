@@ -184,7 +184,7 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
     }
     if mailink_on && this_window_exposed && !new_rings.is_empty() {
         let mut q = app.mailink_pending_rings.lock();
-        q.extend(new_rings);
+        q.extend(new_rings.into_iter().map(|(t, title)| (t, title, "escalation")));
         // Bounded: the doorbell drains every 2 s, so anything past this is a loop that isn't
         // running, and a burst of stale pushes is worse than a dropped one.
         if q.len() > MAX_PENDING_RINGS {
@@ -194,7 +194,7 @@ pub(crate) fn publish(app: &AppState, label: &str, mut snapshot: Value) {
     }
 }
 
-const MAX_PENDING_RINGS: usize = 32;
+pub(crate) const MAX_PENDING_RINGS: usize = 32;
 
 /// Internal marker on a stored snapshot: whether the window has a designated tab. Stripped
 /// before anything reaches the wire — a served snapshot is exposed by construction.
@@ -253,8 +253,9 @@ pub(crate) fn changed_frames(app: &AppState, seen: &mut HashMap<String, u64>) ->
     out
 }
 
-/// Drain the escalation rings queued by `publish`, for the doorbell loop.
-pub(crate) fn take_pending_rings(app: &AppState) -> Vec<(String, String)> {
+/// Drain the rings queued for the doorbell loop: Overlord escalations from `publish`, and the
+/// §14 `account` ring from `mailink::accounts`. Each carries its own attention kind.
+pub(crate) fn take_pending_rings(app: &AppState) -> Vec<(String, String, &'static str)> {
     std::mem::take(&mut *app.mailink_pending_rings.lock())
 }
 
@@ -427,7 +428,13 @@ mod tests {
     fn a_new_escalation_queues_one_ring_and_a_repeat_queues_none() {
         let (app, shown, hidden) = fixture();
         publish(&app, "main", json!({ "escalations": [esc("e1", &shown), esc("e2", &hidden), esc("e3", "")] }));
-        let rings: HashSet<(String, String)> = take_pending_rings(&app).into_iter().collect();
+        let rings: HashSet<(String, String)> = take_pending_rings(&app)
+            .into_iter()
+            .map(|(t, title, kind)| {
+                assert_eq!(kind, "escalation");
+                (t, title)
+            })
+            .collect();
         let want: HashSet<(String, String)> =
             [("overlord".to_string(), "Overlord".to_string()), (shown.clone(), "worker".to_string())].into();
         assert_eq!(
