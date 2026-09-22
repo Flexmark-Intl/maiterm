@@ -41,7 +41,7 @@ If a sign-in comes back as an account you already hold, maiTerm refuses it and s
 
 ## The account list
 
-Each account is a card, grouped by runtime, showing its plan, its organisation and when it was last verified. The active account's card carries a bar down its edge — accent-coloured when new tabs really launch under it, grey when it is active but **Manage agent logins** is off. The dot beside the name says the same thing in miniature.
+Each account is a card, grouped by runtime, showing its plan, its organisation and when it was last verified. The active account's card carries a bar down its edge — accent-coloured when new tabs really launch under it, grey when it is active but **Manage agent logins** is off. The dot beside the name is green only on the account new tabs really launch under.
 
 Inside each card sits that account's **SSH hosts** section, with a one-line summary of what it covers — *Every host*, *2 hosts*, *No hosts yet*, *Not set up*. It only reads as in use on the active account, because only the active account is ever sent to a host. The other cards keep their host settings, drawn with a dashed outline and marked as applying only while that account is active.
 
@@ -49,7 +49,7 @@ Inside each card sits that account's **SSH hosts** section, with a one-line summ
 |---|---|
 | **Use** | Makes this the account new tabs launch under — SSH tabs included, on the hosts it covers |
 | **Verify** | Reads back the identity this account currently resolves to |
-| **Remove** | Signs the account out and deletes its directory |
+| **Remove** | Signs the account out, deletes its directory and forgets its SSH token. If it was active, another account becomes active — and that account's SSH host settings take effect |
 | **SSH hosts → Set up…** | Mints this account's remote token — see [SSH hosts](#ssh-hosts) |
 | **Use on every SSH host** | Sends the token to every host while this account is active |
 | **Add host** | Names one host at a time instead |
@@ -85,7 +85,7 @@ It doesn't. Those are shared into every account, so a tab running as one behaves
 
 ## SSH hosts
 
-An SSH tab runs its agent on another machine, and that machine has its own single login slot. Left alone, a remote agent is whoever that host was last signed in as — whichever account is active on your side.
+An SSH tab runs its agent on another machine, and that machine has its own single login slot. Left alone, a remote agent is whoever that host was last signed in as, no matter which account is active on your side.
 
 You can have SSH tabs run as the active account instead. It is opt-in per account, from the **SSH hosts** section on its card, and it works differently from a local account in one way that matters: **here maiTerm does hold a credential.** A remote host cannot share your local sign-in, so the account needs a token of its own.
 
@@ -98,26 +98,30 @@ maiTerm stores the token in your system keychain under its own entry — the Key
 Then choose where it goes. Nothing is sent anywhere until you do one of these:
 
 - **Use on every SSH host** — every SSH tab, while this account is the active one.
-- **Add host** — one host at a time. A hostname or ssh alias covers every user on that host; `user@host` covers only that user.
+- **Add host** — one host at a time. Hosts are matched by name exactly as you type them after `ssh`, nothing is looked up: `nova` covers `ssh nova` and `ssh ews@nova`, but not `ssh nova.example.com`, even when both reach the same machine. `ews@nova` covers only `ssh ews@nova` — not another user on `nova`, and not `ssh -l ews nova`. Add each spelling you use.
 
 ### What happens when a tab connects
 
 Only the **active** account is sent — switching accounts switches your SSH tabs along with your local ones, and as locally, a session already running keeps what it started with until you reload it.
 
-When maiTerm starts an SSH session to a covered host — a new tab, a reload, a restored or resumed session, or an `ssh` you type yourself in a maiTerm tab — it first opens a separate, short-lived connection to that host and writes the token over it, into a file only your user can read in `~/.maiterm/tokens/`. The new shell reads that file once and deletes it; one that was never picked up is swept after ten minutes. The token never appears on a command line, in the terminal, in your scrollback or in your shell history, on either machine.
+When maiTerm starts an SSH session to a covered host — a new tab, a reload, a restored or resumed session — it first opens a separate, short-lived connection to that host and writes the token over it, into a file only your user can read in `~/.maiterm/tokens/`. The remote shell reads that file once and deletes it. The token never appears on a command line, in the terminal, in your scrollback or in your shell history, on either machine — only the file's path does.
+
+An `ssh` you type yourself in a maiTerm tab gets the token too, delivered the same way once the session is up, as long as **Preferences → Claude Code → Enable IDE Integration over SSH** is on (it is by default). With that off, a typed `ssh` gets nothing.
+
+A file that is written but never read — the `ssh` after it failed, say — stays on the host until the next covered connection there clears out anything older than ten minutes. On a host you never connect to again, that is never.
 
 It also tells the agent which plan the account is on. A token on its own does not say, and that is not cosmetic: the plan decides which model the agent uses by default.
 
 To check a session, run `/status` in the remote agent. **Auth token: CLAUDE_CODE_OAUTH_TOKEN** means it is running on the token maiTerm sent.
 
-If the token cannot be delivered, maiTerm says so in a notification — because the tab will not fail. It comes up as whatever login the host already has, and the work is billed there.
+**Check it, because a wrong answer does not look wrong.** Whenever the token is missing, expired or not accepted, the tab does not fail — it comes up as whatever login the host already has, and the work is billed there. maiTerm sends a notification when it cannot *deliver* the token (unless notifications are off), but it cannot see what happens on the host after that, and it still sends a token the card says has expired.
 
 ### What the token trades away
 
 - **It bills your subscription, not API credits** — the same plan the account already has.
 - **It is narrower than a sign-in.** Model requests and MCP servers — maiTerm's own included — work normally, but Remote Control sessions and claude.ai connectors do not, and `--bare` sessions ignore the token. A host that needs those should be signed in on its own instead.
 - **It lasts a year and does not rotate.** The card counts it down and warns in the last 30 days.
-- **Nothing in maiTerm or the Claude Code CLI can revoke it.** **Remove token** stops maiTerm handing it out; a session already running with it keeps working.
+- **Assume nothing revokes it.** The Claude Code CLI has no revoke command, and whether signing the account out also kills its tokens is untested. **Remove token** stops maiTerm handing it out; a session already running with it keeps working.
 - **maiTerm cannot tell which account a token belongs to.** A token carries no profile, so the agent reports no email for it. The browser window you approve in decides — which is why the dialog steers you to a private one.
 - **On the host, it is as private as that user's processes.** Anyone who can read the environment of your remote shell can read the token.
 - **Named hosts are the only record of where it went.** With **Use on every SSH host** on, there is no such list.
@@ -126,6 +130,7 @@ If the token cannot be delivered, maiTerm says so in a notification — because 
 
 - **macOS and Linux.** The Windows build does not hand a tab its account yet — the pane works and the accounts are kept, but tabs still launch under your normal login.
 - **SSH hosts need key-based login.** The token travels over its own connection, which cannot answer a password or passphrase prompt. A host you can only reach by typing a password gets a notification instead of the account.
+- **SSH hosts need a POSIX login shell.** The token is picked up with `.`, which bash, zsh, sh, dash and ksh understand. A remote user whose login shell is csh or tcsh gets the file read and deleted without the token ever being set.
 - **SSH hosts need a keychain here.** A Linux machine with no Secret Service running — a headless box, say — has nowhere safe to keep the token, and setting one up fails there.
 - **Claude Code today.** The other runtimes are named in the sign-in dialog as not yet available, rather than half-wired.
 - **A key your own shell exports is still a key.** maiTerm cleans the environment it starts a tab in, but your shell profile runs afterwards, inside the tab. An `ANTHROPIC_API_KEY` exported there still outranks the account, and Verify — which asks from outside your shell — will not see it.
