@@ -10,7 +10,7 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount } from '$lib/tauri/commands';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
@@ -979,6 +979,9 @@
               if (i === maxAttempts - 1) return; // timed out
             }
             if (destroyed) return;
+            // The edge maiLink §14 binds on: the ssh this path typed is up. Always runs, so the
+            // account a phone is shown never depends on whether a phone was watching.
+            void bindRemoteAccount(tabId).catch(() => {});
             await enableBridge(tabId, ctx.sshCommand!, ptyId, false, bakedPort).catch(() => {});
             if (destroyed) return;
             if (splitCtx?.launchCommand) {
@@ -1784,6 +1787,7 @@
       if (i === maxAttempts - 1) return; // timed out
     }
     if (destroyed) return;
+    void bindRemoteAccount(tabId).catch(() => {}); // maiLink §14 — see the spawn poll
     await enableBridge(tabId, sshCommand, ptyId, false, bakedPort).catch(() => {});
     if (destroyed) return;
     const resumeCmd = autoResumeCommand ?? autoResumeRememberedCommand ?? null;

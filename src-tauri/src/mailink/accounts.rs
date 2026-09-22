@@ -66,6 +66,21 @@ pub(crate) fn chat_account(app: &AppState, tab_id: &str, runtime_slug: &str) -> 
         .unwrap_or(Value::Null)
 }
 
+/// Bind this tab's remote record to the ssh maiTerm just typed for it — the spawn/reconnect/replay
+/// paths call this from their own "ssh came up" poll, which runs whether or not maiLink is. Fresh
+/// probe, and `try_bind` checks the argv names THIS handoff, so a different ssh never binds.
+pub(crate) fn bind_after_ssh_up(app: &AppState, tab_id: &str) -> bool {
+    let pty = app.tab_pty_map.read().get(tab_id).cloned();
+    let Some((pid, cmd)) = pty.and_then(|p| crate::pty::get_pty_foreground_ssh(app, &p, true)) else {
+        return false;
+    };
+    let mut records = app.tab_accounts.write();
+    records
+        .get_mut(tab_id)
+        .and_then(|r| r.remote.as_mut())
+        .is_some_and(|r| tab_record::try_bind(r, pid, &cmd))
+}
+
 /// Bind this tab's fresh remote record to the ssh process holding its terminal RIGHT NOW — for
 /// the handoff paths that type the fragment into an ssh already running (the bridge's typed-ssh
 /// path, the manual inject), where the argv carries no handoff path to recognise it by. Fresh
@@ -206,10 +221,16 @@ pub(crate) fn clear_remote(app: &AppState, tab_id: &str) {
     }
 }
 
-/// A prepared handoff that the session never used: whatever was recorded, this session is not
-/// running as the account.
-pub(crate) fn downgrade_remote(app: &AppState, tab_id: &str, reason: &str) {
+/// A prepared handoff that the session never used: that session is not running as the account.
+///
+/// **Only if the record is still THAT handoff's.** A newer prep for the same tab may have replaced
+/// it in the meantime, and downgrading the newer one would mark a session that did get its token
+/// as `not_applied`.
+pub(crate) fn downgrade_remote(app: &AppState, tab_id: &str, handle: &str, reason: &str) {
     let current = app.tab_accounts.read().get(tab_id).and_then(|r| r.remote.clone());
+    if current.as_ref().and_then(|r| r.handle.as_deref()) != Some(handle) {
+        return;
+    }
     let account = current.and_then(|r| r.account);
     note_remote(
         app,
@@ -319,8 +340,16 @@ mod tests {
     fn an_unused_prep_is_downgraded_and_keeps_its_intended_account() {
         let (app, tab) = fixture(false);
         let account = Some(tab_record::AccountRef { id: "a".into(), label: "a@example.com".into() });
-        note_remote(&app, &tab, RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None));
-        downgrade_remote(&app, &tab, "prepared but not used");
+        let mut r = RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None);
+        r.handle = Some("h1".into());
+        note_remote(&app, &tab, r);
+        downgrade_remote(&app, &tab, "h-other", "not ours");
+        assert_eq!(
+            app.tab_accounts.read()[&tab].remote.as_ref().unwrap().state,
+            RemoteState::SentUnverified,
+            "a discard for a different handoff must not touch this record"
+        );
+        downgrade_remote(&app, &tab, "h1", "prepared but not used");
         let r = app.tab_accounts.read()[&tab].remote.clone().unwrap();
         assert_eq!(r.state, RemoteState::NotApplied);
         assert_eq!(r.account, account);

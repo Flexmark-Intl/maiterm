@@ -2097,17 +2097,19 @@ bridge tunnel — not the tunnel alone, which a typed `ssh` with the bridge off 
 then be served the LOCAL shell's account. An SSH tab that never went through the handoff is
 `{ known: false }`.
 
-**A remote record belongs to one ssh process, not to the tab** — and it is bound on evidence,
-never on timing. One shell can run many ssh sessions and only some go through the handoff
-(`ssh -t host claude` does not), and two rounds of review each found a time window that let a later
-hand-typed ssh inherit an earlier handoff. So:
-- the ssh maiTerm *types* (spawn, reconnect, auto-resume replay) carries the handoff file's path in
-  its own argv, and the record binds to the ssh whose command line names THAT handoff's file. The
-  file is named per handoff (tab id + a nonce minted per push), not per tab: with the tab id alone,
-  an ssh re-run from shell history, or the outer ssh around a replay, named the same path as a newer
-  handoff and inherited its account;
+**A remote record belongs to one ssh process, not to the tab** — bound on evidence, on an edge
+the desktop always sees, and never when a phone happens to look. One shell can run many ssh
+sessions and only some go through the handoff (`ssh -t host claude` does not). Four review rounds
+each found a rule that let a later ssh inherit an earlier handoff — a time window twice, a
+per-tab file name, and binding lazily on a maiLink tick (an ssh that came and went unobserved was
+then claimed by its own Up+Enter re-run). So:
+- every handoff has its own name (tab id + a nonce per push), carried in the file name;
+- the ssh maiTerm *types* (spawn, reconnect, auto-resume replay) carries that name in its argv,
+  and the path that typed it binds the record when its own "ssh is up" poll sees an ssh whose
+  command line names THAT handoff;
 - where the fragment is typed *into* an ssh already running (the bridge's typed-ssh path, the
-  manual "Inject maiTerm Env Vars"), the handoff binds to that process as it runs.
+  manual "Inject maiTerm Env Vars"), the handoff binds to that process as it runs;
+- a bound record is never re-bound, and serving a chat never binds anything.
 
 An unbound record, or any ssh other than the bound one, is `{ known: false }`. On Windows the
 binding probe does not exist yet, so every SSH chat there is `{ known: false }` — unknown, never

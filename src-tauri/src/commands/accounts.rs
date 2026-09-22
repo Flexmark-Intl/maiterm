@@ -1714,8 +1714,8 @@ pub struct RemoteTokenPrep {
     /// frontend has no use for it and the record is written here, in Rust.
     #[serde(skip)]
     pub account_id: Option<String>,
-    /// The handoff's own name (`remote::handoff_handle`), for the record and for discard.
-    #[serde(skip)]
+    /// The handoff's own name (`remote::handoff_handle`). Sent to the frontend so a discard can
+    /// name WHICH handoff it is taking back — a file name, not a credential.
     pub handle: Option<String>,
 }
 
@@ -1959,19 +1959,25 @@ pub async fn discard_remote_account_token(
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     tab_id: String,
     ssh_args: String,
+    handle: String,
 ) -> Result<(), String> {
-    // Prepared and never used: whatever the push recorded, this session is NOT running as the
-    // account. Downgraded before the best-effort cleanup, which can fail without changing that.
-    // The file is named by the handoff's own handle, which only the record knows. Read it BEFORE
-    // the downgrade, which writes a fresh record. No handle ⇒ nothing was staged to take back.
-    let handle = state
-        .tab_accounts
-        .read()
-        .get(&tab_id)
-        .and_then(|r| r.remote.as_ref())
-        .and_then(|r| r.handle.clone());
-    crate::mailink::accounts::downgrade_remote(state.inner(), &tab_id, "the token was prepared but the session did not use it");
-    let Some(script) = handle.as_deref().and_then(accounts::remote::discard_script) else {
+    // Prepared and never used: that session is NOT running as the account. Downgraded before the
+    // best-effort cleanup, which can fail without changing that.
+    //
+    // **Named by the caller's OWN prep**, not read off the tab's current record: a newer prep may
+    // already have replaced that, and this must take back the file THIS prep staged — never the
+    // newer one, which a live session may be about to read. The downgrade is scoped the same way.
+    crate::mailink::accounts::downgrade_remote(
+        state.inner(),
+        &tab_id,
+        &handle,
+        "the token was prepared but the session did not use it",
+    );
+    // A handle is always `<tab id>-<nonce>`; anything else is not this tab's to delete.
+    if !handle.starts_with(&format!("{tab_id}-")) {
+        return Ok(());
+    }
+    let Some(script) = accounts::remote::discard_script(&handle) else {
         return Ok(());
     };
     match run_ssh(&ssh_args, &script, None).await {
@@ -1984,6 +1990,17 @@ pub async fn discard_remote_account_token(
             Ok(())
         }
     }
+}
+
+/// The ssh maiTerm typed for this tab's handoff has come up: bind the handoff to that process
+/// (maiLink §14). Called from the frontend's own ssh-up poll, so binding never depends on whether
+/// maiLink is running. Quiet and best effort — an unbound record just reads as unknown.
+#[tauri::command]
+pub fn bind_remote_account(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    tab_id: String,
+) -> bool {
+    crate::mailink::accounts::bind_after_ssh_up(state.inner(), &tab_id)
 }
 
 /// Run one short script on the remote over a connection of its own, optionally feeding it

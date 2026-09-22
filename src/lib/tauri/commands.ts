@@ -1798,6 +1798,9 @@ export interface RemoteTokenPrep {
   account_label: string | null;
   host: string | null;
   detail: string | null;
+  /** This handoff's own name — a file name, not a credential. What `discardRemoteAccountToken`
+   *  takes back. */
+  handle: string | null;
 }
 
 /** Put the active account's remote token on this tab's ssh host, if that host is covered.
@@ -1824,8 +1827,20 @@ export async function prepareRemoteAccountToken(
  *  The push runs in parallel with the decision about whether to inject, so a caller that changes
  *  its mind has already put a standing one-year credential on that host — and nothing local
  *  revokes it (§9.4). Prefer `beginRemoteAccount`, which pairs this with the announcement. */
-export async function discardRemoteAccountToken(tabId: string, sshArgs: string): Promise<void> {
-  return invoke('discard_remote_account_token', { tabId, sshArgs });
+/** Take back ONE handoff — the one `handle` names (the prep's own), never whatever the tab's
+ *  record holds now, which a newer prep may have replaced. */
+export async function discardRemoteAccountToken(
+  tabId: string,
+  sshArgs: string,
+  handle: string,
+): Promise<void> {
+  return invoke('discard_remote_account_token', { tabId, sshArgs, handle });
+}
+
+/** The ssh maiTerm typed for this tab has come up: bind its account handoff to that process
+ *  (maiLink §14). Call from the ssh-up poll. Returns whether a handoff was bound. */
+export async function bindRemoteAccount(tabId: string): Promise<boolean> {
+  return invoke('bind_remote_account', { tabId });
 }
 
 /** Sign an account out and delete its config root — duplicate, cancelled sign-in, Remove, or

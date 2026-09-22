@@ -9,7 +9,12 @@
  * never reaches this file — see `RemoteTokenPrep`.
  */
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
-import { prepareRemoteAccountToken, discardRemoteAccountToken } from '$lib/tauri/commands';
+import {
+  prepareRemoteAccountToken,
+  discardRemoteAccountToken,
+  bindRemoteAccount,
+  getPtyInfo,
+} from '$lib/tauri/commands';
 import type { RemoteTokenPrep } from '$lib/tauri/commands';
 import { dispatch } from '$lib/stores/notificationDispatch';
 
@@ -99,7 +104,7 @@ export function beginRemoteAccount(
       // Only a `ready` prep put a file on the host, and only an untaken one is unused.
       if (!p || p.status !== 'ready' || taken || abandoned) return;
       abandoned = true;
-      await discardRemoteAccountToken(tabId, sshArgs).catch(() => {});
+      if (p.handle) await discardRemoteAccountToken(tabId, sshArgs, p.handle).catch(() => {});
       await announceMiss(tabId, p.account_label, p.host, why);
     },
   };
@@ -117,4 +122,27 @@ export function remoteAccountExport(
   bindNow = false,
 ): Promise<string | null> {
   return beginRemoteAccount(tabId, sshArgs, bindNow).take();
+}
+
+/**
+ * Bind this tab's account handoff to the ssh maiTerm just typed for it, once that ssh is up.
+ *
+ * maiLink §14 serves a remote account only for the one ssh process its handoff was bound to, and
+ * binding has to happen on an edge the app always sees — this one — never lazily when a phone
+ * happens to look, or an ssh that came and went unobserved leaves the record to be claimed by its
+ * own Up+Enter re-run. For paths that do not already poll for the ssh (auto-resume replay); the
+ * spawn and reconnect polls call `bindRemoteAccount` directly. Never throws.
+ */
+export async function bindRemoteAccountWhenUp(tabId: string, ptyId: string): Promise<void> {
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      if ((await getPtyInfo(ptyId)).foreground_command) {
+        await bindRemoteAccount(tabId);
+        return;
+      }
+    } catch {
+      return; // tab gone
+    }
+  }
 }

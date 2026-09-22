@@ -52,8 +52,9 @@ pub struct RemoteRecord {
     /// The ssh process this handoff belongs to. A tab can run many ssh sessions in one shell, and
     /// only some go through the handoff, so a record describes ONE process, never the tab.
     ///
-    /// Bound only on evidence, never on timing (two review rounds each found a window that let a
-    /// later hand-typed ssh inherit an earlier handoff):
+    /// Bound only on evidence and only on an edge the app always sees — never on timing, and
+    /// never lazily when maiLink happens to look (four review rounds each found one of those
+    /// letting a later ssh inherit an earlier handoff):
     /// - the ssh maiTerm TYPED (spawn, reconnect, replay) carries the handoff file's path in its
     ///   own argv, so it binds when an ssh whose command line names THIS handoff's file is
     ///   observed — per handoff, not per tab (`handle`), or a history re-run or an outer ssh
@@ -141,13 +142,13 @@ pub fn wire(
     }
     let Some(remote) = record.remote.as_mut() else { return unknown() };
     let Some((now_pid, cmd)) = ssh else { return unknown() };
-    match remote.ssh_pid {
-        Some(bound) if bound == now_pid => {}
-        Some(_) => return unknown(),
-        None if remote.handle.as_deref().is_some_and(|h| names_handoff(&cmd, h)) => {
-            remote.ssh_pid = Some(now_pid)
-        }
-        None => return unknown(),
+    let _ = cmd;
+    // Served only for the ONE ssh this handoff was bound to, and binding never happens here.
+    // Binding on a maiLink tick made the record depend on whether a phone happened to be
+    // watching: an ssh that came and went unobserved left the record unbound, and a later
+    // Up+Enter re-run — same argv, file already consumed — then bound it. See `try_bind`.
+    if remote.ssh_pid != Some(now_pid) {
+        return unknown();
     }
 
     let mut out = match remote.account.as_ref() {
@@ -159,6 +160,23 @@ pub fn wire(
         out["reason"] = serde_json::Value::String(reason.to_string());
     }
     Some(out)
+}
+
+/// Bind a remote record to the ssh maiTerm just typed for it — called on the edge the app always
+/// sees (the frontend's own "ssh came up" poll right after typing it), never on a maiLink tick.
+/// Binds only an UNBOUND record, and only to an ssh whose argv names THIS handoff. Returns whether
+/// it bound.
+pub fn try_bind(remote: &mut RemoteRecord, pid: u32, cmd: &str) -> bool {
+    if remote.ssh_pid.is_some() {
+        return false;
+    }
+    match remote.handle.as_deref() {
+        Some(h) if names_handoff(cmd, h) => {
+            remote.ssh_pid = Some(pid);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Whether an ssh command line is the one maiTerm typed for this handoff.
@@ -281,6 +299,14 @@ mod tests {
         assert!(v.get("stale").is_none());
     }
 
+    /// A record bound to `pid` the way the spawn poll binds it.
+    fn bound(account: Option<AccountRef>, state: RemoteState, reason: Option<String>, pid: u32) -> RemoteRecord {
+        let mut r = rec(account, state, reason);
+        let Place::Remote { ssh: Some((_, cmd)) } = typed(pid) else { unreachable!() };
+        assert!(try_bind(&mut r, pid, &cmd));
+        r
+    }
+
     #[test]
     fn an_ssh_tab_ignores_the_local_shell_and_reports_the_handoff() {
         let p = prefs_with("a");
@@ -288,47 +314,54 @@ mod tests {
         // Local shell account is irrelevant to a remote agent: no handoff ⇒ unknown.
         assert_eq!(wire(Some(&mut r), "claude", typed(100), &p), unknown());
 
-        r.remote = Some(rec(Some(aref("a")), RemoteState::NotApplied, Some("token expired".into())));
+        r.remote = Some(bound(Some(aref("a")), RemoteState::NotApplied, Some("token expired".into()), 100));
         let v = wire(Some(&mut r), "claude", typed(100), &p).unwrap();
         assert_eq!(v["remote"], "not_applied");
         assert_eq!(v["reason"], "token expired");
         assert_eq!(v["label"], "a@example.com");
 
-        r.remote = Some(rec(None, RemoteState::HostLogin, None));
+        r.remote = Some(bound(None, RemoteState::HostLogin, None, 200));
         let v = wire(Some(&mut r), "claude", typed(200), &p).unwrap();
         assert_eq!(v, serde_json::json!({ "known": true, "remote": "host_login" }));
     }
 
     #[test]
-    fn an_unbound_record_never_binds_to_an_ssh_that_does_not_name_its_handoff() {
+    fn serving_never_binds_so_an_unobserved_ssh_cannot_be_inherited_by_its_rerun() {
         let p = prefs_with("a");
         let mut r = local("a");
+        // The typed ssh came and went before anything bound it; the user re-runs it from history.
+        // Same argv, file already consumed. Serving must not bind it.
         r.remote = Some(rec(Some(aref("a")), RemoteState::SentUnverified, None));
-        // The first ssh died unseen; the user hand-types another. No timing makes it ours.
-        assert_eq!(wire(Some(&mut r), "claude", other(200), &p), unknown());
-        assert!(r.remote.as_ref().unwrap().ssh_pid.is_none(), "must not bind on a mismatch");
-        // Another handoff's name is not this one's — including one that extends it.
-        assert_eq!(wire(Some(&mut r), "claude", typed_for(301, "t1-aaaa0"), &p), unknown());
-        // An EARLIER handoff for the same tab: an ssh re-run from history, or the outer ssh around
-        // a replay. Same tab, different nonce — never this record's.
-        assert_eq!(wire(Some(&mut r), "claude", typed_for(302, "t1-bbbb"), &p), unknown());
-        let foreign = Place::Remote { ssh: Some((300, "ssh nova '. ~/.maiterm/tokens/tok-t2'".into())) };
-        assert_eq!(wire(Some(&mut r), "claude", foreign, &p), unknown());
+        assert_eq!(wire(Some(&mut r), "claude", typed(200), &p), unknown());
+        assert!(r.remote.as_ref().unwrap().ssh_pid.is_none());
+    }
+
+    #[test]
+    fn try_bind_takes_only_this_handoffs_ssh_and_only_once() {
+        let mut r = rec(Some(aref("a")), RemoteState::SentUnverified, None);
+        assert!(!try_bind(&mut r, 1, "ssh -t nova claude"), "a hand-typed ssh names no handoff");
+        assert!(!try_bind(&mut r, 2, "ssh nova '. ~/.maiterm/tokens/tok-t1-aaaa0'"), "a longer handle is not ours");
+        assert!(!try_bind(&mut r, 3, "ssh nova '. ~/.maiterm/tokens/tok-t1-bbbb'"), "an earlier handoff is not ours");
+        assert!(!try_bind(&mut r, 4, "ssh nova '. ~/.maiterm/tokens/tok-t2'"), "another tab's is not ours");
+        let Place::Remote { ssh: Some((_, cmd)) } = typed(100) else { unreachable!() };
+        assert!(try_bind(&mut r, 100, &cmd));
+        assert!(!try_bind(&mut r, 101, &cmd), "a bound record is never re-bound — a re-run is a new pid");
+        assert_eq!(r.ssh_pid, Some(100));
     }
 
     #[test]
     fn a_bound_record_is_served_only_while_its_own_ssh_runs() {
         let p = prefs_with("a");
         let mut r = local("a");
-        r.remote = Some(rec(Some(aref("a")), RemoteState::SentUnverified, None));
+        r.remote = Some(bound(Some(aref("a")), RemoteState::SentUnverified, None, 100));
         assert_eq!(wire(Some(&mut r), "claude", typed(100), &p).unwrap()["remote"], "sent_unverified");
         assert_eq!(wire(Some(&mut r), "claude", other(200), &p), unknown());
         assert_eq!(wire(Some(&mut r), "claude", Place::Remote { ssh: None }, &p), unknown());
-        // A record bound at handoff time (the bridge path) is served for that pid whatever its argv.
+        // Bound at handoff time (the bridge path): served for that pid whatever its argv.
         let mut r2 = local("a");
-        let mut rec = rec(Some(aref("a")), RemoteState::SentUnverified, None);
-        rec.ssh_pid = Some(200);
-        r2.remote = Some(rec);
+        let mut rec2 = RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None);
+        rec2.ssh_pid = Some(200);
+        r2.remote = Some(rec2);
         assert_eq!(wire(Some(&mut r2), "claude", other(200), &p).unwrap()["remote"], "sent_unverified");
     }
 
@@ -336,7 +369,7 @@ mod tests {
     fn a_codex_chat_over_ssh_is_never_described_by_the_claude_token() {
         let p = prefs_with("a");
         let mut r = local("a");
-        r.remote = Some(rec(Some(aref("a")), RemoteState::SentUnverified, None));
+        r.remote = Some(bound(Some(aref("a")), RemoteState::SentUnverified, None, 100));
         assert_eq!(wire(Some(&mut r), "codex", typed(100), &p), unknown());
     }
 

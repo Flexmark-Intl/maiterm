@@ -1086,7 +1086,7 @@ included.
 
    **How the token travels, and why it is the only shape that works.** Rust reads the vault and
    pushes `export CLAUDE_CODE_OAUTH_TOKEN='…'` on the **stdin of an ssh connection of its own**
-   into a per-tab `~/.maiterm/tokens/tok-<tabid>` (0600); the remote shell *sources* that file
+   into a per-handoff `~/.maiterm/tokens/tok-<tabid>-<nonce>` (0600); the remote shell *sources* that file
    and `rm`s it, so it is read once. What crosses back to the frontend is a shell fragment naming
    a **path**. Four constraints leave no other option:
 

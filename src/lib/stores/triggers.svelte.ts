@@ -3,7 +3,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, getRemoteBridgeEnv, shellEscapePath, countSessionIdClaimants } from '$lib/tauri/commands';
-import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
+import { remoteAccountExport, bindRemoteAccountWhenUp } from '$lib/utils/remoteAccountToken';
 import { stripAnsi } from '$lib/utils/ansi';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
@@ -491,6 +491,8 @@ export async function replayAutoResume(tabId: string) {
       }
       const bytes = Array.from(new TextEncoder().encode(payload));
       await writeTerminal(instance.ptyId, bytes);
+      // Nothing else on this path waits for the ssh, so bind the handoff here (maiLink §14).
+      void bindRemoteAccountWhenUp(tabId, instance.ptyId);
     } else if (cmd) {
       // Local replay: cd to CWD if configured, then run command
       let payload = '';
