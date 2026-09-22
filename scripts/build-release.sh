@@ -58,6 +58,41 @@ clean_dmg_leftovers() {
   rm -f "$DMG_DIR"/rw.*.dmg
 }
 
+# Tauri notarizes and staples the .app, then wraps it in a DMG that it signs but never
+# submits — so the DMG people actually download carries no ticket of its own. `spctl -a -t
+# install` rejects it as "Unnotarized Developer ID", and a first open with no network has
+# nothing to check the app inside against. Every release through v2.5.0 shipped that way.
+#
+# So: submit the finished DMG itself, then staple the ticket to it. Stapling rewrites the DMG
+# only; the updater .tar.gz and its .sig are separate files and are untouched.
+#
+# Skipped, loudly, when the notarization credentials are absent (a local build doesn't need
+# them). With credentials present, a failure here fails the build — a release must never
+# ship an unstapled DMG because this step quietly didn't happen.
+notarize_dmg() {
+  local dmg
+  dmg="$(ls -t "$DMG_DIR"/maiTerm_*.dmg 2>/dev/null | head -1)"
+  if [[ -z "$dmg" ]]; then
+    echo >&2 "=== no DMG to notarize in $DMG_DIR ==="
+    return 1
+  fi
+  if [[ -z "${APPLE_ID:-}" || -z "${APPLE_PASSWORD:-}" || -z "${APPLE_TEAM_ID:-}" ]]; then
+    echo >&2 "=== APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID not set — DMG left un-notarized ==="
+    return 0
+  fi
+  echo "=== notarizing $(basename "$dmg") ==="
+  xcrun notarytool submit "$dmg" \
+    --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
+    --wait || return 1
+  xcrun stapler staple "$dmg" || return 1
+  # Verify rather than trust the two exit codes above: this is the check that caught it.
+  spctl -a -t install -vv "$dmg" 2>&1 | grep -q 'source=Notarized Developer ID' || {
+    echo >&2 "=== $(basename "$dmg") still fails Gatekeeper after stapling ==="
+    return 1
+  }
+  echo "=== $(basename "$dmg") notarized and stapled ==="
+}
+
 attempt=1
 while (( attempt <= MAX_ATTEMPTS )); do
   log="$(mktemp -t maiterm-build)"
@@ -74,6 +109,7 @@ while (( attempt <= MAX_ATTEMPTS )); do
   if (( status == 0 )); then
     rm -f "$log"
     (( attempt > 1 )) && echo "=== build OK on attempt $attempt ==="
+    notarize_dmg || exit 1
     exit 0
   fi
 
