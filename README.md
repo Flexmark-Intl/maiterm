@@ -147,7 +147,7 @@ Triggers watch your terminal output for patterns — Claude asking a question, a
 - **Modes** — edit and preview; state persisted per tab
 
 ### Themes
-- **10 built-in themes** — Tokyo Night (default), Dracula, Solarized Dark, Solarized Light, Nord, Gruvbox Dark, Monokai, Catppuccin Mocha, One Dark, macOS Pro
+- **12 built-in themes** — Tokyo Night (default), Dracula, Solarized Dark, Solarized Light, Tokyo Night Day, Catppuccin Latte, Nord, Gruvbox Dark, Monokai, Catppuccin Mocha, One Dark, macOS Pro
 - **Custom themes** — create and edit via theme editor in preferences
 - **Separate UI and terminal colors** — full control over both
 
@@ -366,7 +366,7 @@ Preferences
 
 ## Theme
 
-Default: Tokyo Night. 10 built-in themes + custom theme support.
+Default: Tokyo Night. 12 built-in themes + custom theme support.
 
 ```css
 --bg-dark:   #1a1b26   /* main background */

@@ -157,7 +157,7 @@ export const myStore = createMyStore();
 
 ## Styling
 
-**Theme system**: 10 built-in themes + custom theme support. Default is Tokyo Night.
+**Theme system**: 12 built-in themes + custom theme support. Default is Tokyo Night.
 
 ```css
 --bg-dark: #1a1b26;     /* Main background */
