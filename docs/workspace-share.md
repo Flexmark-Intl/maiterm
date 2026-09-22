@@ -226,7 +226,10 @@ maiTerm registers `.maiterm-workspace` in Tauri's `bundle.fileAssociations`
 - **Linux**: the bundler only writes `MimeType=` into the `.desktop` file. It does **not**
   ship a shared-mime-info definition, so nothing maps `*.maiterm-workspace` to that type and
   the deb would not associate the file. The deb must also install its own
-  `/usr/share/mime/packages/maiterm.xml` and run `update-mime-database` in postinst. The
+  `/usr/share/mime/packages/maiterm-workspace.xml` and run `update-mime-database` in postinst.
+  And the bundler's `.desktop` template writes `Exec=<bin>` with **no `%F`**, so a file
+  manager launches maiTerm WITHOUT the file — the association would open an empty app. The deb
+  uses its own template (`src-tauri/linux/maiterm.desktop`, the bundler's plus `%F`). The
   AppImage (the updater artifact, so every self-updating Linux user) does not register at
   all: those users get File › Import Shared Workspace…, documented rather than worked around. No rpm
   is shipped.

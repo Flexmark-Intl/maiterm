@@ -75,6 +75,7 @@
         "files": {
           "/usr/share/mime/packages/maiterm-workspace.xml": "linux/maiterm-workspace.xml"
         },
+        "desktopTemplate": "linux/maiterm.desktop",
         "postInstallScript": "linux/postinst.sh",
         "postRemoveScript": "linux/postrm.sh"
       }
