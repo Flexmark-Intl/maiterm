@@ -70,6 +70,12 @@ tauri-plugin-process = "2"
 # whole block was removed after a review checked keyring's manifest rather than believing it.
 keyring = "4"
 
+# Opening a .maiterm-workspace on Windows/Linux launches a second process with the path in
+# argv; this forwards it to the running one (docs/workspace-share.md §7). macOS has
+# LaunchServices for that and never registers the plugin.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
 # Window/webview base colour (commands::window::set_window_background). Same versions
 # wry already pulls in; default features off so only the two bindings we call land.
 [target.'cfg(target_os = "macos")'.dependencies]

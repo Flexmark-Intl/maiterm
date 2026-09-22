@@ -5,6 +5,7 @@ mod comms;
 mod mailink;
 mod pty;
 mod state;
+mod share;
 mod terminal;
 
 pub const APP_DISPLAY_NAME: &str = if cfg!(debug_assertions) { "maiTermDev" } else { "maiTerm" };
@@ -205,7 +206,20 @@ pub fn run() {
         }
     }
 
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Windows/Linux open a file by launching a SECOND process with the path in argv; this
+    // hands that argv to the running maiTerm and exits the newcomer (docs/workspace-share.md
+    // §7), which also keeps two processes off one state file. Registered first, as the plugin
+    // requires. Release only: dev and prod share the bundle identifier, so in dev it would
+    // forward to — and quit in favour of — an installed maiTerm. macOS needs none of it:
+    // LaunchServices already keeps one instance and delivers files as `RunEvent::Opened`.
+    #[cfg(all(not(target_os = "macos"), not(debug_assertions)))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+        share::open::deliver(app, share::open::paths_from_args(&argv, Some(std::path::Path::new(&cwd))));
+    }));
+
+    let builder = builder
         .plugin(build_log_plugin().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -244,6 +258,14 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            // A cold launch on Windows/Linux names the file in our own argv (macOS delivers
+            // even a cold launch as `RunEvent::Opened`). Queued; the frontend drains it on mount.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let args: Vec<String> = std::env::args().collect();
+                share::open::deliver(app.handle(), share::open::paths_from_args(&args, std::env::current_dir().ok().as_deref()));
+            }
+
             // tauri-plugin-log is active by now — surface the warning that
             // arm_running_marker() captured before the logger was ready.
             log_previous_run_status();
@@ -441,6 +463,7 @@ pub fn run() {
 
             let export_state_item = MenuItem::with_id(app, "export_state", "Export State…", true, None::<&str>)?;
             let import_state_item = MenuItem::with_id(app, "import_state", "Import State…", true, None::<&str>)?;
+            let import_workspace_item = MenuItem::with_id(app, "import_workspace", "Import Shared Workspace…", true, None::<&str>)?;
 
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&new_window_item)
@@ -451,6 +474,8 @@ pub fn run() {
                 .separator()
                 .item(&export_state_item)
                 .item(&import_state_item)
+                .separator()
+                .item(&import_workspace_item)
                 .build()?;
 
             let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -560,7 +585,7 @@ pub fn run() {
                         // the focused window so we don't wipe history elsewhere.
                         emit_to_focused_window(app_handle, "clear-nav-history");
                     }
-                    "export_state" | "import_state" => {
+                    "export_state" | "import_state" | "import_workspace" => {
                         // Emit to the focused window so the frontend can show a file
                         // dialog — one dialog, not one per open window.
                         emit_to_focused_window(app_handle, event.id().as_ref());
@@ -825,6 +850,14 @@ pub fn run() {
             commands::workspace::read_app_logs,
             commands::system::check_full_disk_access,
             commands::system::open_full_disk_access_settings,
+            share::commands::share_export_preview,
+            share::commands::share_export_write,
+            share::commands::share_read_file,
+            share::commands::share_check_dirs,
+            share::commands::share_probe,
+            share::commands::share_clone_command,
+            share::commands::share_import_build,
+            share::open::take_pending_share_opens,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -840,6 +873,17 @@ pub fn run() {
             // so listening for that alone left the running marker behind — every
             // deploy looked like a crash next launch — and skipped the final state
             // flush, losing everything since the last command that happened to save.
+            // Files opened from Finder — on a cold launch too, before any webview exists.
+            // The variant only exists on macOS/iOS/Android, and it carries URLs, not paths.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                let paths = urls
+                    .iter()
+                    .filter_map(|u| u.to_file_path().ok())
+                    .filter(|p| share::open::is_share_path(p))
+                    .collect();
+                share::open::deliver(app_handle, paths);
+            }
             if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
                 if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
                     commands::workspace::run_shutdown_cleanup(&state);
