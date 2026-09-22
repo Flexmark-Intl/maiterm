@@ -1074,8 +1074,17 @@
     box-shadow: inset 3px 0 0 var(--yellow, #e0af68);
   }
 
+  /* Opacity, not just --fg-dim: how far --fg-dim sits from --fg is the theme's choice, and in
+     Catppuccin Latte (#4c4f69 vs #6c6f85) a colour swap alone is invisible. Suspended tabs
+     dim by opacity (TerminalTabs), which reads in every theme; this matches them. */
   .workspace-item.suspended .workspace-name {
     color: var(--fg-dim);
+    opacity: 0.5;
+  }
+
+  .workspace-item.suspended:hover .workspace-name,
+  .workspace-item.suspended.active .workspace-name {
+    opacity: 0.75;
   }
 
   .workspace-item.dragging {
