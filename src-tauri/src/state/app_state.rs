@@ -283,7 +283,14 @@ pub struct AppState {
     pub overlord_snapshots: RwLock<HashMap<String, serde_json::Value>>,
     /// `(tab_id, title)` doorbell rings queued by the Overlord publish path, drained by the
     /// maiLink doorbell loop — the one place that knows whether a phone is covered.
-    pub mailink_pending_rings: parking_lot::Mutex<Vec<(String, String)>>,
+    pub mailink_pending_rings: parking_lot::Mutex<Vec<(String, String, &'static str)>>,
+    /// Which account each tab spawned under, keyed by tab id (maiLink §14). Written at
+    /// `pty::spawn_pty` and by the §6 handoff; never inferred from the active account. In memory
+    /// only: a record describes a live shell and every respawn writes a fresh one.
+    pub tab_accounts: RwLock<HashMap<String, crate::accounts::tab_record::TabAccount>>,
+    /// When this process started. maiLink §14.5 treats observations inside a window after it as
+    /// session-restore baseline rather than transitions.
+    pub started_at: Instant,
 }
 
 impl AppState {
@@ -328,6 +335,8 @@ impl AppState {
             mailink_ws_last_drop_ms: AtomicU64::new(0),
             overlord_snapshots: RwLock::new(HashMap::new()),
             mailink_pending_rings: parking_lot::Mutex::new(Vec::new()),
+            tab_accounts: RwLock::new(HashMap::new()),
+            started_at: Instant::now(),
         }
     }
 

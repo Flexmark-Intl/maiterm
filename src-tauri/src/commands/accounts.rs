@@ -1710,6 +1710,10 @@ pub struct RemoteTokenPrep {
     pub host: Option<String>,
     /// Why nothing is being injected, for the states that need saying out loud.
     pub detail: Option<String>,
+    /// Which account this is about, for the per-tab record (maiLink §14). Never serialized: the
+    /// frontend has no use for it and the record is written here, in Rust.
+    #[serde(skip)]
+    pub account_id: Option<String>,
 }
 
 impl RemoteTokenPrep {
@@ -1723,6 +1727,7 @@ impl RemoteTokenPrep {
             account_label: None,
             host: None,
             detail: None,
+            account_id: None,
         }
     }
 }
@@ -1753,6 +1758,41 @@ pub async fn prepare_remote_account_token(
     tab_id: String,
     ssh_args: String,
 ) -> Result<RemoteTokenPrep, String> {
+    let prep = prepare_inner(state.inner(), &tab_id, &ssh_args).await?;
+    // Record how far the handoff got, for maiLink §14. `ready` is recorded as SENT — never as
+    // applied: nothing can read back which account a token is (login.md §2.4), and a bad one
+    // falls through to the host's own login instead of failing (§6.1). An abandoned prep is
+    // downgraded by `discard_remote_account_token`.
+    if accounts::remote::is_safe_handle(&tab_id) {
+        use accounts::tab_record::{RemoteRecord, RemoteState};
+        let (state_, reason) = match prep.status {
+            "ready" => (RemoteState::SentUnverified, None),
+            "not_applicable" => (RemoteState::HostLogin, None),
+            _ => (RemoteState::NotApplied, prep.detail.clone()),
+        };
+        let account = match (&prep.account_id, state_) {
+            (_, RemoteState::HostLogin) | (None, _) => None,
+            (Some(id), _) => Some(accounts::tab_record::AccountRef {
+                id: id.clone(),
+                label: prep.account_label.clone().unwrap_or_else(|| id.clone()),
+            }),
+        };
+        let remote = RemoteRecord {
+            account,
+            state: state_,
+            reason,
+        };
+        crate::mailink::accounts::note_remote(state.inner(), &tab_id, remote);
+    }
+    Ok(prep)
+}
+
+async fn prepare_inner(
+    state: &std::sync::Arc<crate::state::AppState>,
+    tab_id: &str,
+    ssh_args: &str,
+) -> Result<RemoteTokenPrep, String> {
+    let (tab_id, ssh_args) = (tab_id.to_string(), ssh_args.to_string());
     // A tab id is a UUID everywhere it is minted. Anything else is not ours to name a file
     // after, let alone interpolate into a remote shell command.
     if !accounts::remote::is_safe_handle(&tab_id) {
@@ -1767,15 +1807,38 @@ pub async fn prepare_remote_account_token(
     // that makes the bridge and a tab's replay agree on what host they are talking about.
     let target = crate::commands::ssh_tunnel::port_book_key(ssh_args.trim_start_matches("ssh "));
 
-    let (account_id, label, plan) = {
+    let (account_id, label, plan, minted_at) = {
         let prefs = &state.app_data.read().preferences;
         match accounts::remote_account_for_host(prefs, &target) {
             // The plan goes with the token: without it the remote cannot tell what the account is
             // entitled to and silently resolves a different model. See `stage_contents`.
-            Some(a) => (a.id.clone(), a.label.clone(), a.plan.clone()),
+            Some(a) => (a.id.clone(), a.label.clone(), a.plan.clone(), a.token_minted_at),
             None => return Ok(RemoteTokenPrep::not_applicable()),
         }
     };
+
+    // **An expired token is refused, not sent.** Sent, it does not fail on the host — it falls
+    // through to the host's own login (§6.1), which is the month-twelve silent failure this whole
+    // feature exists to prevent. Refusing turns it into the reported `missing_credential` path.
+    // Expiry is our own mint record (§7 forbids parsing the credential), so a token minted by
+    // some other means is not judged here.
+    if let Some(minted) = minted_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now > minted.saturating_add(accounts::TOKEN_LIFETIME_SECS) {
+            log::warn!("accounts: the remote token for {account_id} has expired — not sending it");
+            return Ok(RemoteTokenPrep {
+                status: "missing_credential",
+                export: None,
+                account_label: Some(label),
+                host: Some(target),
+                detail: Some("its remote token has expired — mint a new one in Preferences → Accounts".into()),
+                account_id: Some(account_id),
+            });
+        }
+    }
 
     // Metadata said yes; the vault is the one that actually has to. The two diverge in states
     // the UI renders — a `forgetToken` interrupted between its two awaits, an item removed in
@@ -1802,6 +1865,7 @@ pub async fn prepare_remote_account_token(
                      Preferences → Accounts"
                         .into(),
                 ),
+                account_id: Some(account_id.clone()),
             });
         }
         Err(e) => {
@@ -1812,6 +1876,7 @@ pub async fn prepare_remote_account_token(
                 account_label: Some(label),
                 host: Some(target),
                 detail: Some(format!("the keychain could not be read ({e})")),
+                account_id: Some(account_id.clone()),
             });
         }
     };
@@ -1827,6 +1892,7 @@ pub async fn prepare_remote_account_token(
             account_label: Some(label),
             host: Some(target),
             detail: Some("its stored remote token is not in the expected form — mint it again".into()),
+            account_id: Some(account_id.clone()),
         });
     }
 
@@ -1841,6 +1907,7 @@ pub async fn prepare_remote_account_token(
             account_label: Some(label),
             host: Some(target),
             detail: Some(e),
+            account_id: Some(account_id.clone()),
         });
     }
 
@@ -1850,6 +1917,7 @@ pub async fn prepare_remote_account_token(
         account_label: Some(label),
         host: Some(target),
         detail: None,
+        account_id: Some(account_id),
     })
 }
 
@@ -1865,7 +1933,14 @@ pub async fn prepare_remote_account_token(
 /// Best effort and quiet: this runs on paths that have already gone wrong, and the file will be
 /// swept eventually. Only the path is on the command line.
 #[tauri::command]
-pub async fn discard_remote_account_token(tab_id: String, ssh_args: String) -> Result<(), String> {
+pub async fn discard_remote_account_token(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+    tab_id: String,
+    ssh_args: String,
+) -> Result<(), String> {
+    // Prepared and never used: whatever the push recorded, this session is NOT running as the
+    // account. Downgraded before the best-effort cleanup, which can fail without changing that.
+    crate::mailink::accounts::downgrade_remote(state.inner(), &tab_id, "the token was prepared but the session did not use it");
     let Some(script) = accounts::remote::discard_script(&tab_id) else {
         return Ok(());
     };

@@ -30,6 +30,11 @@
 
 pub mod browser;
 pub mod remote;
+pub mod tab_record;
+
+/// A `setup-token` is valid for one year (login.md §2.4). Expiry is read from maiTerm's own mint
+/// record, never from the credential (§7). The pane's countdown uses the same figure.
+pub const TOKEN_LIFETIME_SECS: u64 = 365 * 24 * 60 * 60;
 pub mod vault;
 
 use std::fs;
@@ -755,9 +760,23 @@ fn merge_json(
 pub fn spawn_env_for(prefs: &crate::state::Preferences) -> (Vec<(String, String)>, Vec<String>) {
     let mut set = Vec::new();
     let mut unset = Vec::new();
-    if !prefs.accounts_setup_complete || !prefs.accounts_enabled {
-        return (set, unset);
+    for (runtime, account_id) in active_accounts(prefs) {
+        if let Some((s, u)) = spawn_env(runtime, &account_id) {
+            set.extend(s);
+            unset.extend(u);
+        }
     }
+    (set, unset)
+}
+
+/// The account a new tab gets for each runtime — the ONE resolution both the spawn env and the
+/// per-tab record (`tab_record::for_spawn`) read, so what a tab is recorded as cannot drift from
+/// what its shell was handed. Only runtimes `spawn_env` would actually inject for.
+pub fn active_accounts(prefs: &crate::state::Preferences) -> Vec<(Runtime, String)> {
+    if !prefs.accounts_setup_complete || !prefs.accounts_enabled {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
     for runtime in ALL_RUNTIMES {
         let Some(account_id) = prefs.active_account_ids.get(runtime.slug()) else {
             continue;
@@ -766,15 +785,17 @@ pub fn spawn_env_for(prefs: &crate::state::Preferences) -> (Vec<(String, String)
             .managed_accounts
             .iter()
             .any(|a| &a.id == account_id && a.runtime == runtime.slug());
-        if !known {
+        let profile = runtime.profile();
+        if !known || !profile.supported || profile.config_env.is_empty() {
             continue;
         }
-        if let Some((s, u)) = spawn_env(*runtime, account_id) {
-            set.extend(s);
-            unset.extend(u);
+        // `spawn_env` injects nothing without a root, so neither may the record claim one.
+        if account_root(*runtime, account_id).is_none() {
+            continue;
         }
+        out.push((*runtime, account_id.clone()));
     }
-    (set, unset)
+    out
 }
 
 /// Which account's remote token should a tab on `host` use? (§6)

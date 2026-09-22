@@ -333,7 +333,15 @@ pub fn spawn_pty(
     // a cross-platform question and must be answered in this section, not in one of the two
     // shell-detection arms.
     {
-        let (set, unset) = crate::accounts::spawn_env_for(&state.app_data.read().preferences);
+        let (set, unset, record) = {
+            let data = state.app_data.read();
+            let (set, unset) = crate::accounts::spawn_env_for(&data.preferences);
+            (set, unset, crate::accounts::tab_record::for_spawn(&data.preferences))
+        };
+        // Recorded HERE, from the same resolution, because this is the only place that knows
+        // what the shell was actually handed — maiLink §14 serves it rather than guessing from
+        // the active account, which a tab stops following the moment someone switches.
+        state.tab_accounts.write().insert(tab_id.to_string(), record);
         for (k, v) in set {
             cmd.env(k, v);
         }
@@ -953,7 +961,7 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
 /// from a snapshot taken up to 800ms ago — before the ssh existed — loses the bridge
 /// for the whole session, until the user happens to redraw the prompt by typing.
 pub fn get_pty_foreground(
-    state: &Arc<AppState>,
+    state: &AppState,
     pty_id: &str,
     fresh: bool,
 ) -> Result<Option<String>, String> {
