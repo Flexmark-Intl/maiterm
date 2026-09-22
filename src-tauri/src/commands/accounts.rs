@@ -1995,12 +1995,18 @@ pub async fn discard_remote_account_token(
 /// The ssh maiTerm typed for this tab's handoff has come up: bind the handoff to that process
 /// (maiLink §14). Called from the frontend's own ssh-up poll, so binding never depends on whether
 /// maiLink is running. Quiet and best effort — an unbound record just reads as unknown.
+///
+/// Async + `spawn_blocking`: it runs a fresh `ps`, and session restore brings many SSH tabs up at
+/// once — on the main thread that is one UI stall per tab (the mesh-liveness pinwheel lesson).
 #[tauri::command]
-pub fn bind_remote_account(
+pub async fn bind_remote_account(
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     tab_id: String,
-) -> bool {
-    crate::mailink::accounts::bind_after_ssh_up(state.inner(), &tab_id)
+) -> Result<bool, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::mailink::accounts::bind_after_ssh_up(&app, &tab_id))
+        .await
+        .map_err(|e| format!("bind task failed: {e}"))
 }
 
 /// Run one short script on the remote over a connection of its own, optionally feeding it

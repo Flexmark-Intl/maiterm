@@ -2109,6 +2109,9 @@ then claimed by its own Up+Enter re-run). So:
   command line names THAT handoff;
 - where the fragment is typed *into* an ssh already running (the bridge's typed-ssh path, the
   manual "Inject maiTerm Env Vars"), the handoff binds to that process as it runs;
+- a record that staged nothing — a refused or failed push (`not_applied`), a host not covered
+  (`host_login`) — binds to the ssh that path's poll sees right after typing it: there is no name
+  to check, and what it claims is a warning, never an identity;
 - a bound record is never re-bound, and serving a chat never binds anything.
 
 An unbound record, or any ssh other than the bound one, is `{ known: false }`. On Windows the

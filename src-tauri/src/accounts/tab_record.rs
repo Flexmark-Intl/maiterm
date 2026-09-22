@@ -166,17 +166,24 @@ pub fn wire(
 /// sees (the frontend's own "ssh came up" poll right after typing it), never on a maiLink tick.
 /// Binds only an UNBOUND record, and only to an ssh whose argv names THIS handoff. Returns whether
 /// it bound.
+///
+/// A record with NO handle staged nothing — a refused or failed push (`not_applied`), or a host
+/// not covered (`host_login`) — so the ssh typed after it carries no name to recognise. Those bind
+/// to the ssh this edge sees, because the edge is the path's own poll right after typing it, and
+/// because what they claim is a warning or "the host's own login", never an identity: misplaced,
+/// the cost is a check, not false reassurance. `sent_unverified` always requires the name.
 pub fn try_bind(remote: &mut RemoteRecord, pid: u32, cmd: &str) -> bool {
     if remote.ssh_pid.is_some() {
         return false;
     }
-    match remote.handle.as_deref() {
-        Some(h) if names_handoff(cmd, h) => {
-            remote.ssh_pid = Some(pid);
-            true
-        }
-        _ => false,
+    let ok = match remote.handle.as_deref() {
+        Some(h) => names_handoff(cmd, h),
+        None => remote.state != RemoteState::SentUnverified,
+    };
+    if ok {
+        remote.ssh_pid = Some(pid);
     }
+    ok
 }
 
 /// Whether an ssh command line is the one maiTerm typed for this handoff.
@@ -347,6 +354,16 @@ mod tests {
         assert!(try_bind(&mut r, 100, &cmd));
         assert!(!try_bind(&mut r, 101, &cmd), "a bound record is never re-bound — a re-run is a new pid");
         assert_eq!(r.ssh_pid, Some(100));
+    }
+
+    #[test]
+    fn a_failed_push_binds_on_the_edge_so_its_warning_reaches_the_phone() {
+        // A failed push stages no file, so the typed ssh names nothing — bind on the edge anyway.
+        let mut failed = RemoteRecord::new(Some(aref("a")), RemoteState::NotApplied, Some("no key".into()));
+        assert!(try_bind(&mut failed, 7, "ssh -t nova 'cd /x && exec $SHELL -l'"));
+        // …but an unnamed SENT record never binds: that would be an identity claim on no evidence.
+        let mut sent = RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None);
+        assert!(!try_bind(&mut sent, 7, "ssh -t nova claude"));
     }
 
     #[test]
