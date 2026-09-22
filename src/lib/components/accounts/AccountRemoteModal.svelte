@@ -162,6 +162,10 @@
   async function mint(then: 'none' | 'copy' | 'private') {
     onUrl = then;
     phase = 'minting';
+    // The button that was clicked unmounts with the explain phase, dropping focus to body —
+    // where the backdrop's Escape handler never fires and Escape closes Preferences instead,
+    // the exact failure `handleKeydown` exists to prevent.
+    requestAnimationFrame(() => panelEl?.focus());
     error = null;
     // A retry is a NEW mint with a new link and a new code. Left standing, `codeSent` would hide
     // the field the second attempt depends on, and the old link would sit above it looking
@@ -258,75 +262,191 @@
     bind:this={panelEl}
     tabindex="-1"
   >
-    <h3>Use {target.label} on remote hosts</h3>
+    <header class="head">
+      <h3>Use {target.label} on remote hosts</h3>
+      <p class="lead">
+        Mints a long-lived token for this account. maiTerm keeps it in your OS keychain and hands
+        it to SSH tabs on the hosts you choose, so a remote agent runs as {target.label} instead
+        of whatever that host is signed in to.
+      </p>
+    </header>
 
     <div class="body">
-      <section>
-        <h4>What this creates</h4>
-        <p>
-          A <strong>separate long-lived token</strong> for this account, minted by the agent in
-          your browser. maiTerm keeps it in your OS keychain and hands it to SSH tabs on hosts
-          you choose — so a remote agent runs as {target.label} instead of as whatever that
-          host happens to be signed in to.
-        </p>
-      </section>
+      <!-- First in the body so a failed mint's reason is the first thing seen on return, not
+           something at the bottom of a scroll. -->
+      {#if error}<p class="error">{error}</p>{/if}
 
-      <!-- The things someone should know BEFORE agreeing, not after. Each is a real property of
-           the credential, not boilerplate. The billing line leads because it is the first
-           question anyone asks about a long-lived token, and the answer is reassuring — but the
-           scope line has to sit right behind it, because §8 requires the trade to be stated
-           here rather than discovered on a host weeks later. -->
-      <section>
-        <h4>What you should know first</h4>
-        <ul>
-          <li>
-            <strong>It uses your subscription, not API credits.</strong> The token authenticates
-            against the same {target.plan ? target.plan.toUpperCase() : 'Pro/Max/Team'} plan
-            this account already has. Remote usage is billed exactly as local usage is.
-          </li>
-          <li>
-            <strong>It is a narrower credential than a sign-in.</strong> On hosts using it,
-            model requests and your local MCP servers work normally — maiTerm's own bridge
-            included — but <em>Remote Control sessions</em> and <em>claude.ai connectors</em> are
-            unavailable, and <code>--bare</code> sessions ignore it. If you need those on a
-            remote host, sign that host in itself instead of enabling it here.
-          </li>
-          <li>
-            <strong>It lasts a year.</strong> It does not rotate, which is exactly why one token
-            can serve several hosts at once — and also why it is worth protecting.
-          </li>
-          <li>
-            <strong>Removing it here does not switch it off there.</strong> maiTerm stops handing
-            it out, but a host that already has it keeps working until the token expires. To cut
-            a token off everywhere, revoke it in your Anthropic account settings.
-          </li>
-          <li>
-            <strong>On the host it is a file-level secret.</strong> Anyone who can read that
-            user's environment can read the token — the same exposure as any credential in a
-            shell profile there.
-          </li>
-          <li>
-            <strong>Naming hosts keeps a record; “every SSH host” does not.</strong> Since
-            nothing revokes these, the list of hosts you named is the only note of where the
-            token went. Turn on the catch-all and there is no such list to consult later.
-          </li>
-        </ul>
-        <p class="aside">
-          None of this applies to your local tabs — those use full sign-ins and lose nothing.
-        </p>
-      </section>
+      {#if phase === 'minting'}
+        <!-- While a mint runs this is the ONLY content. It used to render below the full
+             disclosure, so the link and the code field — the things the user needs right now —
+             arrived under a page of text they had already agreed to. -->
+        <section class="progress" aria-live="polite">
+          <div class="progress-head">
+            <span class="pulse" aria-hidden="true"></span>
+            <h4>
+              {#if cancelling}Cancelling…
+              {:else if openedPrivately}Waiting for you in {browser?.label ?? 'a private window'}
+              {:else if copied}Link copied — waiting for approval
+              {:else if loginUrl}Waiting for approval in your browser
+              {:else}Starting the agent…{/if}
+            </h4>
+          </div>
+          <p class="hint">
+            {#if !loginUrl}
+              The authorization link appears here as soon as the agent produces it.
+            {:else if pasteCode}
+              This is the agent's own fallback link and cannot finish on its own — the window it
+              opened can. It is here so you can see where it was sending you.
+            {:else if openedPrivately}
+              Approve there and this finishes on its own. If that window was not private, close it
+              and use Copy.
+            {:else if copied}
+              Paste it into a private window to mint as a different account.
+            {:else}
+              Approve in the browser and this finishes on its own. To mint as a different account,
+              open the link in a private window instead.
+            {/if}
+          </p>
+          {#if loginUrl}
+            <div class="link-row">
+              <code class="url">{loginUrl}</code>
+              <Button variant="secondary" onclick={copyLink}>{copied ? 'Copy again' : 'Copy'}</Button>
+            </div>
+          {/if}
 
-      <!-- Same trap as adding a second account, and worse here: the mint takes whichever
-           account the browser session holds, so a stale session mints for the wrong one. -->
-      {#if browsers.length}
+          <!-- A FALLBACK, not the next step. The link carries
+               `redirect_uri=http://localhost:<port>/callback` and finishes through the agent's own
+               listener, so approving in the browser is normally all there is to do. Some browsers
+               land on the agent's manual page instead and show a code; this is where that code
+               comes back. Captioned as the required action, it sent people hunting for a code
+               that was not there. -->
+          {#if needsCode}
+            <div class="code-step">
+              <h4>{codeSent ? 'Code sent' : 'Browser showed a code?'}</h4>
+              <p class="hint">
+                {#if codeSent}
+                  Waiting for the agent to accept it.
+                {:else}
+                  Only if approving did not finish this on its own — paste the code here.
+                {/if}
+              </p>
+              {#if codeSent}
+                <div class="link-row">
+                  <Button variant="ghost" onclick={retryCode}>Enter a different code</Button>
+                </div>
+              {:else}
+                <div class="link-row">
+                  <input
+                    bind:this={codeEl}
+                    class="code-input"
+                    type="text"
+                    spellcheck="false"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    aria-label="Code from the browser"
+                    placeholder="Code from the browser"
+                    bind:value={code}
+                    onkeydown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); void sendCode(); }
+                    }}
+                  />
+                  <Button variant="secondary" disabled={!code.trim()} onclick={sendCode}>
+                    Submit
+                  </Button>
+                </div>
+              {/if}
+              {#if codeError}<p class="error">{codeError}</p>{/if}
+            </div>
+          {/if}
+        </section>
+      {:else}
+        <!-- The things someone should know BEFORE agreeing. Each is a real property of the
+             credential, not boilerplate, and each headline states it outright — the detail is
+             one click away rather than gone, because §8 requires the trade to be stated here,
+             not discovered on a host weeks later. Six full paragraphs used to push the choice
+             and the buttons below the fold. The billing line leads because it is the first
+             question anyone asks about a long-lived token; the scope line sits right behind. -->
+        <section>
+          <h4>Before you mint</h4>
+          <ul class="facts">
+            <li class="fact good">
+              <details>
+                <summary>
+                  Uses your {target.plan ? target.plan.toUpperCase() : 'Pro/Max/Team'} subscription,
+                  not API credits
+                </summary>
+                <p>
+                  The token authenticates against the plan this account already has. Remote usage
+                  is billed exactly as local usage is.
+                </p>
+              </details>
+            </li>
+            <li class="fact">
+              <details>
+                <summary>No Remote Control or claude.ai connectors on those hosts</summary>
+                <p>
+                  It is a narrower credential than a sign-in. Model requests and your local MCP
+                  servers work normally — maiTerm's own bridge included — but
+                  <em>Remote Control sessions</em> and <em>claude.ai connectors</em> are unavailable,
+                  and <code>--bare</code> sessions ignore it. If you need those on a host, sign that
+                  host in itself instead.
+                </p>
+              </details>
+            </li>
+            <li class="fact">
+              <details>
+                <summary>Lasts a year and never rotates</summary>
+                <p>
+                  Not rotating is exactly why one token can serve several hosts at once — and also
+                  why it is worth protecting.
+                </p>
+              </details>
+            </li>
+            <li class="fact">
+              <details>
+                <summary>Removing it here does not switch it off on hosts</summary>
+                <p>
+                  maiTerm stops handing it out, but a host that already has it keeps working until
+                  the token expires. To cut it off everywhere, revoke it in your Anthropic account
+                  settings.
+                </p>
+              </details>
+            </li>
+            <li class="fact">
+              <details>
+                <summary>Readable on the host like any shell-profile secret</summary>
+                <p>
+                  Anyone who can read that user's environment on the host can read the token.
+                </p>
+              </details>
+            </li>
+            <li class="fact">
+              <details>
+                <summary>Only named hosts leave a record of where it went</summary>
+                <p>
+                  Since nothing revokes these, the list of hosts you name is the only note of where
+                  the token went. Turn on “every SSH host” and there is no such list to consult
+                  later.
+                </p>
+              </details>
+            </li>
+          </ul>
+          <p class="aside">Your local tabs are unaffected — they keep full sign-ins.</p>
+        </section>
+
+        <!-- Same trap as adding a second account, and worse here: the mint takes whichever
+             account the browser session holds, so a stale session mints for the wrong one — and
+             maiTerm cannot detect it afterwards (§2.4). -->
         <section class="note">
+          <h4>The browser decides which account this is for</h4>
           <p>
-            Your browser may already be signed in to a different account — the token would then
-            be minted for <em>that</em> one. <strong>Mint privately</strong> opens a fresh
-            {browser?.label ?? 'private'} window with no session to reuse. <strong>maiTerm
-            cannot tell you afterwards which account a token belongs to</strong> — a token carries
-            no profile, so the runtime reports no email for it. Which window you sign in with is
-            the only control there is.
+            The token belongs to whichever account the browser is signed in to, and maiTerm
+            <strong>cannot check afterwards</strong> — a token carries no profile.
+            {#if browsers.length}
+              A private {browser?.label ?? ''} window has no session to reuse.
+            {:else}
+              Copy the link and open it in a private window to be sure.
+            {/if}
           </p>
           {#if browsers.length > 1}
             <div class="segments" role="radiogroup" aria-label="Private window">
@@ -344,116 +464,29 @@
             </div>
           {/if}
         </section>
-      {:else}
-        <section class="note">
-          <p>
-            Your browser may already be signed in to a different account — the token would then
-            be minted for <em>that</em> one. Use <strong>Mint and copy link</strong> and paste it
-            into a private window. <strong>maiTerm cannot tell you afterwards which account a
-            token belongs to</strong> — a token carries no profile, so the runtime reports no
-            email for it. Which window you sign in with is the only control there is.
-          </p>
-        </section>
       {/if}
-
-      {#if phase === 'minting'}
-        <section class="link-box">
-          {#if loginUrl}
-            <h4>
-              {#if openedPrivately}Opened in {browser?.label ?? 'a private window'}
-              {:else if copied}Link copied
-              {:else}Authorization link{/if}
-            </h4>
-            <p class="hint">
-              {#if pasteCode}
-                This is the agent's own fallback link and cannot finish on its own — the window
-                it opened can. It is here so you can see where it was sending you.
-              {:else if openedPrivately}
-                Finish there. If that window was not private, close it and use Copy.
-              {:else if copied}
-                On your clipboard. Paste it into a private window to mint as a different account.
-              {:else}
-                Open this in a private window to mint as a different account.
-              {/if}
-            </p>
-            <div class="link-row">
-              <code class="url">{loginUrl}</code>
-              <Button variant="ghost" onclick={copyLink}>{copied ? 'Copy again' : 'Copy'}</Button>
-            </div>
-          {:else if !needsCode}
-            <p class="hint">Waiting for the agent to produce an authorization link…</p>
-          {/if}
-
-          <!-- A FALLBACK, not the next step. The link above carries
-               `redirect_uri=http://localhost:<port>/callback` and finishes through the agent's
-               own listener, so approving in the browser is normally all there is to do. Some
-               browsers land on the agent's manual page instead and show a code; this is where
-               that code comes back. Presented quietly for that reason — captioned as the
-               required action it sent people hunting for a code that was not there. -->
-          {#if needsCode}
-            <div class="code-step">
-              <h4>{codeSent ? 'Waiting for the agent…' : 'If the browser showed you a code'}</h4>
-              <p class="hint">
-                {#if codeSent}
-                  Sent. If the agent did not accept it, you can try again.
-                {:else}
-                  Approving in the browser usually finishes this on its own. If it showed you a
-                  code instead, paste it here.
-                {/if}
-              </p>
-              {#if codeSent}
-                <div class="link-row">
-                  <Button variant="ghost" onclick={retryCode}>Enter a different code</Button>
-                </div>
-              {/if}
-              {#if !codeSent}
-                <div class="link-row">
-                  <input
-                    bind:this={codeEl}
-                    class="code-input"
-                    type="text"
-                    spellcheck="false"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    placeholder="Code from the browser"
-                    bind:value={code}
-                    onkeydown={e => {
-                      if (e.key === 'Enter') { e.preventDefault(); void sendCode(); }
-                    }}
-                  />
-                  <Button variant="secondary" disabled={!code.trim()} onclick={sendCode}>
-                    Submit
-                  </Button>
-                </div>
-              {/if}
-              {#if codeError}<p class="error">{codeError}</p>{/if}
-            </div>
-          {/if}
-        </section>
-      {/if}
-
-      {#if error}<p class="error">{error}</p>{/if}
     </div>
 
     <div class="footer">
-      <!-- Enabled WHILE minting: the common reason to abort is seeing the browser open
-           signed in to the wrong account, and without this the only escape was a key that
-           closed the window and left the flow running to completion. -->
+      <!-- Enabled WHILE minting: the common reason to abort is seeing the browser open signed in
+           to the wrong account, and without this the only escape was a key that closed the
+           window and left the flow running to completion. -->
       <Button variant="ghost" disabled={cancelling} onclick={() => (busy ? cancelMint() : oncancel())}>
         {cancelling ? 'Cancelling…' : busy ? 'Cancel mint' : 'Cancel'}
       </Button>
-      {#if browser}
-        <Button variant="secondary" disabled={busy} onclick={() => mint('private')}>
-          Mint privately
-        </Button>
-      {:else}
-        <Button variant="secondary" disabled={busy} onclick={() => mint('copy')}>
-          Mint and copy link
-        </Button>
+      {#if !busy}
+        <!-- The safe path is the primary one. The copy above says the browser window is the only
+             control over which account the token is for, so the default browser — the one most
+             likely signed in to somebody else — is the secondary choice, not the big button. -->
+        <Button variant="secondary" onclick={() => mint('none')}>Mint in default browser</Button>
+        {#if browser}
+          <Button variant="primary" onclick={() => mint('private')}>
+            Mint in private {browser.label}
+          </Button>
+        {:else}
+          <Button variant="primary" onclick={() => mint('copy')}>Mint and copy link</Button>
+        {/if}
       {/if}
-      <Button variant="primary" disabled={busy} onclick={() => mint('none')}>
-        {busy ? 'Minting…' : 'Mint token'}
-      </Button>
     </div>
   </div>
 </div>
@@ -480,13 +513,139 @@
     width: 92%;
   }
 
-  h3 {
+  .modal:focus {
+    outline: none;
+  }
+
+  .head {
     border-bottom: 1px solid var(--bg-light);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px 16px 12px;
+  }
+
+  h3 {
     color: var(--fg);
     font-size: 0.95rem;
     margin: 0;
-    padding: 14px 16px;
     overflow-wrap: anywhere;
+  }
+
+  .head .lead {
+    max-width: 62ch;
+  }
+
+  /* --- Before you mint: one line per fact, detail on demand --- */
+
+  .facts {
+    border: 1px solid var(--bg-light);
+    border-radius: 6px;
+    gap: 0;
+    list-style: none;
+    padding: 0;
+  }
+
+  .fact + .fact {
+    border-top: 1px solid var(--bg-light);
+  }
+
+  .fact summary {
+    align-items: baseline;
+    color: var(--fg);
+    cursor: pointer;
+    display: flex;
+    gap: 8px;
+    list-style: none;
+    padding: 7px 10px;
+  }
+
+  .fact summary::-webkit-details-marker {
+    display: none;
+  }
+
+  /* The marker carries meaning: green for the one reassuring fact, amber for the costs. */
+  .fact summary::before {
+    background: var(--yellow);
+    border-radius: 50%;
+    content: '';
+    flex: none;
+    height: 6px;
+    transform: translateY(-1px);
+    width: 6px;
+  }
+
+  .fact.good summary::before {
+    background: var(--green);
+  }
+
+  .fact summary::after {
+    color: var(--fg-dim);
+    content: '›';
+    margin-left: auto;
+    transition: transform 0.15s;
+  }
+
+  .fact details[open] summary::after {
+    transform: rotate(90deg);
+  }
+
+  .fact summary:hover {
+    background: color-mix(in srgb, var(--bg-light) 30%, transparent);
+  }
+
+  .fact summary:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  .fact details p {
+    padding: 0 10px 9px 24px;
+  }
+
+  /* --- While minting --- */
+
+  .progress {
+    background: var(--bg-medium);
+    border-radius: 6px;
+    padding: 12px;
+  }
+
+  .progress-head {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+  }
+
+  .progress-head h4 {
+    margin: 0;
+  }
+
+  .progress > .hint {
+    margin-top: 4px;
+  }
+
+  /* The one piece of unprompted motion: it says the mint is alive while the user is away in
+     the browser, which is otherwise indistinguishable from a hang. */
+  .pulse {
+    animation: pulse 1.4s ease-in-out infinite;
+    background: var(--accent);
+    border-radius: 50%;
+    flex: none;
+    height: 8px;
+    width: 8px;
+  }
+
+  @keyframes pulse {
+    50% {
+      opacity: 0.25;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pulse {
+      animation: none;
+    }
   }
 
   .body {
@@ -567,12 +726,6 @@
     opacity: 0.5;
   }
 
-  .link-box {
-    background: var(--bg-medium);
-    border-radius: 6px;
-    padding: 10px 12px;
-  }
-
   .link-row {
     align-items: center;
     display: flex;
@@ -623,9 +776,9 @@
   }
 
   .error {
-    background: rgba(220, 80, 80, 0.12);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
     border-radius: 4px;
-    color: #e06c75;
+    color: var(--red);
     font-size: 0.8rem;
     line-height: 1.5;
     overflow-wrap: anywhere;

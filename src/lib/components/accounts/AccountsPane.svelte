@@ -28,6 +28,13 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let notice = $state<string | null>(null);
+  /** The account `error`/`notice` are about, so they render on its card. Null — or an account
+   *  that no longer exists, as after Remove — puts them at the foot of the pane. */
+  let feedbackId = $state<string | null>(null);
+  /** Point the next message at one account's card. Called first in every per-account action. */
+  function about(account: ManagedAccount | null) {
+    feedbackId = account?.id ?? null;
+  }
   /** Inline confirm — `window.confirm()` does not work in Tauri webviews. */
   let confirmingClear = $state(false);
   /** The post-change modal, when a change has just been made that only affects NEW tabs.
@@ -105,6 +112,7 @@
   const accounts = $derived(preferencesStore.managedAccounts);
   const setupComplete = $derived(preferencesStore.accountsSetupComplete);
   const enabled = $derived(preferencesStore.accountsEnabled);
+  const feedbackOnCard = $derived(!!feedbackId && accounts.some(a => a.id === feedbackId));
 
   function labelFor(slug: string): string {
     return runtimes.find(r => r.slug === slug)?.label ?? slug;
@@ -129,6 +137,7 @@
    *  on a component that is about to be destroyed: the user would finish a browser sign-in and
    *  see the UI change in no way at all — no row, no error, just a line in the log. */
   async function addAccount(account: NewAccount, runtime: string) {
+    about(null);
     try {
       await addAccountInner(account, runtime);
     } catch (e) {
@@ -194,6 +203,7 @@
       ...(setupComplete ? {} : { setupComplete: true, enabled: true }),
     });
     notice = `Added ${row.label}.`;
+    feedbackId = account_id;
     error = null;
   }
 
@@ -204,6 +214,7 @@
    *  is rare enough that the button looked broken to everyone. A check whose "all good" is
    *  silence is not a check the user can trust. */
   async function verify(account: ManagedAccount) {
+    about(account);
     busy = true;
     error = null;
     notice = null;
@@ -248,6 +259,7 @@
    *  process's environment is fixed at exec — nothing can rewrite it from outside afterwards.
    *  Saying so at the moment of the click is the only place it lands. */
   async function makeActive(account: ManagedAccount) {
+    about(account);
     busy = true;
     error = null;
     try {
@@ -289,6 +301,7 @@
    *  Toggling off without it looked like nothing had happened — every running tab carried on
    *  under its managed account with no sign that the feature was now off. */
   async function setEnabled(value: boolean) {
+    about(null);
     busy = true;
     error = null;
     try {
@@ -319,6 +332,32 @@
     return on
       ? 'Active — new tabs launch under this account'
       : 'Active, but management is off — new tabs use your normal login';
+  }
+
+  /** The one-line answer to "what does this account do on SSH hosts", for the section's header.
+   *
+   *  `live` is only claimed when Rust would actually propagate: the account is active, the
+   *  feature is on, and the token is RECORDED — `remote_account_for_host` keys on
+   *  `token_minted_at`, not on vault presence, so an orphan token reads as a warning, not as
+   *  coverage. */
+  function remoteSummary(
+    account: ManagedAccount,
+    tokenPresent: boolean,
+    isActive: boolean,
+  ): { text: string; tone: 'live' | 'idle' | 'warn' } {
+    if (!tokenPresent) return { text: 'Not set up', tone: 'idle' };
+    if (!account.token_minted_at) return { text: 'Token not recorded', tone: 'warn' };
+    if (tokenExpiry(account.token_minted_at).label === 'Token expired') {
+      return { text: 'Token expired', tone: 'warn' };
+    }
+    const n = (account.remote_hosts ?? []).length;
+    const text = account.remote_all_hosts
+      ? 'Every host'
+      : n
+        ? `${n} host${n === 1 ? '' : 's'}`
+        : 'No hosts yet';
+    const covers = account.remote_all_hosts || n > 0;
+    return { text, tone: covers && isActive && enabled ? 'live' : 'idle' };
   }
 
   /** "3 minutes ago", for the last successful Verify. */
@@ -355,6 +394,7 @@
   const HOST_SHAPE = /^[A-Za-z0-9._@-]+$/;
 
   async function addHost(account: ManagedAccount) {
+    about(account);
     // Hostnames are case-insensitive, so normalize rather than let `nova` and `Nova` sit in the
     // list as two entries that behave identically and look like a bug.
     const host = (hostDraft[account.id] ?? '').trim().toLowerCase();
@@ -397,6 +437,7 @@
    *  could claim one host at once — they cannot, because the question is only ever asked of
    *  one. */
   async function setAllHosts(account: ManagedAccount, value: boolean) {
+    about(account);
     busy = true;
     error = null;
     try {
@@ -414,6 +455,7 @@
   }
 
   async function removeHost(account: ManagedAccount, host: string) {
+    about(account);
     busy = true;
     error = null;
     try {
@@ -439,6 +481,7 @@
    *  feature cannot keep, and per §6.1 the failure is silent — the tab comes up as whoever that
    *  host was already signed in to rather than erroring. */
   async function forgetToken(account: ManagedAccount) {
+    about(account);
     busy = true;
     error = null;
     notice = null;
@@ -477,6 +520,7 @@
   }
 
   async function removeAccount(account: ManagedAccount) {
+    about(account);
     busy = true;
     error = null;
     notice = null;
@@ -519,6 +563,7 @@
   /** The destructive half of §10. One place resets everything, so no later field can be
    *  forgotten here and left behind pointing at accounts that no longer exist. */
   async function clearSetup() {
+    about(null);
     busy = true;
     error = null;
     try {
@@ -610,175 +655,197 @@
     </div>
 
     {#each grouped as group (group.slug)}
-      <div class="group">
-        <div class="group-head">{group.label}</div>
+      <section class="runtime" aria-labelledby={`runtime-${group.slug}`}>
+        <h4 class="runtime-head" id={`runtime-${group.slug}`}>{group.label}</h4>
         {#if enabled && !activeIdFor(group.slug)}
           <!-- Enabled with nothing active is a silent no-op: the toggle claims tabs launch
                under the active account while there is none, so they quietly use the normal
                login instead. Say it rather than let the pane imply otherwise. -->
-          <div class="row-warn">
+          <p class="runtime-warn">
             No active account — new tabs use your normal login. Choose one with “Use”.
-          </div>
+          </p>
         {/if}
-        {#each group.rows as account (account.id)}
-          {@const identity = identities[account.id]}
-          {@const isActive = activeIdFor(group.slug) === account.id}
-          <!-- Keyed on what the VAULT holds, not on `token_minted_at`. A token can exist with no
-               metadata — a refused save, a window closed mid-mint — and keying on metadata hid
-               the only control that removes it. -->
-          {@const tokenPresent = hasToken[account.id] ?? !!account.token_minted_at}
-          <div class="row" class:active={isActive}>
-            <div class="row-main">
-              <div class="row-title">
-                <!-- The tooltip goes on a padded wrapper, not the dot: the dot is 6px, which is
-                     a hover target most people never hit, so the explanation may as well not
-                     exist. StatusDot gets no `tooltip` prop here — that would nest two. -->
-                <Tooltip text={statusTooltip(isActive, enabled)}>
-                  <span class="dot-hit">
-                    <StatusDot color={isActive && enabled ? 'green' : 'dim'} />
-                  </span>
-                </Tooltip>
-                <span class="name">{account.label}</span>
-                {#if account.plan}<span class="pill">{account.plan}</span>{/if}
-                {#if isActive}<span class="pill active-pill">Active</span>{/if}
-              </div>
-              {#if account.org_name}<div class="meta">{account.org_name}</div>{/if}
-              {#if account.last_verified_at}
-                <div class="meta">Verified {agoLabel(account.last_verified_at)}</div>
-              {/if}
-              {#if identity && !identity.is_account_login}
-                <div class="meta warn">
-                  {#if !identity.logged_in}
-                    <!-- Nothing is answering. A different problem from being shadowed, with a
-                         different fix, so it must not borrow that wording. -->
-                    Signed out — sign in again to use this account
-                  {:else if identity.shadowed_by}
-                    Resolving as {identity.shadowed_by}, not this account
-                  {:else}
-                    Signed in, but not as this account
+
+        <!-- One card per account, with its SSH hosts INSIDE it. They used to be two sibling
+             rows in one bordered box, split by the same hairline that split two accounts, so a
+             host list read as belonging to whichever account happened to sit next to it. -->
+        <ul class="cards">
+          {#each group.rows as account (account.id)}
+            {@const identity = identities[account.id]}
+            {@const isActive = activeIdFor(group.slug) === account.id}
+            <!-- Keyed on what the VAULT holds, not on `token_minted_at`. A token can exist with
+                 no metadata — a refused save, a window closed mid-mint — and keying on metadata
+                 hid the only control that removes it. -->
+            {@const tokenPresent = hasToken[account.id] ?? !!account.token_minted_at}
+            {@const summary = remoteSummary(account, tokenPresent, isActive)}
+            <li class="card" class:active={isActive} class:live={isActive && enabled}>
+              <div class="card-head">
+                <div class="who">
+                  <div class="title">
+                    <!-- The tooltip goes on a padded wrapper, not the dot: the dot is 6px, which
+                         is a hover target most people never hit. StatusDot gets no `tooltip`
+                         prop here — that would nest two. -->
+                    <Tooltip text={statusTooltip(isActive, enabled)}>
+                      <span class="dot-hit">
+                        <StatusDot color={isActive && enabled ? 'green' : 'dim'} />
+                      </span>
+                    </Tooltip>
+                    <span class="name">{account.label}</span>
+                    {#if account.plan}<span class="pill">{account.plan}</span>{/if}
+                    {#if isActive}<span class="pill active-pill">Active</span>{/if}
+                  </div>
+                  {#if account.org_name || account.last_verified_at}
+                    <div class="meta-line">
+                      {#if account.org_name}<span>{account.org_name}</span>{/if}
+                      {#if account.last_verified_at}
+                        <span>Verified {agoLabel(account.last_verified_at)}</span>
+                      {/if}
+                    </div>
+                  {/if}
+                  {#if identity && !identity.is_account_login}
+                    <div class="meta-line warn">
+                      {#if !identity.logged_in}
+                        <!-- Nothing is answering. A different problem from being shadowed,
+                             with a different fix, so it must not borrow that wording. -->
+                        Signed out — sign in again to use this account
+                      {:else if identity.shadowed_by}
+                        Resolving as {identity.shadowed_by}, not this account
+                      {:else}
+                        Signed in, but not as this account
+                      {/if}
+                    </div>
                   {/if}
                 </div>
-              {/if}
-            </div>
-            <div class="row-actions">
-              {#if !isActive}
-                <Tooltip text="Run tabs opened from now on as this account">
-                  <Button variant="ghost" disabled={busy} onclick={() => makeActive(account)}>
-                    Use
+                <div class="card-actions">
+                  {#if !isActive}
+                    <Tooltip text="Run tabs opened from now on as this account">
+                      <Button variant="secondary" disabled={busy} onclick={() => makeActive(account)}>
+                        Use
+                      </Button>
+                    </Tooltip>
+                  {/if}
+                  <Tooltip text="Check which identity this account currently resolves to">
+                    <Button variant="ghost" disabled={busy} onclick={() => verify(account)}>Verify</Button>
+                  </Tooltip>
+                  <Button variant="ghost" disabled={busy} onclick={() => removeAccount(account)}>
+                    Remove
                   </Button>
-                </Tooltip>
-              {/if}
-              <Tooltip text="Check which identity this account currently resolves to">
-                <Button variant="ghost" disabled={busy} onclick={() => verify(account)}>Verify</Button>
-              </Tooltip>
-              <Button variant="ghost" disabled={busy} onclick={() => removeAccount(account)}>Remove</Button>
-            </div>
-          </div>
-
-          <!-- §6. Its own strip under the row rather than more buttons in it: this is the one
-               part of the feature where maiTerm holds a real credential, and it should not read
-               as another action alongside Use and Verify. -->
-          <div class="remote">
-            {#if !tokenPresent}
-              <div class="remote-head">
-                <span class="remote-label">Remote hosts</span>
-                <Button variant="ghost" disabled={busy} onclick={() => (minting = account)}>
-                  Set up…
-                </Button>
-              </div>
-              <p class="remote-hint">
-                Not set up. SSH tabs use whatever login each host already has.
-              </p>
-            {:else}
-              <div class="remote-head">
-                <span class="remote-label">Remote hosts</span>
-                {#if account.token_minted_at}
-                  {@const exp = tokenExpiry(account.token_minted_at)}
-                  <span class="meta" class:warn={exp.warn}>{exp.label}</span>
-                {:else}
-                  <!-- A token in the keychain that state never recorded. Say so plainly rather
-                       than show a blank: this is the leftover of an interrupted mint, and the
-                       useful action is to remove it and start again. -->
-                  <!-- Vault holds a token, state does not. Rust keys propagation on the
-                       metadata, so this token is inert — say that, or the hosts below read as
-                       working. -->
-                  <span class="meta warn">
-                    Token present but never recorded — not in use. Remove it and mint again.
-                  </span>
-                {/if}
-                <Button variant="ghost" disabled={busy} onclick={() => forgetToken(account)}>
-                  Remove token
-                </Button>
-              </div>
-
-              <!-- The catch-all. A switch rather than a checkbox, per app standard. -->
-              <div class="all-hosts">
-                <span class="setting-label" id={`all-hosts-${account.id}`}>
-                  Use on every SSH host
-                </span>
-                <button
-                  class="toggle small"
-                  class:active={account.remote_all_hosts}
-                  disabled={busy}
-                  aria-pressed={!!account.remote_all_hosts}
-                  aria-labelledby={`all-hosts-${account.id}`}
-                  onclick={() => setAllHosts(account, !account.remote_all_hosts)}
-                >
-                  <span class="toggle-knob"></span>
-                </button>
-              </div>
-              {#if account.remote_all_hosts}
-                <p class="remote-hint">
-                  While this is the active account, every SSH tab uses it. Switching accounts
-                  switches your remotes too.
-                </p>
-              {/if}
-
-              {#if (account.remote_hosts ?? []).length}
-                <div class="hosts">
-                  {#each account.remote_hosts ?? [] as host (host)}
-                    <span class="host">
-                      {host}
-                      <button
-                        type="button"
-                        class="host-x"
-                        disabled={busy}
-                        aria-label={`Stop using ${account.label} on ${host}`}
-                        onclick={() => removeHost(account, host)}>×</button
-                      >
-                    </span>
-                  {/each}
                 </div>
-              {:else if !account.remote_all_hosts}
-                <!-- Only when the catch-all is off, or this contradicts the line above it. -->
-                <p class="remote-hint">
-                  Token ready. Turn on “Use on every SSH host”, or name hosts one at a time —
-                  nothing is sent anywhere until you do.
-                </p>
-              {/if}
+              </div>
 
-              <form
-                class="host-add"
-                onsubmit={e => {
-                  e.preventDefault();
-                  void addHost(account);
-                }}
-              >
-                <input
-                  type="text"
-                  placeholder="hostname or ssh alias"
-                  disabled={busy}
-                  bind:value={
-                    () => hostDraft[account.id] ?? '',
-                    v => (hostDraft = { ...hostDraft, [account.id]: v })
-                  }
-                />
-                <Button variant="ghost" disabled={busy}>Add host</Button>
-              </form>
-            {/if}
-          </div>
-        {/each}
-      </div>
+              <!-- §6. Inset inside the card rather than more buttons beside Use and Verify:
+                   this is the one part of the feature where maiTerm holds a real credential.
+                   Dimmed on an account that is not active, because only the ACTIVE account is
+                   ever propagated (`remote_account_for_host`) — these settings are real but
+                   dormant, and nothing else on the page says so. -->
+              <div class="remote" class:dormant={!isActive}>
+                <div class="remote-head">
+                  <span class="remote-title">SSH hosts</span>
+                  <span class="remote-state {summary.tone}">{summary.text}</span>
+                </div>
+
+                {#if !tokenPresent}
+                  <div class="remote-row">
+                    <p class="remote-hint">SSH tabs use whatever login each host already has.</p>
+                    <Button variant="secondary" disabled={busy} onclick={() => (minting = account)}>
+                      Set up…
+                    </Button>
+                  </div>
+                {:else}
+                  {#if !isActive && (account.remote_all_hosts || (account.remote_hosts ?? []).length)}
+                    <p class="remote-hint">Applies only while this is the active account.</p>
+                  {/if}
+
+                  <div class="remote-row">
+                    {#if account.token_minted_at}
+                      {@const exp = tokenExpiry(account.token_minted_at)}
+                      <span class="token-line" class:warn={exp.warn}>{exp.label}</span>
+                    {:else}
+                      <!-- Vault holds a token, state does not. Rust keys propagation on the
+                           metadata, so this token is inert — say that, or the hosts below read
+                           as working. -->
+                      <span class="token-line warn">
+                        Token present but never recorded — not in use. Remove it and mint again.
+                      </span>
+                    {/if}
+                    <Button variant="ghost" disabled={busy} onclick={() => forgetToken(account)}>
+                      Remove token
+                    </Button>
+                  </div>
+
+                  <!-- The catch-all. A switch rather than a checkbox, per app standard. -->
+                  <div class="remote-row">
+                    <span class="switch-label" id={`all-hosts-${account.id}`}>
+                      Use on every SSH host
+                    </span>
+                    <button
+                      class="toggle small"
+                      class:active={account.remote_all_hosts}
+                      disabled={busy}
+                      aria-pressed={!!account.remote_all_hosts}
+                      aria-labelledby={`all-hosts-${account.id}`}
+                      onclick={() => setAllHosts(account, !account.remote_all_hosts)}
+                    >
+                      <span class="toggle-knob"></span>
+                    </button>
+                  </div>
+
+                  {#if (account.remote_hosts ?? []).length}
+                    <ul class="hosts" aria-label={`Hosts named for ${account.label}`}>
+                      {#each account.remote_hosts ?? [] as host (host)}
+                        <li class="host">
+                          <span class="host-name">{host}</span>
+                          <button
+                            type="button"
+                            class="host-x"
+                            disabled={busy}
+                            aria-label={`Stop using ${account.label} on ${host}`}
+                            onclick={() => removeHost(account, host)}>×</button
+                          >
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else if !account.remote_all_hosts}
+                    <!-- Only when the catch-all is off, or this contradicts the switch above. -->
+                    <p class="remote-hint">
+                      Nothing is sent anywhere until you turn on every host or name one below.
+                    </p>
+                  {/if}
+
+                  <form
+                    class="host-add"
+                    onsubmit={e => {
+                      e.preventDefault();
+                      void addHost(account);
+                    }}
+                  >
+                    <input
+                      type="text"
+                      placeholder="hostname, ssh alias or user@host"
+                      aria-label={`Add a host for ${account.label}`}
+                      disabled={busy}
+                      bind:value={
+                        () => hostDraft[account.id] ?? '',
+                        v => (hostDraft = { ...hostDraft, [account.id]: v })
+                      }
+                    />
+                    <Button variant="secondary" disabled={busy || !(hostDraft[account.id] ?? '').trim()}>
+                      Add host
+                    </Button>
+                  </form>
+                {/if}
+              </div>
+
+              <!-- Feedback lands on the card it is about. At the foot of the pane it was a
+                   scroll away from the button that caused it, on a page with several of each. -->
+              {#if feedbackId === account.id}
+                {#if error}<p class="error in-card">{error}</p>{/if}
+                {#if notice && !error}<p class="notice in-card">{notice}</p>{/if}
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </section>
     {/each}
 
     <div class="actions">
@@ -799,15 +866,22 @@
     </div>
   {/if}
 
-  {#if error}<p class="error">{error}</p>{/if}
-  {#if notice && !error}<p class="notice">{notice}</p>{/if}
+  <!-- Anything not about a card still on screen: adding, clearing, or an account just removed. -->
+  {#if !feedbackOnCard}
+    {#if error}<p class="error">{error}</p>{/if}
+    {#if notice && !error}<p class="notice">{notice}</p>{/if}
+  {/if}
 
   <!-- §10's disclosure. It lives HERE rather than only in the setup modal because a modal is
        read once, under pressure to get past it, and then is unreachable forever — while the
        questions it answers ("did I give maiTerm my credentials?") get asked months later. On
        the pane it is available before setup, so it still teaches before the decision, and
        afterwards, when it is the only place left to check. -->
-  <section class="disclosure">
+  <!-- Collapsed once set up, so the account list is the first thing on the page rather than
+       sitting under five paragraphs the user has already read. Open before setup, when it is
+       the thing being decided on. -->
+  <details class="disclosure" open={!setupComplete}>
+    <summary>How accounts work</summary>
     <h4>What this does</h4>
     <p>
       Each account gets its own config directory. A tab launched under an account uses that
@@ -847,7 +921,7 @@
       a year; the dialog that mints it explains what that costs. Hosts you have not enabled keep
       whatever login they already have.
     </p>
-  </section>
+  </details>
 </div>
 
 {#if announce}
@@ -863,6 +937,7 @@
   <AccountRemoteModal
     account={minting}
     oncomplete={async (acct, mint) => {
+      about(acct);
       // **`acct` comes from the dialog, not from `minting`.** The pane's rows stay in the tab
       // order behind the modal, so a second row's "Set up…" could swap `minting` mid-flight and
       // this would record the token against the wrong account — giving that row an expiry and a
@@ -1011,50 +1086,88 @@
     line-height: 1.4;
   }
 
-  .group {
+  /* --- Accounts: one card per account, SSH hosts nested inside it --- */
+
+  .runtime {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .runtime-head {
+    color: var(--fg-dim);
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .runtime-warn {
+    color: var(--yellow);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    margin: 0;
+  }
+
+  .cards {
+    display: flex;
+    flex-direction: column;
+    /* The gap IS the separation between accounts. A shared border between them is what made
+       a host list look like it belonged to the neighbouring account. */
+    gap: 10px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .card {
+    background: color-mix(in srgb, var(--bg-medium) 55%, transparent);
     border: 1px solid var(--bg-light);
-    border-radius: 6px;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
   }
 
-  .group-head {
-    background: var(--bg-medium);
-    color: var(--fg-dim);
-    font-size: 0.75rem;
-    padding: 6px 10px;
-    text-transform: uppercase;
+  /* The rail says which card is in charge. Accent when new tabs really launch under it; the
+     muted version when it is the active account but management is switched off — the same
+     three states as the dot, readable from across the pane rather than only on hover. */
+  .card.active {
+    box-shadow: inset 3px 0 0 var(--fg-dim);
   }
 
-  .row {
-    align-items: center;
-    border-top: 1px solid var(--bg-light);
+  .card.live {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--bg-light));
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+
+  .card-head {
+    align-items: flex-start;
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 6px 8px;
     justify-content: space-between;
-    padding: 8px 10px;
+    padding: 10px 10px 8px 14px;
   }
 
-  .row.active {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-  }
-
-  .row-main {
+  .who {
     display: flex;
+    flex: 1 1 12rem;
     flex-direction: column;
     gap: 3px;
     min-width: 0;
   }
 
-  .row-title {
+  .title {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
   }
 
   .name {
     color: var(--fg);
-    font-size: 0.85rem;
+    font-size: 0.9rem;
+    font-weight: 600;
     overflow-wrap: anywhere;
   }
 
@@ -1064,7 +1177,6 @@
     color: var(--fg-dim);
     font-size: 0.7rem;
     padding: 1px 5px;
-    text-transform: uppercase;
   }
 
   .active-pill {
@@ -1080,71 +1192,116 @@
     padding: 6px;
   }
 
-  .meta {
+  /* Lined up under the name, past the dot, so the dot reads as marking the whole account. */
+  .meta-line {
     color: var(--fg-dim);
-    font-size: 0.75rem;
-    overflow-wrap: anywhere;
-  }
-
-  .meta.warn {
-    color: #e5c07b;
-  }
-
-  .row-warn {
-    border-top: 1px solid var(--bg-light);
-    color: #e5c07b;
-    font-size: 0.75rem;
-    line-height: 1.4;
-    padding: 6px 10px;
-  }
-
-  .row-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    font-size: 0.75rem;
+    gap: 2px 12px;
+    overflow-wrap: anywhere;
+    padding-left: 12px;
   }
 
-  /* --- Remote hosts (§6) --- */
-
-  .remote {
-    background: var(--bg-dark);
-    border-top: 1px solid var(--bg-light);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 8px 10px 10px;
+  .meta-line.warn {
+    color: var(--yellow);
   }
 
-  .remote-head {
+  .card-actions {
     align-items: center;
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 2px;
   }
 
-  .remote-label {
+  /* Row-sized buttons. The shared Button is sized for dialog footers, and at 1rem three of
+     them outweigh the account name they act on. */
+  .card-actions :global(.btn),
+  .remote :global(.btn) {
+    font-size: 0.8rem;
+    padding: 3px 10px;
+  }
+
+  /* --- SSH hosts (§6), inset inside the card --- */
+
+  .remote {
+    background: var(--bg-dark);
+    border: 1px solid color-mix(in srgb, var(--bg-light) 70%, transparent);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* Indented to the name, like the meta line: visibly a part OF this account. */
+    margin: 0 10px 10px 26px;
+    padding: 8px 10px;
+  }
+
+  /* Only the active account is ever propagated, so another account's host settings are kept
+     but not in effect. Dashed rather than faded: faded would also fade the controls, and
+     these are still meant to be edited. */
+  .remote.dormant {
+    border-style: dashed;
+  }
+
+  .remote-head {
+    align-items: baseline;
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+  }
+
+  .remote-title {
+    color: var(--fg);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .remote-state {
+    font-size: 0.75rem;
+    text-align: right;
+  }
+
+  .remote-state.idle {
     color: var(--fg-dim);
-    font-size: 0.7rem;
-    letter-spacing: 0.04em;
-    margin-right: auto;
-    text-transform: uppercase;
+  }
+
+  .remote-state.live {
+    color: var(--green);
+  }
+
+  .remote-state.warn {
+    color: var(--yellow);
+  }
+
+  .remote-row {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    justify-content: space-between;
   }
 
   .remote-hint {
     color: var(--fg-dim);
+    flex: 1 1 12rem;
     font-size: 0.75rem;
     line-height: 1.4;
     margin: 0;
   }
 
-  .all-hosts {
-    align-items: center;
-    display: flex;
-    gap: 10px;
-    justify-content: space-between;
+  .token-line {
+    color: var(--fg-dim);
+    flex: 1 1 10rem;
+    font-size: 0.75rem;
+    line-height: 1.4;
   }
 
-  .all-hosts .setting-label {
+  .token-line.warn {
+    color: var(--yellow);
+  }
+
+  .switch-label {
+    color: var(--fg);
     font-size: 0.8rem;
   }
 
@@ -1167,34 +1324,49 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
 
   .host {
     align-items: center;
     background: var(--bg-medium);
-    border-radius: 3px;
+    border: 1px solid var(--bg-light);
+    border-radius: 4px;
     color: var(--fg);
     display: inline-flex;
     font-size: 0.75rem;
-    gap: 4px;
-    /* These are user@host strings in a 200-320px pane. Wrapping beats a tooltip nobody hovers,
-       and beats two hosts clipping to the same visible text. */
+    gap: 2px;
+    max-width: 100%;
+    padding: 1px 2px 1px 7px;
+  }
+
+  /* These are user@host strings in a narrow pane. Wrapping beats a tooltip nobody hovers,
+     and beats two hosts clipping to the same visible text. */
+  .host-name {
+    min-width: 0;
     overflow-wrap: anywhere;
-    padding: 2px 4px 2px 7px;
   }
 
   .host-x {
     background: none;
     border: none;
+    border-radius: 3px;
     color: var(--fg-dim);
     cursor: pointer;
     font-size: 0.85rem;
     line-height: 1;
-    padding: 0 3px;
+    padding: 2px 5px;
   }
 
-  .host-x:hover:not(:disabled) {
-    color: #e06c75;
+  .host-x:hover:not(:disabled),
+  .host-x:focus-visible {
+    color: var(--red);
+  }
+
+  .host-x:focus-visible {
+    outline: 1px solid var(--accent);
   }
 
   .host-x:disabled {
@@ -1204,7 +1376,7 @@
 
   .host-add {
     display: flex;
-    gap: 4px;
+    gap: 6px;
   }
 
   .host-add input {
@@ -1240,9 +1412,9 @@
   }
 
   .error {
-    background: rgba(220, 80, 80, 0.12);
+    background: color-mix(in srgb, var(--red) 12%, transparent);
     border-radius: 4px;
-    color: #e06c75;
+    color: var(--red);
     font-size: 0.8rem;
     line-height: 1.5;
     margin: 0;
@@ -1253,24 +1425,53 @@
   .notice {
     color: var(--fg-dim);
     font-size: 0.8rem;
+    line-height: 1.5;
     margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  /* On a card: aligned with the SSH hosts inset above it. */
+  .in-card {
+    margin: -2px 10px 10px 26px;
+  }
+
+  .notice.in-card {
+    color: var(--fg);
   }
 
   .disclosure {
     border-top: 1px solid var(--bg-light);
     margin-top: 4px;
-    padding-top: 12px;
+    padding-top: 10px;
+  }
+
+  .disclosure summary {
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    padding: 2px 0;
+  }
+
+  .disclosure summary:focus-visible {
+    border-radius: 3px;
+    outline: 1px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .disclosure[open] summary {
+    margin-bottom: 8px;
   }
 
   .disclosure h4 {
     color: var(--fg);
     font-size: 0.8rem;
     font-weight: 600;
-    margin: 0 0 3px;
+    margin: 12px 0 3px;
   }
 
-  .disclosure h4:not(:first-child) {
-    margin-top: 12px;
+  .disclosure summary + h4 {
+    margin-top: 0;
   }
 
   .disclosure p {
@@ -1278,6 +1479,7 @@
     font-size: 0.8rem;
     line-height: 1.5;
     margin: 0;
+    max-width: 68ch;
     overflow-wrap: anywhere;
   }
 
