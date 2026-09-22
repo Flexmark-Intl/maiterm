@@ -1,9 +1,9 @@
 ---
 title: Themes
-description: 12 built-in themes plus custom theme support with separate UI and terminal colors.
+description: 15 built-in themes plus custom theme support with separate UI and terminal colors.
 ---
 
-maiTerm ships with 12 built-in themes and supports fully custom themes.
+maiTerm ships with 15 built-in themes and supports fully custom themes.
 
 ## Built-in Themes
 
@@ -13,12 +13,15 @@ maiTerm ships with 12 built-in themes and supports fully custom themes.
 4. **Solarized Light**
 5. **Tokyo Night Day**
 6. **Catppuccin Latte**
-7. **Nord**
-8. **Gruvbox Dark**
-9. **Monokai**
-10. **Catppuccin Mocha**
-11. **One Dark**
-12. **macOS Pro**
+7. **Gruvbox Light**
+8. **One Light**
+9. **GitHub Light**
+10. **Nord**
+11. **Gruvbox Dark**
+12. **Monokai**
+13. **Catppuccin Mocha**
+14. **One Dark**
+15. **macOS Pro**
 
 ## Custom Themes
 
