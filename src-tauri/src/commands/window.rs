@@ -691,7 +691,16 @@ pub(crate) fn clone_workspace_with_id_mapping(
         panes: new_panes,
         active_pane_id: new_active_pane,
         split_root: new_split_root,
-        workspace_notes: ws.workspace_notes.clone(),
+        // Fresh ids: note tools address a note by id, and two workspaces holding one id
+        // would make that address ambiguous.
+        workspace_notes: ws
+            .workspace_notes
+            .iter()
+            .map(|n| crate::state::workspace::WorkspaceNote {
+                id: uuid::Uuid::new_v4().to_string(),
+                ..n.clone()
+            })
+            .collect(),
         // Preserve the mesh nature, but drop topics — they reference source tab ids that
         // were remapped for the new window (same reason agent_bridge is dropped per-tab).
         bridge_all: ws.bridge_all,
@@ -700,7 +709,17 @@ pub(crate) fn clone_workspace_with_id_mapping(
         tasks: new_tasks,
         workstreams: new_workstreams,
         // A copy of the project runs the same services; the definitions carry no tab ids.
-        stack: ws.stack.clone(),
+        // Their ids must be fresh, though: the frontend stack runtime is keyed by service
+        // id alone, so a shared id would share status, starts and restart timers with the
+        // source workspace's service.
+        stack: ws
+            .stack
+            .iter()
+            .map(|s| crate::state::Service {
+                id: uuid::Uuid::new_v4().to_string(),
+                ..s.clone()
+            })
+            .collect(),
         // Never duplicate an Overlord workspace — at most one per window.
         overlord: false,
         // An exemption is a property of the work, not the window: it travels.
@@ -728,5 +747,48 @@ fn clone_split_node(node: &SplitNode, id_map: &std::collections::HashMap<String,
                 clone_split_node(&children.1, id_map),
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod clone_ids_tests {
+    use super::clone_workspace_with_id_mapping;
+    use crate::state::workspace::WorkspaceNote;
+    use crate::state::{Service, Workspace};
+
+    #[test]
+    fn services_and_notes_get_fresh_ids() {
+        let mut ws = Workspace::new("proj".to_string());
+        ws.stack.push(Service {
+            id: "svc-1".to_string(),
+            name: "web".to_string(),
+            normalized_name: "web".to_string(),
+            command: "npm run dev".to_string(),
+            cwd: "/src".to_string(),
+            env: Vec::new(),
+            ssh_command: None,
+            auto_start: false,
+            restart: "on_crash".to_string(),
+            ready_pattern: None,
+            port: None,
+            url: None,
+            origin: "human".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        });
+        ws.workspace_notes.push(WorkspaceNote {
+            id: "note-1".to_string(),
+            content: "hi".to_string(),
+            mode: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        });
+
+        let (cloned, _) = clone_workspace_with_id_mapping(&ws, &[]);
+
+        assert_ne!(cloned.stack[0].id, "svc-1");
+        assert_eq!(cloned.stack[0].name, "web");
+        assert_ne!(cloned.workspace_notes[0].id, "note-1");
+        assert_eq!(cloned.workspace_notes[0].content, "hi");
     }
 }
