@@ -2147,9 +2147,11 @@ A new `AttentionKind`: **`'account'`**, sent once when a chat's `account.remote`
 `tabId` + `kind`; the live reason is pulled over the LAN when the thread opens.
 
 **What counts as a transition.** The previous state is in memory, so a restart would otherwise make
-every restored SSH tab look newly failed and ring once each. The rule: a tab's FIRST handoff
-observation since the desktop started is a baseline and never rings; only a later change into
-`not_applied` does. The desktop's own "Agent account not applied" notification still fires on the
-baseline — it is the user's local signal, and it is not a push.
+every restored SSH tab look newly failed and ring once each (the 08a1289 lesson). The rule:
+observations in the first **three minutes after the desktop starts** are a baseline and never ring
+— that window is session restore respawning every tab. After it, a tab entering `not_applied`
+rings, including a brand-new or reloaded tab (a reload mints a new id, so "first observation per
+tab" would have meant the doorbell almost never rang). The desktop's own "Agent account not
+applied" notification still fires in the window — it is the user's local signal, not a push.
 
 Older phones treat an unknown kind as urgent, which is correct for this one.
