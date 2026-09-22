@@ -85,14 +85,17 @@ src-tauri/src/                # Backend (Rust)
 - `website/CLAUDE.md` — maiterm.dev: the Starlight-docs / hand-authored-landing split, the shared theme contract, the gutter rule, and the copy that has to stay true (licence is source-available, the updater does count users). **Pushing `website/**` to main publishes the site**
 - `docs/login.md` — **Managed agent accounts.** maiTerm holds N Claude logins and hands each tab
   the right one. §5 (local, per-tab `CLAUDE_CONFIG_DIR`) works; §6 (remote `setup-token`
-  propagation) is now built end to end but **has never been run — no token has ever been
-  minted**. Read §6.1 before touching anything here: **credential precedence is a fall-through,
+  propagation) **works — proven on a real host 2026-09-21**, the proof being
+  `Auth token: CLAUDE_CODE_OAUTH_TOKEN` in the remote's `/status`. Read §6.1 before touching
+  anything here: **credential precedence is a fall-through,
   so a missing or wrong credential does not error — the tab silently comes up as a different
   account and the work is billed there.** That one fact shapes every design decision in the
   feature, and it is why a §6 test that only checks the tab works proves nothing. The remote
   token never touches argv, the terminal or the frontend: it goes over the stdin of its own ssh
   connection into a per-tab file the shell reads once (`accounts/remote.rs`) — the ssh command
   maiTerm builds is typed into the user's local shell, so argv means scrollback and history too.
+  The handoff file also carries `CLAUDE_CODE_SUBSCRIPTION_TYPE`: a token tells the runtime nothing
+  about the plan, and that null changes **which model actually serves the request** (§8.1).
   §2.2 is the precedence list, §5.4 the directory contract, §9 the security posture
 - `docs/stack.md` — Workspace Stack (v1 2026-09-11, console drawer 2026-09-15): a workspace's services (dev server, api, db…) as maiTerm-owned tabs that are **not in the tab strip** (§7 — they open in a drawer over the terminal area, and `pane.active_tab_id` is never one of them); a service is a tab whose shell stays up, the binding lives on `Tab.service_id` (never a `tab_id` on the service), status is never persisted (a Rust mirror serves the priming), every PTY write is behind `get_pty_foreground_job` (shell at prompt / recorded pid), agents are writers over MCP (`updateService` reports ports — no socket sniffing), `createService` with no args returns the suggester's list. Read §5 before adding lifecycle paths that copy a `Tab`
 

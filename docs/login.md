@@ -1,9 +1,10 @@
 # maiTerm Login — managed Claude Code identities, local and remote
 
-> Status: **§5 local built and verified on macOS; §6 remote built, NEVER RUN** — 2026-09-21
-> (spec'd 09-19). Owner: Darryl. §13 has the detail. §6 is now complete end to end in code —
-> mint, vault, host policy and injection — but **no token has ever been minted for real**, so
-> none of it has been exercised against a host. Treat every §6 claim as untested.
+> Status: **§5 local verified on macOS; §6 remote WORKS, first proven 2026-09-21** (spec'd
+> 09-19). Owner: Darryl. §13 has the detail. Two accounts minted for real, and a tab on a remote
+> host reported `Auth token: CLAUDE_CODE_OAUTH_TOKEN` — our credential winning the §2.2
+> precedence fight, which is the only proof that counts (§6.1: `loggedIn` is true either way).
+> Still unproven: an account *switch* reaching a remote, expiry, and every platform but macOS.
 > Code: `src-tauri/src/accounts/`, `src-tauri/src/commands/accounts.rs`,
 > `src/lib/components/accounts/`.
 > Scope: maiTerm optionally holds N Claude subscription identities, runs the auth flow
@@ -1064,7 +1065,8 @@ included.
    copy-link paths, the post-change reload offer, and the orphan-root sweep. Two gaps remain:
    §5.2's in-app incognito webview (sign-in still uses the system browser) and §3.4's
    managed-settings refusal (no detector).
-4. 🟡 **Remote propagation (§6).** Both steps built, **never run against a host**. No longer
+4. 🟢 **Remote propagation (§6).** Both steps built and **proven on a real host, 2026-09-21**:
+   two mints, then `Auth token: CLAUDE_CODE_OAUTH_TOKEN` in `/status` on `root@server02`. No longer
    gated on Q1 (§9.4 — we build as if `auth logout` does not revoke). Step 1: the keychain vault
    (`accounts/vault.rs`), `mint_account_token` with verify-before-store, the per-account host
    list and catch-all, and `remote_account_for_host`. Step 2: `accounts/remote.rs` plus
@@ -1127,12 +1129,17 @@ to the unmanaged login; removal and "Clear setup" leaving no roots and — confi
 no orphaned credentials. The startup sweep collected a root a session had resurrected after its
 account was removed.
 
-**Not verified:** anything on a second machine, any runtime but Claude, whether a `setup-token`
-survives `auth logout` (Q1 — no longer gating, see §9.4), and **the whole of §6 against a real
-mint**: the vault round-trips against the real Keychain in a test, but no token has been minted,
-no host has received one — the mint itself was only made *capable* of succeeding on 2026-09-21
-(§2.4) and has not run since — and Q3 (does `setup-token` respect `CLAUDE_CONFIG_DIR`?) is answered by
-the first real mint rather than by anything built so far.
+**§6 verified end to end, 2026-09-21.** Two accounts minted for real (18:13:15 and 18:13:48,
+both vault entries confirmed present, no orphaned `setup-token` processes left behind), then a tab
+on `root@server02` reported `Auth token: CLAUDE_CODE_OAUTH_TOKEN`. Q3 is answered in passing: the
+mint runs against the account's own root and the token it produced authenticates.
+
+**Still not verified:** anything on a second machine; any runtime but Claude; whether a
+`setup-token` survives `auth logout` (Q1 — no longer gating, see §9.4); **an account switch
+actually reaching a remote** (the one thing the active-account model exists to promise, and the
+only way to see it is two accounts and two `auth status` reads on the same host); expiry (§7 is
+not built, and the first token now expires 2027-09-21); and the read-once delete, which should
+leave `~/.maiterm/tokens/` empty on the host but has not been looked at.
 
 > **The §6 test is easy to pass by accident**, and §6.1 is why: a remote session with no token
 > still reports `loggedIn: true`. "The tab came up and `claude` works" proves nothing. Read the
