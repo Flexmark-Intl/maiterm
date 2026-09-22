@@ -800,7 +800,12 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           const bytes = Array.from(new TextEncoder().encode(envCmd));
           await commands.writeTerminal(ptyId, bytes);
           injectedEnvPort.set(tabId, tunnelInfo.remote_port);
-          logInfo("SSH MCP bridge: injected env vars into remote shell for tab " + tabId);
+          // Says whether the ACCOUNT went with them, not just that something was typed. Without
+          // it a §6 miss leaves no trace at all: the remote comes up as the host's own login,
+          // reports itself logged in, and nothing anywhere records that it was meant to be
+          // someone else (§6.1).
+          logInfo("SSH MCP bridge: injected env vars into remote shell for tab " + tabId
+            + (acct ? " (with the managed account)" : " (no managed account for this host)"));
         }
       } catch (e) {
         logError("SSH MCP bridge: failed to inject env vars: " + e);

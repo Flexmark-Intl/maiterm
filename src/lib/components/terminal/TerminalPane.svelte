@@ -657,7 +657,24 @@
             && isInteractiveSshSession(cmd);
           // A foreground that is NOT interactive ssh means a local shell (or a command) owns
           // this PTY — the precondition for treating the NEXT ssh as one we watched start.
-          if (cmd && !isInteractiveSsh) {
+          //
+          // **`cmd === null` is that case, and requiring `cmd` to be truthy made it almost
+          // unreachable.** `get_foreground_command` answers with a command ONLY for
+          // ssh/mosh/autossh; a shell sitting at its own prompt gives null. So the old test
+          // could only pass after a NON-interactive ssh (a `git@` push, a `BatchMode` probe, a
+          // one-shot `ssh host 'cmd'`) had run in this tab first — and in a tab where someone
+          // simply types `ssh host`, it never passed at all. `freshSsh` was then false, so the
+          // bridge skipped the injection and the §6 account token never reached the session:
+          // measured 2026-09-21, a manual ssh came up as the host's own login while the same
+          // tab reloaded (which bakes the fragment into the command instead) came up correctly.
+          //
+          // A rejected probe does not land here — `getPtyForeground` throws and the outer
+          // `.catch` swallows it — so null really does mean "nothing remote owns this PTY".
+          //
+          // The protection this guard exists for is untouched: a tab whose FIRST observation is
+          // already an ssh (the app restarted under a live session, an agent redrawing its
+          // title) never sees the non-ssh side, so it still never counts as fresh.
+          if (!isInteractiveSsh) {
             sawNonSshForeground = true;
           }
           // Fresh only on the transition into ssh, and only if we saw the other side of it.
