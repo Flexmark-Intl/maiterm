@@ -187,7 +187,8 @@ async function handleManifest(request, env, ctx, url) {
 //
 // Stateless. The phone wakes, opens its WS over LAN/WireGuard, and pulls the real content.
 
-// `kind` is three-valued (docs §6.1: permission | question | idle_done) and maiLink registers no
+// `kind` is permission | question | idle_done (docs §6.1), escalation (§13, an Overlord card) or
+// account (§14.5, a chat NOT running as the account it was meant to). maiLink registers no
 // didReceiveRemoteNotification handler — iOS renders what we send, verbatim — so this table IS the
 // notification the human reads. The default sits on the URGENT end on purpose: an unrecognised kind
 // is one the desktop grew after this relay shipped, and guessing "Agent finished" would announce the
@@ -197,13 +198,18 @@ const KIND_BODY = {
   permission: "Needs your approval",
   question: "Needs your answer",
   idle_done: "Agent finished",
+  // Both fell to "Needs you" until this table learned them — the safe direction, and still wrong
+  // copy. `account` is fixed text by contract (§14.5): never the reason or the account label, which
+  // would carry host names and an email through this public relay onto a lock screen.
+  escalation: "Needs your decision",
+  account: "Agent account not applied",
 };
 
 // `Object.hasOwn`, not `??`: `kind` arrives over the network, and a plain object literal answers
 // inherited Object.prototype keys with truthy NON-STRINGS that sail past `??`. `kind:"toString"`
 // yields a function, which JSON.stringify drops — a push with a title and no body; `"__proto__"`
 // yields an object, which FCM's type-checked `notification.body` rejects as 400, so the human is
-// told nothing at all. Unreachable from a real desktop (the Rust side emits three literals), but
+// told nothing at all. Unreachable from a real desktop (the Rust side emits only fixed literals), but
 // this relay is public and multi-tenant, so the lookup is closed rather than argued about.
 const kindBody = (kind) => (Object.hasOwn(KIND_BODY, kind) ? KIND_BODY[kind] : "Needs you");
 
