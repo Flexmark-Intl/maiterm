@@ -50,4 +50,4 @@ Themes are defined in `src/lib/themes/index.ts`. When applied:
 
 1. UI colors are set as CSS custom properties on `document.documentElement`
 2. Terminal colors are applied to each xterm.js instance
-3. The CodeMirror editor uses a matching Tokyo Night theme
+3. The CodeMirror editor takes its colours from the same theme, light or dark

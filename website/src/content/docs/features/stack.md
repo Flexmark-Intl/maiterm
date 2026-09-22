@@ -73,6 +73,8 @@ That shape is deliberate. A side dock takes width from the terminal you're worki
 
 Inside the drawer: a pill per service so you can flick between them, the last reported endpoint, and **Start** / **Stop** / **Restart** for the one you're looking at. Drag its top edge to resize it; the height is remembered.
 
+It slides up over the terminal area and dims what it covers, but the dimming is only a shade — the tab underneath is still live, and clicking it is one of the ways to close the drawer.
+
 The drawer deliberately **doesn't take the keyboard** when it opens — a peek shouldn't steal focus from the tab you're typing in. Click into the console to type, and while your cursor is in there `Escape` belongs to the shell, as it should; use the **×**, the sidebar row, or a click on the work behind to put the drawer away.
 
 ## Crashes, restarts and stopping

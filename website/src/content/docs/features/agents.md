@@ -54,6 +54,8 @@ When you're SSH'd into a remote server, maiTerm bridges the MCP connection so an
 
 If a tunnel goes down — a network blip, or your Mac putting its displays to sleep — maiTerm rebuilds it on its own, backing off between attempts and staggering the tabs that share a host so they rejoin one connection rather than all re-authenticating at once. A tab whose shell has since `ssh`'d somewhere else follows the shell instead of being reconnected to the host it left.
 
+A rebuilt tunnel comes back on **the port it had**. An agent learns maiTerm's port once, when it starts, and keeps it for life — so a tunnel that reconnected on a different number would leave every agent already running on that host talking to a dead port, with each of its tools answering "Unable to connect". While tabs are riding on it, a reconnect keeps asking for its own port for several seconds (the remote end can take that long to let go of the old connection) and only moves to another if something else genuinely holds it. If it ever does have to move, agents started before the move need restarting to reach maiTerm again.
+
 #### Two computers, one remote account
 
 The remote configuration files live in the account's home directory, one copy shared by every session on that host — so if they named a particular maiTerm's connection, whichever machine connected last would own the account and every agent belonging to the other one would silently lose its tools and its hooks. A laptop and a desktop are enough to hit that; so are your own dev and release builds.

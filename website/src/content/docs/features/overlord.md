@@ -44,16 +44,17 @@ Overlord types with **your** authority and no envelope wrapped around it — the
 
 Guards are **human-only**. The supervisor agent can propose changes to a rule's wording, timing and scope, but not to the conditions under which it may fire at all.
 
-### The four rules that ship
+### The three rules that ship
 
 | Rule | What it does |
 |------|--------------|
 | **Checkpoint before compaction** | At ~55% context, have the agent update its docs, memory, code comments and [task board](/features/tasks/), prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought |
 | **Review after commit** | After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on |
-| **Re-bind a running agent** | A tab whose agent is running but not connected to maiTerm gets a `/maiterm init`, restoring its tools and hooks. Only fires when the agent process is confirmed alive — a tab sitting at a shell is left alone |
 | **Keep a task list** | A tab doing sustained work with nothing on the [maiTerm board](/features/tasks/) gets nudged to record it |
 
-They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone.
+They behave like [triggers](/features/triggers/): seeded on first run, individually toggleable, editable in place, hideable and restorable, and auto-updated with new versions of maiTerm until you edit one — at which point your wording is frozen and left alone. If a later version retires a default you had edited, your copy stays, as a rule of your own.
+
+There used to be a fourth, **Re-bind a running agent**, which typed `/maiterm init` into any tab whose agent was running but not connected. Agents bind themselves now, from their first request, so maiTerm no longer volunteers it. The **Agent running but unbound** condition is still there for a rule of your own, and the deck still offers the re-bind as a one-click repair.
 
 Every rule is scoped **Everywhere** in the window by default, or to specific workspaces. A workspace rule is *additional* unless you mark it as superseding the global one.
 

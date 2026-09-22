@@ -128,7 +128,7 @@ To check a session, run `/status` in the remote agent. **Auth token: CLAUDE_CODE
 
 ## Limits worth knowing
 
-- **macOS and Linux.** The Windows build does not hand a tab its account yet — the pane works and the accounts are kept, but tabs still launch under your normal login.
+- **macOS and Linux.** Linux support is new and hasn't been tested on a real machine yet. Not on Windows yet: the Windows build cannot find the agent's command-line tool or create an account directory without elevation, so the pane says the feature is not available there and offers no way to set it up, rather than letting you finish a setup that tabs would ignore.
 - **SSH hosts need key-based login.** The token travels over its own connection, which cannot answer a password or passphrase prompt. A host you can only reach by typing a password gets a notification instead of the account.
 - **SSH hosts need a POSIX login shell.** The token is picked up with `.`, which bash, zsh, sh, dash and ksh understand. A remote user whose login shell is csh or tcsh gets the file read and deleted without the token ever being set.
 - **SSH hosts need a keychain here.** A Linux machine with no Secret Service running — a headless box, say — has nowhere safe to keep the token, and setting one up fails there.
