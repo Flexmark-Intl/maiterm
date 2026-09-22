@@ -22,6 +22,7 @@
   import '$lib/overlord/deck.css';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import ShareExportModal from '$lib/components/share/ShareExportModal.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
@@ -502,6 +503,8 @@
    *  one here so the section mounts and can open its modal. */
   let addingStackFor = $state<string | null>(null);
   let workspaceMenu = $state<{ x: number; y: number; workspaceId: string } | null>(null);
+  /** The workspace the Share dialog is open for (docs/workspace-share.md §3). */
+  let shareExportFor = $state<string | null>(null);
   function workspaceMenuItems(workspaceId: string) {
     const services = stackStore.services(workspaceId);
     const anyLive = services.some((s) => { const st = stackStore.status(s.id); return st === 'running' || st === 'ready' || st === 'starting'; });
@@ -521,6 +524,8 @@
         expandedStacks = new Set(expandedStacks).add(workspaceId);
         requestAnimationFrame(() => stackSections[workspaceId]?.openImport());
       } },
+      { label: '', separator: true, action: () => {} },
+      { label: 'Share workspace…', action: () => { shareExportFor = workspaceId; } },
     ];
   }
 
@@ -773,6 +778,9 @@
 
   {#if workspaceMenu}
     <ContextMenu items={workspaceMenuItems(workspaceMenu.workspaceId)} x={workspaceMenu.x} y={workspaceMenu.y} onclose={() => (workspaceMenu = null)} />
+  {/if}
+  {#if shareExportFor}
+    <ShareExportModal workspaceId={shareExportFor} onclose={() => (shareExportFor = null)} />
   {/if}
 
   {#if updaterStore.showBanner}

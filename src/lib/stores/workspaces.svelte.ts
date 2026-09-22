@@ -3,7 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
 import { getAdapter } from '$lib/agents/adapter';
 import * as commands from '$lib/tauri/commands';
-import { terminalsStore } from '$lib/stores/terminals.svelte';
+import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { getCompiledPatterns } from '$lib/utils/promptPattern';
@@ -1042,7 +1042,7 @@ function createWorkspacesStore() {
       }
     },
 
-    async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean; background?: boolean }) {
+    async createTab(workspaceId: string, paneId: string, name: string, options?: { append?: boolean; background?: boolean; context?: SplitContext }) {
       const previousActiveTabId = workspaces.flatMap(w => w.panes).find(p => p.id === paneId)?.active_tab_id ?? undefined;
       const afterTabId = options?.append ? undefined : previousActiveTabId;
       const tab = await commands.createTab(workspaceId, paneId, name, afterTabId);
@@ -1063,7 +1063,11 @@ function createWorkspacesStore() {
       // immediate sibling matches the user's mental model and avoids pinning
       // every new tab to whichever directory happens to be the majority.
       const ws = workspaces.find(w => w.id === workspaceId);
-      if (ws) {
+      // A caller that knows where the tab belongs (the share wizard's clone tabs) says so;
+      // inheriting from the previous tab would be a guess about something already known.
+      if (options?.context) {
+        terminalsStore.setSplitContext(tab.id, options.context);
+      } else if (ws) {
         const activePane = ws.panes.find(p => p.id === paneId);
         const activeTabId = activePane?.active_tab_id;
         const activeTab = activePane?.tabs.find(t => t.id === activeTabId);
@@ -2298,6 +2302,17 @@ function createWorkspacesStore() {
       // carrying tasks; backup import reloads the whole window.)
       const { tasksStore } = await import('$lib/stores/tasks.svelte');
       await tasksStore.rehydrate();
+    },
+
+    /** A workspace the backend just built and inserted (Workspace Share import): mirror it and
+     *  switch to it. Callers set any launch contexts BEFORE this — the refresh is what mounts
+     *  the new tabs, and a context set after the mount is never consumed. */
+    async adoptImportedWorkspace(workspaceId: string) {
+      const data = await commands.getWindowData();
+      workspaces = data.workspaces;
+      // Same reason as duplicateWorkspace: the tasks store has never seen this workspace id.
+      await tasksStore.rehydrate();
+      await this.setActiveWorkspace(workspaceId);
     },
 
     async duplicateTab(workspaceId: string, paneId: string, tabId: string, opts?: { shallow?: boolean }) {

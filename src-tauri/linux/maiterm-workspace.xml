@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Maps *.maiterm-workspace to the MIME type the .desktop file claims (docs/workspace-share.md §7).
+     The Tauri bundler writes only the .desktop `MimeType=`; without this, nothing associates the extension. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-maiterm-workspace">
+    <comment>maiTerm shared workspace</comment>
+    <glob pattern="*.maiterm-workspace" weight="80"/>
+  </mime-type>
+</mime-info>

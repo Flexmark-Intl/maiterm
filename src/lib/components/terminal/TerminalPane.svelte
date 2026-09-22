@@ -16,7 +16,8 @@
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
   import { encodeClipboardImage } from '$lib/utils/clipboardImage';
   import { readText as clipboardReadText, writeText as clipboardWriteText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
-  import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte';
+  import { stripAnsi } from '$lib/utils/ansi';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -85,6 +86,37 @@
   let canvasAddon: CanvasAddon | null = null;
   let trackActivity = false;
   let visibilityGraceUntil = 0; // timestamp — suppress activity until this time
+  // A one-shot launch's failure watch (SplitContext.launchFallback): the output right after a
+  // shared workspace's remote fork, scanned for "that session isn't here".
+  let launchWatch: { pattern: RegExp; command: string; until: number; tail: string } | null = null;
+
+  async function typeLaunch(ctx: SplitContext) {
+    if (!ctx.launchCommand || destroyed) return;
+    if (ctx.launchFallback) {
+      launchWatch = { pattern: ctx.launchFallback.pattern, command: ctx.launchFallback.command, until: Date.now() + ctx.launchFallback.withinMs, tail: '' };
+    }
+    try {
+      await writeTerminal(ptyId, Array.from(new TextEncoder().encode(ctx.launchCommand + '\n')));
+    } catch (e) {
+      launchWatch = null;
+      logError(`Failed to type launch command: ${e}`);
+    }
+  }
+
+  function watchLaunchOutput(data: Uint8Array) {
+    const w = launchWatch;
+    if (!w) return;
+    if (Date.now() > w.until) { launchWatch = null; return; }
+    w.tail = (w.tail + stripAnsi(new TextDecoder().decode(data))).slice(-2000);
+    if (!w.pattern.test(w.tail)) return;
+    launchWatch = null;
+    logInfo(`Launch failed in tab ${tabId.slice(0, 8)}; falling back to: ${w.command}`);
+    // The agent has printed its refusal and is exiting back to the shell — give it a moment.
+    setTimeout(() => {
+      if (destroyed) return;
+      writeTerminal(ptyId, Array.from(new TextEncoder().encode(w.command + '\n'))).catch(e => logError(String(e)));
+    }, 1000);
+  }
   // --- SSH drop detection / recovery ---
   // Set (via getPtyInfo) while an interactive ssh session is the foreground job.
   let sshForeground: { cmd: string; host: string | null } | null = null;
@@ -588,6 +620,7 @@
     unlistenRaw = await listen<number[]>(`pty-raw-${ptyId}`, (event) => {
       const data = new Uint8Array(event.payload);
       processOutput(tabId, data);
+      if (launchWatch) watchLaunchOutput(data);
       // A service tab announces its own address; the stack reads it (docs/stack.md §9).
       // Cheap and self-limiting — the store drops the scan at the first hit of a run.
       if (isServiceTab()) stackStore.observeOutput(tabId, data);
@@ -948,7 +981,9 @@
             if (destroyed) return;
             await enableBridge(tabId, ctx.sshCommand!, ptyId, false, bakedPort).catch(() => {});
             if (destroyed) return;
-            if ((autoResumeEnabled ?? true) && autoResumeCommand) {
+            if (splitCtx?.launchCommand) {
+              await typeLaunch(splitCtx);
+            } else if ((autoResumeEnabled ?? true) && autoResumeCommand) {
               try {
                 const bytes = Array.from(new TextEncoder().encode(interpolateVariables(tabId, autoResumeCommand, true) + '\n'));
                 await writeTerminal(ptyId, bytes);
@@ -959,6 +994,8 @@
           };
           pollForSsh();
         }
+      } else if (splitCtx?.launchCommand) {
+        setTimeout(() => { if (!destroyed) typeLaunch(splitCtx); }, 500);
       } else if ((autoResumeEnabled ?? true) && autoResumeCommand && (!splitCtx || splitCtx.fireAutoResume)) {
         // Local auto-resume: send command after shell starts (also fires on reload)
         setTimeout(async () => {

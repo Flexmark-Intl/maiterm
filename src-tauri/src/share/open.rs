@@ -78,6 +78,15 @@ pub fn take_pending_share_opens() -> Vec<String> {
         .collect()
 }
 
+/// Dev builds only: act as though the OS had opened `path`. Dev builds are never bundled, so
+/// they never register the extension — this drives everything downstream of the OS (queue,
+/// ring, drain, wizard) for testing.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn share_debug_open(app: tauri::AppHandle, path: String) {
+    deliver(&app, vec![PathBuf::from(path)]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

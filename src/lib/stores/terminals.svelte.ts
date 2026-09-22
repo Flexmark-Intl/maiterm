@@ -39,6 +39,13 @@ export interface SplitContext {
   remoteCwd: string | null;
   /** When true, fire auto-resume command even though this is a split context (used by reload tab). */
   fireAutoResume?: boolean;
+  /** One-shot command typed once the shell (or the ssh hop and its bridge) is ready, INSTEAD of
+   *  the tab's auto-resume command. Never persisted: a shared workspace's first launch
+   *  (docs/workspace-share.md §5) must not become what every later restart replays. */
+  launchCommand?: string;
+  /** If output within `withinMs` of the launch matches `pattern`, type `command` instead — a
+   *  remote fork of a session the receiver can't read falls back to a fresh agent (§5). */
+  launchFallback?: { pattern: RegExp; command: string; withinMs: number };
 }
 
 function createTerminalsStore() {

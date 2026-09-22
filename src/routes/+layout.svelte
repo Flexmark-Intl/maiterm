@@ -9,6 +9,8 @@
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { retryDownBridgesNow } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
+  import ShareImportWizard from '$lib/components/share/ShareImportWizard.svelte';
+  import { SHARE_EXTENSION } from '$lib/share/share';
   import Toast from '$lib/components/Toast.svelte';
   import { pruneHiddenDefaultTriggers, seedDefaultTriggers } from '$lib/triggers/defaults';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -51,6 +53,8 @@
 
   let { children }: Props = $props();
   let showImportPreview = $state(false);
+  /** Shared workspace files waiting for the import wizard, one at a time (docs/workspace-share.md §4). */
+  let shareImportQueue = $state<string[]>([]);
   let importPreview = $state<ImportPreview | null>(null);
   let importFilePath = $state('');
   let showQuickOpen = $state(false);
@@ -575,6 +579,30 @@
         logError(`Import state failed: ${e}`);
       }
     }, { target: appWindow.label }).then(unlisten => { unlistenImportState = unlisten; });
+
+    // Shared workspaces: File ▸ Import Shared Workspace…, and files opened from the OS. The OS
+    // path queues in Rust and rings; drain on every ring and once now, since a cold launch
+    // queued its file before this listener existed (docs/workspace-share.md §7).
+    const drainShareOpens = () => {
+      commands.takePendingShareOpens()
+        .then(paths => { if (paths.length) shareImportQueue = [...shareImportQueue, ...paths]; })
+        .catch(e => logError(`share: draining opened files failed: ${e}`));
+    };
+    let unlistenImportWorkspace: (() => void) | undefined;
+    listen('import_workspace', async () => {
+      try {
+        const path = await dialogOpen({
+          multiple: false,
+          filters: [{ name: 'maiTerm Workspace', extensions: [SHARE_EXTENSION] }],
+        });
+        if (typeof path === 'string') shareImportQueue = [...shareImportQueue, path];
+      } catch (e) {
+        logError(`Import shared workspace failed: ${e}`);
+      }
+    }, { target: appWindow.label }).then(unlisten => { unlistenImportWorkspace = unlisten; });
+    let unlistenShareOpened: (() => void) | undefined;
+    listen('share-file-opened', drainShareOpens, { target: appWindow.label })
+      .then(unlisten => { unlistenShareOpened = unlisten; drainShareOpens(); });
 
     let unlistenStateImported: (() => void) | undefined;
     listen('state-imported', () => {
@@ -1254,6 +1282,8 @@
       unlistenRestoreTab?.();
       unlistenExportState?.();
       unlistenImportState?.();
+      unlistenImportWorkspace?.();
+      unlistenShareOpened?.();
       unlistenStateImported?.();
       unlistenCheckUpdates?.();
       unlistenClearNavHistory?.();
@@ -1295,6 +1325,11 @@
   onclose={() => { showImportPreview = false; }}
   onimported={() => { showImportPreview = false; window.location.reload(); }}
 />
+{#if shareImportQueue.length > 0}
+  {#key shareImportQueue[0]}
+    <ShareImportWizard path={shareImportQueue[0]} onclose={() => { shareImportQueue = shareImportQueue.slice(1); }} />
+  {/key}
+{/if}
 <QuickOpen
   open={showQuickOpen}
   onclose={() => {

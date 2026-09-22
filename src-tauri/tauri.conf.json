@@ -41,6 +41,20 @@
       "icons/icon.png",
       "icons/Assets.car"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["maiterm-workspace"],
+        "name": "maiTerm Workspace",
+        "description": "maiTerm shared workspace",
+        "role": "Editor",
+        "rank": "Owner",
+        "mimeType": "application/x-maiterm-workspace",
+        "exportedType": {
+          "identifier": "com.aiterm.app.workspace",
+          "conformsTo": ["public.data"]
+        }
+      }
+    ],
     "windows": {
       "nsis": {
         "installMode": "perMachine"
@@ -57,7 +71,12 @@
           "libayatana-appindicator3-1"
         ],
         "section": "utils",
-        "priority": "optional"
+        "priority": "optional",
+        "files": {
+          "/usr/share/mime/packages/maiterm-workspace.xml": "linux/maiterm-workspace.xml"
+        },
+        "postInstallScript": "linux/postinst.sh",
+        "postRemoveScript": "linux/postrm.sh"
       }
     }
   },

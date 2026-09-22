@@ -1194,6 +1194,143 @@ export async function importStateSelective(path: string, config: ImportConfig): 
   return invoke('import_state_selective', { path, config });
 }
 
+// Workspace Share (docs/workspace-share.md) — mirrors src-tauri/src/share/
+
+export type ShareRootKind = 'git' | 'plain';
+
+export interface SharedRoot {
+  id: string;
+  path: string;
+  kind: ShareRootKind;
+  remotes: Record<string, string>;
+  branch?: string | null;
+}
+
+export interface ShareTabContext {
+  tab_id: string;
+  cwd: string | null;
+  ssh_command: string | null;
+  remote_cwd: string | null;
+  live_agent: { runtime: AgentRuntime; session_id: string | null } | null;
+}
+
+export interface ShareExportPreview {
+  name: string;
+  roots: (SharedRoot & { warning: string | null; tab_count: number })[];
+  tabs: {
+    id: string;
+    name: string;
+    kind: 'local' | 'remote' | 'editor' | 'remote_editor' | 'dropped';
+    root_id: string | null;
+    place: string | null;
+    agent: { runtime: AgentRuntime; reason: string; forkable: boolean } | null;
+    dropped_reason: string | null;
+  }[];
+  services: { id: string; name: string; env_names: string[] }[];
+  note_count: number;
+  task_count: number;
+}
+
+export interface ShareExportOptions {
+  include_notes: boolean;
+  include_tasks: boolean;
+  services: { id: string; env_values: string[] }[];
+  agent_tab_ids: string[];
+}
+
+export type ShareDirVerdict =
+  | { verdict: 'clone' }
+  | { verdict: 'use' }
+  | { verdict: 'reject'; reason: string };
+
+export type ShareProbe =
+  | { outcome: 'reachable'; branch_exists: boolean | null }
+  | { outcome: 'denied'; message: string }
+  | { outcome: 'unverified'; message: string };
+
+export interface ShareFileService {
+  name: string;
+  command: string;
+  location?: { root_id: string; subpath: string } | null;
+  env: { name: string; value?: string | null }[];
+  auto_start: boolean;
+  restart: string;
+}
+
+export interface ShareFile {
+  format: string;
+  version: number;
+  exported_at: string;
+  maiterm_version: string;
+  workspace: { name: string; mesh?: boolean; panes: { id: string; name: string; tabs: { id: string; name: string; kind: { type: string }; agent?: { runtime: AgentRuntime } | null }[] }[] };
+  roots: SharedRoot[];
+  services: ShareFileService[];
+  notes?: { tabs: Record<string, unknown>; workspace: unknown[] } | null;
+  tasks?: { tasks: unknown[] } | null;
+}
+
+export type ShareRootCheck = { root_id: string; local_path: string; repo_name: string | null } & ShareDirVerdict;
+
+export interface ShareImportPreview {
+  file: ShareFile;
+  roots: ShareRootCheck[];
+}
+
+export interface ShareImportOptions {
+  mapping: Record<string, string>;
+  include_notes: boolean;
+  include_tasks: boolean;
+  services: number[];
+  env_values: Record<number, Record<string, string>>;
+}
+
+export interface ShareAgentLaunch {
+  tab_id: string;
+  runtime: AgentRuntime;
+  cwd: string | null;
+  ssh_command: string | null;
+  remote_cwd: string | null;
+  fork_session_id: string | null;
+}
+
+export interface ShareImportResult {
+  workspace: Workspace;
+  launches: ShareAgentLaunch[];
+  notices: string[];
+}
+
+export async function shareExportPreview(workspaceId: string, contexts: ShareTabContext[]): Promise<ShareExportPreview> {
+  return invoke('share_export_preview', { workspaceId, contexts });
+}
+
+export async function shareExportWrite(workspaceId: string, contexts: ShareTabContext[], options: ShareExportOptions, path: string): Promise<void> {
+  return invoke('share_export_write', { workspaceId, contexts, options, path });
+}
+
+export async function shareReadFile(path: string): Promise<ShareImportPreview> {
+  return invoke('share_read_file', { path });
+}
+
+export async function shareCheckDirs(checks: { root: SharedRoot; dir: string }[]): Promise<ShareDirVerdict[]> {
+  return invoke('share_check_dirs', { checks });
+}
+
+export async function shareProbe(requests: { url: string; branch: string | null }[]): Promise<ShareProbe[]> {
+  return invoke('share_probe', { requests });
+}
+
+export async function shareCloneCommand(url: string, dest: string, branch: string | null): Promise<string> {
+  return invoke('share_clone_command', { url, dest, branch });
+}
+
+export async function shareImportBuild(path: string, options: ShareImportOptions): Promise<ShareImportResult> {
+  return invoke('share_import_build', { path, options });
+}
+
+export async function takePendingShareOpens(): Promise<string[]> {
+  return invoke('take_pending_share_opens');
+}
+
 export async function runScheduledBackup(): Promise<string> {
   return invoke('run_scheduled_backup');
 }

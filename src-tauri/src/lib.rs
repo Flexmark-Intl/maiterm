@@ -858,6 +858,8 @@ pub fn run() {
             share::commands::share_clone_command,
             share::commands::share_import_build,
             share::open::take_pending_share_opens,
+            #[cfg(debug_assertions)]
+            share::open::share_debug_open,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
