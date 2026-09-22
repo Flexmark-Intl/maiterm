@@ -1758,7 +1758,14 @@ pub async fn prepare_remote_account_token(
     tab_id: String,
     ssh_args: String,
 ) -> Result<RemoteTokenPrep, String> {
-    let prep = prepare_inner(state.inner(), &tab_id, &ssh_args).await?;
+    let prep = match prepare_inner(state.inner(), &tab_id, &ssh_args).await {
+        Ok(p) => p,
+        Err(e) => {
+            // No outcome to record — but an earlier session's record must not stand in for it.
+            crate::mailink::accounts::clear_remote(state.inner(), &tab_id);
+            return Err(e);
+        }
+    };
     // Record how far the handoff got, for maiLink §14. `ready` is recorded as SENT — never as
     // applied: nothing can read back which account a token is (login.md §2.4), and a bad one
     // falls through to the host's own login instead of failing (§6.1). An abandoned prep is
@@ -1777,11 +1784,7 @@ pub async fn prepare_remote_account_token(
                 label: prep.account_label.clone().unwrap_or_else(|| id.clone()),
             }),
         };
-        let remote = RemoteRecord {
-            account,
-            state: state_,
-            reason,
-        };
+        let remote = RemoteRecord::new(account, state_, reason);
         crate::mailink::accounts::note_remote(state.inner(), &tab_id, remote);
     }
     Ok(prep)

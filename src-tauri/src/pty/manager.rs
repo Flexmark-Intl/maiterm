@@ -988,6 +988,34 @@ pub fn get_pty_foreground(
     Ok(get_foreground_command(pid))
 }
 
+/// The pid of the ssh/mosh process holding this PTY's terminal, if one does — cached polling
+/// variant. maiLink §14 binds a remote-account record to this pid, so a LATER ssh in the same tab
+/// (a different process) is never served an earlier session's handoff. Unix only; elsewhere
+/// `None`, which makes every remote record read as unknown rather than guessed.
+pub fn get_pty_foreground_ssh_pid(state: &AppState, pty_id: &str) -> Option<u32> {
+    let pid = {
+        let registry = state.pty_registry.read();
+        registry.get(pty_id)?.child_pid?
+    };
+    foreground_ssh_pid(pid)
+}
+
+#[cfg(unix)]
+fn foreground_ssh_pid(shell_pid: u32) -> Option<u32> {
+    let rows = ps_rows_snapshot()?;
+    let shell_row = rows.iter().find(|r| r.pid == shell_pid)?;
+    if shell_row.tpgid <= 0 || (shell_row.tpgid as u32) == shell_row.pgid {
+        return None;
+    }
+    let leader = rows.iter().find(|r| r.pid == shell_row.tpgid as u32)?;
+    is_ssh_command(&leader.cmd).then_some(leader.pid)
+}
+
+#[cfg(not(unix))]
+fn foreground_ssh_pid(_shell_pid: u32) -> Option<u32> {
+    None
+}
+
 /// What holds a PTY's terminal right now — the pre-write guard for the stack store
 /// (docs/stack.md §4). `get_foreground_command` answers only "is it ssh?"; a service
 /// tab needs "is the shell at its prompt?" (safe to type a start) and "is the job I

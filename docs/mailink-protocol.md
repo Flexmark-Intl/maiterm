@@ -2097,6 +2097,15 @@ bridge tunnel — not the tunnel alone, which a typed `ssh` with the bridge off 
 then be served the LOCAL shell's account. An SSH tab that never went through the handoff is
 `{ known: false }`.
 
+**A remote record belongs to one ssh process, not to the tab.** One shell can run many ssh
+sessions, and only some go through the handoff (`ssh -t host claude` does not). The record binds to
+the ssh pid holding the terminal on its first observation (the push runs *before* the ssh starts,
+so this cannot happen at write time); any other ssh — or a record still unbound 60 s after it was
+written — is `{ known: false }`.
+
+**Claude chats only.** The handoff carries a Claude token. A Codex or Gemini chat over SSH is
+`{ known: false }` and never rings the `account` doorbell.
+
 ### 14.3 Routes
 
 | Route | Answer |
@@ -2138,8 +2147,8 @@ for a phone-initiated switch.
 `GET /models` read `~/.claude.json`'s `additionalModelOptionsCache` for every tab. Under a managed
 account that cache belongs to whichever login owns the home file, so a chat running as account B
 was offered account A's models — including pinned `source: 'account'` rows B may not be entitled
-to. With `?tab=`, a managed local tab reads its own account root's `.claude.json`. An unknown or
-unmanaged tab reads the home file (unchanged behaviour — there the home file IS the tab's login).
+to. With `?tab=`, a managed local tab reads its own account root's `.claude.json`, and a known-unmanaged
+tab reads the home file (unchanged behaviour — there the home file IS the tab's login).
 **An unknown tab and every SSH tab get the builtin rows only** — the curated aliases expected on
 every account, and never an empty array (`[]` reads as a desktop that predates `/models`). Pinned
 `source: 'account'` rows appear only when the desktop knows whose cache they came from; guessing

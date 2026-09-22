@@ -18,27 +18,46 @@ use crate::state::AppState;
 /// turned every resumed tab into an edge.
 const RING_BASELINE_WINDOW: std::time::Duration = std::time::Duration::from_secs(180);
 
-/// Whether this tab's agent runs on another host right now.
+/// Where this tab's agent runs right now, for §14.
 ///
-/// Not `tab_is_ssh` alone: that reads the BRIDGE's tunnel table, and a typed ssh with the bridge
-/// off has no tunnel — it would then be served the LOCAL shell's account, which is exactly the
-/// wrong-identity claim §14 exists to avoid. The foreground probe is the cached polling variant,
-/// the right one for a 2 s summary tick.
-pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
-    if app.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab_id)) {
-        return true;
-    }
+/// Not the bridge's tunnel table alone: a typed ssh with the bridge off has no tunnel, and would
+/// then be served the LOCAL shell's account — exactly the wrong-identity claim §14 exists to
+/// avoid. The ssh pid comes from the cached polling probe, the right one for a summary tick.
+fn place(app: &AppState, tab_id: &str) -> tab_record::Place {
     let pty = app.tab_pty_map.read().get(tab_id).cloned();
-    pty.and_then(|p| crate::pty::get_pty_foreground(app, &p, false).ok().flatten())
-        .is_some()
+    let ssh_pid = pty.and_then(|p| crate::pty::get_pty_foreground_ssh_pid(app, &p));
+    let tunnel = app.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab_id));
+    if ssh_pid.is_some() || tunnel {
+        tab_record::Place::Remote { ssh_pid }
+    } else {
+        tab_record::Place::Local
+    }
+}
+
+/// Whether this tab's agent runs on another host right now.
+pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
+    matches!(place(app, tab_id), tab_record::Place::Remote { .. })
 }
 
 /// The wire `account` for one chat. `Value::Null` = known unmanaged (§14.1 rule 1).
+///
+/// **Probes the process table only for a tab with something to describe.** This runs per tab on
+/// every WS and doorbell tick, and the probe spawns `ps` once its 800 ms cache lapses — so a tab
+/// whose record is empty (it spawned with management off, which is every tab when the feature is
+/// off) answers `null` without one. That answer is right wherever the agent runs: nothing about
+/// this tab is managed.
 pub(crate) fn chat_account(app: &AppState, tab_id: &str, runtime_slug: &str) -> Value {
-    let remote = tab_runs_remote(app, tab_id);
-    let records = app.tab_accounts.read();
+    let needs_probe = match app.tab_accounts.read().get(tab_id) {
+        None => return json!({ "known": false }),
+        Some(r) => !r.local.is_empty() || r.remote.is_some(),
+    };
+    if !needs_probe {
+        return Value::Null;
+    }
+    let place = place(app, tab_id);
+    let mut records = app.tab_accounts.write();
     let data = app.app_data.read();
-    tab_record::wire(records.get(tab_id), runtime_slug, remote, &data.preferences)
+    tab_record::wire(records.get_mut(tab_id), runtime_slug, place, &data.preferences)
         .unwrap_or(Value::Null)
 }
 
@@ -94,13 +113,26 @@ pub(crate) fn set_active(
         if account.runtime != runtime {
             return refuse("runtime_mismatch");
         }
-        p.active_account_ids.insert(runtime.to_string(), account_id.to_string());
-        data.clone()
+        let previous = p.active_account_ids.insert(runtime.to_string(), account_id.to_string());
+        (data.clone(), previous)
     };
+    let (data_clone, previous) = data_clone;
     if let Err(e) = crate::state::save_state(&data_clone) {
-        // The in-memory switch already happened; say the write failed rather than pretend it
-        // took. A restart would revert it.
-        log::warn!("[maiLink] account switch not saved: {e}");
+        // **Rolled back, not left live.** `spawn_pty` reads this in-memory value, so a switch the
+        // phone was told did not happen would still launch every new tab under the new account —
+        // while the desktop pane (which never got the event) and the phone both said otherwise,
+        // until the next frontend save silently reverted it. That is §6.1's failure made locally.
+        log::warn!("[maiLink] account switch not saved, rolling back: {e}");
+        let mut data = app.app_data.write();
+        let ids = &mut data.preferences.active_account_ids;
+        match previous {
+            Some(prev) => {
+                ids.insert(runtime.to_string(), prev);
+            }
+            None => {
+                ids.remove(runtime);
+            }
+        }
         return refuse("not_saved");
     }
     if let Some(h) = handle {
@@ -113,18 +145,16 @@ pub(crate) fn set_active(
     })
 }
 
-/// Live tabs whose spawn account for `runtime` is no longer the active one — the set a switch
-/// just made `stale`. Local tabs only: an SSH tab's account follows its next connect, and counting
-/// it here would promise a remote switch that has not happened either.
-fn tabs_off_active(app: &Arc<AppState>, runtime: &str) -> usize {
-    let live: Vec<String> = app.tab_pty_map.read().keys().cloned().collect();
-    let active = app.app_data.read().preferences.active_account_ids.get(runtime).cloned();
-    let records = app.tab_accounts.read();
-    live.iter()
-        .filter_map(|t| records.get(t))
-        .filter(|r| r.remote.is_none())
-        .filter_map(|r| r.local.get(runtime))
-        .filter(|a| Some(&a.id) != active.as_ref())
+/// The tabs the phone will now see as `stale` and running locally — counted with the SAME
+/// predicate `wire` serves, over the tabs the phone can see, so "N other tabs still on X" matches
+/// the badges it renders. An SSH tab's account follows its next connect, so it is not counted.
+fn tabs_off_active(app: &AppState, runtime: &str) -> usize {
+    super::designated_tabs(app)
+        .into_iter()
+        .filter(|t| t.runtime.as_key() == runtime)
+        .filter(|t| app.tab_pty_map.read().contains_key(&t.tab_id))
+        .map(|t| chat_account(app, &t.tab_id, runtime))
+        .filter(|v| v["stale"] == json!(true) && v.get("remote").is_none())
         .count()
 }
 
@@ -144,6 +174,14 @@ pub(crate) fn note_remote(app: &AppState, tab_id: &str, remote: RemoteRecord) {
     }
 }
 
+/// The handoff errored before it could say how far it got: whatever an earlier session recorded
+/// no longer describes this one.
+pub(crate) fn clear_remote(app: &AppState, tab_id: &str) {
+    if let Some(r) = app.tab_accounts.write().get_mut(tab_id) {
+        r.remote = None;
+    }
+}
+
 /// A prepared handoff that the session never used: whatever was recorded, this session is not
 /// running as the account.
 pub(crate) fn downgrade_remote(app: &AppState, tab_id: &str, reason: &str) {
@@ -152,7 +190,7 @@ pub(crate) fn downgrade_remote(app: &AppState, tab_id: &str, reason: &str) {
     note_remote(
         app,
         tab_id,
-        RemoteRecord { account, state: RemoteState::NotApplied, reason: Some(reason.to_string()) },
+        RemoteRecord::new(account, RemoteState::NotApplied, Some(reason.to_string())),
     );
 }
 
@@ -165,6 +203,8 @@ fn queue_ring(app: &AppState, tab_id: &str) {
     if app.mailink_info.read().is_none() || !super::is_designated(app, tab_id) {
         return;
     }
+    // The handoff carries a CLAUDE token. A Codex or Gemini chat over the same ssh is not
+    // running as that account either way, so its failure is not this chat's news.
     let title = {
         let data = app.app_data.read();
         data.windows
@@ -173,6 +213,7 @@ fn queue_ring(app: &AppState, tab_id: &str) {
             .flat_map(|ws| &ws.panes)
             .flat_map(|p| &p.tabs)
             .find(|t| t.id == tab_id)
+            .filter(|t| t.runtime.map_or(true, |r| r == crate::state::AgentRuntime::Claude))
             .map(|t| t.name.clone())
     };
     let Some(title) = title else { return };
@@ -190,11 +231,11 @@ mod tests {
     use crate::state::workspace::{WindowData, Workspace};
 
     fn failed(reason: &str) -> RemoteRecord {
-        RemoteRecord { account: None, state: RemoteState::NotApplied, reason: Some(reason.into()) }
+        RemoteRecord::new(None, RemoteState::NotApplied, Some(reason.into()))
     }
 
     fn sent() -> RemoteRecord {
-        RemoteRecord { account: None, state: RemoteState::SentUnverified, reason: None }
+        RemoteRecord::new(None, RemoteState::SentUnverified, None)
     }
 
     /// maiLink running, one window with one tab named "worker". `aged` puts the app past the
@@ -254,7 +295,7 @@ mod tests {
     fn an_unused_prep_is_downgraded_and_keeps_its_intended_account() {
         let (app, tab) = fixture(false);
         let account = Some(tab_record::AccountRef { id: "a".into(), label: "a@example.com".into() });
-        note_remote(&app, &tab, RemoteRecord { account: account.clone(), state: RemoteState::SentUnverified, reason: None });
+        note_remote(&app, &tab, RemoteRecord::new(account.clone(), RemoteState::SentUnverified, None));
         downgrade_remote(&app, &tab, "prepared but not used");
         let r = app.tab_accounts.read()[&tab].remote.clone().unwrap();
         assert_eq!(r.state, RemoteState::NotApplied);

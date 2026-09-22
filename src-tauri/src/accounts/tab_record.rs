@@ -49,6 +49,30 @@ pub struct RemoteRecord {
     pub state: RemoteState,
     /// One human sentence for `NotApplied`. Never token material.
     pub reason: Option<String>,
+    /// The ssh process this handoff belongs to — bound on the first observation after it (the
+    /// push usually happens BEFORE the ssh starts, so it cannot be known at record time). A tab
+    /// can run many ssh sessions in one shell; without this, a later session that never went
+    /// through the handoff (`ssh -t host claude`, the bridge off) was served this one's account.
+    pub ssh_pid: Option<u32>,
+    pub recorded_at: std::time::Instant,
+}
+
+impl RemoteRecord {
+    pub fn new(account: Option<AccountRef>, state: RemoteState, reason: Option<String>) -> Self {
+        Self { account, state, reason, ssh_pid: None, recorded_at: std::time::Instant::now() }
+    }
+}
+
+/// How long an unbound record may wait for its ssh to appear. The handoff runs just before the
+/// ssh is typed; past this, whatever ssh is running is not the one the record was written for.
+pub const BIND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Where a tab's agent is running right now, as observed by the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Local,
+    /// On another host. `ssh_pid` is the ssh process holding the terminal, when it could be read.
+    Remote { ssh_pid: Option<u32> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -86,38 +110,46 @@ pub fn account_ref(prefs: &crate::state::Preferences, id: &str) -> AccountRef {
 /// A tab's account as served to maiLink — §14.2 `ChatAccount`.
 ///
 /// `None` from this function means the wire value `null`: the tab is KNOWN to run unmanaged.
-/// Unknown is `Some({known: false})`, never `None`.
+/// Unknown is `Some({known: false})`, never `None`. Takes the record mutably only to bind an
+/// unbound remote record to the ssh process now holding the terminal (see `RemoteRecord::ssh_pid`).
 pub fn wire(
-    record: Option<&TabAccount>,
+    record: Option<&mut TabAccount>,
     runtime_slug: &str,
-    is_ssh: bool,
+    place: Place,
     prefs: &crate::state::Preferences,
 ) -> Option<serde_json::Value> {
-    let Some(record) = record else {
-        return Some(serde_json::json!({ "known": false }));
+    let unknown = || Some(serde_json::json!({ "known": false }));
+    let Some(record) = record else { return unknown() };
+
+    let Place::Remote { ssh_pid } = place else {
+        let a = record.local.get(runtime_slug)?;
+        return Some(account_fields(a, runtime_slug, prefs));
     };
 
     // An SSH tab's agent runs on the remote, so the LOCAL shell's account says nothing about who
-    // is answering. Its account is the one the handoff meant, with `remote` saying how far it got.
-    if is_ssh {
-        let Some(remote) = record.remote.as_ref() else {
-            // Connected through a path that never ran the handoff (the pre-0.10 build, or the
-            // bridge off for a typed ssh). Nothing is known about who the host runs as.
-            return Some(serde_json::json!({ "known": false }));
-        };
-        let mut out = match remote.account.as_ref() {
-            Some(a) => account_fields(a, runtime_slug, prefs),
-            None => serde_json::json!({ "known": true }),
-        };
-        out["remote"] = serde_json::to_value(remote.state).unwrap_or_default();
-        if let Some(reason) = remote.reason.as_deref() {
-            out["reason"] = serde_json::Value::String(reason.to_string());
-        }
-        return Some(out);
+    // is answering. And the §6 handoff only ever carries a CLAUDE token: a Codex or Gemini chat
+    // over the same ssh never reads it, so it must not be described by it.
+    if runtime_slug != "claude" {
+        return unknown();
+    }
+    let Some(remote) = record.remote.as_mut() else { return unknown() };
+    let Some(now_pid) = ssh_pid else { return unknown() };
+    match remote.ssh_pid {
+        Some(bound) if bound == now_pid => {}
+        Some(_) => return unknown(),
+        None if remote.recorded_at.elapsed() <= BIND_WINDOW => remote.ssh_pid = Some(now_pid),
+        None => return unknown(),
     }
 
-    let a = record.local.get(runtime_slug)?;
-    Some(account_fields(a, runtime_slug, prefs))
+    let mut out = match remote.account.as_ref() {
+        Some(a) => account_fields(a, runtime_slug, prefs),
+        None => serde_json::json!({ "known": true }),
+    };
+    out["remote"] = serde_json::to_value(remote.state).unwrap_or_default();
+    if let Some(reason) = remote.reason.as_deref() {
+        out["reason"] = serde_json::Value::String(reason.to_string());
+    }
+    Some(out)
 }
 
 /// The descriptive fields for one account id, plus `stale` pre-resolved against the CURRENT
@@ -181,26 +213,31 @@ mod tests {
         TabAccount { local: [("claude".to_string(), aref(id))].into(), remote: None }
     }
 
+    const SSH: Place = Place::Remote { ssh_pid: Some(100) };
+    fn unknown() -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "known": false }))
+    }
+
     #[test]
     fn no_record_is_unknown_never_the_active_account() {
         let p = prefs_with("a");
-        assert_eq!(wire(None, "claude", false, &p), Some(serde_json::json!({ "known": false })));
+        assert_eq!(wire(None, "claude", Place::Local, &p), unknown());
     }
 
     #[test]
     fn an_empty_record_is_known_unmanaged() {
         let p = prefs_with("a");
-        assert_eq!(wire(Some(&TabAccount::default()), "claude", false, &p), None);
+        assert_eq!(wire(Some(&mut TabAccount::default()), "claude", Place::Local, &p), None);
     }
 
     #[test]
     fn a_tab_keeps_its_spawn_account_after_a_switch_and_says_it_is_stale() {
         let p = prefs_with("b");
-        let v = wire(Some(&local("a")), "claude", false, &p).unwrap();
+        let v = wire(Some(&mut local("a")), "claude", Place::Local, &p).unwrap();
         assert_eq!(v["id"], "a");
         assert_eq!(v["label"], "a@example.com");
         assert_eq!(v["stale"], true);
-        let v = wire(Some(&local("b")), "claude", false, &p).unwrap();
+        let v = wire(Some(&mut local("b")), "claude", Place::Local, &p).unwrap();
         assert!(v.get("stale").is_none());
     }
 
@@ -209,21 +246,48 @@ mod tests {
         let p = prefs_with("a");
         let mut r = local("a");
         // Local shell account is irrelevant to a remote agent: no handoff ⇒ unknown.
-        assert_eq!(wire(Some(&r), "claude", true, &p), Some(serde_json::json!({ "known": false })));
+        assert_eq!(wire(Some(&mut r), "claude", SSH, &p), unknown());
 
-        r.remote = Some(RemoteRecord {
-            account: Some(aref("a")),
-            state: RemoteState::NotApplied,
-            reason: Some("token expired".into()),
-        });
-        let v = wire(Some(&r), "claude", true, &p).unwrap();
+        r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::NotApplied, Some("token expired".into())));
+        let v = wire(Some(&mut r), "claude", SSH, &p).unwrap();
         assert_eq!(v["remote"], "not_applied");
         assert_eq!(v["reason"], "token expired");
         assert_eq!(v["label"], "a@example.com");
 
-        r.remote = Some(RemoteRecord { account: None, state: RemoteState::HostLogin, reason: None });
-        let v = wire(Some(&r), "claude", true, &p).unwrap();
+        r.remote = Some(RemoteRecord::new(None, RemoteState::HostLogin, None));
+        let v = wire(Some(&mut r), "claude", SSH, &p).unwrap();
         assert_eq!(v, serde_json::json!({ "known": true, "remote": "host_login" }));
+    }
+
+    #[test]
+    fn a_later_ssh_session_is_not_served_an_earlier_handoff() {
+        let p = prefs_with("a");
+        let mut r = local("a");
+        r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None));
+        // First observation binds the record to ssh pid 100.
+        assert_eq!(wire(Some(&mut r), "claude", SSH, &p).unwrap()["remote"], "sent_unverified");
+        // The user exits and runs a different ssh (pid 200) with no handoff: unknown.
+        assert_eq!(wire(Some(&mut r), "claude", Place::Remote { ssh_pid: Some(200) }, &p), unknown());
+        // Unreadable foreground: never guessed.
+        assert_eq!(wire(Some(&mut r), "claude", Place::Remote { ssh_pid: None }, &p), unknown());
+    }
+
+    #[test]
+    fn an_unbound_record_past_the_window_is_not_claimed_by_whatever_ssh_is_running() {
+        let p = prefs_with("a");
+        let mut r = local("a");
+        let mut rec = RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None);
+        rec.recorded_at = std::time::Instant::now() - BIND_WINDOW * 2;
+        r.remote = Some(rec);
+        assert_eq!(wire(Some(&mut r), "claude", SSH, &p), unknown());
+    }
+
+    #[test]
+    fn a_codex_chat_over_ssh_is_never_described_by_the_claude_token() {
+        let p = prefs_with("a");
+        let mut r = local("a");
+        r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None));
+        assert_eq!(wire(Some(&mut r), "codex", SSH, &p), unknown());
     }
 
     #[test]
@@ -231,7 +295,8 @@ mod tests {
         let mut p = prefs_with("a");
         let r = local("a");
         p.managed_accounts.retain(|a| a.id != "a");
-        let v = wire(Some(&r), "claude", false, &p).unwrap();
+        let mut r = r;
+        let v = wire(Some(&mut r), "claude", Place::Local, &p).unwrap();
         assert_eq!(v["label"], "a@example.com");
         assert_eq!(v["removed"], true);
     }
@@ -240,6 +305,6 @@ mod tests {
     fn a_disabled_feature_marks_every_managed_tab_stale() {
         let mut p = prefs_with("a");
         p.accounts_enabled = false;
-        assert_eq!(wire(Some(&local("a")), "claude", false, &p).unwrap()["stale"], true);
+        assert_eq!(wire(Some(&mut local("a")), "claude", Place::Local, &p).unwrap()["stale"], true);
     }
 }
