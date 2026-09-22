@@ -1035,8 +1035,9 @@ included.
    `prepare_remote_account_token`, wired into every path that starts a remote session.
 
    **Step 1 was rebuilt on 2026-09-21 after the first real attempt.** The mint had never been
-   capable of succeeding: `setup-token` is a paste-code TUI with no localhost callback (§2.4),
-   and it was being run with `Stdio::null()` and pipes. It now runs on a PTY, the dialog asks
+   capable of succeeding: `setup-token` is an ink TUI that emits nothing at all with piped stdio
+   and never exits after printing (§2.4), and it was being run with `Stdio::null()` and pipes —
+   so the flow completed, the token was rendered, and maiTerm saw zero bytes. It now runs on a PTY, the dialog asks
    for the code, and `submit_account_code` types it in. Three things that version got wrong and
    this one has to keep right: the PTY is **400 columns** (a wrapped token has a newline in the
    middle of it, and extraction stops at the first control character — storing a truncated

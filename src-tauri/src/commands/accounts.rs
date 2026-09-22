@@ -265,12 +265,13 @@ struct LoginUrlEvent {
     /// to offer "Open in <browser>" at all. Offering it on a paste-code link invites the user
     /// to walk into the dead end that the Rust side just declined to walk them into.
     paste_code: bool,
-    /// True for a mint: the browser will end on a code, and the dialog must ask for it.
+    /// True for a mint: offer the code field as a FALLBACK.
     ///
-    /// Note this is not the inverse of `paste_code`. A *sign-in*'s paste-code link is a dead end
-    /// because there is nowhere to put the code; a *mint* is always a paste-code flow and always
-    /// has somewhere to put it (`submit_account_code`). One says "this link cannot finish", the
-    /// other says "this link finishes here".
+    /// Not the inverse of `paste_code`, and not a claim that a code is required. A mint's link
+    /// normally completes in the browser through the runtime's own localhost callback; the
+    /// runtime also builds a manual URL whose page shows a code, and some browsers land there.
+    /// So this means "a code may appear — have somewhere to put it", where `paste_code` means
+    /// "this link cannot finish at all".
     needs_code: bool,
 }
 
@@ -1535,6 +1536,16 @@ fn verify_token_identity(profile: &accounts::RuntimeProfile, token: &accounts::v
 /// The variable a minted token is consumed through, here and on every remote (§6 step 2).
 const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/// Said when a mint is cancelled after the browser has already finished it.
+///
+/// The cancel is honoured — nothing is stored — but a credential exists in the world and maiTerm
+/// cannot take it back (§9.4: no revoke, and `auth logout` is not known to reach one). Saying so
+/// is the whole obligation: silence here would leave a standing one-year token nobody knows about.
+const TOKEN_MINTED_BUT_DISCARDED: &str =
+    "Cancelled. The browser had already finished, so a token was created — it has NOT been kept, \
+     but it is live for a year and nothing local can revoke it. Revoke it in your Anthropic \
+     account settings if you do not want it standing.";
+
 /// Mint a `setup-token` for an existing account and put it in the vault (§6 step 1).
 ///
 /// Returns metadata only. **The token itself never crosses the IPC boundary** — §9.3 is explicit
@@ -1598,6 +1609,20 @@ pub async fn mint_account_token(
 
     let token = run_mint_on_pty(&app, rt, &account_id, timeout_secs, open_with).await?;
 
+    // **Cancelled between the browser and here?** This is the window that matters most and the
+    // one that was open longest: the mint is done, a real credential exists, and the checks below
+    // take seconds — a live API round trip among them. The usual reason to cancel is watching the
+    // browser authorise the WRONG account, which is noticed exactly here.
+    //
+    // Cancelling cannot un-mint it. `setup-token` has no revoke and `auth logout` is not known to
+    // reach one (§9.4), so the honest thing is to not keep it and to say that a credential now
+    // exists which only the user can retire. Storing it instead would record account B's token
+    // against account A, and per §6.1 nothing downstream could ever tell — a token carries no
+    // identity to compare.
+    if mint_cancelled(&account_id) {
+        return Err(TOKEN_MINTED_BUT_DISCARDED.to_string());
+    }
+
     // Step 2: does this token actually work?
     //
     // **Not "who is it" — that is not answerable.** `auth status --json` gives a token no email,
@@ -1611,6 +1636,13 @@ pub async fn mint_account_token(
             .await
             .map_err(|e| format!("token check task failed: {e}"))??
     };
+
+    // Asked again, because the check above is seconds old by now and those seconds are a live
+    // network request. The last moment a cancel can still mean anything is immediately before
+    // the write.
+    if mint_cancelled(&account_id) {
+        return Err(TOKEN_MINTED_BUT_DISCARDED.to_string());
+    }
 
     // Step 3.
     let id_for_store = account_id.clone();

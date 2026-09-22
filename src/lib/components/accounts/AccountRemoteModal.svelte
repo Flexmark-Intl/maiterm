@@ -65,6 +65,8 @@
   let codeSent = $state(false);
   let codeError = $state<string | null>(null);
   let codeEl = $state<HTMLInputElement | null>(null);
+  /** A cancel has been asked for and the mint has not answered yet. */
+  let cancelling = $state(false);
 
   let browsers = $state<PrivateBrowserInfo[]>([]);
   let browserId = $state<string | null>(null);
@@ -93,7 +95,11 @@
         pasteCode = e.payload.paste_code;
         needsCode = e.payload.needs_code;
         openedPrivately = e.payload.opened && onUrl === 'private';
-        if (e.payload.open_error) error = e.payload.open_error;
+        // Assigned, not or-ed in: the grace-period note ("the agent opened its own window")
+        // is emitted BEFORE a late shim capture, and leaving it up next to "Opened in Chrome"
+        // tells the user to approve in a window that does not exist — which is the wrong-account
+        // mint this dialog exists to prevent.
+        error = e.payload.open_error ?? null;
         if (onUrl === 'copy' && loginUrl) void copyLink();
         // **Deliberately not focused.** The flow normally finishes on its own through the
         // runtime's localhost callback; the code field is the fallback for when the browser
@@ -167,6 +173,7 @@
     code = '';
     copied = false;
     openedPrivately = false;
+    cancelling = false;
     try {
       const openWith = then === 'private' ? (browser?.id ?? null) : then === 'copy' ? null : 'default';
       // The row's OWN runtime, not a literal. Only Claude can mint today, but a hardcoded slug
@@ -191,12 +198,18 @@
    *  as a sign-in: the mint runs on a PTY and is registered separately, and the same command
    *  flags both — from here they are one action. */
   async function cancelMint() {
+    cancelling = true;
     try {
       await commands.cancelAccountLogin(target.id);
     } catch (e) {
       logError(`[accounts] cancelling the mint failed: ${e}`);
     }
-    oncancel();
+    // **Deliberately does NOT close the dialog.** Cancelling after the browser has finished
+    // cannot un-mint the token — there is no revoke (§9.4) — so Rust answers that cancel with a
+    // message saying a live credential now exists and only the user can retire it. Unmounting
+    // here would throw that away: the in-flight `mint()` rejects into a component that is gone.
+    // The flow lands in `mint()`'s catch, which shows the reason and returns to 'explain'; the
+    // footer's Cancel then closes as usual.
   }
 
   async function focusThisWindow() {
@@ -426,8 +439,8 @@
       <!-- Enabled WHILE minting: the common reason to abort is seeing the browser open
            signed in to the wrong account, and without this the only escape was a key that
            closed the window and left the flow running to completion. -->
-      <Button variant="ghost" onclick={() => (busy ? cancelMint() : oncancel())}>
-        {busy ? 'Cancel mint' : 'Cancel'}
+      <Button variant="ghost" disabled={cancelling} onclick={() => (busy ? cancelMint() : oncancel())}>
+        {cancelling ? 'Cancelling…' : busy ? 'Cancel mint' : 'Cancel'}
       </Button>
       {#if browser}
         <Button variant="secondary" disabled={busy} onclick={() => mint('private')}>

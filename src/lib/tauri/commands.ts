@@ -1460,20 +1460,23 @@ export interface AccountLoginUrl {
    *  paste-a-code variant, which cannot complete because the CLI's stdin is null. The UI must
    *  not offer to open it: doing so walks the user into a dead end that looks like success. */
   paste_code: boolean;
-  /** True for a mint: the browser ends on a code, and the dialog has to ask for it.
+  /** True for a mint: offer the code field as a FALLBACK.
    *
-   *  **Not the inverse of `paste_code`.** A sign-in's paste-code link is a dead end because
-   *  there is nowhere to put the code. A mint is *always* a paste-code flow — `setup-token` runs
-   *  no localhost callback at all — and always has somewhere to put it. One flag says "this link
-   *  cannot finish", the other says "this link finishes here". */
+   *  **Not the inverse of `paste_code`, and not a statement that a code is required.**
+   *  `setup-token` runs its own localhost callback and normally finishes in the browser with
+   *  nothing typed; it also builds a manual URL whose page shows a code, and some browsers land
+   *  there. So this means "a code may appear — have somewhere to put it", where `paste_code`
+   *  means "this link cannot finish at all". The UI must not caption it as the next step: doing
+   *  so sent a user hunting for a code that did not exist. */
   needs_code: boolean;
 }
 
 /** Hand a running mint the authorization code the browser showed.
  *
- *  `claude setup-token` cannot complete by itself: it opens `…?code=true`, runs no localhost
- *  callback, and waits for the code to be typed back at it on a terminal. maiTerm runs it on a
- *  PTY so there is something to type into — this is that. */
+ *  A fallback. `claude setup-token` runs its own `127.0.0.1` callback and usually finishes in the
+ *  browser, but it also builds a manual URL whose page shows a code instead, and some browsers
+ *  land there. maiTerm runs the mint on a PTY — required anyway, since it is an ink TUI that
+ *  prints nothing to a pipe — so there is something to type the code into. */
 export async function submitAccountCode(accountId: string, code: string): Promise<void> {
   return invoke('submit_account_code', { accountId, code });
 }
