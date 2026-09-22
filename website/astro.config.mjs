@@ -41,6 +41,7 @@ export default defineConfig({
             { label: 'Terminal', slug: 'features/terminal' },
             { label: 'Workspaces & Panes', slug: 'features/workspaces' },
             { label: 'Workspace Stack', slug: 'features/stack' },
+            { label: 'Workspace Share', slug: 'features/workspace-share' },
             { label: 'Code Editor', slug: 'features/editor' },
             { label: 'Agent Integration', slug: 'features/agents' },
             { label: 'Agent Accounts', slug: 'features/accounts' },

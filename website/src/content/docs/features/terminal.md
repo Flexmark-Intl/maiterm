@@ -82,6 +82,8 @@ Export your entire maiTerm state — workspaces, tabs, scrollback, notes, prefer
 - **Selective import** — preview what's in a backup, pick which workspaces to import, choose overwrite or merge mode
 - **Exclude scrollback** option to keep exports lightweight
 
+A backup is *your* machine: importing its preferences brings your accounts and chat credentials with it, and every workspace lands in the first window. To hand one workspace to someone else — or set it up on a fresh machine with its repositories cloned for you — use [Workspace Share](/features/workspace-share/) instead.
+
 ## Reconnect a Dropped SSH Session
 
 When an SSH session drops because of a network blip — not a clean `exit` — maiTerm notices the difference. Instead of resetting the tab to a bare local shell, it preserves the remote title and shows a **disconnected** badge in the tab bar. Click it to reconnect: maiTerm replays the same connection and drops you back into the directory you were in, so a flaky network doesn't cost you your place. A clean logout you did on purpose is left alone.

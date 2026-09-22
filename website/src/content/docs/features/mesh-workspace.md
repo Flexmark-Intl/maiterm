@@ -73,6 +73,8 @@ Registering an agent isn't a blind paste. A tab coming out of a resume is often 
 
 After a restart, the mesh **auto-rechecks** readiness and offers to wake or re-init any agents that dropped, so your mesh comes back the way you left it. Each agent can also carry an optional **purpose** note — a one-line scope steer that tells it what its role in the mesh is — and those purposes persist across restarts.
 
+A mesh can be handed to a teammate with [Workspace Share](/features/workspace-share/#mesh-workspaces): the workspace arrives as a mesh, every tab keeps its role name and purpose, and their agents join each other as they start. The conversations yours had stay with you.
+
 You can also ready a whole mesh **from your phone**: mesh workspaces are badged in the [maiLink](/features/mailink/) inbox with a one-tap **Initialize all** that triages each member the same way — register the running-but-unregistered, resume the exited, leave the live ones alone.
 
 :::note
