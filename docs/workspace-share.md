@@ -19,7 +19,7 @@ is wrong for a handoff on every one of those. Share carries **structure**, never
 | Local editor tabs, as root-relative paths; remote editor tabs (`EditorFileInfo.is_remote`) as ssh command + `remote_path` | | Diff tabs (they hold full file contents) and board tabs |
 | Stack services (**default ON**, deselectable per service), cwd as root-relative; `env` per §3 | | Archived tabs, `overlord` / `overlord_exempt` |
 | An agent tab's runtime (`Tab.runtime`) and, for remote tabs only, its session id extracted from `trigger_variables` (§5) | | The rest of `trigger_variables`, import/attention flags, composer drafts |
-| | | Mesh / bridge state (`mesh_purpose`, `bridge_all`), maiLink and comms bindings |
+| A Mesh Workspace (`bridge_all`) and each tab's mesh role (`mesh_purpose`) — membership IS the roster, so flag + tab names + purposes is the whole mesh; the receiver's agents join it as they init | | Mesh topics (the sender's conversation history, keyed by the sender's tab ids), 1:1 Agent Bridge pairings, maiLink and comms bindings |
 
 **Ids.** Every id is re-minted on import so importing the same file twice, or a file built
 from a workspace you were once sent, never collides. `clone_workspace_with_id_mapping`

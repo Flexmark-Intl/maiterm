@@ -85,6 +85,12 @@ pub struct SharedWorkspace {
     pub panes: Vec<SharedPane>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_pane_id: Option<String>,
+    /// A Mesh Workspace (`bridge_all`, docs/mesh-workspace.md): every agent tab bridged to
+    /// every other. Membership IS the roster, so the flag plus each tab's role (its name and
+    /// `mesh_purpose`) is the whole mesh. Topics are not: they are conversation history
+    /// between the SENDER's sessions, keyed by their tab ids.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh: bool,
 }
 
 /// Ids inside the file are file-local references (split leaves, task assignees). Every one
@@ -109,6 +115,9 @@ pub struct SharedTab {
     pub auto_resume: Option<SharedAutoResume>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<SharedAgent>,
+    /// Mesh role: what this agent owns, fed into its priming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_purpose: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -659,6 +668,7 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
                 kind,
                 auto_resume,
                 agent,
+                mesh_purpose: if ws.bridge_all { tab.mesh_purpose.clone().filter(|p| !p.trim().is_empty()) } else { None },
             });
         }
         // A pane whose every tab was dropped would arrive empty; give it a plain shell.
@@ -670,6 +680,7 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
                 kind: SharedTabKind::Local { location: None },
                 auto_resume: None,
                 agent: None,
+                mesh_purpose: None,
             });
         }
         let active_tab_id = pane
@@ -738,6 +749,7 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
             split_root: ws.split_root.clone(),
             panes,
             active_pane_id: ws.active_pane_id.clone(),
+            mesh: ws.bridge_all,
         },
         roots: table.roots.clone(),
         services,
@@ -929,6 +941,9 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 }
             };
             tab.custom_name = st.custom_name;
+            if file.workspace.mesh {
+                tab.mesh_purpose = st.mesh_purpose.clone();
+            }
             tab.import_highlight = true;
             if let Some(agent) = &st.agent {
                 tab.runtime = Some(agent.runtime);
@@ -982,6 +997,7 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
     ws.panes = panes;
     ws.split_root = split_root;
     ws.import_highlight = true;
+    ws.bridge_all = file.workspace.mesh;
 
     let now = crate::commands::workspace::iso_now();
     let home_dir = home().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|| "~".to_string());
@@ -1099,6 +1115,26 @@ mod tests {
         assert_eq!(remote.agent.as_ref().unwrap().session_id.as_deref(), Some("11111111-aaaa"));
         // The literal id in the command became the variable.
         assert_eq!(remote.auto_resume.as_ref().unwrap().command.as_deref(), Some("claude --resume %claudeSessionId"));
+    }
+
+    #[test]
+    fn a_mesh_travels_as_its_flag_and_roles() {
+        let mut ws = sample_ws();
+        ws.bridge_all = true;
+        ws.panes[0].tabs[1].mesh_purpose = Some("owns the API".to_string());
+        ws.mesh_topics.push(crate::state::MeshTopic::new("t1".into(), "auth".into(), ws.panes[0].tabs[1].id.clone(), String::new()));
+        let file = export_file(&ws, &[], &ExportOptions::default());
+        assert!(file.workspace.mesh);
+        assert!(!serde_json::to_string(&file).unwrap().contains("\"auth\""), "topics are the sender's history");
+        let got = build_workspace(&file, &ImportOptions::default()).workspace;
+        assert!(got.bridge_all);
+        assert!(got.mesh_topics.is_empty());
+        assert_eq!(got.panes[0].tabs[1].mesh_purpose.as_deref(), Some("owns the API"));
+
+        ws.bridge_all = false;
+        let plain = export_file(&ws, &[], &ExportOptions::default());
+        assert!(!plain.workspace.mesh);
+        assert!(plain.workspace.panes[0].tabs[1].mesh_purpose.is_none());
     }
 
     #[test]
