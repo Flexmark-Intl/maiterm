@@ -78,6 +78,11 @@ function createUpdaterStore() {
   let checking = $state(false);
   let downloading = $state(false);
   let installed = $state(false);
+  /** Download done, the bundle swap under way — the phase a hang would sit in. */
+  let installing = $state(false);
+  let downloadedBytes = $state(0);
+  /** Null when the server sent no Content-Length. */
+  let totalBytes = $state<number | null>(null);
   let currentUpdate = $state<Update | null>(null);
   let dismissed = $state(false);
   let releaseNotes = $state<ChangelogEntry[]>([]);
@@ -85,7 +90,16 @@ function createUpdaterStore() {
   let showWhatsNewRequested = $state(false);
 
   async function checkForUpdates(silent = false): Promise<Update | null> {
-    if (checking || downloading) return null;
+    if (downloading) {
+      // A manual check mid-install used to return with no word at all — and if the
+      // banner had been dismissed, nothing on screen said an install was running.
+      if (!silent) {
+        dismissed = false;
+        toastStore.addToast('Update In Progress', `v${currentUpdate?.version} is still ${installing ? 'installing' : 'downloading'}.`, 'info');
+      }
+      return null;
+    }
+    if (checking) return null;
     checking = true;
     try {
       const update = await check();
@@ -168,15 +182,34 @@ function createUpdaterStore() {
   async function downloadAndInstall() {
     if (!currentUpdate || downloading) return;
     downloading = true;
+    installing = false;
+    downloadedBytes = 0;
+    totalBytes = null;
+    const version = currentUpdate.version;
+    logInfo(`Update v${version}: download started`);
     try {
-      await currentUpdate.downloadAndInstall();
+      await currentUpdate.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          totalBytes = event.data.contentLength ?? null;
+        } else if (event.event === 'Progress') {
+          downloadedBytes += event.data.chunkLength;
+        } else if (event.event === 'Finished') {
+          installing = true;
+          logInfo(`Update v${version}: downloaded ${downloadedBytes} bytes, installing`);
+        }
+      });
       installed = true;
+      // The finished state carries the Restart button; a banner dismissed mid-download
+      // would otherwise hide it, leaving an installed update that only a quit reveals.
+      dismissed = false;
+      logInfo(`Update v${version}: installed`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logError(`Update install failed: ${msg}`);
       toastStore.addToast('Update Failed', msg, 'error');
     } finally {
       downloading = false;
+      installing = false;
     }
   }
 
@@ -215,6 +248,9 @@ function createUpdaterStore() {
     get checking() { return checking; },
     get downloading() { return downloading; },
     get installed() { return installed; },
+    get installing() { return installing; },
+    get downloadedBytes() { return downloadedBytes; },
+    get totalBytes() { return totalBytes; },
     get currentUpdate() { return currentUpdate; },
     get dismissed() { return dismissed; },
     get releaseNotes() { return releaseNotes; },

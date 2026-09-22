@@ -789,8 +789,17 @@
       {#if updaterStore.installed}
         <div class="update-text">Update installed</div>
         <button class="update-action" onclick={() => updaterStore.restart()}>Restart</button>
+      {:else if updaterStore.installing}
+        <div class="update-text">Installing v{updaterStore.currentUpdate?.version}…</div>
       {:else if updaterStore.downloading}
-        <div class="update-text">Downloading v{updaterStore.currentUpdate?.version}…</div>
+        <div class="update-text">
+          Downloading v{updaterStore.currentUpdate?.version}…
+          {#if updaterStore.totalBytes}
+            {Math.floor(updaterStore.downloadedBytes / updaterStore.totalBytes * 100)}%
+          {:else if updaterStore.downloadedBytes}
+            {(updaterStore.downloadedBytes / 1048576).toFixed(1)} MB
+          {/if}
+        </div>
       {:else}
         <div class="update-text">
           v{updaterStore.currentUpdate?.version} available
@@ -839,7 +848,7 @@
   entries={whatsNewEntries}
   title="What's New"
   oninstall={updaterStore.currentUpdate && !updaterStore.installed ? handleInstallFromModal : undefined}
-  installLabel={rechecking ? 'Checking…' : updaterStore.downloading ? 'Downloading…' : updaterStore.installed ? 'Restarting…' : 'Install & Restart'}
+  installLabel={rechecking ? 'Checking…' : updaterStore.installing ? 'Installing…' : updaterStore.downloading ? 'Downloading…' : updaterStore.installed ? 'Restarting…' : 'Install & Restart'}
   installDisabled={rechecking || updaterStore.downloading || updaterStore.installed}
   {newerVersionPrompt}
   oninstallLatest={handleInstallLatest}
