@@ -407,8 +407,8 @@
                 <summary>Removing it here does not switch it off on hosts</summary>
                 <p>
                   maiTerm stops handing it out, but a host that already has it keeps working until
-                  the token expires. To cut it off everywhere, revoke it in your Anthropic account
-                  settings.
+                  the token expires, a year after it was minted. Nothing maiTerm or the agent CLI
+                  offers can revoke it early.
                 </p>
               </details>
             </li>

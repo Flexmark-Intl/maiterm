@@ -609,7 +609,7 @@
 <div class="pane">
   <h3>Accounts</h3>
   <p class="hint">
-    Hold more than one agent login and switch between them per tab. Off by default — maiTerm
+    Hold more than one agent login and choose which one new tabs start under. Off by default — maiTerm
     does not touch your sign-in unless you turn this on.
   </p>
 
@@ -901,8 +901,8 @@
 
     <h4>What it does not do</h4>
     <p>
-      maiTerm never reads, writes or parses your login, and never touches the runtime's Keychain
-      item. It owns the <em>directory</em>; the runtime owns the credential inside it and does
+      maiTerm never reads, writes or parses your login, and never touches the keychain entry or
+      credentials file it lives in. It owns the <em>directory</em>; the runtime owns the credential inside it and does
       its own sign-in, refresh and sign-out.
     </p>
 
