@@ -2102,7 +2102,10 @@ never on timing. One shell can run many ssh sessions and only some go through th
 (`ssh -t host claude` does not), and two rounds of review each found a time window that let a later
 hand-typed ssh inherit an earlier handoff. So:
 - the ssh maiTerm *types* (spawn, reconnect, auto-resume replay) carries the handoff file's path in
-  its own argv, and the record binds to the ssh whose command line names that tab's file;
+  its own argv, and the record binds to the ssh whose command line names THAT handoff's file. The
+  file is named per handoff (tab id + a nonce minted per push), not per tab: with the tab id alone,
+  an ssh re-run from shell history, or the outer ssh around a replay, named the same path as a newer
+  handoff and inherited its account;
 - where the fragment is typed *into* an ssh already running (the bridge's typed-ssh path, the
   manual "Inject maiTerm Env Vars"), the handoff binds to that process as it runs.
 

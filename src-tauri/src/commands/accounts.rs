@@ -1714,6 +1714,9 @@ pub struct RemoteTokenPrep {
     /// frontend has no use for it and the record is written here, in Rust.
     #[serde(skip)]
     pub account_id: Option<String>,
+    /// The handoff's own name (`remote::handoff_handle`), for the record and for discard.
+    #[serde(skip)]
+    pub handle: Option<String>,
 }
 
 impl RemoteTokenPrep {
@@ -1728,6 +1731,7 @@ impl RemoteTokenPrep {
             host: None,
             detail: None,
             account_id: None,
+            handle: None,
         }
     }
 }
@@ -1785,7 +1789,8 @@ pub async fn prepare_remote_account_token(
                 label: prep.account_label.clone().unwrap_or_else(|| id.clone()),
             }),
         };
-        let remote = RemoteRecord::new(account, state_, reason);
+        let mut remote = RemoteRecord::new(account, state_, reason);
+        remote.handle = prep.handle.clone();
         crate::mailink::accounts::note_remote(state.inner(), &tab_id, remote);
         // `bind_now`: the caller is about to type the fragment into an ssh that is ALREADY
         // running, so that process is the one this handoff belongs to. Every other caller types
@@ -1846,6 +1851,7 @@ async fn prepare_inner(
                 host: Some(target),
                 detail: Some("its remote token has expired — mint a new one in Preferences → Accounts".into()),
                 account_id: Some(account_id),
+                handle: None,
             });
         }
     }
@@ -1876,6 +1882,7 @@ async fn prepare_inner(
                         .into(),
                 ),
                 account_id: Some(account_id.clone()),
+                handle: None,
             });
         }
         Err(e) => {
@@ -1887,6 +1894,7 @@ async fn prepare_inner(
                 host: Some(target),
                 detail: Some(format!("the keychain could not be read ({e})")),
                 account_id: Some(account_id.clone()),
+                handle: None,
             });
         }
     };
@@ -1903,10 +1911,12 @@ async fn prepare_inner(
             host: Some(target),
             detail: Some("its stored remote token is not in the expected form — mint it again".into()),
             account_id: Some(account_id.clone()),
+            handle: None,
         });
     }
 
-    let script = accounts::remote::stage_script(&tab_id)
+    let handle = accounts::remote::handoff_handle(&tab_id).ok_or_else(|| "unusable tab id".to_string())?;
+    let script = accounts::remote::stage_script(&handle)
         .ok_or_else(|| "unusable tab id".to_string())?;
     let contents = accounts::remote::stage_contents(token.expose(), plan.as_deref());
     if let Err(e) = run_ssh(&ssh_args, &script, Some(&contents)).await {
@@ -1918,16 +1928,18 @@ async fn prepare_inner(
             host: Some(target),
             detail: Some(e),
             account_id: Some(account_id.clone()),
+            handle: None,
         });
     }
 
     Ok(RemoteTokenPrep {
         status: "ready",
-        export: accounts::remote::export_fragment(&tab_id),
+        export: accounts::remote::export_fragment(&handle),
         account_label: Some(label),
         host: Some(target),
         detail: None,
         account_id: Some(account_id),
+        handle: Some(handle),
     })
 }
 
@@ -1950,8 +1962,16 @@ pub async fn discard_remote_account_token(
 ) -> Result<(), String> {
     // Prepared and never used: whatever the push recorded, this session is NOT running as the
     // account. Downgraded before the best-effort cleanup, which can fail without changing that.
+    // The file is named by the handoff's own handle, which only the record knows. Read it BEFORE
+    // the downgrade, which writes a fresh record. No handle ⇒ nothing was staged to take back.
+    let handle = state
+        .tab_accounts
+        .read()
+        .get(&tab_id)
+        .and_then(|r| r.remote.as_ref())
+        .and_then(|r| r.handle.clone());
     crate::mailink::accounts::downgrade_remote(state.inner(), &tab_id, "the token was prepared but the session did not use it");
-    let Some(script) = accounts::remote::discard_script(&tab_id) else {
+    let Some(script) = handle.as_deref().and_then(accounts::remote::discard_script) else {
         return Ok(());
     };
     match run_ssh(&ssh_args, &script, None).await {

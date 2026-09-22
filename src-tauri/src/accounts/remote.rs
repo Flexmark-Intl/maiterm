@@ -57,7 +57,20 @@ pub fn is_safe_handle(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// The handoff file for one tab.
+/// A handoff's name: the tab id plus a nonce minted per prepare. The nonce is what makes a
+/// handoff recognisable as ITSELF (maiLink §14 binds a record to the ssh whose argv names it) —
+/// with the tab id alone, an ssh re-run from shell history, or the outer ssh around a replay,
+/// named the same path as a newer handoff and inherited its account.
+pub fn handoff_handle(tab_id: &str) -> Option<String> {
+    if !is_safe_handle(tab_id) {
+        return None;
+    }
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let handle = format!("{tab_id}-{}", &nonce[..12]);
+    is_safe_handle(&handle).then_some(handle)
+}
+
+/// The handoff file for one handle (see `handoff_handle`).
 pub fn token_path(tab_id: &str) -> Option<String> {
     is_safe_handle(tab_id).then(|| format!("{REMOTE_DIR}/tok-{tab_id}"))
 }
@@ -168,6 +181,15 @@ pub fn discard_script(tab_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_handoff_gets_its_own_name() {
+        let tab = "3f2a9c1e-0000-4000-8000-000000000000";
+        let (a, b) = (handoff_handle(tab).unwrap(), handoff_handle(tab).unwrap());
+        assert_ne!(a, b);
+        assert!(a.starts_with(tab) && is_safe_handle(&a));
+        assert!(handoff_handle("a'b").is_none());
+    }
 
     #[test]
     fn rejects_anything_that_is_not_a_uuid_shape() {

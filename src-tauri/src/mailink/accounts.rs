@@ -45,8 +45,8 @@ pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
 
 /// The wire `account` for one chat. `Value::Null` = known unmanaged (§14.1 rule 1).
 ///
-/// **The process probe is skipped only when nothing CAN be managed**: the record is empty and the
-/// feature is off. This runs per tab on every WS and doorbell tick, and the probe spawns `ps` once
+/// **The process probe is skipped only when nothing CAN be managed**: the record is empty and no
+/// account could be handed to a tab right now. This runs per tab on every WS and doorbell tick, and the probe spawns `ps` once
 /// its 800 ms cache lapses, so a machine that never turned the feature on pays nothing. Gating on
 /// the record alone was wrong: an empty record over SSH is `{known:false}`, not `null`.
 pub(crate) fn chat_account(app: &AppState, tab_id: &str, runtime_slug: &str) -> Value {
@@ -54,16 +54,15 @@ pub(crate) fn chat_account(app: &AppState, tab_id: &str, runtime_slug: &str) -> 
         None => return json!({ "known": false }),
         Some(r) => r.local.is_empty() && r.remote.is_none(),
     };
-    if record_empty {
-        let p = &app.app_data.read().preferences;
-        if !(p.accounts_setup_complete && p.accounts_enabled) {
-            return Value::Null;
-        }
+    // Nothing to describe AND nothing that could be handed out now (feature off, or no supported
+    // runtime with an active account — every Windows machine today): `null`, no probe.
+    if record_empty && crate::accounts::active_accounts(&app.app_data.read().preferences).is_empty() {
+        return Value::Null;
     }
     let place = place(app, tab_id);
     let mut records = app.tab_accounts.write();
     let data = app.app_data.read();
-    tab_record::wire(records.get_mut(tab_id), tab_id, runtime_slug, place, &data.preferences)
+    tab_record::wire(records.get_mut(tab_id), runtime_slug, place, &data.preferences)
         .unwrap_or(Value::Null)
 }
 
