@@ -97,6 +97,18 @@ the `origin` URL (the first recorded remote when there is no `origin`). A reject
 Per-root prompt: a directory picker that states which repo will be cloned into it, validated
 by the same rule.
 
+**Access probe.** Every git root that will be cloned gets `git ls-remote --heads <url>` in
+step 1, before anything is created. It runs non-interactively (`GIT_TERMINAL_PROMPT=0`,
+`GIT_SSH_COMMAND='ssh -o BatchMode=yes'`, a timeout), so it cannot answer a passphrase or
+2FA prompt the real clone could. Its outcomes are therefore three, not two:
+
+- **reachable** — and the heads list says whether the recorded branch exists, so the branch
+  fallback in step 2 is known up front;
+- **not found / denied** (the remote answered no) — shown as "you don't have access to X",
+  that root can't be cloned until it is fixed or remapped to an existing checkout;
+- **could not verify** (timeout, or it needed interactive auth) — a warning only; the clone
+  in step 2 will ask for whatever it needs.
+
 **Step 2 — clone.** Clones run in a **visible terminal tab**, one per root, never a hidden
 subprocess: a clone can ask for an SSH passphrase, a 2FA touch, or host-key trust, and a
 hidden one just hangs. `git clone --branch <recorded>`; if the branch does not exist on the
@@ -211,8 +223,5 @@ deploy build.
 
 ## 8. Open questions
 
-- Private repos the receiver cannot access fail at clone (step 2) with git's own message.
-  Worth an earlier `git ls-remote` probe in step 1? Proposed: yes, it is cheap and it turns a
-  late failure into a "you don't have access to X" before anything is created.
 - Stack service commands may call tools the receiver does not have. Out of scope for v1: the
   service fails visibly in its own tab like any other.
