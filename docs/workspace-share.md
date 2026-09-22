@@ -67,8 +67,9 @@ warns per root when the receiver would not get your code:
 Warnings, not blocks.
 
 **Service `env`.** `Service.env` often holds tokens, and the file's principle is structure,
-not identity. Variable **names** always travel; **values** are dropped unless ticked per
-variable in the dialog. On import, a service with a dropped value asks for it before its
+not identity. Variable **names** always travel; **values** are the sender's choice — all,
+some or none — via a per-variable checkbox with an all/none toggle per service, every value
+unticked by default. On import, a service with a dropped value asks for it before its
 first start. Output: `<workspace-name>.maiterm-workspace` (§6).
 
 ## 4. Import wizard
