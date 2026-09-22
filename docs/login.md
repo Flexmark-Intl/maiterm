@@ -114,31 +114,35 @@ hypothetical. Any status UI must show the *resolved* source, never a green "logg
 
 ### 2.4 `claude setup-token`
 
-> **It is NOT "the same flow as `/login`", and assuming it was cost this feature a rebuild.**
-> Measured against 2.1.278 on 2026-09-21, after the first real mint attempt hung:
+> **Corrected 2026-09-21, twice.** The first correction was itself wrong; both are recorded
+> because the mistake is the instructive part.
 >
-> | | `auth login` | `setup-token` |
-> |---|---|---|
-> | Browser URL | `redirect_uri=http://localhost:<port>/callback` | `…/oauth/authorize?**code=true**` |
-> | Listening sockets | yes — its own callback server | **zero** |
-> | Completes by itself | yes | **no** — the browser shows a code to type back |
-> | Output with piped stdio | a URL and progress lines | **nothing at all** |
+> **What is true** (2.1.278, measured directly and confirmed against the shipped bundle):
 >
-> Two consequences, and both are structural:
+> - It **does** run its own `127.0.0.1` callback server. A freshly started one holds a LISTEN
+>   socket, and the URL it hands to `open` carries
+>   `redirect_uri=http://localhost:<port>/callback`. **Approving in the browser finishes it**,
+>   with nothing typed.
+> - It builds *two* URLs — a manual one it prints on screen, and the localhost one it opens.
+>   **`code=true` is on both and is not the paste-code marker; `redirect_uri` is.** Some browsers
+>   land on the manual page and show a code instead, which is why a code field exists as a
+>   fallback.
+> - It is an **ink TUI**. Given piped stdio it emits **nothing whatsoever** — no URL, no token,
+>   no error — so a finished mint and a hung one look identical. It also **does not exit** after
+>   printing the token; it sits on a final frame.
+> - It has **no flags at all** — `--help` lists only `-h`.
 >
-> 1. **There is no callback to wait for.** The only way it finishes is a human bringing a code
->    back, so anything driving it needs somewhere to put that code.
-> 2. **It is an ink TUI and needs a tty to say anything.** With pipes it emits zero bytes — no
->    URL, no prompt, no error — so there is nothing to scrape and nothing to show, and a failure
->    is indistinguishable from a hang. Under `script -q /dev/null` it renders a banner, a
->    spinner, and its own "Browser didn't open?" link as an OSC 8 hyperlink.
+> **So the PTY is required, but not for the reason first written here.** The original mint gave
+> it `Stdio::null()` and pipes; the flow completed, the token was rendered, and maiTerm saw zero
+> bytes. Nothing about a missing callback.
 >
-> maiTerm therefore runs it on a **PTY** (`run_mint_on_pty`), takes the link from the browser
-> shim rather than the output, and hands the code back through `submit_account_code`. The first
-> version gave it `Stdio::null()` and pipes; it could never have worked, in any environment.
->
-> It also has **no flags at all** — `--help` lists only `-h`. There is no account selector, no
-> output path, and no non-interactive mode.
+> **The wrong correction, and why it looked right.** The first diagnosis said "no localhost
+> callback, so it cannot complete by itself" on the strength of `lsof -p <pid> -a -i` showing
+> zero listening sockets on the hung process. That process had already received its callback
+> — the server closes once it fires — so the measurement was of an absence that meant the
+> opposite of what it was read to mean. **This is `absence-read-as-a-claim`, committed while
+> writing the feature whose central hazard is that exact pattern.** The check that would have
+> caught it costs one command: start a fresh one and look *then*.
 
 - Opens a browser flow; prints an `sk-ant-oat01-…` token to the terminal
   and **saves it nowhere**. Whoever runs it must capture that output.

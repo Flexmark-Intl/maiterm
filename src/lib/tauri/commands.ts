@@ -1478,6 +1478,14 @@ export async function submitAccountCode(accountId: string, code: string): Promis
   return invoke('submit_account_code', { accountId, code });
 }
 
+/** Offer the code field again after a code the agent would not take.
+ *
+ *  The agent validates the `<code>#<state>` shape itself and re-prompts on a bad one. Without
+ *  this, one mistyped character left the dialog waiting on a mint that was waiting on it. */
+export async function resetAccountCode(accountId: string): Promise<void> {
+  return invoke('reset_account_code', { accountId });
+}
+
 /** A workspace that has tabs still running under the previous account. */
 export interface AccountReloadWorkspace {
   id: string;

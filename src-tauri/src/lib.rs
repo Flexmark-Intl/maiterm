@@ -722,6 +722,7 @@ pub fn run() {
             commands::accounts::forget_account_token,
             commands::accounts::has_account_token,
             commands::accounts::submit_account_code,
+            commands::accounts::reset_account_code,
             commands::accounts::prepare_remote_account_token,
             commands::accounts::discard_remote_account_token,
             commands::accounts::discard_account_root,

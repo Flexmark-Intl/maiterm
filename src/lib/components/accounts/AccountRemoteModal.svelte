@@ -95,9 +95,10 @@
         openedPrivately = e.payload.opened && onUrl === 'private';
         if (e.payload.open_error) error = e.payload.open_error;
         if (onUrl === 'copy' && loginUrl) void copyLink();
-        // The browser has the user's attention; the field they have to come back to should
-        // already be waiting for a paste when they do.
-        if (needsCode) requestAnimationFrame(() => codeEl?.focus());
+        // **Deliberately not focused.** The flow normally finishes on its own through the
+        // runtime's localhost callback; the code field is the fallback for when the browser
+        // shows a code instead. Focusing it would assert it is the next step, which sends the
+        // user hunting for a code that usually does not exist.
       });
       if (dead) void fn();
       else unlisten = fn;
@@ -117,13 +118,29 @@
     const value = code.trim();
     if (!value || codeSent) return;
     codeError = null;
+    codeSent = true;
     try {
       await commands.submitAccountCode(target.id, value);
-      codeSent = true;
-      code = '';
     } catch (e) {
       codeError = e instanceof Error ? e.message : String(e);
+      codeSent = false;
     }
+  }
+
+  /** Offer the field again after a code the agent would not take.
+   *
+   *  The agent validates the `<code>#<state>` shape itself and re-prompts on a bad one — copying
+   *  only the half before the `#` is common enough that it has its own error message. Without a
+   *  way back, one mistyped character meant sitting on "Finishing…" until the deadline. */
+  async function retryCode() {
+    codeError = null;
+    codeSent = false;
+    try {
+      await commands.resetAccountCode(target.id);
+    } catch (e) {
+      logError(`[accounts] resetting the mint code failed: ${e}`);
+    }
+    requestAnimationFrame(() => codeEl?.focus());
   }
 
   async function copyLink() {
@@ -354,20 +371,28 @@
             <p class="hint">Waiting for the agent to produce an authorization link…</p>
           {/if}
 
-          <!-- The step that makes a mint different from a sign-in. `setup-token` runs no
-               localhost callback, so nothing completes on its own: approving in the browser
-               produces a CODE, and this is where it comes back. -->
+          <!-- A FALLBACK, not the next step. The link above carries
+               `redirect_uri=http://localhost:<port>/callback` and finishes through the agent's
+               own listener, so approving in the browser is normally all there is to do. Some
+               browsers land on the agent's manual page instead and show a code; this is where
+               that code comes back. Presented quietly for that reason — captioned as the
+               required action it sent people hunting for a code that was not there. -->
           {#if needsCode}
             <div class="code-step">
-              <h4>{codeSent ? 'Finishing…' : 'Paste the code'}</h4>
+              <h4>{codeSent ? 'Waiting for the agent…' : 'If the browser showed you a code'}</h4>
               <p class="hint">
                 {#if codeSent}
-                  Exchanging it for a token, then checking that the token works.
+                  Sent. If the agent did not accept it, you can try again.
                 {:else}
-                  Approving in the browser gives you a code rather than finishing by itself.
-                  Copy it and paste it here.
+                  Approving in the browser usually finishes this on its own. If it showed you a
+                  code instead, paste it here.
                 {/if}
               </p>
+              {#if codeSent}
+                <div class="link-row">
+                  <Button variant="ghost" onclick={retryCode}>Enter a different code</Button>
+                </div>
+              {/if}
               {#if !codeSent}
                 <div class="link-row">
                   <input

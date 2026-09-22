@@ -1006,12 +1006,50 @@ static ACTIVE_MINTS: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
 struct MintHandle {
-    /// The PTY master's writer — how the code reaches the TUI.
-    writer: std::sync::Arc<parking_lot::Mutex<Box<dyn std::io::Write + Send>>>,
+    /// The PTY master's writer — how the code reaches the TUI. `None` until the child is up:
+    /// the entry is created *before* that so Cancel can reach a mint during the seconds it
+    /// spends reconciling the config root and opening a terminal.
+    writer: Option<std::sync::Arc<parking_lot::Mutex<Box<dyn std::io::Write + Send>>>>,
     cancelled: bool,
-    /// Set once a code has been typed. A second submit is refused rather than sent: by then the
-    /// TUI has moved on, and a stray line goes to whatever prompt is showing now.
+    /// A code is in flight. Guards against a double-click, not against a retry — a code the CLI
+    /// rejects leaves it prompting again, so this clears when the write fails and the dialog can
+    /// offer another go.
     code_sent: bool,
+}
+
+/// Removes its account's entry from `ACTIVE_MINTS` however the mint ends.
+///
+/// A `Drop` guard rather than a call at the end, because `mint_account_token` has half a dozen
+/// `?` returns after the entry exists and every one of them would otherwise leave a handle
+/// behind — after which `submit_account_code` answers a *live* mint with "already submitted",
+/// and a second mint is refused for an account that is not minting.
+struct MintRegistration(String);
+
+impl Drop for MintRegistration {
+    fn drop(&mut self) {
+        ACTIVE_MINTS.lock().remove(&self.0);
+    }
+}
+
+/// Claim the mint slot for an account, before anything slow happens.
+///
+/// Refuses a second concurrent mint for the same account rather than overwriting: the registry
+/// is keyed by account id, so last-writer-wins would have the older mint's cleanup delete the
+/// younger one's handle and strand it.
+fn register_mint(account_id: &str) -> Result<MintRegistration, String> {
+    let mut guard = ACTIVE_MINTS.lock();
+    if guard.contains_key(account_id) {
+        return Err("a mint is already running for this account".to_string());
+    }
+    guard.insert(
+        account_id.to_string(),
+        MintHandle { writer: None, cancelled: false, code_sent: false },
+    );
+    Ok(MintRegistration(account_id.to_string()))
+}
+
+fn mint_cancelled(account_id: &str) -> bool {
+    ACTIVE_MINTS.lock().get(account_id).map(|h| h.cancelled).unwrap_or(false)
 }
 
 /// How wide the mint's PTY is.
@@ -1024,13 +1062,25 @@ const MINT_PTY_COLS: u16 = 400;
 
 /// Hand a mint the authorization code the browser showed.
 ///
-/// **This is the whole reason the mint runs on a PTY.** `claude setup-token` is not
-/// `claude auth login`: it opens `…/oauth/authorize?code=true` and runs **no localhost callback
-/// server** (verified against 2.1.278 — the live process holds zero listening sockets), so it
-/// cannot complete by itself. It waits for the user to type a code back. And it is an ink TUI:
-/// given piped stdio it prints *nothing at all* — no URL, no prompt, no error — and simply
-/// blocks. The first version of this feature gave it `Stdio::null()`, so it could never finish;
-/// the pane sat on "Minting…" until the deadline killed a child that had emitted zero bytes.
+/// **A fallback, not the main path — and the first version of this comment had that backwards.**
+/// `claude setup-token` *does* run its own `127.0.0.1` callback server (verified against
+/// 2.1.278: `lsof -p <pid> -a -i` on a freshly started one shows a LISTEN socket, and the URL it
+/// hands to `open` carries `redirect_uri=http://localhost:<port>/callback`). Approving in the
+/// browser normally finishes the flow with nothing typed at all. The `code=true` parameter is on
+/// *both* URLs it builds and is not the paste-code marker — `redirect_uri` is.
+///
+/// What it also builds is a manual variant, shown on screen, whose callback page displays a code
+/// instead. This exists for the browser that lands there.
+///
+/// The earlier claim — "no localhost callback, so it cannot complete by itself" — came from
+/// running `lsof` on a process whose callback had **already fired**, so the server was already
+/// closed. An absence read as a claim, in a feature whose whole hazard is exactly that.
+///
+/// The PTY is still required, for the *other* reason: `setup-token` is an ink TUI and given
+/// piped stdio it prints **nothing at all** — no URL, no token, no error. The first version gave
+/// it `Stdio::null()` and pipes, so when the flow completed and the token was rendered, maiTerm
+/// saw zero bytes and the CLI sat on its final frame. The pane stayed on "Minting…" until the
+/// deadline killed a child that had done its job.
 ///
 /// The code is not credential material on its own — it is one half of an exchange that also
 /// needs the PKCE verifier held by the child process — but it is treated as write-only anyway:
@@ -1054,18 +1104,43 @@ pub async fn submit_account_code(account_id: String, code: String) -> Result<(),
             return Err("that mint is no longer running".to_string());
         };
         if handle.code_sent {
-            return Err("a code has already been submitted for this mint".to_string());
+            return Err("a code is already being submitted for this mint".to_string());
         }
+        let Some(writer) = handle.writer.clone() else {
+            return Err("that mint has not started its terminal yet — try again in a moment".to_string());
+        };
         handle.code_sent = true;
-        handle.writer.clone()
+        writer
     };
 
     // `\r`, not `\n`: the child is on a tty in raw mode, where Enter arrives as carriage return.
-    let mut w = writer.lock();
-    w.write_all(code.as_bytes())
-        .and_then(|_| w.write_all(b"\r"))
-        .and_then(|_| w.flush())
-        .map_err(|e| format!("could not hand the code to the mint: {e}"))
+    let written = {
+        let mut w = writer.lock();
+        w.write_all(code.as_bytes())
+            .and_then(|_| w.write_all(b"\r"))
+            .and_then(|_| w.flush())
+    };
+
+    // **Released on failure, so a rejected code is not a dead end.** The CLI validates the
+    // `<code>#<state>` shape itself and re-prompts on a bad one ("Invalid code. Please make sure
+    // the full code was copied" — copying only the half before the `#` is common enough that
+    // Anthropic wrote an error for it). Latching here permanently would leave the dialog saying
+    // "Finishing…" at a TUI waiting to be told again, until the deadline.
+    if written.is_err() {
+        if let Some(handle) = ACTIVE_MINTS.lock().get_mut(&account_id) {
+            handle.code_sent = false;
+        }
+    }
+    written.map_err(|e| format!("could not hand the code to the mint: {e}"))
+}
+
+/// Let the dialog offer the code field again after a code the CLI did not accept.
+#[tauri::command]
+pub async fn reset_account_code(account_id: String) -> Result<(), String> {
+    if let Some(handle) = ACTIVE_MINTS.lock().get_mut(&account_id) {
+        handle.code_sent = false;
+    }
+    Ok(())
 }
 
 /// What the frontend learns about a mint. **Never the token.**
@@ -1107,10 +1182,11 @@ fn extract_setup_token(transcript: &str, require_terminated: bool) -> Option<acc
 
 /// Drive `claude setup-token` to completion on a PTY, and hand back the token.
 ///
-/// **A PTY, not pipes, and that is forced.** See `submit_account_code` for the measurements: the
-/// command runs no localhost callback, so it cannot complete itself; and it is an ink TUI, so
-/// with piped stdio it writes nothing whatsoever. Both halves of the flow — showing the user a
-/// link, and taking the code back — need a terminal on the other end.
+/// **A PTY, not pipes, and that is forced.** `setup-token` is an ink TUI: with piped stdio it
+/// writes nothing whatsoever — not the URL, not the token, not an error — so a completed mint
+/// and a hung one are indistinguishable, and there is nothing to read the token out of. It also
+/// does not exit once it has printed: it sits on a final frame. See `submit_account_code` for
+/// the measurements, including the one the first version of this got wrong.
 ///
 /// **Everything this reads is credential material.** The token is printed into the same stream
 /// as the rest of the render, so the buffer is never logged, never emitted, and never returned;
@@ -1118,7 +1194,8 @@ fn extract_setup_token(transcript: &str, require_terminated: bool) -> Option<acc
 ///
 /// The link still comes from the browser shim rather than from the output, for a reason that is
 /// now doubled: the TUI wraps its URL in an OSC 8 hyperlink and splits it across rows, and the
-/// buffer holding it is secret.
+/// buffer holding it is secret. The shim's capture is also the *right* link — the localhost
+/// variant the runtime was about to open, not the manual one it prints on screen.
 async fn run_mint_on_pty(
     app: &tauri::AppHandle,
     rt: Runtime,
@@ -1136,8 +1213,8 @@ async fn run_mint_on_pty(
     let scrub: Vec<String> = profile.shadowing_env.iter().map(|s| s.to_string()).collect();
     let cli = accounts::resolve_cli(profile)
         .ok_or_else(|| format!("could not find the `{}` command", profile.cli))?;
-    // Longer than a sign-in's: this flow has two human steps in it, not one — approve in the
-    // browser, then find the code and bring it back.
+    // Longer than a sign-in's: the browser round trip is the same, but this one can also fall
+    // back to the user finding a code and bringing it back.
     let deadline = std::time::Duration::from_secs(timeout_secs.unwrap_or(600).clamp(60, 1800));
 
     let app = app.clone();
@@ -1188,14 +1265,31 @@ async fn run_mint_on_pty(
             .take_writer()
             .map_err(|e| format!("could not write to the mint's terminal: {e}"))?;
 
-        ACTIVE_MINTS.lock().insert(
-            id.clone(),
-            MintHandle {
-                writer: std::sync::Arc::new(parking_lot::Mutex::new(writer)),
-                cancelled: false,
-                code_sent: false,
-            },
-        );
+        // The slot was claimed by `mint_account_token` before any of this, so Cancel reaches a
+        // mint during the reconcile and the spawn. Filling the writer in is the last step.
+        {
+            let mut guard = ACTIVE_MINTS.lock();
+            match guard.get_mut(&id) {
+                Some(handle) => {
+                    handle.writer =
+                        Some(std::sync::Arc::new(parking_lot::Mutex::new(writer)));
+                }
+                // Cancelled and cleaned up while we were starting. Nothing to run for.
+                None => {
+                    drop(guard);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("Token mint cancelled".to_string());
+                }
+            }
+        }
+        // Checked here as well as in the loop: a cancel during the spawn has already happened,
+        // and without this the browser window opens *after* the user backed out.
+        if mint_cancelled(&id) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Token mint cancelled".to_string());
+        }
 
         let buffer = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
         {
@@ -1214,38 +1308,31 @@ async fn run_mint_on_pty(
 
         let start = std::time::Instant::now();
         let mut announced = false;
+        let mut said_no_shim = false;
         let outcome = loop {
-            if ACTIVE_MINTS.lock().get(&id).map(|h| h.cancelled).unwrap_or(false) {
+            if mint_cancelled(&id) {
                 break Err("Token mint cancelled".to_string());
             }
 
-            // Tell the UI where to send the user, and that a code is coming back. Emitted once,
-            // as soon as the shim fires — or, if it never does, after the grace period, because
-            // the runtime will have opened its own window and the code field is still the only
-            // way this finishes.
+            // Announce the link the moment the shim has it.
+            //
+            // **Only a real URL latches.** The first version latched on the grace period too and
+            // announced an empty one, which loses the link for good: the shim still swallows the
+            // `open` a moment later, so no window ever appears, and the captured URL can never be
+            // emitted because `announced` is already set. The user is left with no link, no
+            // window, and a message telling them to approve in a window that does not exist.
+            // The grace-period note is worth saying once; it must not close the door behind it.
             if !announced {
                 let captured = suppressor
                     .as_ref()
                     .and_then(|s| s.captured().as_deref().and_then(|c| extract_login_url(c, false)));
-                let grace_up = start.elapsed() > SHIM_GRACE;
-                if captured.is_some() || grace_up {
+                if let Some(url) = captured {
                     announced = true;
-                    let from_shim = captured.is_some();
-                    let url = captured.unwrap_or_default();
-                    // Unlike a sign-in, this link is NOT a dead end when it came from the shim:
-                    // it is the paste-code link, and the code field below is what completes it.
-                    let open_error = if !from_shim {
-                        Some(
-                            "maiTerm could not take over the browser launch, so the agent opened \
-                             its own window — approve there, then bring the code back here."
-                                .to_string(),
-                        )
-                    } else {
-                        match open_with.as_deref() {
-                            Some("default") => accounts::browser::open_default(&url).err(),
-                            Some(id) => accounts::browser::open_private_window(id, &url).err(),
-                            None => None,
-                        }
+                    let open_error = match open_with.as_deref() {
+                        Some("default") => accounts::browser::open_default(&url).err(),
+                        Some(id) => accounts::browser::open_private_window(id, &url).err(),
+                        // Copy-to-clipboard: deliberately opens nothing.
+                        None => None,
                     };
                     if let Some(e) = &open_error {
                         log::warn!("accounts: opening the mint link: {e}");
@@ -1255,11 +1342,30 @@ async fn run_mint_on_pty(
                         LoginUrlEvent {
                             account_id: id.clone(),
                             url,
-                            opened: from_shim && open_with.is_some() && open_error.is_none(),
+                            opened: open_with.is_some() && open_error.is_none(),
                             open_error,
-                            // The mint's link always ends in a code, but maiTerm can take that
-                            // code — so this is not the "cannot complete" case the sign-in uses
-                            // this flag for.
+                            // This IS the link the runtime would have opened — the shim captured
+                            // the `redirect_uri=http://localhost:<port>/callback` variant, which
+                            // completes through the CLI's own listener. Not a dead end.
+                            paste_code: false,
+                            needs_code: true,
+                        },
+                    );
+                } else if !said_no_shim && start.elapsed() > SHIM_GRACE {
+                    // The runtime opened its own window (or `$BROWSER`/`settings.json` sent it
+                    // somewhere the shim never sees). Say so, keep looking.
+                    said_no_shim = true;
+                    let _ = app.emit(
+                        LOGIN_URL_EVENT,
+                        LoginUrlEvent {
+                            account_id: id.clone(),
+                            url: String::new(),
+                            opened: false,
+                            open_error: Some(
+                                "maiTerm could not take over the browser launch, so the agent \
+                                 opened its own window — approve there."
+                                    .to_string(),
+                            ),
                             paste_code: false,
                             needs_code: true,
                         },
@@ -1274,10 +1380,19 @@ async fn run_mint_on_pty(
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    // **Copied out ONCE, deliberately.** A temporary in a `match` scrutinee lives
+                    // until the end of the whole `match`, so `match extract(&buffer.lock()) { …
+                    // None => … buffer.lock() … }` holds the guard across its own arms — and
+                    // `parking_lot::Mutex` is not reentrant, so the second lock parks the thread
+                    // forever. That deadlock was on the FAILURE path (a policy that forbids
+                    // long-lived tokens, an account on hold, a killed child), which is the one a
+                    // user meets first: the dialog would sit on "Minting…" past every deadline,
+                    // with the child, the PTY and the reader thread all leaked.
+                    let seen = buffer.lock().clone();
                     // Nothing more is coming, so an unterminated tail is the whole of it.
-                    break match extract_setup_token(&buffer.lock(), false) {
+                    break match extract_setup_token(&seen, false) {
                         Some(token) => Ok(token),
-                        None => Err(match transcript_tail(&buffer.lock()) {
+                        None => Err(match transcript_tail(&seen) {
                             Some(tail) => {
                                 format!("Token mint failed: {}", redact_secrets(&tail))
                             }
@@ -1294,8 +1409,8 @@ async fn run_mint_on_pty(
 
             if start.elapsed() > deadline {
                 break Err(
-                    "The mint timed out. Approve the link in the browser, then paste the code it \
-                     shows back here."
+                    "The mint timed out. Approving the link in the browser normally finishes it; \
+                     if the browser showed you a code instead, paste it in before the next try."
                         .to_string(),
                 );
             }
@@ -1307,7 +1422,6 @@ async fn run_mint_on_pty(
         // version of this feature left two of them running for days.
         let _ = child.kill();
         let _ = child.wait();
-        ACTIVE_MINTS.lock().remove(&id);
         outcome
     })
     .await
@@ -1466,6 +1580,14 @@ pub async fn mint_account_token(
                 .to_string(),
         );
     }
+    // Claimed BEFORE the reconcile below, which walks the whole config root and can take
+    // seconds. Cancel is keyed by account id and can only reach a mint that is registered, so
+    // without this an Escape in that window is a silent no-op: the dialog closes, a browser
+    // window the user has already backed out of opens behind it, and — because the flow finishes
+    // through the runtime's own localhost callback — approving there stores a real token for an
+    // account whose webview is gone. Dropped on every exit path, `?` returns included.
+    let _registration = register_mint(&account_id)?;
+
     // The root must already exist and hold this account's login; unlike a sign-in, a mint never
     // creates one. Reconcile anyway — the user may have installed skills since.
     let home = home_dir()?;
