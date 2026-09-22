@@ -2051,7 +2051,8 @@
                 // session — and those are exactly the shells that would otherwise come up
                 // under the host's own login with nothing saying so (§6.1). It names a file,
                 // not a credential; refused rather than escaped if it could break out.
-                const acct = await remoteAccountExport(tabId, bridge.hostKey);
+                // bindNow: typed into the ssh running here, not carried in a new one's argv.
+                const acct = await remoteAccountExport(tabId, bridge.hostKey, true);
                 let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + bridge.remotePort
                   + " MAITERM_AUTH=" + auth;
                 if (acct && !acct.includes("'")) envCmd += "; " + acct;

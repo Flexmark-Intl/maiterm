@@ -20,18 +20,22 @@ const RING_BASELINE_WINDOW: std::time::Duration = std::time::Duration::from_secs
 
 /// Where this tab's agent runs right now, for §14.
 ///
-/// Not the bridge's tunnel table alone: a typed ssh with the bridge off has no tunnel, and would
-/// then be served the LOCAL shell's account — exactly the wrong-identity claim §14 exists to
-/// avoid. The ssh pid comes from the cached polling probe, the right one for a summary tick.
+/// Remote-ness comes from the same foreground probe the rest of the app uses (which works on
+/// Windows too, through its sysinfo tree walk), or the bridge's tunnel — not the tunnel alone,
+/// which a typed ssh with the bridge off never gets and would then be served the LOCAL shell's
+/// account. The (pid, argv) pair used for binding is a separate, Unix-only probe; where it is
+/// missing the tab is still Remote, just with nothing to bind to, which reads as unknown.
 fn place(app: &AppState, tab_id: &str) -> tab_record::Place {
     let pty = app.tab_pty_map.read().get(tab_id).cloned();
-    let ssh_pid = pty.and_then(|p| crate::pty::get_pty_foreground_ssh_pid(app, &p));
+    let fg = pty
+        .as_deref()
+        .and_then(|p| crate::pty::get_pty_foreground(app, p, false).ok().flatten());
     let tunnel = app.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab_id));
-    if ssh_pid.is_some() || tunnel {
-        tab_record::Place::Remote { ssh_pid }
-    } else {
-        tab_record::Place::Local
+    if fg.is_none() && !tunnel {
+        return tab_record::Place::Local;
     }
+    let ssh = pty.as_deref().and_then(|p| crate::pty::get_pty_foreground_ssh(app, p, false));
+    tab_record::Place::Remote { ssh }
 }
 
 /// Whether this tab's agent runs on another host right now.
@@ -41,24 +45,40 @@ pub(crate) fn tab_runs_remote(app: &AppState, tab_id: &str) -> bool {
 
 /// The wire `account` for one chat. `Value::Null` = known unmanaged (§14.1 rule 1).
 ///
-/// **Probes the process table only for a tab with something to describe.** This runs per tab on
-/// every WS and doorbell tick, and the probe spawns `ps` once its 800 ms cache lapses — so a tab
-/// whose record is empty (it spawned with management off, which is every tab when the feature is
-/// off) answers `null` without one. That answer is right wherever the agent runs: nothing about
-/// this tab is managed.
+/// **The process probe is skipped only when nothing CAN be managed**: the record is empty and the
+/// feature is off. This runs per tab on every WS and doorbell tick, and the probe spawns `ps` once
+/// its 800 ms cache lapses, so a machine that never turned the feature on pays nothing. Gating on
+/// the record alone was wrong: an empty record over SSH is `{known:false}`, not `null`.
 pub(crate) fn chat_account(app: &AppState, tab_id: &str, runtime_slug: &str) -> Value {
-    let needs_probe = match app.tab_accounts.read().get(tab_id) {
+    let record_empty = match app.tab_accounts.read().get(tab_id) {
         None => return json!({ "known": false }),
-        Some(r) => !r.local.is_empty() || r.remote.is_some(),
+        Some(r) => r.local.is_empty() && r.remote.is_none(),
     };
-    if !needs_probe {
-        return Value::Null;
+    if record_empty {
+        let p = &app.app_data.read().preferences;
+        if !(p.accounts_setup_complete && p.accounts_enabled) {
+            return Value::Null;
+        }
     }
     let place = place(app, tab_id);
     let mut records = app.tab_accounts.write();
     let data = app.app_data.read();
-    tab_record::wire(records.get_mut(tab_id), runtime_slug, place, &data.preferences)
+    tab_record::wire(records.get_mut(tab_id), tab_id, runtime_slug, place, &data.preferences)
         .unwrap_or(Value::Null)
+}
+
+/// Bind this tab's fresh remote record to the ssh process holding its terminal RIGHT NOW — for
+/// the handoff paths that type the fragment into an ssh already running (the bridge's typed-ssh
+/// path, the manual inject), where the argv carries no handoff path to recognise it by. Fresh
+/// probe: this is an edge, and a cached snapshot could predate the ssh.
+pub(crate) fn bind_remote_now(app: &AppState, tab_id: &str) {
+    let pty = app.tab_pty_map.read().get(tab_id).cloned();
+    let Some((pid, _)) = pty.and_then(|p| crate::pty::get_pty_foreground_ssh(app, &p, true)) else {
+        return;
+    };
+    if let Some(remote) = app.tab_accounts.write().get_mut(tab_id).and_then(|r| r.remote.as_mut()) {
+        remote.ssh_pid = Some(pid);
+    }
 }
 
 /// `GET /accounts` and the WS `accounts` frame — §14.3 `AccountsSnapshot`.
@@ -125,6 +145,11 @@ pub(crate) fn set_active(
         log::warn!("[maiLink] account switch not saved, rolling back: {e}");
         let mut data = app.app_data.write();
         let ids = &mut data.preferences.active_account_ids;
+        // Only undo OUR write. If something else set this runtime while the save ran (the desktop
+        // pane's whole-object replace), putting `previous` back would clobber that instead.
+        if ids.get(runtime).map(String::as_str) != Some(account_id) {
+            return refuse("not_saved");
+        }
         match previous {
             Some(prev) => {
                 ids.insert(runtime.to_string(), prev);

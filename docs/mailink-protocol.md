@@ -2097,11 +2097,22 @@ bridge tunnel — not the tunnel alone, which a typed `ssh` with the bridge off 
 then be served the LOCAL shell's account. An SSH tab that never went through the handoff is
 `{ known: false }`.
 
-**A remote record belongs to one ssh process, not to the tab.** One shell can run many ssh
-sessions, and only some go through the handoff (`ssh -t host claude` does not). The record binds to
-the ssh pid holding the terminal on its first observation (the push runs *before* the ssh starts,
-so this cannot happen at write time); any other ssh — or a record still unbound 60 s after it was
-written — is `{ known: false }`.
+**A remote record belongs to one ssh process, not to the tab** — and it is bound on evidence,
+never on timing. One shell can run many ssh sessions and only some go through the handoff
+(`ssh -t host claude` does not), and two rounds of review each found a time window that let a later
+hand-typed ssh inherit an earlier handoff. So:
+- the ssh maiTerm *types* (spawn, reconnect, auto-resume replay) carries the handoff file's path in
+  its own argv, and the record binds to the ssh whose command line names that tab's file;
+- where the fragment is typed *into* an ssh already running (the bridge's typed-ssh path, the
+  manual "Inject maiTerm Env Vars"), the handoff binds to that process as it runs.
+
+An unbound record, or any ssh other than the bound one, is `{ known: false }`. On Windows the
+binding probe does not exist yet, so every SSH chat there is `{ known: false }` — unknown, never
+the local account.
+
+**`null` needs nothing to be manageable.** A tab with an empty record answers `null` without a
+process probe only while the feature is off; with it on, an empty-record tab over SSH is
+`{ known: false }`.
 
 **Claude chats only.** The handoff carries a Claude token. A Codex or Gemini chat over SSH is
 `{ known: false }` and never rings the `account` doorbell.

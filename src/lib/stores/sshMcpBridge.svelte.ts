@@ -679,7 +679,9 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
   // credential on that host before any of the guards below have run. Every path that ends up not
   // typing it must `abandon()` — otherwise the only thing that would ever remove the file is the
   // sweep inside the next push to the same host, which for a host nobody opens again is never.
-  const account = ptyId && freshSsh ? remoteAccount.beginRemoteAccount(tabId, sshArgs) : null;
+  // bindNow: the fragment is typed into THIS ssh, which is already up (maiLink §14 binds the
+  // handoff to it; its argv names no handoff file to be recognised by later).
+  const account = ptyId && freshSsh ? remoteAccount.beginRemoteAccount(tabId, sshArgs, true) : null;
 
   try {
     // Inside the try: these can REJECT, not just return null, and a throw before the

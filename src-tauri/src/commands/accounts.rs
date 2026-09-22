@@ -1757,6 +1757,7 @@ pub async fn prepare_remote_account_token(
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     tab_id: String,
     ssh_args: String,
+    bind_now: Option<bool>,
 ) -> Result<RemoteTokenPrep, String> {
     let prep = match prepare_inner(state.inner(), &tab_id, &ssh_args).await {
         Ok(p) => p,
@@ -1786,6 +1787,12 @@ pub async fn prepare_remote_account_token(
         };
         let remote = RemoteRecord::new(account, state_, reason);
         crate::mailink::accounts::note_remote(state.inner(), &tab_id, remote);
+        // `bind_now`: the caller is about to type the fragment into an ssh that is ALREADY
+        // running, so that process is the one this handoff belongs to. Every other caller types
+        // an ssh whose own argv names the handoff file, and is bound when that is seen.
+        if bind_now.unwrap_or(false) {
+            crate::mailink::accounts::bind_remote_now(state.inner(), &tab_id);
+        }
     }
     Ok(prep)
 }

@@ -988,31 +988,36 @@ pub fn get_pty_foreground(
     Ok(get_foreground_command(pid))
 }
 
-/// The pid of the ssh/mosh process holding this PTY's terminal, if one does — cached polling
-/// variant. maiLink §14 binds a remote-account record to this pid, so a LATER ssh in the same tab
-/// (a different process) is never served an earlier session's handoff. Unix only; elsewhere
-/// `None`, which makes every remote record read as unknown rather than guessed.
-pub fn get_pty_foreground_ssh_pid(state: &AppState, pty_id: &str) -> Option<u32> {
+/// The ssh/mosh process holding this PTY's terminal — its pid and full command line — if one
+/// does. maiLink §14 binds a remote-account record to exactly one such process: the command line
+/// is how it recognises the ssh maiTerm typed (it names the tab's handoff file), and the pid is
+/// how a LATER ssh in the same shell is told apart. `fresh` bypasses the snapshot cache, for the
+/// one edge that binds. Unix only; elsewhere `None`, which leaves every remote record unbound —
+/// read as unknown, never guessed.
+pub fn get_pty_foreground_ssh(state: &AppState, pty_id: &str, fresh: bool) -> Option<(u32, String)> {
     let pid = {
         let registry = state.pty_registry.read();
         registry.get(pty_id)?.child_pid?
     };
-    foreground_ssh_pid(pid)
+    foreground_ssh(pid, fresh)
 }
 
 #[cfg(unix)]
-fn foreground_ssh_pid(shell_pid: u32) -> Option<u32> {
+fn foreground_ssh(shell_pid: u32, fresh: bool) -> Option<(u32, String)> {
+    if fresh {
+        invalidate_stale_ps_snapshot();
+    }
     let rows = ps_rows_snapshot()?;
     let shell_row = rows.iter().find(|r| r.pid == shell_pid)?;
     if shell_row.tpgid <= 0 || (shell_row.tpgid as u32) == shell_row.pgid {
         return None;
     }
     let leader = rows.iter().find(|r| r.pid == shell_row.tpgid as u32)?;
-    is_ssh_command(&leader.cmd).then_some(leader.pid)
+    is_ssh_command(&leader.cmd).then(|| (leader.pid, leader.cmd.clone()))
 }
 
 #[cfg(not(unix))]
-fn foreground_ssh_pid(_shell_pid: u32) -> Option<u32> {
+fn foreground_ssh(_shell_pid: u32, _fresh: bool) -> Option<(u32, String)> {
     None
 }
 

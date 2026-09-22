@@ -58,11 +58,16 @@ export interface RemoteAccountHandoff {
  * Never throws: a remote session that cannot carry an account is still a remote session the user
  * asked for, and failing the ssh over this would be the wrong trade.
  */
-export function beginRemoteAccount(tabId: string, sshArgs: string): RemoteAccountHandoff {
+export function beginRemoteAccount(
+  tabId: string,
+  sshArgs: string,
+  /** See `prepareRemoteAccountToken`: true only when the fragment goes into a RUNNING ssh. */
+  bindNow = false,
+): RemoteAccountHandoff {
   let taken = false;
   let abandoned = false;
 
-  const prep: Promise<RemoteTokenPrep | null> = prepareRemoteAccountToken(tabId, sshArgs)
+  const prep: Promise<RemoteTokenPrep | null> = prepareRemoteAccountToken(tabId, sshArgs, bindNow)
     .then(async (p) => {
       if (p.status === 'missing_credential' || p.status === 'failed') {
         // Announced here rather than at the call site, because this is the §6.1 state: nothing
@@ -106,6 +111,10 @@ export function beginRemoteAccount(tabId: string, sshArgs: string): RemoteAccoun
  * For callers that build one ssh command and send it — there is no branch between deciding and
  * doing, so there is nothing to abandon.
  */
-export function remoteAccountExport(tabId: string, sshArgs: string): Promise<string | null> {
-  return beginRemoteAccount(tabId, sshArgs).take();
+export function remoteAccountExport(
+  tabId: string,
+  sshArgs: string,
+  bindNow = false,
+): Promise<string | null> {
+  return beginRemoteAccount(tabId, sshArgs, bindNow).take();
 }

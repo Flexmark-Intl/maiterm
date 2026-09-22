@@ -49,30 +49,32 @@ pub struct RemoteRecord {
     pub state: RemoteState,
     /// One human sentence for `NotApplied`. Never token material.
     pub reason: Option<String>,
-    /// The ssh process this handoff belongs to — bound on the first observation after it (the
-    /// push usually happens BEFORE the ssh starts, so it cannot be known at record time). A tab
-    /// can run many ssh sessions in one shell; without this, a later session that never went
-    /// through the handoff (`ssh -t host claude`, the bridge off) was served this one's account.
+    /// The ssh process this handoff belongs to. A tab can run many ssh sessions in one shell, and
+    /// only some go through the handoff, so a record describes ONE process, never the tab.
+    ///
+    /// Bound only on evidence, never on timing (two review rounds each found a window that let a
+    /// later hand-typed ssh inherit an earlier handoff):
+    /// - the ssh maiTerm TYPED (spawn, reconnect, replay) carries the handoff file's path in its
+    ///   own argv, so it binds when an ssh whose command line names `tok-<tab>` is observed;
+    /// - where the fragment is typed INTO an ssh already running (the bridge's typed-ssh path,
+    ///   the manual inject), the handoff command binds to that process at the moment it runs.
+    /// Unbound is `{known:false}`.
     pub ssh_pid: Option<u32>,
-    pub recorded_at: std::time::Instant,
 }
 
 impl RemoteRecord {
     pub fn new(account: Option<AccountRef>, state: RemoteState, reason: Option<String>) -> Self {
-        Self { account, state, reason, ssh_pid: None, recorded_at: std::time::Instant::now() }
+        Self { account, state, reason, ssh_pid: None }
     }
 }
 
-/// How long an unbound record may wait for its ssh to appear. The handoff runs just before the
-/// ssh is typed; past this, whatever ssh is running is not the one the record was written for.
-pub const BIND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// Where a tab's agent is running right now, as observed by the caller.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
     Local,
-    /// On another host. `ssh_pid` is the ssh process holding the terminal, when it could be read.
-    Remote { ssh_pid: Option<u32> },
+    /// On another host. `ssh` is the process holding the terminal (pid, command line), when it
+    /// could be read.
+    Remote { ssh: Option<(u32, String)> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -114,6 +116,7 @@ pub fn account_ref(prefs: &crate::state::Preferences, id: &str) -> AccountRef {
 /// unbound remote record to the ssh process now holding the terminal (see `RemoteRecord::ssh_pid`).
 pub fn wire(
     record: Option<&mut TabAccount>,
+    tab_id: &str,
     runtime_slug: &str,
     place: Place,
     prefs: &crate::state::Preferences,
@@ -121,7 +124,7 @@ pub fn wire(
     let unknown = || Some(serde_json::json!({ "known": false }));
     let Some(record) = record else { return unknown() };
 
-    let Place::Remote { ssh_pid } = place else {
+    let Place::Remote { ssh } = place else {
         let a = record.local.get(runtime_slug)?;
         return Some(account_fields(a, runtime_slug, prefs));
     };
@@ -133,11 +136,11 @@ pub fn wire(
         return unknown();
     }
     let Some(remote) = record.remote.as_mut() else { return unknown() };
-    let Some(now_pid) = ssh_pid else { return unknown() };
+    let Some((now_pid, cmd)) = ssh else { return unknown() };
     match remote.ssh_pid {
         Some(bound) if bound == now_pid => {}
         Some(_) => return unknown(),
-        None if remote.recorded_at.elapsed() <= BIND_WINDOW => remote.ssh_pid = Some(now_pid),
+        None if names_handoff(&cmd, tab_id) => remote.ssh_pid = Some(now_pid),
         None => return unknown(),
     }
 
@@ -150,6 +153,19 @@ pub fn wire(
         out["reason"] = serde_json::Value::String(reason.to_string());
     }
     Some(out)
+}
+
+/// Whether an ssh command line is the one maiTerm typed with this tab's handoff fragment in it.
+///
+/// Matched as a whole path: `tok-a1` must not be found inside `tok-a10`.
+fn names_handoff(cmd: &str, tab_id: &str) -> bool {
+    let Some(path) = crate::accounts::remote::token_path(tab_id) else { return false };
+    cmd.match_indices(path.as_str()).any(|(i, _)| {
+        cmd[i + path.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    })
 }
 
 /// The descriptive fields for one account id, plus `stale` pre-resolved against the CURRENT
@@ -213,7 +229,16 @@ mod tests {
         TabAccount { local: [("claude".to_string(), aref(id))].into(), remote: None }
     }
 
-    const SSH: Place = Place::Remote { ssh_pid: Some(100) };
+    const TAB: &str = "t1";
+    /// The ssh maiTerm typed: its argv names this tab's handoff file.
+    fn typed(pid: u32) -> Place {
+        Place::Remote {
+            ssh: Some((pid, format!("ssh -t nova '[ -r ~/.maiterm/tokens/tok-{TAB} ] && . x; exec $SHELL -l'"))),
+        }
+    }
+    fn other(pid: u32) -> Place {
+        Place::Remote { ssh: Some((pid, "ssh -t nova claude".into())) }
+    }
     fn unknown() -> Option<serde_json::Value> {
         Some(serde_json::json!({ "known": false }))
     }
@@ -221,23 +246,23 @@ mod tests {
     #[test]
     fn no_record_is_unknown_never_the_active_account() {
         let p = prefs_with("a");
-        assert_eq!(wire(None, "claude", Place::Local, &p), unknown());
+        assert_eq!(wire(None, TAB, "claude", Place::Local, &p), unknown());
     }
 
     #[test]
     fn an_empty_record_is_known_unmanaged() {
         let p = prefs_with("a");
-        assert_eq!(wire(Some(&mut TabAccount::default()), "claude", Place::Local, &p), None);
+        assert_eq!(wire(Some(&mut TabAccount::default()), TAB, "claude", Place::Local, &p), None);
     }
 
     #[test]
     fn a_tab_keeps_its_spawn_account_after_a_switch_and_says_it_is_stale() {
         let p = prefs_with("b");
-        let v = wire(Some(&mut local("a")), "claude", Place::Local, &p).unwrap();
+        let v = wire(Some(&mut local("a")), TAB, "claude", Place::Local, &p).unwrap();
         assert_eq!(v["id"], "a");
         assert_eq!(v["label"], "a@example.com");
         assert_eq!(v["stale"], true);
-        let v = wire(Some(&mut local("b")), "claude", Place::Local, &p).unwrap();
+        let v = wire(Some(&mut local("b")), TAB, "claude", Place::Local, &p).unwrap();
         assert!(v.get("stale").is_none());
     }
 
@@ -246,40 +271,48 @@ mod tests {
         let p = prefs_with("a");
         let mut r = local("a");
         // Local shell account is irrelevant to a remote agent: no handoff ⇒ unknown.
-        assert_eq!(wire(Some(&mut r), "claude", SSH, &p), unknown());
+        assert_eq!(wire(Some(&mut r), TAB, "claude", typed(100), &p), unknown());
 
         r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::NotApplied, Some("token expired".into())));
-        let v = wire(Some(&mut r), "claude", SSH, &p).unwrap();
+        let v = wire(Some(&mut r), TAB, "claude", typed(100), &p).unwrap();
         assert_eq!(v["remote"], "not_applied");
         assert_eq!(v["reason"], "token expired");
         assert_eq!(v["label"], "a@example.com");
 
         r.remote = Some(RemoteRecord::new(None, RemoteState::HostLogin, None));
-        let v = wire(Some(&mut r), "claude", SSH, &p).unwrap();
+        let v = wire(Some(&mut r), TAB, "claude", typed(200), &p).unwrap();
         assert_eq!(v, serde_json::json!({ "known": true, "remote": "host_login" }));
     }
 
     #[test]
-    fn a_later_ssh_session_is_not_served_an_earlier_handoff() {
+    fn an_unbound_record_never_binds_to_an_ssh_that_does_not_name_its_handoff() {
         let p = prefs_with("a");
         let mut r = local("a");
         r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None));
-        // First observation binds the record to ssh pid 100.
-        assert_eq!(wire(Some(&mut r), "claude", SSH, &p).unwrap()["remote"], "sent_unverified");
-        // The user exits and runs a different ssh (pid 200) with no handoff: unknown.
-        assert_eq!(wire(Some(&mut r), "claude", Place::Remote { ssh_pid: Some(200) }, &p), unknown());
-        // Unreadable foreground: never guessed.
-        assert_eq!(wire(Some(&mut r), "claude", Place::Remote { ssh_pid: None }, &p), unknown());
+        // The first ssh died unseen; the user hand-types another. No timing makes it ours.
+        assert_eq!(wire(Some(&mut r), TAB, "claude", other(200), &p), unknown());
+        assert!(r.remote.as_ref().unwrap().ssh_pid.is_none(), "must not bind on a mismatch");
+        // Another tab's handoff is not this tab's either — including one whose id extends ours.
+        let longer = Place::Remote { ssh: Some((301, format!("ssh nova '. ~/.maiterm/tokens/tok-{TAB}0'"))) };
+        assert_eq!(wire(Some(&mut r), TAB, "claude", longer, &p), unknown());
+        let foreign = Place::Remote { ssh: Some((300, "ssh nova '. ~/.maiterm/tokens/tok-t2'".into())) };
+        assert_eq!(wire(Some(&mut r), TAB, "claude", foreign, &p), unknown());
     }
 
     #[test]
-    fn an_unbound_record_past_the_window_is_not_claimed_by_whatever_ssh_is_running() {
+    fn a_bound_record_is_served_only_while_its_own_ssh_runs() {
         let p = prefs_with("a");
         let mut r = local("a");
+        r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None));
+        assert_eq!(wire(Some(&mut r), TAB, "claude", typed(100), &p).unwrap()["remote"], "sent_unverified");
+        assert_eq!(wire(Some(&mut r), TAB, "claude", other(200), &p), unknown());
+        assert_eq!(wire(Some(&mut r), TAB, "claude", Place::Remote { ssh: None }, &p), unknown());
+        // A record bound at handoff time (the bridge path) is served for that pid whatever its argv.
+        let mut r2 = local("a");
         let mut rec = RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None);
-        rec.recorded_at = std::time::Instant::now() - BIND_WINDOW * 2;
-        r.remote = Some(rec);
-        assert_eq!(wire(Some(&mut r), "claude", SSH, &p), unknown());
+        rec.ssh_pid = Some(200);
+        r2.remote = Some(rec);
+        assert_eq!(wire(Some(&mut r2), TAB, "claude", other(200), &p).unwrap()["remote"], "sent_unverified");
     }
 
     #[test]
@@ -287,7 +320,7 @@ mod tests {
         let p = prefs_with("a");
         let mut r = local("a");
         r.remote = Some(RemoteRecord::new(Some(aref("a")), RemoteState::SentUnverified, None));
-        assert_eq!(wire(Some(&mut r), "codex", SSH, &p), unknown());
+        assert_eq!(wire(Some(&mut r), TAB, "codex", typed(100), &p), unknown());
     }
 
     #[test]
@@ -296,7 +329,7 @@ mod tests {
         let r = local("a");
         p.managed_accounts.retain(|a| a.id != "a");
         let mut r = r;
-        let v = wire(Some(&mut r), "claude", Place::Local, &p).unwrap();
+        let v = wire(Some(&mut r), TAB, "claude", Place::Local, &p).unwrap();
         assert_eq!(v["label"], "a@example.com");
         assert_eq!(v["removed"], true);
     }
@@ -305,6 +338,6 @@ mod tests {
     fn a_disabled_feature_marks_every_managed_tab_stale() {
         let mut p = prefs_with("a");
         p.accounts_enabled = false;
-        assert_eq!(wire(Some(&mut local("a")), "claude", Place::Local, &p).unwrap()["stale"], true);
+        assert_eq!(wire(Some(&mut local("a")), TAB, "claude", Place::Local, &p).unwrap()["stale"], true);
     }
 }

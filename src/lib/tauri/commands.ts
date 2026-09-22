@@ -1811,8 +1811,12 @@ export interface RemoteTokenPrep {
 export async function prepareRemoteAccountToken(
   tabId: string,
   sshArgs: string,
+  /** The fragment will be typed into an ssh that is ALREADY running (the bridge's typed-ssh
+   *  path, the manual inject), so Rust binds the handoff to that process now. Leave false where
+   *  maiTerm types a NEW ssh carrying the fragment in its argv — that one is recognised by it. */
+  bindNow = false,
 ): Promise<RemoteTokenPrep> {
-  return invoke('prepare_remote_account_token', { tabId, sshArgs });
+  return invoke('prepare_remote_account_token', { tabId, sshArgs, bindNow });
 }
 
 /** Take back a handoff file that is not going to be used.
