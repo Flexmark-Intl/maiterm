@@ -2564,7 +2564,11 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         // lie. A tab that just STARTED a tool is active this instant, so the
                         // frame's own `now` is the honest answer — and `meta` is the contract's
                         // one merge-only-when-present field, so omitting it strands nothing.
-                        let ev = if prev.as_deref() != Some(key.as_str()) || reg_changed {
+                        // An account change enriches too (§14): the summary has no lastActivityTs,
+                        // so an unenriched frame stamps `now`, and one switch would float every chat
+                        // it flipped to the top of the inbox as "just now". Rare — switches and ssh
+                        // edges, not tool cadence — so the two tail reads do not recur.
+                        let ev = if prev.as_deref() != Some(key.as_str()) || reg_changed || account_changed {
                             enriched_chat_state_event(&s.app, c)
                         } else {
                             chat_state_event(c)
