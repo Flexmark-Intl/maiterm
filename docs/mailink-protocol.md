@@ -2011,6 +2011,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.7` | adds `ChatDetail.subagents` and the WS `subagents` event (§4.3 `Subagent`) |
 | `0.8` | adds `tool` + `detail` on `Chat`, `ChatDetail` and every `chat_state` frame |
 | `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted; adds `MaitermTask.notes`; **removes `MaitermTask.topicId`** |
+| `0.10` | adds `account` on `Chat`, `ChatDetail` and `chat_state` (§14); `GET /accounts`, WS `accounts`, `POST /accounts/active`; `GET /models?tab=`; attention kind `account` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,
@@ -2025,3 +2026,108 @@ unconditionally and let the status code decide.
 **Treat any field newer than the version you require as optional anyway.** The table is a floor,
 not a promise that nothing else is missing — and on a client where a render throw is unrecoverable,
 optional-with-a-fallback costs less than being right.
+
+## 14. v0.10 — Which account a chat is running as (DRAFT, 2026-09-22)
+
+The desktop can hold several Claude logins (`docs/login.md`). One account per runtime is
+*active*, a tab reads it **when its shell spawns**, and keeps it until it respawns — so two chats
+can genuinely be billed to different accounts at once, and a chat keeps its account after the
+active one changes. This section puts that on the wire. Reviewed with the maiLink client before
+implementation; the four rules below are the review's.
+
+### 14.1 The rules this shape exists to keep
+
+1. **Absent ≠ `null` ≠ unknown.** `account` absent = a desktop older than 0.10. `null` = a tab
+   the desktop KNOWS runs unmanaged (the feature is off, or no account was active at spawn).
+   Unknown is its own explicit state, never `null` and never guessed.
+2. **Never fill a tab's account in from the active account.** That is exactly the value the
+   feature makes wrong: a tab keeps its spawn account after a switch. The desktop records the
+   pairing at spawn (`pty::spawn_pty`, the single spawn path — reload, restore, resume and
+   auto-resume all pass through it and each records afresh). A tab with a live PTY and no record
+   answers `known: false`.
+3. **No state claims a remote account is working.** The desktop can see that it *delivered* a
+   token to an SSH session, never that the host accepted it — a token carries no identity to read
+   back (login.md §2.4), and a wrong or expired one does not fail, it falls through to the host's
+   own login (§6.1). So the vocabulary has no "applied".
+4. **Failure is chat state, not a queued notification.** "Running as the wrong account" is a
+   property of the tab now; it renders on the row and clears itself when the tab respawns
+   correctly. The doorbell rings once, on the transition into it.
+
+### 14.2 Shapes
+
+```ts
+interface ChatAccount {
+  known: boolean;           // false ⇒ a live tab with no spawn record. Every other field absent.
+                            //   Render "account unknown", never the active account.
+  id?: string;              // managed account id (stable; matches AccountsSnapshot.accounts[].id)
+  label?: string;           // what the desktop shows — usually the email
+  org?: string;             // organisation name, when the account reported one
+  plan?: string;            // 'max' | 'pro' | 'team' | 'enterprise' | other, as reported
+  stale?: boolean;          // true ⇒ this is not the CURRENTLY active account for its runtime
+                            //   (the tab predates a switch). Pre-resolved desktop-side.
+  remote?: 'sent_unverified' | 'not_applied' | 'host_login';
+                            // SSH tabs only; absent on a local tab.
+                            //   sent_unverified — the token was placed for this session. NOT proof
+                            //     the host is running as this account: say so, and offer nothing
+                            //     that reads as a check mark. `/status` in the remote agent
+                            //     ("Auth token: CLAUDE_CODE_OAUTH_TOKEN") is the human's check.
+                            //   not_applied — the host IS NOT running as `label`: delivery failed,
+                            //     the token expired, or it was prepared and never used. A warning.
+                            //   host_login — this host is not covered by the account (no token,
+                            //     or not in its host list); the agent runs as whatever the host is
+                            //     signed in to. Informational, not an error.
+  reason?: string;          // with not_applied: one human sentence ("ssh refused the key", "token
+                            //   expired"). Never token material.
+}
+
+// Chat and ChatDetail, and every chat_state frame whose account changed:
+account?: ChatAccount | null;
+```
+
+For an SSH tab, `id`/`label`/… name the account the desktop *meant* the remote to run as (the
+active account at connect time); `remote` says how far that got. For `host_login` they are absent —
+the desktop does not know who the host is signed in as.
+
+### 14.3 Routes
+
+| Route | Answer |
+|---|---|
+| `GET /accounts` | `AccountsSnapshot` |
+| WS `accounts` | `AccountsSnapshot`, full replace, on any change to the list, the active ids, or `enabled` |
+| `POST /accounts/active` `{ runtime, accountId }` | §13.4 `{ accepted, confirmed, result?, reason? }` |
+| `GET /models?tab=<tabId>` | `ModelOption[]` read from **that tab's** account (see 14.4). Without `tab`, the machine default as before |
+
+```ts
+interface AccountsSnapshot {
+  enabled: boolean;         // false ⇒ feature off: say "not managed", not "no accounts"
+  accounts: { id: string; runtime: string; label: string; org?: string; plan?: string;
+              active: boolean }[];   // [] is a real answer
+}
+```
+
+**`POST /accounts/active`** switches what *new* tabs launch as, and nothing else — it does not
+respawn anything (a phone respawning tabs it cannot see kills agents mid-turn; a per-tab respawn,
+if ever, is its own verb). `result` names the consequence so the phone can say it:
+
+```ts
+result: { tabsStillOnPrevious: number }   // live tabs whose account is now `stale: true`
+```
+
+Refusals (`accepted: false, confirmed: true`): `reason: 'disabled'` (feature off), `'unknown_account'`,
+`'runtime_mismatch'`. It is run by the desktop window that owns preferences, through the same
+webview round trip as the Overlord actions, so the desktop's own UI updates with it.
+
+### 14.4 Why `/models` changed
+
+`GET /models` read `~/.claude.json`'s `additionalModelOptionsCache` for every tab. Under a managed
+account that cache belongs to whichever login owns the home file, so a chat running as account B
+was offered account A's models — including pinned `source: 'account'` rows B may not be entitled
+to. With `?tab=`, a managed local tab reads its own account root's `.claude.json`. An unknown or
+unmanaged tab reads the home file (unchanged behaviour). **An SSH tab still reads the local file**;
+its real list is on the remote host and is not fetched — a known gap, unchanged by 0.10.
+
+### 14.5 Doorbell
+
+A new `AttentionKind`: **`'account'`**, sent once when a chat's `account.remote` *becomes*
+`not_applied` (not on every snapshot that still says so). The relay carries `kind` through. Older
+phones treat an unknown kind as urgent, which is correct for this one.
