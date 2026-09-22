@@ -2070,7 +2070,9 @@ type ChatAccount =
       label: string;        // what the desktop shows — usually the email. On an SSH tab this is
                             //   the account the desktop INTENDED the remote to run as (the active
                             //   one at connect), never a claim that it does — `remote` says how
-                            //   far it got. "Removed account" if the row is gone since spawn.
+                            //   far it got. If the account was removed since, the LAST-KNOWN
+                            //   label (recorded at spawn/connect), with `removed: true`.
+      removed?: true;       // the account is no longer in AccountsSnapshot; `id` matches nothing
       org?: string;
       plan?: string;        // 'max' | 'pro' | 'team' | 'enterprise' | other, as reported
       stale?: true;         // this is not the CURRENTLY active account for its runtime (the tab
@@ -2088,6 +2090,9 @@ type ChatAccount =
                             //   only — never in a push (§14.5).
     };
 
+// These three are exhaustive: a `known: true` value with no `label` is ALWAYS host_login. The desktop
+// serves `{ known: false }` rather than any other nameless shape.
+//
 // Chat and ChatDetail, and every chat_state frame whose account OR stale changed:
 account?: ChatAccount | null;   // absent = pre-0.10 desktop; null = known unmanaged
 ```

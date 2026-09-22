@@ -151,9 +151,13 @@ pub fn wire(
         return unknown();
     }
 
-    let mut out = match remote.account.as_ref() {
-        Some(a) => account_fields(a, runtime_slug, prefs),
-        None => serde_json::json!({ "known": true }),
+    // §14.2's union has exactly one nameless known branch, host_login. Every prep that reaches
+    // sent_unverified or not_applied carries its account, so a nameless one is not produced
+    // today — and must not reach the wire as `{known:true}` with no label if that ever changes.
+    let mut out = match (remote.account.as_ref(), remote.state) {
+        (Some(a), _) => account_fields(a, runtime_slug, prefs),
+        (None, RemoteState::HostLogin) => serde_json::json!({ "known": true }),
+        (None, _) => return unknown(),
     };
     out["remote"] = serde_json::to_value(remote.state).unwrap_or_default();
     if let Some(reason) = remote.reason.as_deref() {
@@ -380,6 +384,16 @@ mod tests {
         rec2.ssh_pid = Some(200);
         r2.remote = Some(rec2);
         assert_eq!(wire(Some(&mut r2), "claude", other(200), &p).unwrap()["remote"], "sent_unverified");
+    }
+
+    #[test]
+    fn a_nameless_non_host_login_record_never_reaches_the_wire_as_known() {
+        let p = prefs_with("a");
+        let mut r = local("a");
+        let mut rec = RemoteRecord::new(None, RemoteState::NotApplied, Some("x".into()));
+        rec.ssh_pid = Some(100);
+        r.remote = Some(rec);
+        assert_eq!(wire(Some(&mut r), "claude", typed(100), &p), unknown());
     }
 
     #[test]
