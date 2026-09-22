@@ -31,9 +31,14 @@
   /** The account `error`/`notice` are about, so they render on its card. Null — or an account
    *  that no longer exists, as after Remove — puts them at the foot of the pane. */
   let feedbackId = $state<string | null>(null);
-  /** Point the next message at one account's card. Called first in every per-account action. */
+  /** Point the next message at one account's card. Called first in every per-account action.
+   *
+   *  **Clears the old message too.** Moving only the target carried whatever was still standing
+   *  — one account's "signed out" error — onto the card of the account acted on next. */
   function about(account: ManagedAccount | null) {
     feedbackId = account?.id ?? null;
+    error = null;
+    notice = null;
   }
   /** Inline confirm — `window.confirm()` does not work in Tauri webviews. */
   let confirmingClear = $state(false);
