@@ -52,6 +52,7 @@ src-tauri/src/                # Backend (Rust)
 │   ├── mod.rs                # Runtime registry, the symlink farm + merged .claude.json, spawn env
 │   ├── vault.rs              # OS keychain, maiTerm's ONLY secret (the §6 remote setup-token)
 │   ├── remote.rs             # §6 handoff: the staging script and the shell fragment that reads it
+│   ├── tab_record.rs         # Which account each tab SPAWNED under + how far its ssh handoff got (maiLink §14)
 │   └── browser.rs            # Private-window opening, and the shim that shadows the runtime's
 ├── claude_code/              # Claude Code IDE integration (MCP server)
 ├── comms/                    # Comms integration (/maiterm resolve): Mattermost client + thread-reply watcher
@@ -60,6 +61,7 @@ src-tauri/src/                # Backend (Rust)
 │   ├── board.rs              # maiTerm tasks as the phone sees them (reads + phone writes)
 │   ├── overlord.rs           # Overlord engine MIRROR — the frontend publishes, this serves
 │   ├── rpc.rs                # Ask a window's webview to act ({accepted, confirmed})
+│   ├── accounts.rs           # §14: a chat's account on the wire, /accounts, the phone switch, the `account` ring
 │   ├── transcript.rs         # Claude JSONL / Codex rollout tail → turns + meta
 │   └── mirror.rs             # SSH transcript + task-board shadow for remote sessions
 ├── terminal/                 # Terminal backend (alacritty_terminal)
@@ -80,7 +82,7 @@ src-tauri/src/                # Backend (Rust)
 - `docs/codex-integration-review.md` — Codex integration findings, project constraints, and verification gaps (2026-09-07; C7 fixed, C1–C6 outstanding). Holds the captured codex-cli 0.153.4 hook trace — read it before touching Codex hook handling
 - `src/lib/triggers/CLAUDE.md` — Trigger engine, defaults, variables, dedup
 - `docs/tasks.md` — maiTerm Tasks: maiTerm owns agent task state for every runtime; `Workspace.tasks`, workstreams, the seven lanes (`backlog` is a parking lot, `todo` is where work starts, `dropped` is retracted work that does NOT satisfy dependents), the append-only `notes` log, the MCP tools (`assign_to`, `block_on`/`unblock_from`, `ready`/`status`/`limit`), the side panel, the phone, and the Claude-store importer
-- `docs/mailink-protocol.md` — the maiLink wire contract, shared with the phone app's own repo. §4 REST/WS, §5 replies and prompts, §6 the doorbell relay, §13 Overlord + task writes. **Read §13.1 before touching the mirror**: the Overlord engine is a frontend store, so the phone is served a published snapshot rather than a webview round trip. Every wire change bumps `protocolVersion` (§13.5), additive ones included
+- `docs/mailink-protocol.md` — the maiLink wire contract, shared with the phone app's own repo. §4 REST/WS, §5 replies and prompts, §6 the doorbell relay, §13 Overlord + task writes. **Read §13.1 before touching the mirror**: the Overlord engine is a frontend store, so the phone is served a published snapshot rather than a webview round trip. Every wire change bumps `protocolVersion` (§13.5), additive ones included. Currently **0.10**; §14 is which account a chat runs as
 - `docs/overlord.md` — Overlord per-window supervisor: engine/agent split, rule schema, checkpoint ritual, MCP tools (replyToOverlord/driveTab/listEscalations/proposeRuleChanges)
 - `website/CLAUDE.md` — maiterm.dev: the Starlight-docs / hand-authored-landing split, the shared theme contract, the gutter rule, and the copy that has to stay true (licence is source-available, the updater does count users). **Pushing `website/**` to main publishes the site**
 - `docs/login.md` — **Managed agent accounts.** maiTerm holds N Claude logins and hands each tab
@@ -92,11 +94,14 @@ src-tauri/src/                # Backend (Rust)
   account and the work is billed there.** That one fact shapes every design decision in the
   feature, and it is why a §6 test that only checks the tab works proves nothing. The remote
   token never touches argv, the terminal or the frontend: it goes over the stdin of its own ssh
-  connection into a per-tab file the shell reads once (`accounts/remote.rs`) — the ssh command
+  connection into a per-handoff file the shell reads once (`accounts/remote.rs`) — the ssh command
   maiTerm builds is typed into the user's local shell, so argv means scrollback and history too.
   The handoff file also carries `CLAUDE_CODE_SUBSCRIPTION_TYPE`: a token tells the runtime nothing
   about the plan, and that null changes **which model actually serves the request** (§8.1).
-  §2.2 is the precedence list, §5.4 the directory contract, §9 the security posture
+  §2.2 is the precedence list, §5.4 the directory contract, §9 the security posture. The phone
+  sees which account a chat runs as through `docs/mailink-protocol.md` §14 — **recorded at spawn,
+  never inferred from the active account**, and an SSH chat's account is served only while the one
+  ssh process that received that handoff runs
 - `docs/stack.md` — Workspace Stack (v1 2026-09-11, console drawer 2026-09-15): a workspace's services (dev server, api, db…) as maiTerm-owned tabs that are **not in the tab strip** (§7 — they open in a drawer over the terminal area, and `pane.active_tab_id` is never one of them); a service is a tab whose shell stays up, the binding lives on `Tab.service_id` (never a `tab_id` on the service), status is never persisted (a Rust mirror serves the priming), every PTY write is behind `get_pty_foreground_job` (shell at prompt / recorded pid), agents are writers over MCP (`updateService` reports ports — no socket sniffing), `createService` with no args returns the suggester's list. Read §5 before adding lifecycle paths that copy a `Tab`
 - `docs/workspace-share.md` — Workspace Share (2026-09-22): a workspace exported as a `.maiterm-workspace` for ANOTHER user/computer — the sister of backup, carrying structure and never identity. The file is built from an **allowlist** of `Shared*` types (`src-tauri/src/share/`), so a new `Tab` field never reaches it by default — the opposite of reload's whole-record rule, deliberately. Tabs point into repo **roots** (git top level + subpath); import applies one rule to every candidate directory (absent/empty → clone, matching checkout → use, else reject), probes with `git ls-remote`, clones in visible tabs, re-mints every id. Agent tabs start through a one-shot `SplitContext.launchCommand` (never persisted). **An ssh command must be `cleanSshCommand`ed before it reaches the file** — the raw one carries the sender's `MAITERM_AUTH`
 

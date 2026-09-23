@@ -731,6 +731,10 @@ expiry, so parsing is the only way to get it — and it would break without warn
 - **Remote (oat tokens)**: we minted them, so we know `minted_at + 1 year`. Exact, free,
   and no private formats. Warn at T-30d; this is the silent-failure case that motivated the
   feature, and a one-year token fails around month eleven on a box nobody is looking at.
+  **Past that date the token is refused, not sent** (2026-09-22, `prepare_remote_account_token`):
+  sent, it would not fail on the host but fall through to the host's own login (§6.1). Refused,
+  it becomes the reported `missing_credential` path — a desktop notification, and on the phone a
+  `not_applied` chat (`docs/mailink-protocol.md` §14).
 - **Remote liveness**: `claude auth status --json` over SSH per host, cached, cheap. Gives
   `loggedIn` and the resolved `apiKeySource` — which catches the §2.2 shadowing case.
 - **Local**: we do not have expiry and will not fake it. Claude Code's own 3-day warning

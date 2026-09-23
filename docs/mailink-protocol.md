@@ -4,6 +4,15 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.10 changelog** (2026-09-22). Additive: which account a chat is running as (§14) — `account`
+> on `Chat`, `ChatDetail` and `chat_state`; `GET /accounts`, WS `accounts`, `POST /accounts/active`;
+> `GET /models?tab=`; attention kind `account`. Designed with the maiLink client before any code.
+> The load-bearing rules: a tab's account is RECORDED at spawn and never inferred from the active
+> one; nothing claims a remote account WORKED (`sent_unverified` at best); and an SSH chat is
+> described only while the one ssh process that received that handoff runs — bound on evidence
+> (a per-handoff nonce in the ssh's argv) on an edge the desktop always sees. That last rule took
+> six review rounds; every earlier version was a timing guess. Read §14 before touching it.
+>
 > **v0.8 changelog** (2026-09-08). Additive: `tool` and `detail` on `Chat`, `ChatDetail` and every
 > `chat_state` frame — the agent's currently-running tool and its primary argument. maiTerm has
 > tracked both on every PreToolUse since the hooks went in, and cleared both on Stop, but only ever
@@ -1992,7 +2001,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.9" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.10" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -2181,7 +2190,8 @@ not fetched.
 
 ### 14.5 Doorbell
 
-A new `AttentionKind`: **`'account'`**, sent once when a chat's `account.remote` *becomes*
+A new `AttentionKind`: **`'account'`** (relay copy: `update-worker/src/worker.js` `KIND_BODY`,
+which must carry it or iOS shows the generic "Needs you"), sent once when a chat's `account.remote` *becomes*
 `not_applied`. **Content-light like every push:** title = tab name, body = the fixed string
 "Agent account not applied". Never `reason` (free text that can name hosts) and never `label`
 (usually an email) — the push crosses a public relay onto a lock screen. The phone needs only
