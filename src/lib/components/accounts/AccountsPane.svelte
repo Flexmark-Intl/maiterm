@@ -98,6 +98,16 @@
     return { label: `Token expires in ${days} day${days === 1 ? '' : 's'}`, warn: days <= 30 };
   }
 
+  /** When the token was minted, to the minute. claude.ai lists every token as "Claude Code"
+   *  with only a "Connected N hours ago" to tell them apart (§9.4), so this is the one thing
+   *  the user can match a row against before deleting it. */
+  function mintedOn(mintedAt: number): string {
+    return new Date(mintedAt * 1000).toLocaleString(undefined, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+  }
+
   $effect(() => {
     void (async () => {
       try {
@@ -490,6 +500,9 @@
     busy = true;
     error = null;
     notice = null;
+    // Read before the patch clears it: the notice below is the last place it is shown, and it
+    // is what the user matches against claude.ai's list of identical "Claude Code" rows.
+    const mintedAt = account.token_minted_at;
     try {
       // **Keychain FIRST, state second — the opposite of `removeAccount` below, and for a
       // reason specific to this pair rather than a contradiction of it.**
@@ -516,7 +529,9 @@
       hasToken = { ...hasToken, [account.id]: false };
       notice =
         `Removed the remote token for ${account.label}. Hosts that already have it keep ` +
-        `working until it expires — revoke it in your Anthropic account settings to cut it off.`;
+        `working until it expires. To cut it off, delete it on claude.ai under Settings → ` +
+        `Claude Code → Authorization tokens` +
+        (mintedAt ? ` — the entry connected ${mintedOn(mintedAt)}.` : '.');
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -764,7 +779,9 @@
                   <div class="remote-row">
                     {#if account.token_minted_at}
                       {@const exp = tokenExpiry(account.token_minted_at)}
-                      <span class="token-line" class:warn={exp.warn}>{exp.label}</span>
+                      <span class="token-line" class:warn={exp.warn}>
+                        {exp.label} · minted {mintedOn(account.token_minted_at)}
+                      </span>
                     {:else}
                       <!-- Vault holds a token, state does not. Rust keys propagation on the
                            metadata, so this token is inert — say that, or the hosts below read

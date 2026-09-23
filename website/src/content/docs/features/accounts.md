@@ -121,7 +121,7 @@ To check a session, run `/status` in the remote agent. **Auth token: CLAUDE_CODE
 - **It bills your subscription, not API credits** — the same plan the account already has.
 - **It is narrower than a sign-in.** Model requests and MCP servers — maiTerm's own included — work normally, but Remote Control sessions and claude.ai connectors do not, and `--bare` sessions ignore the token. A host that needs those should be signed in on its own instead.
 - **It lasts a year and does not rotate.** The card counts it down and warns in the last 30 days.
-- **Assume nothing revokes it.** The Claude Code CLI has no revoke command, and whether signing the account out also kills its tokens is untested. **Remove token** stops maiTerm handing it out; a session already running with it keeps working.
+- **Removing it in maiTerm does not revoke it.** **Remove token** stops maiTerm handing it out; a session already running with it keeps working. To revoke it, delete it on claude.ai under **Settings → Claude Code → Authorization tokens**. Every entry there is labelled "Claude Code", so match it by when it was connected: the account card shows when the token was minted.
 - **maiTerm cannot tell which account a token belongs to.** A token carries no profile, so the agent reports no email for it. The browser window you approve in decides — which is why the dialog steers you to a private one.
 - **On the host, it is as private as that user's processes.** Anyone who can read the environment of your remote shell can read the token.
 - **Named hosts are the only record of where it went.** With **Use on every SSH host** on, there is no such list.

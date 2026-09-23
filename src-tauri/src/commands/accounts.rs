@@ -1539,12 +1539,13 @@ const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 /// Said when a mint is cancelled after the browser has already finished it.
 ///
 /// The cancel is honoured — nothing is stored — but a credential exists in the world and maiTerm
-/// cannot take it back (§9.4: no revoke, and `auth logout` is not known to reach one). Saying so
+/// cannot take it back (§9.4: the CLI has no revoke; only claude.ai's token list does, and there
+/// every entry reads "Claude Code", so "connected just now" is the one way to pick it). Saying so
 /// is the whole obligation: silence here would leave a standing one-year token nobody knows about.
 const TOKEN_MINTED_BUT_DISCARDED: &str =
     "Cancelled. The browser had already finished, so a token was created — it has NOT been kept, \
-     but it is live for a year and nothing local can revoke it. Revoke it in your Anthropic \
-     account settings if you do not want it standing.";
+     but it is live for a year. To revoke it, delete the entry connected just now on claude.ai \
+     under Settings → Claude Code → Authorization tokens.";
 
 /// Mint a `setup-token` for an existing account and put it in the vault (§6 step 1).
 ///

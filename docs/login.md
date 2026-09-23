@@ -867,6 +867,18 @@ revoke).
 > revoke of its own — `claude setup-token` has no flags at all and there is no `claude auth
 > revoke` — so if logout does not reach these tokens, nothing local does, and a design that
 > assumes it might is a design that quietly relies on something we never tested.
+>
+> **claude.ai does offer one (found 2026-09-22):** Settings → Claude Code → Authorization tokens
+> (`claude.ai/settings/claude-code`) lists OAuth grants with a delete button each. It is not the
+> API-keys page — that is Console keys, a different credential. **The catch: entries cannot be
+> told apart.** Every row is labelled "Claude Code", with only "Connected N hours ago" and its
+> scopes; `/login` sessions and setup-tokens sit side by side, so a wrong pick signs some other
+> Claude Code session out. maiTerm's contribution is the one thing it knows that the list shows
+> too — **when the token was minted**: the account card shows it to the minute, the Remove-token
+> notice repeats it (it is the last place the time exists), and a cancelled-after-mint says
+> "connected just now". Still unverified: that deleting the row kills a token already in use
+> on a host (expected, as it is a server-side grant), and whether a setup-token's row carries
+> only `user:inference` and so could be told apart by scope.
 
 Assuming the worse answer is what produces the revoke story, rather than what postpones it:
 

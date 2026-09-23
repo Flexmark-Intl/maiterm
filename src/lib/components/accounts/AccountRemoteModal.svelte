@@ -4,7 +4,8 @@
    *  **This dialog's job is the disclosure, not the button.** Everything else in the Accounts
    *  pane hands the credential back to the runtime and keeps only a directory. This one makes
    *  maiTerm hold a real secret: a standing token, valid a year, that does not rotate and that
-   *  nothing local can revoke (§9.4). Someone agreeing to that should be told what they are
+   *  nothing local can revoke — only claude.ai's token list, where it cannot be told apart
+   *  (§9.4). Someone agreeing to that should be told what they are
    *  agreeing to, at the moment they agree, and not in a settings page they will never reopen.
    *
    *  The browser picker is here for the same reason it is on sign-in and it matters MORE here:
@@ -407,8 +408,10 @@
                 <summary>Removing it here does not switch it off on hosts</summary>
                 <p>
                   maiTerm stops handing it out, but a host that already has it keeps working until
-                  the token expires, a year after it was minted. Nothing maiTerm or the agent CLI
-                  offers can revoke it early.
+                  the token expires, a year after it was minted. To cut it off sooner, delete it on
+                  claude.ai under Settings → Claude Code → Authorization tokens. Every entry there
+                  is named “Claude Code”, so match it by when it was connected; the account card
+                  shows when this one was minted.
                 </p>
               </details>
             </li>
@@ -424,9 +427,9 @@
               <details>
                 <summary>Only named hosts leave a record of where it went</summary>
                 <p>
-                  Since nothing revokes these, the list of hosts you name is the only note of where
-                  the token went. Turn on “every SSH host” and there is no such list to consult
-                  later.
+                  Revoking the token cuts off every host at once, but the list of hosts you name is
+                  the only note of where it went. Turn on “every SSH host” and there is no such list
+                  to consult later.
                 </p>
               </details>
             </li>
