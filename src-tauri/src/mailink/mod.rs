@@ -4731,11 +4731,35 @@ fn scrollback_time_for(app: &AppState, tab_id: &str) -> Option<u64> {
 /// exactly the recency clump this signal exists to prevent. The last-real-turn ts does not advance
 /// on a pure resume. (mtime is still the right change-gate for WS streaming, where "anything
 /// appended → re-scan" is the intended semantics — see stream_new_messages.)
+///
+/// **A suspended tab answers its `suspended_at`, never `now`.** Suspend kills the PTY, and a tab
+/// parked long enough loses its scrollback row and never had a resolvable session, so it reached
+/// the `now` arm — stamped with request time on every read, walking forward in step with the
+/// clock and pinning months-old tabs to the top of the phone's Focus ("today and yesterday").
+/// `now` is only the right answer for a tab that is genuinely new, and a suspended one is not.
 fn last_activity_ts(app: &AppState, tab_id: &str, scrollback_ts: Option<u64>, now: u64) -> u64 {
     resolved_session_for_tab(app, tab_id)
         .and_then(|(rt, sid)| transcript::last_turn_ts_for(rt, &sid))
         .or(scrollback_ts)
+        .or_else(|| suspended_at_ms(app, tab_id))
         .unwrap_or(now)
+}
+
+/// The tab's `suspended_at` (RFC3339) in unix ms: the last moment it had a live PTY. Only read on
+/// `last_activity_ts`'s fallback arm, so the tab walk is not paid for tabs with a real signal.
+fn suspended_at_ms(app: &AppState, tab_id: &str) -> Option<u64> {
+    let data = app.app_data.read();
+    let at = data
+        .windows
+        .iter()
+        .flat_map(|w| &w.workspaces)
+        .flat_map(|ws| &ws.panes)
+        .flat_map(|p| &p.tabs)
+        .find(|tab| tab.id == tab_id)?
+        .suspended_at
+        .clone()?;
+    let ms = transcript::rfc3339_to_ms(&at);
+    (ms > 0).then_some(ms as u64)
 }
 
 /// The in-memory-only slice of `build_chats` that the periodic tickers (WS diff loop, doorbell)
@@ -5298,6 +5322,35 @@ async fn ring_devices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A suspended tab with no transcript and no scrollback row used to answer `now` — a
+    /// months-old tab reading as "just active" on every GET, walking forward with the clock.
+    #[test]
+    fn a_suspended_tab_with_no_other_signal_answers_its_suspend_time_not_now() {
+        let app = AppState::new();
+        let (suspended, fresh) = {
+            let mut data = app.app_data.write();
+            let mut win = crate::state::WindowData::new("main".into());
+            let mut ws = crate::state::Workspace::new("Proj".into());
+            let mut second = ws.panes[0].tabs[0].clone();
+            second.id = "fresh-tab".into();
+            ws.panes[0].tabs[0].suspended_at = Some("2026-07-15T16:50:37Z".into());
+            let suspended = ws.panes[0].tabs[0].id.clone();
+            ws.panes[0].tabs.push(second);
+            win.workspaces.push(ws);
+            data.windows.push(win);
+            (suspended, "fresh-tab".to_string())
+        };
+        let now = 1_790_000_000_000;
+        assert_eq!(
+            last_activity_ts(&app, &suspended, None, now),
+            transcript::rfc3339_to_ms("2026-07-15T16:50:37Z") as u64,
+        );
+        // A scrollback row still wins over the suspend time — it is the later, real signal.
+        assert_eq!(last_activity_ts(&app, &suspended, Some(42), now), 42);
+        // And a genuinely new tab is still "just now".
+        assert_eq!(last_activity_ts(&app, &fresh, None, now), now);
+    }
 
     /// Drive the real router with a JSON body of `body_len` bytes and report the status.
     /// The token is deliberately wrong, so a body that survives the extractor lands on
