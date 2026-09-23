@@ -2068,7 +2068,10 @@ implementation; the four rules below are the review's.
 type ChatAccount =
   | { known: false }        // a live tab with no spawn record, or an SSH session that never went
                             //   through the handoff. Render "account unknown" — never the active
-                            //   account.
+                            //   account. On a DORMANT chat it means only "not running": a tab
+                            //   with no PTY since the desktop started has no spawn record, and
+                            //   the next spawn writes one (arriving as a `chat_state` with
+                            //   `account`). Clients suppress it there rather than display it.
   | { known: true; remote: 'host_login' }
                             // SSH only: this host is not covered by the account (no token, or not
                             //   in its host list), so the agent runs as whatever the host is
