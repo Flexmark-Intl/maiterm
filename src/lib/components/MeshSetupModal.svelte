@@ -69,7 +69,7 @@
     const seen = new Set<string>();
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
         const inst = terminalsStore.get(tab.id);
         if (!inst || !tab.runtime || claudeStateStore.getState(tab.id)) continue; // only ambiguous tabs
         seen.add(tab.id);
@@ -110,7 +110,7 @@
     const out: Row[] = [];
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
         const inst = terminalsStore.get(tab.id);
         const termLive = !!inst;                                // terminal/PTY attached
         const agentLive = !!claudeStateStore.getState(tab.id);  // agent SESSION running + init'd

@@ -130,7 +130,7 @@ function createAgentMeshStore() {
     const out: string[] = [];
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
+        if ((tab.tab_type ?? 'terminal') === 'terminal' && !tab.service_id && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
       }
     }
     return out;
@@ -157,8 +157,8 @@ function createAgentMeshStore() {
   /** Is this tab an agent participant in the mesh? A named terminal tab that has run (or is
    *  running) an agent. The name requirement is the join gate (§6 — a tab needs an explicit
    *  descriptive name to be addressable). */
-  function isAgentMember(tab: { id: string; tab_type?: string; custom_name?: boolean; name: string; runtime?: unknown }): boolean {
-    if ((tab.tab_type ?? 'terminal') !== 'terminal') return false;
+  function isAgentMember(tab: { id: string; tab_type?: string; custom_name?: boolean; name: string; runtime?: unknown; service_id?: string | null }): boolean {
+    if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) return false;
     if (!tab.custom_name) return false;
     return !!claudeStateStore.getState(tab.id) || !!tab.runtime;
   }
@@ -190,7 +190,7 @@ function createAgentMeshStore() {
   function hasUnreadyMembers(ws: Workspace): boolean {
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+        if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
         if (!tab.runtime) continue; // never an agent → not expected in the mesh
         if (!claudeStateStore.getState(tab.id)) return true; // was an agent, not running now
       }
@@ -430,7 +430,7 @@ function createAgentMeshStore() {
       if (!ws?.bridge_all || ws.suspended) return;
       for (const pane of ws.panes) {
         for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') !== 'terminal') continue;
+          if ((tab.tab_type ?? 'terminal') !== 'terminal' || tab.service_id) continue; // stack services aren't agents
           if (!tab.runtime) continue; // never an agent — nothing to initialize
           if (claudeStateStore.getState(tab.id)) continue; // already live
           const inst = terminalsStore.get(tab.id);
