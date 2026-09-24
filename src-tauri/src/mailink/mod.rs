@@ -2309,6 +2309,13 @@ async fn post_push_register(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// The permission card's text when maiTerm cannot say which command the Approve button answers —
+/// two agents asking at once (claude_code/gate.rs), or a request with no tool recorded.
+/// **The phone matches this string EXACTLY** (maiLink 9a60619) and replaces it with a warning to
+/// check the terminal before approving. Changing it silently turns that warning off; tell the
+/// maiLink side, or move them to an explicit wire flag first.
+const UNATTRIBUTED_PERMISSION_TEXT: &str = "Permission requested";
+
 /// Every `kind` the doorbell can ring (docs §6.2). The phone shows one switch per entry, so a
 /// kind belongs here only once something in this build actually rings it.
 const DOORBELL_KINDS: &[&str] = &["permission", "question", "idle_done", "escalation", "account"];
@@ -5134,12 +5141,12 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
                 (Some(d), _) => d.to_string(),
                 (None, Some(d)) => format!("{}({}) — approve?", a.tool_name, d),
                 (None, None) if !a.tool_name.is_empty() => format!("{} — approve?", a.tool_name),
-                _ => "Permission requested".to_string(),
+                _ => UNATTRIBUTED_PERMISSION_TEXT.to_string(),
             },
             None => match (tool.as_deref(), tool_detail_for_tab(app, tab_id).as_deref()) {
                 (Some(t), Some(d)) => format!("{t}({d}) — approve?"),
                 (Some(t), None) => format!("{t} — approve?"),
-                _ => "Permission requested".to_string(),
+                _ => UNATTRIBUTED_PERMISSION_TEXT.to_string(),
             },
         };
         // For Codex the state is NOT proof a human was asked, so the card is answerable only
