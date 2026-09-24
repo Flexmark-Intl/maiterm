@@ -2983,6 +2983,9 @@ enum HookPhase {
     /// Codex only: the human interrupted the active turn (Esc). Not a `Stop` — no turn
     /// completed, so nothing here is a result for a human to read.
     Interrupt,
+    /// Claude only: one of an agent's calls is asking for permission. Touches nothing but the
+    /// gate ledger; the Notification six seconds later is what says a human is being asked.
+    PermissionAsked,
     /// Claude only: a subagent finished. Touches nothing but the gate ledger — a subagent
     /// denied a call and then done emits nothing else that could say its prompt is over.
     SubagentStop,
@@ -2995,7 +2998,7 @@ enum HookPhase {
 /// names handled here include shared events and Codex's PermissionRequest/PostCompact.
 /// Interrupt remains unhandled (docs/codex-integration-review.md C5). Unrecognized names
 /// fall through to `Other` (logged, no state change) — matching the prior behavior.
-fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event: &Value) -> HookPhase {
+fn normalize_hook_event(runtime: crate::state::AgentRuntime, name: &str, event: &Value) -> HookPhase {
     match name {
         "SessionStart" => HookPhase::SessionStart,
         "SessionEnd" => HookPhase::SessionEnd,
@@ -3020,6 +3023,10 @@ fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event:
         // review can resolve it with no human involved. Squashing it into Claude's
         // `permission_prompt` was what made maiLink offer an answerable card for an approval
         // nobody was ever asked (review C7).
+        // Claude's shares the name and nothing else: it fires as a call asks, before the dialog,
+        // and maiTerm reads it only to learn WHICH call (claude_code/gate.rs). The human-is-
+        // being-asked signal stays the Notification.
+        "PermissionRequest" if runtime == crate::state::AgentRuntime::Claude => HookPhase::PermissionAsked,
         "PermissionRequest" => HookPhase::PermissionRequest,
         // Codex emits PostCompact alongside PreCompact; both are compaction signals.
         "PostCompact" => HookPhase::Compact,
@@ -3469,26 +3476,36 @@ async fn hooks_handler(
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.state = match notification_type.as_str() {
-                        // A prompt still attributed to a call in flight outranks "idle": the
-                        // main thread can sit at its input while a subagent waits on a decision.
-                        "idle_prompt"
-                            if session.claude_gate.held()
-                                && matches!(session.state, AgentSessionState::WaitingPermission) =>
-                        {
-                            session.state
-                        }
                         "idle_prompt" => AgentSessionState::WaitingInput,
                         "permission_prompt" => AgentSessionState::WaitingPermission,
                         _ => session.state,
                     };
+                    // Claude never sends idle_prompt while a dialog is on screen or the main
+                    // thread is busy, so it closes any prompt — including one whose call was
+                    // DENIED, which fires no hook of its own. The main thread is idle, so none
+                    // of its calls is in flight either.
+                    if notification_type == "idle_prompt" {
+                        session.claude_gate.prompt_closed();
+                        session.claude_gate.agent_ended("");
+                    }
                     // Attribute the prompt to the calls that could be waiting on it
-                    // (`claude_code/gate.rs`). When exactly one could, it is the gated call, so
-                    // it — not whichever agent's PreToolUse happened to land last — is what the
-                    // card describes.
+                    // (`claude_code/gate.rs`). The Notification comes 6s after the dialog, so
+                    // whichever agent's PreToolUse landed last is no evidence at all: the card
+                    // names a call only when exactly one could be asking, and names none when
+                    // several could — the wrong command beside an Approve button is worse than
+                    // no command.
                     if notification_type == "permission_prompt" {
-                        if let Some(gated) = session.claude_gate.prompt_opened() {
-                            session.tool_name = Some(gated.tool_name.clone());
-                            session.tool_detail = gated.detail.clone();
+                        use crate::claude_code::gate::Attribution;
+                        match session.claude_gate.prompt_opened() {
+                            Attribution::One(gated) => {
+                                session.tool_name = Some(gated.tool_name.clone());
+                                session.tool_detail = gated.detail.clone();
+                            }
+                            Attribution::Several => {
+                                session.tool_name = None;
+                                session.tool_detail = None;
+                            }
+                            Attribution::Unknown => {}
                         }
                     }
                     // Any runtime whose permission Notification carries the gated tool inline
@@ -3509,14 +3526,6 @@ async fn hooks_handler(
                 }
             }
 
-            // Read back rather than tracked through the arm: `idle_prompt` must not settle the
-            // mirror to idle over a prompt Rust is still holding.
-            let gate_held = {
-                use crate::state::app_state::AgentSessionState;
-                srv.state.agent_sessions.read().get(&session_id).is_some_and(|s| {
-                    s.claude_gate.held() && matches!(s.state, AgentSessionState::WaitingPermission)
-                })
-            };
             log::debug!("Claude hook: Notification type='{}' session={} (tab {:?})",
                 notification_type, &session_id[..session_id.len().min(8)], tab_id);
             emit_dual(&srv.app_handle, "agent-hook-notification", "claude-hook-notification", serde_json::json!({
@@ -3524,7 +3533,6 @@ async fn hooks_handler(
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "notification_type": notification_type,
-                "gate_held": gate_held,
                 "title": event.get("title"),
                 "body": event.get("body"),
             }));
@@ -3580,6 +3588,23 @@ async fn hooks_handler(
                 // frontend mirror has to keep showing it, as Rust does.
                 "gate_held": subagent_gate,
             }));
+        }
+
+        HookPhase::PermissionAsked => {
+            let agent = crate::claude_code::gate::agent_key(&event);
+            let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            if !session_id.is_empty() {
+                let mut sessions = srv.state.agent_sessions.write();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.claude_gate.call_asked(
+                        &agent,
+                        tool_name,
+                        &tool_input_fingerprint(event.get("tool_input")),
+                    );
+                }
+            }
+            log::debug!("Claude hook: PermissionRequest tool='{}' agent='{}' session={}",
+                tool_name, agent, &session_id[..session_id.len().min(8)]);
         }
 
         HookPhase::SubagentStop => {
@@ -3813,6 +3838,8 @@ async fn hooks_handler(
                         detail: event
                             .get("tool_input")
                             .and_then(crate::mailink::transcript::compact_tool_arg),
+                        fingerprint: tool_input_fingerprint(event.get("tool_input")),
+                        asked: false,
                     });
                     gate_held = session.claude_gate.held()
                         && matches!(session.state, AgentSessionState::WaitingPermission);
@@ -4075,6 +4102,10 @@ mod tests {
         normalize_hook_event(AgentRuntime::Claude, name, &ev)
     }
 
+    fn norm_codex(name: &str, ev: serde_json::Value) -> HookPhase {
+        normalize_hook_event(AgentRuntime::Codex, name, &ev)
+    }
+
     // ─── Codex approval correlation (review C7) ──────────────────────────────
     //
     // Ground truth for these tests was captured from codex-cli 0.153.4 with logging hooks on an
@@ -4149,7 +4180,11 @@ mod tests {
         // The two are NOT interchangeable: Claude's Notification means the human is being asked,
         // Codex's hook fires before anything has decided. Folding them together is what made
         // maiLink offer an answerable card for an auto-resolved approval.
-        assert_eq!(norm("PermissionRequest", serde_json::json!({})), HookPhase::PermissionRequest);
+        assert_eq!(norm_codex("PermissionRequest", serde_json::json!({})), HookPhase::PermissionRequest);
+        // Claude's own PermissionRequest is neither: it only says WHICH call is asking, for the
+        // prompt ledger (claude_code/gate.rs), and must never reach the Codex arm that files an
+        // approval.
+        assert_eq!(norm("PermissionRequest", serde_json::json!({})), HookPhase::PermissionAsked);
         assert_eq!(
             norm("Notification", serde_json::json!({ "notification_type": "permission_prompt" })),
             HookPhase::Notification { notification_type: "permission_prompt".into() }
@@ -4333,7 +4368,7 @@ mod tests {
         // it actually fires before the approval flow decides anything (review C7). Its arm still
         // sets WaitingPermission and emits the same wire event, so the bridge and the delivery
         // holds are unchanged; what differs is that the request is now filed and retired.
-        assert_eq!(norm("PermissionRequest", nil.clone()), HookPhase::PermissionRequest);
+        assert_eq!(norm_codex("PermissionRequest", nil.clone()), HookPhase::PermissionRequest);
         // Codex's PostCompact joins PreCompact as a compaction signal.
         assert_eq!(norm("PostCompact", nil.clone()), HookPhase::Compact);
         // Codex shares these names with Claude verbatim.

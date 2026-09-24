@@ -325,14 +325,14 @@ function createAgentStateStore() {
       });
       unlisteners.push(u4);
 
-      const u5 = await listen<{ session_id: string; tab_id: string | null; notification_type: string; runtime?: string; gate_held?: boolean }>('agent-hook-notification', (e) => {
-        const { session_id, tab_id, notification_type, gate_held } = e.payload;
+      const u5 = await listen<{ session_id: string; tab_id: string | null; notification_type: string; runtime?: string }>('agent-hook-notification', (e) => {
+        const { session_id, tab_id, notification_type } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         if (notification_type === 'permission_prompt') {
           setState(tab_id, session_id, 'permission', undefined, undefined, runtime);
           dispatch(getDescriptor(runtime).displayName, 'Needs permission approval', 'info', { tabId: tab_id });
-        } else if (notification_type === 'idle_prompt' && !gate_held) {
+        } else if (notification_type === 'idle_prompt') {
           setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
           // Notification disabled — the Stop hook already notifies when Claude finishes,
           // and this fires at awkward moments (e.g. between tool calls). Re-enable if we

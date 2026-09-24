@@ -448,6 +448,12 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
   - **Both command hooks must stay matchable by `is_maiterm_command_hook`.** The SessionEnd one echoes nothing, so it has no phrase to match and no `url` field; `MAITERM_CMD_HOOK_POST_MARKER` (`/hooks?tab_id=$MAITERM_TAB_ID`) is its signature. Without it the merge cannot recognise the previous copy and every 30s re-assert appends another — the duplicate-hook failure that produced phantom tab ids.
 - `Notification` (HTTP): Receives Claude Code notification events.
 - `Stop` (HTTP): Receives stop events.
+- `PermissionRequest`, `PostToolUseFailure`, `SubagentStop` (HTTP): feed only the permission-prompt
+  ledger (`gate.rs`), which decides which call a Claude permission prompt is holding up. The
+  Notification that says a human is being asked names no agent and arrives 6s after the dialog,
+  and every subagent hook carries the parent's `session_id`, so without this a background
+  subagent's calls cleared its parent's prompt. Claude's `PermissionRequest` is NOT Codex's: it
+  normalizes to its own phase and never files an approval.
 
 **Connection tab affinity:**
 - Server stores connection_id → tab_id mapping in `ServerState.connection_tabs`
@@ -680,7 +686,7 @@ agents.
 - "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
-**Remote Claude hooks:** All eight events use command hooks reading `MAITERM_PORT`,
+**Remote Claude hooks:** All eleven events use command hooks reading `MAITERM_PORT`,
 `MAITERM_AUTH`, and `MAITERM_TAB_ID` from the process environment. SessionStart also
 requests `prime=1` and echoes the tab id and returned instructions into Claude's
 context. Preserve `curl --max-time`: a zombie tunnel can accept a connection and

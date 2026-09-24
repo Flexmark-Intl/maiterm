@@ -428,8 +428,13 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
         "UserPromptSubmit": http_hook(&hooks_url),
         "PreToolUse": http_hook(&hooks_url),
         "PostToolUse": http_hook(&hooks_url),
-        // Both only feed the permission-prompt ledger (claude_code/gate.rs): a failed call and
-        // a finished subagent are the ends that would otherwise leave a call "in flight" forever.
+        // These three only feed the permission-prompt ledger (claude_code/gate.rs).
+        // PermissionRequest says WHICH call is asking — the Notification never does. A failed
+        // call and a finished subagent are the ends that would otherwise leave a call "in
+        // flight" forever. The server answers PermissionRequest with the same empty 200 that
+        // PreToolUse — equally able to allow or deny — has always had, and PreToolUse has never
+        // decided anything that way, so the human is still the one asked.
+        "PermissionRequest": http_hook(&hooks_url),
         "PostToolUseFailure": http_hook(&hooks_url),
         "SubagentStop": http_hook(&hooks_url),
         "PreCompact": http_hook(&hooks_url)
@@ -503,7 +508,7 @@ fn command_hook_is_ours_to_sweep(
 /// Registers:
 /// - SessionStart (command) — reads $MAITERM_TAB_ID, POSTs to our server, injects tab ID context
 /// - SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse,
-///   PostToolUseFailure, SubagentStop, PreCompact (http)
+///   PermissionRequest, PostToolUseFailure, SubagentStop, PreCompact (http)
 ///
 /// We identify our entries by matching the hook URL, so we don't clobber user hooks.
 fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
