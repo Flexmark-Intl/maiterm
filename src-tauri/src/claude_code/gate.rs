@@ -15,15 +15,21 @@
 //!
 //! Four facts about Claude Code's side, all read out of the 2.1.281 binary, shape everything
 //! below:
-//! - **`PermissionRequest` fires when a call actually asks**, before the dialog shows, and names
-//!   the agent, the tool and its input. It carries no `tool_use_id`.
+//! - **`PermissionRequest` fires when a call asks**, and names the agent, the tool and its input,
+//!   but no `tool_use_id`. It fires when the dialog is REQUESTED, not when it shows. Dialogs
+//!   stack: a foreground ask goes on top of the one on screen, while a background subagent's goes
+//!   underneath. So the hooks can say which calls are asking but never which dialog is on top.
+//!   Calls settled without asking (allow rules, `acceptEdits`, the auto-mode classifier, a
+//!   deciding PreToolUse hook) fire no `PermissionRequest`.
 //! - **The Notification fires 6 SECONDS after the dialog opens**, from a cancellable timer, and
 //!   not at all if the dialog closes sooner. By then other agents have usually started and
 //!   finished calls of their own, so "what was in flight when the Notification came" is a poor
 //!   answer to "which call is asking" on its own.
 //! - **A denied call fires no hook at all.** Its agent moving on, or stopping, is the only
 //!   evidence that it is over.
-//! - **`idle_prompt` is never sent while a dialog is on screen**, so it closes any prompt.
+//! - **`idle_prompt` is never sent while any dialog is open**, covered or background ones
+//!   included: the idle notifier checks the same dialog store every subagent's dialog goes into.
+//!   So it closes any prompt.
 //!
 //! The rule, built on evidence rather than timing:
 //!
@@ -40,9 +46,15 @@
 //! When the prompt opens with nothing in flight there is no evidence to attribute it with, and
 //! the old rule applies unchanged (see [`GateLedger::held`]).
 //!
-//! Known limit: an agent's sibling calls run concurrently, so a sibling that STARTS after the
-//! gated call asked would read as its agent moving on. That is the old behaviour, narrowed to
-//! one agent's own parallel batch.
+//! Known limits:
+//! - An agent's sibling calls run concurrently, so a sibling that STARTS after the gated call
+//!   asked would read as its agent moving on. That is the old behaviour, narrowed to one agent's
+//!   own parallel batch.
+//! - An ask approved within the Notification's 6s opens no prompt and leaves no trace but its
+//!   call running. If ANOTHER agent's prompt opens while that call still runs, both are
+//!   candidates: the card says "Permission requested", and the prompt holds after its approval
+//!   until the other call ends or its agent asks, starts a call or stops. The hooks cannot close
+//!   this; only the screen can say no dialog is open.
 
 /// The agent that made a call. `""` is the main thread — a hook with no `agent_id`.
 pub fn agent_key(event: &serde_json::Value) -> String {
@@ -143,7 +155,16 @@ impl GateLedger {
             .rposition(|c| mine(c) && c.fingerprint == fingerprint)
             .or_else(|| self.in_flight.iter().rposition(mine));
         if let Some(pos) = pos {
-            self.in_flight[pos].asked = true;
+            // An agent's newest ask is its only live one: a foreground ask stacks on top of the
+            // agent's earlier dialog, which has closed or is covered. Across agents nothing in the
+            // hooks says which dialog is on top (`PermissionRequest` fires when a dialog is
+            // requested, not when it shows, and background asks go UNDER the visible one), so
+            // other agents' asks are left alone and several make an unnameable card.
+            for (i, c) in self.in_flight.iter_mut().enumerate() {
+                if c.agent == agent {
+                    c.asked = i == pos;
+                }
+            }
         }
     }
 
@@ -368,6 +389,34 @@ mod tests {
         g.call_started(call("sub-1", "agent-a", "Read"));
         assert_eq!(g.call_ended("sub-1"), GateChange::Unchanged);
         assert!(g.held());
+    }
+
+    /// Round-2 review: an ask approved inside the Notification's 6s never opens a prompt, and
+    /// its call may then run for minutes. The same agent asking again proves that earlier ask is
+    /// no longer live, so it cannot join the next prompt's candidates.
+    #[test]
+    fn an_agents_new_ask_retires_its_earlier_one() {
+        let mut g = GateLedger::default();
+        g.call_started(call("build", "agent-a", "Bash"));
+        g.call_asked("agent-a", "Bash", "fp-build"); // approved at once, no Notification
+        g.call_started(call("test", "agent-a", "Bash"));
+        g.call_asked("agent-a", "Bash", "fp-test");
+        assert_eq!(one(g.prompt_opened()).as_deref(), Some("test"));
+    }
+
+    /// Two agents asking at once cannot be ordered from the hooks, so the card names neither.
+    /// Known residual: a quick-approved call from agent A that is STILL RUNNING when agent B's
+    /// prompt opens is one of these, and holds B's prompt until it ends.
+    #[test]
+    fn asks_from_two_agents_are_several() {
+        let mut g = GateLedger::default();
+        g.call_started(call("build", "agent-a", "Bash"));
+        g.call_asked("agent-a", "Bash", "fp-build");
+        g.call_started(call("rm", "", "Bash"));
+        g.call_asked("", "Bash", "fp-rm");
+        assert_eq!(g.prompt_opened(), Attribution::Several);
+        assert_eq!(g.call_ended("rm"), GateChange::Unchanged);
+        assert_eq!(g.call_ended("build"), GateChange::Released);
     }
 
     #[test]
