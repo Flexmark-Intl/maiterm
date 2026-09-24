@@ -306,10 +306,12 @@ function createAgentStateStore() {
       });
       unlisteners.push(u2);
 
-      const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-stop', (e) => {
-        const { session_id, tab_id } = e.payload;
+      const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string; gate_held?: boolean }>('agent-hook-stop', (e) => {
+        const { session_id, tab_id, gate_held } = e.payload;
         if (!tab_id) return;
-        setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
+        // A background subagent's permission prompt outlives the parent's turn ending
+        // (claude_code/gate.rs). Rust keeps the tab in permission; so does this mirror.
+        if (!gate_held) setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
         setVariable(tab_id, 'claudeAction', '');
       });
       unlisteners.push(u3);
@@ -323,14 +325,14 @@ function createAgentStateStore() {
       });
       unlisteners.push(u4);
 
-      const u5 = await listen<{ session_id: string; tab_id: string | null; notification_type: string; runtime?: string }>('agent-hook-notification', (e) => {
-        const { session_id, tab_id, notification_type } = e.payload;
+      const u5 = await listen<{ session_id: string; tab_id: string | null; notification_type: string; runtime?: string; gate_held?: boolean }>('agent-hook-notification', (e) => {
+        const { session_id, tab_id, notification_type, gate_held } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         if (notification_type === 'permission_prompt') {
           setState(tab_id, session_id, 'permission', undefined, undefined, runtime);
           dispatch(getDescriptor(runtime).displayName, 'Needs permission approval', 'info', { tabId: tab_id });
-        } else if (notification_type === 'idle_prompt') {
+        } else if (notification_type === 'idle_prompt' && !gate_held) {
           setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
           // Notification disabled — the Stop hook already notifies when Claude finishes,
           // and this fires at awkward moments (e.g. between tool calls). Re-enable if we
@@ -382,8 +384,8 @@ function createAgentStateStore() {
       unlisteners.push(u6);
 
       // PreToolUse: track which tool Claude is about to use + set %claudeAction variable
-      const u7 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; tool_input: Record<string, unknown> | null; runtime?: string; approvals_open?: number }>('agent-hook-pre-tool-use', (e) => {
-        const { session_id, tab_id, tool_name, tool_input, approvals_open } = e.payload;
+      const u7 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; tool_input: Record<string, unknown> | null; runtime?: string; approvals_open?: number; gate_held?: boolean }>('agent-hook-pre-tool-use', (e) => {
+        const { session_id, tab_id, tool_name, tool_input, approvals_open, gate_held } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         const action = buildActionString(runtime, tool_name, tool_input);
@@ -395,8 +397,12 @@ function createAgentStateStore() {
         // the card. Rust makes the same call; this mirror has to agree
         // (docs/codex-integration-review.md C7).
         const held = approvals_open ? sessions.get(tab_id)?.state : undefined;
-        setState(tab_id, session_id, held ?? 'active', tool_name, detail, runtime);
-        setVariable(tab_id, 'claudeAction', action);
+        // Claude: a prompt held by some OTHER agent's call. Neither the state nor the tool it
+        // names may move — the tool fields are what the approval describes (claude_code/gate.rs).
+        if (!gate_held) {
+          setState(tab_id, session_id, held ?? 'active', tool_name, detail, runtime);
+          setVariable(tab_id, 'claudeAction', action);
+        }
         // AskUserQuestion is the agent's native "ask the human" tool — the single canonical
         // "needs you" signal (alongside permission prompts). When it fires on a tab you're not
         // looking at (e.g. a background mesh agent), surface a toast + deep-link so it isn't
@@ -408,9 +414,11 @@ function createAgentStateStore() {
       unlisteners.push(u7);
 
       // PostToolUse: tool finished, clear tool info (still active/thinking)
-      const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string; approvals_open?: number }>('agent-hook-post-tool-use', (e) => {
-        const { session_id, tab_id, approvals_open } = e.payload;
+      const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string; approvals_open?: number; gate_held?: boolean }>('agent-hook-post-tool-use', (e) => {
+        const { session_id, tab_id, approvals_open, gate_held } = e.payload;
         if (!tab_id) return;
+        // Claude: this call ended but the prompt is held by another. Leave it exactly as it is.
+        if (gate_held) return;
         // A tool finishing does NOT mean the tab is unblocked: Codex runs tools in parallel, so
         // another call can still be waiting on an approval. Rust keeps the session in
         // WaitingPermission until nothing is outstanding, and this mirror has to agree — it used

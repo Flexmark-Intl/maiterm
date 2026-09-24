@@ -2515,6 +2515,12 @@ async fn process_message(
                                         .as_ref()
                                         .map(|e| e.recent_tool_calls.clone())
                                         .unwrap_or_default(),
+                                    // Preserved with the approvals, for the same reason: dropping
+                                    // it mid-prompt would release a Claude gate nothing ended.
+                                    claude_gate: existing
+                                        .as_ref()
+                                        .map(|e| e.claude_gate.clone())
+                                        .unwrap_or_default(),
                                     model: existing.and_then(|e| e.model),
                                     connection_id: Some(connection_id.to_string()),
                                 },
@@ -2568,6 +2574,7 @@ async fn process_message(
                                     pending_approvals: Vec::new(),
                                     approval_seq: 0,
                                     recent_tool_calls: Vec::new(),
+                                    claude_gate: Default::default(),
                                     model: None,
                                     finished_a_turn: false,
                                     connection_id: Some(connection_id.to_string()),
@@ -2976,6 +2983,9 @@ enum HookPhase {
     /// Codex only: the human interrupted the active turn (Esc). Not a `Stop` — no turn
     /// completed, so nothing here is a result for a human to read.
     Interrupt,
+    /// Claude only: a subagent finished. Touches nothing but the gate ledger — a subagent
+    /// denied a call and then done emits nothing else that could say its prompt is over.
+    SubagentStop,
     Compact,
     Other,
 }
@@ -2993,6 +3003,10 @@ fn normalize_hook_event(_runtime: crate::state::AgentRuntime, name: &str, event:
         "UserPromptSubmit" => HookPhase::Prompt,
         "PreToolUse" => HookPhase::ToolPre,
         "PostToolUse" => HookPhase::ToolPost,
+        // A call that failed has ended exactly as one that succeeded has. Without this, a failed
+        // Bash stayed "in flight" in the Claude gate ledger and could hold a later prompt open.
+        "PostToolUseFailure" => HookPhase::ToolPost,
+        "SubagentStop" => HookPhase::SubagentStop,
         "PreCompact" => HookPhase::Compact,
         "Notification" => HookPhase::Notification {
             notification_type: event
@@ -3028,6 +3042,13 @@ fn reinit_state(existing: Option<&crate::state::app_state::AgentSessionInfo>) ->
     use crate::state::app_state::AgentSessionState;
     match existing {
         Some(e) if !e.pending_approvals.is_empty() => AgentSessionState::WaitingPermission,
+        // A Claude prompt still attributed to a call in flight is the same held gate.
+        Some(e)
+            if e.claude_gate.held()
+                && matches!(e.state, AgentSessionState::WaitingPermission) =>
+        {
+            AgentSessionState::WaitingPermission
+        }
         _ => AgentSessionState::Active,
     }
 }
@@ -3255,6 +3276,7 @@ async fn hooks_handler(
                         pending_approvals: Vec::new(),
                         approval_seq: 0,
                         recent_tool_calls: Vec::new(),
+                        claude_gate: Default::default(),
                         model: model.clone(),
                         finished_a_turn: had_result,
                         connection_id: None,
@@ -3447,10 +3469,28 @@ async fn hooks_handler(
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.state = match notification_type.as_str() {
+                        // A prompt still attributed to a call in flight outranks "idle": the
+                        // main thread can sit at its input while a subagent waits on a decision.
+                        "idle_prompt"
+                            if session.claude_gate.held()
+                                && matches!(session.state, AgentSessionState::WaitingPermission) =>
+                        {
+                            session.state
+                        }
                         "idle_prompt" => AgentSessionState::WaitingInput,
                         "permission_prompt" => AgentSessionState::WaitingPermission,
                         _ => session.state,
                     };
+                    // Attribute the prompt to the calls that could be waiting on it
+                    // (`claude_code/gate.rs`). When exactly one could, it is the gated call, so
+                    // it — not whichever agent's PreToolUse happened to land last — is what the
+                    // card describes.
+                    if notification_type == "permission_prompt" {
+                        if let Some(gated) = session.claude_gate.prompt_opened() {
+                            session.tool_name = Some(gated.tool_name.clone());
+                            session.tool_detail = gated.detail.clone();
+                        }
+                    }
                     // Any runtime whose permission Notification carries the gated tool inline
                     // (Claude's does not — its tool context came from the preceding PreToolUse).
                     // Codex no longer reaches here; its PermissionRequest has its own arm.
@@ -3469,6 +3509,14 @@ async fn hooks_handler(
                 }
             }
 
+            // Read back rather than tracked through the arm: `idle_prompt` must not settle the
+            // mirror to idle over a prompt Rust is still holding.
+            let gate_held = {
+                use crate::state::app_state::AgentSessionState;
+                srv.state.agent_sessions.read().get(&session_id).is_some_and(|s| {
+                    s.claude_gate.held() && matches!(s.state, AgentSessionState::WaitingPermission)
+                })
+            };
             log::debug!("Claude hook: Notification type='{}' session={} (tab {:?})",
                 notification_type, &session_id[..session_id.len().min(8)], tab_id);
             emit_dual(&srv.app_handle, "agent-hook-notification", "claude-hook-notification", serde_json::json!({
@@ -3476,6 +3524,7 @@ async fn hooks_handler(
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "notification_type": notification_type,
+                "gate_held": gate_held,
                 "title": event.get("title"),
                 "body": event.get("body"),
             }));
@@ -3489,18 +3538,27 @@ async fn hooks_handler(
             .or(tab_id_from_param);
 
             // Update session state to stopped + clear tool
+            let mut subagent_gate = false;
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
-                    session.state = AgentSessionState::Stopped;
+                    // The main thread's turn is over, so none of its calls is waiting. A prompt
+                    // that still holds after that belongs to a background subagent, and the
+                    // parent finishing its turn does not answer it.
+                    session.claude_gate.agent_ended("");
+                    subagent_gate = session.claude_gate.held()
+                        && matches!(session.state, AgentSessionState::WaitingPermission);
+                    if !subagent_gate {
+                        session.state = AgentSessionState::Stopped;
+                        session.tool_name = None;
+                        session.tool_detail = None;
+                    }
                     // The one place this is ever set: a turn ending here is what makes the tab
                     // hold something a human hasn't read. Never cleared — a later idle_prompt
                     // Notification rewrites `state` back to WaitingInput ~60s from now, and the
                     // result is no less unread for that.
                     session.finished_a_turn = true;
-                    session.tool_name = None;
-                    session.tool_detail = None;
                     session.pending_question = None;
                     session.pending_question_at = None;
                     // The turn is over, so nothing is awaiting a decision — whichever way each
@@ -3518,7 +3576,51 @@ async fn hooks_handler(
                 "runtime": runtime_key,
                 "session_id": session_id,
                 "tab_id": tab_id,
+                // A background subagent's prompt survives the parent's turn ending; the
+                // frontend mirror has to keep showing it, as Rust does.
+                "gate_held": subagent_gate,
             }));
+        }
+
+        HookPhase::SubagentStop => {
+            let tab_id = {
+                let sessions = srv.state.agent_sessions.read();
+                sessions.get(&session_id).map(|s| s.tab_id.clone())
+            }
+            .or(tab_id_from_param);
+            let agent = crate::claude_code::gate::agent_key(&event);
+            // The one state change this event makes: a prompt only this subagent could have
+            // been holding is over. Emitted as a tool ending, which is what the frontend mirror
+            // already knows how to settle.
+            let mut released = false;
+            if !session_id.is_empty() && !agent.is_empty() {
+                use crate::claude_code::gate::GateChange;
+                use crate::state::app_state::AgentSessionState;
+                let mut sessions = srv.state.agent_sessions.write();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    if session.claude_gate.agent_ended(&agent) == GateChange::Released
+                        && matches!(session.state, AgentSessionState::WaitingPermission)
+                        && session.pending_approvals.is_empty()
+                    {
+                        session.state = AgentSessionState::Active;
+                        session.tool_name = None;
+                        session.tool_detail = None;
+                        released = true;
+                    }
+                }
+            }
+            log::debug!("Claude hook: SubagentStop agent={} session={} released_prompt={}",
+                agent, &session_id[..session_id.len().min(8)], released);
+            if released {
+                emit_dual(&srv.app_handle, "agent-hook-post-tool-use", "claude-hook-post-tool-use", serde_json::json!({
+                    "runtime": runtime_key,
+                    "session_id": session_id,
+                    "tab_id": tab_id,
+                    "tool_name": "",
+                    "tool_input": null,
+                    "approvals_open": 0,
+                }));
+            }
         }
 
         HookPhase::Prompt => {
@@ -3537,6 +3639,10 @@ async fn hooks_handler(
                     // A new prompt means a new turn: anything still filed belongs to a turn that
                     // has ended.
                     clear_approvals(session);
+                    // The human could type, so no permission dialog is up. The main thread's old
+                    // calls are over too; a background subagent's may still be running.
+                    session.claude_gate.prompt_closed();
+                    session.claude_gate.agent_ended("");
                 }
             }
 
@@ -3686,15 +3792,33 @@ async fn hooks_handler(
 
             // Update session state back to active + track current tool
             let mut approvals_open = 0usize;
+            let mut gate_held = false;
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     let turn_id = event.get("turn_id").and_then(|v| v.as_str()).unwrap_or("");
                     drop_other_turns(session, turn_id);
+                    // Claude: this agent starting a call proves only that THIS agent isn't the
+                    // one blocked. A subagent's call used to clear its parent's prompt here,
+                    // because every hook reads as the parent's session (claude_code/gate.rs).
+                    session.claude_gate.call_started(crate::claude_code::gate::InFlightCall {
+                        tool_use_id: event
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        agent: crate::claude_code::gate::agent_key(&event),
+                        tool_name: tool_name.clone(),
+                        detail: event
+                            .get("tool_input")
+                            .and_then(crate::mailink::transcript::compact_tool_arg),
+                    });
+                    gate_held = session.claude_gate.held()
+                        && matches!(session.state, AgentSessionState::WaitingPermission);
                     // A parallel tool starting must not report the session as unblocked while
                     // another tool's approval is still outstanding.
-                    if session.pending_approvals.is_empty() {
+                    if session.pending_approvals.is_empty() && !gate_held {
                         session.state = AgentSessionState::Active;
                     }
                     // Codex's PermissionRequest carries no tool_use_id; this is the record the
@@ -3715,14 +3839,21 @@ async fn hooks_handler(
                             session.recent_tool_calls.drain(..overflow);
                         }
                     }
-                    session.tool_name = if tool_name.is_empty() { None } else { Some(tool_name.clone()) };
-                    // Compact primary-arg label (e.g. the Bash command) so a permission prompt
-                    // for this tool can show WHAT is being approved (maiLink card).
-                    session.tool_detail = event
-                        .get("tool_input")
-                        .and_then(crate::mailink::transcript::compact_tool_arg);
+                    // While a prompt holds, the tool fields ARE the approval card: they name the
+                    // gated call. Another agent's call starting must not rewrite them into a
+                    // description of something nobody is being asked about.
+                    if !gate_held {
+                        session.tool_name = if tool_name.is_empty() { None } else { Some(tool_name.clone()) };
+                        // Compact primary-arg label (e.g. the Bash command) so a permission prompt
+                        // for this tool can show WHAT is being approved (maiLink card).
+                        session.tool_detail = event
+                            .get("tool_input")
+                            .and_then(crate::mailink::transcript::compact_tool_arg);
+                    }
                     // Capture the structured AskUserQuestion prompt (its tool_input.questions feed
-                    // the maiLink PendingPrompt); any other tool starting means no open question.
+                    // the maiLink PendingPrompt). Any other call starting used to mean no open
+                    // question, but a subagent's calls go on while the parent's ask is open, so
+                    // the question stays while the AskUserQuestion call is still in flight.
                     if tool_name == "AskUserQuestion" {
                         session.pending_question = event.get("tool_input").cloned();
                         session.pending_question_at = Some(
@@ -3731,7 +3862,7 @@ async fn hooks_handler(
                                 .map(|d| d.as_millis() as i64)
                                 .unwrap_or(0),
                         );
-                    } else {
+                    } else if !session.claude_gate.has_in_flight("AskUserQuestion") {
                         session.pending_question = None;
                         session.pending_question_at = None;
                     }
@@ -3752,6 +3883,9 @@ async fn hooks_handler(
                 // the same call Rust does or the desktop clears its permission alert while
                 // maiLink still shows the approval (review C7).
                 "approvals_open": approvals_open,
+                // Claude's equivalent: a prompt held by a call this event did not end. The
+                // mirror keeps its state AND its tool fields, as Rust does.
+                "gate_held": gate_held,
             }));
         }
 
@@ -3772,6 +3906,7 @@ async fn hooks_handler(
             // its own tool_use_id, so a gate held for a parallel tool survives untouched. The
             // session leaves WaitingPermission only once nothing is outstanding.
             let mut approvals_open = 0usize;
+            let mut gate_held = false;
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
@@ -3785,8 +3920,23 @@ async fn hooks_handler(
                         );
                     }
                     settle_permission_state(session);
-                    session.tool_name = None;
-                    session.tool_detail = None;
+                    // Claude: the call that just ran was not waiting on anyone. When it was the
+                    // last call the prompt could be holding, the prompt is over — the gated call
+                    // was approved and has now run.
+                    let released = session.claude_gate.call_ended(tool_use_id.unwrap_or(""))
+                        == crate::claude_code::gate::GateChange::Released;
+                    if released
+                        && session.pending_approvals.is_empty()
+                        && matches!(session.state, AgentSessionState::WaitingPermission)
+                    {
+                        session.state = AgentSessionState::Active;
+                    }
+                    gate_held = session.claude_gate.held()
+                        && matches!(session.state, AgentSessionState::WaitingPermission);
+                    if !gate_held {
+                        session.tool_name = None;
+                        session.tool_detail = None;
+                    }
                     // AskUserQuestion completing means the human answered → no open question.
                     if tool_name == "AskUserQuestion" {
                         session.pending_question = None;
@@ -3798,7 +3948,7 @@ async fn hooks_handler(
                         // synthesizes a ghost "permission" card from the stale state. Scoped to
                         // AskUserQuestion so a real gate held for another (parallel) tool is
                         // never masked.
-                        if matches!(session.state, AgentSessionState::WaitingPermission) {
+                        if matches!(session.state, AgentSessionState::WaitingPermission) && !gate_held {
                             session.state = AgentSessionState::Active;
                         }
                     }
@@ -3818,6 +3968,7 @@ async fn hooks_handler(
                 // go active on any tool completing, which disagreed with Rust the moment a
                 // parallel call was still awaiting a decision (review C7).
                 "approvals_open": approvals_open,
+                "gate_held": gate_held,
             }));
         }
 
@@ -3946,6 +4097,7 @@ mod tests {
             pending_approvals: Vec::new(),
             approval_seq: 0,
             recent_tool_calls: Vec::new(),
+            claude_gate: Default::default(),
             model: None,
             transcript_path: None,
             finished_a_turn: false,

@@ -483,6 +483,9 @@ function buildSetupScript(
       UserPromptSubmit: [eventHook],
       PreToolUse: [eventHook],
       PostToolUse: [eventHook],
+      // Mirrors lockfile.rs build_our_hooks: the ends the permission-prompt ledger needs.
+      PostToolUseFailure: [eventHook],
+      SubagentStop: [eventHook],
       PreCompact: [eventHook],
     },
   });

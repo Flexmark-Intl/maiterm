@@ -181,6 +181,10 @@ pub struct AgentSessionInfo {
     /// `PreToolUse` calls seen in the active turn, newest last, bounded by
     /// `MAX_RECENT_TOOL_CALLS`. Dropped wholesale when the turn changes.
     pub recent_tool_calls: Vec<RecentToolCall>,
+    /// Claude only: which calls are in flight, and which of them an open permission prompt may be
+    /// holding. Subagent hooks share the parent's session id and the prompt names no agent, so
+    /// this is what stops a busy subagent clearing its parent's prompt (`claude_code/gate.rs`).
+    pub claude_gate: crate::claude_code::gate::GateLedger,
 }
 
 /// How many `PreToolUse` records to retain per session for approval binding. Codex runs tools in
