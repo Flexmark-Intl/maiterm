@@ -1757,6 +1757,11 @@ pub struct MailinkDevice {
     /// See docs/mailink-protocol.md §6.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_cap: Option<String>,
+    /// Doorbell kinds this device asked NOT to be pushed (docs/mailink-protocol.md §6.2). Kept
+    /// verbatim, unknown kinds included, so a newer phone and an older desktop never fight over
+    /// a word one of them doesn't know. Pushes only: the WS `attention` frame is unaffected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_mute: Vec<String>,
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: i64,

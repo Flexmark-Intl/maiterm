@@ -414,6 +414,10 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/ws", get(ws_handler))
         .route("/mailink/v1/pair", post(post_pair))
         .route("/mailink/v1/push-register", post(post_push_register))
+        .route(
+            "/mailink/v1/push-prefs",
+            get(get_push_prefs).post(post_push_prefs),
+        )
         // Outermost, so it sees the final status of every route including the WS upgrade (which
         // authenticates itself and never calls `authorize`).
         .layer(axum::middleware::from_fn_with_state(api.clone(), log_rejections))
@@ -488,7 +492,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.10";
+const PROTOCOL_VERSION: &str = "0.11";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -2240,6 +2244,7 @@ async fn post_pair(
         push_platform: None,
         push_env: None,
         push_cap: None,
+        push_mute: Vec::new(),
         created_at: now_ms() as i64,
         last_seen_at: now_ms() as i64,
     };
@@ -2302,6 +2307,74 @@ async fn post_push_register(
     };
     let _ = crate::state::save_state(&data_clone);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Every `kind` the doorbell can ring (docs §6.2). The phone shows one switch per entry, so a
+/// kind belongs here only once something in this build actually rings it.
+const DOORBELL_KINDS: &[&str] = &["permission", "question", "idle_done", "escalation", "account"];
+
+fn push_prefs_json(muted: &[String]) -> Value {
+    json!({ "kinds": DOORBELL_KINDS, "muted": muted })
+}
+
+/// Blank and repeated entries dropped, order kept. Unknown kinds are KEPT: a newer phone may mute
+/// a kind this desktop doesn't ring yet, and rejecting it would make the two fight.
+fn normalize_mutes(muted: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in muted {
+        let m = m.trim().to_string();
+        if !m.is_empty() && !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// GET /push-prefs — which doorbell kinds this device has muted. The device is its bearer token;
+/// the dev token has no device record, so it gets 409 exactly as `/push-register` does.
+async fn get_push_prefs(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let hash = sha256_hex(bearer_token(&headers).as_bytes());
+    let data = s.app.app_data.read();
+    match data.preferences.mailink_devices.iter().find(|d| d.token_hash == hash) {
+        Some(d) => Ok(Json(push_prefs_json(&d.push_mute))),
+        None => Err(StatusCode::CONFLICT),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PushPrefsBody {
+    muted: Vec<String>,
+}
+
+/// POST /push-prefs — replace this device's muted kinds; answers what was stored.
+async fn post_push_prefs(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<PushPrefsBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let hash = sha256_hex(bearer_token(&headers).as_bytes());
+    let muted = normalize_mutes(body.muted);
+    let data_clone = {
+        let mut data = s.app.app_data.write();
+        match data
+            .preferences
+            .mailink_devices
+            .iter_mut()
+            .find(|d| d.token_hash == hash)
+        {
+            Some(d) => d.push_mute = muted.clone(),
+            None => return Err(StatusCode::CONFLICT),
+        }
+        data.clone()
+    };
+    let _ = crate::state::save_state(&data_clone);
+    log::info!("[maiLink] push prefs: muted {:?}", muted);
+    Ok(Json(push_prefs_json(&muted)))
 }
 
 #[derive(serde::Deserialize)]
@@ -5288,6 +5361,9 @@ async fn ring_devices(
         .preferences
         .mailink_devices
         .iter()
+        // A device that muted this kind is skipped (§6.2). Only the push: the attention it
+        // stands for still reaches every phone over the WS and the chat list.
+        .filter(|d| !d.push_mute.iter().any(|m| m == kind))
         .filter_map(|d| match (d.push_token.as_ref(), d.push_cap.as_ref()) {
             (Some(t), Some(cap)) => Some((
                 t.clone(),
@@ -5322,6 +5398,24 @@ async fn ring_devices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mute the desktop doesn't recognise is KEPT — it is a newer phone's word, and dropping it
+    /// would make the two fight. Only blanks and repeats go.
+    #[test]
+    fn push_mutes_keep_unknown_kinds_and_drop_blanks_and_repeats() {
+        let got = normalize_mutes(vec![
+            "idle_done".into(),
+            " idle_done ".into(),
+            "".into(),
+            "   ".into(),
+            "some_future_kind".into(),
+            "permission".into(),
+        ]);
+        assert_eq!(got, vec!["idle_done", "some_future_kind", "permission"]);
+        let body = push_prefs_json(&got);
+        assert_eq!(body["kinds"].as_array().unwrap().len(), DOORBELL_KINDS.len());
+        assert_eq!(body["muted"][1], "some_future_kind");
+    }
 
     /// A suspended tab with no transcript and no scrollback row used to answer `now` — a
     /// months-old tab reading as "just active" on every GET, walking forward with the clock.

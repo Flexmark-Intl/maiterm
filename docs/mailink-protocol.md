@@ -4,6 +4,14 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.11 changelog** (2026-09-24). Additive: per-device push preferences (§6.2) —
+> `GET /push-prefs` and `POST /push-prefs`, where a phone names the doorbell kinds it does not want
+> PUSHED. It filters the push and nothing else: the WS `attention` frame, `unread` and the
+> attention list are untouched. The filter has to live on the desktop because iOS shows a remote
+> alert on arrival, and the phone cannot drop one without the notification-filtering
+> entitlement. Designed with the maiLink client, which asked for POST rather than PUT because
+> every other write on this API is a POST.
+>
 > **v0.10 changelog** (2026-09-22). Additive: which account a chat is running as (§14) — `account`
 > on `Chat`, `ChatDetail` and `chat_state`; `GET /accounts`, WS `accounts`, `POST /accounts/active`;
 > `GET /models?tab=`; attention kind `account`. Designed with the maiLink client before any code.
@@ -383,6 +391,8 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 |---|---|---|
 | `POST /pair` | Redeem QR code → token | `{code,device_name}` → `{device_id,token,server_name}` |
 | `POST /push-register` | Store push token + relay capability for doorbell | `{token,platform,env,cap}` → `{ok}` (`platform`: `"apns"`\|`"fcm"`; `cap` from §6 `/push-capability`) |
+| `GET  /push-prefs` | Which doorbell kinds this device has muted (§6.2) | → `{kinds, muted}`; `409` for the dev token |
+| `POST /push-prefs` | Replace this device's muted kinds (§6.2) | `{muted}` → `{kinds, muted}` as stored; `409` for the dev token |
 | `GET  /chats` | List maiLink-native chats + state | → `Chat[]` (see §4.3) |
 | `GET  /models` | What this machine can switch a Claude tab to — so the picker stops hardcoding a list that goes stale on every Claude release | → `ModelOption[]` |
 | `GET  /tasks` | The maiTerm task board (§4.3 `TaskBoard`): every workspace with a designated tab, its workstreams and rows. Pure in-memory read, safe to poll; fetch once on roster load and let the WS `tasks` event keep per-tab rows current | → `TaskBoard` |
@@ -1267,6 +1277,42 @@ Relay endpoints (in `update-worker/`):
   `503` if `CAP_SECRET` unset, else echoes the upstream APNs/FCM verdict.
 - gateway-by-`env`: only `env:"production"`→`api.push.apple.com`, else the sandbox gateway.
 
+### 6.2 Per-device push preferences — `GET` / `POST /push-prefs` (v0.11)
+
+A phone can decline whole kinds of push. The usual reason is that `idle_done` ("Agent finished")
+is noise to someone who only wants to hear when an agent is blocked on them.
+
+**The filter lives on the desktop, and it has to.** iOS displays a remote alert the moment it
+arrives. A phone cannot suppress one it has already received without Apple's
+notification-filtering entitlement, so the only place a push can be dropped is before it is sent.
+
+```ts
+// GET  /mailink/v1/push-prefs                       → PushPrefs
+// POST /mailink/v1/push-prefs  { muted: string[] }  → PushPrefs, as stored
+interface PushPrefs {
+  kinds: string[];   // every kind THIS desktop can ring — one switch each, nothing else
+  muted: string[];   // the kinds this device will not be pushed
+}
+```
+
+- **The device is its bearer token**, as on `/push-register`. The dev token has no device record,
+  so it gets `409`.
+- `kinds` today is `permission`, `question`, `idle_done`, `escalation`, `account`. A client builds
+  its switches from this list rather than from its own, so it never offers a switch that does
+  nothing.
+- **`muted` is stored verbatim, unknown kinds included** (trimmed, with blanks and duplicates
+  dropped). A newer phone may mute a kind an older desktop has never heard of. Rejecting that
+  would make the two fight, and storing it means the mute is already in place on the day the
+  desktop learns the kind.
+- **POST replaces the list; it does not merge.** Send the full set of kinds this device wants
+  muted.
+- **It filters the push and nothing else.** A muted kind still reaches the phone as a WS
+  `attention` frame, still counts toward `unread`, and still appears in the attention list. The
+  mute answers "don't wake me for this", not "hide this from me".
+- The default is empty, so a phone that never calls this is pushed exactly as before.
+- **A desktop older than 0.11 answers `404`.** A client should say the desktop needs an update to
+  choose, rather than show switches that store nothing.
+
 ---
 
 ## 7. Security & threat model
@@ -2001,7 +2047,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.10" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.11" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -2021,6 +2067,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.8` | adds `tool` + `detail` on `Chat`, `ChatDetail` and every `chat_state` frame |
 | `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted; adds `MaitermTask.notes`; **removes `MaitermTask.topicId`** |
 | `0.10` | adds `account` on `Chat`, `ChatDetail` and `chat_state` (§14); `GET /accounts`, WS `accounts`, `POST /accounts/active`; `GET /models?tab=`; attention kind `account` |
+| `0.11` | adds `GET /push-prefs` and `POST /push-prefs` (§6.2), per-device push mutes |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,
