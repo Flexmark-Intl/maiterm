@@ -173,6 +173,18 @@ driveTab({ tab_id: string, kind: 'process' | 'slash', text: string })
   `already_running` rather than `outstanding_directive`: the two call for opposite
   responses, and only one of them is "wait and retry". `already_running` means
   *the engine is doing this; stand down* — see §9.2.
+- **Only a `process` directive holds the tab.** It takes the `outstanding` slot and
+  arms `driveWatch`, because it asks something and the answer has to come back. A
+  `slash` send takes neither: `/model`, `/effort`, `/compact` produce no answer, so
+  nothing could release the slot but the 15-minute sweep, which then raised a
+  `directive_unacked` card per tab. An agent told to send `/model default` then
+  `/effort medium` to every tab got the first command out, a refusal on every second
+  one, and ~105 "no reply" cards on the way (2026-09-25). This is the rule rituals
+  already follow — a step holds the slot only when it sets `await`. Back-to-back
+  sends are still kept off a working tab by the `idle` check, which a slash that
+  starts a turn (`/compact`, a skill) trips by itself. The cost: a skill invoked as
+  `slash` has no return leg, so the tool description says to send it as `process`
+  when the output matters.
 - MCP-exposed to Overlord-the-agent only (never to supervised agents).
 - **Pre-approved via allowlist** — the guards are mechanical, and a
   permission-prompt-per-injection would make Overlord useless. The contrast is

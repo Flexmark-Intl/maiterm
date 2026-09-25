@@ -4595,6 +4595,16 @@ function createOverlordStore() {
       } catch {
         return { sent: false, reason: 'no_live_repl' };
       }
+      ledger(tabId, null, 'overlord_judgment', 0, step, 'sent');
+      // A slash command is a control, not a question: `/model`, `/effort`, `/compact` produce
+      // no answer, so nothing would ever release the slot. Holding it anyway refused every
+      // later driveTab at that tab until the 15-minute sweep, and then raised one "no reply"
+      // notice per tab — a bulk `/model default` + `/effort medium` across a window cost a
+      // full timeout per tab and a flood of cards for nothing (2026-09-25). Rituals already
+      // hold the slot only on a step that sets `await`; this is the same rule. What stops the
+      // next send landing mid-turn is the `idle` check above, which a slash that starts a
+      // turn (`/compact`, a skill) trips on its own.
+      if (kind === 'slash') return { sent: true };
       setOutstanding(tabId, {
         id: crypto.randomUUID(),
         ruleId: null,
@@ -4604,7 +4614,6 @@ function createOverlordStore() {
         sentAt: Date.now(),
         acked: false,
       });
-      ledger(tabId, null, 'overlord_judgment', 0, step, 'sent');
       // Watch for the answer. `replyToOverlord` is voluntary and the directive is raw text
       // with no envelope, so an agent that simply answers in its terminal — the normal
       // case — would otherwise never reach the supervisor that asked.
