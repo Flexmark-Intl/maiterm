@@ -770,7 +770,7 @@
                 {#if s.e.tabId}
                   <button class="ov-btn ov-btn-primary" onclick={() => navigateToTab(s.e.tabId)}>Open tab</button>
                 {/if}
-                {#if s.e.kind === 'directive_unacked' && s.e.tabId && overlordStore.outstandingFor(s.e.tabId)}
+                {#if s.e.kind === 'directive_unacked' && s.e.tabId && overlordStore.outstandingFor(s.e.tabId)?.ruleId === null}
                   <Tooltip text="Stop waiting for this tab's answer, so rules and the Overlord agent can reach it again.">
                     <button class="ov-btn" onclick={() => overlordStore.releaseDirective(s.e.tabId)}>Release</button>
                   </Tooltip>

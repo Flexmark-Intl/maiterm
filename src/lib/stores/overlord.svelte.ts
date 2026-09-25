@@ -676,8 +676,31 @@ function createOverlordStore() {
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   function bumpLive() { liveVersion++; }
 
-  function setOutstanding(tabId: string, d: OutstandingDirective) { outstanding.set(tabId, d); bumpLive(); }
-  function clearOutstanding(tabId: string) { if (outstanding.delete(tabId)) bumpLive(); }
+  function setOutstanding(tabId: string, d: OutstandingDirective) {
+    if (outstanding.has(tabId)) withdrawUnackedCards(tabId);
+    outstanding.set(tabId, d);
+    bumpLive();
+  }
+  function clearOutstanding(tabId: string) {
+    if (!outstanding.delete(tabId)) return;
+    withdrawUnackedCards(tabId);
+    bumpLive();
+  }
+  /**
+   * A `directive_unacked` card is about ONE directive, but it is keyed only by tab, so it has
+   * to leave with that directive's slot. Left behind it outlived the directive it quoted, and
+   * its Release button — shown whenever the tab held any directive — freed the NEXT one: an
+   * answered census request's card released the agent's own later driveTab, whose reply was
+   * then never harvested. Withdrawn wherever the slot changes hands, so a card on the deck
+   * always describes the directive that is actually outstanding.
+   */
+  function withdrawUnackedCards(tabId: string) {
+    const stale = escalations.filter((e) => e.tabId === tabId && e.kind === 'directive_unacked');
+    if (!stale.length) return;
+    escalations = escalations.filter((e) => !stale.includes(e));
+    for (const e of stale) unNudged.delete(e.id);
+    scheduleMirror();
+  }
 
   // ── Tab / workspace helpers ─────────────────────────────────────────────────
 
@@ -3069,11 +3092,15 @@ function createOverlordStore() {
      *
      * A rule's directive is refused. The ritual is awaiting that step, with its own timeout
      * and `on_timeout` the rule author chose, and freeing the slot underneath it would let a
-     * second sender type into a tab mid-sequence.
+     * second sender type into a tab mid-sequence. Keyed on the DIRECTIVE's owner, not on a
+     * ritual merely running: a `directive_unacked` rule runs with the census request it is
+     * complaining about still in the slot, and that one is nobody's wait but ours.
      */
     releaseDirective(tabId: string): { released: boolean; reason?: string; detail?: string; text?: string } {
+      const d = outstanding.get(tabId);
+      if (!d) return { released: false, reason: 'none', detail: 'That tab has no outstanding directive.' };
       const run = rituals.get(tabId);
-      if (run) {
+      if (d.ruleId !== null && run) {
         return {
           released: false,
           reason: 'rule_owned',
@@ -3083,16 +3110,8 @@ function createOverlordStore() {
             `It ends on its own timeout; nothing was released.`,
         };
       }
-      const d = outstanding.get(tabId);
-      if (!d) return { released: false, reason: 'none', detail: 'That tab has no outstanding directive.' };
-      clearOutstanding(tabId);
+      clearOutstanding(tabId); // withdraws the tab's unacked card with it
       driveWatch.delete(tabId);
-      const stale = escalations.filter((e) => e.tabId === tabId && e.kind === 'directive_unacked');
-      if (stale.length) {
-        escalations = escalations.filter((e) => !stale.includes(e));
-        for (const e of stale) unNudged.delete(e.id);
-        scheduleMirror();
-      }
       ledger(tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `[released] ${d.text}` }, 'aborted');
       logInfo(`overlord: released outstanding directive on ${tabId.slice(0, 8)} — ${JSON.stringify(d.text.slice(0, 80))}`);
       return { released: true, text: d.text };
