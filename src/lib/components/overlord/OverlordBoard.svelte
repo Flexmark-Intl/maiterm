@@ -770,6 +770,11 @@
                 {#if s.e.tabId}
                   <button class="ov-btn ov-btn-primary" onclick={() => navigateToTab(s.e.tabId)}>Open tab</button>
                 {/if}
+                {#if s.e.kind === 'directive_unacked' && s.e.tabId && overlordStore.outstandingFor(s.e.tabId)}
+                  <Tooltip text="Stop waiting for this tab's answer, so rules and the Overlord agent can reach it again.">
+                    <button class="ov-btn" onclick={() => overlordStore.releaseDirective(s.e.tabId)}>Release</button>
+                  </Tooltip>
+                {/if}
                 <button class="ov-btn" onclick={() => overlordStore.dismissEscalation(s.e.id)}>Clear</button>
               </div>
 
@@ -1041,7 +1046,12 @@
             {/if}
 
             {#if u.awaiting && !u.ritual}
-              <span class="ov-chip ov-chip-tone unit-flag" style:--tone="var(--ov-warn)">awaiting reply</span>
+              <span class="unit-flag unit-await">
+                <span class="ov-chip ov-chip-tone" style:--tone="var(--ov-warn)">awaiting reply</span>
+                <Tooltip text="Stop waiting for this tab's answer, so rules and the Overlord agent can reach it again.">
+                  <button class="ov-btn" onclick={() => overlordStore.releaseDirective(u.tab.id)}>Release</button>
+                </Tooltip>
+              </span>
             {/if}
 
             {#if unitNotes[u.tab.id]}
@@ -1549,6 +1559,7 @@
   }
 
   .unit-flag { align-self: flex-start; }
+  .unit-await { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
   /* ── Ledger ───────────────────────────────────────────────────────────── */
   .ledger-intro {

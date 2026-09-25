@@ -2243,7 +2243,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 29] = [
+const PEER_ADDRESSING_TOOLS: [&str; 30] = [
     // Files leave the machine for the human's phone and land in a named tab's chat. An
     // inferred identity would put one agent's files in a stranger's conversation, which is
     // the "speak as it" side of this line, not the "act on it" side.
@@ -2259,6 +2259,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 29] = [
     // Overlord tools that speak with authority (drive tabs / mutate rules / drain the
     // escalation queue) must never run on a deduced identity either.
     "driveTab",
+    "releaseDirective",
     "proposeRuleChanges",
     "listEscalations",
     // And the tab-lifecycle tools most of all: these are gated on the caller BEING the

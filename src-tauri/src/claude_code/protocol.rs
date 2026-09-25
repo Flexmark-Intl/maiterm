@@ -934,6 +934,18 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
             }
         },
         {
+            "name": "releaseDirective",
+            "description": "Overlord agent only: stop waiting on a tab's answer to an earlier driveTab directive. While that answer is owed, driveTab refuses the tab with `outstanding_directive` and no rule can reach it; this frees it immediately instead of after the 15-minute timeout. Use it when no answer is coming — the directive was a command rather than a question, or the agent has moved on. Any reply that arrives afterwards is not delivered to you, and a pending `directive_unacked` card for the tab is withdrawn. Returns `{ released: true, text }` with the directive that was released. Refuses `rule_owned` when a RULE is mid-sequence on that tab — the rule owns that wait and ends it on its own timeout — and `none` when nothing is outstanding. Ledgered.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "tab_id": { "type": "string", "description": "TARGET tab id" }
+                },
+                "required": ["tab_id"]
+            }
+        },
+        {
             "name": "recoverTab",
             "description": "Overlord agent only: get an agent tab responding again. The remedy is chosen from the tab's process state, not guessed — 'unbound' (agent alive, never ran /maiterm init) gets /maiterm init typed into it, which restores routing; 'stopped' (nothing running) gets the runtime's resume command, relaunching the agent. Returns `kind` telling you which it did. IMPORTANT: `sent: true` means the line was TYPED, not that the tab recovered — it always comes back with `verified: false`, because an agent still coming up (especially a remote one over SSH replaying its transcript) swallows the line silently and nothing at the moment of typing can tell. Do not report a tab recovered on this result. maiTerm watches for 45s and raises a `rebind_failed` escalation if it did not take, telling you to call recoverTab again — by then the tab reads 'stopped' rather than 'unbound', so the second call relaunches the agent instead of re-typing an init already shown not to work. Use it on any tab listWorkspaces reports as state 'unbound' or 'stopped'. Refuses `no_terminal` when the tab has no live terminal to type into — a suspended tab needs resumeTab, and a tab in a suspended workspace needs resumeWorkspace — and `not_unready` when the tab's agent is running and bound, i.e. there is nothing to recover.",
             "inputSchema": {

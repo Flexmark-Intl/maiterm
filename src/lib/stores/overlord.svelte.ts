@@ -2879,14 +2879,12 @@ function createOverlordStore() {
               `: ${JSON.stringify(od.text.slice(0, 160))}. That tab's outstanding slot is ` +
               // Says what actually works. The old text sent the reader to driveTab, which is
               // the one thing that CANNOT work here: it refuses a tab that already owes an
-              // answer (`outstanding_directive`). Nothing clears this slot but the tab
-              // answering or the tab going away — `ackOutstanding` exists but is wired to no
-              // control, so there is no manual release. Better to say so than to send
-              // someone round a loop that returns a refusal.
-              `held until it answers, so no rule and no driveTab can reach it. If the agent ` +
-              `is gone or wedged, reload or close the tab — that is the only thing that ` +
-              `releases the slot. If it is alive and simply never acknowledges, it can clear ` +
-              `this itself with replyToOverlord kind:'ack'.`,
+              // answer (`outstanding_directive`). `releaseDirective` is the manual release —
+              // the deck's Release button and the agent's tool of the same name.
+              `held until it answers, so no rule and no driveTab can reach it. If no answer ` +
+              `is coming, release it (Release on this card, or releaseDirective). If the ` +
+              `agent is alive and simply never acknowledges, it can clear this itself with ` +
+              `replyToOverlord kind:'ack'.`,
           );
         }
         // Claude task-store importer — one-way, into maiTerm's own store.
@@ -3059,6 +3057,47 @@ function createOverlordStore() {
       unNudged.delete(id);
       scheduleMirror();
     },
+    /**
+     * Stop waiting on a tab's answer to a `driveTab` directive — the manual release that did
+     * not exist. The slot was held until the tab answered or 15 minutes passed, so a directive
+     * that will never be answered (a slash command sent before 09e6b79, an agent that took it
+     * as an instruction rather than a question) refused every later send at that tab for the
+     * full window, and both the deck and the agent could only watch. Releasing drops the
+     * reply watch too, and the card that was complaining about the silence: whoever released
+     * it has decided no answer is coming. A reply that does arrive later is simply not
+     * harvested.
+     *
+     * A rule's directive is refused. The ritual is awaiting that step, with its own timeout
+     * and `on_timeout` the rule author chose, and freeing the slot underneath it would let a
+     * second sender type into a tab mid-sequence.
+     */
+    releaseDirective(tabId: string): { released: boolean; reason?: string; detail?: string; text?: string } {
+      const run = rituals.get(tabId);
+      if (run) {
+        return {
+          released: false,
+          reason: 'rule_owned',
+          detail:
+            `The rule "${run.ruleName}" is running its sequence on that tab ` +
+            `(step ${Math.min(run.stepIndex + 1, run.stepCount)} of ${run.stepCount}) and owns the wait. ` +
+            `It ends on its own timeout; nothing was released.`,
+        };
+      }
+      const d = outstanding.get(tabId);
+      if (!d) return { released: false, reason: 'none', detail: 'That tab has no outstanding directive.' };
+      clearOutstanding(tabId);
+      driveWatch.delete(tabId);
+      const stale = escalations.filter((e) => e.tabId === tabId && e.kind === 'directive_unacked');
+      if (stale.length) {
+        escalations = escalations.filter((e) => !stale.includes(e));
+        for (const e of stale) unNudged.delete(e.id);
+        scheduleMirror();
+      }
+      ledger(tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `[released] ${d.text}` }, 'aborted');
+      logInfo(`overlord: released outstanding directive on ${tabId.slice(0, 8)} — ${JSON.stringify(d.text.slice(0, 80))}`);
+      return { released: true, text: d.text };
+    },
+
     /** Resolve an 'ack' gate / clear the outstanding directive for a tab (§8). */
     ackOutstanding(tabId: string) {
       const d = outstanding.get(tabId);

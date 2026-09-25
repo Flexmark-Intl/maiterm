@@ -260,6 +260,14 @@ function createClaudeCodeStore() {
           else result = await overlordStore.driveTab(a.tab_id, a.kind === 'slash' ? 'slash' : 'process', a.text);
           break;
         }
+        case 'releaseDirective': {
+          const a = args as { tabId?: string; tab_id: string };
+          if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };
+          else if (!overlordStore.isOverlordAgentTab(a.tabId)) result = { error: 'releaseDirective is available only to the Overlord agent tab.' };
+          else if (!a.tab_id) result = { error: 'tab_id is required.' };
+          else result = overlordStore.releaseDirective(a.tab_id);
+          break;
+        }
         case 'getTabPrompt': {
           const a = args as { tabId?: string; tab_id: string };
           if (!a.tabId) result = { error: 'No tab identity — call initSession first.' };

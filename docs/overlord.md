@@ -414,8 +414,15 @@ still suppresses them and the ceiling never sees them.
 
 **The card now says what actually works.** It used to send the reader to `driveTab`, which is
 the one thing that cannot work on a jammed tab — it refuses a tab that already owes an answer
-(`outstanding_directive`). Nothing releases that slot except the tab answering or the tab going
-away: **`ackOutstanding` exists but is wired to no control**, so there is no manual release.
+(`outstanding_directive`). For a long time nothing released that slot except the tab answering
+or the tab going away. **`releaseDirective` is now the manual release** (2026-09-25): a
+Release button on this card and on the unit's "awaiting reply" chip, and an Overlord-agent MCP
+tool of the same name. It clears the slot, drops the reply watch and withdraws this card —
+whoever releases has decided no answer is coming, so a late reply is not harvested. It refuses
+`rule_owned` while a ritual holds the tab: the rule is awaiting that step under its own
+timeout, and freeing the slot under it would let a second sender type in mid-sequence. The
+case that forced it was a bulk slash command, sent before slash sends stopped holding the slot
+at all (§4), which left the agent unable to reach ~50 tabs for 15 minutes with no remedy.
 
 **`drive_reply` and `directive_unacked` used to double-fire on one directive.**
 `harvestDriveReplies` dropped the watch on expiry but left `outstanding` to a `setTimeout`

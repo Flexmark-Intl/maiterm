@@ -16,7 +16,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled)` (67 tools; the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled)` (68 tools; the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
@@ -82,6 +82,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | startCommsThread | Comms: open a NEW thread in one of this tab's monitored channels (agent-initiated) and bind to it; `bind: false` posts without binding. Backend-only |
 | sendFilesToPhone | Send files from this machine to the human's paired maiLink phone — any type, per-path success/failure, SSH paths fetched over the bridge. Copies into the maiLink asset store; refused on an inferred identity. Backend-only |
 | unbindCommsThread | Comms: clear the tab's thread binding without posting (idempotent). Backend-only |
+| releaseDirective | Overlord agent only: stop waiting on a tab's answer to a `driveTab` directive, freeing the `outstanding` slot now instead of at the 15-minute timeout. Drops the reply watch and the tab's `directive_unacked` card; refuses `rule_owned` mid-ritual. The deck's Release button calls the same store method. docs/overlord.md §9 |
 | getTabPrompt | Overlord agent only: what is blocking a tab — `permission` (tool gate: tool + detail) or `question` (AskUserQuestion: the questions and options), plus the `prompt_id` stale-guard |
 | answerTabPrompt | Overlord agent only: answer that prompt with the human's authority, through the SAME responder the phone uses (runtime-specific permission keymap, one-shot selector guard, submit confirmation). Ledgered. Doctrine requires escalating consequential decisions to the human instead |
 | archiveTab / closeTab / deleteArchivedTab | Overlord agent only: take a tab out of the window (recoverable / irreversible) and prune the archive. Each takes `tab_id` **or** `tab_ids: string[]` (max 50) — cleanup arrives as a list, and one call per tab cost a model turn per tab. Batching is transport only: every id keeps its own `retireGuard`, its own ledger entry and its own `results[]` row, a refusal stops that tab and not the batch, and the loop is sequential because each retirement persists the pane tree. `recoverTab`/`resumeTab` stay single — they type into a live PTY. docs/overlord.md → Batched retirement |
