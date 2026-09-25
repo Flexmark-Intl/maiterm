@@ -89,6 +89,9 @@ function createAgentStateStore() {
   let sessions = $state<Map<string, AgentTabSession>>(new Map());
   const unlisteners: (() => void)[] = [];
   // tabId → timeout handle for stale tool detection
+  /** How long a compaction may run with no event before the tab is presumed back at its
+   *  prompt. Observed compactions take ~60s; this is the failed/cancelled case, not a budget. */
+  const COMPACT_STALE_MS = 5 * 60_000;
   const staleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** Mark a tab's idle result as read. Shared by the public markRead() and the
@@ -454,7 +457,22 @@ function createAgentStateStore() {
         const { session_id, tab_id, trigger, event } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
-        if (event === 'PreCompact') setState(tab_id, session_id, 'active', undefined, undefined, runtime);
+        if (event === 'PreCompact') {
+          setState(tab_id, session_id, 'active', undefined, undefined, runtime);
+          // A compaction that fails or is cancelled with Esc sends nothing after it — no
+          // SessionStart(compact), and Claude has no Interrupt hook — so without an expiry the
+          // tab read busy until its next prompt, and Overlord refused it (`agent_busy`) and
+          // skipped every idle-guarded rule on it. Parked in the stale-timer slot on purpose:
+          // ANY later state change clears that slot, so this fires only if nothing followed.
+          staleTimers.set(tab_id, setTimeout(() => {
+            staleTimers.delete(tab_id);
+            const s = sessions.get(tab_id);
+            if (s?.sessionId === session_id && s.state === 'active' && !s.toolName) {
+              setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
+              markReadInternal(tab_id);
+            }
+          }, COMPACT_STALE_MS));
+        }
         dispatch(getDescriptor(runtime).displayName, `Compacting conversation (${trigger})...`, 'info', { tabId: tab_id });
       });
       unlisteners.push(u9);
