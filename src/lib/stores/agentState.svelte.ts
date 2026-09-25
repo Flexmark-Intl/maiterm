@@ -443,11 +443,18 @@ function createAgentStateStore() {
       });
       unlisteners.push(u10);
 
-      // PreCompact: context compaction starting
-      const u9 = await listen<{ session_id: string; tab_id: string | null; trigger: string; runtime?: string }>('agent-hook-pre-compact', (e) => {
-        const { tab_id, trigger } = e.payload;
+      // PreCompact: context compaction starting. The agent is working from here — a manual
+      // `/compact` fires no UserPromptSubmit, so without this the tab read `idle` for the whole
+      // compaction (~60s observed) and anything gated on idle typed into it: Overlord's
+      // driveTab, once a slash send stopped holding the tab's outstanding slot. The
+      // SessionStart(compact) that ends it already sets `active`; this just starts it on time.
+      // Only on the START: Codex's PostCompact arrives on this same event, and marking a tab
+      // working after its compaction finished would leave it reading busy.
+      const u9 = await listen<{ session_id: string; tab_id: string | null; trigger: string; runtime?: string; event?: string }>('agent-hook-pre-compact', (e) => {
+        const { session_id, tab_id, trigger, event } = e.payload;
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
+        if (event === 'PreCompact') setState(tab_id, session_id, 'active', undefined, undefined, runtime);
         dispatch(getDescriptor(runtime).displayName, `Compacting conversation (${trigger})...`, 'info', { tabId: tab_id });
       });
       unlisteners.push(u9);

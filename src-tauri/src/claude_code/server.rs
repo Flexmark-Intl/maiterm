@@ -4020,6 +4020,9 @@ async fn hooks_handler(
                 "session_id": session_id,
                 "tab_id": tab_id,
                 "trigger": trigger,
+                // Pre vs Post: both normalize to Compact, but only a START makes the agent
+                // busy — the frontend must not mark a tab working on a Codex PostCompact.
+                "event": hook_event_name,
             }));
         }
 
