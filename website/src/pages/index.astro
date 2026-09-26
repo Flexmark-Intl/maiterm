@@ -50,7 +50,8 @@ const KEY_FEATURES = [
     // NOT "an account per client". There is no per-tab or per-workspace binding —
     // one account per runtime is active at a time (Preferences.active_account_ids)
     // and a tab reads it at spawn. Two can run at once because each tab keeps what
-    // it started with, but nothing remembers the pairing, and tabs that respawn
+    // it started with; the pairing is recorded only for the life of that shell
+    // (accounts/tab_record.rs, what maiLink shows), and tabs that respawn
     // come back under whatever is active then. Promise the simultaneity, not an
     // assignment the app does not store.
     blurb:

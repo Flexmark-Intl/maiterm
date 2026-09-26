@@ -38,7 +38,7 @@ Each **step** is either a free-text directive or a slash command, and can wait f
 Overlord types with **your** authority and no envelope wrapped around it — the target agent cannot tell an Overlord directive from you typing. That's deliberate: an envelope would teach agents to hold work "for the human", and you can't wrap a slash command in one anyway. So the safety is mechanical rather than a matter of prompt adherence:
 
 - **A live agent must be there.** The real hazard isn't a misbehaving agent, it's an absent one — "spin up a review of that commit" typed at a bare shell prompt is a shell command.
-- **One directive at a time per tab**, so sequences stay coherent.
+- **One directive at a time per tab**, so sequences stay coherent. A directive that asks something holds the tab until it's answered, or for 15 minutes; a slash command such as `/model`, `/effort` or `/compact` never answers, so it doesn't hold the tab at all. A tab that is mid-compaction counts as busy, so nothing is typed into it halfway through.
 - **A rate ceiling per tab per hour**, and a required quiet period before anything is sent.
 - **Your own keystrokes abort a running sequence.** If you start typing, the ritual stops.
 
@@ -74,6 +74,8 @@ With Overlord enabled, a **♔ Overlord** row appears above the workspace list i
 - **Ledger** — a verbatim record of every directive sent: which tab, which rule (or you, or the agent), the exact bytes, and what came of it. Because injections are by design indistinguishable from you typing, this is the only way to reconstruct who told a project to do something at 3am.
 
 **You're never asked the same question twice.** When a tab hits a decision only you can make, it asks you directly — on screen, where you can answer it — *and* files the fact with Overlord. The supervisor's only possible move on a card like that would be to put the same question to you a second time, in a transcript you'd then have to leave anyway to answer the original. So those cards stay on the deck and out of the agent's queue: the card carries **Open tab** and says why there's no second prompt. Everything the supervisor can actually *do* something about — a blocked tab, a timed-out step, an unanswered directive — still reaches it, because fixing one before you get to the board is most of the point of running a supervisor.
+
+**A directive nobody will answer can be let go.** A tab that owes an answer is out of reach — no rule fires at it and the supervisor can't drive it — until it replies or the 15 minutes run out. When you can see no reply is coming, **Release** stops the wait at once: it sits beside the *awaiting reply* chip on the tab's fleet card and on the unanswered-directive card in Triage. A reply that turns up afterwards is not collected, and the unanswered-directive card goes with the directive it described. A wait a rule is running as one of its own steps isn't yours to release — that sequence ends on its own timeout.
 
 **A blocked card withdraws itself** when the tab it's about reports that it isn't blocked any more, rather than sitting on the deck until someone dismisses a problem that already went away.
 
@@ -114,6 +116,7 @@ Clicking the Overlord row creates the Overlord workspace if it doesn't exist yet
 |------|--------------|
 | `listEscalations` | Pull the queue of things the engine couldn't settle deterministically |
 | `driveTab` | Inject a directive into another tab in this window, with your authority |
+| `releaseDirective` | Stop waiting on a tab's answer to an earlier directive, so it can be driven again — the same thing as **Release** on the deck |
 | `getTabPrompt` / `answerTabPrompt` | See what a tab is stopped at, and answer it |
 | `proposeRuleChanges` | Propose rule edits for you to approve or reject |
 | `archiveTab` / `closeTab` / `deleteArchivedTab` | Put a finished session away — one tab or a list of them in a single call |

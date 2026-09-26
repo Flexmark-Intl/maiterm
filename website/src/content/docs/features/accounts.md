@@ -71,7 +71,7 @@ An account is an environment variable handed to the shell **when the tab starts*
 
 So switching decides what *new* tabs use. Tabs already open keep the account they started with, and so does an agent already working in one.
 
-There is no per-tab or per-workspace assignment behind this. One account per runtime is active at a time, and a tab reads it once, at spawn. Two accounts can be live together because each tab keeps what it started with — but nothing records the pairing, so a tab that respawns later (a restart, a reload, a resumed workspace) comes back under whatever is active *then*.
+There is no per-tab or per-workspace assignment behind this. One account per runtime is active at a time, and a tab reads it once, at spawn. Two accounts can be live together because each tab keeps what it started with. maiTerm notes which account a running shell started under — that is what [maiLink](/features/mailink/) shows beside a chat — but the note lasts only as long as that shell, so a tab that respawns later (a restart, a reload, a resumed workspace) comes back under whatever is active *then*.
 
 To move tabs across, respawn their shells — reloading a tab (`Cmd+Shift+R`) keeps its name, directory and scrollback and restarts the shell inside it. Switching accounts offers to do that for you at the granularity you think in: everything, one window, or one workspace.
 
@@ -114,7 +114,7 @@ It also tells the agent which plan the account is on. A token on its own does no
 
 To check a session, run `/status` in the remote agent. **Auth token: CLAUDE_CODE_OAUTH_TOKEN** means it is running on the token maiTerm sent.
 
-**Check it, because a wrong answer does not look wrong.** Whenever the token is missing, expired or not accepted, the tab does not fail — it comes up as whatever login the host already has, and the work is billed there. maiTerm sends a notification when it cannot *deliver* the token (unless notifications are off), but it cannot see what happens on the host after that, and it still sends a token the card says has expired.
+**Check it, because a wrong answer does not look wrong.** Whenever the token is missing, expired or not accepted, the tab does not fail — it comes up as whatever login the host already has, and the work is billed there. maiTerm sends a notification when it cannot *deliver* the token (unless notifications are off), but it cannot see what happens on the host after that. A token past the year the card counts down is not sent at all — you get the same notification, telling you to mint a new one, instead of a session that quietly runs as someone else.
 
 ### What the token trades away
 
