@@ -11,9 +11,11 @@
   import { dispatch } from '$lib/stores/notificationDispatch';
   import {
     getPtyForegroundJob, writeTerminal, shareCheckDirs, shareCloneCommand, shareImportBuild, shareProbe, shareReadFile,
-    type ShareDirVerdict, type ShareImportPreview, type ShareProbe, type SharedRoot,
+    type ShareDirVerdict, type ShareImportPreview, type ShareProbe, type SharedLoc, type SharedRoot,
   } from '$lib/tauri/commands';
   import { launchContextFor } from '$lib/share/share';
+  import { buildForkCommand } from '$lib/agents/resume';
+  import { launchCommand } from '$lib/agents/descriptor';
 
   interface Props {
     path: string;
@@ -44,6 +46,8 @@
   let includeNotes = $state(false);
   let includeTasks = $state(false);
   let serviceOn = $state<boolean[]>([]);
+  /** Per service: may it start by itself when the workspace opens (§4.2)? */
+  let autoStartOn = $state<boolean[]>([]);
   /** service index → var → value, for values the sender didn't send */
   let envInputs = $state<Record<number, Record<string, string>>>({});
   let notices = $state<string[]>([]);
@@ -79,6 +83,7 @@
         } satisfies RootRow;
       });
       serviceOn = p.file.services.map(() => true);
+      autoStartOn = p.file.services.map(s => s.auto_start);
       envInputs = Object.fromEntries(p.file.services.map((s, i) => [i, Object.fromEntries(s.env.filter(e => e.value == null).map(e => [e.name, '']))]));
       preview = p;
       probeAll();
@@ -317,6 +322,8 @@
         include_tasks: includeTasks,
         services: serviceOn.map((on, i) => (on ? i : -1)).filter(i => i >= 0),
         env_values: envInputs,
+        approved: approvedKeys(),
+        digest: preview.digest,
       });
       // Contexts first: adopting the workspace is what mounts its tabs (§5).
       for (const l of result.launches) terminalsStore.setSplitContext(l.tab_id, launchContextFor(l));
@@ -340,6 +347,69 @@
   }
 
   const agentTabs = $derived((preview?.file.workspace.panes ?? []).flatMap(p => p.tabs).filter(t => t.agent).length);
+
+  // ── Review (§4.2) — every command the import would run, and where ─────────────────────────
+  // The file is someone else's and opens on a double-click. Rust runs only what's approved here,
+  // by key, so a command this list doesn't show is a command that doesn't run.
+
+  interface ReviewItem {
+    key: string;
+    what: string;
+    command: string;
+    where: string;
+    /** For a remote tab: the ssh item this one runs through. Unticked, this can't run either. */
+    needs?: string;
+  }
+
+  function dirFor(loc: SharedLoc | null | undefined): string {
+    if (!loc) return 'your home directory';
+    const row = rows.find(r => r.root.id === loc.root_id);
+    if (!row?.dest) return 'your home directory';
+    return loc.subpath ? joinPath(row.dest, loc.subpath) : row.dest;
+  }
+
+  const reviewItems = $derived.by(() => {
+    const items: ReviewItem[] = [];
+    for (const t of (preview?.file.workspace.panes ?? []).flatMap(p => p.tabs)) {
+      const k = t.kind;
+      const remote = k.type === 'remote';
+      const sshKey = `tab:${t.id}:ssh`;
+      if (k.type === 'remote' || k.type === 'remote_editor') {
+        items.push({
+          key: sshKey,
+          what: k.type === 'remote' ? `“${t.name}” connects` : `“${t.name}” opens ${k.remote_path}`,
+          command: `ssh ${k.ssh_command}`,
+          where: 'on this computer',
+        });
+      }
+      if (k.type !== 'local' && k.type !== 'remote') continue;
+      const where = k.type === 'remote'
+        ? `on the remote host${k.remote_cwd ? `, in ${k.remote_cwd}` : ''}`
+        : `on this computer, in ${dirFor(k.location)}`;
+      if (t.agent) {
+        const fork = remote && t.agent.session_id ? buildForkCommand(t.agent.runtime, t.agent.session_id) : null;
+        items.push({ key: `tab:${t.id}:agent`, what: `“${t.name}” starts its agent`, command: fork ?? launchCommand(t.agent.runtime), where, needs: remote ? sshKey : undefined });
+      }
+      if (t.auto_resume?.enabled && t.auto_resume.command) {
+        items.push({ key: `tab:${t.id}:resume`, what: `“${t.name}” runs when it opens`, command: t.auto_resume.command, where, needs: remote ? sshKey : undefined });
+      }
+    }
+    return items;
+  });
+
+  let approved = $state<Record<string, boolean>>({});
+  $effect(() => {
+    // New keys start ticked: they're on screen, and "Set up workspace" is the approval.
+    for (const it of reviewItems) if (!(it.key in approved)) approved[it.key] = true;
+  });
+
+  function approvedKeys(): string[] {
+    const keys = reviewItems.filter(it => approved[it.key] && (!it.needs || approved[it.needs])).map(it => it.key);
+    preview?.file.services.forEach((s, i) => {
+      if (s.auto_start && serviceOn[i] && autoStartOn[i]) keys.push(`service:${i}:start`);
+    });
+    return keys;
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -364,6 +434,13 @@
           {#if preview.file.workspace.mesh}It's a mesh workspace: its agents will be bridged to each other.{/if}
           {#if agentTabs > 0}{agentTabs} tab{agentTabs === 1 ? '' : 's'} will start an agent.{/if}
         </p>
+
+        {#if preview.file.refused?.length}
+          <div class="refused">
+            <span class="warn">Parts of this file would have run something on this computer, so they were left out:</span>
+            <ul>{#each preview.file.refused as r}<li>{r}</li>{/each}</ul>
+          </div>
+        {/if}
 
         {#if rows.length > 0}
           <h3>Directories</h3>
@@ -434,6 +511,12 @@
             {#each preview.file.services as s, i}
               <div class="row" class:off={!serviceOn[i]}>
                 <label class="check"><input type="checkbox" bind:checked={serviceOn[i]} /> <span class="name">{s.name}</span> <span class="mono dim">{s.command}</span></label>
+                {#if serviceOn[i] && s.env.some(e => e.value != null)}
+                  <div class="sub env-given"><span class="dim">With</span> {#each s.env.filter(e => e.value != null) as e (e.name)}<span class="mono">{e.name}={e.value}</span> {/each}</div>
+                {/if}
+                {#if serviceOn[i] && s.auto_start}
+                  <label class="check sub-check"><input type="checkbox" bind:checked={autoStartOn[i]} /> Starts by itself when the workspace opens</label>
+                {/if}
                 {#if serviceOn[i] && Object.keys(envInputs[i] ?? {}).length > 0}
                   <div class="env">
                     <span class="dim">The sender left these for you to fill in:</span>
@@ -451,6 +534,23 @@
           <h3>Also import</h3>
           {#if preview.file.notes}<label class="check"><input type="checkbox" bind:checked={includeNotes} /> Notes</label>{/if}
           {#if preview.file.tasks}<label class="check"><input type="checkbox" bind:checked={includeTasks} /> Task board ({preview.file.tasks.tasks.length})</label>{/if}
+        {/if}
+
+        {#if reviewItems.length > 0 && phase === 'map'}
+          <h3>Commands it will run</h3>
+          <p class="dim hint">Exactly as they'll be typed. Untick anything you don't want run — the tab still opens, it just doesn't run it.</p>
+          <div class="list">
+            {#each reviewItems as it (it.key)}
+              {@const blocked = !!it.needs && !approved[it.needs]}
+              <div class="row" class:off={!approved[it.key] || blocked}>
+                <label class="check">
+                  <input type="checkbox" checked={approved[it.key] && !blocked} disabled={blocked} onchange={(e) => { approved[it.key] = e.currentTarget.checked; }} />
+                  <span>{it.what}</span> <span class="dim">{it.where}</span>
+                </label>
+                <pre class="cmd">{it.command}</pre>
+              </div>
+            {/each}
+          </div>
         {/if}
 
         {#if denied.length > 0}
@@ -501,5 +601,11 @@
   .env-row input { flex: 1; min-width: 0; background: var(--bg-dark); border: 1px solid var(--bg-light); border-radius: 4px; color: var(--fg); padding: 3px 6px; font-family: monospace; }
   .link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font-size: 0.846rem; }
   .notices { margin: 8px 0 0; padding-left: 18px; color: var(--fg-dim); }
+  .refused { margin: 6px 0 0; font-size: 0.846rem; }
+  .refused ul { margin: 4px 0 0; padding-left: 18px; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .hint { margin: 0 0 6px; font-size: 0.846rem; }
+  .cmd { margin: 4px 0 0 22px; padding: 4px 6px; background: var(--bg-dark); border-radius: 4px; font-family: monospace; font-size: 0.846rem; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
+  .sub-check { margin: 4px 0 0 22px; font-size: 0.846rem; }
+  .env-given { margin-left: 22px; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bg-light); }
 </style>

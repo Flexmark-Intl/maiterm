@@ -201,7 +201,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn probe(url: &str, branch: Option<&str>) -> Probe {
     let child = git()
-        .args(["ls-remote", "--heads", url])
+        // `--`: the URL comes from someone else's file, and one starting `--upload-pack=` is
+        // an option that runs a command — before the human has clicked anything (§4.2).
+        .args(["ls-remote", "--heads", "--", url])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();

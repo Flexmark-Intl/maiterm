@@ -1262,11 +1262,27 @@ export interface ShareFile {
   version: number;
   exported_at: string;
   maiterm_version: string;
-  workspace: { name: string; mesh?: boolean; panes: { id: string; name: string; tabs: { id: string; name: string; kind: { type: string }; agent?: { runtime: AgentRuntime } | null }[] }[] };
+  workspace: { name: string; mesh?: boolean; panes: { id: string; name: string; tabs: SharedTab[] }[] };
   roots: SharedRoot[];
   services: ShareFileService[];
   notes?: { tabs: Record<string, unknown>; workspace: unknown[] } | null;
   tasks?: { tasks: unknown[] } | null;
+  /** What the import took out of the file as unsafe to run (docs/workspace-share.md §4.2). */
+  refused?: string[];
+}
+
+export type SharedLoc = { root_id: string; subpath: string };
+
+export interface SharedTab {
+  id: string;
+  name: string;
+  kind:
+    | { type: 'local'; location?: SharedLoc | null }
+    | { type: 'remote'; ssh_command: string; remote_cwd?: string | null }
+    | { type: 'editor'; location: SharedLoc }
+    | { type: 'remote_editor'; ssh_command: string; remote_path: string; file_path: string };
+  auto_resume?: { enabled: boolean; command?: string | null } | null;
+  agent?: { runtime: AgentRuntime; session_id?: string | null } | null;
 }
 
 export type ShareRootCheck = { root_id: string; local_path: string; repo_name: string | null } & ShareDirVerdict;
@@ -1274,6 +1290,7 @@ export type ShareRootCheck = { root_id: string; local_path: string; repo_name: s
 export interface ShareImportPreview {
   file: ShareFile;
   roots: ShareRootCheck[];
+  digest: string;
 }
 
 export interface ShareImportOptions {
@@ -1282,6 +1299,10 @@ export interface ShareImportOptions {
   include_tasks: boolean;
   services: number[];
   env_values: Record<number, Record<string, string>>;
+  /** Review keys (`tab:<id>:resume|ssh|agent`, `service:<i>:start`) — nothing else runs. */
+  approved: string[];
+  /** The preview's digest: the build refuses a file that changed since the review. */
+  digest: string;
 }
 
 export interface ShareAgentLaunch {

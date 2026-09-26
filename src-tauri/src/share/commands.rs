@@ -68,6 +68,8 @@ pub struct RootCheck {
 pub struct ImportPreview {
     pub file: ShareFile,
     pub roots: Vec<RootCheck>,
+    /// Handed back in `ImportOptions::digest`, so the build uses the file that was reviewed.
+    pub digest: String,
 }
 
 /// The one rule (§4), for either kind of root. A plain root has nothing to clone or match:
@@ -83,7 +85,7 @@ fn check(root: &SharedRoot, dir: &std::path::Path) -> DirVerdict {
 #[tauri::command]
 pub async fn share_read_file(path: String) -> Result<ImportPreview, String> {
     blocking(move || {
-        let file = super::read_file(&PathBuf::from(&path))?;
+        let (file, digest) = super::read_file(&PathBuf::from(&path))?;
         let roots = file
             .roots
             .iter()
@@ -97,7 +99,7 @@ pub async fn share_read_file(path: String) -> Result<ImportPreview, String> {
                 }
             })
             .collect();
-        Ok(ImportPreview { file, roots })
+        Ok(ImportPreview { file, roots, digest })
     })
     .await?
 }
@@ -157,7 +159,10 @@ pub async fn share_import_build(
     options: ImportOptions,
 ) -> Result<ImportResult, String> {
     let result = blocking(move || -> Result<ImportResult, String> {
-        let file = super::read_file(&PathBuf::from(&path))?;
+        let (file, digest) = super::read_file(&PathBuf::from(&path))?;
+        if digest != options.digest {
+            return Err("The file changed after you reviewed it. Open it again to import.".to_string());
+        }
         Ok(super::build_workspace(&file, &options))
     })
     .await??;
