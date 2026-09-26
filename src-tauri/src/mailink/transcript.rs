@@ -2861,7 +2861,15 @@ mod tests {
             eprintln!("[codex smoke] no ~/.codex/sessions — skipped");
             return;
         }
-        // Newest-first walk; pick the first file big enough to hold real turns.
+        // Newest-first walk; pick the first rollout that recorded a real turn. Size alone is no
+        // evidence of one: a Codex started and quit untouched writes a lone `session_meta` line
+        // whose instructions alone run past 20KB. A usage-carrying `token_count` means the
+        // model answered, which is also what the meta assertions below read.
+        let has_turn = |p: &std::path::Path| {
+            std::fs::read_to_string(p)
+                .map(|s| s.contains(r#""type":"token_count","info":{"#))
+                .unwrap_or(false)
+        };
         let mut picked: Option<(String, PathBuf)> = None;
         'walk: for y in subdirs_desc(&root) {
             for m in subdirs_desc(&y) {
@@ -2870,8 +2878,7 @@ mod tests {
                     for e in entries.flatten() {
                         let p = e.path();
                         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        let big = std::fs::metadata(&p).map(|md| md.len() > 20_000).unwrap_or(false);
-                        if name.starts_with("rollout-") && name.ends_with(".jsonl") && big {
+                        if name.starts_with("rollout-") && name.ends_with(".jsonl") && has_turn(&p) {
                             // session id = the last 36 chars before ".jsonl" (uuid).
                             let stem = name.trim_end_matches(".jsonl");
                             if stem.len() > 36 {
@@ -2884,13 +2891,13 @@ mod tests {
             }
         }
         let Some((sid, path)) = picked else {
-            eprintln!("[codex smoke] no sizeable rollout — skipped");
+            eprintln!("[codex smoke] no rollout with a turn in it — skipped");
             return;
         };
         let located = locate_codex_jsonl(&sid).expect("locates by session id");
         assert_eq!(located, path, "locator must resolve the same file");
         let turns = codex_turns_for_session(&sid, 40, ToolRender::Marker).expect("parses");
-        assert!(!turns.is_empty(), "a >20KB rollout distills to at least one turn");
+        assert!(!turns.is_empty(), "a rollout the model answered distills to at least one turn");
         let meta = codex_session_meta(&sid).expect("meta parses");
         assert!(meta.context_tokens > 0);
         assert!(codex_session_last_turn_ts(&sid).is_some());
