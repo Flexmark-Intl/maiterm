@@ -59,6 +59,14 @@ Three decisions carry most of the design:
    Cross-tab injection is `driveTab`, which exists only for the Overlord and sits behind three
    mechanical guards (`docs/overlord.md` §3). A follow-up that could target any tab would be
    `driveTab` without them, handed to every agent.
+
+   **This has to be enforced; it is not the default.** The MCP server fills in `tabId` from
+   the connection's affinity only when the caller leaves it out
+   (`src-tauri/src/claude_code/server.rs` ~2810): an explicit `tabId` naming any tab in the
+   instance is honoured, for every tool. So the follow-up tools must refuse a `tabId` that
+   differs from the connection's affinity, checked in Rust before the call is forwarded to the
+   frontend, and the write tools go on `PEER_ADDRESSING_TOOLS` (~2240), which already refuses
+   task and stack writes on an identity that was only inferred after a reconnect.
 2. **One-shot only.** No recurrence. An agent that wants to keep checking re-arms itself when
    the follow-up fires, which means every repetition is a decision it takes with fresh
    context. Recurring, engine-owned schedules already exist: Overlord rituals. A recurring
@@ -85,9 +93,11 @@ pub struct FollowUp {
 
 pub enum FollowUpDue {
     At { at: String },                                   // RFC 3339, wall clock
-    ServiceReady { service_id: String },
-    ServiceStopped { service_id: String },               // stopped or crashed
-    TaskDone { task_id: String },
+    // Services and tasks are per WORKSPACE, and the tab can move. The condition records the
+    // workspace it was set in, so a moved tab's follow-up still looks in the right place.
+    ServiceReady { workspace_id: String, service_id: String },
+    ServiceStopped { workspace_id: String, service_id: String },   // stopped or crashed
+    TaskDone { workspace_id: String, task_id: String },
 }
 ```
 
@@ -98,12 +108,13 @@ copies or moves a tab** (memory: reload-mints-a-new-tab-id). Each one here is de
 
 | Path | Follow-ups | Why |
 |------|-----------|-----|
-| Reload (`carry_tab_state_on_reload`) | **Carried** | Reload copies the whole `Tab` record; the replacement is the same session. Free, and correct. |
-| Duplicate / split clone / `clone_workspace_with_id_mapping` | **Cleared** | A duplicate that inherited them would deliver every follow-up twice, to two agents. Same treatment as `service_id`: a duplicate is built as a fresh `Tab`, and `clone_workspace_with_id_mapping` sets it to `None` explicitly (`commands/window.rs` ~593) — both places need the new field. |
-| Move to another pane or workspace | Carried | Same tab, same session. (Unlike `service_id`, which `move_tab_to_workspace` clears because a service belongs to its workspace — `commands/workspace.rs` ~468. A follow-up belongs to the tab.) |
+| Reload (`carry_tab_state_on_reload`) | **Moved** — one line | The replacement is the same session, and `carry_tab_record` copies the whole record (`..src`, `commands/workspace.rs` ~2113), so the new tab gets them for free. But reload *copies*, then deletes the original later (`reloadTab` → `deleteTab`, `workspaces.svelte.ts` ~2564 → ~2593), and in between **both tabs hold the same follow-ups**. So clear them on the original in the release block that already does this for comms claims, under the same write lock (~2195). |
+| Duplicate / split clone / copy to workspace / new conversation | **Cleared** | A duplicate that inherited them would deliver every follow-up twice, to two agents. Every frontend path (`duplicateTab`, `splitPaneWithContext`, `copyTabToWorkspace`, `newConversationFrom`) builds a fresh `Tab` and copies named fields, so they drop a new field by default. `Tab` has no `Default`: the three constructors (`state/workspace.rs` ~1873ff) and `clone_workspace_with_id_mapping` (`commands/window.rs` ~593, behind `duplicate_workspace` and `duplicate_window`) are full struct literals, so adding the field is a compile error in all four until each says empty. Plus the `fully_populated` test literal (`commands/workspace.rs` ~3272), which only `cargo check --tests` compiles. |
+| Move to another pane or workspace | Carried | Same tab, same session. (Unlike `service_id`, which `move_tab_to_workspace` clears because a service belongs to its workspace — `commands/workspace.rs` ~467. A follow-up belongs to the tab, and its condition carries its own `workspace_id`.) |
 | Workspace Share export | **Never** | The share file is an allowlist of `Shared*` types (`docs/workspace-share.md`), so a new `Tab` field doesn't reach it unless added. Keep it that way: a follow-up is this agent's note about this session. |
 | Archive | Held | Delivered on restore, marked late (§6.3). Archiving is reversible; dropping them would make it not. |
-| Close | **Dropped, logged** | Nothing left to deliver to. |
+| Close | **Dropped, logged** | Nothing left to deliver to. Log it from the store's `deleteTab`, **not** from Rust `delete_tab`: reload removes the original through `delete_tab` too, so logging there reports a false drop on every reload. |
+| Delete an archived tab (`delete_archived_tab`, ~2452) | **Dropped, logged** | Same as close. |
 | Backup restore | Restored | Stale by then — the late handling in §6.3 is what keeps that from being a surprise. |
 
 The stack-service and task conditions reference ids. A service id survives reload; a task id
@@ -111,10 +122,23 @@ is stable. If the referenced service or task no longer exists when checked, the 
 **fires**, marked with the reason ("service `web` was removed") rather than waiting forever.
 An unmeetable condition is still news to the agent.
 
+"No longer exists" has two false positives to rule out:
+- **A moved tab.** Look up in the condition's own `workspace_id`, not the tab's current
+  workspace, or every follow-up on a moved tab fires as orphaned.
+- **An archived task.** `archive_tab` lifts the archived tab's tasks out of `workspace.tasks`
+  into `tab.archived_tasks` (~2365). A follow-up on *another* tab waiting on one of them
+  must search `archived_tabs[*].archived_tasks` too, or it reads a parked task as deleted.
+
 ## 4. MCP surface
 
-Three tools, scoped to the calling tab, gated by a preference like the task and stack tools
-(`follow_ups_enabled`, default on).
+Three tools, scoped to the calling tab (enforced — §2), gated by a preference like the task
+and stack tools (`follow_ups_enabled`, default on). They are served by the frontend store,
+which is where every tool not handled by `handle_backend_tool` already goes
+(`server.rs` ~2878). The gate is two places: `tool_list_response(tasks_enabled,
+stack_enabled)` (`protocol.rs` ~50) grows a third parameter so the tools disappear from the
+list, and — as the stack tools do (`claudeCode.svelte.ts` ~948), and the task tools don't —
+the handler re-checks the preference when called, so a client holding a stale tool list is
+still refused.
 
 | Tool | Does |
 |------|------|
@@ -133,19 +157,33 @@ Limits, enforced in the tool and returned as a refusal that says which one tripp
 - **Rate: 20 created per tab per hour.** The backstop for an agent that re-arms in a tight
   loop, same role as the Overlord's `max_per_hour`.
 
-**Priming.** When follow-ups are on, the `initSession` / SessionStart priming says they exist
-in one line, and lists this tab's pending ones. A resumed agent then knows what it already
-scheduled instead of scheduling it again — the task system's re-send duplication problem
-(`docs/tasks.md` §3, "Tab ids are not durable") in another form.
+**Priming.** When follow-ups are on, the priming says they exist in one line, and lists this
+tab's pending ones. A resumed agent then knows what it already scheduled instead of
+scheduling it again — the task system's re-send duplication problem (`docs/tasks.md` §3,
+"Tab ids are not durable") in another form. The priming is `session_priming_text`
+(`server.rs` ~493), in Rust, reading `app_data` — shared by the `initSession` reply and the
+SessionStart hook — so the pending list is read from persisted `Tab.follow_ups`, never from
+frontend state. Codex receives no hook context, so a Codex tab sees the line only when it
+calls `initSession`.
 
 ## 5. Triggers
 
 - **Time.** Compared against the **wall clock** on every tick, never a stored duration. A
   laptop that slept through the due time wakes, sees the follow-up is past due, and delivers
   it marked late. A duration-based timer would silently shift everything by the sleep.
-- **Stack service ready / stopped.** Read from the stack store's runtime status
-  (`docs/stack.md`). "Ready" means the stack's own meaning — it announced an address — so a
-  follow-up on a worker that never announces one waits until `expires_at`.
+- **Stack service ready / stopped — on a TRANSITION, never on the level.** Service runtime
+  status is never persisted, and a service nothing has reported reads as `stopped`
+  (`stack_priming_list`'s `unwrap_or("stopped")`, `server.rs` ~575). Evaluated as a level,
+  "when `web` stops" would fire at every app launch, and at once for a service that was
+  never started. So these fire on a change the store observes while the tab's window is
+  running: `ready` entered, or `stopped`/`crashed` entered *from* a running state. A
+  transition that happened while maiTerm was closed is not seen, which is right — nothing
+  observed it, so nothing can claim it.
+
+  "Ready" is the stack's own status, which is set three ways: an address read from the
+  service's output (`stack.svelte.ts` ~891), a match on its `ready_pattern`, which may carry
+  no port (~864), or an agent's `updateService { ready: true }` (`claudeCode.svelte.ts`
+  ~1080). A follow-up on a worker that does none of those waits until `expires_at`.
 - **Task done.** Read from the task store. `dropped` counts as done-for-this-purpose but is
   named as dropped in the envelope: the agent asked to hear when the task ended, and a
   retraction is an ending it needs to know about. (This is the opposite of dependency
@@ -160,28 +198,62 @@ second is exactly what §2's "never typed into a shell" rules out.
 
 ### 6.1 The path
 
-Delivery goes through **`agentDelivery`** (`src/lib/stores/agentDeliveryLive.ts`), the FIFO
-mailbox the bridge and the mesh already share, under a new owner tag
-(`DELIVERY_OWNER_FOLLOWUP`). One mailbox per tab is the point of that module: two
-controllers would mean two `injecting` guards for one PTY, and a follow-up paste could land
-inside a bridge message. It already holds while the agent is at a permission or elicitation
-prompt, serializes injections, and backs off on failure.
+Delivery goes through **`agentDelivery`** (core in `src/lib/stores/agentDelivery.ts`, the
+live instance in `agentDeliveryLive.ts`), the mailbox the bridge and the mesh already share,
+under a third owner tag (`DELIVERY_OWNER_FOLLOWUP` — `owners` is a `Set<string>`, so this is
+free). One mailbox per tab is the point of that module: two controllers would mean two
+`injecting` guards for one PTY, and a follow-up paste could land inside a bridge message. It
+already holds while the agent is at a permission or elicitation prompt (Claude: permission or
+an open `AskUserQuestion`; Codex: permission only — `src/lib/agents/adapter.ts`) and
+serializes injections.
 
-**One addition: follow-ups wait for the agent to be idle**, where bridge messages don't.
-`agentDelivery` delivers to a live session mid-turn, which suits a peer's reply. A
-follow-up is never urgent, and some runtimes take input typed mid-turn differently from
-Claude Code's queueing — Codex is unverified here. Waiting for a completed turn costs a
-little latency and removes the question.
+**But its `deliver()` can't be used as it stands.** It is fire-and-forget:
 
-The tick runs in the frontend, where delivery has to happen anyway (it needs `claudeState`,
+- When a tab isn't deliverable, `deliver()` queues the text and returns `'queued'`
+  (`agentDelivery.ts` ~136). The drain later injects it and tells nobody — no completion
+  callback.
+- A queued item can't be taken back, so Cancel and "Deliver now" couldn't reach it.
+- The queue is in memory, so a restart loses it.
+- It has no idea of idle. `busy` is a 1s post-inject cooldown, and `ready` isn't cleared when
+  a turn starts, so a queued item drains mid-turn the moment a permission prompt clears.
+
+So the follow-up store **never queues in the controller**. The follow-up stays in
+`Tab.follow_ups`, the one durable place, until delivered. The store checks its own gate
+(below), then calls one new controller method, `tryDeliverNow(tabId, text)`. That method
+injects only if the tab is deliverable *and its queue is empty*, and otherwise returns
+`'held'` without queueing. The injection still goes through the controller's `injecting`
+guard, so it can't interleave with a bridge or mesh paste. Anything held is retried on the
+next tick.
+
+Two notes on the controller:
+- A failed inject there is re-queued and retried on a fixed 1.5s drain tick, not backed off.
+  That doesn't matter here, since follow-ups don't use its queue.
+- A slot's `ready` flag is flipped only by the bridge and mesh listeners, and `remap` forces
+  it false after a reload (~212). A follow-up-only slot would work by accident at best. The
+  follow-up store therefore reads readiness from the agent state store directly rather than
+  from the slot.
+
+**Follow-ups wait for the agent to be idle**, where bridge messages don't. `agentDelivery`
+delivers to a live session mid-turn, which suits a peer's reply. A follow-up is never urgent,
+and some runtimes take input typed mid-turn differently from Claude Code's queueing (Codex is
+unverified here). So the store's gate is: agent state `idle` (`agentState.svelte.ts`), not
+awaiting the human, and `tryDeliverNow` accepts. Waiting for a completed turn costs a little
+latency and removes the question.
+
+The tick runs in the frontend, where delivery has to happen anyway (it needs agent state,
 the adapter's `isAwaitingHumanInput`, and the PTY). Because WKWebView throttles timers in an
-occluded window (memory: screen-sleep-webview-occlusion-stall), the tick is also run on
-`visibilitychange` and window focus, and the wall-clock comparison (§5) makes a late tick
-merely late, never wrong.
+occluded window (memory: screen-sleep-webview-occlusion-stall), the tick also runs on
+`visibilitychange` and window focus. The wall-clock comparison (§5) makes a late tick merely
+late, never wrong. If a hung webview proves to be a real problem, `src-tauri/src/commands/scheduler.rs`
+is the precedent for timers that must not depend on one. It owns the backup and memory-sampler
+loops for exactly that reason. It wouldn't help much here, though, since delivery needs the
+webview anyway.
 
 **Removed only after the inject succeeds.** A crash between writing the prompt and
 persisting the removal delivers it twice on the next launch; the alternative loses it
-silently. A duplicate "check the deploy" is the cheaper failure.
+silently. A duplicate "check the deploy" is the cheaper failure. `tryDeliverNow` returning
+`'delivered'` is that success. It means the bytes reached the PTY, not that the agent read
+them, which is as far as any delivery here can see.
 
 ### 6.2 When the agent isn't there
 
@@ -189,15 +261,16 @@ silently. A duplicate "check the deploy" is the cheaper failure.
 |---------|--------------|
 | Live agent, idle | Deliver. |
 | Live agent, busy or at a human prompt | Wait. |
-| Tab at a shell, agent exited, runtime resumable | **Resume the agent, then deliver.** The resume command is built the way `src/lib/agents/resume.ts` builds it (the runtime's session id from `trigger_variables`). Delivery waits for the resumed session to register and complete its first turn — the "ready is reachable too early" watch item in `docs/overlord.md` §4.0 is this exact risk. |
+| Tab at a shell, agent exited, runtime resumable | **Resume the agent, then deliver.** Reuse the Overlord's `recoverTab` path (`overlord.svelte.ts` ~3683), which already types a resume into a shell safely: the command is `resumeCommandFor` (`agentState.svelte.ts` ~27), a template from `src/lib/agents/resume.ts` such as `claude --resume %claudeSessionId`, filled in by `interpolateVariables` (`triggers.svelte.ts` ~777) from the tab's `trigger_variables`; if a `%` survives substitution there is no session id, and it refuses (`no_session_id`) rather than typing a broken command. Delivery then waits for the resumed session to register and complete its first turn — the "ready is reachable too early" watch item in `docs/overlord.md` §4.0 is this exact risk. |
 | Tab at a shell, not resumable (no session id, or an SSH tab whose connection is gone) | **Hold and surface.** The row goes to "due — agent not running" with a Deliver button (§8). Never typed. |
 | Suspended tab or suspended workspace | Hold and surface. Waking a suspended workspace because a timer fired is the human's call, not a follow-up's. |
 | Archived | Held; delivered on restore. |
 
 Resuming the agent is the one place a follow-up types anything that isn't its own text, and
-it types only what auto-resume would already type for that tab. It is still worth a
-preference (`follow_ups_resume_agent`, default on) because it starts a session — and spends
-quota — without the human there.
+it types only the runtime's own resume command for that tab's session — never the tab's
+stored `auto_resume_command`, which is free text a user (or an imported workspace file) may
+have edited into anything. It is still worth a preference (`follow_ups_resume_agent`,
+default on) because it starts a session — and spends quota — without the human there.
 
 ### 6.3 Late, expired, and orphaned
 
@@ -255,9 +328,16 @@ envelope saying so.
 What has to be established first — none of it is known yet, and nothing in maiTerm detects
 a usage limit today:
 
-- **The signal.** Candidates: an entry in the transcript JSONL (the house rule is that agent
-  facts come from the transcript, not the screen — memory: mailink-meta-fields-from-transcript),
-  a hook, or the TUI's own text. The reset time has to be read out of it, with its time zone.
+- **The signal.** The house rule is that agent facts come from the transcript, not the screen
+  (memory: mailink-meta-fields-from-transcript). Two leads already sit in code that reads
+  transcripts and throws them away:
+  - Claude writes synthetic records (`isApiErrorMessage`, `"model":"<synthetic>"`) that
+    `src-tauri/src/mailink/transcript.rs` meets and skips (~999). A limit error is likely
+    one of these.
+  - Codex `token_count` events carry a `rate_limits` object that nothing reads (fixtures near
+    ~2768).
+
+  The reset time has to be read out of whichever is right, with its time zone.
   Verify against real limit events per runtime before designing the parser; a fixture proves
   only the shape assumed (memory: verify-parsers-against-real-transcripts).
 - **Consent.** Auto-continuing at reset spends the new window's quota the moment it opens,
@@ -270,9 +350,10 @@ a usage limit today:
 ## 10. Build order
 
 1. `FollowUp` on `Tab` (Rust + TS), the lifecycle table in §3 wired and tested, including the
-   duplicate-clears / reload-carries pair.
-2. Frontend store + tick, time trigger only, delivery through `agentDelivery` with the idle
-   gate. `createFollowUp` / `listFollowUps` / `cancelFollowUp`.
+   duplicate-clears / reload-moves pair (and `cargo check --tests` for the test literal).
+2. `tryDeliverNow` on the delivery controller, with tests. Frontend store + tick, time
+   trigger only, idle gate. `createFollowUp` / `listFollowUps` / `cancelFollowUp`, with the
+   own-tab refusal and `PEER_ADDRESSING_TOOLS` entry in Rust (§2).
 3. The human side: badge, menu, list.
 4. Stack and task triggers.
 5. Resume-then-deliver (§6.2).
