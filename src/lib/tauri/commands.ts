@@ -1283,6 +1283,7 @@ export interface SharedTab {
     | { type: 'remote_editor'; ssh_command: string; remote_path: string; file_path: string };
   auto_resume?: { enabled: boolean; command?: string | null } | null;
   agent?: { runtime: AgentRuntime; session_id?: string | null } | null;
+  mesh_purpose?: string | null;
 }
 
 export type ShareRootCheck = { root_id: string; local_path: string; repo_name: string | null } & ShareDirVerdict;

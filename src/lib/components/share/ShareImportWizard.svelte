@@ -357,6 +357,8 @@
     what: string;
     command: string;
     where: string;
+    /** Text the agent is given as its mesh role, pasted into its prompt. */
+    told?: string;
     /** For a remote tab: the ssh item this one runs through. Unticked, this can't run either. */
     needs?: string;
   }
@@ -388,7 +390,9 @@
         : `on this computer, in ${dirFor(k.location)}`;
       if (t.agent) {
         const fork = remote && t.agent.session_id ? buildForkCommand(t.agent.runtime, t.agent.session_id) : null;
-        items.push({ key: `tab:${t.id}:agent`, what: `“${t.name}” starts its agent`, command: fork ?? launchCommand(t.agent.runtime), where, needs: remote ? sshKey : undefined });
+        // A mesh role is pasted into the agent's prompt as if typed, so it's reviewed with the start.
+        const told = preview?.file.workspace.mesh && t.mesh_purpose ? t.mesh_purpose : undefined;
+        items.push({ key: `tab:${t.id}:agent`, what: `“${t.name}” starts its agent`, command: fork ?? launchCommand(t.agent.runtime), where, told, needs: remote ? sshKey : undefined });
       }
       if (t.auto_resume?.enabled && t.auto_resume.command) {
         items.push({ key: `tab:${t.id}:resume`, what: `“${t.name}” runs when it opens`, command: t.auto_resume.command, where, needs: remote ? sshKey : undefined });
@@ -548,6 +552,7 @@
                   <span>{it.what}</span> <span class="dim">{it.where}</span>
                 </label>
                 <pre class="cmd">{it.command}</pre>
+                {#if it.told}<div class="sub told"><span class="dim">Then told, as its mesh role:</span><pre class="cmd">{it.told}</pre></div>{/if}
               </div>
             {/each}
           </div>
@@ -607,5 +612,7 @@
   .cmd { margin: 4px 0 0 22px; padding: 4px 6px; background: var(--bg-dark); border-radius: 4px; font-family: monospace; font-size: 0.846rem; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg); }
   .sub-check { margin: 4px 0 0 22px; font-size: 0.846rem; }
   .env-given { margin-left: 22px; }
+  .told { margin-left: 22px; }
+  .told .cmd { margin-left: 0; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bg-light); }
 </style>

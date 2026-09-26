@@ -282,25 +282,44 @@ pub fn ssh_refusal(cmd: &str) -> Option<String> {
     if let Some(c) = cmd.chars().find(|&c| c != ' ' && !shell_plain(c)) {
         return Some(format!("it contains {c:?}, which the shell would act on"));
     }
-    const RUNS_LOCALLY: [&str; 6] = ["proxycommand", "localcommand", "permitlocalcommand", "knownhostscommand", "match", "include"];
-    // An option can arrive as `-oName=v`, `-o Name=v`, `-o Name v`, or inside a cluster
-    // (`-vo Name=v`), so a token counts as one when it is a flag, carries `=`, or follows a
-    // cluster ending in `o`. A bare `matchbox` host is none of those.
+    // Options that run, or load code from, something on this computer.
+    const RUNS_LOCALLY: [&str; 8] = [
+        "proxycommand", "localcommand", "permitlocalcommand", "knownhostscommand",
+        "match", "include", "pkcs11provider", "securitykeyprovider",
+    ];
+    // ssh(1)'s flags that take an argument. A cluster (`-vp22`, `-lFred`) is read the way ssh
+    // reads it: flags until the first of these, whose argument is the rest of the token or,
+    // if nothing is left, the next token — so `Fred` in `-lFred` is a user, not `-F`.
+    const TAKES_ARG: &str = "BbcDEeFIiJLlmOoPpQRSWw";
     let tokens: Vec<&str> = cmd.split(' ').filter(|t| !t.is_empty()).collect();
-    for (i, t) in tokens.iter().enumerate() {
-        let lc = t.to_ascii_lowercase();
-        let after_o = i > 0 && tokens[i - 1].starts_with('-') && tokens[i - 1].ends_with('o');
-        if t.starts_with('-') || t.contains('=') || after_o {
-            if let Some(k) = RUNS_LOCALLY.iter().find(|k| lc.contains(*k)) {
-                return Some(format!("its {k} option runs a command on this computer"));
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i];
+        i += 1;
+        let Some(cluster) = t.strip_prefix('-').filter(|c| !c.is_empty() && !c.starts_with('-')) else { continue };
+        for (at, flag) in cluster.char_indices() {
+            if !TAKES_ARG.contains(flag) {
+                continue;
             }
-        }
-        // Single-letter flags before any `o` in a cluster; what follows `o` is an option name.
-        if let Some(flags) = t.strip_prefix('-').filter(|f| !f.starts_with('-')) {
-            let flags = flags.split('o').next().unwrap_or("");
-            if flags.contains('F') || flags.contains('E') {
-                return Some(format!("its {t} flag reads or writes a file on this computer"));
+            let rest = &cluster[at + flag.len_utf8()..];
+            let arg = if rest.is_empty() {
+                i += 1;
+                tokens.get(i - 1).copied().unwrap_or("")
+            } else {
+                rest
+            };
+            match flag {
+                'F' | 'E' => return Some(format!("its -{flag} flag reads or writes a file on this computer")),
+                'I' => return Some("its -I flag loads a library on this computer".to_string()),
+                'o' => {
+                    let name = arg.split('=').next().unwrap_or("").to_ascii_lowercase();
+                    if let Some(k) = RUNS_LOCALLY.iter().find(|k| name == **k) {
+                        return Some(format!("its {k} option runs a command on this computer"));
+                    }
+                }
+                _ => {}
             }
+            break;
         }
     }
     None
@@ -338,6 +357,22 @@ fn sanitize(file: &mut ShareFile) {
             root.kind = RootKind::Plain;
         }
     }
+    for s in &mut file.services {
+        // The name goes unquoted into `env NAME=… command` (stack/model.ts `startLine`).
+        let name_ok = |n: &str| {
+            n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        let service = s.name.clone();
+        s.env.retain(|e| {
+            let ok = name_ok(&e.name);
+            if !ok {
+                refused.push(format!("Service “{service}”: {:?} isn't a variable name, so it was dropped", e.name));
+            }
+            ok
+        });
+    }
+    let mut seen_ids = std::collections::HashSet::new();
     for pane in &mut file.workspace.panes {
         pane.tabs.retain_mut(|tab| {
             let bad_ssh = match &tab.kind {
@@ -346,14 +381,29 @@ fn sanitize(file: &mut ShareFile) {
                     .or_else(|| {
                         remote_cwd.as_deref().and_then(|d| remote_dir_refusal(d).map(|why| format!("its remote directory ({d}): {why}")))
                     }),
-                SharedTabKind::RemoteEditor { ssh_command, .. } => {
-                    ssh_refusal(ssh_command).map(|why| format!("its ssh command ({ssh_command}): {why}"))
-                }
+                // The path is expanded on the remote with an unquoted `echo` (`expand_remote_tilde`).
+                SharedTabKind::RemoteEditor { ssh_command, remote_path, .. } => ssh_refusal(ssh_command)
+                    .map(|why| format!("its ssh command ({ssh_command}): {why}"))
+                    .or_else(|| remote_dir_refusal(remote_path).map(|why| format!("its remote file ({remote_path}): {why}"))),
                 _ => None,
             };
             if let Some(why) = bad_ssh {
                 refused.push(format!("Tab “{}” was left out — {why}", tab.name));
                 return false;
+            }
+            // Review keys are tab ids: two tabs sharing one would share one approval.
+            if !seen_ids.insert(tab.id.clone()) {
+                refused.push(format!("Tab “{}” was left out — another tab in the file has its id", tab.name));
+                return false;
+            }
+            // A mesh role is pasted into the agent's prompt. Control characters could end the
+            // paste early and turn the rest into keystrokes; the text itself is shown in review.
+            if let Some(p) = &mut tab.mesh_purpose {
+                let clean: String = p.chars().filter(|c| !c.is_control()).take(500).collect();
+                if clean != *p {
+                    refused.push(format!("Tab “{}”: control characters were removed from its mesh role", tab.name));
+                    *p = clean;
+                }
             }
             if let Some(agent) = &mut tab.agent {
                 if agent.session_id.as_deref().is_some_and(|id| !session_id_ok(id)) {
@@ -1099,7 +1149,8 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
             let ssh_ok = approved("ssh");
             let resume = st.auto_resume.as_ref().map(|ar| SharedAutoResume {
                 command: ar.command.clone().filter(|_| approved("resume")),
-                remembered_command: ar.remembered_command.clone().filter(|_| approved("resume")),
+                // Never shown in review, and it runs later in `command`'s place: not carried.
+                remembered_command: None,
                 ..ar.clone()
             });
             let remote_declined = matches!(st.kind, SharedTabKind::Remote { .. }) && !ssh_ok;
@@ -1163,7 +1214,9 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 }
             };
             tab.custom_name = st.custom_name;
-            if file.workspace.mesh {
+            // The role is pasted into an agent's prompt, and the review shows it with that agent's
+            // start — so it's carried only when that start was approved.
+            if file.workspace.mesh && st.agent.is_some() && approved("agent") && !remote_declined {
                 tab.mesh_purpose = st.mesh_purpose.clone();
             }
             tab.import_highlight = true;
@@ -1393,11 +1446,16 @@ mod tests {
         ws.bridge_all = true;
         ws.panes[0].tabs[1].mesh_purpose = Some("owns the API".to_string());
         ws.mesh_topics.push(crate::state::MeshTopic::new("t1".into(), "auth".into(), ws.panes[0].tabs[1].id.clone(), String::new()));
-        let file = export_file(&ws, &[], &ExportOptions::default());
+        let agent = ws.panes[0].tabs[1].id.clone();
+        let file = export_file(&ws, &[], &ExportOptions { agent_tab_ids: vec![agent], ..Default::default() });
         assert!(file.workspace.mesh);
         assert!(!serde_json::to_string(&file).unwrap().contains("\"auth\""), "topics are the sender's history");
-        let got = build_workspace(&file, &ImportOptions::default()).workspace;
-        assert!(got.bridge_all);
+        let unreviewed = build_workspace(&file, &ImportOptions::default()).workspace;
+        assert!(unreviewed.bridge_all);
+        assert_eq!(unreviewed.panes[0].tabs[1].mesh_purpose, None, "a role rides only an approved agent start");
+        let id = &file.workspace.panes[0].tabs[1].id;
+        let approved = [tab_review_key(id, "ssh"), tab_review_key(id, "agent")].into_iter().collect();
+        let got = build_workspace(&file, &ImportOptions { approved, ..Default::default() }).workspace;
         assert!(got.mesh_topics.is_empty());
         assert_eq!(got.panes[0].tabs[1].mesh_purpose.as_deref(), Some("owns the API"));
 
@@ -1440,7 +1498,17 @@ mod tests {
 
     #[test]
     fn ssh_targets_that_would_run_something_locally_are_refused() {
-        for ok in ["ews@nova", "-p 2222 ews@nova", "-i ~/.ssh/id_ed25519 -J bastion ews@nova", "matchbox.local", "-o ServerAliveInterval=30 ews@nova", "-oUserKnownHostsFile=/dev/null ews@nova"] {
+        for ok in [
+            "ews@nova",
+            "-p 2222 ews@nova",
+            "-i ~/.ssh/id_ed25519 -J bastion ews@nova",
+            "matchbox.local",
+            "-o ServerAliveInterval=30 ews@nova",
+            "-oUserKnownHostsFile=/dev/null ews@nova",
+            "-lFred nova",
+            "-JEdge nova",
+            "-vp22 nova",
+        ] {
             assert_eq!(ssh_refusal(ok), None, "{ok}");
         }
         for bad in [
@@ -1457,6 +1525,9 @@ mod tests {
             "-F /tmp/evil_config nova",
             "-vF/tmp/evil nova",
             "-E /tmp/log nova",
+            "-I /tmp/lib.so nova",
+            "-oPKCS11Provider=/tmp/lib.so nova",
+            "-o Match nova",
             "",
         ] {
             assert!(ssh_refusal(bad).is_some(), "{bad:?} should be refused");
@@ -1475,19 +1546,27 @@ mod tests {
             { "id": "b", "name": "proxy", "kind": { "type": "remote", "ssh_command": "-oProxyCommand=/tmp/x nova" } },
             { "id": "c", "name": "cwd", "kind": { "type": "remote", "ssh_command": "nova", "remote_cwd": "x'; id; '" } },
             { "id": "d", "name": "sid", "kind": { "type": "remote", "ssh_command": "nova" }, "agent": { "runtime": "claude", "session_id": "x; id" } },
-            { "id": "e", "name": "editor", "kind": { "type": "remote_editor", "ssh_command": "nova|id", "remote_path": "/x", "file_path": "x" } }
+            { "id": "e", "name": "editor", "kind": { "type": "remote_editor", "ssh_command": "nova|id", "remote_path": "/x", "file_path": "x" } },
+            { "id": "f", "name": "tilde", "kind": { "type": "remote_editor", "ssh_command": "nova", "remote_path": "~$(id)/x", "file_path": "x" } },
+            { "id": "d", "name": "dup", "kind": { "type": "local" } },
+            { "id": "g", "name": "role", "kind": { "type": "local" }, "mesh_purpose": "owns\u001b[201~\rrm -rf ~" }
           ] } ] },
-          "roots": [ { "id": "r", "path": "~/x", "kind": "git", "remotes": { "origin": "--upload-pack=touch /tmp/pwned" }, "branch": "--upload-pack=x" } ]
+          "roots": [ { "id": "r", "path": "~/x", "kind": "git", "remotes": { "origin": "--upload-pack=touch /tmp/pwned" }, "branch": "--upload-pack=x" } ],
+          "services": [ { "name": "s", "command": "make", "restart": "never", "env": [ { "name": "A;id", "value": "1" }, { "name": "OK_1", "value": "2" } ] } ]
         }"#;
         let file = parse(text).unwrap();
         let names: Vec<&str> = file.workspace.panes[0].tabs.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["sid"]);
+        assert_eq!(names, vec!["sid", "role"]);
         assert_eq!(file.workspace.panes[0].tabs[0].agent.as_ref().unwrap().session_id, None);
+        assert_eq!(file.workspace.panes[0].tabs[1].mesh_purpose.as_deref(), Some("owns[201~rm -rf ~"));
+        let env: Vec<&str> = file.services[0].env.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(env, vec!["OK_1"]);
         assert!(file.roots[0].remotes.is_empty());
         assert_eq!(file.roots[0].branch, None);
         assert_eq!(file.roots[0].kind, RootKind::Plain);
         assert!(!file.refused.iter().any(|r| r.contains("pre-filled")), "a sender can't write the refusal list");
-        assert_eq!(file.refused.len(), 7, "{:#?}", file.refused);
+        // 5 bad tabs, the tilde path, the duplicate id, the role, the env name, the URL, the branch.
+        assert_eq!(file.refused.len(), 11, "{:#?}", file.refused);
     }
 
     #[test]

@@ -186,6 +186,18 @@ something presented as a host.
   isn't, the id is dropped and the agent starts fresh.
 - **Repo URL and branch:** one starting with `-` is a git option (`--upload-pack=<cmd>`). The
   access probe runs **when the wizard opens**, before any click, so it also passes `--`.
+- **Remote editor path:** it's expanded on the remote with an unquoted `echo`
+  (`expand_remote_tilde`), so it gets the plain-character rule too.
+- **Service env var names:** they go unquoted into `env NAME=… cmd` (`startLine`). A name that
+  isn't `[A-Za-z_][A-Za-z0-9_]*` is dropped.
+- **Duplicate tab ids:** approvals are keyed by tab id, so every tab after the first to use an
+  id is left out.
+- **Mesh role:** it's pasted into the agent's prompt, so control characters (which could end
+  the bracketed paste) are stripped and it's capped at 500 characters. The review shows it with
+  the agent's start, and it's carried only when that start is approved.
+
+`remembered_command` is never carried: the review doesn't show it, and it later runs in
+`command`'s place.
 
 `refused` is `skip_deserializing`: a sender can't pre-fill the list to hide what was removed.
 
