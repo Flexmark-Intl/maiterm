@@ -194,7 +194,12 @@ something presented as a host.
   id is left out.
 - **Mesh role:** it's pasted into the agent's prompt, so control characters (which could end
   the bracketed paste) are stripped and it's capped at 500 characters. The review shows it with
-  the agent's start, and it's carried only when that start is approved.
+  the agent's start, and it's carried only when that start is approved. Tab, pane and
+  workspace names get the same control-character strip, since a member's role in every peer's
+  opener is its tab name.
+- **ssh option names:** they're read the way ssh reads them, so `-o=ProxyCommand=…` (an empty
+  first word is skipped) is caught. `SmartcardDevice` (an alias for PKCS11Provider) and
+  `XAuthLocation` (run under `-X`/`-Y`) are on the list.
 
 `remembered_command` is never carried: the review doesn't show it, and it later runs in
 `command`'s place.
