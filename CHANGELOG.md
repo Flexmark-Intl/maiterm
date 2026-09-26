@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.7.0
+
+Permission prompts that reach your phone, and an Overlord that no longer gets stuck waiting.
+
+### From your phone
+
+- **Permission prompts no longer vanish.** While a background subagent kept working, its parent's permission prompt could disappear from the phone within a second, leaving it visible only in the terminal. It now stays up until it's answered. When maiTerm can't tell which of several calls is asking, the card says "Permission requested" instead of naming the wrong one.
+- **Choose which pushes each phone gets** — turn off "Agent finished", say, and keep the ones that need you. Needs the matching maiLink update.
+- **See which account a chat is running as**, and switch the active account from the phone. Needs the matching maiLink update.
+
+### Overlord
+
+- **Release a stuck directive by hand.** A directive nobody would ever answer used to hold its tab for 15 minutes. Release it from the awaiting-reply chip or the unacked card.
+- **`/model`, `/effort` and `/compact` sent through Overlord no longer lock the tab.** They never answer, so each one used to hold the tab until it timed out.
+- **A tab that's compacting counts as busy**, so nothing types into it halfway through.
+
+### Fixes
+
+- **The updater shows its progress.** A percentage while downloading, then Installing. Dismissing the banner no longer hides the Restart button.
+- **Revoking an SSH account token** — the account card now shows when the token was minted, which is how you pick it out on claude.ai under Settings → Claude Code → Authorization tokens. An expired token is no longer sent to hosts.
+
 ## v2.6.0
 
 Be more than one Claude account at once, and hand a whole workspace to someone else.
