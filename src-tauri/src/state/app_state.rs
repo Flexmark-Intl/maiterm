@@ -299,10 +299,14 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        let db_path = dirs::data_dir()
-            .expect("No data directory found")
-            .join(app_data_slug())
-            .join("aiterm-scrollback.db");
+        let db_path = if cfg!(test) {
+            test_scrollback_db_path()
+        } else {
+            dirs::data_dir()
+                .expect("No data directory found")
+                .join(app_data_slug())
+                .join("aiterm-scrollback.db")
+        };
         let scrollback_db = ScrollbackDb::open(db_path)
             .expect("Failed to open scrollback database");
 
@@ -351,4 +355,16 @@ impl AppState {
         let handle = registry.get(pty_id)?;
         Some((handle.term.columns() as u16, handle.term.screen_lines() as u16))
     }
+}
+
+/// A fresh scrollback DB for each test `AppState`. Sharing the real one raced: on a runner
+/// where the file doesn't exist yet, parallel tests all create it and switch it to WAL, which
+/// needs exclusive access and can fail "database is locked" without waiting out busy_timeout.
+/// It also kept tests out of the developer's own dev scrollback.
+fn test_scrollback_db_path() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir()
+        .join("aiterm-test-scrollback")
+        .join(format!("{}-{}.db", std::process::id(), n))
 }
