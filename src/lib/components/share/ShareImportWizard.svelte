@@ -43,6 +43,12 @@
     /** git's question, when its last line is one (a sign-in, a passphrase, host-key trust). */
     asking: string | null;
     reply: string;
+    /** The recent text when a reply was sent. After a hidden answer git prints only a newline,
+     *  so its question stays the last line until the server answers; re-offering the form then
+     *  looks like a rejection, and a second password typed into it lands, echoed, in the shell. */
+    answeredAt: string | null;
+    /** The recent text as of the last poll. */
+    lastShown: string;
   }
 
   // What git and ssh print when they stop for input: "Username for 'https://…': ",
@@ -54,6 +60,14 @@
     const lines = text.split('\n').map(l => l.trimEnd());
     while (lines.length && !lines[lines.length - 1]) lines.pop();
     row.tail = lines.slice(-4);
+    const shown = lines.join('\n');
+    row.lastShown = shown;
+    // Answered, and nothing new since: not a fresh question. A repeated one (ssh re-asking a
+    // passphrase) adds a line, which is enough to tell them apart.
+    if (row.answeredAt !== null) {
+      if (shown === row.answeredAt) { row.asking = null; return; }
+      row.answeredAt = null;
+    }
     const last = lines[lines.length - 1] ?? '';
     row.asking = ASKING.test(last) ? last.trim() : null;
   }
@@ -64,6 +78,7 @@
     const text = row.reply;
     row.reply = '';
     row.asking = null;
+    row.answeredAt = row.lastShown;
     await writeTerminal(inst.ptyId, Array.from(new TextEncoder().encode(text + '\r')));
   }
 
@@ -98,9 +113,10 @@
   onDestroy(() => {
     cancelled = true;
     // A failed clone's tab was kept for Retry; with the wizard gone nothing will use it. A
-    // running one is left alone: the human may be watching it finish.
+    // running one is left alone: the human may be watching it finish. So is 'manual', which is
+    // a clone maiTerm can't see the end of — it may well still be running.
     for (const r of rows) {
-      if (r.cloneTab && r.clone !== 'running') {
+      if (r.cloneTab && (r.clone === 'failed' || r.clone === 'done' || r.clone === 'idle')) {
         workspacesStore.closeTabOrPane(r.cloneTab.workspaceId, r.cloneTab.paneId, r.cloneTab.tabId).catch(() => {});
       }
     }
@@ -126,6 +142,8 @@
           tail: [],
           asking: null,
           reply: '',
+          answeredAt: null,
+          lastShown: '',
         } satisfies RootRow;
       });
       serviceOn = p.file.services.map(() => true);
@@ -173,19 +191,29 @@
       rows[i].recordedRejected = `${dir}: ${v.reason}`;
       return;
     }
+    if (rows[i].dest !== dir) forgetClone(rows[i]);
     rows[i].dest = dir;
     rows[i].verdict = v;
     rows[i].recordedRejected = null;
     rows[i].skipped = false;
   }
 
-  function skip(i: number) {
-    // A failed clone's tab (kept for Retry) has nothing left to do.
-    const t = rows[i].cloneTab;
+  /** The root is going somewhere else, or nowhere: whatever was cloned or cloning for its old
+   *  destination no longer counts. Without this a 'done' row re-pointed after Back was built
+   *  into a directory nothing ever cloned into. */
+  function forgetClone(row: RootRow) {
+    const t = row.cloneTab;
     if (t) workspacesStore.closeTabOrPane(t.workspaceId, t.paneId, t.tabId).catch(() => {});
-    rows[i].cloneTab = null;
-    rows[i].clone = 'idle';
-    rows[i].cloneError = null;
+    row.cloneTab = null;
+    row.clone = 'idle';
+    row.cloneError = null;
+    row.tail = [];
+    row.asking = null;
+    row.answeredAt = null;
+  }
+
+  function skip(i: number) {
+    forgetClone(rows[i]);
     rows[i].dest = null;
     rows[i].verdict = null;
     rows[i].recordedRejected = null;
