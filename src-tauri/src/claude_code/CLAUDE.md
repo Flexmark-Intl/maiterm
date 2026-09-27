@@ -460,14 +460,17 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
   confirm (2.1.283+). The confirm was also invisible to the phone's model picker. It answers
   only for a session this maiTerm knows, because `~/.claude/settings.json` is shared by every
   Claude on the machine.
-- **Newer events go in only where the installed Claude knows them** (`NEWER_HOOK_EVENTS`: the
-  four above). Claude ignores an unknown hook event, but opens a "Settings Warning" dialog at
-  startup to say so, and that dialog holds every launch. Verified on 2.1.283; the SessionStart
-  hook never ran behind it. The evidence is the event's name in the Claude executable
-  (`events_installed_claude_knows`, cached by path/size/mtime). The remote setup's Python applies
-  the same rule on the host. Both REMOVE our entries for an event the host's Claude doesn't
-  know, and no Claude found means none of them. Adding a new event to either list without
-  this gate is the bug.
+- **A recent event goes in only where EVERY installed Claude knows it** (`NEWER_HOOK_EVENTS`,
+  today just `PreModelSwitch`). Claude ignores an unknown hook event, but opens a "Settings
+  Warning" dialog at startup to say so, and that dialog holds every launch. Verified on 2.1.283;
+  the SessionStart hook never ran behind it. The evidence is the event's name in the Claude
+  executable, checked in every copy maiTerm can find (`accounts::cli_candidates`), because a tab
+  runs whichever `claude` its shell finds and maiTerm can't see which. See
+  `events_installed_claude_knows`, cached by path/size/mtime. The remote setup's Python applies
+  the same rule on the host. Both REMOVE our entries for an event some Claude doesn't know, and
+  no Claude found means none. Keep the list to genuinely new events: gating the year-old
+  permission-ledger events on a probe that can fail (an nvm-only Claude, a Finder launch) cost
+  the ledger and protected nobody. Adding a brand-new event WITHOUT the gate is the bug.
 
 **Connection tab affinity:**
 - Server stores connection_id → tab_id mapping in `ServerState.connection_tabs`

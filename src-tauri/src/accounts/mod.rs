@@ -405,19 +405,24 @@ pub fn reconcile_at(
 /// (where Claude Code's native installer puts it) nor Homebrew. Dev-clean, broken after deploy,
 /// which is the repo's standing "runs against the INSTALLED build" trap.
 pub fn resolve_cli(profile: &RuntimeProfile) -> Option<PathBuf> {
+    cli_candidates(profile).into_iter().next()
+}
+
+/// Every installed copy of a runtime's CLI maiTerm can find, in `resolve_cli`'s order: PATH
+/// first (so a user's own install wins over anything we guess at), then the usual install
+/// locations. More than one is common — an npm install beside the native one — and a tab runs
+/// whichever its login shell finds, which maiTerm cannot see. So a question about "the"
+/// installed CLI that must hold for the tabs has to hold for all of these.
+pub fn cli_candidates(profile: &RuntimeProfile) -> Vec<PathBuf> {
     if profile.cli.is_empty() {
-        return None;
-    }
-    // PATH first, so a user's own install wins over anything we guess at.
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(profile.cli);
-            if is_executable(&candidate) {
-                return Some(candidate);
-            }
-        }
+        return Vec::new();
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            candidates.push(dir.join(profile.cli));
+        }
+    }
     if let Some(h) = dirs::home_dir() {
         // Claude Code's native install location, then the usual per-user bins.
         for d in [".local/bin", "bin", ".bun/bin", ".volta/bin", ".npm-global/bin"] {
@@ -427,7 +432,13 @@ pub fn resolve_cli(profile: &RuntimeProfile) -> Option<PathBuf> {
     for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         candidates.push(Path::new(d).join(profile.cli));
     }
-    candidates.into_iter().find(|c| is_executable(c))
+    let mut out: Vec<PathBuf> = Vec::new();
+    for c in candidates {
+        if is_executable(&c) && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn is_executable(p: &Path) -> bool {

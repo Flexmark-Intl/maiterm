@@ -328,37 +328,56 @@ fn hook_url_marker(port: u16) -> String {
 /// dialog at startup (verified on 2.1.283: `Unknown hook event "…" was ignored`), and that dialog
 /// holds every launch before any session exists: the SessionStart hook never ran behind it. So
 /// one event too new for the installed Claude turns every session start into a dialog.
-/// `PreModelSwitch` is weeks old. The other three are older and were registered unconditionally
-/// until this list existed.
-const NEWER_HOOK_EVENTS: &[&str] = &["PermissionRequest", "PostToolUseFailure", "SubagentStop", "PreModelSwitch"];
+///
+/// Only events recent enough for that to be a real risk belong here. PermissionRequest,
+/// PostToolUseFailure and SubagentStop are about a year old, and gating them on a probe that
+/// can fail (maiTerm can't find an nvm-only Claude from a Finder launch) cost the
+/// permission-prompt ledger while protecting nobody.
+const NEWER_HOOK_EVENTS: &[&str] = &["PreModelSwitch"];
 
-/// Which of `NEWER_HOOK_EVENTS` the installed Claude knows. The evidence is the event's name in
-/// the Claude executable itself: the native build embeds its JS, and an npm install's `claude`
-/// resolves to `cli.js`. Cached against the resolved path, size and mtime, because the drift
-/// check calls this every 30s and the binary is ~220 MB. If no Claude is found, the answer is
-/// none: leaving the events out costs the permission ledger and the model-switch skip, while
-/// including an unknown one costs a dialog on every launch.
+/// Which of `NEWER_HOOK_EVENTS` EVERY Claude maiTerm can find knows.
+///
+/// The evidence is the event's name in the Claude executable itself: the native build embeds its
+/// JS, and an npm install's `claude` resolves to `cli.js`. EVERY, because a tab runs whichever
+/// `claude` its login shell finds, and maiTerm, perhaps launched from Finder with launchd's PATH,
+/// can't see which. An older npm install beside a newer native one must turn the event off, not
+/// on. None found means none: a missing event costs the model-switch skip, an unknown one a
+/// dialog on every launch. Known gap: a Claude maiTerm can't find at all (an nvm-only install)
+/// isn't counted.
+///
+/// Cached against every copy's path, size and mtime, because the drift check calls this every
+/// 30s and a binary is ~220 MB. A release-build scan stops at the first sighting, about 20 ms.
 fn events_installed_claude_knows() -> Vec<&'static str> {
     use std::sync::Mutex;
-    type Key = (PathBuf, u64, Option<std::time::SystemTime>);
+    type Key = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
     static CACHE: Mutex<Option<(Key, Vec<&'static str>)>> = Mutex::new(None);
 
-    let Some(path) = crate::accounts::resolve_cli(crate::accounts::Runtime::Claude.profile())
-        .and_then(|p| fs::canonicalize(p).ok())
-    else {
+    let mut key: Key = Vec::new();
+    for p in crate::accounts::cli_candidates(crate::accounts::Runtime::Claude.profile()) {
+        let Ok(real) = fs::canonicalize(&p) else { continue };
+        let Ok(meta) = fs::metadata(&real) else { continue };
+        let entry = (real, meta.len(), meta.modified().ok());
+        if !key.contains(&entry) {
+            key.push(entry);
+        }
+    }
+    if key.is_empty() {
         return Vec::new();
-    };
-    let Ok(meta) = fs::metadata(&path) else { return Vec::new() };
-    let key: Key = (path.clone(), meta.len(), meta.modified().ok());
+    }
     if let Some((k, known)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if *k == key {
             return known.clone();
         }
     }
 
-    let Ok(f) = fs::File::open(&path) else { return Vec::new() };
-    let known = names_found_in(f, NEWER_HOOK_EVENTS, 8 << 20);
-    log::info!("Claude at {} knows hook events {:?}", path.display(), known);
+    let mut known: Vec<&'static str> = NEWER_HOOK_EVENTS.to_vec();
+    for (path, _, _) in &key {
+        let here = fs::File::open(path)
+            .map(|f| names_found_in(f, NEWER_HOOK_EVENTS, 8 << 20))
+            .unwrap_or_default();
+        log::info!("Claude at {} knows hook events {:?}", path.display(), here);
+        known.retain(|e| here.contains(e));
+    }
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, known.clone()));
     known
 }
@@ -1517,9 +1536,21 @@ mod newer_hook_event_tests {
     #[test]
     fn names_are_found_across_chunk_boundaries() {
         let hay = b"xxPermissionRequest..PreModelSwitch....".to_vec();
-        let got = names_found_in(&hay[..], NEWER_HOOK_EVENTS, 3);
+        let names: &[&'static str] = &["PermissionRequest", "PostToolUseFailure", "PreModelSwitch"];
+        let got = names_found_in(&hay[..], names, 3);
         assert_eq!(got, vec!["PermissionRequest", "PreModelSwitch"]);
-        assert!(names_found_in(&b"nothing here"[..], NEWER_HOOK_EVENTS, 4).is_empty());
+        assert!(names_found_in(&b"nothing here"[..], names, 4).is_empty());
+    }
+
+    /// The year-old permission-ledger events are registered whether or not a Claude can be found:
+    /// gating them cost the ledger wherever the probe failed, and protected nobody.
+    #[test]
+    fn only_the_new_event_is_gated() {
+        assert_eq!(NEWER_HOOK_EVENTS, &["PreModelSwitch"]);
+        let hooks = build_our_hooks(51234, "AUTH");
+        for e in ["PermissionRequest", "PostToolUseFailure", "SubagentStop"] {
+            assert!(hooks.get(e).is_some(), "{e} is registered unconditionally");
+        }
     }
 
     /// The installed Claude on this machine, when there is one. Diagnostic rather than an

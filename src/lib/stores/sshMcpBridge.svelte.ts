@@ -528,18 +528,22 @@ function buildSetupScript(
     '  if re.search(r"127\\.0\\.0\\.1:\\d+/hooks",u):return True\n' +
     '  if hk.get("type")=="command" and "AITERM" in hk.get("command",""):return True\n' +
     ' return False\n' +
-    // Events newer than the rest go in only if THIS host's Claude knows them (lockfile.rs
-    // NEWER_HOOK_EVENTS, same list, same evidence: the name in the Claude executable). An event
-    // it doesn't know opens a "Settings Warning" dialog on every launch. Ones it doesn't know
-    // are also taken OUT, so a host an earlier build wrote them to is repaired. No Claude found
-    // means none of them: a missing event costs a feature, an unknown one costs a dialog.
+    // Events newer than the rest go in only if EVERY Claude on this host knows them (lockfile.rs
+    // NEWER_HOOK_EVENTS, same list, same evidence: the name in the Claude executable; every,
+    // because a tab runs whichever `claude` its shell finds). An event a Claude doesn't know
+    // opens a "Settings Warning" dialog on every launch. Ones not known are also taken OUT, so
+    // a host an earlier build wrote them to is repaired. No Claude found means none of them.
     'import shutil\n' +
-    'NEWER=["PermissionRequest","PostToolUseFailure","SubagentStop","PreModelSwitch"]\n' +
-    'def claude_bin():\n' +
+    'NEWER=["PreModelSwitch"]\n' +
+    'def claude_bins():\n' +
     ' c=[shutil.which("claude")]+[os.path.expanduser(x) for x in ["~/.local/bin/claude","~/bin/claude","~/.bun/bin/claude","~/.volta/bin/claude","~/.npm-global/bin/claude"]]+["/opt/homebrew/bin/claude","/usr/local/bin/claude","/usr/bin/claude"]\n' +
-    ' for x in c:\n' +
-    '  if x and os.path.isfile(x):return os.path.realpath(x)\n' +
-    ' return None\n' +
+    ' return sorted(set(os.path.realpath(x) for x in c if x and os.path.isfile(x)))\n' +
+    'def known_all():\n' +
+    ' bins=claude_bins()\n' +
+    ' if not bins:return set()\n' +
+    ' k=set(NEWER)\n' +
+    ' for b in bins:k&=known(b)\n' +
+    ' return k\n' +
     'def known(path):\n' +
     ' got=set()\n' +
     ' if not path:return got\n' +
@@ -553,7 +557,7 @@ function buildSetupScript(
     '    if n in buf:got.add(n.decode())\n' +
     '   tail=buf[-32:]\n' +
     ' return got\n' +
-    'k=known(claude_bin())\n' +
+    'k=known_all()\n' +
     'for ev in NEWER:\n' +
     ' if ev in k:continue\n' +
     ' h["hooks"].pop(ev,None)\n' +
