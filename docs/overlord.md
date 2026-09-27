@@ -852,7 +852,21 @@ Interruption semantics (decided 2026-08-22):
   answer the prompt, which only pauses the ritual (above). Until 2026-09-27 they
   counted, so a checkpoint whose prep step hit a prompt (a memory write outside
   the cwd) aborted when the human approved it, and `/compact` never came
-  (`terminalsStore.getLastTakeoverInputAt`).
+  (`terminalsStore.getLastTakeoverInputAt`). The hook-derived `permission` state
+  can't draw this line on its own — for Claude it arrives 6s after the dialog
+  opens, and a denial never clears it — so `claudeStateStore.classifyKeystroke`
+  decides per key:
+  - the window OPENS at Claude's `PermissionRequest` hook
+    (`agent-hook-permission-asked`, emitted for this alone), or when `state`
+    enters `permission` (Codex; a Claude ask whose hook we missed);
+  - it CLOSES at the first answer key — Enter or a digit, which count as
+    answering, or a bare Esc, a denial, which counts as takeover — so text typed
+    after a denial, or while an approved tool runs, is the human's again. It
+    also closes when the ASKING agent's call ends (another agent's PostToolUse
+    in the first 6s must not close it), and on Stop, interrupt or a new prompt.
+  Known gaps: feedback typed into the dialog before Enter (approve-with-feedback)
+  is excused, and a prompt answered from the phone leaves the window open until
+  the call ends, excusing keys typed in the tab meanwhile.
 - **App restart aborts**: in-flight rituals do not survive a restart — never
   resume a half-ritual into a respawned tab. Ledger `aborted`; cooldown refires.
 

@@ -3594,6 +3594,7 @@ async fn hooks_handler(
         HookPhase::PermissionAsked => {
             let agent = crate::claude_code::gate::agent_key(&event);
             let tool_name = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            let mut tab_id = None;
             if !session_id.is_empty() {
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
@@ -3602,10 +3603,21 @@ async fn hooks_handler(
                         tool_name,
                         &tool_input_fingerprint(event.get("tool_input")),
                     );
+                    tab_id = Some(session.tab_id.clone());
                 }
             }
+            let tab_id = tab_id.or(tab_id_from_param);
             log::debug!("Claude hook: PermissionRequest tool='{}' agent='{}' session={}",
                 tool_name, agent, &session_id[..session_id.len().min(8)]);
+            // Not a state change — the prompt state still comes from the Notification, 6s later.
+            // The frontend needs the moment a dialog may be on screen so a keystroke answering it
+            // isn't read as the human taking over an Overlord ritual (docs/overlord.md §7).
+            let _ = srv.app_handle.emit("agent-hook-permission-asked", serde_json::json!({
+                "runtime": runtime_key,
+                "session_id": session_id,
+                "tab_id": tab_id,
+                "agent": agent,
+            }));
         }
 
         HookPhase::SubagentStop => {
@@ -3644,6 +3656,7 @@ async fn hooks_handler(
                     "tab_id": tab_id,
                     "tool_name": "",
                     "tool_input": null,
+                    "agent": agent,
                     "approvals_open": 0,
                 }));
             }
@@ -3992,6 +4005,9 @@ async fn hooks_handler(
                 "tab_id": tab_id,
                 "tool_name": tool_name,
                 "tool_input": event.get("tool_input"),
+                // Which agent's call ended ("" = main thread): only that agent's own call can end
+                // the ask it raised (agentState `askOpen`).
+                "agent": crate::claude_code::gate::agent_key(&event),
                 // How many approvals this session is STILL gated on. The frontend mirror used to
                 // go active on any tool completing, which disagreed with Rust the moment a
                 // parallel call was still awaiting a decision (review C7).

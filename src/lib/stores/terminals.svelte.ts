@@ -108,7 +108,7 @@ function createTerminalsStore() {
     /** ms epoch of the tab's last raw PTY output, or undefined if none seen. */
     getLastOutputAt(tabId: string): number | undefined { return lastOutputAt.get(tabId); },
     /** Stamp human keyboard input (called from TerminalPane's onData only).
-     *  `answeringPrompt`: the agent was stopped at a permission prompt. */
+     *  `answeringPrompt`: a permission dialog may be on screen and this key answers it. */
     noteUserInput(tabId: string, answeringPrompt = false) {
       const now = Date.now();
       lastUserInputAt.set(tabId, now);

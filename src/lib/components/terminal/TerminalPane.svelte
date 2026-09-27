@@ -1126,7 +1126,7 @@
       // real keystrokes. They are not human input: counting them would make merely
       // clicking into a tab abort an in-flight Overlord ritual.
       if (data !== '\x1b[I' && data !== '\x1b[O') {
-        terminalsStore.noteUserInput(tabId, claudeStateStore.getState(tabId)?.state === 'permission');
+        terminalsStore.noteUserInput(tabId, claudeStateStore.classifyKeystroke(tabId, data));
       }
       if (hasRustSelection) {
         clearSelection(ptyId).then(applyFrame).catch(() => {});

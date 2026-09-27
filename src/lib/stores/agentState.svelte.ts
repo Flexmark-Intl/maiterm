@@ -93,6 +93,18 @@ function createAgentStateStore() {
    *  prompt. Observed compactions take ~60s; this is the failed/cancelled case, not a budget. */
   const COMPACT_STALE_MS = 5 * 60_000;
   const staleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Plain (non-reactive) facts for the Overlord's takeover check (docs/overlord.md §7):
+  // is a keystroke ANSWERING a permission dialog, or the human taking the tab over?
+  // The hook-derived `state` marks neither end of a Claude dialog — it turns 'permission'
+  // 6s after the dialog opens (the Notification), and a denial fires no hook to clear it.
+  // `askOpen`: tab → the agent whose PermissionRequest opened a dialog. Only that agent's
+  //   own call ending closes it — another agent's PostToolUse in the first 6s carries
+  //   `gate_held: false` like any other.
+  // `answered`: the human pressed an answer key (Enter, a digit, Esc) since the dialog
+  //   opened. Keys after it are the human's again, even while `state` still reads
+  //   'permission' — the approved tool is still running, or the denial left it stale.
+  const askOpen = new Map<string, string>();
+  const answered = new Set<string>();
 
   /** Mark a tab's idle result as read. Shared by the public markRead() and the
    *  session-start handler, which must not leave a fresh start looking like an unseen result. */
@@ -114,6 +126,8 @@ function createAgentStateStore() {
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
     // Clear alert when leaving permission state (but only if we set it).
     if (state === 'permission') {
+      // A dialog newly on screen — Codex's, or a Claude one whose PermissionRequest we missed.
+      if (current?.state !== 'permission') answered.delete(tabId);
       activityStore.setTabState(tabId, 'alert');
     } else if (current?.state === 'permission') {
       activityStore.clearTabState(tabId);
@@ -149,6 +163,8 @@ function createAgentStateStore() {
     // refers to the session we're currently showing.
     if (expectedSessionId && was.sessionId !== expectedSessionId) return;
     clearStaleTimer(tabId);
+    askOpen.delete(tabId);
+    answered.delete(tabId);
     sessions = new Map(sessions);
     sessions.delete(tabId);
     // Clean up tab state if session ended while in permission state
@@ -185,6 +201,21 @@ function createAgentStateStore() {
     /** Get Claude state for a tab, if a Claude session is active there. */
     getState(tabId: string): AgentTabSession | undefined {
       return sessions.get(tabId);
+    },
+
+    /** Is this keystroke answering a permission dialog (rather than the human taking the
+     *  conversation over)? Called for every human keystroke; an answer key (Enter, a digit)
+     *  counts as answering and closes the window, and a bare Esc — a denial — closes it
+     *  WITHOUT counting, since §7 treats a denial as the human redirecting. */
+    classifyKeystroke(tabId: string, data: string): boolean {
+      const open = askOpen.has(tabId) || (sessions.get(tabId)?.state === 'permission' && !answered.has(tabId));
+      if (!open) return false;
+      const isEsc = data === '\x1b';
+      if (isEsc || data === '\r' || /^[0-9]$/.test(data)) {
+        askOpen.delete(tabId);
+        answered.add(tabId);
+      }
+      return !isEsc;
     },
 
     /** Check if any tab in the list has a Claude session needing attention. */
@@ -314,7 +345,10 @@ function createAgentStateStore() {
         if (!tab_id) return;
         // A background subagent's permission prompt outlives the parent's turn ending
         // (claude_code/gate.rs). Rust keeps the tab in permission; so does this mirror.
-        if (!gate_held) setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
+        if (!gate_held) {
+          askOpen.delete(tab_id);
+          setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
+        }
         setVariable(tab_id, 'claudeAction', '');
       });
       unlisteners.push(u3);
@@ -322,6 +356,7 @@ function createAgentStateStore() {
       const u4 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-user-prompt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
+        askOpen.delete(tab_id);
         // Clear tool state — new prompt means previous operation ended (possibly interrupted)
         setState(tab_id, session_id, 'active', undefined, undefined, runtimeOf(e.payload));
         setVariable(tab_id, 'claudeAction', '');
@@ -417,9 +452,11 @@ function createAgentStateStore() {
       unlisteners.push(u7);
 
       // PostToolUse: tool finished, clear tool info (still active/thinking)
-      const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string; approvals_open?: number; gate_held?: boolean }>('agent-hook-post-tool-use', (e) => {
+      const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string; agent?: string; approvals_open?: number; gate_held?: boolean }>('agent-hook-post-tool-use', (e) => {
         const { session_id, tab_id, approvals_open, gate_held } = e.payload;
         if (!tab_id) return;
+        // Only the asking agent's own call ending closes its dialog (see `askOpen`).
+        if (askOpen.get(tab_id) === (e.payload.agent ?? '')) askOpen.delete(tab_id);
         // Claude: this call ended but the prompt is held by another. Leave it exactly as it is.
         if (gate_held) return;
         // A tool finishing does NOT mean the tab is unblocked: Codex runs tools in parallel, so
@@ -440,11 +477,22 @@ function createAgentStateStore() {
       const u10 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-interrupt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
+        askOpen.delete(tab_id);
         setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
         markReadInternal(tab_id);
         setVariable(tab_id, 'claudeAction', '');
       });
       unlisteners.push(u10);
+
+      // Claude's PermissionRequest: a dialog is opening. Deliberately NOT a state change —
+      // see `askOpen`.
+      const u11 = await listen<{ session_id: string; tab_id: string | null; agent?: string }>('agent-hook-permission-asked', (e) => {
+        const { tab_id } = e.payload;
+        if (!tab_id) return;
+        askOpen.set(tab_id, e.payload.agent ?? '');
+        answered.delete(tab_id);
+      });
+      unlisteners.push(u11);
 
       // PreCompact: context compaction starting. The agent is working from here — a manual
       // `/compact` fires no UserPromptSubmit, so without this the tab read `idle` for the whole
