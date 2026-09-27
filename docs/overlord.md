@@ -856,17 +856,21 @@ Interruption semantics (decided 2026-08-22):
   can't draw this line on its own — for Claude it arrives 6s after the dialog
   opens, and a denial never clears it — so `claudeStateStore.classifyKeystroke`
   decides per key:
-  - the window OPENS at Claude's `PermissionRequest` hook
+  - a dialog OPENS at Claude's `PermissionRequest` hook
     (`agent-hook-permission-asked`, emitted for this alone), or when `state`
-    enters `permission` (Codex; a Claude ask whose hook we missed);
-  - it CLOSES at the first answer key — Enter or a digit, which count as
-    answering, or a bare Esc, a denial, which counts as takeover — so text typed
-    after a denial, or while an approved tool runs, is the human's again. It
-    also closes when the ASKING agent's call ends (another agent's PostToolUse
-    in the first 6s must not close it), and on Stop, interrupt or a new prompt.
-  Known gaps: feedback typed into the dialog before Enter (approve-with-feedback)
-  is excused, and a prompt answered from the phone leaves the window open until
-  the call ends, excusing keys typed in the tab meanwhile.
+    enters `permission` (Codex; a Claude ask whose hook we missed). Dialogs
+    stack, so asks are COUNTED, and the window stays open while any is
+    unanswered;
+  - navigation (arrows, Tab) leaves it open; a bare Esc is a denial and counts
+    as takeover; ANY other key answers the dialog on top (Enter, Claude's
+    digits, Codex's y/a/n). Once all are answered, text typed after a denial or
+    while an approved tool runs is the human's again. An ask also leaves when
+    its OWN agent's call ends (another agent's PostToolUse in the first 6s must
+    not close it), and all of them on Stop, interrupt or a new prompt.
+  Known gaps: feedback typed into a dialog (Tab, then text) counts as takeover
+  from its second character, so approve-with-feedback aborts the ritual; and a
+  dialog answered from the phone stays counted until its call ends, excusing
+  keys typed in the tab meanwhile.
 - **App restart aborts**: in-flight rituals do not survive a restart — never
   resume a half-ritual into a respawned tab. Ledger `aborted`; cooldown refires.
 

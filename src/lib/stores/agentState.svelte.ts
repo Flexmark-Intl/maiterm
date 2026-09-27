@@ -97,14 +97,28 @@ function createAgentStateStore() {
   // is a keystroke ANSWERING a permission dialog, or the human taking the tab over?
   // The hook-derived `state` marks neither end of a Claude dialog — it turns 'permission'
   // 6s after the dialog opens (the Notification), and a denial fires no hook to clear it.
-  // `askOpen`: tab → the agent whose PermissionRequest opened a dialog. Only that agent's
-  //   own call ending closes it — another agent's PostToolUse in the first 6s carries
-  //   `gate_held: false` like any other.
-  // `answered`: the human pressed an answer key (Enter, a digit, Esc) since the dialog
-  //   opened. Keys after it are the human's again, even while `state` still reads
-  //   'permission' — the approved tool is still running, or the denial left it stale.
-  const askOpen = new Map<string, string>();
+  // `asks`: tab → the agents whose PermissionRequests opened dialogs, one entry per ask —
+  //   dialogs STACK (claude_code/gate.rs), so answering the top one can reveal another.
+  //   An entry leaves only when its OWN agent's call ends: another agent's PostToolUse in
+  //   the first 6s carries `gate_held: false` like any other.
+  // `answers`: answer keys pressed against those asks. Dialogs still on screen =
+  //   asks − answers. A call that ends consumes one answer (it was probably the one
+  //   answered); a denial ends no call, so its answer stays counted until the turn ends.
+  // `answered`: every dialog has been answered from the keyboard. Keys after it are the
+  //   human's again even while `state` still reads 'permission' — the approved tool is
+  //   still running, or a denial left the state stale.
+  const asks = new Map<string, string[]>();
+  const answers = new Map<string, number>();
   const answered = new Set<string>();
+
+  function pendingAsks(tabId: string): number {
+    return (asks.get(tabId)?.length ?? 0) - (answers.get(tabId) ?? 0);
+  }
+
+  function clearAsks(tabId: string) {
+    asks.delete(tabId);
+    answers.delete(tabId);
+  }
 
   /** Mark a tab's idle result as read. Shared by the public markRead() and the
    *  session-start handler, which must not leave a fresh start looking like an unseen result. */
@@ -163,7 +177,7 @@ function createAgentStateStore() {
     // refers to the session we're currently showing.
     if (expectedSessionId && was.sessionId !== expectedSessionId) return;
     clearStaleTimer(tabId);
-    askOpen.delete(tabId);
+    clearAsks(tabId);
     answered.delete(tabId);
     sessions = new Map(sessions);
     sessions.delete(tabId);
@@ -204,18 +218,21 @@ function createAgentStateStore() {
     },
 
     /** Is this keystroke answering a permission dialog (rather than the human taking the
-     *  conversation over)? Called for every human keystroke; an answer key (Enter, a digit)
-     *  counts as answering and closes the window, and a bare Esc — a denial — closes it
-     *  WITHOUT counting, since §7 treats a denial as the human redirecting. */
+     *  conversation over)? Called for every human keystroke.
+     *
+     *  Navigating the dialog (arrows and other escape sequences, Tab) leaves it open. A bare
+     *  Esc denies — §7 treats a denial as the human redirecting, so it is NOT answering.
+     *  Every other key answers the dialog on top: Enter, Claude's digits, Codex's y/a/n.
+     *  Runtime-agnostic on purpose; the price is that feedback typed into the dialog
+     *  (Tab, then text) counts as takeover from its second character. */
     classifyKeystroke(tabId: string, data: string): boolean {
-      const open = askOpen.has(tabId) || (sessions.get(tabId)?.state === 'permission' && !answered.has(tabId));
-      if (!open) return false;
-      const isEsc = data === '\x1b';
-      if (isEsc || data === '\r' || /^[0-9]$/.test(data)) {
-        askOpen.delete(tabId);
-        answered.add(tabId);
-      }
-      return !isEsc;
+      const byAsk = pendingAsks(tabId) > 0;
+      const byState = sessions.get(tabId)?.state === 'permission' && !answered.has(tabId);
+      if (!byAsk && !byState) return false;
+      if (data === '\t' || (data.length > 1 && data.startsWith('\x1b'))) return true;
+      if (byAsk) answers.set(tabId, (answers.get(tabId) ?? 0) + 1);
+      if (pendingAsks(tabId) <= 0) answered.add(tabId);
+      return data !== '\x1b';
     },
 
     /** Check if any tab in the list has a Claude session needing attention. */
@@ -346,7 +363,7 @@ function createAgentStateStore() {
         // A background subagent's permission prompt outlives the parent's turn ending
         // (claude_code/gate.rs). Rust keeps the tab in permission; so does this mirror.
         if (!gate_held) {
-          askOpen.delete(tab_id);
+          clearAsks(tab_id);
           setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
         }
         setVariable(tab_id, 'claudeAction', '');
@@ -356,7 +373,7 @@ function createAgentStateStore() {
       const u4 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-user-prompt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
-        askOpen.delete(tab_id);
+        clearAsks(tab_id);
         // Clear tool state — new prompt means previous operation ended (possibly interrupted)
         setState(tab_id, session_id, 'active', undefined, undefined, runtimeOf(e.payload));
         setVariable(tab_id, 'claudeAction', '');
@@ -455,8 +472,14 @@ function createAgentStateStore() {
       const u8 = await listen<{ session_id: string; tab_id: string | null; tool_name: string; runtime?: string; agent?: string; approvals_open?: number; gate_held?: boolean }>('agent-hook-post-tool-use', (e) => {
         const { session_id, tab_id, approvals_open, gate_held } = e.payload;
         if (!tab_id) return;
-        // Only the asking agent's own call ending closes its dialog (see `askOpen`).
-        if (askOpen.get(tab_id) === (e.payload.agent ?? '')) askOpen.delete(tab_id);
+        // Only the asking agent's own call ending closes its dialog (see `asks`).
+        const pending = asks.get(tab_id);
+        const i = pending?.lastIndexOf(e.payload.agent ?? '') ?? -1;
+        if (pending && i >= 0) {
+          pending.splice(i, 1);
+          const n = answers.get(tab_id) ?? 0;
+          if (n > 0) answers.set(tab_id, n - 1);
+        }
         // Claude: this call ended but the prompt is held by another. Leave it exactly as it is.
         if (gate_held) return;
         // A tool finishing does NOT mean the tab is unblocked: Codex runs tools in parallel, so
@@ -477,7 +500,7 @@ function createAgentStateStore() {
       const u10 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-interrupt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
-        askOpen.delete(tab_id);
+        clearAsks(tab_id);
         setState(tab_id, session_id, 'idle', undefined, undefined, runtimeOf(e.payload));
         markReadInternal(tab_id);
         setVariable(tab_id, 'claudeAction', '');
@@ -485,11 +508,20 @@ function createAgentStateStore() {
       unlisteners.push(u10);
 
       // Claude's PermissionRequest: a dialog is opening. Deliberately NOT a state change —
-      // see `askOpen`.
+      // see `asks`.
       const u11 = await listen<{ session_id: string; tab_id: string | null; agent?: string }>('agent-hook-permission-asked', (e) => {
         const { tab_id } = e.payload;
         if (!tab_id) return;
-        askOpen.set(tab_id, e.payload.agent ?? '');
+        // An agent's newest ask supersedes its earlier one (gate.rs `call_asked`), so it
+        // holds one entry at most. A blocked agent can't ask again, so the earlier dialog
+        // was answered — a denial, which ended no call — and takes its answer with it.
+        const agent = e.payload.agent ?? '';
+        const prev = asks.get(tab_id) ?? [];
+        const list = prev.filter((a) => a !== agent);
+        const n = answers.get(tab_id) ?? 0;
+        if (list.length < prev.length && n > 0) answers.set(tab_id, n - 1);
+        list.push(agent);
+        asks.set(tab_id, list);
         answered.delete(tab_id);
       });
       unlisteners.push(u11);
