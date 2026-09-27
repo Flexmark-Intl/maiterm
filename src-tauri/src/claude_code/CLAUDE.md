@@ -703,11 +703,16 @@ agents.
 - "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
-**Remote Claude hooks:** All twelve events use command hooks reading `MAITERM_PORT`,
-`MAITERM_AUTH`, and `MAITERM_TAB_ID` from the process environment. SessionStart also
+**Remote Claude hooks:** Every event uses a command hook reading `MAITERM_PORT`,
+`MAITERM_AUTH`, and `MAITERM_TAB_ID` from the process environment. There are eleven, plus
+`PreModelSwitch` where every Claude on the host knows it (the setup's Python probes each
+`claude` it can find). SessionStart also
 requests `prime=1` and echoes the tab id and returned instructions into Claude's
-context. Preserve `curl --max-time`: a zombie tunnel can accept a connection and
-never answer. The settings merge uses remote Python 3; nova's documented version
+context, and PreModelSwitch prints the server's `allow` (`replyCmd`); every other event
+discards the reply. Preserve `curl --max-time`: a zombie tunnel can accept a connection and
+never answer. **Anyone testing that Python must run it with `HOME` pointed at a scratch
+directory.** A review once ran it against the real `~/.claude/settings.json` and left junk
+hooks behind. The settings merge uses remote Python 3; nova's documented version
 is older than 3.11, so do not require `tomllib`. Codex has its own shim and outstanding
 priming/configuration work described in the review.
 
