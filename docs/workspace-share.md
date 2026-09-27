@@ -124,6 +124,20 @@ window's active pane, in the BACKGROUND — and a background tab has no Terminal
 something mounts it, so the wizard dispatches `activate-tab` for it (and for every imported
 agent tab, which would otherwise wait unlaunched behind its pane's active tab).
 
+That tab is in the background, **behind the wizard's modal**, so the human can't see it. The
+first real import stalled on a private GitLab repo over https: the probe said "could not
+verify" (`could not read Username`), the clone sat at `Username for …:` where nobody could see
+it, and the only way out was Cancel. So the wizard brings the tab to the human instead:
+- each running row shows the clone's last lines;
+- when the last line is git's or ssh's question (username, password, passphrase, host-key
+  yes/no), it offers an inline reply, masked when the question is for a secret, and writes the
+  answer plus Enter to the PTY;
+- **Stop** sends Ctrl-C;
+- a failed row shows git's own output;
+- once nothing is running and something has failed, **Back** returns to the directory step to
+  Skip or re-point that root;
+- closing the wizard closes failed clones' tabs.
+
 "Done" is not an exit code: the tab is a shell, and the wizard watches `get_pty_foreground_job`
 for the shell to go busy and come back to its prompt, then re-applies the rule to the
 destination — it must now **match**. (The rule alone can't say "done": a clone in progress

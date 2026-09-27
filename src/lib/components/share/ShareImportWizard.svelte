@@ -10,7 +10,7 @@
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { dispatch } from '$lib/stores/notificationDispatch';
   import {
-    getPtyForegroundJob, writeTerminal, shareCheckDirs, shareCloneCommand, shareImportBuild, shareProbe, shareReadFile,
+    getPtyForegroundJob, getTerminalRecentText, writeTerminal, shareCheckDirs, shareCloneCommand, shareImportBuild, shareProbe, shareReadFile,
     type ShareDirVerdict, type ShareImportPreview, type ShareProbe, type SharedLoc, type SharedRoot,
   } from '$lib/tauri/commands';
   import { launchContextFor } from '$lib/share/share';
@@ -37,6 +37,40 @@
     cloneTab: { workspaceId: string; paneId: string; tabId: string } | null;
     cloneError: string | null;
     skipped: boolean;
+    /** The clone tab's last lines. The tab itself is behind this modal, so this is the only
+     *  place a human sees what git is doing — or that it's waiting on them. */
+    tail: string[];
+    /** git's question, when its last line is one (a sign-in, a passphrase, host-key trust). */
+    asking: string | null;
+    reply: string;
+  }
+
+  // What git and ssh print when they stop for input: "Username for 'https://…': ",
+  // "Enter passphrase for key …: ", "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
+  const ASKING = /(username|password|passphrase|\bpin\b|verification code|one-time|continue connecting|yes\/no)[^\n]*[:?\])]\s*$/i;
+  const SECRET = /password|passphrase|\bpin\b|token|code/i;
+
+  function updateTail(row: RootRow, text: string) {
+    const lines = text.split('\n').map(l => l.trimEnd());
+    while (lines.length && !lines[lines.length - 1]) lines.pop();
+    row.tail = lines.slice(-4);
+    const last = lines[lines.length - 1] ?? '';
+    row.asking = ASKING.test(last) ? last.trim() : null;
+  }
+
+  async function sendReply(row: RootRow) {
+    const inst = row.cloneTab ? terminalsStore.get(row.cloneTab.tabId) : undefined;
+    if (!inst) return;
+    const text = row.reply;
+    row.reply = '';
+    row.asking = null;
+    await writeTerminal(inst.ptyId, Array.from(new TextEncoder().encode(text + '\r')));
+  }
+
+  /** Ctrl-C to the clone: git exits, the shell comes back, and the row lands on 'failed'. */
+  async function stopClone(row: RootRow) {
+    const inst = row.cloneTab ? terminalsStore.get(row.cloneTab.tabId) : undefined;
+    if (inst) await writeTerminal(inst.ptyId, [0x03]);
   }
 
   let preview = $state<ShareImportPreview | null>(null);
@@ -61,7 +95,16 @@
   /** Set when the wizard closes. Clone watchers are async loops that outlive the component;
    *  without this a Cancel mid-clone still built the workspace when git finished. */
   let cancelled = false;
-  onDestroy(() => { cancelled = true; });
+  onDestroy(() => {
+    cancelled = true;
+    // A failed clone's tab was kept for Retry; with the wizard gone nothing will use it. A
+    // running one is left alone: the human may be watching it finish.
+    for (const r of rows) {
+      if (r.cloneTab && r.clone !== 'running') {
+        workspacesStore.closeTabOrPane(r.cloneTab.workspaceId, r.cloneTab.paneId, r.cloneTab.tabId).catch(() => {});
+      }
+    }
+  });
 
   (async () => {
     try {
@@ -80,6 +123,9 @@
           cloneTab: null,
           cloneError: null,
           skipped: false,
+          tail: [],
+          asking: null,
+          reply: '',
         } satisfies RootRow;
       });
       serviceOn = p.file.services.map(() => true);
@@ -134,6 +180,12 @@
   }
 
   function skip(i: number) {
+    // A failed clone's tab (kept for Retry) has nothing left to do.
+    const t = rows[i].cloneTab;
+    if (t) workspacesStore.closeTabOrPane(t.workspaceId, t.paneId, t.tabId).catch(() => {});
+    rows[i].cloneTab = null;
+    rows[i].clone = 'idle';
+    rows[i].cloneError = null;
     rows[i].dest = null;
     rows[i].verdict = null;
     rows[i].recordedRejected = null;
@@ -252,6 +304,7 @@
         if (Date.now() - started > 15_000) { row.clone = 'failed'; row.cloneError = 'The clone tab was closed'; }
         continue;
       }
+      try { updateTail(row, await getTerminalRecentText(inst.ptyId, 12)); } catch { /* next poll */ }
       let atPrompt: boolean | null = null;
       try { atPrompt = (await getPtyForegroundJob(inst.ptyId)).shell_at_prompt; } catch { continue; }
       if (atPrompt === null) {
@@ -276,7 +329,7 @@
       row.cloneTab = null;
     } else {
       row.clone = 'failed';
-      row.cloneError = 'git clone didn\'t finish — its tab shows why';
+      row.cloneError = 'git clone didn\'t finish:';
     }
   }
 
@@ -299,6 +352,15 @@
     }
     // A missing branch is the likeliest reason a clone with --branch failed: retry without it.
     await startClone(row, false);
+  }
+
+  /** Cloning with nothing running and something failed: Retry may never work (no access, the
+   *  wrong server), so the human needs a way back to Skip or re-point that root. */
+  const stalled = $derived(phase === 'cloning' && !rows.some(r => r.clone === 'running') && rows.some(r => r.clone === 'failed'));
+
+  function backToMap() {
+    for (const r of rows) if (r.clone === 'failed') { r.clone = 'idle'; r.cloneError = null; }
+    phase = 'map';
   }
 
   // ── Build (§4 step 3) ──────────────────────────────────────────────────────────
@@ -481,20 +543,32 @@
                     {#if r.probe.branch_exists === false}<div class="sub warn">Branch {r.root.branch} isn't on the remote — the default branch will be cloned.</div>{/if}
                   {:else if r.probe.outcome === 'denied'}
                     <div class="sub error">You don't have access to this repository: {r.probe.message}</div>
+                  {:else if /could not read (username|password)/i.test(r.probe.message)}
+                    <div class="sub dim">This repository needs a sign-in. The clone will ask for it here.</div>
                   {:else}
-                    <div class="sub dim">Couldn't check access ({r.probe.message}) — the clone will ask for anything it needs.</div>
+                    <div class="sub dim">Couldn't check access ({r.probe.message}). The clone will ask here for anything it needs.</div>
                   {/if}
                 {/if}
                 {#if phase === 'cloning' && r.verdict?.verdict === 'clone'}
                   <div class="sub">
                     {#if r.clone === 'idle'}<span class="dim">Waiting for the clone before it…</span>
-                    {:else if r.clone === 'running'}<span class="dim">Cloning… (see its tab)</span>
+                    {:else if r.clone === 'running'}
+                      <span class="dim">Cloning…</span> <button class="link" onclick={() => stopClone(r)}>Stop</button>
+                      {#if r.tail.length}<pre class="tail">{r.tail.join('\n')}</pre>{/if}
+                      {#if r.asking}
+                        <form class="reply" onsubmit={(e) => { e.preventDefault(); sendReply(r); }}>
+                          <span class="warn">git is asking for this:</span>
+                          <input type={SECRET.test(r.asking) ? 'password' : 'text'} bind:value={r.reply} spellcheck="false" autocomplete="off" aria-label={r.asking} />
+                          <Button variant="secondary" type="submit">Send</Button>
+                        </form>
+                      {/if}
                     {:else if r.clone === 'done'}<span class="ok">Cloned</span>
                     {:else if r.clone === 'manual'}
                       <span class="dim">maiTerm can't tell when the clone finishes here.</span>
                       <button class="link" onclick={() => markManualDone(r)}>It's finished</button>
                     {:else if r.clone === 'failed'}
                       <span class="error">{r.cloneError}</span> <button class="link" onclick={() => retry(r)}>Retry</button>
+                      {#if r.tail.length}<pre class="tail">{r.tail.join('\n')}</pre>{/if}
                     {/if}
                   </div>
                 {/if}
@@ -569,8 +643,11 @@
         <Button variant="primary" onclick={onclose}>Done</Button>
       {:else}
         <Button variant="secondary" onclick={onclose} disabled={phase === 'building'}>Cancel</Button>
+        {#if stalled}
+          <Button variant="secondary" onclick={backToMap}>Back</Button>
+        {/if}
         <Button variant="primary" onclick={startImport} disabled={!canStart}>
-          {phase === 'cloning' ? 'Cloning…' : phase === 'building' ? 'Setting up…' : 'Set up workspace'}
+          {phase === 'cloning' && !stalled ? 'Cloning…' : phase === 'building' ? 'Setting up…' : 'Set up workspace'}
         </Button>
       {/if}
     </div>
@@ -613,6 +690,9 @@
   .sub-check { margin: 4px 0 0 22px; font-size: 0.846rem; }
   .env-given { margin-left: 22px; }
   .told { margin-left: 22px; }
+  .tail { margin: 4px 0 0; padding: 4px 6px; background: var(--bg-dark); border-radius: 4px; font-family: monospace; font-size: 0.769rem; color: var(--fg-dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .reply { margin-top: 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .reply input { flex: 1; min-width: 160px; background: var(--bg-dark); border: 1px solid var(--bg-light); border-radius: 4px; color: var(--fg); padding: 3px 6px; font-family: monospace; }
   .told .cmd { margin-left: 0; }
   .footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--bg-light); }
 </style>
