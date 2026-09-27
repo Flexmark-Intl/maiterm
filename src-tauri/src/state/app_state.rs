@@ -169,9 +169,9 @@ pub struct AgentSessionInfo {
     /// Used to recover affinity after SSE reconnects: if a session's
     /// connection_id is no longer in connection_tabs, it's orphaned.
     pub connection_id: Option<String>,
-    /// Approvals Codex is currently deciding, oldest first. Empty for Claude, which has no
-    /// `PermissionRequest` hook — its permission Notification means the human really is being
-    /// asked, and that path is untouched.
+    /// Approvals Codex is currently deciding, oldest first. Always empty for Claude. Its
+    /// permission Notification means the human really is being asked. Its `PermissionRequest`
+    /// hook files nothing here: it only tells `claude_gate` which call is asking.
     ///
     /// `WaitingPermission` is entered when this becomes non-empty and left when it drains, so a
     /// gate held for one tool is never cleared by an unrelated tool finishing.

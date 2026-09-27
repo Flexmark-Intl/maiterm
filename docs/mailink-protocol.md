@@ -655,7 +655,12 @@ interface ChatDetail extends Chat {
   pendingPrompt?: {         // present iff state==='permission' or a question is open
     prompt_id: string;      // opaque, minted when the agent opens this prompt; echoed in /respond
     kind: 'permission' | 'question';
-    text: string;
+    text: string;           // permission: "Tool(detail) — approve?" when maiTerm knows which call
+                            // the Approve button answers. EXACTLY "Permission requested" when it
+                            // doesn't: two agents asking at once (Claude's hooks can't say which
+                            // dialog is on top), or no tool recorded. The phone matches that
+                            // literal (maiLink 9a60619) and warns to check the terminal first,
+                            // so it is contract: `UNATTRIBUTED_PERMISSION_TEXT` in mailink/mod.rs.
     options?: string[];     // e.g. ["Yes","Yes, don't ask again","No"]; absent ⇒ free-text only
     asked_at?: number;      // question only: unix ms the ask opened — DISPLAY-ONLY ("asked 2m ago")
     expires_at?: number;    // question only, AUTHORITATIVE: unix ms the ask will auto-resolve.
