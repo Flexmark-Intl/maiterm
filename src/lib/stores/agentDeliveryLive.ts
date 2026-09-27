@@ -4,7 +4,8 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
-import { error as logError } from '@tauri-apps/plugin-log';
+import { trustDialogOpen } from '$lib/tauri/commands';
+import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
  * The ONE live delivery mailbox — the agentDelivery core wired to real PTYs, shared by the
@@ -34,6 +35,14 @@ export async function injectPrompt(tabId: string, text: string): Promise<boolean
     return false;
   }
   try {
+    // Every bridge and mesh write ends in a CR, and at Claude's workspace-trust dialog that CR
+    // confirms "No, exit". The queued path never gets here for a tab with no session, but the
+    // one-off writes do: the disconnect notice goes to any partner that isn't `active`, and the
+    // fork directive goes in anyway once the fork's boot timeout expires.
+    if (await trustDialogOpen(tabId)) {
+      logInfo(`agentDelivery: ${tabId.slice(0, 8)} is at the workspace-trust dialog — not typing into it`);
+      return false;
+    }
     await bracketedPasteSubmit(inst.ptyId, text);
     return true;
   } catch (e) {
