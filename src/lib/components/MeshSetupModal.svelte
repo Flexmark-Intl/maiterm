@@ -5,11 +5,11 @@
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { roleName } from '$lib/stores/meshRouting';
   import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
-  import { getAgentLiveness, writeTerminal } from '$lib/tauri/commands';
+  import { getAgentLiveness, trustDialogOpen, writeTerminal } from '$lib/tauri/commands';
   import { replayAutoResume } from '$lib/stores/triggers.svelte';
   import StatusDot from '$lib/components/ui/StatusDot.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
-  import { error as logError } from '@tauri-apps/plugin-log';
+  import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
   interface Props {
     open: boolean;
@@ -215,8 +215,18 @@
     pending[r.tabId] = { started: Date.now(), sentAt: null };
     const entry = pending[r.tabId]; // proxy identity — detects supersede/resolve below
     try {
+      // Never at Claude's workspace-trust dialog, where either CR confirms "No, exit". Look
+      // only once the screen has settled: a just-started Claude may not have drawn it yet.
+      const atTrustDialog = async () => {
+        await waitForQuiet(r.tabId);
+        if (!(await trustDialogOpen(r.tabId))) return false;
+        logInfo(`mesh setup: ${r.tabId.slice(0, 8)} is at the workspace-trust dialog — not typing into it`);
+        delete pending[r.tabId];
+        return true;
+      };
+      if (await atTrustDialog()) return;
       await writeTerminal(r.ptyId, [0x0d]);
-      await waitForQuiet(r.tabId);
+      if (await atTrustDialog()) return;
       if (pending[r.tabId] !== entry) return; // resolved (went ready) or a newer send took over
       await bracketedPasteSubmit(r.ptyId, '/maiterm init');
       entry.sentAt = Date.now();

@@ -1820,6 +1820,21 @@ function createOverlordStore() {
           recordPermissionHandoff(tabId, escalationId, rule.id);
           return;
         }
+        // Claude's workspace-trust dialog comes before any session, so the tab maps to no state
+        // at all and the permission handoff above never sees it — while the paste's CR below
+        // would confirm "No, exit". Trusting a folder is the human's call, not the agent's.
+        if (await commands.trustDialogOpen(tabId)) {
+          ledger(tabId, rule.id, origin, i, step, 'blocked_guard');
+          escalate(
+            tabId,
+            rule.id,
+            'permission_stuck',
+            `"${rule.name}" fired on ${tabDisplayName(tabId)}, which is at Claude's workspace-trust ` +
+              `dialog (asking whether to trust its folder). Nothing was typed. Trusting a folder is ` +
+              `the human's decision — it can be answered from the phone or the terminal.`,
+          );
+          return;
+        }
         const inst = terminalsStore.get(tabId);
         if (!inst) {
           ledger(tabId, rule.id, origin, i, step, 'blocked_no_repl');

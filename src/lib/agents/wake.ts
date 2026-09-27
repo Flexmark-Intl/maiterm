@@ -41,26 +41,37 @@ const INIT_QUIET_POLL_MS = 300;
  *  message of its own once the budget expires, so an init pasted after that point would land
  *  ON TOP of that message. Past the deadline we skip the paste rather than race it. */
 async function settleAndSendInit(tabId: string, ptyId: string, deadline: number): Promise<boolean> {
-  // The one startup dialog a bare CR must never answer: at Claude's workspace-trust dialog it
+  // Claude's workspace-trust dialog is the one startup screen a CR must never answer: it
   // confirms "No, exit", Claude quits, and the next resume stops at the same dialog. The phone
-  // answers it as its own card.
-  if (await trustDialogOpen(tabId)) {
-    logInfo(`wake: ${tabId.slice(0, 8)} is at the workspace-trust dialog — not typing into it`);
-    return false;
-  }
+  // answers it as its own card. A single look before typing isn't enough — a Claude that has
+  // just started may not have DRAWN it yet, and a CR sent then waits in the tty and lands on it.
+  // So every keystroke waits for the screen to settle (output quiet) and looks again.
+  const settledAndSafe = async (): Promise<boolean> => {
+    await waitQuiet(tabId, deadline);
+    if (Date.now() >= deadline) return false;
+    if (await trustDialogOpen(tabId)) {
+      logInfo(`wake: ${tabId.slice(0, 8)} is at the workspace-trust dialog — not typing into it`);
+      return false;
+    }
+    return true;
+  };
+  if (!(await settledAndSafe())) return false;
   await writeTerminal(ptyId, [0x0d]);
-  while (Date.now() < deadline) {
-    const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
-    if (Date.now() - lastOut >= INIT_QUIET_MS) break;
-    await new Promise((res) => setTimeout(res, INIT_QUIET_POLL_MS));
-  }
+  if (!(await settledAndSafe())) return false;
   if (claudeStateStore.getState(tabId)) return false; // re-registered on its own while settling
-  if (Date.now() >= deadline) {
-    logInfo(`wake: ${tabId.slice(0, 8)} never went quiet within budget — skipping init paste`);
-    return false;
-  }
   await bracketedPasteSubmit(ptyId, '/maiterm init');
   return true;
+}
+
+/** Wait until the tab's output has been quiet for INIT_QUIET_MS, or `until` passes. Quiet is
+ *  the evidence the screen is settled: a booting TUI, a compaction or a thinking spinner all
+ *  repaint continuously. */
+export async function waitQuiet(tabId: string, until: number): Promise<void> {
+  while (Date.now() < until) {
+    const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
+    if (Date.now() - lastOut >= INIT_QUIET_MS) return;
+    await new Promise((res) => setTimeout(res, INIT_QUIET_POLL_MS));
+  }
 }
 
 /** Run one wake. Resolves when the remedy has been DELIVERED, not when the agent is ready —

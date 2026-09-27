@@ -6,6 +6,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
+import { waitQuiet } from '$lib/agents/wake';
 import { agentDelivery as deliveryCtl, DELIVERY_OWNER_MESH as OWNER } from '$lib/stores/agentDeliveryLive';
 import { createMeshRouter, roleName, MESH_ONBOARDED_VAR, MESH_FORMER_ROLES_VAR, type MeshMember, type MeshRouter } from '$lib/stores/meshRouting';
 import { performMeshSend, type MeshEdge, type MeshSendResult } from '$lib/stores/meshSend';
@@ -203,19 +204,20 @@ function createAgentMeshStore() {
   // be sitting at a startup dialog (e.g. "restore as is / compact first") that would swallow a
   // straight paste — so send a bare CR to answer it, wait for the PTY to go output-quiet
   // (compaction/thinking spinners repaint continuously), then deliver the init exactly once.
-  const INIT_QUIET_MS = 1500;
-  const INIT_QUIET_POLL_MS = 300;
+  //
+  // Except Claude's workspace-trust dialog, where that CR confirms "No, exit". Each keystroke
+  // waits for the screen to settle and looks first, since a just-started Claude may not have
+  // drawn it yet (wake.ts, same rule).
   const INIT_QUIET_CAP_MS = 120_000;
   async function settleAndSendInit(tabId: string, ptyId: string) {
-    // Not the trust dialog: the bare CR below would confirm its "No, exit" (wake.ts, same guard).
-    if (await commands.trustDialogOpen(tabId)) return;
+    const until = Date.now() + INIT_QUIET_CAP_MS;
+    const safe = async () => {
+      await waitQuiet(tabId, until);
+      return !(await commands.trustDialogOpen(tabId));
+    };
+    if (!(await safe())) return;
     await commands.writeTerminal(ptyId, [0x0d]);
-    const t0 = Date.now();
-    while (Date.now() - t0 < INIT_QUIET_CAP_MS) {
-      const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
-      if (Date.now() - lastOut >= INIT_QUIET_MS) break;
-      await new Promise((res) => setTimeout(res, INIT_QUIET_POLL_MS));
-    }
+    if (!(await safe())) return;
     if (claudeStateStore.getState(tabId)) return; // re-registered on its own while settling
     await bracketedPasteSubmit(ptyId, '/maiterm init');
   }

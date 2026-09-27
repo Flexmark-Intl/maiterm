@@ -676,7 +676,9 @@ interface ChatDetail extends Chat {
                             // literal (maiLink 9a60619) and warns to check the terminal first,
                             // so it is contract: `UNATTRIBUTED_PERMISSION_TEXT` in mailink/mod.rs.
     options?: string[];     // e.g. ["Yes","Yes, don't ask again","No"]; absent ⇒ free-text only
-                            // v0.12, Claude's workspace-trust dialog (prompt_id "t_<tabId>",
+                            // v0.12, Claude's workspace-trust dialog (prompt_id
+                            // "t_<tabId>_<digest of the folder>" — a card for one folder
+                            // can never answer a later dialog for another;
                             // text "Trust <path>?", tab registered:false): the dialog's rows in
                             // SCREEN order, today ["No, exit","Yes, I trust this folder"] — or
                             // "No, continue without these permissions" for a folder whose
@@ -2092,7 +2094,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted; adds `MaitermTask.notes`; **removes `MaitermTask.topicId`** |
 | `0.10` | adds `account` on `Chat`, `ChatDetail` and `chat_state` (§14); `GET /accounts`, WS `accounts`, `POST /accounts/active`; `GET /models?tab=`; attention kind `account` |
 | `0.11` | adds `GET /push-prefs` and `POST /push-prefs` (§6.2), per-device push mutes |
-| `0.12` | Claude's workspace-trust dialog as a `permission` card on an UNREGISTERED tab (`prompt_id` `t_<tabId>`, `options` in screen order), rung as `permission`; `reason:"trust_dialog"` from `/wake` and `POST /message`; adds `POST /chats/{tabId}/keys` |
+| `0.12` | Claude's workspace-trust dialog as a `permission` card on an UNREGISTERED tab (`prompt_id` `t_<tabId>_<folder digest>`, `options` in screen order), rung as `permission`; `reason:"trust_dialog"` from `/wake` and `POST /message`; adds `POST /chats/{tabId}/keys` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

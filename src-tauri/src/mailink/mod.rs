@@ -1160,6 +1160,12 @@ async fn post_message(
             ))
         }
     };
+    // Once more at the last moment before typing. Every path below ends in a CR, and at the
+    // trust dialog that CR is "No, exit".
+    if trust_dialog_open(&s.app, &tab_id) {
+        return Ok(Json(json!({ "status": "unreachable", "reason": "trust_dialog",
+            "detail": wake_detail("trust_dialog") })));
+    }
 
     // Image attach: Claude only. Gate BEFORE touching the PTY and return a machine-readable
     // `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app notice — never a
@@ -1321,6 +1327,15 @@ async fn wake_tab(s: &ApiState, tab_id: &str) -> Wake {
         if tab_registered(&s.app, tab_id) {
             return Wake::Woke(action);
         }
+        // The remedy itself is what usually OPENS the dialog: `resume` types `claude --resume`
+        // in an untrusted folder and Claude stops there, alive and never registering. The
+        // check at the top saw a shell; this is the one that sees the dialog.
+        if trust_dialog_open(&s.app, tab_id) {
+            return Wake::Unreachable("trust_dialog");
+        }
+    }
+    if trust_dialog_open(&s.app, tab_id) {
+        return Wake::Unreachable("trust_dialog");
     }
     if agent_is_up(&s.app, &pty).await {
         log::info!("[maiLink] tab {tab_id} woke but never registered — delivering anyway");
@@ -1508,6 +1523,11 @@ pub(crate) async fn respond_to_prompt(
                 return json!({ "ok": false, "reason": "stale",
                     "detail": "that dialog is no longer open in the terminal" });
             };
+            // The same folder the stale-guard approved, read again at the moment of typing.
+            if trust_prompt_id(tab_id, &dialog.path) != cur_id {
+                return json!({ "ok": false, "reason": "stale",
+                    "detail": "the dialog on screen now asks about a different folder" });
+            }
             let Some(keys) = dialog.keys_for(choice.unwrap_or("")) else {
                 return json!({ "ok": false, "reason": "stale",
                     "detail": "that isn't one of the options the dialog shows" });
@@ -3788,7 +3808,9 @@ fn trust_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<trust::TrustDial
     let pty = pty_for_tab(app, tab_id)?;
     let registry = app.terminal_registry.read();
     let handle = registry.get(&pty)?;
-    trust::parse(&crate::terminal::render::viewport_text(&handle.term))
+    // The live screen, not the scrolled viewport: the question is what Claude is drawing, and
+    // a human scrolled up a few lines must neither hide an open dialog nor revive a dead one.
+    trust::parse(&crate::terminal::render::screen_text(&handle.term))
 }
 
 /// Keys the phone may send by name (`POST /chats/{tabId}/keys`). A fixed allowlist of real key
@@ -3869,10 +3891,12 @@ fn permission_prompt_id(app: &AppState, tab_id: &str) -> String {
     }
 }
 
-/// The prompt id of a trust dialog. Per-tab is enough: the dialog is the same question until it
-/// is answered, and answering it ends it.
-fn trust_prompt_id(tab_id: &str) -> String {
-    format!("t_{tab_id}")
+/// The prompt id of a trust dialog: `t_<tab>_<digest of the folder>`. The folder is in it
+/// because it is the whole question. A per-tab id let a card reading "Trust /a?" answer a later
+/// dialog for /b on the same tab (Esc at the desktop, `cd`, `claude` again): the id still
+/// matched, and the phone trusted a folder its human never saw.
+fn trust_prompt_id(tab_id: &str, path: &str) -> String {
+    format!("t_{tab_id}_{}", &sha256_hex(path.as_bytes())[..12])
 }
 
 /// What prompt is open on a tab: `question`, `permission`, or `trust` — Claude's workspace-trust
@@ -3881,9 +3905,11 @@ fn trust_prompt_id(tab_id: &str) -> String {
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
     let states = session_states(app);
     let Some(s) = states.get(tab_id) else {
-        return (runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude)
-            && trust_dialog_for_tab(app, tab_id).is_some())
-        .then(|| ("trust", trust_prompt_id(tab_id), AgentRuntime::Claude));
+        if runtime_for_tab(app, tab_id) != Some(AgentRuntime::Claude) {
+            return None;
+        }
+        return trust_dialog_for_tab(app, tab_id)
+            .map(|d| ("trust", trust_prompt_id(tab_id, &d.path), AgentRuntime::Claude));
     };
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
@@ -5293,7 +5319,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         // rows are read off the screen in screen order ("No, exit" first, as displayed), and
         // `/respond` walks the highlight to the chosen one.
         detail["pendingPrompt"] = json!({
-            "prompt_id": trust_prompt_id(tab_id),
+            "prompt_id": trust_prompt_id(tab_id, &dialog.path),
             "thread_id": tab_id,
             "kind": "permission",
             "respondable": true,

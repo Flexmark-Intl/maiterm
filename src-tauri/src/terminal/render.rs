@@ -419,6 +419,33 @@ fn emit_color_sgr(
     }
 }
 
+/// Plain text of the LIVE screen, one line per row, trailing blanks trimmed — the rows the
+/// program is drawing on, whatever the human has scrolled back to.
+///
+/// Not `viewport_text`, which honours `display_offset`: a tab scrolled up a few lines shows
+/// older rows, so "is this dialog the last thing on screen" answered no while the dialog was
+/// open, and yes for a dialog left above a shell prompt once the right rows were in view. A
+/// caller asking what the PROGRAM is showing needs this one.
+pub fn screen_text<T: EventListener>(term: &Term<T>) -> String {
+    use alacritty_terminal::index::{Column, Line};
+    let grid = term.grid();
+    let cols = grid.columns();
+    (0..grid.screen_lines())
+        .map(|l| {
+            let row = &grid[Line(l as i32)];
+            let mut s = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    s.push(cell.c);
+                }
+            }
+            s.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Plain text of the VISIBLE viewport, one line per row, trailing blanks trimmed.
 ///
 /// Deliberately the viewport and not the buffer: callers use this to ask what is on screen
@@ -440,4 +467,37 @@ pub fn viewport_text<T: EventListener>(term: &Term<T>) -> String {
     }
     lines.push(row.trim_end().to_string());
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod screen_text_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::grid::Scroll;
+    use alacritty_terminal::term::Config;
+
+    struct Size;
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize { 5 }
+        fn screen_lines(&self) -> usize { 5 }
+        fn columns(&self) -> usize { 20 }
+    }
+
+    /// A human scrolled back must not change what the PROGRAM is showing: `screen_text` keeps
+    /// reading the live rows while `viewport_text` follows the scroll.
+    #[test]
+    fn screen_text_ignores_the_scroll_position_and_viewport_text_does_not() {
+        let mut term = Term::new(Config { scrolling_history: 100, ..Config::default() }, &Size, VoidListener);
+        let mut vte: alacritty_terminal::vte::ansi::Processor = Default::default();
+        for i in 0..12 {
+            vte.advance(&mut term, format!("line {i}\r\n").as_bytes());
+        }
+        vte.advance(&mut term, b"FOOTER");
+        let live = screen_text(&term);
+        assert!(live.ends_with("FOOTER"), "{live}");
+
+        term.scroll_display(Scroll::Delta(3));
+        assert_eq!(screen_text(&term), live, "scrolling moves the view, not the screen");
+        assert!(!viewport_text(&term).ends_with("FOOTER"), "the viewport follows the scroll");
+    }
 }
