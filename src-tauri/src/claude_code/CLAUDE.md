@@ -455,6 +455,19 @@ Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up 
   and every subagent hook carries the parent's `session_id`, so without this a background
   subagent's calls cleared its parent's prompt. Claude's `PermissionRequest` is NOT Codex's: it
   normalizes to its own phase and never files an approval.
+- `PreModelSwitch` (HTTP): the one hook whose REPLY is the point. The server answers `allow`
+  (`hookSpecificOutput.permissionDecision`), which skips Claude's "Switch model?" cache-miss
+  confirm (2.1.283+). The confirm was also invisible to the phone's model picker. It answers
+  only for a session this maiTerm knows, because `~/.claude/settings.json` is shared by every
+  Claude on the machine.
+- **Newer events go in only where the installed Claude knows them** (`NEWER_HOOK_EVENTS`: the
+  four above). Claude ignores an unknown hook event, but opens a "Settings Warning" dialog at
+  startup to say so, and that dialog holds every launch. Verified on 2.1.283; the SessionStart
+  hook never ran behind it. The evidence is the event's name in the Claude executable
+  (`events_installed_claude_knows`, cached by path/size/mtime). The remote setup's Python applies
+  the same rule on the host. Both REMOVE our entries for an event the host's Claude doesn't
+  know, and no Claude found means none of them. Adding a new event to either list without
+  this gate is the bug.
 
 **Connection tab affinity:**
 - Server stores connection_id → tab_id mapping in `ServerState.connection_tabs`
@@ -687,7 +700,7 @@ agents.
 - "Inject maiTerm Env Vars" — re-writes `export MAITERM_TAB_ID=... MAITERM_PORT=... MAITERM_AUTH=...` to the PTY for the current shell (useful after tmux attach, sudo, su)
 - "Install MCP for Current User" — writes the full setup script (lockfile, MCP, hooks, skill) to the PTY, executing as the current user. Needed after `sudo -i` or `su -l otheruser` where `~/` changed but the tunnel is still accessible on localhost.
 
-**Remote Claude hooks:** All eleven events use command hooks reading `MAITERM_PORT`,
+**Remote Claude hooks:** All twelve events use command hooks reading `MAITERM_PORT`,
 `MAITERM_AUTH`, and `MAITERM_TAB_ID` from the process environment. SessionStart also
 requests `prime=1` and echoes the tab id and returned instructions into Claude's
 context. Preserve `curl --max-time`: a zombie tunnel can accept a connection and

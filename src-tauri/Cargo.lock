@@ -66,6 +66,7 @@ dependencies = [
  "keyring",
  "libc",
  "log",
+ "memchr",
  "notify",
  "notify-debouncer-mini",
  "objc2-app-kit 0.3.2",

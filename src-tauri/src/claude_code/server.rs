@@ -3220,6 +3220,35 @@ async fn hooks_handler(
         }
     });
 
+    // Claude Code 2.1.283+ confirms a model switch ("Switch model?") whenever the current
+    // model's prompt cache is probably warm, since switching throws it away. In a maiTerm tab the
+    // switch was asked for (typed `/model`, or the phone's picker, which can't see that dialog at
+    // all), so the confirm only gets in the way. `PreModelSwitch` is the supported off switch —
+    // "same contract as PreToolUse: allow proceeds (skipping the interactive cache-miss confirm)"
+    // in the 2.1.283 schema, whose output is `hookSpecificOutput {hookEventName,
+    // permissionDecision}`. This reply is the one deliberate exception to "no body for the
+    // runtime's own http hooks": here the body IS the answer.
+    //
+    // Only for a session this maiTerm knows. ~/.claude/settings.json is shared by every Claude on
+    // the machine, and a session in some other terminal gets its confirm exactly as before.
+    if hook_event_name == "PreModelSwitch" && runtime == crate::state::AgentRuntime::Claude {
+        let ours = tab_id_from_param.is_some()
+            || srv.state.agent_sessions.read().contains_key(&session_id);
+        if !ours {
+            return StatusCode::OK.into_response();
+        }
+        log::info!("Claude hook: PreModelSwitch session={} → allow (skipping the cache-miss confirm)",
+            &session_id[..session_id.len().min(8)]);
+        return axum::Json(serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreModelSwitch",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": "maiTerm: the switch was asked for",
+            }
+        }))
+        .into_response();
+    }
+
     // Kept aside for the `prime=1` reply at the end — the match arms below consume
     // `tab_id_from_param`. Only cloned when a reply is actually asked for.
     let prime_tab = if params.contains_key("prime") {

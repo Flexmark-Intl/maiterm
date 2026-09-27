@@ -14,6 +14,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Already in the tree via regex; direct for scanning the Claude binary for hook event names.
+memchr = "2.8"
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"

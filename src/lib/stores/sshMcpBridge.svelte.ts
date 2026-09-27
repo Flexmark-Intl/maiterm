@@ -443,6 +443,16 @@ function buildSetupScript(
   // `--data-binary @-` streams the payload straight through — nothing here needs to read it.
   const eventCmd = hookGate + hookPost + "--data-binary @- " + hooksUrlExpr + " 2>/dev/null; } || true";
 
+  // PreModelSwitch is the other event whose reply matters: the server answers `allow`, which
+  // skips Claude's "Switch model?" confirm, and Claude reads it from this hook's stdout. So the
+  // generic hook without `-o /dev/null`. An unreachable server prints nothing, and Claude simply
+  // asks as it always did. Keeps the POST marker, so the settings merge still knows it as ours.
+  const replyCmd =
+    hookGate +
+    "curl -s --connect-timeout 2 --max-time 4 " +
+    "-H \"x-claude-code-ide-authorization: $MAITERM_AUTH\" -H 'content-type: application/json' " +
+    "--data-binary @- " + hooksUrlExpr + " 2>/dev/null; } || true";
+
   // SessionStart is the one event whose REPLY matters, so it cannot use the generic hook: it
   // asks for `&prime=1` and echoes what comes back, which is how the standing instructions the
   // server tailors to this tab reach the model. Everything else gets StatusCode::OK and an
@@ -487,6 +497,7 @@ function buildSetupScript(
       // call asks, and the ends that would otherwise leave a call in flight forever.
       PermissionRequest: [eventHook],
       PostToolUseFailure: [eventHook],
+      PreModelSwitch: [commandHook(replyCmd)],
       SubagentStop: [eventHook],
       PreCompact: [eventHook],
     },
@@ -517,6 +528,38 @@ function buildSetupScript(
     '  if re.search(r"127\\.0\\.0\\.1:\\d+/hooks",u):return True\n' +
     '  if hk.get("type")=="command" and "AITERM" in hk.get("command",""):return True\n' +
     ' return False\n' +
+    // Events newer than the rest go in only if THIS host's Claude knows them (lockfile.rs
+    // NEWER_HOOK_EVENTS, same list, same evidence: the name in the Claude executable). An event
+    // it doesn't know opens a "Settings Warning" dialog on every launch. Ones it doesn't know
+    // are also taken OUT, so a host an earlier build wrote them to is repaired. No Claude found
+    // means none of them: a missing event costs a feature, an unknown one costs a dialog.
+    'import shutil\n' +
+    'NEWER=["PermissionRequest","PostToolUseFailure","SubagentStop","PreModelSwitch"]\n' +
+    'def claude_bin():\n' +
+    ' c=[shutil.which("claude")]+[os.path.expanduser(x) for x in ["~/.local/bin/claude","~/bin/claude","~/.bun/bin/claude","~/.volta/bin/claude","~/.npm-global/bin/claude"]]+["/opt/homebrew/bin/claude","/usr/local/bin/claude","/usr/bin/claude"]\n' +
+    ' for x in c:\n' +
+    '  if x and os.path.isfile(x):return os.path.realpath(x)\n' +
+    ' return None\n' +
+    'def known(path):\n' +
+    ' got=set()\n' +
+    ' if not path:return got\n' +
+    ' want=[n.encode() for n in NEWER];tail=b""\n' +
+    ' with open(path,"rb") as f:\n' +
+    '  while len(got)<len(want):\n' +
+    '   b=f.read(8<<20)\n' +
+    '   if not b:break\n' +
+    '   buf=tail+b\n' +
+    '   for n in want:\n' +
+    '    if n in buf:got.add(n.decode())\n' +
+    '   tail=buf[-32:]\n' +
+    ' return got\n' +
+    'k=known(claude_bin())\n' +
+    'for ev in NEWER:\n' +
+    ' if ev in k:continue\n' +
+    ' h["hooks"].pop(ev,None)\n' +
+    ' kept=[e for e in s.get("hooks",{}).get(ev,[]) if not is_aiterm(e)]\n' +
+    ' if kept:s["hooks"][ev]=kept\n' +
+    ' else:s.get("hooks",{}).pop(ev,None)\n' +
     'for ev,entries in h["hooks"].items():\n' +
     ' existing=[e for e in s.get("hooks",{}).get(ev,[]) if not is_aiterm(e)]\n' +
     ' existing.extend(entries)\n' +

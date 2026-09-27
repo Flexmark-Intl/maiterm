@@ -322,6 +322,91 @@ fn hook_url_marker(port: u16) -> String {
     format!("http://127.0.0.1:{}/hooks", port)
 }
 
+/// Hook events we register only when this machine's Claude knows them.
+///
+/// Claude Code ignores a hook event it doesn't know, but it says so in a "Settings Warning"
+/// dialog at startup (verified on 2.1.283: `Unknown hook event "…" was ignored`), and that dialog
+/// holds every launch before any session exists: the SessionStart hook never ran behind it. So
+/// one event too new for the installed Claude turns every session start into a dialog.
+/// `PreModelSwitch` is weeks old. The other three are older and were registered unconditionally
+/// until this list existed.
+const NEWER_HOOK_EVENTS: &[&str] = &["PermissionRequest", "PostToolUseFailure", "SubagentStop", "PreModelSwitch"];
+
+/// Which of `NEWER_HOOK_EVENTS` the installed Claude knows. The evidence is the event's name in
+/// the Claude executable itself: the native build embeds its JS, and an npm install's `claude`
+/// resolves to `cli.js`. Cached against the resolved path, size and mtime, because the drift
+/// check calls this every 30s and the binary is ~220 MB. If no Claude is found, the answer is
+/// none: leaving the events out costs the permission ledger and the model-switch skip, while
+/// including an unknown one costs a dialog on every launch.
+fn events_installed_claude_knows() -> Vec<&'static str> {
+    use std::sync::Mutex;
+    type Key = (PathBuf, u64, Option<std::time::SystemTime>);
+    static CACHE: Mutex<Option<(Key, Vec<&'static str>)>> = Mutex::new(None);
+
+    let Some(path) = crate::accounts::resolve_cli(crate::accounts::Runtime::Claude.profile())
+        .and_then(|p| fs::canonicalize(p).ok())
+    else {
+        return Vec::new();
+    };
+    let Ok(meta) = fs::metadata(&path) else { return Vec::new() };
+    let key: Key = (path.clone(), meta.len(), meta.modified().ok());
+    if let Some((k, known)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *k == key {
+            return known.clone();
+        }
+    }
+
+    let Ok(f) = fs::File::open(&path) else { return Vec::new() };
+    let known = names_found_in(f, NEWER_HOOK_EVENTS, 8 << 20);
+    log::info!("Claude at {} knows hook events {:?}", path.display(), known);
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, known.clone()));
+    known
+}
+
+/// Whether `hooks` holds an entry of ours for a newer event that `expected` leaves out.
+fn stale_newer_event_entry(
+    hooks: &serde_json::Map<String, serde_json::Value>,
+    expected: &serde_json::Value,
+    hooks_url: &str,
+) -> bool {
+    NEWER_HOOK_EVENTS.iter().any(|event| {
+        expected.get(*event).is_none()
+            && hooks
+                .get(*event)
+                .and_then(|v| v.as_array())
+                .is_some_and(|arr| arr.iter().any(|e| entry_matches_url(e, hooks_url)))
+    })
+}
+
+/// Which of `names` occur in the stream, reading `chunk` bytes at a time. Each chunk carries the
+/// previous one's tail, so a name split across a boundary is still found; stops early once every
+/// name has been seen.
+fn names_found_in(mut r: impl std::io::Read, names: &[&'static str], chunk: usize) -> Vec<&'static str> {
+    let finders: Vec<_> = names.iter().map(|e| memchr::memmem::Finder::new(e.as_bytes())).collect();
+    let overlap = names.iter().map(|e| e.len()).max().unwrap_or(0);
+    let mut found = vec![false; names.len()];
+    let mut buf: Vec<u8> = Vec::new();
+    let mut block = vec![0u8; chunk.max(1)];
+    loop {
+        let n = match r.read(&mut block) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&block[..n]);
+        for (i, finder) in finders.iter().enumerate() {
+            if !found[i] && finder.find(&buf).is_some() {
+                found[i] = true;
+            }
+        }
+        if found.iter().all(|&x| x) {
+            break;
+        }
+        let keep = buf.len().saturating_sub(overlap);
+        buf.drain(..keep);
+    }
+    names.iter().zip(&found).filter(|(_, &f)| f).map(|(e, _)| *e).collect()
+}
+
 /// Build the hook entries we register, keyed by event name. Shared by
 /// `write_hook_settings` (install) and `hooks_are_current` (reassert drift
 /// check) so the two can never disagree about what "our hooks" look like.
@@ -396,7 +481,7 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
         }])
     };
 
-    serde_json::json!({
+    let mut hooks = serde_json::json!({
         "SessionStart": [
             // Command hook: echo tab ID into Claude's context + background curl for tab mapping
             {
@@ -436,9 +521,19 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
         // decided anything that way, so the human is still the one asked.
         "PermissionRequest": http_hook(&hooks_url),
         "PostToolUseFailure": http_hook(&hooks_url),
+        // The one hook whose REPLY matters: `allow` skips Claude's "Switch model?" confirm in a
+        // maiTerm tab. See the PreModelSwitch branch at the top of `hooks_handler`.
+        "PreModelSwitch": http_hook(&hooks_url),
         "SubagentStop": http_hook(&hooks_url),
         "PreCompact": http_hook(&hooks_url)
-    })
+    });
+    // Only events the installed Claude knows — see NEWER_HOOK_EVENTS for why one it doesn't
+    // costs a dialog on every launch.
+    let known = events_installed_claude_knows();
+    if let Some(map) = hooks.as_object_mut() {
+        map.retain(|event, _| !NEWER_HOOK_EVENTS.contains(&event.as_str()) || known.contains(&event.as_str()));
+    }
+    hooks
 }
 
 /// Stable signature of maiTerm's SessionStart *command* hook — the entry that echoes
@@ -508,7 +603,7 @@ fn command_hook_is_ours_to_sweep(
 /// Registers:
 /// - SessionStart (command) — reads $MAITERM_TAB_ID, POSTs to our server, injects tab ID context
 /// - SessionEnd, Notification, Stop, UserPromptSubmit, PreToolUse, PostToolUse,
-///   PermissionRequest, PostToolUseFailure, SubagentStop, PreCompact (http)
+///   PermissionRequest, PostToolUseFailure, PreModelSwitch, SubagentStop, PreCompact (http)
 ///
 /// We identify our entries by matching the hook URL, so we don't clobber user hooks.
 fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
@@ -596,6 +691,19 @@ fn write_hook_settings(port: u16, auth: &str) -> Result<(), String> {
                 }
             }
         }
+        // A newer event we no longer register (the installed Claude doesn't know it): take our
+        // entry out, or the dialog it causes outlives the decision to leave it out.
+        for event in NEWER_HOOK_EVENTS {
+            if our_hooks.get(*event).is_some() {
+                continue;
+            }
+            if let Some(arr) = hooks_map.get_mut(*event).and_then(|v| v.as_array_mut()) {
+                arr.retain(|entry| !entry_matches_url(entry, &hooks_url));
+                if arr.is_empty() {
+                    hooks_map.remove(*event);
+                }
+            }
+        }
     }
 
     // Also register our hooks URL in allowedHttpHookUrls
@@ -638,6 +746,11 @@ fn hooks_are_current(path: &std::path::Path, port: u16, auth: &str) -> bool {
         ours.as_array().unwrap().iter().all(|entry| arr.contains(entry))
     });
     if !all_present {
+        return false;
+    }
+    // An entry of ours for a newer event the installed Claude doesn't know is drift: it opens a
+    // "Settings Warning" dialog on every launch. The write path takes it out.
+    if stale_newer_event_entry(hooks, &expected, &hook_url_marker(port)) {
         return false;
     }
 
@@ -1393,5 +1506,32 @@ mod command_hook_sweep_tests {
         });
         assert!(!command_hook_is_ours_to_sweep(&user_hook, 56819, &[]));
         assert!(!command_hook_is_ours_to_sweep(&http_hook(56819), 56819, &[]));
+    }
+}
+
+#[cfg(test)]
+mod newer_hook_event_tests {
+    use super::*;
+
+    /// A name split across a read boundary is still found. Chunks of 3 bytes cut every name.
+    #[test]
+    fn names_are_found_across_chunk_boundaries() {
+        let hay = b"xxPermissionRequest..PreModelSwitch....".to_vec();
+        let got = names_found_in(&hay[..], NEWER_HOOK_EVENTS, 3);
+        assert_eq!(got, vec!["PermissionRequest", "PreModelSwitch"]);
+        assert!(names_found_in(&b"nothing here"[..], NEWER_HOOK_EVENTS, 4).is_empty());
+    }
+
+    /// The installed Claude on this machine, when there is one. Diagnostic rather than an
+    /// assertion about CI: prints what the probe sees and how long a cold scan takes.
+    #[test]
+    #[ignore]
+    fn probe_the_installed_claude() {
+        let t = std::time::Instant::now();
+        let known = events_installed_claude_knows();
+        println!("known={known:?} cold={:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        assert_eq!(events_installed_claude_knows(), known);
+        println!("cached={:?}", t.elapsed());
     }
 }
