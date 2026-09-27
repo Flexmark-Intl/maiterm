@@ -848,6 +848,11 @@ Interruption semantics (decided 2026-08-22):
 - **Human input aborts**: any human-typed input into the target tab aborts the
   in-flight ritual silently (ledger `aborted`). Human presence means the human
   is attending the tab; the cooldown refires the rule later if still relevant.
+  Keys pressed while the agent sits at a permission prompt are NOT this: they
+  answer the prompt, which only pauses the ritual (above). Until 2026-09-27 they
+  counted, so a checkpoint whose prep step hit a prompt (a memory write outside
+  the cwd) aborted when the human approved it, and `/compact` never came
+  (`terminalsStore.getLastTakeoverInputAt`).
 - **App restart aborts**: in-flight rituals do not survive a restart — never
   resume a half-ritual into a respawned tab. Ledger `aborted`; cooldown refires.
 

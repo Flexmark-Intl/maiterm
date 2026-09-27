@@ -1125,7 +1125,9 @@
       // xterm routes DECSET-1004 focus reports (ESC[I / ESC[O) through onData alongside
       // real keystrokes. They are not human input: counting them would make merely
       // clicking into a tab abort an in-flight Overlord ritual.
-      if (data !== '\x1b[I' && data !== '\x1b[O') terminalsStore.noteUserInput(tabId);
+      if (data !== '\x1b[I' && data !== '\x1b[O') {
+        terminalsStore.noteUserInput(tabId, claudeStateStore.getState(tabId)?.state === 'permission');
+      }
       if (hasRustSelection) {
         clearSelection(ptyId).then(applyFrame).catch(() => {});
       }

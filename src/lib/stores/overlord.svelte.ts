@@ -911,8 +911,9 @@ function createOverlordStore() {
     return (await replState(tabId)) === 'ready';
   }
 
+  /** Keys that answered a permission prompt don't count: a prompt pauses a ritual (§7). */
   function humanTypedSince(tabId: string, sinceMs: number): boolean {
-    const at = terminalsStore.getLastUserInputAt(tabId);
+    const at = terminalsStore.getLastTakeoverInputAt(tabId);
     return at !== undefined && at > sinceMs;
   }
 

@@ -78,6 +78,11 @@ function createTerminalsStore() {
   // and never touch this. The Overlord engine uses it to abort an in-flight ritual the
   // moment the human types into the target tab (docs/overlord.md §7).
   const lastUserInputAt = new Map<string, number>();
+  // The same, minus keystrokes that answered an agent's permission prompt. Answering a
+  // prompt is not taking the conversation over: the agent's turn carries on, and a
+  // ritual that aborted on it (§7 says a prompt PAUSES a ritual) died mid-step with the
+  // agent still working — the checkpoint did all its prep and never typed /compact.
+  const lastTakeoverInputAt = new Map<string, number>();
   // Tabs whose PTY is being spawned — treated as "active" by the tab grouping
   // logic so they don't flash into the suspended group before registration.
   let spawningTabs = $state(new Set<string>());
@@ -102,10 +107,17 @@ function createTerminalsStore() {
     markDirty(tabId: string) { dirtyTabs.add(tabId); lastOutputAt.set(tabId, Date.now()); },
     /** ms epoch of the tab's last raw PTY output, or undefined if none seen. */
     getLastOutputAt(tabId: string): number | undefined { return lastOutputAt.get(tabId); },
-    /** Stamp human keyboard input (called from TerminalPane's onData only). */
-    noteUserInput(tabId: string) { lastUserInputAt.set(tabId, Date.now()); },
+    /** Stamp human keyboard input (called from TerminalPane's onData only).
+     *  `answeringPrompt`: the agent was stopped at a permission prompt. */
+    noteUserInput(tabId: string, answeringPrompt = false) {
+      const now = Date.now();
+      lastUserInputAt.set(tabId, now);
+      if (!answeringPrompt) lastTakeoverInputAt.set(tabId, now);
+    },
     /** ms epoch of the tab's last human keystroke, or undefined if none seen. */
     getLastUserInputAt(tabId: string): number | undefined { return lastUserInputAt.get(tabId); },
+    /** Last human keystroke that was NOT answering a permission prompt. */
+    getLastTakeoverInputAt(tabId: string): number | undefined { return lastTakeoverInputAt.get(tabId); },
     isDirty(tabId: string) { return dirtyTabs.has(tabId); },
     clearDirty(tabId: string) { dirtyTabs.delete(tabId); },
     markSpawning(tabId: string) { spawningTabs = new Set(spawningTabs).add(tabId); },
