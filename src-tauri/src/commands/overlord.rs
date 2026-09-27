@@ -66,6 +66,13 @@ pub fn get_tab_prompt(
     Ok(crate::mailink::tab_prompt_view(state.inner(), &tab_id))
 }
 
+/// Whether Claude's workspace-trust dialog is open on this tab (mailink/trust.rs). Every
+/// automated path that types into a tab asks first: an Enter there confirms "No, exit".
+#[tauri::command]
+pub fn trust_dialog_open(state: State<'_, Arc<AppState>>, tab_id: String) -> bool {
+    crate::mailink::trust_dialog_open(state.inner(), &tab_id)
+}
+
 /// Answer a tab's open prompt, through the SAME hardened path the phone uses — the
 /// runtime-specific permission keymap, the one-shot selector guard, and the
 /// did-it-actually-submit check. `prompt_id` is the stale-guard: pass the one from
@@ -79,6 +86,13 @@ pub async fn answer_tab_prompt(
     answers: Option<Vec<crate::mailink::Answer>>,
 ) -> Result<Value, String> {
     let app = state.inner().clone();
+    // Trusting a folder lets an agent read, edit and run everything in it, including whatever
+    // the folder's own settings pre-approve. The phone may answer it: that is the human. The
+    // Overlord agent may not, whatever its doctrine says about unblocking the fleet.
+    if crate::mailink::trust_dialog_open(&app, &tab_id) {
+        return Ok(serde_json::json!({ "ok": false, "reason": "human_decision",
+            "detail": "That tab is at Claude's workspace-trust dialog. Trusting a folder is the human's decision: escalate it (needs_human) rather than answer it." }));
+    }
     Ok(crate::mailink::respond_to_prompt(
         &app,
         &tab_id,

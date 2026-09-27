@@ -769,6 +769,7 @@ pub fn run() {
             commands::overlord::get_agent_reply_since,
             commands::overlord::get_tab_prompt,
             commands::overlord::answer_tab_prompt,
+            commands::overlord::trust_dialog_open,
             commands::overlord::append_overlord_ledger,
             commands::overlord::publish_overlord_snapshot,
             commands::overlord::get_overlord_ledger,

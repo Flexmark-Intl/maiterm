@@ -3675,6 +3675,12 @@ function createOverlordStore() {
       }
       const kind = unreadyKind(tabId);
       if (!kind) return { sent: false, reason: 'not_unready', detail: 'That tab is not classified as unready — its agent is running and bound, so there is nothing to recover.' };
+      // Claude's workspace-trust dialog reads as an unbound agent, and both recoveries end in an
+      // Enter that would confirm its "No, exit". It is the human's decision, not a recovery.
+      if (await commands.trustDialogOpen(tabId)) {
+        return { sent: false, kind, reason: 'trust_dialog',
+          detail: "That tab is at Claude's workspace-trust dialog, asking whether to trust its folder. Trusting a folder is the human's decision: escalate it (needs_human). Nothing was typed." };
+      }
 
       let text: string;
       if (kind === 'unbound') {

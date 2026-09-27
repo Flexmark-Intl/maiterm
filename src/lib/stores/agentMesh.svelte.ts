@@ -207,6 +207,8 @@ function createAgentMeshStore() {
   const INIT_QUIET_POLL_MS = 300;
   const INIT_QUIET_CAP_MS = 120_000;
   async function settleAndSendInit(tabId: string, ptyId: string) {
+    // Not the trust dialog: the bare CR below would confirm its "No, exit" (wake.ts, same guard).
+    if (await commands.trustDialogOpen(tabId)) return;
     await commands.writeTerminal(ptyId, [0x0d]);
     const t0 = Date.now();
     while (Date.now() - t0 < INIT_QUIET_CAP_MS) {

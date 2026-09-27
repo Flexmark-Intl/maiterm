@@ -335,19 +335,30 @@ export interface PromptAnswer {
 }
 
 /** What is currently blocking a tab. `kind: 'permission'` is a tool gate (carries `tool` and
- *  `detail`); `kind: 'question'` is an AskUserQuestion (carries `questions`). */
+ *  `detail`); `kind: 'question'` is an AskUserQuestion (carries `questions`); `kind: 'trust'` is
+ *  Claude's workspace-trust dialog before any session exists (carries `path`, `options` and a
+ *  `note` that it is the human's decision). */
 export interface TabPrompt {
-  kind: 'permission' | 'question';
+  kind: 'permission' | 'question' | 'trust';
   prompt_id: string;
   runtime: string;
   tool?: string;
   detail?: string;
   questions?: unknown;
   asked_at?: number;
+  path?: string;
+  options?: string[];
+  note?: string;
 }
 
 export async function getTabPrompt(tabId: string): Promise<TabPrompt | null> {
   return invoke('get_tab_prompt', { tabId });
+}
+
+/** Whether Claude's workspace-trust dialog is open on this tab. Every automated path that types
+ *  into a tab must ask first: an Enter there confirms "No, exit" and Claude quits. */
+export async function trustDialogOpen(tabId: string): Promise<boolean> {
+  return invoke('trust_dialog_open', { tabId });
 }
 
 /** Answer a tab's open prompt through the same hardened path the phone uses. Pass the

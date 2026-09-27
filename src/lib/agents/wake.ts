@@ -1,4 +1,4 @@
-import { writeTerminal } from '$lib/tauri/commands';
+import { trustDialogOpen, writeTerminal } from '$lib/tauri/commands';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
@@ -41,6 +41,13 @@ const INIT_QUIET_POLL_MS = 300;
  *  message of its own once the budget expires, so an init pasted after that point would land
  *  ON TOP of that message. Past the deadline we skip the paste rather than race it. */
 async function settleAndSendInit(tabId: string, ptyId: string, deadline: number): Promise<boolean> {
+  // The one startup dialog a bare CR must never answer: at Claude's workspace-trust dialog it
+  // confirms "No, exit", Claude quits, and the next resume stops at the same dialog. The phone
+  // answers it as its own card.
+  if (await trustDialogOpen(tabId)) {
+    logInfo(`wake: ${tabId.slice(0, 8)} is at the workspace-trust dialog — not typing into it`);
+    return false;
+  }
   await writeTerminal(ptyId, [0x0d]);
   while (Date.now() < deadline) {
     const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;

@@ -39,6 +39,7 @@ pub(crate) mod mirror;
 pub(crate) mod models;
 pub(crate) mod shells;
 pub(crate) mod subagents;
+pub(crate) mod trust;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod overlord;
@@ -182,8 +183,14 @@ fn is_attn(key: &str) -> bool {
 ///
 /// Sibling guard: `tab_looks_live_despite_no_session` reports "active" rather than "idle" for the
 /// UNregistered case for exactly this reason. This is that same rule for the registered path.
-fn rings_attention(prev_key: Option<&str>, prev_registered: bool, key: &str) -> bool {
-    prev_key.is_some_and(|p| prev_registered && !is_attn(p)) && is_attn(key)
+///
+/// One exception, and it is not a registration edge: attention on a tab that is STILL
+/// unregistered. The only way such a tab reaches attention is a prompt read off its screen
+/// (Claude's workspace-trust dialog, which comes before any session exists), so nothing is
+/// "coming up" — a human is being asked. Registration edges stay silent: they arrive with
+/// `registered` true.
+fn rings_attention(prev_key: Option<&str>, prev_registered: bool, key: &str, registered: bool) -> bool {
+    prev_key.is_some_and(|p| (prev_registered || !registered) && !is_attn(p)) && is_attn(key)
 }
 
 /// `~/Library/Application Support/<slug>/mailink/` (or the OS equivalent).
@@ -389,6 +396,7 @@ fn build_router(api: ApiState) -> Router {
         )
         .route("/mailink/v1/chats/{tab_id}/respond", post(post_respond))
         .route("/mailink/v1/chats/{tab_id}/interrupt", post(post_interrupt))
+        .route("/mailink/v1/chats/{tab_id}/keys", post(post_keys))
         .route(
             "/mailink/v1/chats/{tab_id}/shells/{shell_id}/stop",
             post(post_shell_stop),
@@ -492,7 +500,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.11";
+const PROTOCOL_VERSION: &str = "0.12";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1237,6 +1245,7 @@ fn wake_detail(reason: &str) -> &'static str {
     match reason {
         "no-pty" => "This tab has no live terminal — resume its workspace first.",
         "no-agent" => "This tab's agent has exited and it has no resume command to restart it.",
+        "trust_dialog" => "Claude is asking whether to trust this folder. Answer that first.",
         _ => "The agent is still starting up — try again in a moment.",
     }
 }
@@ -1282,6 +1291,12 @@ async fn wake_tab(s: &ApiState, tab_id: &str) -> Wake {
     let Some(pty) = pty_for_tab(&s.app, tab_id) else {
         return Wake::Unreachable("no-pty");
     };
+    // Claude's trust dialog is the one pre-session screen where any wake is destructive: both
+    // remedies end in an Enter, which confirms "No, exit", and the next resume stops at the same
+    // dialog. It is answered as its own prompt card (`trust`).
+    if trust_dialog_open(&s.app, tab_id) {
+        return Wake::Unreachable("trust_dialog");
+    }
     let action = match wake_remedy(
         agent_is_up(&s.app, &pty).await,
         tab_has_resume(&s.app, tab_id),
@@ -1422,7 +1437,15 @@ pub(crate) struct Answer {
 pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
     let (kind, prompt_id, runtime) = current_prompt(app, tab_id)?;
     let mut v = json!({ "kind": kind, "prompt_id": prompt_id, "runtime": runtime.as_key() });
-    if kind == "question" {
+    if kind == "trust" {
+        if let Some(d) = trust_dialog_for_tab(app, tab_id) {
+            v["path"] = json!(d.path);
+            v["options"] = json!(d.options);
+        }
+        v["note"] = json!("Claude is asking whether to trust this folder before it starts. \
+            Trusting a folder lets the agent read, edit and run everything in it: the human's \
+            decision. answerTabPrompt refuses it; escalate with needs_human.");
+    } else if kind == "question" {
         if let Some(t) = pending_question_for_tab(app, tab_id) {
             if let Some(q) = t.get("questions") {
                 v["questions"] = q.clone();
@@ -1477,6 +1500,39 @@ pub(crate) async fn respond_to_prompt(
         return json!({ "ok": false, "reason": "no_pty" });
     };
     match kind {
+        // Claude's workspace-trust dialog. Answered by walking the highlight to the chosen row
+        // and pressing Enter, read off the screen at THIS moment: the dialog may have closed,
+        // or the human may have moved the highlight at the desktop, since the card was built.
+        "trust" => {
+            let Some(dialog) = trust_dialog_for_tab(app, tab_id) else {
+                return json!({ "ok": false, "reason": "stale",
+                    "detail": "that dialog is no longer open in the terminal" });
+            };
+            let Some(keys) = dialog.keys_for(choice.unwrap_or("")) else {
+                return json!({ "ok": false, "reason": "stale",
+                    "detail": "that isn't one of the options the dialog shows" });
+            };
+            if let Err(e) = send_keys(app, &pty, &keys).await {
+                log::warn!("[maiLink] trust dialog keys failed for tab {tab_id}: {e}");
+                return json!({ "ok": false, "reason": "inject_failed" });
+            }
+            // Confirm it closed rather than claim it: Claude either starts or exits, and both
+            // take the dialog off the bottom of the screen.
+            let mut closed = false;
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if trust_dialog_for_tab(app, tab_id).is_none() {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed {
+                return json!({ "ok": false, "reason": "inject_failed",
+                    "detail": "the dialog was still open after the keys went in" });
+            }
+            log::info!("[maiLink] trust dialog answered for tab {tab_id}: {:?} ({})",
+                choice.unwrap_or(""), dialog.path);
+        }
         // permission menu: a single keystroke selects the option (no bracketed paste);
         // the key is runtime-specific — see permission_key.
         "permission" => {
@@ -1584,6 +1640,50 @@ async fn post_respond(
         )
         .await,
     ))
+}
+
+#[derive(serde::Deserialize)]
+struct KeysBody {
+    keys: Vec<String>,
+}
+
+/// At most this many keys per request. The phone sends one per press; the cap only bounds a
+/// malformed or hostile body.
+const MAX_KEYS_PER_REQUEST: usize = 16;
+
+/// Which named keys a `/keys` body may carry: all of them known, none missing. `Err` means
+/// nothing is sent, so a phone never delivers half a sequence.
+fn validate_keys(keys: &[String]) -> Result<Vec<&str>, ()> {
+    if keys.is_empty() || keys.len() > MAX_KEYS_PER_REQUEST {
+        return Err(());
+    }
+    keys.iter()
+        .map(|k| NAMED_KEYS.contains(&k.as_str()).then_some(k.as_str()).ok_or(()))
+        .collect()
+}
+
+/// POST /chats/{tabId}/keys — press named keys in the tab's terminal (docs §4.1, v0.12). The
+/// escape hatch for any screen maiTerm has not learned to read: a pre-session picker, a pager,
+/// a dialog from a Claude release newer than this build. Works on an unregistered tab, since
+/// those screens come before any session. `400` for an unknown, empty or oversized list, with
+/// nothing sent; `409` when the tab has no terminal.
+async fn post_keys(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+    Json(body): Json<KeysBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    if !is_designated(&s.app, &tab_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let keys = validate_keys(&body.keys).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
+    send_keys(&s.app, &pty, &keys)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    log::info!("[maiLink] keys {:?} → tab {tab_id}", keys);
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// POST /chats/{tabId}/interrupt — send Esc to the agent (the documented "human interrupts"
@@ -2659,7 +2759,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         // Same edge rule the push doorbell uses — see `rings_attention`. A tab
                         // that merely APPEARS in the roster already idle, or whose session row is
                         // being created for the first time, must not announce "finished".
-                        if rings_attention(prev.as_deref(), prev_reg, &key) {
+                        if rings_attention(prev.as_deref(), prev_reg, &key, c["registered"].as_bool().unwrap_or(true)) {
                             let ev = attention_event(&s.app, &tab, &st, c["title"].as_str().unwrap_or_default());
                             if socket.send(Message::Text(ev.to_string().into())).await.is_err() {
                                 return;
@@ -3675,6 +3775,63 @@ fn codex_approval_overlay_open(app: &AppState, tab_id: &str) -> bool {
     viewport_shows_codex_approval(&text)
 }
 
+/// Whether Claude's workspace-trust dialog is open on this tab. For every automated path that
+/// types into a tab (wake, mesh init, Overlord's re-bind): a bare Enter or a pasted command's CR
+/// confirms the dialog's highlighted "No, exit", and Claude quits to the shell.
+pub(crate) fn trust_dialog_open(app: &AppState, tab_id: &str) -> bool {
+    trust_dialog_for_tab(app, tab_id).is_some()
+}
+
+/// Claude's workspace-trust dialog, when it is OPEN on this tab's screen (`mailink/trust.rs`).
+/// Only a tab with no session can be sitting at it — the dialog comes before any session exists.
+fn trust_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<trust::TrustDialog> {
+    let pty = pty_for_tab(app, tab_id)?;
+    let registry = app.terminal_registry.read();
+    let handle = registry.get(&pty)?;
+    trust::parse(&crate::terminal::render::viewport_text(&handle.term))
+}
+
+/// Keys the phone may send by name (`POST /chats/{tabId}/keys`). A fixed allowlist of real key
+/// sequences, never a paste, so a pre-session screen (the trust dialog, a picker nobody has
+/// taught maiTerm to read) can still be driven from the phone. No ctrl-c: `/interrupt` owns
+/// stopping.
+const NAMED_KEYS: &[&str] = &["up", "down", "left", "right", "enter", "esc", "tab", "space", "backspace"];
+
+/// The bytes for one named key. Arrows follow the terminal's cursor-key mode (DECCKM): an
+/// application in APP_CURSOR mode expects `ESC O x`, everything else `ESC [ x`.
+fn key_bytes(name: &str, app_cursor: bool) -> Option<&'static [u8]> {
+    let arrow = |normal: &'static [u8], app: &'static [u8]| if app_cursor { app } else { normal };
+    Some(match name {
+        "up" => arrow(b"\x1b[A", b"\x1bOA"),
+        "down" => arrow(b"\x1b[B", b"\x1bOB"),
+        "right" => arrow(b"\x1b[C", b"\x1bOC"),
+        "left" => arrow(b"\x1b[D", b"\x1bOD"),
+        "enter" => b"\r",
+        "esc" => b"\x1b",
+        "tab" => b"\t",
+        "space" => b" ",
+        "backspace" => b"\x7f",
+        _ => return None,
+    })
+}
+
+/// Write named keys to a PTY one at a time. The gap is not politeness: a lone ESC followed at
+/// once by another key reads as Alt+that key, so "esc" then "down" written together is a
+/// different keystroke from the two the caller asked for.
+async fn send_keys(app: &Arc<AppState>, pty: &str, keys: &[&str]) -> Result<(), String> {
+    for (i, name) in keys.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        let app_cursor = app.terminal_registry.read().get(pty).is_some_and(|h| {
+            h.term.mode().contains(alacritty_terminal::term::TermMode::APP_CURSOR)
+        });
+        let bytes = key_bytes(name, app_cursor).ok_or_else(|| format!("unknown key {name}"))?;
+        crate::pty::write_pty(app, pty, bytes)?;
+    }
+    Ok(())
+}
+
 /// Does this viewport text contain a Codex approval header?
 ///
 /// Whitespace is squashed out of both sides first. The TUI wraps its header to the pane width,
@@ -3712,9 +3869,22 @@ fn permission_prompt_id(app: &AppState, tab_id: &str) -> String {
     }
 }
 
+/// The prompt id of a trust dialog. Per-tab is enough: the dialog is the same question until it
+/// is answered, and answering it ends it.
+fn trust_prompt_id(tab_id: &str) -> String {
+    format!("t_{tab_id}")
+}
+
+/// What prompt is open on a tab: `question`, `permission`, or `trust` — Claude's workspace-trust
+/// dialog on a tab with no session. `trust` is internal: every surface shows it as a
+/// `permission`, but it is answered with different keys and must never reach `permission_key`.
 fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
     let states = session_states(app);
-    let s = states.get(tab_id)?;
+    let Some(s) = states.get(tab_id) else {
+        return (runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude)
+            && trust_dialog_for_tab(app, tab_id).is_some())
+        .then(|| ("trust", trust_prompt_id(tab_id), AgentRuntime::Claude));
+    };
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
     if s.tool.as_deref() == Some("AskUserQuestion") {
@@ -4094,6 +4264,9 @@ struct TabView {
     detail: Option<String>,
     registered: bool,
     finished: bool,
+    /// Claude's workspace-trust dialog, open on an unregistered tab's screen. Makes the tab a
+    /// `permission` with a card of its own (`mailink/trust.rs`).
+    trust: Option<trust::TrustDialog>,
 }
 
 impl TabView {
@@ -4129,21 +4302,32 @@ fn tab_view(
             detail: s.detail.clone(),
             registered: true,
             finished: s.finished,
+            trust: None,
         },
-        None => TabView {
-            state: if tab_looks_live_despite_no_session(app, tab_id, now) {
-                "active"
-            } else {
-                "dormant"
-            },
-            runtime: runtime_key(tab_runtime),
-            // An unregistered tab has no session that could be running a tool or have finished
-            // a turn — the fallback knows a tab is alive and nothing more than that.
-            tool: None,
-            detail: None,
-            registered: false,
-            finished: false,
-        },
+        None => {
+            // The trust dialog comes before any session exists, so only this arm can be sitting
+            // at it. Claude only: it is Claude's dialog, and the read costs a viewport render.
+            let trust = (tab_runtime == AgentRuntime::Claude)
+                .then(|| trust_dialog_for_tab(app, tab_id))
+                .flatten();
+            TabView {
+                state: if trust.is_some() {
+                    "permission"
+                } else if tab_looks_live_despite_no_session(app, tab_id, now) {
+                    "active"
+                } else {
+                    "dormant"
+                },
+                runtime: runtime_key(tab_runtime),
+                // An unregistered tab has no session that could be running a tool or have
+                // finished a turn — the fallback knows a tab is alive and nothing more than that.
+                tool: None,
+                detail: None,
+                registered: false,
+                finished: false,
+                trust,
+            }
+        }
     }
 }
 
@@ -5104,7 +5288,19 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // mixed multi-question forms are verified end-to-end against the live TUI; the one remaining
     // combo (multiSelect + Other simultaneously) uses a best-guess gesture pending device
     // validation (docs §12.3).
-    if tool.as_deref() == Some("AskUserQuestion") {
+    if let Some(dialog) = v.trust.as_ref() {
+        // Claude's workspace-trust dialog (mailink/trust.rs). A permission card of its own: the
+        // rows are read off the screen in screen order ("No, exit" first, as displayed), and
+        // `/respond` walks the highlight to the chosen one.
+        detail["pendingPrompt"] = json!({
+            "prompt_id": trust_prompt_id(tab_id),
+            "thread_id": tab_id,
+            "kind": "permission",
+            "respondable": true,
+            "text": format!("Trust {}?", dialog.path),
+            "options": dialog.options,
+        });
+    } else if tool.as_deref() == Some("AskUserQuestion") {
         let mut pp = json!({
             // Per-ask id (q_<tab>_<asked_at>) — must agree with current_prompt's stale-guard.
             "prompt_id": question_prompt_id(app, tab_id),
@@ -5335,7 +5531,7 @@ async fn doorbell_loop(app: Arc<AppState>) {
                 Some((k, r)) => (Some(k.as_str()), *r),
                 None => (None, false),
             };
-            if rings_attention(prev_key, prev_reg, &key) {
+            if rings_attention(prev_key, prev_reg, &key, reg) {
                 // Distinguish an open AskUserQuestion (state coincides with "permission") from a
                 // real approval prompt so the push line/route matches what the card will show.
                 let kind = match current_prompt(&app, &tab) {
@@ -5405,6 +5601,23 @@ async fn ring_devices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/keys` sends all of a list or none of it: one unknown name must not leave the phone
+    /// having pressed the keys before it.
+    #[test]
+    fn a_keys_list_is_all_known_or_rejected_whole() {
+        let ok = vec!["down".to_string(), "enter".to_string()];
+        assert_eq!(validate_keys(&ok), Ok(vec!["down", "enter"]));
+        assert!(validate_keys(&["down".to_string(), "ctrl-c".to_string()]).is_err());
+        assert!(validate_keys(&[]).is_err());
+        assert!(validate_keys(&vec!["space".to_string(); MAX_KEYS_PER_REQUEST + 1]).is_err());
+        // Every allowlisted name has bytes, in both cursor modes.
+        for k in NAMED_KEYS {
+            assert!(key_bytes(k, false).is_some() && key_bytes(k, true).is_some(), "{k}");
+        }
+        assert_eq!(key_bytes("down", false), Some(&b"\x1b[B"[..]), "the byte verified against the trust dialog");
+        assert_eq!(key_bytes("down", true), Some(&b"\x1bOB"[..]), "DECCKM application mode");
+    }
 
     /// A mute the desktop doesn't recognise is KEPT — it is a newer phone's word, and dropping it
     /// would make the two fight. Only blanks and repeats go.
@@ -5656,23 +5869,38 @@ mod tests {
         // dormant + unregistered; seconds later its SessionStart hook inserts a row that maps to
         // "idle". That is a textbook transition into attention, and the desktop having been down
         // means nothing is `covered` — so every resumed tab rang "Agent finished" at once.
-        assert!(!rings_attention(Some(&dormant), false, &idle));
+        assert!(!rings_attention(Some(&dormant), false, &idle, true));
         // Same edge from the live-agent fallback's "active" — also a registration edge.
-        assert!(!rings_attention(Some(&active), false, &idle));
+        assert!(!rings_attention(Some(&active), false, &idle, true));
 
         // What must still ring: a real turn ending on a tab whose session row already existed.
-        assert!(rings_attention(Some(&active), true, &idle));
+        assert!(rings_attention(Some(&active), true, &idle, true));
         // ...and a prompt opening on one.
-        assert!(rings_attention(Some(&active), true, &attn_key("permission", Some("permission"))));
-        assert!(rings_attention(Some(&active), true, &attn_key("active", Some("question"))));
+        assert!(rings_attention(Some(&active), true, &attn_key("permission", Some("permission")), true));
+        assert!(rings_attention(Some(&active), true, &attn_key("active", Some("question")), true));
 
         // Unchanged guards: a first sighting baselines silently whatever its registration...
-        assert!(!rings_attention(None, true, &idle));
+        assert!(!rings_attention(None, true, &idle, true));
         // ...and a tab that was ALREADY wanting a human doesn't re-ring.
-        assert!(!rings_attention(Some(&idle), true, &idle));
-        assert!(!rings_attention(Some(&idle), true, &attn_key("permission", Some("permission"))));
+        assert!(!rings_attention(Some(&idle), true, &idle, true));
+        assert!(!rings_attention(Some(&idle), true, &attn_key("permission", Some("permission")), true));
         // Leaving attention is not an edge into it.
-        assert!(!rings_attention(Some(&idle), true, &active));
+        assert!(!rings_attention(Some(&idle), true, &active, true));
+    }
+
+    /// Claude's workspace-trust dialog comes before any session, so the tab is unregistered on
+    /// both sides of the edge. It must ring — a human is being asked, and from the phone nothing
+    /// else will get this tab going. The storm guard above still holds, because a registration
+    /// edge arrives with `registered` true.
+    #[test]
+    fn a_trust_dialog_on_an_unregistered_tab_rings() {
+        let dormant = attn_key("dormant", None);
+        let trust = attn_key("permission", Some("permission"));
+        assert!(rings_attention(Some(&dormant), false, &trust, false));
+        // First sighting still baselines — a restart finding a tab already at the dialog.
+        assert!(!rings_attention(None, false, &trust, false));
+        // And it rings once, not on every tick it stays open.
+        assert!(!rings_attention(Some(&trust), false, &trust, false));
     }
 
     #[test]

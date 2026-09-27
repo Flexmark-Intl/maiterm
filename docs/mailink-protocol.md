@@ -4,6 +4,19 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.12 changelog** (2026-09-27). Additive, both for screens that come before any session:
+> - **Claude's workspace-trust dialog is a permission card.** `claude` in an untrusted folder
+>   stops at "Quick safety check: Is this a project you created or one you trust?" before any
+>   hook fires, so the tab read `dormant`. Initialize then pasted `/maiterm init` into it, the
+>   Enter confirmed the highlighted "No, exit", and Claude quit. maiTerm now reads the dialog
+>   off the tab's screen (`mailink/trust.rs`). While it is open, the tab reports
+>   `state:"permission"` with `registered:false` and a `pendingPrompt` whose `options` are the
+>   dialog's rows in screen order; `/respond` walks the highlight to the chosen row and presses
+>   Enter. It rings the doorbell as `permission`. Initialize, `/wake` and `POST /message` answer
+>   `reason:"trust_dialog"` instead of typing.
+> - **`POST /chats/{tabId}/keys`**: press named keys (`up down left right enter esc tab space
+>   backspace`) in a tab's terminal, for any screen maiTerm hasn't learned to read.
+>
 > **v0.11 changelog** (2026-09-24). Additive: per-device push preferences (§6.2) —
 > `GET /push-prefs` and `POST /push-prefs`, where a phone names the doorbell kinds it does not want
 > PUSHED. It filters the push and nothing else: the WS `attention` frame, `unread` and the
@@ -403,6 +416,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"unreachable", reason, detail}` |
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
+| `POST /chats/{tabId}/keys` | Press named keys in the tab's terminal (v0.12): the escape hatch for a screen nobody has taught maiTerm to read. Real key sequences, never a paste; arrows follow the terminal's cursor-key mode; keys go in ~40 ms apart so a lone `esc` can't merge with the next key into an Alt chord. Works on an unregistered tab | `{keys: string[]}` from `up down left right enter esc tab space backspace` (1–16) → `{ok:true}`. `400` for an unknown name, an empty list or more than 16, with NOTHING sent; `404` not designated; `409` no terminal |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle, clears the restored prompt | `{}` → `{ok, settled, composerCleared}` (may hold up to 3 s — §5) |
 | `POST /chats/{tabId}/shells/{shellId}/stop` | Terminate one background shell (SIGTERM→SIGKILL on its own pid) | `{}` → `{ok:true, stopped:bool}`; IDEMPOTENT — an already-dead or unknown shell is `ok:true, stopped:false`, never 404 |
 | `POST /chats/{tabId}/new` | Start a NEW conversation from this one (light clone: SSH host + cwd, fresh agent session) | `{}` → `{ok:true, tabId}`; `{ok:false, reason:"timeout"}` if the tab didn't appear in time |
@@ -662,6 +676,11 @@ interface ChatDetail extends Chat {
                             // literal (maiLink 9a60619) and warns to check the terminal first,
                             // so it is contract: `UNATTRIBUTED_PERMISSION_TEXT` in mailink/mod.rs.
     options?: string[];     // e.g. ["Yes","Yes, don't ask again","No"]; absent ⇒ free-text only
+                            // v0.12, Claude's workspace-trust dialog (prompt_id "t_<tabId>",
+                            // text "Trust <path>?", tab registered:false): the dialog's rows in
+                            // SCREEN order, today ["No, exit","Yes, I trust this folder"] — or
+                            // "No, continue without these permissions" for a folder whose
+                            // settings pre-approve tools. `/respond` takes the exact label.
     asked_at?: number;      // question only: unix ms the ask opened — DISPLAY-ONLY ("asked 2m ago")
     expires_at?: number;    // question only, AUTHORITATIVE: unix ms the ask will auto-resolve.
                             // Sent only when the CC build+settings actually expire it (§11);
@@ -2052,7 +2071,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.11" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.12" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -2073,6 +2092,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.9` | adds a **seventh lane, `dropped`**, to `status` / `effectiveStatus` everywhere a task is served or accepted; adds `MaitermTask.notes`; **removes `MaitermTask.topicId`** |
 | `0.10` | adds `account` on `Chat`, `ChatDetail` and `chat_state` (§14); `GET /accounts`, WS `accounts`, `POST /accounts/active`; `GET /models?tab=`; attention kind `account` |
 | `0.11` | adds `GET /push-prefs` and `POST /push-prefs` (§6.2), per-device push mutes |
+| `0.12` | Claude's workspace-trust dialog as a `permission` card on an UNREGISTERED tab (`prompt_id` `t_<tabId>`, `options` in screen order), rung as `permission`; `reason:"trust_dialog"` from `/wake` and `POST /message`; adds `POST /chats/{tabId}/keys` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,
