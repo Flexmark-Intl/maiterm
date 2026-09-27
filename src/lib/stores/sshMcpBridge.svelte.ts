@@ -548,14 +548,19 @@ function buildSetupScript(
     ' got=set()\n' +
     ' if not path:return got\n' +
     ' want=[n.encode() for n in NEWER];tail=b""\n' +
-    ' with open(path,"rb") as f:\n' +
-    '  while len(got)<len(want):\n' +
-    '   b=f.read(8<<20)\n' +
-    '   if not b:break\n' +
-    '   buf=tail+b\n' +
-    '   for n in want:\n' +
-    '    if n in buf:got.add(n.decode())\n' +
-    '   tail=buf[-32:]\n' +
+    // A copy we can see but not read (a root-only install) knows nothing, rather than raising
+    // and aborting the whole merge, which would leave the host with no hooks at all.
+    ' try:\n' +
+    '  with open(path,"rb") as f:\n' +
+    '   while len(got)<len(want):\n' +
+    '    b=f.read(8<<20)\n' +
+    '    if not b:break\n' +
+    '    buf=tail+b\n' +
+    '    for n in want:\n' +
+    '     if n in buf:got.add(n.decode())\n' +
+    '    tail=buf[-32:]\n' +
+    ' except OSError:\n' +
+    '  return set()\n' +
     ' return got\n' +
     'k=known_all()\n' +
     'for ev in NEWER:\n' +
