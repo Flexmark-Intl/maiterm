@@ -1293,9 +1293,19 @@ pub(crate) async fn send_tab_message(
     if text.trim().is_empty() {
         return json!({ "status": "empty" });
     }
-    if let Some((kind, _, _)) = open_prompt(app, tab_id) {
-        return json!({ "status": "prompt_open", "reason": kind,
-            "detail": "Answer the open prompt first: typing now would go into it, not to the agent." });
+    // Any dialog at all, not only a prompt the hooks reported: a picker or a question the hooks
+    // missed takes the text and its CR just the same.
+    let prompt_up = || {
+        open_prompt(app, tab_id).map(|(kind, _, _)| kind).or_else(|| {
+            live_screen_text(app, tab_id)
+                .is_some_and(|s| permission::any_dialog_open(&s))
+                .then_some("dialog")
+        })
+    };
+    let refuse = |kind: &str| json!({ "status": "prompt_open", "reason": kind,
+        "detail": "Answer the open prompt first: typing now would go into it, not to the agent." });
+    if let Some(kind) = prompt_up() {
+        return refuse(kind);
     }
     let Some(pty) = pty_for_tab(app, tab_id) else {
         return json!({ "status": "unreachable", "reason": "no-pty", "detail": wake_detail("no-pty") });
@@ -1304,6 +1314,10 @@ pub(crate) async fn send_tab_message(
         Ok(woke) => woke,
         Err(unreachable) => return unreachable,
     };
+    // Again after the wake, which can take 45 s: a dialog may have opened meanwhile.
+    if let Some(kind) = prompt_up() {
+        return refuse(kind);
+    }
     match inject_text(app, &pty, text, true).await {
         Ok(()) => json!({ "status": "delivered", "woke": woke }),
         Err(e) => {
@@ -3983,8 +3997,10 @@ fn open_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, Ag
             if claude_dialog_on_screen(app, tab_id) { cur } else { None }
         }
         Some(_) => cur,
+        // Inventing a prompt the hooks haven't reported takes more than a footer: the rows must
+        // read as a permission dialog's, so nothing else on screen is ever answered as one.
         None if runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude)
-            && claude_dialog_on_screen(app, tab_id) =>
+            && permission_dialog_for_tab(app, tab_id).is_some() =>
         {
             Some(("permission", permission_prompt_id(app, tab_id), AgentRuntime::Claude))
         }

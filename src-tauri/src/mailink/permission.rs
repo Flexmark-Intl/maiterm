@@ -68,6 +68,14 @@ pub(crate) fn dialog_open(screen: &str) -> bool {
     footer(&lines).is_some()
 }
 
+/// Whether the screen ends in ANY Claude dialog's footer (a permission, a question, a picker,
+/// the trust dialog). For paths that must not type: text and its CR go into whatever dialog is
+/// up, never to the agent.
+pub(crate) fn any_dialog_open(screen: &str) -> bool {
+    dialog_open(screen)
+        || screen.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.contains("Esc to cancel"))
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Footer {
     Tool,
@@ -83,7 +91,12 @@ const PLAN_FOOTER_MAX_LINES: usize = 6;
 /// provided nothing between it and the end is blank or a row.
 fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
     let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    if lines[last].contains("Esc to cancel") {
+    // "Esc to cancel" is Claude's generic dialog footer. The AskUserQuestion selector
+    // ("Enter to select · ↑/↓ to navigate · Esc to cancel"), the trust dialog ("Enter to
+    // confirm · Esc to cancel") and pickers like /model draw it too, each after an "Enter to"
+    // hint. A tool permission's footer has none ("Esc to cancel · Tab to amend"): read as one,
+    // an ask's "No" would press Esc into the agent's question.
+    if lines[last].contains("Esc to cancel") && !lines[last].contains("Enter to") {
         return Some((last, Footer::Tool));
     }
     for i in (last.saturating_sub(PLAN_FOOTER_MAX_LINES - 1)..=last).rev() {
@@ -301,6 +314,12 @@ mod tests {
             assert!(dialog_open(s));
         }
         assert!(dialog_open(" rows this build can't read\n Esc to cancel · Tab to amend\n"));
+        // Other Claude dialogs share "Esc to cancel", after an "Enter to" hint.
+        let ask = " ❯ 1. Blue\n   2. Green\n ────\n   3. Chat about this\n\n Enter to select · ↑/↓ to navigate · Esc to cancel\n";
+        assert!(!dialog_open(ask));
+        assert!(!footer_open(ask));
+        assert_eq!(parse(ask), None);
+        assert!(!dialog_open(" ❯ 1. No, exit\n   2. Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n"));
         assert!(!dialog_open("⏺ Bash(npm test)\n  ⎿  Running…\n\n✻ Working… (esc to interrupt)\n"));
         assert!(!dialog_open(&format!("{}\nSHELL$ ", TWO_ROWS.trim_end())));
     }
