@@ -401,19 +401,22 @@ export function answerBlocker(task: Task, answer: BlockerAnswer): AnswerResult {
 
   const ref = `task "${task.title}" (id ${task.id})`;
   const comment = text ? `\n${text}` : '';
+  // The task may have been adopted from the runtime's own todo list when the question was set
+  // (claudeCode handleUpdateTasks), and then only the agent closes it: say so.
+  const close = `\n\nThe task is back in Active. Carry on from here, and close it with updateTasks (task id ${task.id}) when it is done.`;
   if (b.kind === 'decision') {
     const said = choice ?? text;
     return {
       ok: true,
       note: `Decided: ${said}${choice && text ? ` (${text})` : ''}`,
-      message: `[maiTerm] The human answered your question on ${ref}.\nQuestion: ${b.question}\nAnswer: ${said}${choice ? comment : ''}\n\nThe task is back in Active. Carry on from here.`,
+      message: `[maiTerm] The human answered your question on ${ref}.\nQuestion: ${b.question}\nAnswer: ${said}${choice ? comment : ''}${close}`,
     };
   }
   const did = b.kind === 'action' ? 'Done by the human' : 'Cleared by the human';
   return {
     ok: true,
     note: `${did}${text ? `: ${text}` : ''}`,
-    message: `[maiTerm] ${b.kind === 'action' ? 'The human has done what' : 'The human says the wait is over on what'} ${ref} was waiting for: ${b.question}${comment}\n\nThe task is back in Active. Carry on from here.`,
+    message: `[maiTerm] ${b.kind === 'action' ? 'The human has done what' : 'The human says the wait is over on what'} ${ref} was waiting for: ${b.question}${comment}${close}`,
   };
 }
 
