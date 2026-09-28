@@ -23,7 +23,13 @@
   const unexplained = $derived(unexplainedBlocked(tasks, workspacesStore.parkedTaskIds));
   /** Receipts for "Ask for the reason", by task id. */
   let asked = $state<Record<string, string>>({});
-  async function askReason(t: Task) {
+  /** Asks in flight. The button stays up across the liveness round trip, and a second ask
+   *  would either type the question twice or, failing the output-quiet check, raise a second
+   *  Overlord handoff and overwrite this one's receipt with "could not be reached". */
+  let asking = $state<Record<string, true>>({});
+  async function askReason(t: Task, e: MouseEvent) {
+    if (e.detail > 1 || asking[t.id] || asked[t.id]) return;
+    asking = { ...asking, [t.id]: true };
     const r = await overlordStore.askForBlockerReason(t.id);
     asked = {
       ...asked,
@@ -35,6 +41,8 @@
             ? 'The tab was busy, so Overlord will pass it on.'
             : 'The tab could not be reached, and there is no supervisor to relay it.',
     };
+    const { [t.id]: _, ...rest } = asking;
+    asking = rest;
   }
   /** Outcome lines by task id. An answered card leaves the queue, so the receipt is kept here
    *  and shown in a short list of what was just answered. */
@@ -94,7 +102,7 @@
           {#if asked[t.id]}
             <span class="receipt">{asked[t.id]}</span>
           {:else if t.tab_id}
-            <button onclick={() => askReason(t)}>Ask for the reason</button>
+            <button disabled={!!asking[t.id]} onclick={(e) => askReason(t, e)}>Ask for the reason</button>
           {/if}
         </div>
       {/each}

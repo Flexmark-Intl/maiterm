@@ -976,7 +976,8 @@ interface MaitermTask {
   // 0.13. What a Blocked task is waiting for when the reason is not another task (maiTerm
   // docs/tasks.md §3.1). Explicit `null` when there is none; only ever non-null while `status`
   // is "blocked". `decision` and `action` are the human's to answer (POST /tasks/{id}/answer);
-  // `external` waits on something outside maiTerm (a review, CI, a person) and has no answer.
+  // `external` waits on something outside maiTerm (a review, CI, a person): not a question for
+  // the human, so it doesn't count in `Chat.asks`, but /answer accepts it as "it arrived".
   // Waiting on other tasks is never a blocker: that is `blockedBy` + `effectiveStatus`.
   blocker: {
     kind: 'decision' | 'action' | 'external';
@@ -2018,7 +2019,7 @@ interface OutstandingDirective {
 | `POST /tasks` | `{ tabId, workstream?: string, tasks: [{ title, detail?, status?: TaskLane, assign?: boolean }] }` | `{ tasks: MaitermTask[] }` — one row per spec |
 | `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
 | `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
-| `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, text?: string }` (0.13) | `{ accepted, confirmed, result?: { answered, told, reason?, detail?, task } }` — see below |
+| `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, text?: string }` (0.13) | `{ accepted, confirmed, reason?, result?: { answered: true, told, task } }` — see below |
 
 **Answering a blocker (0.13).** `POST /tasks/{id}/answer` is the phone's "prompt me": the human
 answers the question on a task's `blocker`. It is the same human-only verb as the desktop's answer
@@ -2026,13 +2027,17 @@ controls. It logs the answer on the task ("Decided: …", "Done by the human"), 
 Active (which clears the blocker), and types a `[maiTerm] The human answered…` message into the
 carrying tab. Like `/start`, it crosses into the webview and answers the §13.4 envelope, and
 `result.told` means the same thing (`tab`, `agent` relays it later, `nobody`).
+- **A refusal is `accepted:false` with the sentence in `reason`**, the §13.4 rule, and nothing
+  is typed. Show `reason` verbatim and re-read the task (`GET /tasks`): the three refusals are
+  a stale answer (the agent replaced its question), a task no longer waiting (answered elsewhere
+  or moved on), and an answer that doesn't fit (an option that wasn't offered, or a decision
+  with neither option nor text).
 - **`askedAt` is required and is the stale guard.** Send back the `blocker.askedAt` you rendered.
-  An agent can replace its question between your render and the tap; a mismatch answers
-  `answered:false, reason:"stale"` and nothing is typed. Re-read the task and show the new question.
+  An agent can replace its question between your render and the tap.
 - `option` is an index into `blocker.options`. `text` is the answer for a decision with no
   options, or a comment alongside an option or on an action. A decision needs one of the two;
-  an `action` needs neither (it means "I've done it"). `reason:"bad_answer"` otherwise.
-- `reason:"no_blocker"`: the task isn't waiting any more (answered elsewhere, or moved on).
+  an `action` needs neither (it means "I've done it"), and neither does an `external` wait
+  (it means "it arrived": the task moves on and the agent is told the wait is over).
 - **Don't answer on a double tap.** When one answered card leaves your list, the next slides
   under the finger with a question that is not new; the desktop drops the second click of a
   double-click for exactly this reason.

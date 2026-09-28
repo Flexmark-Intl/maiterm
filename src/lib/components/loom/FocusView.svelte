@@ -49,7 +49,11 @@
               preview: ask?.blocker?.question ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : s?.state === 'permission' ? 'Needs your approval' : ''),
             };
           })
-          .filter((c) => c.state !== null || c.asks),
+          // The open chat stays listed even when it stops qualifying. Answering the question on
+          // a chat whose agent has exited clears its only reason to be here, and dropping it
+          // would jump Focus to another chat and hide the "could not be told" receipt, which
+          // is exactly the case that receipt is for.
+          .filter((c) => c.state !== null || c.asks || c.tabId === loomStore.focusChatTabId),
       ),
     ),
   );

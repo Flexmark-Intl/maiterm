@@ -71,11 +71,16 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         } else if (opt !== undefined && opt !== null && typeof opt !== 'number') {
           result = { error: 'option must be a number' };
         } else {
-          result = await overlordStore.answerBlocker(a.id, {
+          const r = await overlordStore.answerBlocker(a.id, {
             asked_at: a.askedAt,
             option: typeof opt === 'number' ? opt : undefined,
             text: typeof text === 'string' ? text : undefined,
           });
+          // A refusal (stale, no longer blocked, a bad option) is the §13.4 envelope's
+          // `accepted:false` with the sentence as `reason`, like every other refusal. Returned as
+          // a result it read as accepted, and a client following the envelope rule showed a stale
+          // answer as delivered.
+          result = r.answered ? r : { error: r.detail ?? 'That answer was not accepted.' };
         }
         break;
       }

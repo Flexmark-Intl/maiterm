@@ -777,8 +777,8 @@ struct TaskAnswerBody {
 /// and type the answer into the carrying tab (docs/tasks.md §3.1). The same human-only verb as
 /// the desktop's answer controls, reached through the owning window's webview like `/start`,
 /// and for the same reason: it types into a terminal with the human's authority, so no MCP
-/// path reaches it. `result.answered:false` with a `reason` (`stale`, `no_blocker`,
-/// `bad_answer`) is a refusal the phone shows, not a transport failure.
+/// path reaches it. A refusal (stale, no longer blocked, a bad answer) is the envelope's
+/// `accepted:false` with the sentence as `reason`, like every other refusal.
 async fn post_task_answer(
     State(s): State<ApiState>,
     headers: HeaderMap,
@@ -792,9 +792,6 @@ async fn post_task_answer(
     if out.0["accepted"] == Value::Bool(true) {
         if let Some(row) = board::task_row(&s.app, &task_id) {
             out.0["result"]["task"] = row;
-        }
-        if let Some(detail) = out.0["result"]["detail"].as_str().map(str::to_string) {
-            out.0["reason"] = json!(detail);
         }
     }
     Ok(out)

@@ -75,7 +75,10 @@
       const active = document.activeElement;
       if (active && active !== document.body && !active.closest('.loom-drawer')) return;
       const tab = workspacesStore.activeTab;
-      if (tab && tab.id === beforeTab && before?.isConnected && !before.closest('.loom-drawer')) {
+      if (
+        tab && tab.id === beforeTab && before && before !== document.body &&
+        before.isConnected && !before.closest('.loom-drawer')
+      ) {
         before.focus({ preventScroll: true });
       } else if (tab?.tab_type === 'terminal') {
         terminalsStore.focusTerminal(tab.id);
