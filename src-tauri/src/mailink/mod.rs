@@ -4689,6 +4689,19 @@ fn turns_from_records(records: &[assets::AssetRecord]) -> Vec<Value> {
         .collect()
 }
 
+/// A tab's chat exactly as the phone's thread gets it: the distilled transcript (or the live
+/// screen for a tab without one) with the files the agent sent merged in by time. The desktop's
+/// Focus view reads this, so the two surfaces never parse a transcript two ways.
+pub(crate) fn tab_transcript(app: &AppState, tab_id: &str) -> Vec<Value> {
+    let mut turns = build_transcript(app, tab_id, now_ms());
+    let sent = asset_turns(tab_id);
+    if !sent.is_empty() {
+        turns.extend(sent);
+        turns.sort_by_key(|t| t.get("ts").and_then(|v| v.as_u64()).unwrap_or(0));
+    }
+    turns
+}
+
 fn build_transcript(app: &AppState, tab_id: &str, now: u64) -> Vec<Value> {
     // Resolve via the LIVE session, or (post-relaunch, pre-initSession) the persisted resume
     // id — so a dormant/resuming agent still shows its real distilled conversation, keyed to
@@ -5209,14 +5222,9 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // lights up; falls back to the distilled terminal scrape for other runtimes / when no
     // transcript is found. See mailink/transcript.rs.
     let ph = std::time::Instant::now();
-    let mut transcript = build_transcript(app, tab_id, now);
-    // Files an agent sent belong where it sent them, so merge by ts rather than appending. The
-    // live terminal_snapshot turn carries `now`, so it stays last on its own.
-    let sent = asset_turns(tab_id);
-    if !sent.is_empty() {
-        transcript.extend(sent);
-        transcript.sort_by_key(|t| t.get("ts").and_then(|v| v.as_u64()).unwrap_or(0));
-    }
+    // Files an agent sent belong where it sent them, so they are merged by ts rather than
+    // appended. The live terminal_snapshot turn carries `now`, so it stays last on its own.
+    let transcript = tab_transcript(app, tab_id);
     let ms_transcript = ph.elapsed().as_millis(); // 8 MiB tail read + distill
 
     let mut detail = json!({

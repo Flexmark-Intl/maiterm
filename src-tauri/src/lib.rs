@@ -770,6 +770,7 @@ pub fn run() {
             commands::overlord::get_tab_prompt,
             commands::overlord::answer_tab_prompt,
             commands::overlord::trust_dialog_open,
+            commands::overlord::get_tab_transcript,
             commands::overlord::append_overlord_ledger,
             commands::overlord::publish_overlord_snapshot,
             commands::overlord::get_overlord_ledger,

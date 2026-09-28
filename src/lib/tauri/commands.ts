@@ -361,6 +361,26 @@ export async function trustDialogOpen(tabId: string): Promise<boolean> {
   return invoke('trust_dialog_open', { tabId });
 }
 
+/** One distilled transcript turn, the same shape the phone's thread receives
+ *  (docs/mailink-protocol.md §4.3). `tool` turns carry a one-line marker like
+ *  `Bash(npm test)`. A `terminal_snapshot` is a raw live-screen scrape for a tab without a
+ *  readable transcript: render it preformatted and never append it as history. */
+export interface ChatTurn {
+  msg_id: string;
+  role: 'agent' | 'user' | 'system' | 'tool';
+  kind?: 'terminal_snapshot' | 'peer_message' | 'goal_status' | 'asset';
+  text: string;
+  /** unix ms */
+  ts: number;
+  goal?: { event: 'set' | 'blocked' | 'met' | 'failed' | 'cleared'; condition?: string };
+  peer?: { direction: 'in' | 'out'; name?: string; topic?: string };
+}
+
+/** A tab's chat as the phone sees it, for the Workstream Loom's Focus view. */
+export async function getTabTranscript(tabId: string): Promise<ChatTurn[]> {
+  return invoke('get_tab_transcript', { tabId });
+}
+
 /** Answer a tab's open prompt through the same hardened path the phone uses. Pass the
  *  `prompt_id` from `getTabPrompt` — it is the stale-guard against answering a prompt that
  *  opened while the decision was being made. */

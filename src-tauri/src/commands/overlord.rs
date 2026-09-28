@@ -55,6 +55,19 @@ pub async fn get_agent_reply_since(
     .map_err(|e| format!("agent reply read failed to run: {}", e))
 }
 
+/// A tab's chat as the phone sees it (`mailink::tab_transcript`), for the Workstream Loom's
+/// Focus view. Up to an 8 MiB transcript tail read, so it runs on the blocking pool.
+#[tauri::command]
+pub async fn get_tab_transcript(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Vec<Value>, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::mailink::tab_transcript(&app_state, &tab_id))
+        .await
+        .map_err(|e| format!("transcript read failed to run: {}", e))
+}
+
 /// What is currently blocking a tab: a tool permission gate, or an AskUserQuestion the agent
 /// raised. `None` when nothing is open. Overlord needs the distinction to decide whether it
 /// may answer or must put the decision to the human.
