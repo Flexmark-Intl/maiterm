@@ -7,6 +7,7 @@
   import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { wakeTab, type WakeAction } from '$lib/agents/wake';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
+  import { loomStore } from '$lib/stores/loom.svelte';
   import { retryDownBridgesNow } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import ShareImportWizard from '$lib/components/share/ShareImportWizard.svelte';
@@ -977,6 +978,14 @@
         const tab = workspacesStore.activeTab;
         agentBridgeCallerTabId = tab?.tab_type === 'terminal' ? tab.id : null;
         if (!showAgentBridgePicker) showAgentBridgePicker = true;
+        return;
+      }
+
+      // Cmd+Shift+J - Workstream Loom (docs/loom.md). Not G: that is the editor's find-previous.
+      if (isMeta && e.shiftKey && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        e.stopPropagation();
+        loomStore.toggle();
         return;
       }
 

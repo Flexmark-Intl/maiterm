@@ -10,6 +10,7 @@
   import SplitContainer from '$lib/components/pane/SplitContainer.svelte';
   import MeshStageView from '$lib/components/MeshStageView.svelte';
   import ServiceConsole from '$lib/components/stack/ServiceConsole.svelte';
+  import LoomDrawer from '$lib/components/loom/LoomDrawer.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import TerminalPane from '$lib/components/terminal/TerminalPane.svelte';
   import EditorPane from '$lib/components/editor/EditorPane.svelte';
@@ -560,6 +561,8 @@
           {/if}
           <!-- Floats over the split tree; renders nothing unless a service is being shown. -->
           <ServiceConsole workspaceId={workspace.id} />
+          <!-- Workstream Loom (Cmd+Shift+J): covers the terminal area without resizing it. -->
+          <LoomDrawer workspaceId={workspace.id} />
         {:else}
           {@const suspendedWorkspaces = workspacesStore.workspaces.filter(w => w.suspended)}
           {@const activeWorkspaces = workspacesStore.workspaces.filter(w => !w.suspended)}

@@ -121,6 +121,7 @@
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>E</kbd> <span>Toggle notes panel</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd> <span>Toggle tasks panel</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> <span>Toggle composer dock</span></div>
+          <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>Shift</kbd> + <kbd>J</kbd> <span>Workstream Loom</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>B</kbd> <span>Toggle sidebar</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>F</kbd> <span>Find in terminal</span></div>
           <div class="shortcut"><kbd>{modLabel}</kbd> + <kbd>K</kbd> <span>Clear terminal + scrollback</span></div>

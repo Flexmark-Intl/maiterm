@@ -1,0 +1,65 @@
+# Workstream Loom
+
+> Status: loom and decisions views built 2026-09-27; Focus view and the phone next.
+> Sketch: https://claude.ai/code/artifact/c1508940-a0f8-4e88-bf1c-442143f6733f
+
+## Why
+
+Agents add follow-up tasks, mark work blocked pending a decision, and ask questions while
+the human isn't looking. Then a review comes back and the agent carries on, and the
+question scrolls away. The task board has held all of this since `docs/tasks.md`, but
+nothing drew it as a picture, and a blocker was a lane plus free text, so nothing could
+tell "waiting on your decision" from "waiting on eight other tasks".
+
+The loom is that picture. It opens over the terminal area with **Cmd+Shift+J** (G is the
+editor's find-previous) and has three views of the same workspace:
+
+| View | What it answers |
+|---|---|
+| Loom | Who is working on what, what is waiting and on what, and what has gone quiet |
+| Decisions | Every question waiting on the human, oldest first, answerable in place |
+| Focus | (next) the maiLink-style chat list with a condensed chat beside the workspace's work |
+
+## The data it stands on
+
+- **Blockers** (`docs/tasks.md` §3.1): `Task.blocker {kind, question, context, options,
+  command, asked_at}`. `decision` and `action` blockers are the Decisions queue; waiting on
+  other tasks is derived from `blocked_by`, never stored.
+- **Answering** is `overlordStore.answerBlocker`, human-only like "Do it". Every surface
+  answers through `components/tasks/BlockerCard.svelte`, which carries the two guards:
+  - a typed draft belongs to the question it was typed under, and a re-ask drops it;
+  - nothing sent without visible typed text (an option, "I've done it", Enter in an empty
+    field) is accepted while the question is under 1.5 s old, measured from its own
+    `asked_at`. A card can mount with a new question right under the pointer.
+- **Chat** (Focus): `get_tab_transcript` serves `mailink::tab_transcript`, the same turns
+  the phone's thread gets. `loom/model.ts` `chatRows` folds tool runs with the phone's
+  vocabulary (`toolVerb`), and `focusSections` applies the phone's Focus rules.
+
+## The loom view
+
+- **Left: agents.** Every agent tab in scope, plus any tab still holding open tasks.
+  Ordered permission → working → idle → no session, then by name, so the column doesn't
+  reshuffle as agents finish turns. Clicking one fades everything it isn't part of.
+- **Middle: workstreams.** Open tasks only (backlog is the parking lot, retired is
+  history). Streams with a question waiting on the human come first. A chip untouched for
+  14 days while claiming to be active or to-do is drawn quiet (`isQuiet`): the board had
+  month-old "active" rows that looked exactly like live work.
+- **Strings** are drawn in one SVG over the grid from the DOM rects, recomputed on a
+  ResizeObserver, on scroll of the stream column, and on any data change. Moving dots on a
+  string mean the task is active; a slow amber dash running backwards means it is waiting;
+  a faint dotted string joins a task to what it depends on. Strings to chips scrolled out
+  of view are skipped.
+- **Right: the selected task.** Lane, workstream, agent, age; the blocker card with its
+  answer controls, or the unmet dependencies, or "no reason recorded"; detail; the log.
+
+## Scope
+
+A drawer in every workspace, over the active workspace by default, with a switch to every
+workspace in the window. The Overlord workspace always shows the whole window: it
+supervises all of it.
+
+## Next
+
+- Focus view (the chat list and condensed chat).
+- The phone: blockers on the wire and decisions in "Needs you" (protocol 0.13).
+- Overlord flags a blocked task with no blocker record.
