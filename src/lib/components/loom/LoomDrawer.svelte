@@ -37,17 +37,34 @@
   const summary = $derived(summarize(tasks, now, workspacesStore.parkedTaskIds));
   const decisions = $derived(decisionsQueue(tasks).length);
 
-  // Escape closes, except from a field inside the drawer (an answer being typed).
+  /** The drawer covers the terminal, so it must take the keyboard. Unlike ServiceConsole, whose
+   *  focused terminal is the visible one inside it, a terminal left focused here is HIDDEN: its
+   *  xterm eats Escape (sending ESC interrupts a working agent) and every keystroke lands in a
+   *  terminal nobody can see. Focus moves to the drawer on open and goes back on close. */
+  let drawerEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    if (!loomStore.open || !drawerEl) return;
+    const before = document.activeElement as HTMLElement | null;
+    // Root CLAUDE.md: focus explicitly on a frame, never rely on autofocus.
+    const raf = requestAnimationFrame(() => drawerEl?.focus({ preventScroll: true }));
+    return () => {
+      cancelAnimationFrame(raf);
+      if (before?.isConnected) before.focus({ preventScroll: true });
+    };
+  });
+
+  // Escape closes, except from a field inside the drawer (an answer being typed), and except
+  // an Escape another overlay already handled (QuickOpen and the pickers preventDefault it).
   $effect(() => {
     if (!loomStore.open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
       const target = e.target as Element | null;
       if (target?.closest?.('.loom-drawer') && target.matches('input, textarea')) {
         (target as HTMLElement).blur();
+        drawerEl?.focus({ preventScroll: true });
         return;
       }
-      if (target?.closest?.('.terminal-container, .xterm')) return;
       e.preventDefault();
       loomStore.close();
     };
@@ -62,7 +79,7 @@
 </script>
 
 {#if loomStore.open && workspace}
-  <section class="loom-drawer" aria-label="Workstream Loom">
+  <section class="loom-drawer" aria-label="Workstream Loom" tabindex="-1" bind:this={drawerEl}>
     <header>
       <span class="where">
         {#if workspace.overlord}
@@ -109,6 +126,7 @@
     background: var(--bg-dark);
     color: var(--fg);
     animation: loom-in 160ms ease-out;
+    outline: none;
   }
   @keyframes loom-in {
     from { opacity: 0; transform: translateY(6px); }

@@ -32,7 +32,20 @@
    *  mounts when a question first appears, and may appear right under the pointer, while a card
    *  opened on a question asked minutes ago is answerable at once. */
   const FRESH_MS = 1500;
-  const isFresh = () => !!b && Date.now() - Date.parse(b.asked_at) < FRESH_MS;
+  /** A future asked_at (a task shared from a machine whose clock runs ahead) is not fresh: it
+   *  would otherwise stay unanswerable until this clock caught up. */
+  const isFresh = () => {
+    if (!b) return false;
+    const age = Date.now() - Date.parse(b.asked_at);
+    return age >= 0 && age < FRESH_MS;
+  };
+
+  /** The second click of a double-click is never an answer. When a card is answered it leaves
+   *  its list at once, and the next card slides into its place, under the pointer, with a
+   *  question that is not fresh; the double-click's second click would answer it. `detail` is
+   *  the click count, which the browser keeps by position and time, not by element; keyboard
+   *  activation reports 0. */
+  const secondClick = (e: MouseEvent) => e.detail > 1;
 
   $effect.pre(() => {
     const a = b?.asked_at;
@@ -85,7 +98,7 @@
     {#if b.options?.length}
       <div class="opts">
         {#each b.options as o, i (i)}
-          <button class="opt" disabled={sending} onclick={() => answer(i)}>
+          <button class="opt" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(i); }}>
             <b>{o.label}{#if o.recommended}<em> recommended</em>{/if}</b>
             {#if o.detail}<span>{o.detail}</span>{/if}
           </button>
@@ -115,9 +128,9 @@
         }}
       />
       {#if b.kind === 'decision'}
-        <button class="send" disabled={sending || !draftText.trim()} onclick={() => answer(undefined)}>Send</button>
+        <button class="send" disabled={sending || !draftText.trim()} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>Send</button>
       {:else}
-        <button class="send" disabled={sending} onclick={() => answer(undefined)}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
+        <button class="send" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(undefined); }}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
       {/if}
     </div>
   </div>

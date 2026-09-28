@@ -41,6 +41,9 @@ export interface LoomSummary {
 export function summarize(tasks: Task[], now: number, parked?: ReadonlySet<string>): LoomSummary {
   const s: LoomSummary = { active: 0, needsYou: 0, waiting: 0, quiet: 0 };
   for (const t of tasks) {
+    // Counts what the loom draws: backlog is the parking lot and isn't drawn, even when a
+    // dependency makes its effective lane read blocked.
+    if (t.status === 'backlog') continue;
     const lane = laneOf(t, tasks, parked);
     if (lane === 'active') s.active++;
     if (lane === 'blocked') {
@@ -74,7 +77,8 @@ export interface AgentTabInput {
  *  needs attention (permission, then working, then idle, then no session), then by name, so the
  *  column doesn't reshuffle as agents finish turns. */
 export function loomAgents(tabs: AgentTabInput[], tasks: Task[]): LoomAgent[] {
-  const open = (tabId: string) => tasks.filter((t) => t.tab_id === tabId && !isRetired(t.status)).map((t) => t.id);
+  const open = (tabId: string) =>
+    tasks.filter((t) => t.tab_id === tabId && !isRetired(t.status) && t.status !== 'backlog').map((t) => t.id);
   const rank: Record<string, number> = { permission: 0, active: 1, idle: 2 };
   return tabs
     .map((t) => ({

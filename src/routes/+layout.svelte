@@ -825,6 +825,7 @@
             (e.shiftKey && key === 't') ||                           // Cmd+Shift+T duplicate tab
             (e.shiftKey && key === 'r') ||                           // Cmd+Shift+R reload tab
             (e.shiftKey && key === 'e') ||                           // Cmd+Shift+E tasks panel
+            (e.shiftKey && key === 'j') ||                           // Cmd+Shift+J Workstream Loom
             (key === 'w') ||                                         // Cmd+W close tab
             (!e.shiftKey && e.key >= '1' && e.key <= '9') ||         // Cmd+1-9 switch tab
             (e.shiftKey && (e.key === '[' || e.code === 'BracketLeft')) ||  // Cmd+Shift+[ prev tab

@@ -500,7 +500,9 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
     detail: input.detail ?? null,
     status: input.blocker ? 'blocked' : (input.status ?? 'todo'),
     tab_id: input.tab_id ?? null,
-    blocked_by: input.blocked_by ?? [],
+    // Deduped: createTasks stores the list as sent, and only updateTasks went through
+    // resolveEdges, which dedups.
+    blocked_by: [...new Set(input.blocked_by ?? [])],
     origin: input.origin ?? 'human',
     workstream_id: input.workstream_id ?? null,
     created_at: now,

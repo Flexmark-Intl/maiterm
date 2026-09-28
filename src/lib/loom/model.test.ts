@@ -38,6 +38,16 @@ describe('summary', () => {
     const ext = task({ id: 'ext', status: 'blocked', blocker: blocker('external', '2026-09-27T10:00:00Z') });
     expect(summarize([dep, held, ask, ext], NOW)).toEqual({ active: 1, needsYou: 1, waiting: 2, quiet: 0 });
   });
+
+  it('counts only what the loom draws: a parked row held by a dependency is not waiting', () => {
+    const dep = task({ id: 'dep', status: 'active' });
+    const parked = task({ id: 'p', status: 'backlog', blocked_by: ['dep'] });
+    expect(summarize([dep, parked], NOW)).toEqual({ active: 1, needsYou: 0, waiting: 0, quiet: 0 });
+  });
+
+  it('never stores a dependency twice', () => {
+    expect(makeTask({ title: 'b', blocked_by: ['a', 'a'] }).blocked_by).toEqual(['a']);
+  });
 });
 
 describe('the agent column', () => {

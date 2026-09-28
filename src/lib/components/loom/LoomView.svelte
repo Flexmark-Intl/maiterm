@@ -90,7 +90,12 @@
     if (l === 'blocked' && t.status !== 'blocked') return 'waiting on tasks';
     return laneName(l);
   }
-  const unmet = (t: Task) => resolveBlockers(t, tasks, parked).filter((b) => b.state === 'waiting' || b.state === 'parked');
+  const unmet = (t: Task) => {
+    const seen = new Set<string>();
+    return resolveBlockers(t, tasks, parked).filter(
+      (b) => (b.state === 'waiting' || b.state === 'parked') && !seen.has(b.id) && !!seen.add(b.id),
+    );
+  };
 
   function related(t: Task): boolean {
     const a = loomStore.focusAgentId;
@@ -112,6 +117,7 @@
   // ── Strings ────────────────────────────────────────────────────────────────────────────
   let host = $state<HTMLElement | null>(null);
   let streamsEl = $state<HTMLElement | null>(null);
+  let agentsEl = $state<HTMLElement | null>(null);
   interface Edge { d: string; color: string; cls: string; bead: boolean; key: string }
   let edges = $state<Edge[]>([]);
   let raf = 0;
@@ -127,8 +133,12 @@
         const r = n.getBoundingClientRect();
         return { l: r.left - H.left, r: r.right - H.left, t: r.top - H.top, b: r.bottom - H.top, cy: r.top - H.top + r.height / 2 };
       };
-      const view = streamsEl?.getBoundingClientRect();
-      const inView = (b: { t: number; b: number }) => !view || (b.b > view.top - H.top && b.t < view.bottom - H.top);
+      // Both columns scroll; a string to a card scrolled out of its column is not drawn.
+      const cols = [streamsEl, agentsEl].map((el) => el?.getBoundingClientRect());
+      const within = (v: DOMRect | undefined) => (b: { t: number; b: number }) =>
+        !v || (b.b > v.top - H.top && b.t < v.bottom - H.top);
+      const inView = within(cols[0]);
+      const agentInView = within(cols[1]);
       const out: Edge[] = [];
       const sel = loomStore.selectedTaskId, fa = loomStore.focusAgentId;
       for (const s of streams) {
@@ -139,7 +149,7 @@
           const cold = !!fa && !related(t);
           if (t.tab_id) {
             const ab = box(`[data-loom-agent="${t.tab_id}"]`);
-            if (ab) {
+            if (ab && agentInView(ab)) {
               const mx = (tb.l - ab.r) * 0.5;
               const l = lane(t);
               out.push({
@@ -151,7 +161,9 @@
               });
             }
           }
-          for (const dep of t.blocked_by ?? []) {
+          // Deduped: createTasks stores blocked_by as sent, and a repeated id would give two
+          // strings the same key.
+          for (const dep of new Set(t.blocked_by ?? [])) {
             const db = box(`[data-loom-task="${dep}"]`);
             if (!db || !inView(db)) continue;
             const same = Math.abs(db.cy - tb.cy) < 24;
@@ -190,7 +202,7 @@
     {/each}
   </svg>
 
-  <aside class="agents">
+  <aside class="agents" bind:this={agentsEl} onscroll={draw}>
     <h3>Agents</h3>
     {#each agents as a (a.tabId)}
       <button
@@ -260,7 +272,10 @@
       </dl>
       {#if selected.status === 'blocked' && selected.blocker}
         {#key selected.id}
-          <BlockerCard task={selected} variant="card" onnote={(text) => (outcome = text)} />
+          {@const forId = selected.id}
+          <!-- The note can arrive after the human has moved on (it waits for the paste), so it
+               only lands if this task is still the one selected. -->
+          <BlockerCard task={selected} variant="card" onnote={(text) => { if (loomStore.selectedTaskId === forId) outcome = text; }} />
         {/key}
       {:else if lane(selected) === 'blocked'}
         {@const deps = unmet(selected)}
