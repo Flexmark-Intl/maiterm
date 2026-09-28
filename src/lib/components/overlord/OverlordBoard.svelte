@@ -9,8 +9,9 @@
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { escalationLabel, fireRefusal, fmtAge, outcomeLabel, outcomeTone } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
-  import ContextMenu from '$lib/components/ContextMenu.svelte';
   import OverlordBoardView from './OverlordBoardView.svelte';
+  import LoomHome from '$lib/components/loom/LoomHome.svelte';
+  import { loomStore, type DeckView } from '$lib/stores/loom.svelte';
   import '$lib/overlord/deck.css';
 
   /**
@@ -76,8 +77,9 @@
    *  could possibly run one. */
   const PRESSURE_PCT = $derived(overlordStore.checkpointThreshold ?? PRESSURE_FALLBACK_PCT);
 
-  type View = 'deck' | 'fleet' | 'board' | 'ledger';
-  let view = $state<View>('deck');
+  /** Which view is showing lives in the loom store: Cmd+Shift+J and "show in the weave" links
+   *  set it from outside the deck. The Loom is home. */
+  const view = $derived(loomStore.deckView);
 
   // ── Fleet derivation ────────────────────────────────────────────────────────
   const boardWorkspaces = $derived(workspacesStore.workspaces.filter((w) => !w.overlord && !w.overlord_exempt));
@@ -120,42 +122,9 @@
     };
   }
 
-  /** `context` — most-in-need first: busy rituals, then permission, then pressure, then
-   *  staleness, highest context within each. `activity` — most recent real turn first. */
-  type FleetSort = 'context' | 'activity';
-  let fleetSort = $state<FleetSort>('context');
-
-  /** Agent tabs whose whole workspace is suspended. Parked, not dormant: every PTY in it is
-   *  killed by design, so a card for one would say "not loaded" about a tab nobody expects
-   *  to be running. They are counted so the fleet says where they went, not shown. */
-  const parkedCount = $derived.by(() => {
-    let n = 0;
-    for (const ws of boardWorkspaces) {
-      if (!ws.suspended) continue;
-      for (const pane of ws.panes) {
-        for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.runtime && !tab.overlord_exempt) n++;
-        }
-      }
-    }
-    return n;
-  });
-
-  /** Agent tabs the human exempted, by tab flag or workspace flag. Counted in the bar, never
-   *  shown: a card for one would offer actions every one of which is refused. */
-  const exemptCount = $derived.by(() => {
-    let n = 0;
-    for (const ws of workspacesStore.workspaces) {
-      if (ws.overlord) continue;
-      for (const pane of ws.panes) {
-        for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') === 'terminal' && tab.runtime && (ws.overlord_exempt || tab.overlord_exempt)) n++;
-        }
-      }
-    }
-    return n;
-  });
-
+  /** The supervised agent tabs, most in need first: busy rituals, then permission, then
+   *  pressure, then staleness, highest context within each. Feeds the triage queue and the
+   *  telemetry; the per-agent view is the Loom's Focus (docs/loom.md). */
   const fleet = $derived.by<FleetUnit[]>(() => {
     void now;
     const units: FleetUnit[] = [];
@@ -167,9 +136,6 @@
           units.push(unitFor(tab, ws));
         }
       }
-    }
-    if (fleetSort === 'activity') {
-      return units.sort((a, b) => (b.lastTurn ?? 0) - (a.lastTurn ?? 0) || (b.pct ?? 0) - (a.pct ?? 0));
     }
     const rank = (u: FleetUnit) =>
       (u.ritual ? 0 : u.state === 'permission' ? 1 : (u.pct ?? 0) >= PRESSURE_PCT ? 2 : u.state === 'dormant' ? 4 : 3);
@@ -384,47 +350,6 @@
     recoverNote = r === 'permission' ? fireRefusal('tab_permission', 'that') : null;
   }
 
-  // ── Fleet: manual trigger ──────────────────────────────────────────────────
-  /** Which card's Trigger menu is open, and where. */
-  let triggerMenu = $state<{ x: number; y: number; tabId: string; anchor: HTMLElement } | null>(null);
-  /** A refusal, shown on the card that was clicked rather than in the deck's note slot:
-   *  the fleet is a grid, and a message at the top of it doesn't say which card it means. */
-  let unitNotes = $state<Record<string, string>>({});
-
-  /** Toggles. The menu leaves a mousedown on its anchor alone, so this is the only
-   *  handler that runs for a second press on the same button. */
-  function openTrigger(e: MouseEvent, tabId: string) {
-    if (triggerMenu?.tabId === tabId) { triggerMenu = null; return; }
-    const anchor = e.currentTarget as HTMLElement;
-    const r = anchor.getBoundingClientRect();
-    triggerMenu = { x: r.left, y: r.bottom + 4, tabId, anchor };
-  }
-
-  function triggerItems(tabId: string) {
-    return overlordStore.rulesForTab(tabId).map((rule) => ({
-      label: rule.name,
-      // A disabled rule is still offered — "don't run this on its own, but let me run it" —
-      // and says so, since firing it is the one time its switch position matters.
-      shortcut: rule.enabled ? undefined : 'off',
-      action: () => void fire(tabId, rule.id),
-    }));
-  }
-
-  function clearNote(tabId: string) {
-    if (!(tabId in unitNotes)) return;
-    const next = { ...unitNotes };
-    delete next[tabId];
-    unitNotes = next;
-  }
-
-  async function fire(tabId: string, ruleId: string) {
-    clearNote(tabId);
-    const r = await overlordStore.fireRule(tabId, ruleId);
-    if (r.started) return; // the card's ritual strip is the feedback
-    unitNotes = { ...unitNotes, [tabId]: fireRefusal(r.reason, 'that rule') };
-    setTimeout(() => clearNote(tabId), 8000);
-  }
-
   // ── Archive / close ────────────────────────────────────────────────────────
   let tabBusy = $state<string | null>(null);
   /** Inline confirmation — `confirm()` does nothing in a Tauri webview, and closing a
@@ -474,23 +399,11 @@
       : `${parts.join(', ')}.`;
   }
 
-  /** Context ring geometry — r=13 → circumference 81.68. */
-  const RING_C = 81.68;
-  function ringDash(pct: number | null): string {
-    const v = Math.max(0, Math.min(100, pct ?? 0));
-    return `${(v / 100) * RING_C} ${RING_C}`;
-  }
   function pctTone(pct: number | null): string {
     if (pct === null) return 'var(--ov-ink-dim)';
     if (pct >= 75) return 'var(--ov-critical)';
     if (pct >= PRESSURE_PCT) return 'var(--ov-pressure)';
     return 'var(--ov-ok)';
-  }
-  function stateTone(s: FleetUnit['state']): string {
-    return s === 'permission' ? 'var(--ov-warn)'
-      : s === 'active' ? 'var(--ov-live)'
-      : s === 'idle' ? 'var(--ov-ok)'
-      : 'var(--ov-ink-dim)';
   }
 </script>
 
@@ -511,8 +424,8 @@
       </div>
 
       <nav class="segments">
-        {#each [['deck', 'Triage', needsYou], ['fleet', 'Fleet', fleet.length], ['board', 'Board', overlordStore.tasks.filter(isInFlight).length], ['ledger', 'Ledger', 0]] as [id, label, count] (id)}
-          <button class="segment" class:on={view === id} onclick={() => (view = id as View)}>
+        {#each [['loom', 'Loom', 0], ['deck', 'Triage', needsYou], ['board', 'Board', overlordStore.tasks.filter(isInFlight).length], ['ledger', 'Ledger', 0]] as [id, label, count] (id)}
+          <button class="segment" class:on={view === id} onclick={() => loomStore.setDeckView(id as DeckView)}>
             {label}
             {#if (count as number) > 0}<span class="segment-count">{count}</span>{/if}
           </button>
@@ -577,9 +490,15 @@
   <!-- ══ Body ══════════════════════════════════════════════════════════════ -->
   <!-- Every view but the board is a vertical list that scrolls as one. The board is a
        fixed frame with its own scrollers inside it, so it takes the height instead. -->
-  <div class="body" class:body-fill={view === 'board'}>
+  <div class="body" class:body-fill={view === 'board'} class:body-loom={view === 'loom'}>
 
-    {#if !engineOn}
+    <!-- ── Loom (home) ─────────────────────────────────────────────────── -->
+    <!-- Works with the engine off: it is the human's own view of the agents, not supervision. -->
+    {#if view === 'loom'}
+      <LoomHome active={visible} />
+    {/if}
+
+    {#if !engineOn && view !== 'loom'}
       <div class="standby ov-panel ov-bracket ov-in">
         <span class="standby-mark">♔</span>
         <p class="ov-label-lead">Overlord is on standby</p>
@@ -971,111 +890,6 @@
       </div>
     {/if}
 
-    <!-- ── Fleet ───────────────────────────────────────────────────────── -->
-    {#if view === 'fleet'}
-      {#if fleet.length === 0}
-        <div class="allclear ov-in"><div class="allclear-rule"></div><span class="ov-label">{parkedCount ? 'every agent tab is in a suspended workspace' : 'no agent tabs in this window'}</span><div class="allclear-rule"></div></div>
-      {/if}
-      {#if fleet.length > 0 || parkedCount > 0 || exemptCount > 0}
-        <div class="fleet-bar ov-in">
-          <span class="ov-label">sort</span>
-          <div class="fleet-sort" role="group" aria-label="Sort the fleet">
-            <button class="fleet-sort-btn" class:on={fleetSort === 'context'} onclick={() => (fleetSort = 'context')}>peak context</button>
-            <button class="fleet-sort-btn" class:on={fleetSort === 'activity'} onclick={() => (fleetSort = 'activity')}>latest activity</button>
-          </div>
-          {#if parkedCount > 0 || exemptCount > 0}
-            <span class="ov-label fleet-parked">
-              {[
-                parkedCount > 0 ? `${parkedCount} in suspended workspaces` : '',
-                exemptCount > 0 ? `${exemptCount} exempt` : '',
-              ].filter(Boolean).join(' · ')} — not shown
-            </span>
-          {/if}
-        </div>
-      {/if}
-      <div class="fleet">
-        {#each fleet as u, i (u.tab.id)}
-          <div class="unit ov-panel ov-in" class:unit-busy={!!u.ritual} style:--i={i}>
-            <div class="unit-head">
-              <span class="ov-dot" class:ov-dot-live={u.state === 'active' || u.state === 'permission'}
-                    style:--tone={stateTone(u.state)}></span>
-              <span class="unit-name">{u.tab.name}</span>
-              <span class="ov-mono unit-age">{fmtAge(u.lastTurn)}</span>
-            </div>
-            <div class="unit-ws ov-label">{u.ws.name}</div>
-            {#if u.state === 'dormant' && !u.loaded}
-              <!-- Says why the gauges are empty. Nothing can read this tab until its pane
-                   mounts, and reading "dormant" with no numbers looks like a dead agent. -->
-              <div class="unit-note">not loaded — open its workspace to check on it</div>
-            {/if}
-
-            <div class="unit-gauge">
-              <svg viewBox="0 0 32 32" class="ring" aria-hidden="true">
-                <circle cx="16" cy="16" r="13" class="ring-track" />
-                <circle cx="16" cy="16" r="13" class="ring-fill"
-                        style:stroke={pctTone(u.pct)} stroke-dasharray={ringDash(u.pct)} />
-              </svg>
-              <div class="unit-gauge-read">
-                <span class="ov-mono unit-pct" style:color={pctTone(u.pct)}>{u.pct ?? '—'}<i>%</i></span>
-                <span class="ov-label">context</span>
-              </div>
-              {#if u.todosTotal > 0}
-                <div class="unit-todos">
-                  <span class="ov-mono">{u.todosDone}/{u.todosTotal}</span>
-                  <span class="ov-label">todos</span>
-                </div>
-              {/if}
-            </div>
-
-            {#if u.ritual}
-              <div class="unit-ritual">
-                <div class="unit-ritual-head">
-                  <span class="ov-label" style:color="var(--ov-live)">{u.ritual.ruleName}</span>
-                  <span class="ov-mono">{u.ritual.step}/{u.ritual.steps}</span>
-                </div>
-                <div class="steps">
-                  {#each Array(u.ritual.steps) as _, si (si)}
-                    <span class="step" class:done={si < u.ritual.step - 1} class:now={si === u.ritual.step - 1}></span>
-                  {/each}
-                </div>
-              </div>
-            {:else if u.topTodo}
-              <p class="unit-todo">{u.topTodo}</p>
-            {:else if u.report}
-              <p class="unit-todo unit-report">“{u.report}”</p>
-            {/if}
-
-            {#if u.awaiting && !u.ritual}
-              <span class="unit-flag unit-await">
-                <span class="ov-chip ov-chip-tone" style:--tone="var(--ov-warn)">awaiting reply</span>
-                <Tooltip text="Stop waiting for this tab's answer, so rules and the Overlord agent can reach it again.">
-                  <button class="ov-btn" onclick={() => overlordStore.releaseDirective(u.tab.id)}>Release</button>
-                </Tooltip>
-              </span>
-            {/if}
-
-            {#if unitNotes[u.tab.id]}
-              <div class="unit-note unit-refusal">{unitNotes[u.tab.id]}</div>
-            {/if}
-
-            <div class="unit-foot">
-              <button class="ov-btn" onclick={() => navigateToTab(u.tab.id)}>View</button>
-              {#if overlordStore.rulesForTab(u.tab.id).length > 0}
-                <button class="ov-btn unit-trigger" class:on={triggerMenu?.tabId === u.tab.id}
-                        onclick={(e) => openTrigger(e, u.tab.id)} aria-haspopup="menu">
-                  Trigger <span class="unit-caret">▾</span>
-                </button>
-              {:else}
-                <Tooltip text="No Overlord rule with a sequence applies to this tab.">
-                  <button class="ov-btn unit-trigger" disabled>Trigger <span class="unit-caret">▾</span></button>
-                </Tooltip>
-              {/if}
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
     <!-- ── Board ───────────────────────────────────────────────────────── -->
     <!-- Indexed by workstream, not by workspace→tab. The component owns its own
          scrolling, so the deck body stops scrolling while it is on screen. -->
@@ -1114,9 +928,6 @@
   </div>
 </div>
 
-{#if triggerMenu}
-  <ContextMenu items={triggerItems(triggerMenu.tabId)} x={triggerMenu.x} y={triggerMenu.y} anchor={triggerMenu.anchor} onclose={() => (triggerMenu = null)} />
-{/if}
 
 <style>
   /* ── Shell ────────────────────────────────────────────────────────────── */
@@ -1301,6 +1112,15 @@
     padding-bottom: 16px;
   }
 
+  /* The Loom is edge to edge: its panes scroll on their own. */
+  .body.body-loom {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+  }
+
   .standby {
     text-align: center;
     padding: 28px 24px;
@@ -1427,139 +1247,6 @@
   .signal-note { color: var(--ov-ink-dim); font-size: 0.8rem; margin-top: 5px; }
   .signal-actions { display: flex; gap: 6px; margin-top: 9px; }
 
-  /* ── Fleet ────────────────────────────────────────────────────────────── */
-  .fleet {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
-    gap: 10px;
-  }
-
-  .fleet-bar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-  }
-  .fleet-sort {
-    display: inline-flex;
-    border: 1px solid var(--ov-hair);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .fleet-sort-btn {
-    padding: 3px 10px;
-    font-size: 0.74rem;
-    color: var(--ov-ink-dim);
-    background: transparent;
-    border: 0;
-    cursor: pointer;
-  }
-  .fleet-sort-btn + .fleet-sort-btn { border-left: 1px solid var(--ov-hair); }
-  .fleet-sort-btn:hover { color: var(--ov-ink); }
-  .fleet-sort-btn.on {
-    color: var(--ov-ink);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-  }
-  .fleet-parked { margin-left: auto; opacity: 0.8; }
-
-  .unit {
-    text-align: left;
-    padding: 11px 12px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    transition: border-color 0.16s ease, background 0.16s ease;
-  }
-  .unit:hover {
-    border-color: color-mix(in srgb, var(--ov-live) 45%, transparent);
-    background: var(--ov-panel-lift);
-  }
-  .unit-busy { border-color: color-mix(in srgb, var(--ov-live) 45%, transparent); }
-
-  .unit-foot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    margin-top: auto;
-    padding-top: 8px;
-    border-top: 1px solid color-mix(in srgb, var(--ov-hair) 60%, transparent);
-  }
-  .unit-trigger.on { border-color: var(--accent); color: var(--ov-ink); }
-  .unit-caret { font-size: 0.7em; opacity: 0.7; margin-left: 2px; }
-  .unit-refusal { color: var(--ov-warn); }
-
-  .unit-head { display: flex; align-items: center; gap: 7px; }
-  .unit-name {
-    font-weight: 600;
-    font-size: 0.92rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .unit-age { font-size: 0.73rem; color: var(--ov-ink-dim); margin-left: auto; }
-  .unit-ws { opacity: 0.75; margin-top: -4px; }
-  .unit-note { color: var(--ov-ink-dim); font-size: 0.74rem; line-height: 1.4; }
-
-  .unit-gauge { display: flex; align-items: center; gap: 11px; }
-  .ring { width: 34px; height: 34px; transform: rotate(-90deg); flex-shrink: 0; }
-  .ring-track { fill: none; stroke: var(--ov-hair); stroke-width: 2.5; }
-  .ring-fill {
-    fill: none;
-    stroke-width: 2.5;
-    stroke-linecap: round;
-    transition: stroke-dasharray 0.6s cubic-bezier(0.2, 0.7, 0.3, 1);
-  }
-  .unit-gauge-read { display: flex; flex-direction: column; gap: 2px; }
-  .unit-pct { font-size: 1.15rem; line-height: 1; font-weight: 500; }
-  .unit-pct i { font-size: 0.68rem; font-style: normal; opacity: 0.55; }
-  .unit-todos {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-left: auto;
-    text-align: right;
-    font-size: 0.88rem;
-    color: var(--ov-ink-mid);
-  }
-
-  .unit-todo {
-    font-size: 0.82rem;
-    color: var(--ov-ink-dim);
-    line-height: 1.45;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .unit-report { font-style: italic; }
-
-  .unit-ritual { display: flex; flex-direction: column; gap: 5px; }
-  .unit-ritual-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 8px;
-    font-size: 0.78rem;
-    color: var(--ov-ink-dim);
-  }
-  .steps { display: flex; gap: 3px; }
-  .step {
-    flex: 1;
-    height: 3px;
-    border-radius: 1px;
-    background: var(--ov-hair);
-  }
-  .step.done { background: color-mix(in srgb, var(--ov-live) 55%, transparent); }
-  .step.now {
-    background: var(--ov-live);
-    animation: ovBreathe 1.7s ease-in-out infinite;
-  }
-
-  .unit-flag { align-self: flex-start; }
-  .unit-await { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
   /* ── Ledger ───────────────────────────────────────────────────────────── */
   .ledger-intro {

@@ -81,9 +81,10 @@
         onnote={(text) => (answered = [{ id: t.id, title: t.title, text }, ...answered.filter((a) => a.id !== t.id)].slice(0, 5))}
       />
       <div class="actions">
-        <button onclick={() => { loomStore.select(t.id); loomStore.setView('loom'); }}>Show in the loom</button>
+        <button onclick={() => loomStore.show('weave', t.id)}>Show in the weave</button>
         {#if t.tab_id}
-          <button onclick={() => { loomStore.close(); void navigateToTab(t.tab_id!); }}>Open the tab</button>
+          <button onclick={() => { loomStore.openChat(t.tab_id!); loomStore.show('focus'); }}>Talk to the agent</button>
+          <button onclick={() => void navigateToTab(t.tab_id!)}>Open the tab</button>
         {/if}
       </div>
     </article>

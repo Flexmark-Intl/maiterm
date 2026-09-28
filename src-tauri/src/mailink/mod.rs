@@ -1185,26 +1185,10 @@ async fn post_message(
         return Err(StatusCode::NOT_FOUND);
     }
     let pty = pty_for_tab(&s.app, &tab_id).ok_or(StatusCode::CONFLICT)?;
-
-    // Auto-wake. An unregistered tab isn't merely untracked — if its agent EXITED, the PTY is a
-    // bash prompt and injecting the message would run it as a shell command. So bring the tab
-    // back to a state where typing is safe before typing (no-op for a registered tab, which is
-    // the whole point: never touch a live, possibly-mid-turn agent).
-    let woke = match wake_tab(&s, &tab_id).await {
-        Wake::AlreadyRegistered => None,
-        Wake::Woke(action) => Some(action),
-        Wake::Unreachable(reason) => {
-            return Ok(Json(
-                json!({ "status": "unreachable", "reason": reason, "detail": wake_detail(reason) }),
-            ))
-        }
+    let woke = match ready_to_type(&s.app, s.app_handle.as_ref(), &tab_id).await {
+        Ok(woke) => woke,
+        Err(unreachable) => return Ok(Json(unreachable)),
     };
-    // Once more at the last moment before typing. Every path below ends in a CR, and at the
-    // trust dialog that CR is "No, exit".
-    if trust_dialog_open(&s.app, &tab_id) {
-        return Ok(Json(json!({ "status": "unreachable", "reason": "trust_dialog",
-            "detail": wake_detail("trust_dialog") })));
-    }
 
     // Image attach: Claude only. Gate BEFORE touching the PTY and return a machine-readable
     // `status:"unsupported"` (HTTP 200) so the phone reframes it as an in-app notice — never a
@@ -1265,6 +1249,68 @@ async fn post_message(
     Ok(Json(
         json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }),
     ))
+}
+
+/// Bring a tab to where typing a message into it is safe, or say why it can't be. `Ok` carries
+/// the wake remedy used (`None` for an already-registered tab); `Err` is the `unreachable`
+/// reply. Shared by the phone's `POST /message` and the desktop Loom's composer.
+///
+/// Auto-wake: an unregistered tab isn't merely untracked — if its agent EXITED, the PTY is a
+/// bash prompt and injecting the message would run it as a shell command. So bring the tab back
+/// to a state where typing is safe before typing (no-op for a registered tab, which is the whole
+/// point: never touch a live, possibly-mid-turn agent).
+async fn ready_to_type(
+    app: &Arc<AppState>,
+    handle: Option<&tauri::AppHandle>,
+    tab_id: &str,
+) -> Result<Option<&'static str>, Value> {
+    let woke = match wake_tab(app, handle, tab_id).await {
+        Wake::AlreadyRegistered => None,
+        Wake::Woke(action) => Some(action),
+        Wake::Unreachable(reason) => {
+            return Err(json!({ "status": "unreachable", "reason": reason, "detail": wake_detail(reason) }))
+        }
+    };
+    // Once more at the last moment before typing. Every path ends in a CR, and at the trust
+    // dialog that CR is "No, exit".
+    if trust_dialog_open(app, tab_id) {
+        return Err(json!({ "status": "unreachable", "reason": "trust_dialog",
+            "detail": wake_detail("trust_dialog") }));
+    }
+    Ok(woke)
+}
+
+/// Type a message into a tab's agent from the desktop (the Loom's composer), under the same
+/// rules as the phone's `POST /message`, plus one: a message is refused while a permission or
+/// question prompt is open. Typed there, its characters go to the dialog (a digit picks a row,
+/// the rest lands in "tell Claude what to do differently") instead of reaching the agent.
+pub(crate) async fn send_tab_message(
+    app: &Arc<AppState>,
+    handle: Option<&tauri::AppHandle>,
+    tab_id: &str,
+    text: &str,
+) -> Value {
+    if text.trim().is_empty() {
+        return json!({ "status": "empty" });
+    }
+    if let Some((kind, _, _)) = current_prompt(app, tab_id) {
+        return json!({ "status": "prompt_open", "reason": kind,
+            "detail": "Answer the open prompt first: typing now would go into it, not to the agent." });
+    }
+    let Some(pty) = pty_for_tab(app, tab_id) else {
+        return json!({ "status": "unreachable", "reason": "no-pty", "detail": wake_detail("no-pty") });
+    };
+    let woke = match ready_to_type(app, handle, tab_id).await {
+        Ok(woke) => woke,
+        Err(unreachable) => return unreachable,
+    };
+    match inject_text(app, &pty, text, true).await {
+        Ok(()) => json!({ "status": "delivered", "woke": woke }),
+        Err(e) => {
+            log::warn!("[loom] message to tab {tab_id} failed: {e}");
+            json!({ "status": "failed", "detail": "The message couldn't be typed into that tab." })
+        }
+    }
 }
 
 /// How long a wake holds its caller. A local `claude --resume` is usually up inside 10 s; an
@@ -1329,27 +1375,27 @@ fn wake_remedy(agent_up: bool, has_resume: bool) -> Result<&'static str, &'stati
 ///  4. Past the budget, fall back to the process probe. Registration is the goal, but delivery
 ///     only needs a live agent — and for a runtime that never registers, that's the only signal
 ///     there is. A live agent is safe to type into whether or not it registered.
-async fn wake_tab(s: &ApiState, tab_id: &str) -> Wake {
-    if tab_registered(&s.app, tab_id) {
+async fn wake_tab(app: &Arc<AppState>, handle: Option<&tauri::AppHandle>, tab_id: &str) -> Wake {
+    if tab_registered(app, tab_id) {
         return Wake::AlreadyRegistered;
     }
-    let Some(pty) = pty_for_tab(&s.app, tab_id) else {
+    let Some(pty) = pty_for_tab(app, tab_id) else {
         return Wake::Unreachable("no-pty");
     };
     // Claude's trust dialog is the one pre-session screen where any wake is destructive: both
     // remedies end in an Enter, which confirms "No, exit", and the next resume stops at the same
     // dialog. It is answered as its own prompt card (`trust`).
-    if trust_dialog_open(&s.app, tab_id) {
+    if trust_dialog_open(app, tab_id) {
         return Wake::Unreachable("trust_dialog");
     }
     let action = match wake_remedy(
-        agent_is_up(&s.app, &pty).await,
-        tab_has_resume(&s.app, tab_id),
+        agent_is_up(app, &pty).await,
+        tab_has_resume(app, tab_id),
     ) {
         Ok(action) => action,
         Err(reason) => return Wake::Unreachable(reason),
     };
-    let Some(h) = s.app_handle.as_ref() else {
+    let Some(h) = handle else {
         return Wake::Unreachable("no-pty");
     };
     // tab ids are app-unique — the owning window acts, every other window finds no instance.
@@ -1363,20 +1409,20 @@ async fn wake_tab(s: &ApiState, tab_id: &str) -> Wake {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(WAKE_BUDGET_MS);
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(WAKE_POLL_MS)).await;
-        if tab_registered(&s.app, tab_id) {
+        if tab_registered(app, tab_id) {
             return Wake::Woke(action);
         }
         // The remedy itself is what usually OPENS the dialog: `resume` types `claude --resume`
         // in an untrusted folder and Claude stops there, alive and never registering. The
         // check at the top saw a shell; this is the one that sees the dialog.
-        if trust_dialog_open(&s.app, tab_id) {
+        if trust_dialog_open(app, tab_id) {
             return Wake::Unreachable("trust_dialog");
         }
     }
-    if trust_dialog_open(&s.app, tab_id) {
+    if trust_dialog_open(app, tab_id) {
         return Wake::Unreachable("trust_dialog");
     }
-    if agent_is_up(&s.app, &pty).await {
+    if agent_is_up(app, &pty).await {
         log::info!("[maiLink] tab {tab_id} woke but never registered — delivering anyway");
         return Wake::Woke(action);
     }
@@ -1397,7 +1443,7 @@ async fn post_wake(
     if !is_designated(&s.app, &tab_id) {
         return Err(StatusCode::NOT_FOUND);
     }
-    Ok(Json(match wake_tab(&s, &tab_id).await {
+    Ok(Json(match wake_tab(&s.app, s.app_handle.as_ref(), &tab_id).await {
         Wake::AlreadyRegistered => {
             json!({ "ok": true, "woke": null, "reason": "already-registered" })
         }

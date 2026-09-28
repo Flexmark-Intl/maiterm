@@ -1,20 +1,29 @@
 <!--
-  Focus, the maiLink way: on the left the chats that need you, the ones working now, and
-  anything unread or active since the start of yesterday; in the middle the chosen chat,
-  condensed the way the phone shows it (tool runs folded, events as thin rules, task events
-  placed where they happened); on the right that agent's work.
+  Focus: where the human works with the agents without going into their terminals.
+
+  On the left the chats that need you, the ones working now, and anything unread or active since
+  the start of yesterday (the phone's inbox rules). In the middle the chosen chat, condensed the
+  way the phone shows it (tool runs folded, events as thin rules, task events placed where they
+  happened), then whatever the agent is stopped at (a permission, a question, a task question),
+  answerable in place, and a composer. On the right that agent's work.
+
+  The header carries what the Fleet cards used to: state, context, a running ritual, an
+  unanswered directive with Release, and the Trigger menu.
 -->
 <script lang="ts">
   import { loomStore } from '$lib/stores/loom.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
   import { tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { getTabTranscript, type ChatTurn } from '$lib/tauri/commands';
+  import { getTabTranscript, sendTabMessage, type ChatTurn } from '$lib/tauri/commands';
   import { chatRows, focusSections, taskEventsFor, type FocusChat } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
-  import { fmtAge } from '$lib/overlord/format';
+  import { fireRefusal, fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
+  import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import PromptCard from './PromptCard.svelte';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import type { Task, Workspace } from '$lib/tauri/types';
 
@@ -22,8 +31,10 @@
     workspaces: Workspace[];
     tasks: Task[];
     now: number;
+    /** The deck is on screen: poll and keep the chat live only then. */
+    active: boolean;
   }
-  let { workspaces, tasks, now }: Props = $props();
+  let { workspaces, tasks, now, active }: Props = $props();
 
   interface Chat extends FocusChat { name: string; workspace: string; preview: string }
 
@@ -46,7 +57,7 @@
               unread: s?.state === 'idle' && s.read === false,
               lastActivity: s?.updatedAt ?? 0,
               asks: !!ask,
-              preview: ask?.blocker?.question ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : s?.state === 'permission' ? 'Needs your approval' : ''),
+              preview: s?.state === 'permission' ? 'Needs your approval' : ask?.blocker?.question ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : ''),
             };
           })
           // The open chat stays listed even when it stops qualifying. Answering the question on
@@ -71,23 +82,26 @@
     if (openId && openId !== loomStore.focusChatTabId) loomStore.openChat(openId);
   });
   const open = $derived(chats.find((c) => c.tabId === openId) ?? null);
+  const liveState = $derived(openId ? claudeStateStore.getState(openId) : null);
 
   // ── The transcript: read on open, then every 3 s while shown (the phone polls 2 s). ──
   let turns = $state<ChatTurn[]>([]);
   let loadedFor = $state<string | null>(null);
+  let reload: () => void = () => {};
   $effect(() => {
     const id = openId;
     turns = [];
     loadedFor = null;
-    if (!id) return;
+    if (!id || !active) return;
     let alive = true;
     const load = () =>
       getTabTranscript(id)
         .then((t) => { if (alive) { turns = t; loadedFor = id; } })
         .catch(() => { if (alive) loadedFor = id; });
+    reload = () => void load();
     void load();
     const timer = setInterval(load, 3000);
-    return () => { alive = false; clearInterval(timer); };
+    return () => { alive = false; clearInterval(timer); reload = () => {}; };
   });
 
   const rows = $derived(openId ? chatRows(turns, taskEventsFor(openId, tasks)) : []);
@@ -100,6 +114,71 @@
    *  the answer moves the task out of Blocked before the note arrives, so the question is gone
    *  by then, and the note ("the agent could not be told") is exactly what must still show. */
   let outcome = $state<{ chat: string; text: string } | null>(null);
+
+  // ── What the Fleet card showed ────────────────────────────────────────────────────────────
+  const ctx = $derived(openId ? (overlordStore.facts.get(openId)?.context_pct ?? null) : null);
+  const ritual = $derived(openId ? overlordStore.ritualProgress.find((r) => r.tabId === openId) ?? null : null);
+  const awaiting = $derived(openId ? !!overlordStore.outstandingFor(openId) : false);
+  const rules = $derived(openId ? overlordStore.rulesForTab(openId) : []);
+  let triggerMenu = $state<{ x: number; y: number; anchor: HTMLElement } | null>(null);
+  // The menu lists THIS chat's rules; switching chats closes it rather than retarget it.
+  $effect(() => {
+    void openId;
+    triggerMenu = null;
+  });
+  let headNote = $state<{ chat: string; text: string } | null>(null);
+  function openTrigger(e: MouseEvent) {
+    if (triggerMenu) { triggerMenu = null; return; }
+    const anchor = e.currentTarget as HTMLElement;
+    const r = anchor.getBoundingClientRect();
+    triggerMenu = { x: r.left, y: r.bottom + 4, anchor };
+  }
+  async function fire(ruleId: string) {
+    const chat = openId;
+    if (!chat) return;
+    const r = await overlordStore.fireRule(chat, ruleId);
+    headNote = r.started ? null : { chat, text: fireRefusal(r.reason, 'that rule') };
+  }
+  const ctxTone = (p: number | null) =>
+    p === null ? 'var(--fg-dim)' : p >= 75 ? 'var(--red)' : p >= (overlordStore.checkpointThreshold ?? 60) ? 'var(--orange, #ff9e64)' : 'var(--green)';
+
+  // ── Composer ──────────────────────────────────────────────────────────────────────────────
+  /** Drafts by chat, so switching chats never sends one agent's words to another. */
+  let drafts = $state<Record<string, string>>({});
+  const draft = $derived(openId ? (drafts[openId] ?? '') : '');
+  let sending = $state(false);
+  let sendNote = $state<{ chat: string; text: string } | null>(null);
+
+  async function send() {
+    const chat = openId;
+    const text = chat ? (drafts[chat] ?? '') : '';
+    if (!chat || !text.trim() || sending) return;
+    sending = true;
+    sendNote = null;
+    try {
+      const r = await sendTabMessage(chat, text);
+      if (r.status === 'delivered') {
+        drafts = { ...drafts, [chat]: '' };
+        sendNote = r.woke ? { chat, text: `Woke the agent (${r.woke === 'init' ? 're-registered it' : 'resumed it'}) and sent.` } : null;
+        pinned = true;
+        reload();
+      } else {
+        sendNote = { chat, text: r.detail ?? `Not sent (${r.reason ?? r.status}).` };
+      }
+    } catch (e) {
+      sendNote = { chat, text: `Not sent: ${e}` };
+    } finally {
+      sending = false;
+    }
+  }
+  function onComposerKey(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      void send();
+    } else if (e.key === 'Escape') {
+      (e.currentTarget as HTMLElement).blur();
+    }
+  }
 
   /** Links in a transcript open in the browser. WKWebView drops `target=_blank` without a
    *  new-window handler, so a plain link would do nothing (NotesPanel does the same). */
@@ -129,11 +208,13 @@
         <section>
           <h4 class:needs><span>{title}</span><span>{list.length}</span></h4>
           {#each list as c (c.tabId)}
+            {@const pct = overlordStore.facts.get(c.tabId)?.context_pct ?? null}
             <button class="row" aria-pressed={openId === c.tabId} onclick={() => loomStore.openChat(c.tabId)}>
-              <i class="dot" data-state={c.asks ? 'ask' : (c.state ?? 'none')} class:pulse={c.state === 'active'}></i>
+              <i class="dot" data-state={c.state === 'permission' ? 'permission' : c.asks ? 'ask' : (c.state ?? 'none')} class:pulse={c.state === 'active'}></i>
               <span class="nm">{c.name}</span>
-              <span class="age">{c.lastActivity ? fmtAge(c.lastActivity) : ''}</span>
-              {#if c.preview}<span class="pv" class:ask={c.asks}>{c.preview}</span>{/if}
+              <span class="age">{pct !== null ? `${pct}% · ` : ''}{c.lastActivity ? fmtAge(c.lastActivity) : ''}</span>
+              {#if workspaces.length > 1}<span class="ws">{c.workspace}</span>{/if}
+              {#if c.preview}<span class="pv" class:ask={c.asks || c.state === 'permission'}>{c.preview}</span>{/if}
             </button>
           {/each}
         </section>
@@ -145,63 +226,100 @@
     {#if !listed.length}<p class="hint">No agent chats in scope right now.</p>{/if}
   </aside>
 
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="chat" bind:this={chatEl} onscroll={onChatScroll} onclick={onChatClick}>
+  <div class="convo">
     {#if open}
-      <div class="chat-h">
-        <b>{open.name}</b>
-        <span>{open.workspace} · {open.asks ? 'waiting on you' : (open.state ?? 'no session')}</span>
-        <button class="link" onclick={() => { loomStore.close(); void navigateToTab(open.tabId); }}>Open the tab</button>
-      </div>
-      {#if loadedFor !== openId}
-        <p class="hint">Reading the chat…</p>
-      {:else if !rows.length}
-        <p class="hint">No messages captured for this tab yet.</p>
-      {/if}
-      {#each rows as r (r.kind === 'tools' || r.kind === 'task' ? r.key : r.turn.msg_id)}
-        {#if r.kind === 'tools'}
-          {#if r.turns.length === 1}
-            <span class="tool">{r.turns[0].text}</span>
-          {:else}
-            <div class="run">
-              <button aria-expanded={expanded.includes(r.key)} onclick={() => toggle(r.key)}>
-                <span class="verbs">{r.verbs.join(' · ')}</span>
-                <span class="n">{r.turns.length} {expanded.includes(r.key) ? '▴' : '▾'}</span>
-              </button>
-              {#if expanded.includes(r.key)}
-                <div class="calls">{#each r.turns as t (t.msg_id)}<span class="tool">{t.text}</span>{/each}</div>
-              {/if}
-            </div>
+      <header class="chat-h">
+        <div class="who">
+          <b>{open.name}</b>
+          <span>{open.workspace} · {open.state === 'permission' ? 'waiting on a permission' : open.asks ? 'waiting on you' : (open.state ?? 'no session')}</span>
+        </div>
+        <div class="gauges">
+          <span class="ctx" style="--t: {ctxTone(ctx)}"><i><s style="width: {Math.min(100, ctx ?? 0)}%"></s></i><em>{ctx ?? '—'}% context</em></span>
+          {#if ritual}<span class="ritual">{ritual.ruleName} · {ritual.step}/{ritual.steps}</span>{/if}
+          {#if awaiting && !ritual}
+            <span class="await">awaiting reply
+              <button onclick={() => overlordStore.releaseDirective(open.tabId)}>Release</button>
+            </span>
           {/if}
-        {:else if r.kind === 'task'}
-          <button class="rule" data-kind={r.event.kind} onclick={() => { loomStore.select(r.event.taskId); loomStore.setView('loom'); }}>
-            <span><b>{EVENT_LABEL[r.event.kind]}</b><em>{r.event.kind === 'added' ? r.event.text : `${r.event.title}: ${r.event.text}`}</em></span>
-          </button>
-        {:else if r.kind === 'rule'}
-          <div class="rule" data-kind="peer">
-            <span><b>{r.turn.kind === 'goal_status' ? `Goal ${r.turn.goal?.event ?? ''}` : r.turn.peer?.direction === 'in' ? `From ${r.turn.peer?.name ?? 'a peer'}` : `To ${r.turn.peer?.name ?? 'a peer'}`}</b><em>{r.turn.text.split('\n')[0]}</em></span>
-          </div>
-        {:else if r.turn.kind === 'terminal_snapshot'}
-          <pre class="snap">{r.turn.text}</pre>
-        {:else if r.turn.role === 'user'}
-          <div class="you">{r.turn.text}</div>
-        {:else if r.turn.role === 'agent'}
-          <div class="agent">{@html renderTurnMarkdown(r.turn.text)}</div>
-        {:else}
-          <div class="sys">{r.turn.text}</div>
+        </div>
+        <div class="acts">
+          {#if rules.length}
+            <button class:on={!!triggerMenu} onclick={openTrigger} aria-haspopup="menu">Trigger ▾</button>
+          {/if}
+          <button onclick={() => void navigateToTab(open.tabId)}>Open the tab</button>
+        </div>
+        {#if headNote && headNote.chat === open.tabId}<p class="hint wide">{headNote.text}</p>{/if}
+      </header>
+
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="chat" bind:this={chatEl} onscroll={onChatScroll} onclick={onChatClick}>
+        {#if loadedFor !== openId}
+          <p class="hint">Reading the chat…</p>
+        {:else if !rows.length}
+          <p class="hint">No messages captured for this tab yet.</p>
         {/if}
-      {/each}
-      {#if openAsk}
-        {@const chat = open.tabId}
-        <div class="ask">
+        {#each rows as r (r.kind === 'tools' || r.kind === 'task' ? r.key : r.turn.msg_id)}
+          {#if r.kind === 'tools'}
+            {#if r.turns.length === 1}
+              <span class="tool">{r.turns[0].text}</span>
+            {:else}
+              <div class="run">
+                <button aria-expanded={expanded.includes(r.key)} onclick={() => toggle(r.key)}>
+                  <span class="verbs">{r.verbs.join(' · ')}</span>
+                  <span class="n">{r.turns.length} {expanded.includes(r.key) ? '▴' : '▾'}</span>
+                </button>
+                {#if expanded.includes(r.key)}
+                  <div class="calls">{#each r.turns as t (t.msg_id)}<span class="tool">{t.text}</span>{/each}</div>
+                {/if}
+              </div>
+            {/if}
+          {:else if r.kind === 'task'}
+            <button class="rule" data-kind={r.event.kind} onclick={() => loomStore.show('weave', r.event.taskId)}>
+              <span><b>{EVENT_LABEL[r.event.kind]}</b><em>{r.event.kind === 'added' ? r.event.text : `${r.event.title}: ${r.event.text}`}</em></span>
+            </button>
+          {:else if r.kind === 'rule'}
+            <div class="rule" data-kind="peer">
+              <span><b>{r.turn.kind === 'goal_status' ? `Goal ${r.turn.goal?.event ?? ''}` : r.turn.peer?.direction === 'in' ? `From ${r.turn.peer?.name ?? 'a peer'}` : `To ${r.turn.peer?.name ?? 'a peer'}`}</b><em>{r.turn.text.split('\n')[0]}</em></span>
+            </div>
+          {:else if r.turn.kind === 'terminal_snapshot'}
+            <pre class="snap">{r.turn.text}</pre>
+          {:else if r.turn.role === 'user'}
+            <div class="you">{r.turn.text}</div>
+          {:else if r.turn.role === 'agent'}
+            <div class="agent">{@html renderTurnMarkdown(r.turn.text)}</div>
+          {:else}
+            <div class="sys">{r.turn.text}</div>
+          {/if}
+        {/each}
+        {#if liveState?.state === 'active'}
+          <p class="working"><i></i>{liveState.toolDetail ?? liveState.toolName ?? 'Working…'}</p>
+        {/if}
+      </div>
+
+      <div class="dock">
+        <PromptCard tabId={open.tabId} {active} pulse={liveState?.state} />
+        {#if openAsk}
+          {@const chat = open.tabId}
           {#key openAsk.id}
             <BlockerCard task={openAsk} variant="card" onnote={(text) => (outcome = { chat, text })} />
           {/key}
+        {/if}
+        {#if outcome && outcome.chat === open.tabId}<p class="hint">{outcome.text}</p>{/if}
+        <div class="composer">
+          <textarea
+            rows="2"
+            placeholder={`Message ${open.name}…`}
+            value={draft}
+            oninput={(e) => (drafts = { ...drafts, [open.tabId]: (e.currentTarget as HTMLTextAreaElement).value })}
+            onkeydown={onComposerKey}
+            disabled={sending}
+          ></textarea>
+          <button class="send" onclick={() => void send()} disabled={sending || !draft.trim()}>{sending ? 'Sending…' : 'Send'}</button>
         </div>
-      {/if}
-      {#if outcome && outcome.chat === open.tabId}<p class="hint">{outcome.text}</p>{/if}
+        {#if sendNote && sendNote.chat === open.tabId}<p class="hint">{sendNote.text}</p>{/if}
+      </div>
     {:else}
-      <p class="hint">Pick a chat on the left.</p>
+      <p class="hint pad">Pick a chat on the left.</p>
     {/if}
   </div>
 
@@ -209,7 +327,7 @@
     {#if open}
       <h4>{open.name}'s work</h4>
       {#each agentTasks as t (t.id)}
-        <button class="task" onclick={() => { loomStore.select(t.id); loomStore.setView('loom'); }}>
+        <button class="task" onclick={() => loomStore.show('weave', t.id)}>
           <span class="t">{t.title}</span>
           <span class="m">{t.status === 'blocked' && t.blocker ? BLOCKER_LABEL[t.blocker.kind] : t.status} · {fmtAge(t.updated_at)}</span>
         </button>
@@ -222,7 +340,7 @@
           {#if loose.length}
             <h4>Unclaimed in {w.name}</h4>
             {#each loose as t (t.id)}
-              <button class="task" onclick={() => { loomStore.select(t.id); loomStore.setView('loom'); }}>
+              <button class="task" onclick={() => loomStore.show('weave', t.id)}>
                 <span class="t">{t.title}</span><span class="m">{t.status}</span>
               </button>
             {/each}
@@ -233,9 +351,19 @@
   </aside>
 </div>
 
+{#if triggerMenu && openId}
+  <ContextMenu
+    items={rules.map((rule) => ({ label: rule.name, shortcut: rule.enabled ? undefined : 'off', action: () => void fire(rule.id) }))}
+    x={triggerMenu.x}
+    y={triggerMenu.y}
+    anchor={triggerMenu.anchor}
+    onclose={() => (triggerMenu = null)}
+  />
+{/if}
+
 <style>
-  .focus { position: absolute; inset: 0; display: grid; grid-template-columns: 240px minmax(0, 560px) minmax(0, 1fr); }
-  .list, .chat, .rail { overflow-y: auto; min-width: 0; }
+  .focus { position: absolute; inset: 0; display: grid; grid-template-columns: 250px minmax(0, 1fr) 260px; }
+  .list, .rail { overflow-y: auto; min-width: 0; }
   .list { border-right: 1px solid var(--bg-light); padding: 12px 10px; display: flex; flex-direction: column; gap: 14px; }
   section { display: flex; flex-direction: column; gap: 2px; }
   h4 { margin: 0 4px 4px; display: flex; justify-content: space-between; font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim); }
@@ -256,7 +384,8 @@
   }
   .row[aria-pressed='true'] { background: var(--bg-medium); border-color: var(--bg-light); }
   .nm { font-weight: 600; font-size: 12.5px; overflow-wrap: anywhere; }
-  .age { font-size: 10.5px; color: var(--fg-dim); }
+  .age { font-size: 10.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+  .ws { grid-column: 2 / -1; font-size: 10.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .pv { grid-column: 2 / -1; font-size: 11.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
   .pv.ask { color: var(--orange, #ff9e64); }
   .dot { width: 7px; height: 7px; border-radius: 50%; align-self: center; background: var(--fg-dim); }
@@ -265,14 +394,37 @@
   .dot[data-state='ask'] { background: var(--orange, #ff9e64); }
   .pulse { animation: pulse 1.6s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) { .pulse, .working i { animation: none; } }
 
-  .chat { border-right: 1px solid var(--bg-light); padding: 12px 18px 18px; display: flex; flex-direction: column; gap: 9px; }
-  .chat-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding-bottom: 8px; border-bottom: 1px solid var(--bg-light); }
-  .chat-h b { font-size: 14px; }
-  .chat-h span { font-size: 11px; color: var(--fg-dim); }
-  .link { margin-left: auto; background: none; border: 0; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; }
+  .convo { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--bg-light); }
+  .chat-h { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 18px; border-bottom: 1px solid var(--bg-light); }
+  .who { display: flex; flex-direction: column; min-width: 0; }
+  .who b { font-size: 14px; overflow-wrap: anywhere; }
+  .who span { font-size: 11px; color: var(--fg-dim); }
+  .gauges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 11px; color: var(--fg-dim); }
+  .ctx { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+  .ctx i { display: block; width: 60px; height: 3px; border-radius: 2px; background: var(--bg-light); overflow: hidden; }
+  .ctx s { display: block; height: 100%; background: var(--t); }
+  .ctx em { font-style: normal; color: var(--t); }
+  .ritual { color: var(--green); }
+  .await { display: inline-flex; align-items: center; gap: 6px; color: var(--orange, #ff9e64); }
+  .acts { display: flex; gap: 6px; margin-left: auto; }
+  .acts button, .await button {
+    background: var(--bg-medium);
+    border: 1px solid var(--bg-light);
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  .acts button.on { border-color: var(--accent); }
+  .wide { flex-basis: 100%; }
+
+  .chat { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 18px; display: flex; flex-direction: column; gap: 9px; }
   .you { align-self: flex-end; max-width: 85%; background: var(--bg-light); border-radius: 14px 14px 4px 14px; padding: 8px 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; }
-  .agent { font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; }
+  .agent { font-size: 12.5px; line-height: 1.5; overflow-wrap: anywhere; max-width: 72ch; }
   .agent :global(p) { margin: 0 0 6px; }
   .agent :global(pre) { background: var(--bg-medium); padding: 8px; border-radius: 6px; overflow-x: auto; }
   .agent :global(code) { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; }
@@ -306,8 +458,31 @@
   .rule span { display: inline-flex; gap: 6px; max-width: 80%; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
   .rule b { color: var(--c); font-weight: 500; flex: none; }
   .rule em { font-style: normal; text-transform: none; letter-spacing: 0; color: var(--fg); opacity: 0.8; overflow-wrap: anywhere; }
-  .ask { margin-top: 4px; }
+  .working { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .working i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; animation: pulse 1.2s ease-in-out infinite; }
+
+  .dock { display: flex; flex-direction: column; gap: 8px; padding: 10px 18px 14px; border-top: 1px solid var(--bg-light); background: var(--bg-dark); }
+  .composer { display: flex; gap: 8px; align-items: flex-end; }
+  .composer textarea {
+    flex: 1;
+    min-width: 0;
+    resize: vertical;
+    min-height: 40px;
+    max-height: 40vh;
+    background: var(--bg-medium);
+    border: 1px solid var(--bg-light);
+    border-radius: 8px;
+    color: var(--fg);
+    font: inherit;
+    font-size: 12.5px;
+    line-height: 1.45;
+    padding: 8px 10px;
+  }
+  .composer textarea:focus { outline: none; border-color: var(--accent); }
+  .send { background: var(--accent); color: var(--bg-dark); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .send:disabled { opacity: 0.45; cursor: default; }
   .hint { margin: 0; font-size: 11.5px; color: var(--fg-dim); }
+  .pad { padding: 18px; }
 
   .rail { padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
   .rail h4 { margin: 8px 0 2px; }
@@ -315,8 +490,8 @@
   .task .t { font-size: 12px; overflow-wrap: anywhere; }
   .task .m { font-size: 10.5px; color: var(--fg-dim); }
 
-  @media (max-width: 1000px) {
-    .focus { grid-template-columns: 200px minmax(0, 1fr); }
+  @media (max-width: 1100px) {
+    .focus { grid-template-columns: 210px minmax(0, 1fr); }
     .rail { display: none; }
   }
 </style>

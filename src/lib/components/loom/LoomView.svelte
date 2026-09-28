@@ -305,8 +305,8 @@
       {/if}
       {#if selected.tab_id}
         <div class="actions">
-          <button onclick={() => { loomStore.close(); void navigateToTab(selected.tab_id!); }}>Open the tab</button>
-          <button onclick={() => { loomStore.openChat(selected.tab_id!); loomStore.setView('focus'); }}>Show its chat</button>
+          <button onclick={() => { loomStore.openChat(selected.tab_id!); loomStore.show('focus'); }}>Talk to the agent</button>
+          <button onclick={() => void navigateToTab(selected.tab_id!)}>Open the tab</button>
         </div>
       {/if}
     {:else}

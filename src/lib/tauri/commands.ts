@@ -398,6 +398,38 @@ export async function answerTabPrompt(
   });
 }
 
+/** The HUMAN answering a tab's prompt from the Loom. Same responder as `answerTabPrompt`, but
+ *  it may answer Claude's workspace-trust dialog, which the Overlord agent's path refuses. Never
+ *  call it from an agent's tool handler. */
+export async function answerTabPromptAsHuman(
+  tabId: string,
+  prompt_id: string,
+  choice?: string | null,
+  answers?: PromptAnswer[] | null,
+): Promise<{ ok: boolean; reason?: string; detail?: string }> {
+  return invoke('answer_tab_prompt_as_human', {
+    tabId,
+    promptId: prompt_id,
+    choice: choice ?? null,
+    answers: answers ?? null,
+  });
+}
+
+/** What happened to a message typed from the Loom's composer. */
+export interface SendResult {
+  status: 'delivered' | 'unreachable' | 'prompt_open' | 'failed' | 'empty';
+  reason?: string;
+  detail?: string;
+  /** The wake it took ('init' | 'resume'), when the tab's agent had to be brought back first. */
+  woke?: string | null;
+}
+
+/** Type a message into a tab's agent, under the phone's rules: an unregistered tab is woken
+ *  first, the trust dialog is never typed at, and nothing is sent while a prompt is open. */
+export async function sendTabMessage(tabId: string, text: string): Promise<SendResult> {
+  return invoke('send_tab_message', { tabId, text });
+}
+
 /** Append entries to this window's Overlord ledger (ring-buffered backend-side). */
 export async function appendOverlordLedger(entries: OverlordLedgerEntry[]): Promise<void> {
   return invoke('append_overlord_ledger', { entries });

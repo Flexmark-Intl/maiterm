@@ -116,6 +116,43 @@ pub async fn answer_tab_prompt(
     .await)
 }
 
+/// The human answering a tab's prompt from the Loom (docs/loom.md): the same responder as
+/// `answer_tab_prompt`, without its trust-dialog refusal, which exists to keep the Overlord
+/// AGENT from trusting folders. A separate command, never a flag on that one, so no path the
+/// agent's tool call reaches can carry the human's exemption.
+#[tauri::command]
+pub async fn answer_tab_prompt_as_human(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    prompt_id: Option<String>,
+    choice: Option<String>,
+    answers: Option<Vec<crate::mailink::Answer>>,
+) -> Result<Value, String> {
+    let app = state.inner().clone();
+    Ok(crate::mailink::respond_to_prompt(
+        &app,
+        &tab_id,
+        prompt_id.as_deref(),
+        choice.as_deref(),
+        answers.as_deref(),
+    )
+    .await)
+}
+
+/// Type a message into a tab's agent from the Loom's composer: the phone's `POST /message`
+/// rules (wake an unregistered tab, never type at the trust dialog) plus a refusal while a
+/// prompt is open. See `mailink::send_tab_message`.
+#[tauri::command]
+pub async fn send_tab_message(
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    text: String,
+) -> Result<Value, String> {
+    let app = state.inner().clone();
+    Ok(crate::mailink::send_tab_message(&app, Some(&app_handle), &tab_id, &text).await)
+}
+
 /// Append entries to this window's Overlord ledger (verbatim injection record —
 /// docs/overlord.md §3). Frontend-owned entry format; ring-buffered at LEDGER_MAX.
 #[tauri::command]

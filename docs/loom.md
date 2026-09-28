@@ -1,7 +1,8 @@
 # Workstream Loom
 
-> Status: loom, decisions and Focus views built 2026-09-27; the phone half (maiLink protocol
-> 0.13: task `blocker`, `Chat.asks`, `POST /tasks/{id}/answer`) built 2026-09-28.
+> Status: built 2026-09-27 as a drawer; moved into the Overlord deck as its home view, with a
+> composer and in-place prompts, 2026-09-28. The phone half (maiLink protocol 0.13: task
+> `blocker`, `Chat.asks`, `POST /tasks/{id}/answer`) built 2026-09-28.
 > Sketch: https://claude.ai/code/artifact/c1508940-a0f8-4e88-bf1c-442143f6733f
 
 ## Why
@@ -12,14 +13,28 @@ question scrolls away. The task board has held all of this since `docs/tasks.md`
 nothing drew it as a picture, and a blocker was a lane plus free text, so nothing could
 tell "waiting on your decision" from "waiting on eight other tasks".
 
-The loom is that picture. It opens over the terminal area with **Cmd+Shift+J** (G is the
-editor's find-previous) and has three views of the same workspace:
+The Loom is where the human works with the agents without going into their terminals. It is
+the **Overlord deck's home view** (Loom · Triage · Board · Ledger), in the Overlord workspace,
+and it spans every workspace in the window, with a filter to one. **Cmd+Shift+J** opens the
+Overlord workspace on it, board tab in front, and pressed again goes back to the workspace
+switched from most recently (G is the editor's find-previous).
 
-| View | What it answers |
+It has three modes:
+
+| Mode | What it answers |
 |---|---|
-| Loom | Who is working on what, what is waiting and on what, and what has gone quiet |
+| Focus | The maiLink-style chat list; the chosen chat condensed, with what it is stopped at and a composer; that agent's work |
+| Weave | Who is working on what, what is waiting and on what, and what has gone quiet |
 | Decisions | Every question waiting on the human, oldest first, answerable in place |
-| Focus | The maiLink-style chat list, with a condensed chat beside that agent's work |
+
+**Why the Overlord and not a drawer.** It was first built as a drawer over the terminal area.
+That put a second heavy view on top of a live terminal on the webview's one thread, and it
+had to fight the hidden terminal for the keyboard (xterm eats Escape, which interrupts the
+agent). In the Overlord workspace no other workspace's terminal is on screen, so none paints,
+and the deck is an ordinary tab. It is also the place the rest of the supervision already
+lives: the Loom absorbed the Fleet view, whose per-agent readouts (state, context, a running
+ritual, an unanswered directive with Release, the Trigger menu) are now Focus's chat header.
+The Loom works with the engine off: it is the human's view, not supervision.
 
 ## The data it stands on
 
@@ -36,7 +51,7 @@ editor's find-previous) and has three views of the same workspace:
   the phone's thread gets. `loom/model.ts` `chatRows` folds tool runs with the phone's
   vocabulary (`toolVerb`), and `focusSections` applies the phone's Focus rules.
 
-## The loom view
+## The weave
 
 - **Left: agents.** Every agent tab in scope, plus any tab still holding open tasks.
   Ordered permission → working → idle → no session, then by name, so the column doesn't
@@ -55,9 +70,7 @@ editor's find-previous) and has three views of the same workspace:
 
 ## Scope
 
-A drawer in every workspace, over the active workspace by default, with a switch to every
-workspace in the window. The Overlord workspace always shows the whole window: it
-supervises all of it.
+Every workspace in the window but the Overlord's own, or one picked from the filter chips.
 
 ## Focus
 
@@ -70,11 +83,21 @@ part that otherwise scrolls away. Agent turns render through `loom/markdown.ts`,
 instance that never emits HTML it didn't build: a transcript quotes the web into a webview
 that can reach every command. Links open in the browser (WKWebView drops `target=_blank`).
 
-**The drawer holds the keyboard while open.** It covers the terminal, so a focused terminal
-underneath is a hidden one: xterm eats Escape (interrupting the agent) and typing lands where
-nobody can see it. Focus landing in the terminal area goes back to the drawer. Closing
-returns focus to what had it when the drawer opened if that tab is still on screen, else to
-the terminal on screen, never to a tab switched away from.
+Under the chat, in this order:
+- **The prompt the agent is stopped at** (`PromptCard.svelte`): a tool permission with the
+  dialog's own rows (read off the screen, `mailink/permission.rs`), an AskUserQuestion with
+  its options and an Other field, or Claude's workspace-trust dialog. Answered through
+  `answer_tab_prompt_as_human`: the phone's responder and `prompt_id` stale guard, without
+  the trust refusal that keeps the Overlord AGENT from trusting folders. It is a separate
+  command so nothing an agent's tool call reaches can carry the exemption. BlockerCard's two
+  click guards apply: nothing in a prompt's first 1.5 s on screen, never the second click of
+  a double-click.
+- **A task question** on one of its tasks, through BlockerCard.
+- **The composer.** Enter sends, Shift+Enter is a newline; drafts are kept per chat. It sends
+  through `send_tab_message`, the phone's `POST /message` rules (an unregistered tab is woken
+  first, the trust dialog is never typed at) plus one: **nothing is sent while a prompt is
+  open**, because typed text goes into the dialog, a digit picks a row and the rest lands in
+  "tell Claude what to do differently".
 
 ## Blocked with no reason recorded
 
@@ -101,3 +124,5 @@ earlier release.
 - A push when an agent asks a new question: a doorbell kind on the desktop, plus its relay
   `KIND_BODY` line.
 - Exercise Focus live on a build with registered agent sessions (dev HMR empties the stores).
+- Focus lists a tab only once it has an agent session (or a task question), so a tab sitting
+  at the trust dialog before any session, or a dormant one, can't be picked there yet.

@@ -805,6 +805,34 @@
       terminalsStore.focusTerminal(target.id);
     }
 
+    /** Cmd+Shift+J: open the Overlord workspace on the Loom, its board tab in front. Pressed
+     *  again while the Loom is showing, go back to the workspace switched from most recently. */
+    async function toggleLoom() {
+      const ws = workspacesStore.activeWorkspace;
+      const board = (w: typeof ws) => {
+        for (const p of w?.panes ?? []) {
+          const t = p.tabs.find((x) => x.tab_type === 'board');
+          if (t) return { paneId: p.id, tabId: t.id };
+        }
+        return null;
+      };
+      const here = board(ws);
+      const onLoom = !!ws?.overlord && loomStore.deckView === 'loom' && !!here &&
+        ws.panes.find((p) => p.id === here.paneId)?.active_tab_id === here.tabId;
+      if (onLoom) {
+        const switched = workspacesStore.lastSwitchedAt;
+        const back = workspacesStore.workspaces
+          .filter((w) => !w.overlord)
+          .sort((a, b) => (switched.get(b.id) ?? 0) - (switched.get(a.id) ?? 0))[0];
+        if (back) await workspacesStore.setActiveWorkspace(back.id);
+        return;
+      }
+      const ow = await workspacesStore.ensureOverlordWorkspace();
+      loomStore.setDeckView('loom');
+      const target = board(workspacesStore.workspaces.find((w) => w.id === ow.id) ?? ow);
+      if (target) await workspacesStore.setActiveTab(ow.id, target.paneId, target.tabId);
+    }
+
     function handleKeydown(e: KeyboardEvent) {
       const isMeta = isModKey(e);
       const activeTabIsEditor = workspacesStore.activeTab?.tab_type === 'editor';
@@ -982,11 +1010,12 @@
         return;
       }
 
-      // Cmd+Shift+J - Workstream Loom (docs/loom.md). Not G: that is the editor's find-previous.
+      // Cmd+Shift+J - Workstream Loom (docs/loom.md): the Overlord deck's home view, and back.
+      // Not G: that is the editor's find-previous.
       if (isMeta && e.shiftKey && e.key.toLowerCase() === 'j') {
         e.preventDefault();
         e.stopPropagation();
-        loomStore.toggle();
+        void toggleLoom();
         return;
       }
 

@@ -1857,6 +1857,12 @@ property of the work, not the window.
 
 ### Fleet: parked workspaces, sort, View, Trigger (2026-09-02)
 
+> **Superseded 2026-09-28:** the Fleet view is gone. The deck's home view is the Workstream
+> Loom (`docs/loom.md`), and a Fleet card's readouts (state, context, ritual, awaiting reply
+> with Release, Trigger, Open the tab) are the header of the Loom's Focus chat. `fleet`
+> itself still exists in `OverlordBoard.svelte`: it feeds the triage queue and the
+> telemetry. The notes below are kept for the Trigger rules, which are unchanged.
+
 **Tabs in a suspended workspace are not on the fleet.** They used to be, as
 dormant cards reading "not loaded — open its workspace to check on it" — a
 description of a tab nobody expects to be running, one per agent tab in the
