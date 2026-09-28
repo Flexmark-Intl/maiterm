@@ -106,23 +106,70 @@ export function toolVerb(text: string): string {
   return 'tools';
 }
 
+/** Something that happened to one of the agent's tasks, placed in its chat by time. The phone's
+ *  transcript doesn't carry these; they come from the task's own record and log. */
+export interface TaskEvent {
+  ts: number;
+  kind: 'added' | 'asked' | 'answered' | 'note';
+  text: string;
+  taskId: string;
+  title: string;
+}
+
+const ASKED = /^(Waiting on your decision|Needs you|Waiting outside): /;
+const ANSWERED = /^(Decided: |Done by the human|Cleared by the human)/;
+
+/** Task events for one tab: each task it carries being added, and every line of its log,
+ *  classified by the prefixes `blockerNote` and `answerBlocker` write. */
+export function taskEventsFor(tabId: string, tasks: Task[]): TaskEvent[] {
+  const out: TaskEvent[] = [];
+  for (const t of tasks) {
+    if (t.tab_id !== tabId) continue;
+    const created = Date.parse(t.created_at);
+    if (Number.isFinite(created)) out.push({ ts: created, kind: 'added', text: t.title, taskId: t.id, title: t.title });
+    for (const n of t.notes ?? []) {
+      const at = Date.parse(n.at);
+      if (!Number.isFinite(at)) continue;
+      const kind = ASKED.test(n.text) ? 'asked' : ANSWERED.test(n.text) ? 'answered' : 'note';
+      out.push({ ts: at, kind, text: n.text, taskId: t.id, title: t.title });
+    }
+  }
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
 export type ChatRow =
   | { kind: 'turn'; turn: ChatTurn }
   | { kind: 'tools'; key: string; turns: ChatTurn[]; verbs: string[] }
   /** Something that happened that wasn't a message: a peer message or a goal change. */
-  | { kind: 'rule'; turn: ChatTurn };
+  | { kind: 'rule'; turn: ChatTurn }
+  | { kind: 'task'; key: string; event: TaskEvent };
 
 /** Fold a transcript into rows: each run of consecutive tool turns becomes one row keyed by its
- *  first msg_id, so a growing run updates in place while the agent streams. */
-export function chatRows(turns: ChatTurn[]): ChatRow[] {
+ *  first msg_id, so a growing run updates in place while the agent streams. Task events are
+ *  placed by time, from the first turn on (older ones belong to a chat that isn't shown), and
+ *  a task event breaks a tool run so it is never folded away. A live-screen snapshot has no
+ *  history, so no events are placed into it. */
+export function chatRows(turns: ChatTurn[], events: TaskEvent[] = []): ChatRow[] {
+  const snapshot = turns.some((t) => t.kind === 'terminal_snapshot');
+  const start = turns.length ? turns[0].ts : Infinity;
+  const pending = snapshot ? [] : events.filter((e) => e.ts >= start);
   const out: ChatRow[] = [];
+  let ei = 0;
+  const flush = (upTo: number) => {
+    while (ei < pending.length && pending[ei].ts <= upTo) {
+      const e = pending[ei++];
+      out.push({ kind: 'task', key: `${e.taskId}:${e.ts}:${e.kind}`, event: e });
+    }
+  };
   for (const turn of turns) {
+    flush(turn.ts);
     const last = out[out.length - 1];
     if (turn.kind === 'peer_message' || turn.kind === 'goal_status') out.push({ kind: 'rule', turn });
     else if (turn.role === 'tool' && last?.kind === 'tools') last.turns.push(turn);
     else if (turn.role === 'tool') out.push({ kind: 'tools', key: turn.msg_id, turns: [turn], verbs: [] });
     else out.push({ kind: 'turn', turn });
   }
+  flush(Infinity);
   for (const r of out) if (r.kind === 'tools') r.verbs = [...new Set(r.turns.map((t) => toolVerb(t.text)))];
   return out;
 }

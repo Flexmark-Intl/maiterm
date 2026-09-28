@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { makeTask } from '$lib/tasks/model';
 import type { ChatTurn } from '$lib/tauri/commands';
 import type { Task } from '$lib/tauri/types';
-import { chatRows, decisionsQueue, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, toolVerb } from './model';
+import { chatRows, decisionsQueue, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb } from './model';
 
 const NOW = Date.parse('2026-09-27T18:00:00Z');
 const task = (over: Partial<Task> = {}): Task => ({ ...makeTask({ title: over.title ?? 't' }, '2026-09-27T17:00:00Z'), ...over });
@@ -95,6 +95,36 @@ describe('the condensed chat', () => {
     const run = rows[1];
     expect(run.kind === 'tools' && run.key).toBe('2');
     expect(run.kind === 'tools' && run.verbs).toEqual(['reading files', 'editing files']);
+  });
+});
+
+describe('task events in the chat', () => {
+  const at = (s: string) => Date.parse(`2026-09-27T${s}Z`);
+  const turn = (msg_id: string, role: ChatTurn['role'], ts: number, kind?: ChatTurn['kind']): ChatTurn => ({ msg_id, role, text: msg_id, ts, ...(kind ? { kind } : {}) });
+  const t = task({
+    id: 'k', title: 'Deploy', tab_id: 'tab', created_at: '2026-09-27T10:00:00Z',
+    notes: [
+      { at: '2026-09-27T10:05:00Z', text: 'Waiting on your decision: Deploy now?', by: 'agent' },
+      { at: '2026-09-27T10:09:00Z', text: 'Decided: Wait', by: 'human' },
+      { at: '2026-09-27T10:10:00Z', text: 'tests green', by: 'agent' },
+    ],
+  });
+
+  it('classifies a task log by what wrote it', () => {
+    expect(taskEventsFor('tab', [t, task({ tab_id: 'other' })]).map((e) => e.kind)).toEqual(['added', 'asked', 'answered', 'note']);
+  });
+
+  it('places events by time, breaking tool runs, and drops ones older than the chat', () => {
+    const rows = chatRows(
+      [turn('u', 'user', at('10:01:00')), turn('r1', 'tool', at('10:04:00')), turn('r2', 'tool', at('10:06:00')), turn('a', 'agent', at('10:11:00'))],
+      taskEventsFor('tab', [t]),
+    );
+    expect(rows.map((r) => (r.kind === 'task' ? r.event.kind : r.kind))).toEqual(['turn', 'tools', 'asked', 'tools', 'answered', 'note', 'turn']);
+  });
+
+  it('puts nothing into a live-screen snapshot', () => {
+    const rows = chatRows([turn('ctx_tab', 'system', at('10:30:00'), 'terminal_snapshot')], taskEventsFor('tab', [t]));
+    expect(rows.map((r) => r.kind)).toEqual(['turn']);
   });
 });
 

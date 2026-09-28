@@ -8,9 +8,11 @@
   import { loomStore, type LoomView as View } from '$lib/stores/loom.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
+  import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { decisionsQueue, summarize } from '$lib/loom/model';
   import LoomView from './LoomView.svelte';
   import DecisionsView from './DecisionsView.svelte';
+  import FocusView from './FocusView.svelte';
 
   interface Props {
     workspaceId: string;
@@ -37,19 +39,37 @@
   const summary = $derived(summarize(tasks, now, workspacesStore.parkedTaskIds));
   const decisions = $derived(decisionsQueue(tasks).length);
 
-  /** The drawer covers the terminal, so it must take the keyboard. Unlike ServiceConsole, whose
-   *  focused terminal is the visible one inside it, a terminal left focused here is HIDDEN: its
-   *  xterm eats Escape (sending ESC interrupts a working agent) and every keystroke lands in a
-   *  terminal nobody can see. Focus moves to the drawer on open and goes back on close. */
+  /** The drawer covers the terminal, so it must hold the keyboard for as long as it is open.
+   *  Unlike ServiceConsole, whose focused terminal is the visible one inside it, a terminal
+   *  focused here is HIDDEN: its xterm eats Escape (sending ESC interrupts a working agent) and
+   *  every keystroke lands in a terminal nobody can see.
+   *
+   *  Taking focus once on open was not enough: switching tabs while the drawer is open focuses
+   *  the new tab's terminal underneath (Cmd+1-9, a toast, an Overlord chip). So any focus that
+   *  lands in the terminal area outside the drawer is sent back to the drawer. On close, focus
+   *  goes to the tab on screen NOW, never to whatever had it when the drawer opened: a tab
+   *  switched away from keeps its slot in the DOM, so refocusing it would type into a hidden
+   *  tab. */
   let drawerEl = $state<HTMLElement | null>(null);
   $effect(() => {
     if (!loomStore.open || !drawerEl) return;
-    const before = document.activeElement as HTMLElement | null;
     // Root CLAUDE.md: focus explicitly on a frame, never rely on autofocus.
     const raf = requestAnimationFrame(() => drawerEl?.focus({ preventScroll: true }));
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target as Element | null;
+      if (!target || target.closest('.loom-drawer') || !target.closest('.main-content')) return;
+      drawerEl?.focus({ preventScroll: true });
+    };
+    document.addEventListener('focusin', onFocusIn, true);
     return () => {
       cancelAnimationFrame(raf);
-      if (before?.isConnected) before.focus({ preventScroll: true });
+      document.removeEventListener('focusin', onFocusIn, true);
+      // Only when the keyboard is still with the drawer (or nowhere): if the human clicked
+      // something else to close it, that has focus now and keeps it.
+      const active = document.activeElement;
+      if (active && active !== document.body && !active.closest('.loom-drawer')) return;
+      const tab = workspacesStore.activeTab;
+      if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
     };
   });
 
@@ -75,6 +95,7 @@
   const VIEWS: { id: View; label: string }[] = [
     { id: 'loom', label: 'Loom' },
     { id: 'decisions', label: 'Decisions' },
+    { id: 'focus', label: 'Focus' },
   ];
 </script>
 
@@ -109,8 +130,10 @@
     <div class="body">
       {#if loomStore.view === 'loom'}
         <LoomView workspaces={scoped} {tasks} {now} multi={windowWide} />
-      {:else}
+      {:else if loomStore.view === 'decisions'}
         <DecisionsView workspaces={scoped} {tasks} />
+      {:else}
+        <FocusView workspaces={scoped} {tasks} {now} />
       {/if}
     </div>
   </section>
