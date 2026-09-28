@@ -1084,11 +1084,18 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   only "no usable bridge" (tunnel down/disabled, mosh) or "staging failed" — render it as the same
   in-app notice as before; a retry after the bridge reconnects can succeed.
 - **Answer a permission/question** (`POST .../respond {choice, prompt_id}`): Claude's TUI
-  answers permission with a numeric/selection keystroke (e.g. `1`=yes, `2`=yes+don't-ask,
-  `3`/Esc=no). The desktop maps `choice` → the correct keystroke for that runtime and injects
-  it **without** bracketed paste (it's a single keypress, not a paste). The
-  `pendingPrompt.options` in `ChatDetail` are what the phone renders as buttons; the
-  index/label maps server-side so the app never hard-codes TUI key bindings. **`prompt_id` is
+  answers permission with the digit of a numbered row, and **the rows vary by request** (two
+  rows on a Write to a project file; up to four on Bash, one of which switches to auto mode;
+  No listed FIRST on a dialog that defaults to it; the plan dialog's row 1 is "Yes, auto-accept
+  edits"). So the desktop reads the dialog off the screen (`mailink/permission.rs`): the card's
+  `options` are its rows in screen order, and `/respond` re-reads them when the tap arrives and
+  presses the digit of the row whose label `choice` is, refusing (`stale`) a label that isn't
+  on screen. A fixed 1/2/3 map once turned a tapped "Yes, don't ask again" into a rejection.
+  Claude's `prompt_id` is `p_<tabId>_<digest of the dialog as drawn>`, so a dialog stacked
+  under the one just answered, or a back-to-back ask, arrives under a NEW id (plain
+  `p_<tabId>` only while the screen can't be read). Codex keeps its stable letter keys. Keys go
+  in **without** bracketed paste (a single keypress, not a paste), and the app never hard-codes
+  TUI key bindings. **`prompt_id` is
   the stale-guard** (multi-phone safety): the server only injects if `prompt_id` matches the
   currently-open prompt, else returns `{ok:false, reason:"stale"}` — so a late-waking phone
   can't approve a prompt that's already been superseded/auto-resolved, and two phones can't

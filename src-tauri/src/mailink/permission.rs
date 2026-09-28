@@ -12,14 +12,22 @@
 //! - Row 2 varies with the request ("Yes, and always allow access to <dir> from this project",
 //!   "Yes, and switch to accept edits …; Yes, and always allow access to …") and wraps onto
 //!   continuation lines indented past the number.
-//! - The dialog ends with "Esc to cancel · Tab to amend", and Esc rejects.
-//! - Like the trust dialog (`trust.rs`), it counts as open only while that footer is the LAST
-//!   non-blank line of the screen, so text left in the scrollback never reads as a live dialog.
+//! - A tool dialog ends with "Esc to cancel · Tab to amend", and Esc rejects. The plan-approval
+//!   dialog (ExitPlanMode) ends instead with "ctrl+g to edit in <editor> · <plan path>", which
+//!   wraps, and its row 1 is "Yes, auto-accept edits": a mode change, never a plain Yes.
+//! - Like the trust dialog (`trust.rs`), it counts as open only while its footer ends the
+//!   screen, so text left in the scrollback never reads as a live dialog.
+//! - The hooks can't tell one Claude dialog from the next (stacked dialogs, back-to-back asks),
+//!   so the screen also gives each its id: a digest of the dialog as drawn.
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PermissionDialog {
     /// The row labels, in screen order, wrapped lines rejoined with a space.
     pub options: Vec<String>,
+    /// Digest of the dialog as drawn (what is asked, and the rows), whitespace removed so a
+    /// re-wrap at another width doesn't change it. Two dialogs asking the identical thing share
+    /// it, which is harmless: an answer means the same on either.
+    pub digest: String,
 }
 
 impl PermissionDialog {
@@ -45,12 +53,36 @@ pub(crate) const FALLBACK_OPTIONS: [&str; 2] = ["Yes", "No"];
 /// fallback keys are sent only then: the hook's permission state outlives the dialog (it holds
 /// until PostToolUse, so through the whole approved command), and an Esc typed into a running
 /// agent interrupts it.
+/// Only a tool dialog's footer counts: on the plan dialog row 1 changes the permission mode.
 pub(crate) fn footer_open(screen: &str) -> bool {
-    screen.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.contains("Esc to cancel"))
+    let lines: Vec<&str> = screen.lines().collect();
+    footer(&lines).is_some_and(|(_, kind)| kind == Footer::Tool)
 }
 
-/// The key for a fallback answer: row 1 is "Yes" on every dialog seen, and Esc rejects. `None`
-/// for anything else, which is refused rather than guessed. Only while `footer_open`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Footer {
+    Tool,
+    Plan,
+}
+
+/// Where the dialog's footer starts, when one ends the screen. The plan dialog's wraps onto a
+/// second line with its path, so the footer may start up to two lines above the last.
+fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
+    let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
+    (last.saturating_sub(1)..=last).rev().find_map(|i| {
+        let l = lines[i];
+        if l.contains("Esc to cancel") {
+            Some((i, Footer::Tool))
+        } else if l.contains("ctrl+g to edit in") {
+            Some((i, Footer::Plan))
+        } else {
+            None
+        }
+    }).filter(|(i, kind)| *kind == Footer::Plan || *i == last)
+}
+
+/// The key for a fallback answer: row 1 is "Yes" on every tool dialog seen, and Esc rejects.
+/// `None` for anything else, which is refused rather than guessed. Only while `footer_open`.
 pub(crate) fn fallback_key(choice: &str) -> Option<&'static str> {
     match choice.trim().to_ascii_lowercase().as_str() {
         "yes" | "1" => Some("1"),
@@ -77,15 +109,14 @@ fn row(line: &str) -> Option<(usize, &str)> {
 /// Parse a screen's text (`terminal::render::screen_text`) for an OPEN permission dialog.
 pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     let lines: Vec<&str> = screen.lines().collect();
-    let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    if !lines[last].contains("Esc to cancel") {
-        return None;
-    }
+    let (foot, _) = footer(&lines)?;
     // Walk up from the footer: continuation lines collect until the row they belong to, and
     // the walk ends at row 1.
     let mut rows: Vec<(usize, String)> = Vec::new();
     let mut cont: Vec<&str> = Vec::new();
-    for line in lines[..last].iter().rev() {
+    let mut first_row = foot;
+    for (i, line) in lines[..foot].iter().enumerate().rev() {
+        first_row = i;
         if line.trim().is_empty() {
             if rows.is_empty() && cont.is_empty() {
                 continue;
@@ -113,7 +144,12 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     if rows.len() < 2 || !cont.is_empty() || !numbered_in_order {
         return None;
     }
-    Some(PermissionDialog { options: rows.into_iter().map(|(_, l)| l).collect() })
+    // The dialog as drawn: from the rule above its question (the last full-width `─` line
+    // before the rows) through the last row.
+    let top = lines[..first_row].iter().rposition(|l| l.starts_with('─')).unwrap_or(0);
+    let drawn: String = lines[top..foot].concat().chars().filter(|c| !c.is_whitespace()).collect();
+    let digest = super::sha256_hex(drawn.as_bytes())[..12].to_string();
+    Some(PermissionDialog { options: rows.into_iter().map(|(_, l)| l).collect(), digest })
 }
 
 #[cfg(test)]
@@ -124,6 +160,7 @@ mod tests {
     const WRITE_100: &str = include_str!("testdata/permission_write_100.txt");
     const WRITE_60: &str = include_str!("testdata/permission_write_60.txt");
     const TWO_ROWS: &str = include_str!("testdata/permission_two_rows_100.txt");
+    const PLAN_100: &str = include_str!("testdata/permission_plan_100.txt");
 
     #[test]
     fn reads_the_real_three_row_dialogs() {
@@ -149,6 +186,34 @@ mod tests {
         assert_eq!(d.key_for("Yes, don't ask again"), None);
         assert_eq!(d.key_for("3"), None, "a digit names a row on screen or nothing");
         assert_eq!(d.key_for("2").as_deref(), Some("2"));
+    }
+
+    /// ExitPlanMode's dialog: a different footer that wraps, and a row 1 that changes the mode.
+    #[test]
+    fn the_plan_dialog_offers_its_own_rows_and_no_fallback() {
+        let d = parse(PLAN_100).expect("open");
+        assert_eq!(d.options[0], "Yes, auto-accept edits");
+        assert_eq!(d.options[1], "Yes, manually approve edits");
+        assert!(d.options[2].starts_with("Tell Claude what to change"));
+        assert_eq!(d.key_for("Yes"), None, "a bare Yes is not a row here");
+        assert_eq!(d.key_for("Yes, manually approve edits").as_deref(), Some("2"));
+        // If its rows couldn't be read, a fallback Yes would press 1 and change the mode.
+        assert!(!footer_open(PLAN_100));
+    }
+
+    /// Each dialog carries its own id, stable across a re-wrap, so an answered card's id never
+    /// hides the next dialog.
+    #[test]
+    fn the_digest_tells_dialogs_apart_but_not_widths() {
+        let ids: Vec<String> = [BASH_100, WRITE_100, TWO_ROWS, PLAN_100].iter().map(|s| parse(s).unwrap().digest).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len());
+        let edited = TWO_ROWS.replace("notes.md", "other.md");
+        assert_ne!(parse(&edited).unwrap().digest, parse(TWO_ROWS).unwrap().digest);
+        // 100 and 60 columns wrap the rows differently; the header path is truncated to the
+        // width, so only the rows region is compared here.
+        let rows = |s: &str| parse(s).unwrap().options.join("");
+        assert_eq!(rows(WRITE_100).replace(' ', ""), rows(WRITE_60).replace(' ', ""));
     }
 
     /// Positions carry no meaning: a dialog that defaults to No lists it first, and a Bash dialog

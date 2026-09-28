@@ -3999,7 +3999,14 @@ fn oldest_approval(app: &AppState, tab_id: &str) -> Option<crate::state::app_sta
 fn permission_prompt_id(app: &AppState, tab_id: &str) -> String {
     match oldest_approval(app, tab_id) {
         Some(a) => format!("p_{tab_id}_{}", a.seq),
-        None => format!("p_{tab_id}"),
+        // Claude: the dialog on screen names itself. Its hooks can't tell one dialog from the
+        // next, so a per-tab id let the phone's answered-card guard hide the dialog stacked
+        // under the one just answered (same id, no state change), leaving the agent blocked
+        // with nothing on the phone. Per-tab only when the screen can't be read.
+        None => match permission_dialog_for_tab(app, tab_id) {
+            Some(d) => format!("p_{tab_id}_{}", d.digest),
+            None => format!("p_{tab_id}"),
+        },
     }
 }
 
@@ -6125,7 +6132,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_permission_prompt_id_is_per_request_and_claudes_is_per_tab() {
+    fn codex_permission_prompt_id_is_per_request() {
         use crate::state::app_state::{AgentSessionInfo, PendingApproval};
         let app = AppState::new();
         let mk = |tab: &str, rt: AgentRuntime, approvals: Vec<PendingApproval>| AgentSessionInfo {
@@ -6163,7 +6170,8 @@ mod tests {
             s.insert("sid-claude".into(), mk("tab-claude", AgentRuntime::Claude, vec![]));
         }
         assert_eq!(super::permission_prompt_id(&app, "tab-codex"), "p_tab-codex_4");
-        // Claude files no approvals here; its single-gate model keeps the per-tab id.
+        // Claude files no approvals here. Its id comes from the dialog on screen, and this tab
+        // has no terminal, so it falls back to the per-tab id.
         assert_eq!(super::permission_prompt_id(&app, "tab-claude"), "p_tab-claude");
     }
 
