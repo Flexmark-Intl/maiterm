@@ -18,13 +18,14 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { BLOCKER_LABEL, effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
+  import { effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskAddModal from './TaskAddModal.svelte';
+  import BlockerCard from './BlockerCard.svelte';
 
   interface Props {
     tabId: string;
@@ -334,64 +335,6 @@
     );
   }
 
-  /** Free-text answer being typed under one blocker, pinned to the question it was started
-   *  against. The row itself always holds the NEWEST question (the each block is keyed by task
-   *  id, so its handlers read the live row), so reading `t.blocker.asked_at` at send time made
-   *  `answerBlocker`'s stale guard compare the row with itself. */
-  let answerDraft = $state<{ id: string; askedAt: string; text: string }>({ id: '', askedAt: '', text: '' });
-
-  /** When each row's current question first appeared. An option click inside the grace window
-   *  after a re-ask is refused: the buttons may have been relabelled under the pointer, and the
-   *  human was reading the old ones. */
-  let questionShownAt = $state<Record<string, { askedAt: string; at: number }>>({});
-  const REASK_GRACE_MS = 1500;
-  $effect(() => {
-    for (const t of all) {
-      const a = t.blocker?.asked_at;
-      if (a && questionShownAt[t.id]?.askedAt !== a) {
-        questionShownAt[t.id] = { askedAt: a, at: Date.now() };
-      }
-    }
-  });
-
-  function draftFor(t: Task): string {
-    return answerDraft.id === t.id && answerDraft.askedAt === t.blocker?.asked_at ? answerDraft.text : '';
-  }
-
-  async function answer(t: Task, option?: number) {
-    if (!t.blocker) return;
-    let askedAt = t.blocker.asked_at;
-    let text = '';
-    if (answerDraft.id === t.id && answerDraft.text.trim()) {
-      // The draft names the question it was typed against; if the agent has re-asked since,
-      // this is refused as stale rather than delivered against the new question.
-      askedAt = answerDraft.askedAt;
-      text = answerDraft.text;
-    }
-    // A click (an option, "I've done it") names nothing but the row, so it answers whatever is
-    // on screen now; refuse it just after a re-ask. A draft is exempt: it carries its own pin.
-    const shown = questionShownAt[t.id];
-    if (!text && shown?.askedAt === t.blocker.asked_at && Date.now() - shown.at < REASK_GRACE_MS) {
-      note(t.id, 'The agent just changed its question. Read it again before answering.');
-      return;
-    }
-    const r = await overlordStore.answerBlocker(t.id, { asked_at: askedAt, option, text });
-    if (!r.answered) {
-      note(t.id, r.detail ?? 'Could not answer.');
-      return;
-    }
-    // Only this row's draft: another row may be mid-answer while this one was being delivered.
-    if (answerDraft.id === t.id) answerDraft = { id: '', askedAt: '', text: '' };
-    note(
-      t.id,
-      r.told === 'tab'
-        ? 'Answer sent to the agent.'
-        : r.told === 'agent'
-          ? 'Answered. The tab was busy, so Overlord will pass it on.'
-          : 'Answered and moved to Active, but the agent could not be told. The tab is not reachable.',
-    );
-  }
-
   function setAssignee(t: Task, mineNow: boolean) {
     tasksStore.update(workspaceId, t.id, { tab_id: mineNow ? tabId : null });
   }
@@ -657,42 +600,8 @@
               <!-- What the agent stopped on, when it isn't another task: the question stays
                    here instead of scrolling away in the agent's output. -->
               {#if t.blocker && t.status === 'blocked'}
-                <div class="blocker" data-kind={t.blocker.kind}>
-                  <span class="blocker-kind">{BLOCKER_LABEL[t.blocker.kind]} · {fmtAge(t.blocker.asked_at)}</span>
-                  <span class="blocker-q">{t.blocker.question}</span>
-                  {#if t.blocker.context}<span class="blocker-ctx">{t.blocker.context}</span>{/if}
-                  {#if t.blocker.options?.length}
-                    <div class="blocker-opts">
-                      {#each t.blocker.options as o, i (i)}
-                        <button class="blocker-opt" class:rec={o.recommended} onclick={() => answer(t, i)}>
-                          <b>{o.label}{#if o.recommended}<em> recommended</em>{/if}</b>
-                          {#if o.detail}<span>{o.detail}</span>{/if}
-                        </button>
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if t.blocker.command}<code class="blocker-cmd">{t.blocker.command}</code>{/if}
-                  <div class="blocker-answer">
-                    <input
-                      id="blocker-answer-{t.id}"
-                      placeholder={t.blocker.kind === 'decision'
-                        ? t.blocker.options?.length ? 'Or write an answer…' : 'Your answer…'
-                        : 'Add a comment (optional)…'}
-                      value={draftFor(t)}
-                      oninput={(e) => {
-                        // Typing always answers the question on screen. A draft started against
-                        // a question since replaced is no longer shown (`draftFor`), so the first
-                        // keystroke here starts a new one pinned to the current question.
-                        answerDraft = { id: t.id, askedAt: t.blocker!.asked_at, text: e.currentTarget.value };
-                      }}
-                      onkeydown={(e) => { if (e.key === 'Enter' && (t.blocker?.kind !== 'decision' || (answerDraft.id === t.id && answerDraft.text.trim()))) answer(t); }}
-                    />
-                    {#if t.blocker.kind === 'decision'}
-                      <button class="mini-btn" disabled={answerDraft.id !== t.id || !answerDraft.text.trim()} onclick={() => answer(t)}>Send</button>
-                    {:else}
-                      <button class="mini-btn" onclick={() => answer(t)}>{t.blocker.kind === 'action' ? "I've done it" : 'It arrived'}</button>
-                    {/if}
-                  </div>
+                <div class="blocker-slot">
+                  <BlockerCard task={t} onnote={(text) => note(t.id, text)} />
                 </div>
               {/if}
 
@@ -1024,75 +933,7 @@
     opacity: 0.85;
   }
 
-  .blocker {
-    --kind: var(--orange, #ff9e64);
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    margin: 4px 0 2px calc(4px + 3.6em);
-    padding: 5px 7px;
-    border-left: 2px solid var(--kind);
-    background: color-mix(in srgb, var(--kind) 8%, transparent);
-    border-radius: 0 4px 4px 0;
-    font-size: 11px;
-    overflow-wrap: anywhere;
-  }
-  .blocker[data-kind='action'] { --kind: var(--red, #f7768e); }
-  .blocker[data-kind='external'] { --kind: var(--cyan, #7dcfff); }
-  .blocker-kind {
-    color: var(--kind);
-    font-size: 9.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-  }
-  .blocker-q { color: var(--fg); font-weight: 600; }
-  .blocker-ctx { color: var(--fg-dim); }
-  .blocker-opts { display: flex; flex-direction: column; gap: 3px; }
-  .blocker-opt {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    text-align: left;
-    background: var(--bg-dark);
-    border: 1px solid var(--bg-light);
-    border-radius: 4px;
-    padding: 4px 6px;
-    color: var(--fg);
-    font-size: 11px;
-    cursor: pointer;
-  }
-  .blocker-opt:hover, .blocker-opt:focus-visible { border-color: var(--kind); }
-  .blocker-opt em { color: var(--kind); font-style: normal; font-size: 9.5px; font-weight: 400; }
-  .blocker-opt span { color: var(--fg-dim); }
-  .blocker-answer { display: flex; gap: 4px; }
-  .blocker-answer input {
-    flex: 1;
-    min-width: 0;
-    background: var(--bg-dark);
-    border: 1px solid var(--bg-light);
-    border-radius: 4px;
-    color: var(--fg);
-    font-size: 11px;
-    padding: 3px 6px;
-  }
-  .mini-btn {
-    background: var(--kind);
-    color: var(--bg-dark);
-    border: 0;
-    border-radius: 4px;
-    font-size: 10.5px;
-    font-weight: 600;
-    padding: 3px 8px;
-    cursor: pointer;
-  }
-  .mini-btn:disabled { opacity: 0.4; cursor: default; }
-  .blocker-cmd {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 10.5px;
-    background: var(--bg-dark);
-    padding: 3px 5px;
-    border-radius: 3px;
-  }
+  .blocker-slot { margin: 4px 0 2px calc(4px + 3.6em); }
 
   .detail {
     background: var(--bg-dark);
