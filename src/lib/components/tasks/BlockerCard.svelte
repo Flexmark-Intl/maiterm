@@ -27,26 +27,27 @@
   let draft = $state<{ askedAt: string; text: string }>({ askedAt: '', text: '' });
   const draftText = $derived(draft.askedAt === b?.asked_at ? draft.text : '');
 
-  /** When the current question replaced a previous one. The question on screen when this
-   *  mounted is not a re-ask (at: 0), so opening the panel doesn't make it unanswerable. */
-  const REASK_GRACE_MS = 1500;
-  let seen = $state<{ askedAt: string; at: number }>({ askedAt: '', at: 0 });
+  /** Nothing answers a question in its first moments on screen. Measured from the question's own
+   *  `asked_at` (stamped locally when it was recorded), not from when this card saw it: a card
+   *  mounts when a question first appears, and may appear right under the pointer, while a card
+   *  opened on a question asked minutes ago is answerable at once. */
+  const FRESH_MS = 1500;
+  const isFresh = () => !!b && Date.now() - Date.parse(b.asked_at) < FRESH_MS;
+
   $effect.pre(() => {
     const a = b?.asked_at;
-    if (!a || seen.askedAt === a) return;
-    seen = { askedAt: a, at: seen.askedAt ? Date.now() : 0 };
-    if (draft.askedAt && draft.askedAt !== a) draft = { askedAt: '', text: '' };
+    if (a && draft.askedAt && draft.askedAt !== a) draft = { askedAt: '', text: '' };
   });
 
   let sending = $state(false);
 
-  /** `typed`: sent from the field (Enter or Send), so the human was looking at the text they
-   *  typed under the question on screen. Otherwise a click on an option or on "I've done it",
-   *  which names nothing but the row and so answers whatever is on screen now: it is refused
-   *  just after a re-ask, when the buttons may have been relabelled under the pointer. */
-  async function answer(option: number | undefined, typed: boolean) {
+  /** Anything that sends without text of the human's own on screen (an option, "I've done it",
+   *  Enter in an empty field) answers whatever is showing now, so it is refused while the
+   *  question is fresh. Visible typed text was typed under the current question: a re-ask
+   *  drops it. */
+  async function answer(option: number | undefined) {
     if (!b || sending) return;
-    if (!typed && Date.now() - seen.at < REASK_GRACE_MS) {
+    if (!draftText.trim() && isFresh()) {
       onnote?.('The agent just changed its question. Read it again before answering.');
       return;
     }
@@ -84,7 +85,7 @@
     {#if b.options?.length}
       <div class="opts">
         {#each b.options as o, i (i)}
-          <button class="opt" disabled={sending} onclick={() => answer(i, false)}>
+          <button class="opt" disabled={sending} onclick={() => answer(i)}>
             <b>{o.label}{#if o.recommended}<em> recommended</em>{/if}</b>
             {#if o.detail}<span>{o.detail}</span>{/if}
           </button>
@@ -100,8 +101,9 @@
           : 'Add a comment (optional)…'}
         value={draftText}
         oninput={(e) => {
-          // Typing right after a re-ask: the field just emptied under the human's hands.
-          if (Date.now() - seen.at < REASK_GRACE_MS) {
+          // Typing into a question that just appeared: it may have replaced the one being
+          // answered, and the field just emptied under the human's hands.
+          if (isFresh()) {
             e.currentTarget.value = '';
             onnote?.('The agent just changed its question. Read it again before answering.');
             return;
@@ -109,13 +111,13 @@
           draft = { askedAt: b.asked_at, text: e.currentTarget.value };
         }}
         onkeydown={(e) => {
-          if (e.key === 'Enter' && (b.kind !== 'decision' || draftText.trim())) answer(undefined, true);
+          if (e.key === 'Enter' && (b.kind !== 'decision' || draftText.trim())) answer(undefined);
         }}
       />
       {#if b.kind === 'decision'}
-        <button class="send" disabled={sending || !draftText.trim()} onclick={() => answer(undefined, true)}>Send</button>
+        <button class="send" disabled={sending || !draftText.trim()} onclick={() => answer(undefined)}>Send</button>
       {:else}
-        <button class="send" disabled={sending} onclick={() => answer(undefined, false)}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
+        <button class="send" disabled={sending} onclick={() => answer(undefined)}>{b.kind === 'action' ? "I've done it" : 'It arrived'}</button>
       {/if}
     </div>
   </div>
