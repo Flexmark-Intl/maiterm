@@ -5,6 +5,7 @@
   width change makes Claude Code re-render its transcript into scrollback).
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { loomStore, type LoomView as View } from '$lib/stores/loom.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
@@ -53,6 +54,11 @@
   let drawerEl = $state<HTMLElement | null>(null);
   $effect(() => {
     if (!loomStore.open || !drawerEl) return;
+    // What had the keyboard, and on which tab. Restored on close only while that tab is still
+    // the one on screen: an editor keeps its caret, and a tab switched away from is not
+    // refocused (its slot stays in the DOM, hidden).
+    const before = document.activeElement as HTMLElement | null;
+    const beforeTab = untrack(() => workspacesStore.activeTab?.id ?? null);
     // Root CLAUDE.md: focus explicitly on a frame, never rely on autofocus.
     const raf = requestAnimationFrame(() => drawerEl?.focus({ preventScroll: true }));
     const onFocusIn = (e: FocusEvent) => {
@@ -69,7 +75,11 @@
       const active = document.activeElement;
       if (active && active !== document.body && !active.closest('.loom-drawer')) return;
       const tab = workspacesStore.activeTab;
-      if (tab?.tab_type === 'terminal') terminalsStore.focusTerminal(tab.id);
+      if (tab && tab.id === beforeTab && before?.isConnected && !before.closest('.loom-drawer')) {
+        before.focus({ preventScroll: true });
+      } else if (tab?.tab_type === 'terminal') {
+        terminalsStore.focusTerminal(tab.id);
+      }
     };
   });
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { makeTask } from '$lib/tasks/model';
 import type { ChatTurn } from '$lib/tauri/commands';
 import type { Task } from '$lib/tauri/types';
-import { chatRows, decisionsQueue, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb } from './model';
+import { chatRows, decisionsQueue, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
 
 const NOW = Date.parse('2026-09-27T18:00:00Z');
 const task = (over: Partial<Task> = {}): Task => ({ ...makeTask({ title: over.title ?? 't' }, '2026-09-27T17:00:00Z'), ...over });
@@ -27,6 +27,20 @@ describe('the decisions queue', () => {
     const ext = task({ id: 'e', status: 'blocked', blocker: blocker('external', '2026-09-01T10:00:00Z') });
     const moved = task({ id: 'm', status: 'active', blocker: blocker('decision', '2026-09-01T10:00:00Z') });
     expect(decisionsQueue([a, b, ext, moved, task()]).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('blocked with no reason', () => {
+  it('finds only rows nothing explains', () => {
+    const dep = task({ id: 'dep', status: 'active' });
+    const rows = [
+      dep,
+      task({ id: 'bare', status: 'blocked' }),
+      task({ id: 'asks', status: 'blocked', blocker: blocker('decision', '2026-09-27T10:00:00Z') }),
+      task({ id: 'waits', status: 'blocked', blocked_by: ['dep'] }),
+      task({ id: 'mirror', status: 'blocked', origin: 'imported' }),
+    ];
+    expect(unexplainedBlocked(rows).map((t) => t.id)).toEqual(['bare']);
   });
 });
 
@@ -120,6 +134,12 @@ describe('task events in the chat', () => {
       taskEventsFor('tab', [t]),
     );
     expect(rows.map((r) => (r.kind === 'task' ? r.event.kind : r.kind))).toEqual(['turn', 'tools', 'asked', 'tools', 'answered', 'note', 'turn']);
+  });
+
+  it('keys two notes written in the same millisecond apart', () => {
+    const same = task({ id: 'd', tab_id: 'tab', notes: [{ at: '2026-09-27T10:05:00Z', text: 'a', by: 'agent' }, { at: '2026-09-27T10:05:00Z', text: 'b', by: 'agent' }] });
+    const keys = taskEventsFor('tab', [same]).map((e) => e.key);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it('puts nothing into a live-screen snapshot', () => {

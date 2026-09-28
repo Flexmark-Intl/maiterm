@@ -6,8 +6,9 @@
 <script lang="ts">
   import { loomStore } from '$lib/stores/loom.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
-  import { decisionsQueue } from '$lib/loom/model';
+  import { workspacesStore, tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
+  import { decisionsQueue, unexplainedBlocked } from '$lib/loom/model';
+  import { overlordStore } from '$lib/stores/overlord.svelte';
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
   import type { Task, Workspace } from '$lib/tauri/types';
@@ -19,6 +20,22 @@
   let { workspaces, tasks }: Props = $props();
 
   const queue = $derived(decisionsQueue(tasks));
+  const unexplained = $derived(unexplainedBlocked(tasks, workspacesStore.parkedTaskIds));
+  /** Receipts for "Ask for the reason", by task id. */
+  let asked = $state<Record<string, string>>({});
+  async function askReason(t: Task) {
+    const r = await overlordStore.askForBlockerReason(t.id);
+    asked = {
+      ...asked,
+      [t.id]: !r.asked
+        ? 'Nobody carries this task, so there is nobody to ask.'
+        : r.told === 'tab'
+          ? 'Asked. The question will show up here when the agent records it.'
+          : r.told === 'agent'
+            ? 'The tab was busy, so Overlord will pass it on.'
+            : 'The tab could not be reached, and there is no supervisor to relay it.',
+    };
+  }
   /** Outcome lines by task id. An answered card leaves the queue, so the receipt is kept here
    *  and shown in a short list of what was just answered. */
   let answered = $state<{ id: string; title: string; text: string }[]>([]);
@@ -65,6 +82,24 @@
   {:else}
     <p class="empty">Nothing is waiting on you. When an agent stops on a question, it shows up here.</p>
   {/each}
+
+  {#if unexplained.length}
+    <section class="unexplained">
+      <h4>Blocked with no reason recorded</h4>
+      <p class="sub">Whatever these stopped on is only in the agent's chat. Ask, and the question comes back here.</p>
+      {#each unexplained as t (t.id)}
+        <div class="row">
+          <span class="t">{t.title}</span>
+          <span class="m">{t.tab_id ? tabDisplayName(t.tab_id) : 'unassigned'} · {streamName(t)} · {fmtAge(t.updated_at)}</span>
+          {#if asked[t.id]}
+            <span class="receipt">{asked[t.id]}</span>
+          {:else if t.tab_id}
+            <button onclick={() => askReason(t)}>Ask for the reason</button>
+          {/if}
+        </div>
+      {/each}
+    </section>
+  {/if}
 </div>
 
 <style>
@@ -98,4 +133,12 @@
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .actions button { background: var(--bg-dark); border: 1px solid var(--bg-light); color: var(--fg); border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer; }
   .empty { grid-column: 1 / -1; color: var(--fg-dim); text-align: center; padding: 40px 0; margin: 0; }
+  .unexplained { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--bg-light); padding-top: 14px; }
+  .unexplained h4 { margin: 0; font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--yellow); }
+  .sub { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); }
+  .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 6px 0; border-bottom: 1px solid var(--bg-medium); }
+  .row .t { font-size: 12.5px; overflow-wrap: anywhere; }
+  .row .m { font-size: 11px; color: var(--fg-dim); flex: 1; min-width: 12em; }
+  .row button { background: var(--bg-medium); border: 1px solid var(--bg-light); color: var(--fg); border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+  .receipt { font-size: 11.5px; color: var(--fg-dim); }
 </style>

@@ -1,6 +1,6 @@
 # Workstream Loom
 
-> Status: loom and decisions views built 2026-09-27; Focus view and the phone next.
+> Status: loom, decisions and Focus views built 2026-09-27; the phone next.
 > Sketch: https://claude.ai/code/artifact/c1508940-a0f8-4e88-bf1c-442143f6733f
 
 ## Why
@@ -18,7 +18,7 @@ editor's find-previous) and has three views of the same workspace:
 |---|---|
 | Loom | Who is working on what, what is waiting and on what, and what has gone quiet |
 | Decisions | Every question waiting on the human, oldest first, answerable in place |
-| Focus | (next) the maiLink-style chat list with a condensed chat beside the workspace's work |
+| Focus | The maiLink-style chat list, with a condensed chat beside that agent's work |
 
 ## The data it stands on
 
@@ -58,8 +58,43 @@ A drawer in every workspace, over the active workspace by default, with a switch
 workspace in the window. The Overlord workspace always shows the whole window: it
 supervises all of it.
 
+## Focus
+
+The maiLink inbox rules (`focusSections`): needs you (a permission, or a question on one of
+its tasks) → working now → unread or active since the start of yesterday. The chosen chat is
+`get_tab_transcript` polled every 3 s, folded by `chatRows`, with **task events** from the
+tasks' own records (`taskEventsFor`: added, asked, answered, notes) placed by time and keyed
+by their position in the log. The phone's transcript doesn't carry those, and they are the
+part that otherwise scrolls away. Agent turns render through `loom/markdown.ts`, a marked
+instance that never emits HTML it didn't build: a transcript quotes the web into a webview
+that can reach every command. Links open in the browser (WKWebView drops `target=_blank`).
+
+**The drawer holds the keyboard while open.** It covers the terminal, so a focused terminal
+underneath is a hidden one: xterm eats Escape (interrupting the agent) and typing lands where
+nobody can see it. Focus landing in the terminal area goes back to the drawer. Closing
+returns focus to what had it when the drawer opened if that tab is still on screen, else to
+the terminal on screen, never to a tab switched away from.
+
+## Blocked with no reason recorded
+
+A Blocked task with no blocker record and no unmet dependency has its question only in the
+agent's scrollback (`unexplainedBlocked`; imported rows are left out, since their
+dependencies live in the runtime's own store). Decisions lists them under the queue with
+**Ask for the reason** (`overlordStore.askForBlockerReason`), which types one question at
+the carrying agent, human-only like "Do it".
+
+It is a button and not an Overlord rule on purpose. A rule was built and reverted
+(9a44aaf, 1b701f6):
+- **Downgrade.** Its condition was a new variant of the persisted `OverlordCondition` enum,
+  and every seeded default is written into every user's state file on first launch. An older
+  build that met the unknown variant failed to parse the WHOLE file, fell back to an empty
+  state, and later overwrote the backup.
+- **False alarms.** It fired hourly on Claude's own task dependencies, which import as
+  Blocked with an empty `blocked_by`.
+
+Do not add a variant to a persisted serde enum without first shipping a lenient reader in an
+earlier release.
+
 ## Next
 
-- Focus view (the chat list and condensed chat).
 - The phone: blockers on the wire and decisions in "Needs you" (protocol 0.13).
-- Overlord flags a blocked task with no blocker record.

@@ -3356,6 +3356,47 @@ function createOverlordStore() {
       return { answered: true, told: 'agent' };
     },
 
+    /**
+     * The human asks the carrying agent why a task is Blocked when nothing records a reason
+     * (the decisions queue's "Ask for the reason"). Human-only for the same reason as
+     * `startTask`: it types into a terminal. It is a button, not an Overlord rule, on purpose:
+     * a rule's condition would be a new persisted enum variant, and an older build that reads
+     * one fails to parse the whole state file and starts empty (docs/loom.md). It would also
+     * nag on a timer where one question, asked when the human is looking, is what's wanted.
+     */
+    async askForBlockerReason(id: string): Promise<{ asked: boolean; told: 'tab' | 'agent' | 'nobody' }> {
+      const hit = tasksStore.findAnywhere(id);
+      if (!hit || hit.task.status !== 'blocked') return { asked: false, told: 'nobody' };
+      const { task } = hit;
+      const tabId = task.tab_id;
+      if (!tabId) return { asked: false, told: 'nobody' };
+      const text =
+        `[maiTerm] Your human is asking why task "${task.title}" (id ${task.id}) is Blocked: ` +
+        `nothing records a reason. If it waits on a decision, or on something only they can do, ` +
+        `call updateTasks on it with blocker {kind: 'decision' or 'action', question, context, ` +
+        `options}; if it waits on something outside maiTerm (a review, CI, another person), use ` +
+        `kind 'external'; if it waits on another task, use block_on; if it is not blocked any ` +
+        `more, move it to its real status.`;
+      const step: OverlordStep = { kind: 'process', text };
+      if (await noticeToTab(tabId, text, 'blocker-reason')) {
+        ledger(tabId, null, 'human', 0, step, 'sent');
+        return { asked: true, told: 'tab' };
+      }
+      ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+        return { asked: true, told: 'nobody' };
+      }
+      escalate(
+        tabId,
+        null,
+        'task_handoff',
+        `The human asked ${tabDisplayName(tabId)} why a task is Blocked, but that tab could not ` +
+          `be typed into just then. Pass this on when it is reachable:\n\n${text}`,
+        task.id,
+      );
+      return { asked: true, told: 'agent' };
+    },
+
     /** Hand a board task to the Overlord agent to carry (the card's "Send").
      *
      *  A handoff is queued as an agent-only escalation rather than typed at the owning tab:

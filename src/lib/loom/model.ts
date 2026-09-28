@@ -4,7 +4,7 @@
 import type { AgentState } from '$lib/agents/types';
 import type { ChatTurn } from '$lib/tauri/commands';
 import type { Task, TaskStatus } from '$lib/tauri/types';
-import { effectiveStatus, isRetired } from '$lib/tasks/model';
+import { effectiveStatus, hasUnmetDeps, isRetired } from '$lib/tasks/model';
 
 /** A task untouched this long reads as quiet. The board has "active" rows from a month ago that
  *  otherwise look exactly like live work. */
@@ -27,6 +27,16 @@ export function decisionsQueue(tasks: Task[]): Task[] {
   return tasks
     .filter((t) => t.status === 'blocked' && (t.blocker?.kind === 'decision' || t.blocker?.kind === 'action'))
     .sort((a, b) => Date.parse(a.blocker!.asked_at) - Date.parse(b.blocker!.asked_at));
+}
+
+/** Blocked with nothing saying why: no blocker record and no unmet dependency. The question it
+ *  stopped on exists only in the agent's scrollback. Imported rows are left out: they mirror
+ *  the runtime's own task list, whose dependencies live in that store and never reach
+ *  `blocked_by`, so they would all read as unexplained. */
+export function unexplainedBlocked(tasks: Task[], parked?: ReadonlySet<string>): Task[] {
+  return tasks.filter(
+    (t) => t.status === 'blocked' && !t.blocker && t.origin !== 'imported' && !hasUnmetDeps(t, tasks, parked),
+  );
 }
 
 export interface LoomSummary {
@@ -109,6 +119,9 @@ export function toolVerb(text: string): string {
 /** Something that happened to one of the agent's tasks, placed in its chat by time. The phone's
  *  transcript doesn't carry these; they come from the task's own record and log. */
 export interface TaskEvent {
+  /** Unique within the chat: the task and the note's position in its log. Two notes written in
+   *  one updateTasks batch share a millisecond, so a time-based key collides. */
+  key: string;
   ts: number;
   kind: 'added' | 'asked' | 'answered' | 'note';
   text: string;
@@ -126,13 +139,13 @@ export function taskEventsFor(tabId: string, tasks: Task[]): TaskEvent[] {
   for (const t of tasks) {
     if (t.tab_id !== tabId) continue;
     const created = Date.parse(t.created_at);
-    if (Number.isFinite(created)) out.push({ ts: created, kind: 'added', text: t.title, taskId: t.id, title: t.title });
-    for (const n of t.notes ?? []) {
+    if (Number.isFinite(created)) out.push({ key: `${t.id}:added`, ts: created, kind: 'added', text: t.title, taskId: t.id, title: t.title });
+    (t.notes ?? []).forEach((n, i) => {
       const at = Date.parse(n.at);
-      if (!Number.isFinite(at)) continue;
+      if (!Number.isFinite(at)) return;
       const kind = ASKED.test(n.text) ? 'asked' : ANSWERED.test(n.text) ? 'answered' : 'note';
-      out.push({ ts: at, kind, text: n.text, taskId: t.id, title: t.title });
-    }
+      out.push({ key: `${t.id}:n${i}`, ts: at, kind, text: n.text, taskId: t.id, title: t.title });
+    });
   }
   return out.sort((a, b) => a.ts - b.ts);
 }
@@ -158,7 +171,7 @@ export function chatRows(turns: ChatTurn[], events: TaskEvent[] = []): ChatRow[]
   const flush = (upTo: number) => {
     while (ei < pending.length && pending[ei].ts <= upTo) {
       const e = pending[ei++];
-      out.push({ kind: 'task', key: `${e.taskId}:${e.ts}:${e.kind}`, event: e });
+      out.push({ kind: 'task', key: e.key, event: e });
     }
   };
   for (const turn of turns) {

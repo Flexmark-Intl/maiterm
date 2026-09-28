@@ -15,6 +15,7 @@
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
+  import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import type { Task, Workspace } from '$lib/tauri/types';
 
   interface Props {
@@ -55,12 +56,16 @@
   const sections = $derived(focusSections(chats, now));
   const listed = $derived([...sections.needsYou, ...sections.working, ...sections.recent]);
 
-  /** The open chat: the one picked, else the first that needs you. */
+  /** The open chat: the one picked, else the first that needs you. The fallback is written back
+   *  as the pick, so the chat stays put when answering it moves it out of "Needs you". */
   const openId = $derived(
     loomStore.focusChatTabId && chats.some((c) => c.tabId === loomStore.focusChatTabId)
       ? loomStore.focusChatTabId
       : (listed[0]?.tabId ?? null),
   );
+  $effect(() => {
+    if (openId && openId !== loomStore.focusChatTabId) loomStore.openChat(openId);
+  });
   const open = $derived(chats.find((c) => c.tabId === openId) ?? null);
 
   // ── The transcript: read on open, then every 3 s while shown (the phone polls 2 s). ──
@@ -87,7 +92,19 @@
 
   const openAsk = $derived(openId ? asking(openId) : undefined);
   const agentTasks = $derived(openId ? tasks.filter((t) => t.tab_id === openId && !isRetired(t.status) && t.status !== 'backlog') : []);
-  let outcome = $state('');
+  /** The last answer's outcome, for the chat it was given in. Keyed to the CHAT, not the task:
+   *  the answer moves the task out of Blocked before the note arrives, so the question is gone
+   *  by then, and the note ("the agent could not be told") is exactly what must still show. */
+  let outcome = $state<{ chat: string; text: string } | null>(null);
+
+  /** Links in a transcript open in the browser. WKWebView drops `target=_blank` without a
+   *  new-window handler, so a plain link would do nothing (NotesPanel does the same). */
+  function onChatClick(e: MouseEvent) {
+    const anchor = (e.target as Element | null)?.closest?.('a');
+    if (!anchor?.href) return;
+    e.preventDefault();
+    void shellOpen(anchor.href);
+  }
 
   // Keep the newest turn in view as the chat grows, unless the human scrolled up to read.
   let chatEl = $state<HTMLElement | null>(null);
@@ -124,7 +141,8 @@
     {#if !listed.length}<p class="hint">No agent chats in scope right now.</p>{/if}
   </aside>
 
-  <div class="chat" bind:this={chatEl} onscroll={onChatScroll}>
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="chat" bind:this={chatEl} onscroll={onChatScroll} onclick={onChatClick}>
     {#if open}
       <div class="chat-h">
         <b>{open.name}</b>
@@ -136,7 +154,7 @@
       {:else if !rows.length}
         <p class="hint">No messages captured for this tab yet.</p>
       {/if}
-      {#each rows as r (r.kind === 'tools' ? r.key : r.kind === 'task' ? r.key : r.turn.msg_id)}
+      {#each rows as r (r.kind === 'tools' || r.kind === 'task' ? r.key : r.turn.msg_id)}
         {#if r.kind === 'tools'}
           {#if r.turns.length === 1}
             <span class="tool">{r.turns[0].text}</span>
@@ -170,14 +188,14 @@
         {/if}
       {/each}
       {#if openAsk}
-        {@const forId = openAsk.id}
+        {@const chat = open.tabId}
         <div class="ask">
           {#key openAsk.id}
-            <BlockerCard task={openAsk} variant="card" onnote={(text) => { if (openAsk?.id === forId) outcome = text; }} />
+            <BlockerCard task={openAsk} variant="card" onnote={(text) => (outcome = { chat, text })} />
           {/key}
         </div>
       {/if}
-      {#if outcome}<p class="hint">{outcome}</p>{/if}
+      {#if outcome && outcome.chat === open.tabId}<p class="hint">{outcome.text}</p>{/if}
     {:else}
       <p class="hint">Pick a chat on the left.</p>
     {/if}
