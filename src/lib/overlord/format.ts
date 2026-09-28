@@ -27,6 +27,7 @@ export function describeCondition(when: OverlordCondition): string {
     case 'task_stale': return `a task goes stale ${when.days}d`;
     case 'agent_unready': return 'an agent is running but unbound';
     case 'no_todo_list': return 'real work is not on the task list';
+    case 'blocked_unexplained': return 'a task is blocked with no reason recorded';
     case 'permission_pending': return `a permission waits ${fmtMinutes(when.minutes)}`;
     case 'directive_unacked': return `a directive goes unacked ${fmtMinutes(when.minutes)}`;
   }
@@ -42,6 +43,7 @@ export function conditionChip(when: OverlordCondition): string {
     case 'task_stale': return `STALE ${when.days}D`;
     case 'agent_unready': return 'UNREADY';
     case 'no_todo_list': return 'UNTRACKED';
+    case 'blocked_unexplained': return 'NO REASON';
     case 'permission_pending': return `PERM ${when.minutes}M`;
     case 'directive_unacked': return `UNACKED ${when.minutes}M`;
   }
@@ -65,6 +67,7 @@ export function conditionSource(when: OverlordCondition): string {
     case 'commit': return 'git commit tool calls · Claude only';
     case 'no_todo_list': return 'maiTerm tasks + context size · not Gemini';
     case 'task_stale': return 'board timers · every runtime';
+    case 'blocked_unexplained': return 'maiTerm tasks · every runtime';
     case 'agent_unready': return 'agent state + liveness probe · every runtime';
     case 'directive_unacked': return 'directive ledger · every runtime';
   }

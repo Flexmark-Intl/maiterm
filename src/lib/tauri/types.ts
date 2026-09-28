@@ -427,6 +427,8 @@ export type OverlordCondition =
   | { event: 'task_stale'; days: number }
   | { event: 'agent_unready' }
   | { event: 'no_todo_list' }
+  /** A task is Blocked with no blocker record and nothing it depends on (docs/tasks.md §3.1). */
+  | { event: 'blocked_unexplained' }
   | { event: 'permission_pending'; minutes: number }
   | { event: 'directive_unacked'; minutes: number };
 

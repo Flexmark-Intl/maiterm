@@ -510,7 +510,7 @@ than being refused later), at `approveProposal`, and in `runTriage`. It returns 
 the rule was deleted or disabled while the proposal waited, and then splits by condition:
 
 - **Level conditions** (`context_pct`, `tab_idle`, `task_stale`, `agent_unready`,
-  `no_todo_list`, `permission_pending`, `directive_unacked`) describe a state, so they are
+  `no_todo_list`, `blocked_unexplained`, `permission_pending`, `directive_unacked`) describe a state, so they are
   simply re-evaluated with `conditionFires`.
 - **Edge conditions** (`turn_end`, `commit`) describe a moment that has already passed —
   re-checking them would void every edge proposal the instant it was queued. They get an age
@@ -686,9 +686,15 @@ export type OverlordCondition =
   | { event: 'task_stale';        days: number }
   | { event: 'agent_unready' }                                // agent alive, no binding
   | { event: 'no_todo_list' }
+  | { event: 'blocked_unexplained' }                          // Blocked, no blocker, no deps
   | { event: 'permission_pending'; minutes: number }
   | { event: 'directive_unacked';  minutes: number };         // the TTL sweep
 ```
+
+`blocked_unexplained` (2026-09-27, docs/tasks.md §3.1) fires when one of the tab's tasks is
+Blocked in its stored lane with no `blocker` record and no unmet dependency: the question it
+stopped on exists only in the agent's scrollback, so the decisions queue, the loom and the
+phone can't show it. The default rule `blocker_hygiene` asks the idle agent to record it.
 
 **Detection cost** — the honest accounting, and the main build estimate:
 

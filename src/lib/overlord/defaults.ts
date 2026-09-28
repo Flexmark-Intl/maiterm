@@ -116,6 +116,32 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
       },
     ],
   },
+
+  // docs/tasks.md §3.1. A blocked task with no blocker record has its question only in the
+  // agent's scrollback, so the decisions queue, the loom and the phone can't show it.
+  blocker_hygiene: {
+    name: 'Say why a task is blocked',
+    description:
+      'A task sitting in Blocked with no reason recorded gets its agent asked to record the question, so the human sees it in the decisions queue.',
+    cooldown: 3600,
+    when: { event: 'blocked_unexplained' },
+    guards: {
+      agent_state: ['idle'],
+      min_quiet_ms: 3000,
+      require_live_repl: true,
+      max_per_hour: 1,
+      only_if_no_outstanding: true,
+    },
+    sequence: [
+      {
+        kind: 'process',
+        text: "One of your tasks is Blocked with no reason recorded (listTasks with status [\"blocked\"] shows it). If it waits on a decision or on something only your human can do, call updateTasks on it with blocker {kind: 'decision' or 'action', question, context, options} so it reaches them; if it waits on another task, use block_on; if it isn't blocked any more, move it to its real status.",
+        await: { until: 'turn_end' },
+        timeout_seconds: 600,
+        on_timeout: 'continue',
+      },
+    ],
+  },
 };
 
 /** Key-order-insensitive stringify — persisted rules round-trip through serde, whose
