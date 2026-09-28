@@ -124,8 +124,16 @@ fn bare_dialog(lines: &[&str], last: usize) -> Option<(usize, Footer)> {
         let l = lines[i];
         match row(l) {
             Some((1, _)) => {
-                let above = lines[..i].iter().rposition(|l| !l.trim().is_empty())?;
-                return lines[above].contains("Do you want").then_some((last + 1, Footer::Bare));
+                // The question may wrap in a narrow pane ("… fetch this" / " content?"), so it
+                // is looked for in the few lines above row 1, stopping at the dialog's rule.
+                let asks = lines[..i]
+                    .iter()
+                    .rev()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .take_while(|l| !l.starts_with('─'))
+                    .any(|l| l.contains("Do you want"));
+                return asks.then_some((last + 1, Footer::Bare));
             }
             Some(_) => {}
             None if l.starts_with("    ") && !l.trim().is_empty() => {}
@@ -236,6 +244,9 @@ mod tests {
         assert_eq!(d.options, vec!["Yes", "Yes, and don't ask again for example.com", "No, and tell Claude what to do differently (esc)"]);
         assert_eq!(d.key_for("No, and tell Claude what to do differently (esc)").as_deref(), Some("3"));
         assert!(dialog_open(WEBFETCH_100));
+        // In a narrow pane the question wraps.
+        let narrow = WEBFETCH_100.replace("Do you want to allow Claude to fetch this content?", "Do you want to allow Claude to fetch\n this content?");
+        assert!(parse(&narrow).is_some());
         // Numbered rows at the bottom of ordinary output are not a dialog.
         assert!(!dialog_open("Steps:\n 1. build\n 2. test\n"));
         assert_eq!(parse("Steps:\n 1. build\n 2. test\n"), None);
