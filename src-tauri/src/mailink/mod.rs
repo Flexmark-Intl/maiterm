@@ -1614,7 +1614,8 @@ pub(crate) async fn respond_to_prompt(
                 // Claude's rows vary by request, so the choice is matched against the rows on
                 // screen NOW (mailink/permission.rs). A label the dialog doesn't show is refused,
                 // never mapped to a digit: on a two-row dialog, 2 is No.
-                match permission_dialog_for_tab(app, tab_id) {
+                let screen = live_screen_text(app, tab_id).unwrap_or_default();
+                match permission::parse(&screen) {
                     Some(d) => match d.key_for(choice) {
                         Some(k) => k,
                         None => {
@@ -1623,6 +1624,14 @@ pub(crate) async fn respond_to_prompt(
                                 "detail": "that isn't one of the options the dialog shows" });
                         }
                     },
+                    // No readable rows. The hook's permission state holds until PostToolUse, so
+                    // through an approved command's whole run: without a dialog footer on screen
+                    // this is that window, and an Esc would interrupt the working agent.
+                    None if !permission::footer_open(&screen) => {
+                        log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: no dialog on screen");
+                        return json!({ "ok": false, "reason": "stale",
+                            "detail": "that dialog is no longer open in the terminal" });
+                    }
                     None => match permission::fallback_key(choice) {
                         Some(k) => k.to_string(),
                         None => {
@@ -3897,10 +3906,15 @@ fn trust_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<trust::TrustDial
 /// offers (`mailink/permission.rs`). Read from the live screen for the same reason as the trust
 /// dialog: a human scrolled up must not hide it.
 fn permission_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<permission::PermissionDialog> {
+    permission::parse(&live_screen_text(app, tab_id)?)
+}
+
+/// The tab's live screen as text (not the scrolled viewport).
+fn live_screen_text(app: &AppState, tab_id: &str) -> Option<String> {
     let pty = pty_for_tab(app, tab_id)?;
     let registry = app.terminal_registry.read();
     let handle = registry.get(&pty)?;
-    permission::parse(&crate::terminal::render::screen_text(&handle.term))
+    Some(crate::terminal::render::screen_text(&handle.term))
 }
 
 /// The options a Claude permission card offers: the rows on screen, or Yes/No when they can't

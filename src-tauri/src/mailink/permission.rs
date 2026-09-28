@@ -41,8 +41,16 @@ impl PermissionDialog {
 /// build doesn't know): the two answers that mean the same thing on every Claude dialog.
 pub(crate) const FALLBACK_OPTIONS: [&str; 2] = ["Yes", "No"];
 
+/// Whether the screen ends in a permission dialog's footer, whatever its rows look like. The
+/// fallback keys are sent only then: the hook's permission state outlives the dialog (it holds
+/// until PostToolUse, so through the whole approved command), and an Esc typed into a running
+/// agent interrupts it.
+pub(crate) fn footer_open(screen: &str) -> bool {
+    screen.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| l.contains("Esc to cancel"))
+}
+
 /// The key for a fallback answer: row 1 is "Yes" on every dialog seen, and Esc rejects. `None`
-/// for anything else, which is refused rather than guessed.
+/// for anything else, which is refused rather than guessed. Only while `footer_open`.
 pub(crate) fn fallback_key(choice: &str) -> Option<&'static str> {
     match choice.trim().to_ascii_lowercase().as_str() {
         "yes" | "1" => Some("1"),
@@ -143,6 +151,18 @@ mod tests {
         assert_eq!(d.key_for("2").as_deref(), Some("2"));
     }
 
+    /// Positions carry no meaning: a dialog that defaults to No lists it first, and a Bash dialog
+    /// can put "Yes, and switch to auto mode" where the fixed map pressed 3 for No.
+    #[test]
+    fn keys_follow_the_label_not_the_position() {
+        let no_first = " Do you want to proceed?\n ❯ 1. No\n   2. Yes\n   3. Yes, and switch to auto mode\n\n Esc to cancel\n";
+        let d = parse(no_first).unwrap();
+        assert_eq!(d.key_for("Yes").as_deref(), Some("2"));
+        assert_eq!(d.key_for("No").as_deref(), Some("1"));
+        let four = " Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again for: npm test\n   3. Yes, and switch to auto mode\n   4. No\n\n Esc to cancel\n";
+        assert_eq!(parse(four).unwrap().key_for("No").as_deref(), Some("4"));
+    }
+
     #[test]
     fn a_row_is_chosen_by_its_exact_label() {
         let d = parse(BASH_100).unwrap();
@@ -157,6 +177,15 @@ mod tests {
         assert_eq!(parse(&gone), None);
         assert_eq!(parse(""), None);
         assert_eq!(parse("  1 x\n Esc to cancel"), None, "a diff line is not a row");
+    }
+
+    #[test]
+    fn the_fallback_needs_a_dialog_footer_on_screen() {
+        assert!(footer_open(TWO_ROWS));
+        assert!(footer_open(" something unreadable\n Esc to cancel · Tab to amend\n\n"));
+        // An approved command running under a permission state that hasn't cleared yet.
+        assert!(!footer_open("⏺ Bash(npm test)\n  ⎿  Running…\n\n✻ Working… (esc to interrupt)\n"));
+        assert!(!footer_open(""));
     }
 
     #[test]
