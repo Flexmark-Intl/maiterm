@@ -80,6 +80,10 @@ pub(crate) fn any_dialog_open(screen: &str) -> bool {
 enum Footer {
     Tool,
     Plan,
+    /// No footer at all: WebFetch's dialog (and, per the 2.1.283 bundle, sandbox-network and
+    /// EnterPlanMode's) ends at its last row. The "footer" index is one past the screen's last
+    /// line, so the rows are everything above it.
+    Bare,
 }
 
 /// How many lines the plan footer's path may wrap onto: it is the per-account config dir plus a
@@ -105,10 +109,30 @@ fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
             return Some((i, Footer::Plan));
         }
         if l.trim().is_empty() || row(l).is_some() {
-            return None;
+            break;
         }
     }
-    None
+    bare_dialog(lines, last)
+}
+
+/// A dialog with no footer: the screen ends in its rows (or a row's wrapped continuation),
+/// which run unbroken up to row 1, and the line above row 1 asks "Do you want …". The question
+/// is required because numbered rows at the bottom of a screen are otherwise ordinary output.
+fn bare_dialog(lines: &[&str], last: usize) -> Option<(usize, Footer)> {
+    let mut i = last;
+    loop {
+        let l = lines[i];
+        match row(l) {
+            Some((1, _)) => {
+                let above = lines[..i].iter().rposition(|l| !l.trim().is_empty())?;
+                return lines[above].contains("Do you want").then_some((last + 1, Footer::Bare));
+            }
+            Some(_) => {}
+            None if l.starts_with("    ") && !l.trim().is_empty() => {}
+            None => return None,
+        }
+        i = i.checked_sub(1)?;
+    }
 }
 
 /// The key for a fallback answer: row 1 is "Yes" on every tool dialog seen, and Esc rejects.
@@ -203,6 +227,19 @@ mod tests {
     const WRITE_60: &str = include_str!("testdata/permission_write_60.txt");
     const TWO_ROWS: &str = include_str!("testdata/permission_two_rows_100.txt");
     const PLAN_100: &str = include_str!("testdata/permission_plan_100.txt");
+    const WEBFETCH_100: &str = include_str!("testdata/permission_webfetch_100.txt");
+
+    /// WebFetch's dialog has no footer: it ends at its last row.
+    #[test]
+    fn a_dialog_with_no_footer_is_read_from_its_question_and_rows() {
+        let d = parse(WEBFETCH_100).expect("open");
+        assert_eq!(d.options, vec!["Yes", "Yes, and don't ask again for example.com", "No, and tell Claude what to do differently (esc)"]);
+        assert_eq!(d.key_for("No, and tell Claude what to do differently (esc)").as_deref(), Some("3"));
+        assert!(dialog_open(WEBFETCH_100));
+        // Numbered rows at the bottom of ordinary output are not a dialog.
+        assert!(!dialog_open("Steps:\n 1. build\n 2. test\n"));
+        assert_eq!(parse("Steps:\n 1. build\n 2. test\n"), None);
+    }
 
     #[test]
     fn reads_the_real_three_row_dialogs() {
