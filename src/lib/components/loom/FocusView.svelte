@@ -57,7 +57,7 @@
       ),
     ),
   );
-  const sections = $derived(focusSections(chats, now));
+  const sections = $derived(focusSections(chats, now, loomStore.focusChatTabId));
   const listed = $derived([...sections.needsYou, ...sections.working, ...sections.recent]);
 
   /** The open chat: the one picked, else the first that needs you. The fallback is written back

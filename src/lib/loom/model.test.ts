@@ -176,4 +176,10 @@ describe('Focus', () => {
     expect(s.working.map((c) => c.tabId)).toEqual(['working']);
     expect(s.recent.map((c) => c.tabId)).toEqual(['recent', 'unread']);
   });
+
+  it('keeps the open chat listed when it qualifies for nothing else', () => {
+    const s = focusSections([chat('gone', { state: null })], NOW, 'gone');
+    expect(s.recent.map((c) => c.tabId)).toEqual(['gone']);
+    expect(focusSections([chat('gone', { state: null })], NOW).recent).toEqual([]);
+  });
 });

@@ -214,13 +214,17 @@ export interface FocusSections<T extends FocusChat> {
 }
 
 /** Needs you (a permission prompt, or a question on one of its tasks), then working, then
- *  unread or active since the start of yesterday. Opening a chat never removes it. */
-export function focusSections<T extends FocusChat>(chats: T[], now: number): FocusSections<T> {
+ *  unread or active since the start of yesterday. Opening a chat never removes it: `openId`
+ *  is always listed (in recent when it qualifies for nothing else), so a chat answered after
+ *  its agent exited keeps a row to come back to. */
+export function focusSections<T extends FocusChat>(chats: T[], now: number, openId?: string | null): FocusSections<T> {
   const since = focusSince(now);
   const needsYou = chats.filter((c) => c.state === 'permission' || c.asks);
   const working = chats.filter((c) => !needsYou.includes(c) && c.state === 'active');
   const recent = chats
-    .filter((c) => !needsYou.includes(c) && !working.includes(c) && (c.unread || c.lastActivity >= since))
+    .filter(
+      (c) => !needsYou.includes(c) && !working.includes(c) && (c.unread || c.lastActivity >= since || c.tabId === openId),
+    )
     .sort((a, b) => b.lastActivity - a.lastActivity);
   return { needsYou, working, recent };
 }

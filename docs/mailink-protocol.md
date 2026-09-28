@@ -2028,10 +2028,14 @@ Active (which clears the blocker), and types a `[maiTerm] The human answered…`
 carrying tab. Like `/start`, it crosses into the webview and answers the §13.4 envelope, and
 `result.told` means the same thing (`tab`, `agent` relays it later, `nobody`).
 - **A refusal is `accepted:false` with the sentence in `reason`**, the §13.4 rule, and nothing
-  is typed. Show `reason` verbatim and re-read the task (`GET /tasks`): the three refusals are
-  a stale answer (the agent replaced its question), a task no longer waiting (answered elsewhere
-  or moved on), and an answer that doesn't fit (an option that wasn't offered, or a decision
-  with neither option nor text).
+  is typed. Show `reason` verbatim and re-read the task (`GET /tasks`). The refusals are a stale
+  answer (the agent replaced its question), a task no longer waiting (answered elsewhere or moved
+  on), an answer that doesn't fit (an option that wasn't offered, or a decision with neither
+  option nor text), and a task deleted in between.
+- **`confirmed:false` is a timeout** (§13.4): the desktop's screen may be asleep, and there is
+  no `result`. The answer may still land; don't show it as delivered, and don't re-send it at
+  once. Watch the task (the WS `tasks` event, or a later `GET /tasks`): a second answer after
+  the first lands is refused as no longer waiting, which is harmless.
 - **`askedAt` is required and is the stale guard.** Send back the `blocker.askedAt` you rendered.
   An agent can replace its question between your render and the tap.
 - `option` is an index into `blocker.options`. `text` is the answer for a decision with no

@@ -789,7 +789,10 @@ async fn post_task_answer(
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "text": body.text });
     let mut out = overlord_act(&s, &window, "tasks.answer", args).await;
-    if out.0["accepted"] == Value::Bool(true) {
+    // Only a CONFIRMED answer gets the row. On a timeout (accepted, unconfirmed) the webview
+    // hasn't acted, so the row would still show the open question with its askedAt, and a
+    // `result` holding only `task` reads to a client like an answer that told nobody.
+    if out.0["accepted"] == Value::Bool(true) && out.0["confirmed"] == Value::Bool(true) {
         if let Some(row) = board::task_row(&s.app, &task_id) {
             out.0["result"]["task"] = row;
         }
