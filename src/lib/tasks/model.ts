@@ -357,6 +357,66 @@ export function blockerNote(b: TaskBlocker): string {
   return `${BLOCKER_LABEL[b.kind]}: ${b.question}`;
 }
 
+/** The human's answer to a blocker. `asked_at` names the question being answered. */
+export interface BlockerAnswer {
+  asked_at: string;
+  /** Index into a decision's options. */
+  option?: number;
+  /** Free text: the answer itself for a decision without options, or a comment. */
+  text?: string;
+}
+
+export type AnswerResult =
+  | { ok: true; note: string; message: string }
+  | { ok: false; reason: 'no_blocker' | 'stale' | 'bad_answer'; detail: string };
+
+/**
+ * Turn the human's answer into the log line and the message typed to the agent. Pure; the
+ * caller applies it (overlordStore.answerBlocker).
+ *
+ * `asked_at` must match the blocker on the row. An agent can re-ask between the moment a
+ * human reads the question and the moment they tap, and an answer to the old question
+ * delivered against the new one is worse than none: the options may have changed meaning.
+ */
+export function answerBlocker(task: Task, answer: BlockerAnswer): AnswerResult {
+  const b = task.blocker;
+  if (!b || task.status !== 'blocked') {
+    return { ok: false, reason: 'no_blocker', detail: 'This task is not waiting on anything to answer. It may already have been answered or moved on.' };
+  }
+  if (b.asked_at !== answer.asked_at) {
+    return { ok: false, reason: 'stale', detail: 'The agent has asked something new since this was shown. Read the new question before answering.' };
+  }
+  const text = answer.text?.trim() ?? '';
+  const opts = b.options ?? [];
+  let choice: string | null = null;
+  if (answer.option !== undefined) {
+    if (b.kind !== 'decision' || !Number.isInteger(answer.option) || !opts[answer.option]) {
+      return { ok: false, reason: 'bad_answer', detail: 'That option is not one of the choices offered.' };
+    }
+    choice = opts[answer.option].label;
+  }
+  if (b.kind === 'decision' && !choice && !text) {
+    return { ok: false, reason: 'bad_answer', detail: opts.length ? 'Pick one of the options, or write an answer.' : 'Write an answer.' };
+  }
+
+  const ref = `task "${task.title}" (id ${task.id})`;
+  const comment = text ? `\n${text}` : '';
+  if (b.kind === 'decision') {
+    const said = choice ?? text;
+    return {
+      ok: true,
+      note: `Decided: ${said}${choice && text ? ` (${text})` : ''}`,
+      message: `[maiTerm] The human answered your question on ${ref}.\nQuestion: ${b.question}\nAnswer: ${said}${choice ? comment : ''}\n\nThe task is back in Active. Carry on from here.`,
+    };
+  }
+  const did = b.kind === 'action' ? 'Done by the human' : 'Cleared by the human';
+  return {
+    ok: true,
+    note: `${did}${text ? `: ${text}` : ''}`,
+    message: `[maiTerm] ${b.kind === 'action' ? 'The human has done what' : 'The human says the wait is over on what'} ${ref} was waiting for: ${b.question}${comment}\n\nThe task is back in Active. Carry on from here.`,
+  };
+}
+
 /** Map a runtime's own vocabulary onto ours (importer + MCP callers, which speak
  *  Claude's pending/in_progress/completed). Anything unrecognized lands in backlog. */
 export function statusFromAgent(status: string | undefined, blocked?: boolean): TaskStatus {

@@ -636,7 +636,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
     // `blocker` (docs/tasks.md §3.1) is shared by createTasks and updateTasks.
     let blocker_schema = serde_json::json!({
         "type": "object",
-        "description": "Why this task is blocked when the reason is NOT another task: it puts the task in Blocked with your question on it, where the human sees it on the task board. Use it whenever you stop on something only the human can settle — do not leave the question in your chat output, where it scrolls away. Waiting on other tasks is block_on, not this.",
+        "description": "Why this task is blocked when the reason is NOT another task: it puts the task in Blocked with your question on it, where the human sees it and answers it; the answer is typed back to you as a message starting \"[maiTerm] The human answered\", and the task moves back to Active. Use it whenever you stop on something only the human can settle — do not leave the question in your chat output, where it scrolls away. Waiting on other tasks is block_on, not this.",
         "properties": {
             "kind": { "type": "string", "enum": ["decision", "action", "external"], "description": "'decision': the human has to choose (give options). 'action': only the human can do it — a sudo, a login, a payment (give the command if there is one). 'external': waiting on something outside maiTerm — a review, CI, another person." },
             "question": { "type": "string", "description": "One line the human can answer without scrolling back: 'Deploy the relay to production now?', not 'see above'." },

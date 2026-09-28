@@ -351,6 +351,25 @@ log line ("Waiting on your decision: …") so the history records what was asked
 `createTasks` it applies to new rows only: a re-sent list after a compact must not re-ask
 a question the row already carries.
 
+Two consequences of the rule, both found in review. **Anything that rewrites a status
+deletes the question**, so writers must not supply a status nobody asked for: `createTasks`
+passes none when the agent sent none, and a reclaimed row keeps its lane. **Setting a
+blocker on an `imported` row adopts it (origin becomes `agent`).** Otherwise the importer,
+which re-derives an imported row's status from the runtime's todo file every tick, would
+move it out of Blocked within seconds.
+
+**Answering is a human verb** (`overlordStore.answerBlocker`, text from the pure
+`answerBlocker` in `tasks/model.ts`). It logs the answer as a human note ("Decided: …",
+"Done by the human"), moves the task to Active (which clears the blocker by the rule
+above), and types a `[maiTerm] The human answered…` message into the carrying tab. It works
+like "Do it": no MCP tool reaches it, because the text is typed with the human's authority.
+The move happens even if the paste can't land, and `told` reports `tab` / `agent` (the
+Overlord relays it) / `nobody`. The answer names the question it answers (`asked_at`), and
+a mismatch is refused as `stale`: an agent can re-ask between the human reading and
+tapping, and an answer delivered against a different question is worse than none. Today
+the task panel answers; the decisions queue and the phone (protocol 0.13) will use the same
+method.
+
 ## 4. Workstreams
 
 One agent tab is routinely asked to do two unrelated things. A **workstream** is a named

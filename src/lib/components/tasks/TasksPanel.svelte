@@ -334,6 +334,28 @@
     );
   }
 
+  /** Free-text answer being typed under one blocker. */
+  let answerDraft = $state<{ id: string; text: string }>({ id: '', text: '' });
+
+  async function answer(t: Task, option?: number) {
+    if (!t.blocker) return;
+    const text = answerDraft.id === t.id ? answerDraft.text : '';
+    const r = await overlordStore.answerBlocker(t.id, { asked_at: t.blocker.asked_at, option, text });
+    if (!r.answered) {
+      note(t.id, r.detail ?? 'Could not answer.');
+      return;
+    }
+    answerDraft = { id: '', text: '' };
+    note(
+      t.id,
+      r.told === 'tab'
+        ? 'Answer sent to the agent.'
+        : r.told === 'agent'
+          ? 'Answered. The tab was busy, so Overlord will pass it on.'
+          : 'Answered and moved to Active, but the agent could not be told. The tab is not reachable.',
+    );
+  }
+
   function setAssignee(t: Task, mineNow: boolean) {
     tasksStore.update(workspaceId, t.id, { tab_id: mineNow ? tabId : null });
   }
@@ -604,13 +626,32 @@
                   <span class="blocker-q">{t.blocker.question}</span>
                   {#if t.blocker.context}<span class="blocker-ctx">{t.blocker.context}</span>{/if}
                   {#if t.blocker.options?.length}
-                    <ul class="blocker-opts">
+                    <div class="blocker-opts">
                       {#each t.blocker.options as o, i (i)}
-                        <li class:rec={o.recommended}>{o.label}{#if o.recommended}<em> recommended</em>{/if}{#if o.detail}<span> — {o.detail}</span>{/if}</li>
+                        <button class="blocker-opt" class:rec={o.recommended} onclick={() => answer(t, i)}>
+                          <b>{o.label}{#if o.recommended}<em> recommended</em>{/if}</b>
+                          {#if o.detail}<span>{o.detail}</span>{/if}
+                        </button>
                       {/each}
-                    </ul>
+                    </div>
                   {/if}
                   {#if t.blocker.command}<code class="blocker-cmd">{t.blocker.command}</code>{/if}
+                  <div class="blocker-answer">
+                    <input
+                      id="blocker-answer-{t.id}"
+                      placeholder={t.blocker.kind === 'decision'
+                        ? t.blocker.options?.length ? 'Or write an answer…' : 'Your answer…'
+                        : 'Add a comment (optional)…'}
+                      value={answerDraft.id === t.id ? answerDraft.text : ''}
+                      oninput={(e) => (answerDraft = { id: t.id, text: e.currentTarget.value })}
+                      onkeydown={(e) => { if (e.key === 'Enter' && (t.blocker?.kind !== 'decision' || answerDraft.text.trim())) answer(t); }}
+                    />
+                    {#if t.blocker.kind === 'decision'}
+                      <button class="mini-btn" disabled={answerDraft.id !== t.id || !answerDraft.text.trim()} onclick={() => answer(t)}>Send</button>
+                    {:else}
+                      <button class="mini-btn" onclick={() => answer(t)}>{t.blocker.kind === 'action' ? "I've done it" : 'It arrived'}</button>
+                    {/if}
+                  </div>
                 </div>
               {/if}
 
@@ -965,9 +1006,45 @@
   }
   .blocker-q { color: var(--fg); font-weight: 600; }
   .blocker-ctx { color: var(--fg-dim); }
-  .blocker-opts { margin: 0; padding-left: 14px; color: var(--fg); }
-  .blocker-opts em { color: var(--kind); font-style: normal; font-size: 9.5px; }
-  .blocker-opts span { color: var(--fg-dim); }
+  .blocker-opts { display: flex; flex-direction: column; gap: 3px; }
+  .blocker-opt {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    text-align: left;
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light);
+    border-radius: 4px;
+    padding: 4px 6px;
+    color: var(--fg);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .blocker-opt:hover, .blocker-opt:focus-visible { border-color: var(--kind); }
+  .blocker-opt em { color: var(--kind); font-style: normal; font-size: 9.5px; font-weight: 400; }
+  .blocker-opt span { color: var(--fg-dim); }
+  .blocker-answer { display: flex; gap: 4px; }
+  .blocker-answer input {
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-dark);
+    border: 1px solid var(--bg-light);
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+  .mini-btn {
+    background: var(--kind);
+    color: var(--bg-dark);
+    border: 0;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .mini-btn:disabled { opacity: 0.4; cursor: default; }
   .blocker-cmd {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 10.5px;

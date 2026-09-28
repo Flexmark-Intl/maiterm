@@ -23,6 +23,7 @@ import {
   statusFromAgent,
   TASK_STATUSES,
   BLOCKER_OPTION_CAP,
+  answerBlocker,
   parseBlocker,
   settleBlocker,
 } from './model';
@@ -70,6 +71,44 @@ describe('a blocker says what a Blocked task is waiting for', () => {
     const t = makeTask({ title: 'Deploy', status: 'todo', blocker: ok({ kind: 'decision', question: 'Deploy now?' }) }, '2026-09-27T00:00:00Z');
     expect(t.status).toBe('blocked');
     expect(t.notes?.[0].text).toBe('Waiting on your decision: Deploy now?');
+  });
+
+  describe('answering', () => {
+    const at = '2026-09-27T00:00:00Z';
+    const withBlocker = (raw: Parameters<typeof parseBlocker>[0]) =>
+      ({ ...task({ title: 'Relay', status: 'blocked' }), id: 't1', blocker: ok(raw) });
+    const decision = withBlocker({ kind: 'decision', question: 'Deploy now?', options: [{ label: 'Deploy now' }, { label: 'Wait' }] });
+
+    it('delivers the chosen option with the question it answers', () => {
+      const r = answerBlocker(decision, { asked_at: at, option: 1, text: 'after the release' });
+      expect(r).toMatchObject({ ok: true, note: 'Decided: Wait (after the release)' });
+      if (r.ok) expect(r.message).toContain('Question: Deploy now?\nAnswer: Wait\nafter the release');
+    });
+
+    it('refuses an answer to a question the agent has since replaced', () => {
+      expect(answerBlocker(decision, { asked_at: '2026-09-26T00:00:00Z', option: 0 })).toMatchObject({ ok: false, reason: 'stale' });
+    });
+
+    it('refuses an option that was not offered, and an empty decision', () => {
+      expect(answerBlocker(decision, { asked_at: at, option: 5 })).toMatchObject({ ok: false, reason: 'bad_answer' });
+      expect(answerBlocker(decision, { asked_at: at, text: '  ' })).toMatchObject({ ok: false, reason: 'bad_answer' });
+    });
+
+    it('takes free text for a decision without options', () => {
+      const free = withBlocker({ kind: 'decision', question: 'Which port?' });
+      expect(answerBlocker(free, { asked_at: at, text: '8443' })).toMatchObject({ ok: true, note: 'Decided: 8443' });
+    });
+
+    it('marks an action done with no answer needed', () => {
+      const act = withBlocker({ kind: 'action', question: 'Run sudo mdutil', command: 'sudo mdutil -i off /V' });
+      const r = answerBlocker(act, { asked_at: at });
+      expect(r).toMatchObject({ ok: true, note: 'Done by the human' });
+      if (r.ok) expect(r.message).toContain('The human has done what');
+    });
+
+    it('refuses a task that has moved on', () => {
+      expect(answerBlocker({ ...decision, status: 'active' }, { asked_at: at, option: 0 })).toMatchObject({ ok: false, reason: 'no_blocker' });
+    });
   });
 
   it('lives only in the blocked lane', () => {

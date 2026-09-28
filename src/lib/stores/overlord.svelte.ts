@@ -25,7 +25,7 @@ import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
-import { findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type TaskRow } from '$lib/tasks/model';
+import { answerBlocker as answerBlockerText, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
 /**
@@ -3305,6 +3305,55 @@ function createOverlordStore() {
         task.id,
       );
       return { started: true, told: 'agent' };
+    },
+
+    /**
+     * The human answers a blocked task's question (docs/tasks.md §3.1): record the answer in
+     * the task's log, move the task back to Active (which clears the blocker), and type the
+     * answer into the carrying tab.
+     *
+     * **Human-only, like `startTask`, and for the same reason.** The answer is typed into an
+     * agent's terminal with the human's authority, so no MCP tool reaches this; an agent can
+     * clear its own blocker with `updateTasks`, which types nothing.
+     *
+     * The task moves whether or not the tab could be typed into: the decision is made, and
+     * losing it because a paste couldn't land would be worse. `told` says what reached the
+     * agent, with the same Overlord relay fallback as "Do it".
+     */
+    async answerBlocker(
+      id: string,
+      answer: BlockerAnswer,
+    ): Promise<{ answered: boolean; told: 'tab' | 'agent' | 'nobody'; reason?: string; detail?: string }> {
+      const hit = tasksStore.findAnywhere(id);
+      if (!hit) return { answered: false, told: 'nobody', reason: 'not_found', detail: 'No such task.' };
+      const { workspaceId, task } = hit;
+      const r = answerBlockerText(task, answer);
+      if (!r.ok) return { answered: false, told: 'nobody', reason: r.reason, detail: r.detail };
+      tasksStore.update(workspaceId, id, { status: 'active', notes: appendNote(task, r.note, 'human') });
+      bumpLive();
+      const tabId = task.tab_id;
+      if (!tabId) return { answered: true, told: 'nobody' };
+
+      const step: OverlordStep = { kind: 'process', text: r.message };
+      if (await noticeToTab(tabId, r.message, 'answer')) {
+        ledger(tabId, null, 'human', 0, step, 'sent');
+        return { answered: true, told: 'tab' };
+      }
+      ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
+      // Same three conditions as startTask's fallback, for the same reasons.
+      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+        return { answered: true, told: 'nobody' };
+      }
+      escalate(
+        tabId,
+        null,
+        'task_handoff',
+        `The human answered a blocked task carried by ${tabDisplayName(tabId)}, but that tab ` +
+          `could not be typed into just then, so it has NOT been told. Pass this on when it is ` +
+          `reachable:\n\n${r.message}`,
+        task.id,
+      );
+      return { answered: true, told: 'agent' };
     },
 
     /** Hand a board task to the Overlord agent to carry (the card's "Send").
