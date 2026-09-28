@@ -322,6 +322,32 @@ export interface Task {
   /** Append-only progress log, oldest first. Capped at `TASK_NOTE_CAP` on append and
    *  again by Rust before disk. */
   notes?: TaskNote[];
+  /** What a Blocked task is waiting for when it isn't another task. Lives only while
+   *  `status` is 'blocked' (`settleBlocker`); dependencies are derived from `blocked_by`. */
+  blocker?: TaskBlocker | null;
+}
+
+/** 'decision': the human chooses. 'action': only the human can do it (a sudo, a login).
+ *  'external': waiting on something outside maiTerm (a review, CI, a person). */
+export type BlockerKind = 'decision' | 'action' | 'external';
+
+export interface BlockerOption {
+  label: string;
+  detail?: string | null;
+  recommended?: boolean;
+}
+
+export interface TaskBlocker {
+  kind: BlockerKind;
+  /** One line: the question, the action, or what is being waited on. */
+  question: string;
+  context?: string | null;
+  /** Choices for a decision; empty means the answer is free text. */
+  options?: BlockerOption[];
+  /** For an action: the exact command the human has to run. */
+  command?: string | null;
+  asked_at: string;
+  asked_by: TaskNote['by'];
 }
 
 export interface Workspace {

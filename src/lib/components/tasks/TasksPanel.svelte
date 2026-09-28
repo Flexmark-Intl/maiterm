@@ -18,7 +18,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
+  import { BLOCKER_LABEL, effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
@@ -596,6 +596,24 @@
                 </div>
               {/if}
 
+              <!-- What the agent stopped on, when it isn't another task: the question stays
+                   here instead of scrolling away in the agent's output. -->
+              {#if t.blocker && t.status === 'blocked'}
+                <div class="blocker" data-kind={t.blocker.kind}>
+                  <span class="blocker-kind">{BLOCKER_LABEL[t.blocker.kind]} · {fmtAge(t.blocker.asked_at)}</span>
+                  <span class="blocker-q">{t.blocker.question}</span>
+                  {#if t.blocker.context}<span class="blocker-ctx">{t.blocker.context}</span>{/if}
+                  {#if t.blocker.options?.length}
+                    <ul class="blocker-opts">
+                      {#each t.blocker.options as o, i (i)}
+                        <li class:rec={o.recommended}>{o.label}{#if o.recommended}<em> recommended</em>{/if}{#if o.detail}<span> — {o.detail}</span>{/if}</li>
+                      {/each}
+                    </ul>
+                  {/if}
+                  {#if t.blocker.command}<code class="blocker-cmd">{t.blocker.command}</code>{/if}
+                </div>
+              {/if}
+
               {#if detailFor === t.id}
                 <textarea
                   class="detail"
@@ -922,6 +940,40 @@
     font-size: 10px;
     margin: 2px 0 0 calc(4px + 3.6em);
     opacity: 0.85;
+  }
+
+  .blocker {
+    --kind: var(--orange, #ff9e64);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: 4px 0 2px calc(4px + 3.6em);
+    padding: 5px 7px;
+    border-left: 2px solid var(--kind);
+    background: color-mix(in srgb, var(--kind) 8%, transparent);
+    border-radius: 0 4px 4px 0;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+  .blocker[data-kind='action'] { --kind: var(--red, #f7768e); }
+  .blocker[data-kind='external'] { --kind: var(--cyan, #7dcfff); }
+  .blocker-kind {
+    color: var(--kind);
+    font-size: 9.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .blocker-q { color: var(--fg); font-weight: 600; }
+  .blocker-ctx { color: var(--fg-dim); }
+  .blocker-opts { margin: 0; padding-left: 14px; color: var(--fg); }
+  .blocker-opts em { color: var(--kind); font-style: normal; font-size: 9.5px; }
+  .blocker-opts span { color: var(--fg-dim); }
+  .blocker-cmd {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 10.5px;
+    background: var(--bg-dark);
+    padding: 3px 5px;
+    border-radius: 3px;
   }
 
   .detail {

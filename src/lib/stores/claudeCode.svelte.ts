@@ -1,4 +1,4 @@
-import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
+import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
@@ -13,7 +13,7 @@ import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { appendNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isDelegation, isInFlight, normalizeTitle, resolveBlockers, resolveEdges, TASK_NOTE_CAP } from '$lib/tasks/model';
+import { appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isDelegation, isInFlight, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -1667,6 +1667,8 @@ function createClaudeCodeStore() {
     status?: string;
     blocked_by?: string[];
     assign_to_me?: boolean;
+    /** Files the task straight into Blocked with this reason (docs/tasks.md §3.1). */
+    blocker?: BlockerInput;
   }
 
   interface TaskToolUpdate {
@@ -1686,6 +1688,8 @@ function createClaudeCodeStore() {
     assign_to?: string | null;
     /** One line appended to the task's log. Never replaces `detail`. */
     note?: string;
+    /** Sets the reason a task is Blocked (and moves it there), or null to clear it. */
+    blocker?: BlockerInput | null;
   }
 
   /** The shape agents see. Deliberately not the raw Task: `normalized_title` is an
@@ -1726,6 +1730,7 @@ function createClaudeCodeStore() {
       assignee: t.tab_id === selfTabId ? 'you' : (t.tab_id ?? 'unassigned'),
       ...(blockers.length ? { blocked_by: blockers } : {}),
       ...(waiters.length ? { blocking: waiters.map((w) => ({ id: w.id, title: w.title })) } : {}),
+      ...(t.blocker ? { blocker: t.blocker } : {}),
       // The tail of the log, not all of it. A workspace-scope list carries every row, and
       // the newest few notes are what says why a task is where it is — the older ones are
       // history the agent can ask for by narrowing to `scope: 'tab'`.
@@ -1831,13 +1836,22 @@ function createClaudeCodeStore() {
     if ('error' in loc) return loc;
     const inputs = (args.tasks ?? []).filter((t) => t?.title?.trim());
     if (!inputs.length) return { error: 'tasks must be a non-empty array of { title }.' };
+    // Validated before anything is written, so a bad blocker on the third item doesn't leave
+    // the first two created and the agent unsure which of its list landed.
+    const blockers = new Map<number, TaskBlocker>();
+    for (const [i, t] of inputs.entries()) {
+      if (!t.blocker) continue;
+      const parsed = parseBlocker(t.blocker, 'agent');
+      if (!parsed.ok) return { error: `tasks[${i}] "${t.title!.trim()}": ${parsed.detail} Nothing was created.` };
+      blockers.set(i, parsed.blocker);
+    }
     // Agents pass a workstream NAME, not an id — requiring a round trip just to record
     // work would make the common case worse. Reused if it exists, created if not.
     const stream = args.workstream ? tasksStore.ensureWorkstream(loc.workspace.id, args.workstream) : null;
     const before = new Set(tasksStore.forWorkspace(loc.workspace.id).map((t) => t.id));
     const rows = tasksStore.addMany(
       loc.workspace.id,
-      inputs.map((t) => ({
+      inputs.map((t, i) => ({
         title: t.title!.trim(),
         detail: t.detail ?? null,
         status: coerceStatus(t.status),
@@ -1846,6 +1860,9 @@ function createClaudeCodeStore() {
         blocked_by: t.blocked_by ?? [],
         origin: 'agent' as const,
         workstream_id: stream?.id ?? null,
+        // Applies to NEW rows only. A re-sent item matching an existing row leaves that row's
+        // blocker alone, so re-sending a list after a compact doesn't re-ask the question.
+        blocker: blockers.get(i) ?? null,
       })),
     );
     // Report duplicates honestly rather than silently: an agent re-sending its list after
@@ -1937,9 +1954,33 @@ function createClaudeCodeStore() {
           }
           assignTo = want;
         }
+        // Same reason as the assignee: resolved before anything is touched.
+        let blocker: Task['blocker'] | undefined;
+        if (u.blocker === null) blocker = null;
+        else if (u.blocker !== undefined) {
+          const parsed = parseBlocker(u.blocker, 'agent');
+          if (!parsed.ok) {
+            refused.push({ id: u.id!, reason: 'bad_blocker', detail: `${parsed.detail} Nothing in this update was applied.` });
+            continue;
+          }
+          if (u.status && coerceStatus(u.status) !== 'blocked') {
+            refused.push({
+              id: u.id!,
+              reason: 'bad_blocker',
+              detail: 'A blocker is the reason a task is Blocked, so it cannot go with another status. Omit status (setting a blocker moves the task to blocked), or send blocker: null to clear it. Nothing in this update was applied.',
+            });
+            continue;
+          }
+          blocker = parsed.blocker;
+        }
         const patch: Partial<Task> = { updated_at: new Date().toISOString() };
         if (assignTo !== undefined) patch.tab_id = assignTo;
         if (u.status) patch.status = coerceStatus(u.status);
+        if (blocker !== undefined) patch.blocker = blocker;
+        if (blocker) {
+          patch.status = 'blocked';
+          patch.notes = appendNote(list[idx], blockerNote(blocker), 'agent');
+        }
         if (u.title?.trim()) {
           patch.title = u.title.trim();
           patch.normalized_title = normalizeTitle(u.title);
@@ -1948,7 +1989,7 @@ function createClaudeCodeStore() {
         // Appended, never replacing `detail`. That separation is the whole point: `detail`
         // is the spec, and recording why a task is blocked by rewriting the spec destroys
         // the spec. Trimmed here and again by Rust before disk.
-        if (u.note?.trim()) patch.notes = appendNote(list[idx], u.note, 'agent');
+        if (u.note?.trim()) patch.notes = appendNote({ ...list[idx], notes: patch.notes ?? list[idx].notes }, u.note, 'agent');
         if (u.workstream !== undefined) {
           patch.workstream_id = u.workstream.trim()
             ? (tasksStore.ensureWorkstream(loc.workspace.id, u.workstream)?.id ?? null)

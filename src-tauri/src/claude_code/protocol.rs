@@ -632,10 +632,24 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
     // Three batched tools, deliberately no delete: an agent may mark a task done, only a
     // human removes one. All scoped to the CALLING TAB'S WORKSPACE via connection→tab
     // affinity, so a tab cannot see or touch another project's list.
+    //
+    // `blocker` (docs/tasks.md §3.1) is shared by createTasks and updateTasks.
+    let blocker_schema = serde_json::json!({
+        "type": "object",
+        "description": "Why this task is blocked when the reason is NOT another task: it puts the task in Blocked with your question on it, where the human sees it on the task board. Use it whenever you stop on something only the human can settle — do not leave the question in your chat output, where it scrolls away. Waiting on other tasks is block_on, not this.",
+        "properties": {
+            "kind": { "type": "string", "enum": ["decision", "action", "external"], "description": "'decision': the human has to choose (give options). 'action': only the human can do it — a sudo, a login, a payment (give the command if there is one). 'external': waiting on something outside maiTerm — a review, CI, another person." },
+            "question": { "type": "string", "description": "One line the human can answer without scrolling back: 'Deploy the relay to production now?', not 'see above'." },
+            "context": { "type": "string", "description": "Two or three sentences: what you found and what each choice costs." },
+            "options": { "type": "array", "maxItems": 6, "description": "Decision only. The choices, with the one you recommend marked. Omit for a free-text answer.", "items": { "type": "object", "properties": { "label": { "type": "string" }, "detail": { "type": "string" }, "recommended": { "type": "boolean" } }, "required": ["label"] } },
+            "command": { "type": "string", "description": "Action only: the exact command the human has to run." }
+        },
+        "required": ["kind", "question"]
+    });
     tools.extend(serde_json::json!([
         {
             "name": "listTasks",
-            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to), grouped by workstream. Returns each task's id, title, detail, status, workstream and assignee tab. Dependencies come back resolved, not as bare ids: `blocked_by` gives each prerequisite's title and a `state` — 'met' finished, 'waiting' still live, 'parked' off the list with an archived tab (still blocks), 'gone' deleted (does not block). `blocking` is the reverse edge, the tasks waiting on this one — check it before you go idle, so you know what you just released. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and unassigned tasks.",
+            "description": "List the tasks maiTerm is tracking for this project (the workspace this tab belongs to), grouped by workstream. Returns each task's id, title, detail, status, workstream and assignee tab. Dependencies come back resolved, not as bare ids: `blocked_by` gives each prerequisite's title and a `state` — 'met' finished, 'waiting' still live, 'parked' off the list with an archived tab (still blocks), 'gone' deleted (does not block). `blocking` is the reverse edge, the tasks waiting on this one — check it before you go idle, so you know what you just released. `blocker` is present on a task waiting on the human or on something outside maiTerm: the question and options that were asked. Use scope 'tab' for just your own, 'workspace' (default) for the whole project including other agents' work and unassigned tasks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -665,7 +679,8 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
                                 "detail": { "type": "string", "description": "Optional body: acceptance criteria, links, notes. Markdown." },
                                 "status": { "type": "string", "enum": ["backlog", "todo", "active", "blocked", "review", "done"], "description": "Defaults to 'todo'. 'backlog' means deliberately parked, not 'not started yet'." },
                                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Task ids that must finish first" },
-                                "assign_to_me": { "type": "boolean", "description": "Default true" }
+                                "assign_to_me": { "type": "boolean", "description": "Default true" },
+                                "blocker": blocker_schema.clone()
                             },
                             "required": ["title"]
                         }
@@ -695,6 +710,10 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
                                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Replace the whole dependency set. Prefer block_on/unblock_from unless you know the complete list — a replace clobbers any edge added concurrently." },
                                 "block_on": { "type": "array", "items": { "type": "string" }, "description": "Add these task ids as prerequisites, leaving existing ones alone" },
                                 "unblock_from": { "type": "array", "items": { "type": "string" }, "description": "Remove these task ids from this task's prerequisites" },
+                                "blocker": {
+                                    "anyOf": [blocker_schema, { "type": "null" }],
+                                    "description": "Set why this task is blocked (moves it to blocked; don't also send another status), or null to clear it. It clears by itself when the task leaves blocked, including when the human answers it."
+                                },
                                 "assign_to": { "description": "Who owns this task: a tab id from listWorkspaces, the literal \"me\" to claim it for yourself, or null to release it so any tab can pick it up. The tab must be in this project. Omit to leave the assignee alone — omitted and null mean different things. Handing a task to ANOTHER tab does NOT tell that tab: nothing types into a terminal on an agent's say-so. The reply's `handoffs` says who (if anyone) was told — `told: \"agent\"` means this window's Overlord will decide whether to drive it, `told: \"nobody\"` means the row is on the board and the target's panel but nobody has been notified, so mention it to your human if it needs starting now.", "type": ["string", "null"] }
                             },
                             "required": ["id"]

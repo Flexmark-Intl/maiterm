@@ -466,6 +466,7 @@ fn create_in(
                 dup.tab_id = want_tab.map(str::to_string);
                 if let Some(s) = &spec.status {
                     dup.status = s.clone();
+                    dup.settle_blocker();
                 }
                 touched = true;
             }
@@ -495,6 +496,7 @@ fn create_in(
             updated_at: now.to_string(),
             workstream_id: stream_id.clone(),
             notes: Vec::new(),
+            blocker: None,
         });
         ids.push(id);
     }
@@ -626,6 +628,7 @@ fn update_in(
     let t = &mut ws.tasks[ti];
     if let Some(s) = patch.status {
         t.status = s;
+        t.settle_blocker();
     }
     if let Some(title) = patch.title {
         t.title = title.trim().to_string();
@@ -671,6 +674,7 @@ mod tests {
             updated_at: "2026-09-06T00:00:00Z".into(),
             workstream_id: stream.map(Into::into),
             notes: Vec::new(),
+            blocker: None,
         }
     }
 

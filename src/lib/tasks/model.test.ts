@@ -22,8 +22,64 @@ import {
   normalizeTitle,
   statusFromAgent,
   TASK_STATUSES,
+  BLOCKER_OPTION_CAP,
+  parseBlocker,
+  settleBlocker,
 } from './model';
 import type { Task } from '$lib/tauri/types';
+
+describe('a blocker says what a Blocked task is waiting for', () => {
+  const ok = (raw: Parameters<typeof parseBlocker>[0]) => {
+    const r = parseBlocker(raw, 'agent', '2026-09-27T00:00:00Z');
+    if (!r.ok) throw new Error(r.detail);
+    return r.blocker;
+  };
+  const refused = (raw: Parameters<typeof parseBlocker>[0]) => {
+    const r = parseBlocker(raw, 'agent');
+    expect(r.ok).toBe(false);
+    return r.ok ? '' : r.detail;
+  };
+
+  it('takes a decision with options and trims what it keeps', () => {
+    const b = ok({ kind: 'decision', question: ' Deploy now? ', options: [{ label: 'Yes', recommended: true }, { label: ' No ', detail: '' }] });
+    expect(b).toEqual({
+      kind: 'decision', question: 'Deploy now?',
+      options: [{ label: 'Yes', recommended: true }, { label: 'No' }],
+      asked_at: '2026-09-27T00:00:00Z', asked_by: 'agent',
+    });
+  });
+
+  it('refuses a dependency with a pointer to block_on', () => {
+    expect(refused({ kind: 'dependency', question: 'x' })).toMatch(/block_on/);
+  });
+
+  it('refuses what would put a question in the wrong place', () => {
+    refused({ kind: 'urgent', question: 'x' });
+    refused({ kind: 'decision', question: '  ' });
+    refused({ kind: 'external', question: 'CI', options: [{ label: 'a' }] });
+    refused({ kind: 'decision', question: 'x', command: 'sudo true' });
+    refused({ kind: 'decision', question: 'x', options: [{ label: '' }] });
+    refused({ kind: 'decision', question: 'x', options: Array.from({ length: BLOCKER_OPTION_CAP + 1 }, (_, i) => ({ label: `o${i}` })) });
+  });
+
+  it('takes an action with its command', () => {
+    expect(ok({ kind: 'action', question: 'Run it', command: 'sudo mdutil -i off /V' }).command).toBe('sudo mdutil -i off /V');
+  });
+
+  it('files a new task straight into Blocked and logs the question', () => {
+    const t = makeTask({ title: 'Deploy', status: 'todo', blocker: ok({ kind: 'decision', question: 'Deploy now?' }) }, '2026-09-27T00:00:00Z');
+    expect(t.status).toBe('blocked');
+    expect(t.notes?.[0].text).toBe('Waiting on your decision: Deploy now?');
+  });
+
+  it('lives only in the blocked lane', () => {
+    const t = { ...task({ status: 'blocked' }), blocker: ok({ kind: 'external', question: 'Review' }) };
+    expect(settleBlocker(t)).toBe(t);
+    for (const status of TASK_STATUSES.filter((s) => s !== 'blocked')) {
+      expect(settleBlocker({ ...t, status }).blocker).toBeNull();
+    }
+  });
+});
 
 /** Build a task the way the store does, so `normalized_title` matches `title` unless a
  *  test deliberately overrides it (the legacy-row case below). */

@@ -50,6 +50,7 @@ pub fn set_workspace_tasks(
             let drop = t.notes.len() - TASK_NOTE_CAP;
             t.notes.drain(..drop);
         }
+        t.settle_blocker();
     }
     for w in workstreams.iter_mut() {
         w.normalized_name = Workstream::normalize_name(&w.name);

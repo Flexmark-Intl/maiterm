@@ -3348,6 +3348,7 @@ mod reload_carry_tests {
                 updated_at: "2026-08-01T00:00:00Z".to_string(),
                 workstream_id: None,
                 notes: Vec::new(),
+                blocker: None,
             }],
             wake_on_resume: true,
             // A reload carries the service binding: the replacement is the same tab to the

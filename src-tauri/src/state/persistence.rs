@@ -522,6 +522,7 @@ pub fn migrate_app_data(data: &mut AppData) {
                 created_at,
                 updated_at,
                 notes: Vec::new(),
+                blocker: None,
             });
             moved += 1;
         }

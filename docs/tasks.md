@@ -310,6 +310,47 @@ something that exists. The clamp accepts it, so nothing breaks if an agent sends
 Old rows migrate `backlog` → `todo` behind `tasks_backlog_vocabulary_migrated`. The flag is
 required: re-running that remap would drag genuinely parked tasks back onto the board.
 
+### 3.1 Blockers: what a Blocked task is waiting for (2026-09-27)
+
+Until now a blocker was the Blocked lane plus free text in `notes`. Nothing could tell
+"waiting on your decision" (the relay-deploy card, "needs the human's go-ahead") from
+"waiting on eight other tasks", so a decision could only be surfaced by reading every note.
+The agent asked its question in its chat output, carried on with other work, and the
+question scrolled away. This record is the base for the Workstream Loom (the loom, the
+decisions queue, and Focus), and it will be the phone's "prompt me".
+
+```
+Task.blocker: Option<TaskBlocker>
+TaskBlocker { kind, question, context?, options[{label, detail?, recommended?}], command?,
+              asked_at, asked_by }
+```
+
+| kind | means | carries |
+|---|---|---|
+| `decision` | the human has to choose | `options` (≤ 6; none = free-text answer) |
+| `action` | only the human can do it: a sudo, a login, a payment | `command` |
+| `external` | waiting on something outside maiTerm: a review, CI, a person | the question says what |
+
+**Waiting on other tasks is not a kind.** It is derived from `blocked_by` as before, and
+`parseBlocker` refuses `dependency` with a pointer to `block_on`. Storing it would give one
+fact two sources, which would then disagree.
+
+**One rule decides when a blocker exists: only while the stored lane is `blocked`.** It is
+applied at every writer's last step, not remembered by each surface: `settleBlocker` in the
+frontend store's `commit`, and `Task::settle_blocker` in `set_workspace_tasks` and on the
+phone's writes (`mailink/board.rs`). Moving the row out of Blocked by ANY route (a panel
+chip, a board drag, the phone, an agent's status, the future answer verb) is what resolves
+it, so nothing can leave a stale question standing on a task that has moved on. The reverse
+also holds: setting a blocker moves the task to `blocked`, and an update that sends a
+blocker together with another status is refused rather than guessed at.
+
+Set by agents through `createTasks` / `updateTasks` (`blocker`, or `blocker: null` to clear).
+Validation refuses rather than coerces (`parseBlocker`). A wrong kind would put the question
+in the wrong queue, and an agent that isn't told believes it asked. Setting one appends a
+log line ("Waiting on your decision: …") so the history records what was asked. On
+`createTasks` it applies to new rows only: a re-sent list after a compact must not re-ask
+a question the row already carries.
+
 ## 4. Workstreams
 
 One agent tab is routinely asked to do two unrelated things. A **workstream** is a named

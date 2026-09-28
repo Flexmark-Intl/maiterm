@@ -1,7 +1,7 @@
 /** Pure task helpers (docs/tasks.md). No runes here — the reactive surface lives in
  *  `stores/tasks.svelte.ts`, so this stays unit-testable and importable from anywhere. */
 
-import type { Task, TaskNote, TaskStatus, TaskOrigin, Workstream } from '$lib/tauri/types';
+import type { BlockerKind, BlockerOption, Task, TaskBlocker, TaskNote, TaskStatus, TaskOrigin, Workstream } from '$lib/tauri/types';
 
 /** A task tagged with the workspace it came from. A *view* type only — `workspace_id` is
  *  never persisted, since the workspace already owns the list it is nested in. Used where
@@ -267,6 +267,96 @@ export function appendNote(task: Task, text: string, by: TaskNote['by'], now = n
   return next.length > TASK_NOTE_CAP ? next.slice(next.length - TASK_NOTE_CAP) : next;
 }
 
+export const BLOCKER_KINDS: BlockerKind[] = ['decision', 'action', 'external'];
+/** Most choices a decision may offer. MUST match `BLOCKER_OPTION_CAP` in state/workspace.rs. */
+export const BLOCKER_OPTION_CAP = 6;
+const BLOCKER_TEXT_MAX = 2000;
+
+/** Drop a blocker that no longer describes the task: it lives only while the stored lane is
+ *  `blocked`. Every commit applies this, so moving a row out of Blocked by any route (panel,
+ *  agent, the answer verb) resolves it without that surface having to remember. Mirrors
+ *  `Task::settle_blocker` in Rust, which applies it again before disk and on the phone's
+ *  writes. Returns the same object when nothing changes. */
+export function settleBlocker(task: Task): Task {
+  if (!task.blocker || task.status === 'blocked') return task;
+  return { ...task, blocker: null };
+}
+
+/** What an agent sends for `blocker` on createTasks/updateTasks. */
+export interface BlockerInput {
+  kind?: string;
+  question?: string;
+  context?: string | null;
+  options?: { label?: string; detail?: string | null; recommended?: boolean }[];
+  command?: string | null;
+}
+
+export type BlockerParse = { ok: true; blocker: TaskBlocker } | { ok: false; detail: string };
+
+/**
+ * Validate an agent's blocker. Refused rather than coerced: a wrong kind puts a question in
+ * the wrong queue (an `external` wait shown as a decision asks the human something they
+ * cannot answer), and an agent told nothing believes it asked.
+ *
+ * `dependency` is refused with its own message because it is the natural thing to try, and
+ * it is derived from `blocked_by`, never stored.
+ */
+export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Date().toISOString()): BlockerParse {
+  const kind = raw?.kind as BlockerKind;
+  if (raw?.kind === 'dependency') {
+    return { ok: false, detail: 'A dependency is not a blocker kind: record it with block_on (task ids), and the task shows as waiting on them by itself.' };
+  }
+  if (!BLOCKER_KINDS.includes(kind)) {
+    return { ok: false, detail: `blocker.kind must be one of ${BLOCKER_KINDS.join(', ')}.` };
+  }
+  const question = raw.question?.trim() ?? '';
+  if (!question) return { ok: false, detail: 'blocker.question is required: one line saying what you need.' };
+  const context = raw.context?.trim() || null;
+  const command = raw.command?.trim() || null;
+  if ([question, context ?? '', command ?? ''].some((s) => s.length > BLOCKER_TEXT_MAX)) {
+    return { ok: false, detail: `Keep blocker text under ${BLOCKER_TEXT_MAX} characters; put the long version in the task's detail.` };
+  }
+  const options: BlockerOption[] = (raw.options ?? []).map((o) => ({
+    label: o?.label?.trim() ?? '',
+    ...(o?.detail?.trim() ? { detail: o.detail.trim() } : {}),
+    ...(o?.recommended ? { recommended: true } : {}),
+  }));
+  if (options.length && kind !== 'decision') {
+    return { ok: false, detail: 'Only a decision blocker takes options.' };
+  }
+  if (options.some((o) => !o.label)) return { ok: false, detail: 'Every option needs a label.' };
+  if (options.length > BLOCKER_OPTION_CAP) {
+    return { ok: false, detail: `At most ${BLOCKER_OPTION_CAP} options.` };
+  }
+  if (command && kind !== 'action') {
+    return { ok: false, detail: 'Only an action blocker takes a command.' };
+  }
+  return {
+    ok: true,
+    blocker: {
+      kind,
+      question,
+      ...(context ? { context } : {}),
+      ...(options.length ? { options } : {}),
+      ...(command ? { command } : {}),
+      asked_at: now,
+      asked_by: by,
+    },
+  };
+}
+
+/** How each kind reads to the human, everywhere it is shown. */
+export const BLOCKER_LABEL: Record<BlockerKind, string> = {
+  decision: 'Waiting on your decision',
+  action: 'Needs you',
+  external: 'Waiting outside',
+};
+
+/** The log line recorded when a blocker is set, so the task's history says what was asked. */
+export function blockerNote(b: TaskBlocker): string {
+  return `${BLOCKER_LABEL[b.kind]}: ${b.question}`;
+}
+
 /** Map a runtime's own vocabulary onto ours (importer + MCP callers, which speak
  *  Claude's pending/in_progress/completed). Anything unrecognized lands in backlog. */
 export function statusFromAgent(status: string | undefined, blocked?: boolean): TaskStatus {
@@ -333,6 +423,8 @@ export interface TaskInput {
   blocked_by?: string[];
   origin?: TaskOrigin;
   workstream_id?: string | null;
+  /** Implies `status: 'blocked'`, which `makeTask` sets. */
+  blocker?: TaskBlocker | null;
 }
 
 /** Build a persistable Task. `normalized_title` is filled in locally so in-memory dedup
@@ -343,14 +435,15 @@ export function makeTask(input: TaskInput, now = new Date().toISOString()): Task
     title: input.title,
     normalized_title: normalizeTitle(input.title),
     detail: input.detail ?? null,
-    status: input.status ?? 'todo',
+    status: input.blocker ? 'blocked' : (input.status ?? 'todo'),
     tab_id: input.tab_id ?? null,
     blocked_by: input.blocked_by ?? [],
     origin: input.origin ?? 'human',
     workstream_id: input.workstream_id ?? null,
     created_at: now,
     updated_at: now,
-    notes: [],
+    notes: input.blocker ? [{ at: now, text: blockerNote(input.blocker), by: input.blocker.asked_by }] : [],
+    ...(input.blocker ? { blocker: input.blocker } : {}),
   };
 }
 

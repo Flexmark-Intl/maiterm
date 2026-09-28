@@ -13,7 +13,7 @@
 import { error as logError } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
 import type { Task, TaskStatus, Workstream } from '$lib/tauri/types';
-import { findDuplicate, findWorkstream, isRetired, makeTask, makeWorkstream, normalizeTitle, type TaskInput } from '$lib/tasks/model';
+import { findDuplicate, findWorkstream, isRetired, makeTask, makeWorkstream, normalizeTitle, settleBlocker, type TaskInput } from '$lib/tasks/model';
 
 function createTasksStore() {
   let byWorkspace = $state<Map<string, Task[]>>(new Map());
@@ -31,8 +31,11 @@ function createTasksStore() {
     );
   }
 
-  /** Replace one workspace's list in memory and persist it. */
+  /** Replace one workspace's list in memory and persist it. Every writer comes through here,
+   *  so this is where a blocker left behind by a move out of Blocked is dropped: the in-memory
+   *  copy then agrees with what Rust writes to disk. */
   function commit(workspaceId: string, list: Task[]) {
+    list = list.map(settleBlocker);
     byWorkspace.set(workspaceId, list);
     byWorkspace = new Map(byWorkspace);
     persist(workspaceId);

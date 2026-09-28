@@ -607,7 +607,51 @@ pub struct Task {
     /// `TASK_NOTE_CAP`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<TaskNote>,
+    /// Why a Blocked task is waiting, when the reason is not another task: a question for
+    /// the human, something only the human can do, or something outside maiTerm. Lives only
+    /// while `status` is "blocked" (`settle_blocker`). Waiting on other tasks is never stored
+    /// here; it is derived from `blocked_by`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<TaskBlocker>,
 }
+
+/// What a Blocked task is waiting for (docs/tasks.md §3.1).
+///
+/// Before this a blocker was a lane plus free text in `notes`, so nothing could tell "waiting
+/// on your decision" from "waiting on eight other tasks", and a decision sat unanswered in a
+/// terminal's scrollback while the agent moved on to other work.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TaskBlocker {
+    /// "decision" (the human chooses) | "action" (only the human can do it: a sudo, a
+    /// login) | "external" (waiting on something outside maiTerm: a review, CI, a person).
+    pub kind: String,
+    /// One line: the question, the action, or what is being waited on.
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Choices for a decision. Empty means the answer is free text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<BlockerOption>,
+    /// For an action: the exact command the human has to run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    pub asked_at: String,
+    /// Same vocabulary as `TaskNote::by`.
+    pub asked_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockerOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
+}
+
+pub const BLOCKER_KINDS: &[&str] = &["decision", "action", "external"];
+/// Most choices a decision may offer. MUST match `BLOCKER_OPTION_CAP` in src/lib/tasks/model.ts.
+pub const BLOCKER_OPTION_CAP: usize = 6;
 
 /// One line in a task's progress log.
 ///
@@ -661,6 +705,22 @@ impl Task {
     /// the task somebody decided against.
     pub fn is_retired(&self) -> bool {
         self.status == "done" || self.status == "dropped"
+    }
+
+    /// Drop a blocker that no longer describes the task. One rule, applied by every writer
+    /// before disk: a blocker lives only while the stored lane is "blocked". Moving the row out
+    /// of Blocked by any route (panel, phone, agent, the answer verb) is what resolves it, so no
+    /// surface has to remember to clear it. A blocker the frontend's validation would have
+    /// refused (unknown kind, empty question) is dropped too, and so are options past the cap.
+    /// Mirrors `settleBlocker` in src/lib/tasks/model.ts.
+    pub fn settle_blocker(&mut self) {
+        let Some(b) = self.blocker.as_mut() else { return };
+        if self.status != "blocked" || !BLOCKER_KINDS.contains(&b.kind.as_str()) || b.question.trim().is_empty() {
+            self.blocker = None;
+            return;
+        }
+        b.options.retain(|o| !o.label.trim().is_empty());
+        b.options.truncate(BLOCKER_OPTION_CAP);
     }
 
     pub fn normalize_title(title: &str) -> String {
@@ -2098,6 +2158,72 @@ mod task_tests {
         );
         // Interior punctuation is meaningful — only trailing separators are trimmed.
         assert_eq!(Task::normalize_title("Fix v1.2 parser"), "fix v1.2 parser");
+    }
+
+    fn blocked(kind: &str, question: &str, options: usize) -> Task {
+        Task {
+            id: "t".into(),
+            title: "t".into(),
+            normalized_title: "t".into(),
+            detail: None,
+            status: "blocked".into(),
+            tab_id: None,
+            blocked_by: Vec::new(),
+            origin: "agent".into(),
+            created_at: "2026-09-27T00:00:00Z".into(),
+            updated_at: "2026-09-27T00:00:00Z".into(),
+            workstream_id: None,
+            notes: Vec::new(),
+            blocker: Some(super::TaskBlocker {
+                kind: kind.into(),
+                question: question.into(),
+                context: None,
+                options: (0..options)
+                    .map(|i| super::BlockerOption { label: format!("o{i}"), detail: None, recommended: false })
+                    .collect(),
+                command: None,
+                asked_at: "2026-09-27T00:00:00Z".into(),
+                asked_by: "agent".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_blocker_lives_only_in_the_blocked_lane() {
+        let mut t = blocked("decision", "Deploy now?", 2);
+        t.settle_blocker();
+        assert!(t.blocker.is_some());
+        for lane in ["active", "todo", "review", "done", "dropped", "backlog"] {
+            let mut t = blocked("decision", "Deploy now?", 2);
+            t.status = lane.into();
+            t.settle_blocker();
+            assert!(t.blocker.is_none(), "lane {lane}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_blocker_is_dropped_and_options_are_capped() {
+        let mut bad_kind = blocked("dependency", "x", 0);
+        bad_kind.settle_blocker();
+        assert!(bad_kind.blocker.is_none(), "dependency is derived, never stored");
+        let mut empty = blocked("decision", "  ", 0);
+        empty.settle_blocker();
+        assert!(empty.blocker.is_none());
+        let mut many = blocked("decision", "Pick", 9);
+        many.settle_blocker();
+        assert_eq!(many.blocker.unwrap().options.len(), super::BLOCKER_OPTION_CAP);
+    }
+
+    #[test]
+    fn a_task_without_a_blocker_round_trips_without_the_field() {
+        let mut t = blocked("decision", "x", 0);
+        t.blocker = None;
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("blocker"));
+        let with = serde_json::to_value(blocked("action", "Run sudo", 0)).unwrap();
+        assert!(with["blocker"].get("options").is_none(), "empty options are omitted");
+        let back: Task = serde_json::from_value(with).unwrap();
+        assert_eq!(back.blocker.unwrap().kind, "action");
     }
 }
 
