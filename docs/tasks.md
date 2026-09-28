@@ -366,9 +366,9 @@ like "Do it": no MCP tool reaches it, because the text is typed with the human's
 The move happens even if the paste can't land, and `told` reports `tab` / `agent` (the
 Overlord relays it) / `nobody`. The answer names the question it answers (`asked_at`), and
 a mismatch is refused as `stale`: an agent can re-ask between the human reading and
-tapping, and an answer delivered against a different question is worse than none. Today
-the task panel answers; the decisions queue and the phone (protocol 0.13) will use the same
-method.
+tapping, and an answer delivered against a different question is worse than none. The task
+panel, the Loom's decisions queue and the phone (`POST /tasks/{id}/answer`, protocol 0.13)
+all answer through this one method.
 
 ## 4. Workstreams
 

@@ -1,6 +1,7 @@
 # Workstream Loom
 
-> Status: loom, decisions and Focus views built 2026-09-27; the phone next.
+> Status: loom, decisions and Focus views built 2026-09-27; the phone half (maiLink protocol
+> 0.13: task `blocker`, `Chat.asks`, `POST /tasks/{id}/answer`) built 2026-09-28.
 > Sketch: https://claude.ai/code/artifact/c1508940-a0f8-4e88-bf1c-442143f6733f
 
 ## Why
@@ -97,4 +98,6 @@ earlier release.
 
 ## Next
 
-- The phone: blockers on the wire and decisions in "Needs you" (protocol 0.13).
+- A push when an agent asks a new question: a doorbell kind on the desktop, plus its relay
+  `KIND_BODY` line.
+- Exercise Focus live on a build with registered agent sessions (dev HMR empties the stores).
