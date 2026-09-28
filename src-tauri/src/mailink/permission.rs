@@ -65,20 +65,28 @@ enum Footer {
     Plan,
 }
 
-/// Where the dialog's footer starts, when one ends the screen. The plan dialog's wraps onto a
-/// second line with its path, so the footer may start up to two lines above the last.
+/// How many lines the plan footer's path may wrap onto: it is the per-account config dir plus a
+/// plan slug, near 175 characters, so three or four lines in a narrow split.
+const PLAN_FOOTER_MAX_LINES: usize = 6;
+
+/// Where the dialog's footer starts, when one ends the screen. A tool dialog's footer is the
+/// last non-blank line. The plan dialog's wraps with its path, so it may start a few lines up,
+/// provided nothing between it and the end is blank or a row.
 fn footer(lines: &[&str]) -> Option<(usize, Footer)> {
     let last = lines.iter().rposition(|l| !l.trim().is_empty())?;
-    (last.saturating_sub(1)..=last).rev().find_map(|i| {
+    if lines[last].contains("Esc to cancel") {
+        return Some((last, Footer::Tool));
+    }
+    for i in (last.saturating_sub(PLAN_FOOTER_MAX_LINES - 1)..=last).rev() {
         let l = lines[i];
-        if l.contains("Esc to cancel") {
-            Some((i, Footer::Tool))
-        } else if l.contains("ctrl+g to edit in") {
-            Some((i, Footer::Plan))
-        } else {
-            None
+        if l.contains("ctrl+g to edit in") {
+            return Some((i, Footer::Plan));
         }
-    }).filter(|(i, kind)| *kind == Footer::Plan || *i == last)
+        if l.trim().is_empty() || row(l).is_some() {
+            return None;
+        }
+    }
+    None
 }
 
 /// The key for a fallback answer: row 1 is "Yes" on every tool dialog seen, and Esc rejects.
@@ -109,7 +117,7 @@ fn row(line: &str) -> Option<(usize, &str)> {
 /// Parse a screen's text (`terminal::render::screen_text`) for an OPEN permission dialog.
 pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     let lines: Vec<&str> = screen.lines().collect();
-    let (foot, _) = footer(&lines)?;
+    let (foot, kind) = footer(&lines)?;
     // Walk up from the footer: continuation lines collect until the row they belong to, and
     // the walk ends at row 1.
     let mut rows: Vec<(usize, String)> = Vec::new();
@@ -144,10 +152,22 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     if rows.len() < 2 || !cont.is_empty() || !numbered_in_order {
         return None;
     }
-    // The dialog as drawn: from the rule above its question (the last full-width `─` line
-    // before the rows) through the last row.
-    let top = lines[..first_row].iter().rposition(|l| l.starts_with('─')).unwrap_or(0);
-    let drawn: String = lines[top..foot].concat().chars().filter(|c| !c.is_whitespace()).collect();
+    // The dialog as drawn: from the rule above it through the last row. A tool dialog has one
+    // full-width `─` rule, above what it asks. The plan dialog has two, and the plan sits
+    // between them: without it every plan would share one id, and a tap on an old plan's card
+    // would approve the next. Only what the dialog SAYS goes in: whitespace and the rules
+    // (both change with the width) and the `❯` highlight (arrows at the desk move it) are
+    // dropped, so a resize or a moved highlight keeps the id.
+    let rule_above = |end: usize| lines[..end].iter().rposition(|l| l.starts_with('─'));
+    let mut top = rule_above(first_row).unwrap_or(0);
+    if kind == Footer::Plan {
+        top = rule_above(top).unwrap_or(0);
+    }
+    let drawn: String = lines[top..foot]
+        .concat()
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '─' | '╌' | '❯'))
+        .collect();
     let digest = super::sha256_hex(drawn.as_bytes())[..12].to_string();
     Some(PermissionDialog { options: rows.into_iter().map(|(_, l)| l).collect(), digest })
 }
@@ -210,10 +230,31 @@ mod tests {
         assert_eq!(unique.len(), ids.len());
         let edited = TWO_ROWS.replace("notes.md", "other.md");
         assert_ne!(parse(&edited).unwrap().digest, parse(TWO_ROWS).unwrap().digest);
-        // 100 and 60 columns wrap the rows differently; the header path is truncated to the
-        // width, so only the rows region is compared here.
-        let rows = |s: &str| parse(s).unwrap().options.join("");
-        assert_eq!(rows(WRITE_100).replace(' ', ""), rows(WRITE_60).replace(' ', ""));
+        // The same dialog at 100 and 60 columns: rules and wraps differ, the id doesn't.
+        assert_eq!(parse(WRITE_100).unwrap().digest, parse(WRITE_60).unwrap().digest);
+        // A human moving the highlight at the desk keeps the id.
+        let moved = TWO_ROWS.replace(" ❯ 1. Yes\n   2. No", "   1. Yes\n ❯ 2. No");
+        assert_ne!(moved, TWO_ROWS);
+        assert_eq!(parse(&moved).unwrap().digest, parse(TWO_ROWS).unwrap().digest);
+    }
+
+    /// The plan is what a plan dialog asks, so two plans are two ids: a tap on an old plan's
+    /// card must never approve the next one.
+    #[test]
+    fn two_plans_are_two_dialogs() {
+        let other = PLAN_100.replace("Create an empty file named hello.txt", "Delete the whole repository");
+        assert_ne!(parse(&other).unwrap().digest, parse(PLAN_100).unwrap().digest);
+    }
+
+    /// In a narrow split the plan footer's path wraps onto several lines.
+    #[test]
+    fn a_plan_footer_wrapped_onto_three_lines_is_read() {
+        let narrow = PLAN_100.replace(
+            " ctrl+g to edit in nano · ~/Library/Application Support/com.example.app/accounts/claude/0000000-0000-0\n",
+            " ctrl+g to edit in nano · ~/Library/Application Support/com.example\n .app/accounts/claude/0000000-0000-0\n",
+        );
+        assert_ne!(narrow, PLAN_100);
+        assert_eq!(parse(&narrow).unwrap().options, parse(PLAN_100).unwrap().options);
     }
 
     /// Positions carry no meaning: a dialog that defaults to No lists it first, and a Bash dialog
