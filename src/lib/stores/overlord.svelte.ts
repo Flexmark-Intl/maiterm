@@ -25,7 +25,7 @@ import { guardsForCondition } from '$lib/overlord/format';
 import { getVariables, interpolateVariables, setVariable } from '$lib/stores/triggers.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { summarizeBatch, type TabBatchRow, type TabBatchResult } from '$lib/stores/tabBatch';
-import { answerBlocker as answerBlockerText, appendNote, findImportedDuplicate, hasUnmetDeps, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
+import { answerBlocker as answerBlockerText, appendNote, findImportedDuplicate, isInFlight, isParked, isRetired, makeTask, normalizeTitle, statusFromAgent, type BlockerAnswer, type TaskRow } from '$lib/tasks/model';
 import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
 /**
@@ -1619,7 +1619,6 @@ function createOverlordStore() {
       case 'task_stale': return `a board task goes stale ${when.days} days`;
       case 'agent_unready': return 'an agent is not running';
       case 'no_todo_list': return 'sustained work is not on the task list';
-      case 'blocked_unexplained': return 'a task is blocked with no reason recorded';
       case 'permission_pending': return `a permission waits ${when.minutes} min`;
       case 'directive_unacked': return `a directive is unacked ${when.minutes} min`;
     }
@@ -1929,7 +1928,7 @@ function createOverlordStore() {
    */
   const RECHECKABLE_EVENTS = new Set<OverlordCondition['event']>([
     'context_pct', 'tab_idle', 'task_stale', 'agent_unready',
-    'no_todo_list', 'blocked_unexplained', 'permission_pending', 'directive_unacked',
+    'no_todo_list', 'permission_pending', 'directive_unacked',
   ]);
 
   /** How long an edge proposal stays offerable. Long enough to survive a lunch break;
@@ -2034,17 +2033,6 @@ function createOverlordStore() {
         if (tasksForTab(tab.id).some((t) => t.origin !== 'overlord' && !isParked(t.status))) return false;
         if ((f?.context_used ?? 0) < NO_TODO_MIN_CONTEXT_TOKENS) return false;
         return f?.last_turn_ts !== undefined && now - f.last_turn_ts < NO_TODO_RECENT_TURN_MS;
-      }
-      case 'blocked_unexplained': {
-        // Blocked in the STORED lane, with no blocker record and nothing it waits on: the
-        // question the agent stopped on exists only in its scrollback, so no surface can put
-        // it to the human. A dependency hold is explained by `blocked_by` and doesn't count.
-        const ws = workspaceForTab(tab.id);
-        if (!ws) return false;
-        const all = tasksStore.forWorkspace(ws.id);
-        return tasksForTab(tab.id).some(
-          (t) => t.status === 'blocked' && !t.blocker && !hasUnmetDeps(t, all, workspacesStore.parkedTaskIds),
-        );
       }
       case 'permission_pending': {
         const since = permissionSince.get(tab.id);

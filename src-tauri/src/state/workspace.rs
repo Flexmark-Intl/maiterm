@@ -1236,7 +1236,6 @@ pub enum OverlordCondition {
     TaskStale { days: u64 },
     AgentUnready,
     NoTodoList,
-    BlockedUnexplained,
     PermissionPending { minutes: u64 },
     DirectiveUnacked { minutes: u64 },
 }

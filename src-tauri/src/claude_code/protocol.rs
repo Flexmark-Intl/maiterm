@@ -1044,10 +1044,10 @@ fn overlord_rule_schema() -> Value {
             "workspaces": { "type": "array", "items": { "type": "string" }, "description": "[] or omitted = global" },
             "when": {
                 "type": "object",
-                "description": "The condition. Each event takes its own extra field: context_pct→at_or_above, tab_idle→minutes, task_stale→days, permission_pending→minutes, directive_unacked→minutes; turn_end, commit, agent_unready, no_todo_list and blocked_unexplained take none.",
+                "description": "The condition. Each event takes its own extra field: context_pct→at_or_above, tab_idle→minutes, task_stale→days, permission_pending→minutes, directive_unacked→minutes; turn_end, commit, agent_unready and no_todo_list take none.",
                 "required": ["event"],
                 "properties": {
-                    "event": { "type": "string", "enum": ["context_pct", "turn_end", "commit", "tab_idle", "task_stale", "agent_unready", "no_todo_list", "blocked_unexplained", "permission_pending", "directive_unacked"] },
+                    "event": { "type": "string", "enum": ["context_pct", "turn_end", "commit", "tab_idle", "task_stale", "agent_unready", "no_todo_list", "permission_pending", "directive_unacked"] },
                     "at_or_above": { "type": "number" },
                     "minutes": { "type": "number" },
                     "days": { "type": "number" }

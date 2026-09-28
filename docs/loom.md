@@ -1,6 +1,6 @@
 # Workstream Loom
 
-> Status: loom, decisions and Focus views built 2026-09-27; the phone next.
+> Status: loom and decisions views built 2026-09-27; Focus view and the phone next.
 > Sketch: https://claude.ai/code/artifact/c1508940-a0f8-4e88-bf1c-442143f6733f
 
 ## Why
@@ -18,7 +18,7 @@ editor's find-previous) and has three views of the same workspace:
 |---|---|
 | Loom | Who is working on what, what is waiting and on what, and what has gone quiet |
 | Decisions | Every question waiting on the human, oldest first, answerable in place |
-| Focus | The maiLink-style chat list, with a condensed chat beside that agent's work |
+| Focus | (next) the maiLink-style chat list with a condensed chat beside the workspace's work |
 
 ## The data it stands on
 
@@ -58,26 +58,8 @@ A drawer in every workspace, over the active workspace by default, with a switch
 workspace in the window. The Overlord workspace always shows the whole window: it
 supervises all of it.
 
-## Focus
-
-The maiLink inbox rules (`focusSections`): needs you (a permission, or a question on one of
-its tasks) → working now → unread or active since the start of yesterday. The chosen chat is
-`get_tab_transcript` polled every 3 s, folded by `chatRows`, with **task events** from the
-tasks' own records (`taskEventsFor`: added, asked, answered, notes) placed by time. The
-phone's transcript doesn't carry those, and they are the part that otherwise scrolls away.
-Agent turns render through `loom/markdown.ts`, a marked instance that never emits HTML it
-didn't build: a transcript quotes the web into a webview that can reach every command.
-
-**The drawer holds the keyboard while open.** It covers the terminal, so a focused terminal
-underneath is a hidden one: xterm eats Escape (interrupting the agent) and typing lands where
-nobody can see it. Focus landing in the terminal area goes back to the drawer; closing
-focuses the tab on screen, never the one that had focus when it opened.
-
-## Unexplained blockers
-
-The Overlord condition `blocked_unexplained` and its default rule `blocker_hygiene` ask an
-idle agent to record the question behind a Blocked task that has none (docs/overlord.md).
-
 ## Next
 
+- Focus view (the chat list and condensed chat).
 - The phone: blockers on the wire and decisions in "Needs you" (protocol 0.13).
+- Overlord flags a blocked task with no blocker record.
