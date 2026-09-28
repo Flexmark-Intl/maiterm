@@ -1293,7 +1293,7 @@ pub(crate) async fn send_tab_message(
     if text.trim().is_empty() {
         return json!({ "status": "empty" });
     }
-    if let Some((kind, _, _)) = current_prompt(app, tab_id) {
+    if let Some((kind, _, _)) = open_prompt(app, tab_id) {
         return json!({ "status": "prompt_open", "reason": kind,
             "detail": "Answer the open prompt first: typing now would go into it, not to the agent." });
     }
@@ -1535,7 +1535,7 @@ pub(crate) struct Answer {
 /// answer or must escalate, so the caller gets the tool being approved (permission) or the
 /// structured questions and options (question) rather than just a state word.
 pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
-    let (kind, prompt_id, runtime) = current_prompt(app, tab_id)?;
+    let (kind, prompt_id, runtime) = open_prompt(app, tab_id)?;
     let mut v = json!({ "kind": kind, "prompt_id": prompt_id, "runtime": runtime.as_key() });
     if kind == "trust" {
         if let Some(d) = trust_dialog_for_tab(app, tab_id) {
@@ -1591,7 +1591,7 @@ pub(crate) async fn respond_to_prompt(
     choice: Option<&str>,
     answers: Option<&[Answer]>,
 ) -> Value {
-    let Some((kind, cur_id, runtime)) = current_prompt(app, tab_id) else {
+    let Some((kind, cur_id, runtime)) = open_prompt(app, tab_id) else {
         return json!({ "ok": false, "reason": "stale" });
     };
     if let Some(pid) = prompt_id {
@@ -1767,7 +1767,7 @@ async fn post_respond(
     // The phone routinely taps a cached permission card whose tab has since lost its agent
     // (suspended workspace, exited session) — that must stay a graceful 200 `stale` body,
     // not a 409 the app has no branch for.
-    if current_prompt(&s.app, &tab_id).is_none() {
+    if open_prompt(&s.app, &tab_id).is_none() {
         return Ok(Json(json!({ "ok": false, "reason": "stale" })));
     }
     // The tab must still have a PTY — kept here so the phone's HTTP contract still answers
@@ -3961,6 +3961,35 @@ fn live_screen_text(app: &AppState, tab_id: &str) -> Option<String> {
     let registry = app.terminal_registry.read();
     let handle = registry.get(&pty)?;
     Some(crate::terminal::render::screen_text(&handle.term))
+}
+
+/// Whether a Claude permission dialog is on this tab's screen now, readable rows or not.
+fn claude_dialog_on_screen(app: &AppState, tab_id: &str) -> bool {
+    live_screen_text(app, tab_id).is_some_and(|s| permission::dialog_open(&s))
+}
+
+/// The prompt open on a tab, for everything that ANSWERS one or must not type over one (the
+/// responder, `getTabPrompt`, the Loom's composer): `current_prompt`, with a Claude permission
+/// corrected by the screen in both directions. The hook's state is late and long: it arrives
+/// with the Notification 6 s after the dialog opens, and it holds until the approved tool's
+/// PostToolUse. Read from the hooks alone, a message sent in the first seconds went into the
+/// dialog (its CR confirmed the highlighted row), and after an approval a dead card and a
+/// refused composer stayed up for the whole tool run. Codex's approvals are hook records that
+/// clear on their own, and are left as they are.
+fn open_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String, AgentRuntime)> {
+    let cur = current_prompt(app, tab_id);
+    match cur {
+        Some(("permission", _, rt)) if rt != AgentRuntime::Codex => {
+            if claude_dialog_on_screen(app, tab_id) { cur } else { None }
+        }
+        Some(_) => cur,
+        None if runtime_for_tab(app, tab_id) == Some(AgentRuntime::Claude)
+            && claude_dialog_on_screen(app, tab_id) =>
+        {
+            Some(("permission", permission_prompt_id(app, tab_id), AgentRuntime::Claude))
+        }
+        None => None,
+    }
 }
 
 /// The options a Claude permission card offers: the rows on screen, or Yes/No when they can't

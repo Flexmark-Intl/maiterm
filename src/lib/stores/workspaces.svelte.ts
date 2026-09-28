@@ -505,10 +505,15 @@ function createWorkspacesStore() {
      *  ordinary ordering, Recent, and the normal sidebar list anyway. */
     async ensureOverlordWorkspace() {
       let ws = workspaces.find(w => w.overlord);
-      if (!ws) {
-        ws = await commands.createOverlordWorkspace();
-        // The backend may have returned an existing workspace this store already holds.
-        if (!workspaces.some(w => w.id === ws!.id)) workspaces.push(ws);
+      // A closed Board tab is put back by the backend: it holds the deck and the Loom, and
+      // nothing else creates one.
+      const hasBoard = !!ws?.panes.some(p => p.tabs.some(t => t.tab_type === 'board'));
+      if (!ws || !hasBoard) {
+        const fresh = await commands.createOverlordWorkspace();
+        const at = workspaces.findIndex(w => w.id === fresh.id);
+        if (at === -1) workspaces.push(fresh);
+        else workspaces[at] = fresh;
+        ws = fresh;
       }
       await this.setActiveWorkspace(ws.id);
       return ws;

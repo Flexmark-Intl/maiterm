@@ -99,6 +99,16 @@ Under the chat, in this order:
   open**, because typed text goes into the dialog, a digit picks a row and the rest lands in
   "tell Claude what to do differently".
 
+**"A Claude permission is open" is read off the screen** (`open_prompt` in mailink/mod.rs,
+used by the composer, the prompt card, `getTabPrompt` and the responder). The hook's state is
+late and long: it arrives 6 s after the dialog opens, and it holds until the approved tool
+finishes. Taken from the hooks alone, a message sent in the first seconds went into the
+dialog and its CR confirmed the highlighted row; after an approval, a dead card and a refused
+composer stayed up for the whole tool run.
+
+**Closing the Board tab doesn't strand the Loom.** `create_overlord_workspace` puts a closed
+board back, and `ensureOverlordWorkspace` asks for it whenever the board is missing.
+
 ## Blocked with no reason recorded
 
 A Blocked task with no blocker record and no unmet dependency has its question only in the

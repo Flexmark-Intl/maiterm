@@ -59,6 +59,15 @@ pub(crate) fn footer_open(screen: &str) -> bool {
     footer(&lines).is_some_and(|(_, kind)| kind == Footer::Tool)
 }
 
+/// Whether any Claude permission dialog (a tool's or the plan's) ends the screen, readable
+/// rows or not. The screen is the only prompt-open signal that is both prompt and exact: the
+/// hook's permission state arrives 6 s after the dialog opens and holds until the approved
+/// tool finishes.
+pub(crate) fn dialog_open(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    footer(&lines).is_some()
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Footer {
     Tool,
@@ -283,6 +292,17 @@ mod tests {
         assert_eq!(parse(&gone), None);
         assert_eq!(parse(""), None);
         assert_eq!(parse("  1 x\n Esc to cancel"), None, "a diff line is not a row");
+    }
+
+    /// What the composer and the responder ask before typing: any dialog, rows readable or not.
+    #[test]
+    fn a_dialog_is_open_while_either_footer_ends_the_screen() {
+        for s in [TWO_ROWS, BASH_100, PLAN_100] {
+            assert!(dialog_open(s));
+        }
+        assert!(dialog_open(" rows this build can't read\n Esc to cancel · Tab to amend\n"));
+        assert!(!dialog_open("⏺ Bash(npm test)\n  ⎿  Running…\n\n✻ Working… (esc to interrupt)\n"));
+        assert!(!dialog_open(&format!("{}\nSHELL$ ", TWO_ROWS.trim_end())));
     }
 
     #[test]

@@ -204,7 +204,9 @@ pub fn get_overlord_ledger(
 /// Create this window's Overlord workspace (docs/overlord.md §11): overlord flag set,
 /// first pane holding a Board tab (active) + a terminal tab for the agent. Appended to
 /// the end of the workspace list (it's excluded from ordinary ordering anyway). Returns
-/// the existing Overlord workspace unchanged if one is already flagged.
+/// the existing Overlord workspace if one is already flagged, with its Board tab put back
+/// first if it was closed: the board holds the deck and the Loom, and nothing else creates
+/// one, so a closed board left no way in.
 #[tauri::command]
 pub fn create_overlord_workspace(
     window: tauri::Window,
@@ -212,28 +214,43 @@ pub fn create_overlord_workspace(
 ) -> Result<crate::state::Workspace, String> {
     use crate::state::workspace::{Tab, TabType, Workspace};
     let label = window.label().to_string();
+    let board_tab = || {
+        let mut board = Tab::new("Board".to_string());
+        board.tab_type = TabType::Board;
+        board.custom_name = true;
+        board
+    };
     let (ws, data_clone) = {
         let mut app_data = state.app_data.write();
         let win = app_data.window_mut(&label).ok_or("Window not found")?;
-        if let Some(existing) = win.workspaces.iter().find(|w| w.overlord) {
-            return Ok(existing.clone());
-        }
-        let mut ws = Workspace::new("Overlord".to_string());
-        ws.overlord = true;
-        if let Some(pane) = ws.panes.get_mut(0) {
-            if let Some(term) = pane.tabs.get_mut(0) {
-                term.name = "Overlord Agent".to_string();
-                term.custom_name = true;
+        if let Some(existing) = win.workspaces.iter_mut().find(|w| w.overlord) {
+            let has_board = existing.panes.iter().any(|p| p.tabs.iter().any(|t| t.tab_type == TabType::Board));
+            if has_board {
+                return Ok(existing.clone());
             }
-            let mut board = Tab::new("Board".to_string());
-            board.tab_type = TabType::Board;
-            board.custom_name = true;
-            let board_id = board.id.clone();
+            let Some(pane) = existing.panes.get_mut(0) else {
+                return Ok(existing.clone());
+            };
+            let board = board_tab();
+            pane.active_tab_id = Some(board.id.clone());
             pane.tabs.insert(0, board);
-            pane.active_tab_id = Some(board_id);
+            let ws = existing.clone();
+            (ws, app_data.clone())
+        } else {
+            let mut ws = Workspace::new("Overlord".to_string());
+            ws.overlord = true;
+            if let Some(pane) = ws.panes.get_mut(0) {
+                if let Some(term) = pane.tabs.get_mut(0) {
+                    term.name = "Overlord Agent".to_string();
+                    term.custom_name = true;
+                }
+                let board = board_tab();
+                pane.active_tab_id = Some(board.id.clone());
+                pane.tabs.insert(0, board);
+            }
+            win.workspaces.push(ws.clone());
+            (ws, app_data.clone())
         }
-        win.workspaces.push(ws.clone());
-        (ws, app_data.clone())
     };
     save_state(&data_clone)?;
     Ok(ws)
