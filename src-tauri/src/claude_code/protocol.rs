@@ -871,14 +871,14 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
         },
         {
             "name": "answerTabPrompt",
-            "description": "Overlord agent only: answer a tab's open prompt, with the human's authority. For kind 'permission' pass `choice` ('1' approve / '2' approve and don't ask again / '3' deny, or the option label). For kind 'question' pass `answers` — one entry per question in order, each with `selected` (option labels verbatim) and/or `other` (free text). ALWAYS read getTabPrompt first and pass its prompt_id. ESCALATE INSTEAD OF ANSWERING when the decision is consequential — anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion. Routine approvals in service of work already underway are yours to make. Every answer is recorded in the ledger.",
+            "description": "Overlord agent only: answer a tab's open prompt, with the human's authority. For kind 'permission' pass `choice`: one of getTabPrompt's `options`, verbatim (Claude's rows vary by request, and a label the dialog doesn't show is refused). For Codex, '1' approve / '2' approve for the session / '3' decline. For kind 'question' pass `answers` — one entry per question in order, each with `selected` (option labels verbatim) and/or `other` (free text). ALWAYS read getTabPrompt first and pass its prompt_id. ESCALATE INSTEAD OF ANSWERING when the decision is consequential — anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion. Routine approvals in service of work already underway are yours to make. Every answer is recorded in the ledger.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
                     "tab_id": { "type": "string", "description": "TARGET tab id" },
                     "prompt_id": { "type": "string", "description": "From getTabPrompt — the stale-guard" },
-                    "choice": { "type": "string", "description": "kind 'permission': '1' | '2' | '3' or the option label" },
+                    "choice": { "type": "string", "description": "kind 'permission': one of getTabPrompt's `options`, verbatim" },
                     "answers": {
                         "type": "array",
                         "description": "kind 'question': one entry per question, in order",

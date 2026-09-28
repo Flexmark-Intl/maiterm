@@ -692,7 +692,14 @@ interface ChatDetail extends Chat {
                             // dialog is on top), or no tool recorded. The phone matches that
                             // literal (maiLink 9a60619) and warns to check the terminal first,
                             // so it is contract: `UNATTRIBUTED_PERMISSION_TEXT` in mailink/mod.rs.
-    options?: string[];     // e.g. ["Yes","Yes, don't ask again","No"]; absent ⇒ free-text only
+    options?: string[];     // absent ⇒ free-text only. Claude: the dialog's rows as read off
+                            // the screen, in screen order (["Yes","No"] on a Write to a project
+                            // file; row 2 varies, e.g. "Yes, and always allow access to <dir>
+                            // from this project"), or ["Yes","No"] when the screen can't be
+                            // read. `/respond` matches `choice` against the rows on screen when
+                            // the tap arrives and refuses (`stale`) a label they don't show.
+                            // Codex: always ["Yes","Yes, don't ask again","No"] (stable keys).
+                            // Echo a label verbatim; never assume a fixed list.
                             // v0.12, Claude's workspace-trust dialog (prompt_id
                             // "t_<tabId>_<digest of the folder>" — a card for one folder
                             // can never answer a later dialog for another;
@@ -1778,7 +1785,7 @@ export interface PendingPrompt {
   respondable: boolean;         // permission:true; question:true (selector injection landed, §12.3)
   // permission shape:
   text?: string;
-  options?: string[];           // e.g. ["Yes","Yes, don't ask again","No"]
+  options?: string[];           // the rows on screen (Claude) — see §4 pendingPrompt.options
   // AskUserQuestion shape:
   questions?: AskQuestion[];
 }

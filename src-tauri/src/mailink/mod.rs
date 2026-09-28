@@ -40,6 +40,7 @@ pub(crate) mod models;
 pub(crate) mod shells;
 pub(crate) mod subagents;
 pub(crate) mod trust;
+pub(crate) mod permission;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod overlord;
@@ -1508,6 +1509,9 @@ pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
             v["asked_at"] = json!(at);
         }
     } else {
+        if runtime != AgentRuntime::Codex {
+            v["options"] = json!(claude_permission_options(app, tab_id));
+        }
         let sessions = app.agent_sessions.read();
         if let Some((_, s)) = sessions
             .iter()
@@ -1603,10 +1607,36 @@ pub(crate) async fn respond_to_prompt(
                 return json!({ "ok": false, "reason": "stale",
                     "detail": "that approval is no longer open in the terminal" });
             }
-            let key = permission_key(runtime, choice.unwrap_or(""));
+            let choice = choice.unwrap_or("");
+            let key = if runtime == AgentRuntime::Codex {
+                codex_permission_key(choice).to_string()
+            } else {
+                // Claude's rows vary by request, so the choice is matched against the rows on
+                // screen NOW (mailink/permission.rs). A label the dialog doesn't show is refused,
+                // never mapped to a digit: on a two-row dialog, 2 is No.
+                match permission_dialog_for_tab(app, tab_id) {
+                    Some(d) => match d.key_for(choice) {
+                        Some(k) => k,
+                        None => {
+                            log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: the dialog shows {:?}", d.options);
+                            return json!({ "ok": false, "reason": "stale",
+                                "detail": "that isn't one of the options the dialog shows" });
+                        }
+                    },
+                    None => match permission::fallback_key(choice) {
+                        Some(k) => k.to_string(),
+                        None => {
+                            log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: the dialog can't be read off the screen");
+                            return json!({ "ok": false, "reason": "stale",
+                                "detail": "the dialog can't be read off the screen, so only Yes or No can be sent" });
+                        }
+                    },
+                }
+            };
             if crate::pty::write_pty(app, &pty, key.as_bytes()).is_err() {
                 return json!({ "ok": false, "reason": "inject_failed" });
             }
+            log::info!("[maiLink] permission answered for tab {tab_id}: {choice:?} → {key:?}");
         }
         // AskUserQuestion: replay per-question answers into the open selector.
         "question" => {
@@ -3863,6 +3893,24 @@ fn trust_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<trust::TrustDial
     trust::parse(&crate::terminal::render::screen_text(&handle.term))
 }
 
+/// Claude's tool-permission dialog, when it is open on this tab's screen, with the rows it
+/// offers (`mailink/permission.rs`). Read from the live screen for the same reason as the trust
+/// dialog: a human scrolled up must not hide it.
+fn permission_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<permission::PermissionDialog> {
+    let pty = pty_for_tab(app, tab_id)?;
+    let registry = app.terminal_registry.read();
+    let handle = registry.get(&pty)?;
+    permission::parse(&crate::terminal::render::screen_text(&handle.term))
+}
+
+/// The options a Claude permission card offers: the rows on screen, or Yes/No when they can't
+/// be read. Never a fixed three: that list is how "Yes, don't ask again" became a rejection.
+fn claude_permission_options(app: &AppState, tab_id: &str) -> Vec<String> {
+    permission_dialog_for_tab(app, tab_id)
+        .map(|d| d.options)
+        .unwrap_or_else(|| permission::FALLBACK_OPTIONS.iter().map(|s| s.to_string()).collect())
+}
+
 /// Keys the phone may send by name (`POST /chats/{tabId}/keys`). A fixed allowlist of real key
 /// sequences, never a paste, so a pre-session screen (the trust dialog, a picker nobody has
 /// taught maiTerm to read) can still be driven from the phone. No ctrl-c: `/interrupt` owns
@@ -3987,45 +4035,27 @@ fn question_prompt_id(app: &AppState, tab_id: &str) -> String {
     format!("q_{tab_id}_{at}")
 }
 
-/// Map a permission `choice` to the runtime's TUI keystroke. (Fragile by nature — depends on
-/// the runtime's current affordance; the robust path is a free-text /message. See docs §5.)
+/// Map a permission `choice` to Codex's keystroke. (Claude's dialog is read off the screen
+/// instead: its rows vary by request, see mailink/permission.rs.)
 ///
-///   * Claude: a fixed numeric menu — 1=yes, 2=yes+don't-ask, 3=no. A bare digit passes
-///     through; an unknown label defaults to deny.
-///   * Codex: the approval overlay is a VARIABLE-length list (2–5 options: approve /
-///     approve-for-prefix / approve-for-session / network-amendment / deny / decline
-///     depending on the request), where digit keys select by POSITION — so Claude's "3"
-///     could land on a "Yes, and don't ask again…" row. Codex's default keymap letter
-///     shortcuts are stable regardless of option count (codex-rs tui/src/keymap.rs):
-///     y=approve, a=approve-for-session, n=decline ("No, and tell Codex what to do
-///     differently" — the analogue of Claude's option 3). Digits from the phone are
-///     translated to those letters, never passed through.
-///   * Gemini: no hook registrar yet, so a Gemini session can't reach the permission
-///     state — falls to the Claude arm as a placeholder.
-fn permission_key(runtime: AgentRuntime, choice: &str) -> String {
+/// The approval overlay is a VARIABLE-length list (2–5 options: approve / approve-for-prefix /
+/// approve-for-session / network-amendment / deny / decline depending on the request), where
+/// digit keys select by POSITION. Codex's default keymap letter shortcuts are stable regardless
+/// of option count (codex-rs tui/src/keymap.rs): y=approve, a=approve-for-session, n=decline
+/// ("No, and tell Codex what to do differently"). Digits from the phone are translated to those
+/// letters, never passed through.
+fn codex_permission_key(choice: &str) -> &'static str {
     let c = choice.trim();
-    if runtime == AgentRuntime::Codex {
-        let key = match c {
-            "1" => "y",
-            "2" => "a",
-            "3" => "n",
-            _ => match c.to_lowercase().as_str() {
-                "yes" | "approve" | "allow" => "y",
-                "yes, don't ask again" | "yes, and don't ask again" | "always" => "a",
-                _ => "n", // safe default: decline (returns control to the human)
-            },
-        };
-        return key.to_string();
+    match c {
+        "1" => "y",
+        "2" => "a",
+        "3" => "n",
+        _ => match c.to_lowercase().as_str() {
+            "yes" | "approve" | "allow" => "y",
+            "yes, don't ask again" | "yes, and don't ask again" | "always" => "a",
+            _ => "n", // safe default: decline (returns control to the human)
+        },
     }
-    if c.len() == 1 && c.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        return c.to_string();
-    }
-    match c.to_lowercase().as_str() {
-        "yes" | "approve" | "allow" => "1",
-        "yes, don't ask again" | "yes, and don't ask again" | "always" => "2",
-        _ => "3", // safe default: deny
-    }
-    .to_string()
 }
 
 /// Extract the `Authorization: Bearer <token>` value (empty string if absent).
@@ -5452,7 +5482,13 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             "kind": "permission",
             "respondable": respondable,
             "text": text,
-            "options": ["Yes", "Yes, don't ask again", "No"],
+            // Codex answers by its stable letter keys, so its three are always right. Claude's
+            // rows vary by request and are read off the screen.
+            "options": if runtime == AgentRuntime::Codex.as_key() {
+                json!(["Yes", "Yes, don't ask again", "No"])
+            } else {
+                json!(claude_permission_options(app, tab_id))
+            },
         });
         // Display-only, like the question card's: how long this request has been sitting. No
         // expires_at — nothing auto-resolves a Codex approval on a clock.
@@ -6018,26 +6054,19 @@ mod tests {
     }
 
     #[test]
-    fn permission_key_is_runtime_specific() {
-        use AgentRuntime::*;
-        // Claude: fixed numeric menu; bare digits pass through; unknown label → deny (3).
-        assert_eq!(permission_key(Claude, "Yes"), "1");
-        assert_eq!(permission_key(Claude, "yes, don't ask again"), "2");
-        assert_eq!(permission_key(Claude, "No"), "3");
-        assert_eq!(permission_key(Claude, "2"), "2");
-        assert_eq!(permission_key(Claude, "whatever"), "3");
-        // Codex: stable letter shortcuts (y/a/n) — digits are POSITIONAL in codex's
-        // variable-length overlay and must never pass through raw.
-        assert_eq!(permission_key(Codex, "Yes"), "y");
-        assert_eq!(permission_key(Codex, "approve"), "y");
-        assert_eq!(permission_key(Codex, "Yes, don't ask again"), "a");
-        assert_eq!(permission_key(Codex, "always"), "a");
-        assert_eq!(permission_key(Codex, "No"), "n");
-        assert_eq!(permission_key(Codex, "1"), "y");
-        assert_eq!(permission_key(Codex, "2"), "a");
-        assert_eq!(permission_key(Codex, "3"), "n");
-        assert_eq!(permission_key(Codex, "5"), "n"); // unknown digit → safe decline
-        assert_eq!(permission_key(Codex, "whatever"), "n");
+    fn codex_permission_keys_are_its_stable_letters() {
+        // Digits are POSITIONAL in codex's variable-length overlay and must never pass through
+        // raw. (Claude's keys come from the rows on screen: mailink/permission.rs.)
+        assert_eq!(codex_permission_key("Yes"), "y");
+        assert_eq!(codex_permission_key("approve"), "y");
+        assert_eq!(codex_permission_key("Yes, don't ask again"), "a");
+        assert_eq!(codex_permission_key("always"), "a");
+        assert_eq!(codex_permission_key("No"), "n");
+        assert_eq!(codex_permission_key("1"), "y");
+        assert_eq!(codex_permission_key("2"), "a");
+        assert_eq!(codex_permission_key("3"), "n");
+        assert_eq!(codex_permission_key("5"), "n"); // unknown digit → safe decline
+        assert_eq!(codex_permission_key("whatever"), "n");
     }
 
     #[test]
