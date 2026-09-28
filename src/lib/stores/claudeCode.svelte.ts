@@ -1854,7 +1854,12 @@ function createClaudeCodeStore() {
       inputs.map((t, i) => ({
         title: t.title!.trim(),
         detail: t.detail ?? null,
-        status: coerceStatus(t.status),
+        // Left undefined when the agent sent none, rather than coerced to 'todo': a re-sent
+        // item that reclaims a released row keeps that row's lane (`addMany` takes
+        // `input.status ?? dup.status`). Coercing here reclaimed a Blocked row as todo, and
+        // the settle rule then deleted the question it was carrying. New rows still default
+        // to todo in `makeTask`.
+        status: t.status ? coerceStatus(t.status) : undefined,
         // Assigned to the caller unless it explicitly leaves the task unassigned.
         tab_id: t.assign_to_me === false ? null : loc.tab.id,
         blocked_by: t.blocked_by ?? [],
@@ -1980,6 +1985,12 @@ function createClaudeCodeStore() {
         if (blocker) {
           patch.status = 'blocked';
           patch.notes = appendNote(list[idx], blockerNote(blocker), 'agent');
+          // An imported row is driven by the runtime's private todo file, which re-derives its
+          // status every tick, sweeps it to done when it leaves that file, and closes it out
+          // with the session. Any of those moves it out of Blocked and deletes the question.
+          // Asking the human something about a task is taking it over, so the row becomes the
+          // agent's, and every importer path (all gated on origin) leaves it alone.
+          if (list[idx].origin === 'imported') patch.origin = 'agent';
         }
         if (u.title?.trim()) {
           patch.title = u.title.trim();
