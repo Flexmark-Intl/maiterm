@@ -125,7 +125,55 @@ fn task_view(t: &Task, effective: &str, tab_title: Option<&str>, workstream: Opt
         // Progress log, oldest first. `detail` is the spec; this is what happened. Always
         // an array — `[]` rather than absent — per the v0.4 stated-absence rule.
         "notes": t.notes.iter().map(|n| json!({ "at": n.at, "text": n.text, "by": n.by })).collect::<Vec<_>>(),
+        // v0.13: what a Blocked task is waiting for (docs/tasks.md §3.1). Explicit `null` when
+        // there is none, per the stated-absence rule. Only ever present while `status` is
+        // "blocked" (`Task::settle_blocker`). `decision` and `action` are the human's to
+        // answer, through `POST /tasks/{id}/answer` with `askedAt` as the stale guard.
+        "blocker": t.blocker.as_ref().map(blocker_view),
     })
+}
+
+fn blocker_view(b: &crate::state::workspace::TaskBlocker) -> Value {
+    json!({
+        "kind": b.kind,
+        "question": b.question,
+        "context": b.context,
+        "options": b.options.iter().map(|o| json!({
+            "label": o.label,
+            "detail": o.detail,
+            "recommended": o.recommended,
+        })).collect::<Vec<_>>(),
+        "command": b.command,
+        "askedAt": b.asked_at,
+        "askedBy": b.asked_by,
+    })
+}
+
+/// Whether a task is waiting on the human: a `decision` or `action` blocker. `external` waits
+/// on something outside maiTerm and is not the human's to answer.
+fn asks_human(t: &Task) -> bool {
+    t.status == "blocked" && t.blocker.as_ref().is_some_and(|b| b.kind == "decision" || b.kind == "action")
+}
+
+/// Per designated tab, how many of its tasks are waiting on the human (v0.13 `asks` on a chat
+/// row). A tab can be busy with other work while a question on one of its tasks waits, so this
+/// is a separate fact from the tab's prompt, and the phone pins a chat with `asks > 0` in
+/// "Needs you" the way it pins an open prompt.
+pub(crate) fn asks_by_tab(app: &AppState) -> HashMap<String, usize> {
+    let designated = designated_set(app);
+    let data = app.app_data.read();
+    let mut out: HashMap<String, usize> = HashMap::new();
+    for win in &data.windows {
+        for ws in &win.workspaces {
+            for t in &ws.tasks {
+                let Some(tab) = t.tab_id.as_deref() else { continue };
+                if designated.contains(tab) && asks_human(t) {
+                    *out.entry(tab.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The set of tab ids the phone may see at all. Computed BEFORE taking the state lock — it
@@ -212,6 +260,8 @@ pub(crate) fn tab_change_keys(app: &AppState) -> HashMap<String, u64> {
                 t.workstream_id.hash(h);
                 workstream_name(ws, t.workstream_id.as_deref()).hash(h);
                 titles.get(tab).copied().hash(h);
+                // A re-ask stamps a new asked_at; that is what the phone has to hear about.
+                t.blocker.as_ref().map(|b| (&b.kind, &b.asked_at)).hash(h);
             }
         }
     }
@@ -676,6 +726,46 @@ mod tests {
             notes: Vec::new(),
             blocker: None,
         }
+    }
+
+    fn blocker(kind: &str, asked_at: &str) -> crate::state::workspace::TaskBlocker {
+        crate::state::workspace::TaskBlocker {
+            kind: kind.into(),
+            question: "Deploy now?".into(),
+            context: None,
+            options: vec![crate::state::workspace::BlockerOption { label: "Yes".into(), detail: None, recommended: true }],
+            command: None,
+            asked_at: asked_at.into(),
+            asked_by: "agent".into(),
+        }
+    }
+
+    #[test]
+    fn a_question_on_a_task_reaches_the_phone_and_counts_as_asking() {
+        let (app, tab) = fixture();
+        {
+            let mut data = app.app_data.write();
+            let ws = &mut data.windows[0].workspaces[0];
+            let t1 = ws.tasks.iter_mut().find(|t| t.id == "t1").unwrap();
+            t1.status = "blocked".into();
+            t1.blocker = Some(blocker("decision", "2026-09-27T10:00:00Z"));
+            let t2 = ws.tasks.iter_mut().find(|t| t.id == "t2").unwrap();
+            t2.status = "blocked".into();
+            t2.blocker = Some(blocker("external", "2026-09-27T10:00:00Z"));
+        }
+        // External waits are not the human's to answer.
+        assert_eq!(asks_by_tab(&app).get(&tab), Some(&1));
+        let row = task_row(&app, "t1").unwrap();
+        assert_eq!(row["blocker"]["kind"], "decision");
+        assert_eq!(row["blocker"]["askedAt"], "2026-09-27T10:00:00Z");
+        assert_eq!(row["blocker"]["options"][0]["recommended"], true);
+        // Stated absence: explicit null, not a missing field.
+        assert!(task_row(&app, "t3").unwrap().get("blocker").is_some_and(Value::is_null));
+
+        // A re-ask must re-send the tab's tasks.
+        let before = tab_change_key(&app, &tab);
+        app.app_data.write().windows[0].workspaces[0].tasks[0].blocker = Some(blocker("decision", "2026-09-27T11:00:00Z"));
+        assert_ne!(before, tab_change_key(&app, &tab));
     }
 
     /// A tab the gate lets through in expose-all mode: a detected runtime, not excluded.

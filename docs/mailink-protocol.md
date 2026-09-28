@@ -4,6 +4,17 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.13 changelog** (2026-09-28). Additive: the questions agents stop on reach the phone.
+> - **`MaitermTask.blocker`** (§4.3): what a Blocked task waits for when it isn't another task:
+>   a `decision` (with options), an `action` only the human can do (with the command), or an
+>   `external` wait. Explicit `null` when none. Agents set it through maiTerm's task tools.
+> - **`Chat.asks`**: how many of a chat's tasks wait on the human. The agent may be busy with
+>   other work meanwhile, so neither `state` nor `prompt` moves; pin `asks > 0` in "Needs you".
+>   A change fires `chats_changed`.
+> - **`POST /tasks/{id}/answer`** (§13.3): answer it. `askedAt` is the required stale guard.
+>   No push yet: a new doorbell kind needs relay copy, and the relay deploy is itself waiting on
+>   a human decision.
+>
 > **v0.12 changelog** (2026-09-27). Additive, both for screens that come before any session:
 > - **Claude's workspace-trust dialog is a permission card.** `claude` in an untrusted folder
 >   stops at "Quick safety check: Is this a project you created or one you trust?" before any
@@ -605,6 +616,12 @@ interface Chat {
                             //   note under `state` below. Still not per-device: nothing clears it
                             //   until the agent works again.
   lastActivityTs: number;
+  asks: number;             // 0.13: how many of this chat's tasks wait on the human (a `decision`
+                            //   or `action` blocker). Separate from `prompt`: the agent may be busy
+                            //   with other work while a question on one of its tasks waits, so
+                            //   neither `state` nor `prompt` moves. Pin `asks > 0` in "Needs you".
+                            //   A change fires `chats_changed`; the questions themselves are on
+                            //   the chat's tasks (`blocker`).
   preview: string;          // last line(s) of distilled context
   tool: string | null;      // the tool the agent is running RIGHT NOW, and its primary argument
   detail: string | null;    //   ("Bash" / "npm test", "Edit" / "src/lib.rs"). From the PreToolUse
@@ -956,6 +973,20 @@ interface MaitermTask {
   // here and nowhere else, so render at least the last one wherever you show a blocked
   // task. Capped at 20 by the desktop; `by` is stamped there, not claimed by the writer.
   notes: { at: string; text: string; by: 'human' | 'agent' | 'overlord' }[];
+  // 0.13. What a Blocked task is waiting for when the reason is not another task (maiTerm
+  // docs/tasks.md §3.1). Explicit `null` when there is none; only ever non-null while `status`
+  // is "blocked". `decision` and `action` are the human's to answer (POST /tasks/{id}/answer);
+  // `external` waits on something outside maiTerm (a review, CI, a person) and has no answer.
+  // Waiting on other tasks is never a blocker: that is `blockedBy` + `effectiveStatus`.
+  blocker: {
+    kind: 'decision' | 'action' | 'external';
+    question: string;               // one line, answerable without scrolling back
+    context: string | null;
+    options: { label: string; detail: string | null; recommended: boolean }[];  // decision only; [] = free text
+    command: string | null;         // action only: the exact command the human has to run
+    askedAt: string;                // ISO; the stale guard for /answer — send it back verbatim
+    askedBy: 'human' | 'agent' | 'overlord';
+  } | null;
 }
 
 // GET /tasks — the whole board. Only workspaces with at least one DESIGNATED tab appear, and
@@ -1987,6 +2018,25 @@ interface OutstandingDirective {
 | `POST /tasks` | `{ tabId, workstream?: string, tasks: [{ title, detail?, status?: TaskLane, assign?: boolean }] }` | `{ tasks: MaitermTask[] }` — one row per spec |
 | `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
 | `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
+| `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, text?: string }` (0.13) | `{ accepted, confirmed, result?: { answered, told, reason?, detail?, task } }` — see below |
+
+**Answering a blocker (0.13).** `POST /tasks/{id}/answer` is the phone's "prompt me": the human
+answers the question on a task's `blocker`. It is the same human-only verb as the desktop's answer
+controls. It logs the answer on the task ("Decided: …", "Done by the human"), moves the task to
+Active (which clears the blocker), and types a `[maiTerm] The human answered…` message into the
+carrying tab. Like `/start`, it crosses into the webview and answers the §13.4 envelope, and
+`result.told` means the same thing (`tab`, `agent` relays it later, `nobody`).
+- **`askedAt` is required and is the stale guard.** Send back the `blocker.askedAt` you rendered.
+  An agent can replace its question between your render and the tap; a mismatch answers
+  `answered:false, reason:"stale"` and nothing is typed. Re-read the task and show the new question.
+- `option` is an index into `blocker.options`. `text` is the answer for a decision with no
+  options, or a comment alongside an option or on an action. A decision needs one of the two;
+  an `action` needs neither (it means "I've done it"). `reason:"bad_answer"` otherwise.
+- `reason:"no_blocker"`: the task isn't waiting any more (answered elsewhere, or moved on).
+- **Don't answer on a double tap.** When one answered card leaves your list, the next slides
+  under the finger with a question that is not new; the desktop drops the second click of a
+  double-click for exactly this reason.
+- `result.task` is the row after the call.
 
 **Setting a lane and telling an agent are different acts, and only a human may do the second.**
 `POST /tasks/{id} {status:"active"}` is silent, permanently — that is the path an agent uses to
@@ -2073,7 +2123,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.12" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.13" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -2095,6 +2145,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.10` | adds `account` on `Chat`, `ChatDetail` and `chat_state` (§14); `GET /accounts`, WS `accounts`, `POST /accounts/active`; `GET /models?tab=`; attention kind `account` |
 | `0.11` | adds `GET /push-prefs` and `POST /push-prefs` (§6.2), per-device push mutes |
 | `0.12` | Claude's workspace-trust dialog as a `permission` card on an UNREGISTERED tab (`prompt_id` `t_<tabId>_<folder digest>`, `options` in screen order), rung as `permission`; `reason:"trust_dialog"` from `/wake` and `POST /message`; adds `POST /chats/{tabId}/keys` |
+| `0.13` | adds `MaitermTask.blocker` (explicit `null` when none), `Chat.asks`, and `POST /tasks/{id}/answer` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

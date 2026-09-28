@@ -60,6 +60,25 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         }
         break;
       }
+      case 'tasks.answer': {
+        // v0.13: the phone answers a task's blocker (docs/tasks.md §3.1). Same verb as the
+        // desktop's BlockerCard, human-only for the same reason as tasks.start. The phone has
+        // no freshness pause of its own, so askedAt is its whole stale guard, and required.
+        const opt = (req.args ?? {}).option;
+        const text = (req.args ?? {}).text;
+        if (typeof a.id !== 'string' || typeof a.askedAt !== 'string') {
+          result = { error: 'id and askedAt are required' };
+        } else if (opt !== undefined && opt !== null && typeof opt !== 'number') {
+          result = { error: 'option must be a number' };
+        } else {
+          result = await overlordStore.answerBlocker(a.id, {
+            asked_at: a.askedAt,
+            option: typeof opt === 'number' ? opt : undefined,
+            text: typeof text === 'string' ? text : undefined,
+          });
+        }
+        break;
+      }
       case 'overlord.dismissEscalation': {
         if (typeof a.id !== 'string') result = { error: 'id is required' };
         else { overlordStore.dismissEscalation(a.id); result = { ok: true }; }

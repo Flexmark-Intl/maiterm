@@ -365,6 +365,7 @@ fn build_router(api: ApiState) -> Router {
         .route("/mailink/v1/tasks/{task_id}", post(post_task_update))
         // START is a separate verb from "set the lane to active", deliberately — see the handler.
         .route("/mailink/v1/tasks/{task_id}/start", post(post_task_start))
+        .route("/mailink/v1/tasks/{task_id}/answer", post(post_task_answer))
         // The Overlord engine mirror, every window (mailink/overlord.rs). Baseline on connect;
         // the WS `overlord` frame carries changes inline.
         .route("/mailink/v1/overlord", get(overlord_windows))
@@ -500,7 +501,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.12";
+const PROTOCOL_VERSION: &str = "0.13";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -757,6 +758,43 @@ async fn post_task_start(
         // forever, for something a sentence covers.
         if let Some(reason) = out.0["result"]["reason"].as_str().map(str::to_string) {
             out.0["reason"] = json!(reason);
+        }
+    }
+    Ok(out)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskAnswerBody {
+    /// The `blocker.askedAt` the human was looking at. Required: an answer that names no
+    /// question could land on one the agent asked after the phone last refreshed.
+    asked_at: String,
+    option: Option<u32>,
+    text: Option<String>,
+}
+
+/// `POST /tasks/{id}/answer` (v0.13) — answer a task's blocker: log it, move the task to Active,
+/// and type the answer into the carrying tab (docs/tasks.md §3.1). The same human-only verb as
+/// the desktop's answer controls, reached through the owning window's webview like `/start`,
+/// and for the same reason: it types into a terminal with the human's authority, so no MCP
+/// path reaches it. `result.answered:false` with a `reason` (`stale`, `no_blocker`,
+/// `bad_answer`) is a refusal the phone shows, not a transport failure.
+async fn post_task_answer(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(body): Json<TaskAnswerBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
+    let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "text": body.text });
+    let mut out = overlord_act(&s, &window, "tasks.answer", args).await;
+    if out.0["accepted"] == Value::Bool(true) {
+        if let Some(row) = board::task_row(&s.app, &task_id) {
+            out.0["result"]["task"] = row;
+        }
+        if let Some(detail) = out.0["result"]["detail"].as_str().map(str::to_string) {
+            out.0["reason"] = json!(detail);
         }
     }
     Ok(out)
@@ -2551,6 +2589,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // Per-tab last-seen mesh flag — enabling/disabling a Mesh Workspace from the desktop must
     // re-badge the phone's inbox group the same way (state/prompt don't move).
     let mut mesh: HashMap<String, bool> = HashMap::new();
+    // v0.13 `asks`: questions on a tab's tasks. Diffed like the other roster flags, not folded
+    // into `attn_key` (that key is the doorbell's edge rule and splits positionally).
+    let mut asks: HashMap<String, u64> = HashMap::new();
     // Per-tab last-seen registration flag. A tab registering (or losing its registration) changes
     // the re-initialize affordance without moving state/prompt, so it needs its own diff.
     let mut registered: HashMap<String, bool> = HashMap::new();
@@ -2608,6 +2649,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
         titles.insert(tab.clone(), c["title"].as_str().unwrap_or_default().to_string());
         suspended.insert(tab.clone(), c["workspaceSuspended"].as_bool().unwrap_or(false));
         mesh.insert(tab.clone(), c["mesh"].as_bool().unwrap_or(false));
+        asks.insert(tab.clone(), c["asks"].as_u64().unwrap_or(0));
         registered.insert(tab.clone(), c["registered"].as_bool().unwrap_or(true));
         tools.insert(tab.clone(), tool_key(&c));
         last.insert(tab, key);
@@ -2727,6 +2769,14 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         roster_changed = true;
                     }
                     mesh.insert(tab.clone(), ws_mesh);
+                    // A question set on (or answered for) one of the tab's tasks. The agent may be
+                    // mid-turn on other work, so neither state nor prompt moves: without this the
+                    // inbox would not pin the chat until something else re-fetched the roster.
+                    let n_asks = c["asks"].as_u64().unwrap_or(0);
+                    if prev.is_some() && asks.get(&tab) != Some(&n_asks) {
+                        roster_changed = true;
+                    }
+                    asks.insert(tab.clone(), n_asks);
                     // Registration flips when an agent finally re-registers (or a restart drops
                     // its session entry) — the phone must re-render the re-initialize control.
                     let reg = c["registered"].as_bool().unwrap_or(true);
@@ -2792,7 +2842,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); asks.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -5077,11 +5127,14 @@ fn suspended_at_ms(app: &AppState, tab_id: &str) -> Option<u64> {
 fn build_chat_summaries(app: &AppState) -> Vec<Value> {
     let states = session_states(app);
     let now = now_ms();
+    let asks = board::asks_by_tab(app);
     designated_tabs(app)
         .into_iter()
         .map(|t| {
             let v = tab_view(app, &states, &t.tab_id, t.runtime, now);
             json!({
+                // v0.13, diffed by the WS ticker as a roster change (chats_changed).
+                "asks": asks.get(&t.tab_id).copied().unwrap_or(0),
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspaceSuspended": t.workspace_suspended,
@@ -5117,6 +5170,7 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let scrollback = scrollback_times(app);
     let ms_scrollback = ph.elapsed().as_millis(); // scrollback_db mutex + one SQLite query
     let tab_count = tabs.len();
+    let asks = board::asks_by_tab(app);
     let ph = std::time::Instant::now();
     let chats: Vec<Value> = tabs
         .into_iter()
@@ -5147,6 +5201,11 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 // Additive field: lets clients (and our own tickers) see prompt-kind changes
                 // that don't move `state` — e.g. an AskUserQuestion opening at state=="active".
                 "prompt": prompt_kind,
+                // v0.13: how many of this tab's tasks are waiting on the human (a decision or
+                // action blocker, docs/tasks.md §3.1). Separate from `prompt`: the agent may be
+                // working on something else while a question on one of its tasks waits. The
+                // phone pins `asks > 0` in "Needs you".
+                "asks": asks.get(&t.tab_id).copied().unwrap_or(0),
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
                 // NOT plain `state == "idle"`. Since a starting session registers as idle, that
