@@ -33,7 +33,8 @@ had to fight the hidden terminal for the keyboard (xterm eats Escape, which inte
 agent). In the Overlord workspace no other workspace's terminal is on screen, so none paints,
 and the deck is an ordinary tab. It is also the place the rest of the supervision already
 lives: the Loom absorbed the Fleet view, whose per-agent readouts (state, context, a running
-ritual, an unanswered directive with Release, the Trigger menu) are now Focus's chat header.
+ritual, an unanswered directive with Release) are now Focus's chat header, and its Trigger
+menu is the bolt in Focus's composer.
 The Loom works with the engine off: it is the human's view, not supervision.
 
 ## The data it stands on
@@ -93,9 +94,11 @@ conversation set off by a thin left rule so the eye can skip it:
   (`chatRows` groups them as an `added` row);
 - peer traffic reads "From <peer>" / "To <peer>" with the message as written, folded to four
   lines when long;
-- turns the harness wrote as "user" (a subagent's report handed back, a background task's
-  notice: `injectedTurn`) fold to one line, "Subagent report received", with the report on
-  click.
+- a subagent's report handed back arrives as a "user" turn the harness wrote ("Another Claude
+  session sent a message…"); `injectedTurn` folds it to one line, "Subagent report received",
+  with the report on click. The phone has a copy (maiLink `src/lib/injected-turn.ts`): change
+  the prefix or the labels in both. Turns starting with a tag (`<task-notification>`) never
+  arrive: the transcript reader drops them as system noise.
 
 The list and the agent's-work rail are resizable (drag their borders); the widths are kept
 per viewer in `localStorage`. The composer carries the terminal composer's Overlord action: a
