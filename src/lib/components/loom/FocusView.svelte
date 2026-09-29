@@ -26,6 +26,7 @@
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Resizer from '$lib/components/Resizer.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
+  import { toastStore } from '$lib/stores/toasts.svelte';
   import PromptCard from './PromptCard.svelte';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import type { Task, Workspace } from '$lib/tauri/types';
@@ -143,7 +144,14 @@
     const chat = openId;
     if (!chat) return;
     const r = await overlordStore.fireRule(chat, ruleId);
-    headNote = { chat, text: r.started ? `Running “${name}”: it types once the agent is idle.` : fireRefusal(r.reason, 'that rule') };
+    // Success is a toast that goes away, as in the terminal composer; a refusal stays by the
+    // composer until the next try.
+    if (r.started) {
+      headNote = null;
+      toastStore.addToast(name, 'Running on this agent: it types once the agent is idle.', 'success');
+    } else {
+      headNote = { chat, text: fireRefusal(r.reason, 'that rule') };
+    }
   }
   const ctxTone = (p: number | null) =>
     p === null ? 'var(--fg-dim)' : p >= 75 ? 'var(--red)' : p >= (overlordStore.checkpointThreshold ?? 60) ? 'var(--orange, #ff9e64)' : 'var(--green)';
@@ -432,7 +440,9 @@
 
 <style>
   /* list | drag | chat | drag | rail. The drag handles are the column borders. */
-  .focus { position: absolute; inset: 0; display: grid; grid-template-columns: var(--list-w) auto minmax(0, 1fr) auto var(--rail-w); }
+  /* Saved widths are capped by the space there is now, so widths dragged out on a big screen
+     can't squeeze the chat in a small window. */
+  .focus { position: absolute; inset: 0; display: grid; grid-template-columns: min(var(--list-w), 28%) auto minmax(0, 1fr) auto min(var(--rail-w), 28%); }
   .rail-resizer { display: flex; }
   .list, .rail { overflow-y: auto; min-width: 0; }
   .list { padding: 12px 10px; display: flex; flex-direction: column; gap: 14px; }
@@ -630,7 +640,7 @@
   .task .m { font-size: 10.5px; color: var(--fg-dim); }
 
   @media (max-width: 1100px) {
-    .focus { grid-template-columns: var(--list-w) auto minmax(0, 1fr); }
+    .focus { grid-template-columns: min(var(--list-w), 35%) auto minmax(0, 1fr); }
     .rail, .rail-resizer { display: none; }
   }
 </style>

@@ -165,11 +165,6 @@ describe('turns the harness wrote', () => {
     expect(injectedTurn(text)).toEqual({ label: 'Subagent report received', body: '## Findings\n\n**1.** a bug' });
   });
 
-  it('labels a background task notice by its summary', () => {
-    const text = '<task-notification>\n<task-id>x</task-id>\n<summary>Agent "Review" finished</summary>\n</task-notification>';
-    expect(injectedTurn(text)?.label).toBe('Agent "Review" finished');
-  });
-
   it('leaves the human alone', () => {
     expect(injectedTurn('please look at the agent-message handling')).toBeNull();
   });

@@ -193,8 +193,10 @@ export function chatRows(turns: ChatTurn[], events: TaskEvent[] = []): ChatRow[]
   return out;
 }
 
-/** A "user" turn the harness wrote, not the human: a subagent's report handed back, or a
- *  background task's notice. Shown folded under a plain label, with the body a click away. */
+/** A "user" turn the harness wrote, not the human: a subagent's report handed back. Shown
+ *  folded under a plain label, with the body a click away. (Turns that START with a tag, such
+ *  as a background task's `<task-notification>`, never get here: the transcript reader drops
+ *  them as system noise.) */
 export interface Injected {
   label: string;
   /** The report itself, without the harness's framing. */
@@ -203,17 +205,13 @@ export interface Injected {
 
 export function injectedTurn(text: string): Injected | null {
   const t = text.trimStart();
-  if (t.startsWith('Another Claude session sent a message') || t.startsWith('<agent-message')) {
+  if (t.startsWith('Another Claude session sent a message')) {
     const inner = t.match(/<agent-message[^>]*>([\s\S]*?)(<\/agent-message>|$)/)?.[1] ?? t;
     const after = inner.split(/The report follows:\s*\n/)[1] ?? inner;
     // The harness indents every line of the report by two spaces.
     const body = after.replace(/^ {2}/gm, '').trim();
     const handback = inner.includes('[Subagent hand-back]');
     return { label: handback ? 'Subagent report received' : 'Message from another session', body };
-  }
-  if (t.startsWith('<task-notification>')) {
-    const summary = t.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.trim();
-    return { label: summary || 'Background task finished', body: t.replace(/<[^>]+>/g, '').trim() };
   }
   return null;
 }
