@@ -381,6 +381,36 @@ export async function getTabTranscript(tabId: string): Promise<ChatTurn[]> {
   return invoke('get_tab_transcript', { tabId });
 }
 
+/** A chat's telemetry, as the phone's thread header reads it (mailink-protocol §12.1 `meta`). */
+export interface TabMeta {
+  runtime: 'claude' | 'codex' | 'gemini';
+  /** Display name ("Opus 5"); absent before the first reply. */
+  model?: string;
+  /** Claude only, and absent for good once a session is resumed: unknown, never a value. */
+  effort?: string;
+  contextPct?: number;
+  contextUsed?: number;
+  contextLimit?: number;
+}
+export async function getTabMeta(tabId: string): Promise<TabMeta | null> {
+  return invoke('get_tab_meta', { tabId });
+}
+
+/** A row the model picker offers (mailink-protocol `ModelOption`). `value` is what follows
+ *  `/model`; `display` is what `TabMeta.model` reads on it. */
+export interface ModelOption {
+  value: string;
+  name: string;
+  display: string;
+  family: string;
+  ambiguous: boolean;
+  note: string;
+  source: 'account' | 'builtin';
+}
+export async function listTabModels(tabId: string): Promise<ModelOption[]> {
+  return invoke('list_tab_models', { tabId });
+}
+
 /** Answer a tab's open prompt through the same hardened path the phone uses. Pass the
  *  `prompt_id` from `getTabPrompt` — it is the stale-guard against answering a prompt that
  *  opened while the decision was being made. */

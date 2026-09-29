@@ -104,6 +104,17 @@ conversation set off by a thin left rule so the eye can skip it:
   the prefix or the labels in both. Turns starting with a tag (`<task-notification>`) never
   arrive: the transcript reader drops them as system noise.
 
+**The chat header** reads what the phone's thread header does: the model, its 1M window, the
+reasoning effort and the context gauge, from `get_tab_meta` (the same `build_meta` as the
+phone's chat `meta`), polled with the transcript. It never uses the Overlord engine's facts
+alone, which are polled only while Overlord is on. On a Claude chat the model and the effort
+are pickers, set the phone's way: `/model <value>` (rows from `list_tab_models`, the phone's
+`GET /models?tab=`) or `/effort <level>` typed through `send_tab_message`, so an open prompt
+refuses them like any message. A sent `/model` is not written onto the header, because the
+TUI can refuse it or put a dialog in front; the header changes when the agent replies on the new
+model. A picked effort is shown until the transcript reports one, since a resumed session
+stops recording it.
+
 The list and the agent's-work rail are resizable (drag their borders); the widths are kept
 per viewer in `localStorage`. The composer carries the terminal composer's Overlord action: a
 bolt that runs a rule on this agent by hand, when Overlord is on and a rule applies.

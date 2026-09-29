@@ -538,10 +538,16 @@ async fn models_list(
     if !is_designated(&s.app, &tab) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let source = if accounts::tab_runs_remote(&s.app, &tab) {
+    Ok(Json(json!(models_for_tab(&s.app, &tab))))
+}
+
+/// What THIS tab can be switched to: a managed local tab reads its own account root, and an
+/// unknown or remote tab gets builtins only. Shared by `GET /models?tab=` and the Loom's picker.
+pub(crate) fn models_for_tab(app: &AppState, tab: &str) -> Vec<models::ModelOption> {
+    let source = if accounts::tab_runs_remote(app, tab) {
         models::Cache::None
     } else {
-        match s.app.tab_accounts.read().get(&tab) {
+        match app.tab_accounts.read().get(tab) {
             None => models::Cache::None,
             Some(r) => match r.local.get("claude") {
                 None => models::Cache::Home,
@@ -552,7 +558,7 @@ async fn models_list(
             },
         }
     };
-    Ok(Json(json!(models::available_from(source))))
+    models::available_from(source)
 }
 
 /// `GET /accounts` — §14.3 `AccountsSnapshot`.
@@ -5071,6 +5077,15 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
     if let Some(effort) = meta.effort {
         m["effort"] = json!(effort);
     }
+    Some(m)
+}
+
+/// A chat's `meta` (§12.1) plus its runtime, for the Loom's chat header. The same read the
+/// phone's thread header gets, so the two never disagree about model, effort or context.
+pub(crate) fn tab_meta_view(app: &AppState, tab_id: &str) -> Option<Value> {
+    let (rt, _) = resolved_session_for_tab(app, tab_id)?;
+    let mut m = build_meta(app, tab_id).unwrap_or_else(|| json!({}));
+    m["runtime"] = json!(rt.as_key());
     Some(m)
 }
 

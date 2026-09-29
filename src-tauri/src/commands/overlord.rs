@@ -68,6 +68,31 @@ pub async fn get_tab_transcript(
         .map_err(|e| format!("transcript read failed to run: {}", e))
 }
 
+/// A tab's model, effort and context, plus its runtime (the phone's chat `meta`). `None` before
+/// the tab has an agent session.
+#[tauri::command]
+pub async fn get_tab_meta(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<Value>, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::mailink::tab_meta_view(&app_state, &tab_id))
+        .await
+        .map_err(|e| format!("meta read failed to run: {}", e))
+}
+
+/// The models this tab can be switched to with `/model` (the phone's `GET /models?tab=`).
+#[tauri::command]
+pub async fn list_tab_models(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Value, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || serde_json::json!(crate::mailink::models_for_tab(&app_state, &tab_id)))
+        .await
+        .map_err(|e| format!("model list failed to run: {}", e))
+}
+
 /// What is currently blocking a tab: a tool permission gate, or an AskUserQuestion the agent
 /// raised. `None` when nothing is open. Overlord needs the distinction to decide whether it
 /// may answer or must put the decision to the human.

@@ -16,7 +16,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { getTabTranscript, sendTabMessage, type ChatTurn } from '$lib/tauri/commands';
+  import { getTabMeta, getTabTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
   import { chatRows, focusSections, injectedTurn, taskEventsFor, type FocusChat } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
@@ -91,17 +91,22 @@
   // ── The transcript: read on open, then every 3 s while shown (the phone polls 2 s). ──
   let turns = $state<ChatTurn[]>([]);
   let loadedFor = $state<string | null>(null);
+  /** Model, effort and context, read with the transcript: the phone's thread header. */
+  let meta = $state<TabMeta | null>(null);
   let reload: () => void = () => {};
   $effect(() => {
     const id = openId;
     turns = [];
     loadedFor = null;
+    meta = null;
     if (!id || !active) return;
     let alive = true;
-    const load = () =>
-      getTabTranscript(id)
+    const load = () => {
+      getTabMeta(id).then((m) => { if (alive) meta = m; }).catch(() => {});
+      return getTabTranscript(id)
         .then((t) => { if (alive) { turns = t; loadedFor = id; } })
         .catch(() => { if (alive) loadedFor = id; });
+    };
     reload = () => void load();
     void load();
     const timer = setInterval(load, 3000);
@@ -124,7 +129,84 @@
   let outcome = $state<{ chat: string; text: string } | null>(null);
 
   // ── What the Fleet card showed ────────────────────────────────────────────────────────────
-  const ctx = $derived(openId ? (overlordStore.facts.get(openId)?.context_pct ?? null) : null);
+  // The chat's own meta first: the engine's facts are only polled while Overlord is on.
+  const ctx = $derived(openId ? (meta?.contextPct ?? overlordStore.facts.get(openId)?.context_pct ?? null) : null);
+
+  // ── Model and effort, set the way the phone sets them: `/model X` and `/effort X` typed
+  //    through the composer's path, so an open prompt refuses them the same way. ──────────────
+  const claudeChat = $derived(meta?.runtime === 'claude');
+  /** An effort picked here, shown until the transcript reports one. Claude Code stops writing
+   *  effort after a resume, so for a resumed session this is the only record. Per chat. */
+  let effortPicked = $state<Record<string, string>>({});
+  const effortShown = $derived(openId ? (meta?.effort ?? effortPicked[openId] ?? null) : null);
+  const EFFORTS = [
+    { value: 'low', name: 'Low' },
+    { value: 'medium', name: 'Medium' },
+    { value: 'high', name: 'High' },
+    { value: 'xhigh', name: 'Extra high' },
+    { value: 'max', name: 'Max' },
+  ];
+  let pickMenu = $state<{ x: number; y: number; anchor: HTMLElement; items: { label: string; shortcut?: string; action: () => void }[] } | null>(null);
+  $effect(() => {
+    void openId;
+    pickMenu = null;
+  });
+  const menuAt = (e: MouseEvent) => {
+    const anchor = e.currentTarget as HTMLElement;
+    const r = anchor.getBoundingClientRect();
+    return { x: r.left, y: r.bottom + 4, anchor };
+  };
+  async function typeCommand(chat: string, text: string): Promise<boolean> {
+    try {
+      const r = await sendTabMessage(chat, text);
+      if (r.status === 'delivered') return true;
+      headNote = { chat, text: r.detail ?? `Not sent (${r.reason ?? r.status}).` };
+    } catch (e) {
+      headNote = { chat, text: `Not sent: ${e}` };
+    }
+    return false;
+  }
+  async function openModelPicker(e: MouseEvent) {
+    if (pickMenu) { pickMenu = null; return; }
+    const chat = openId;
+    if (!chat) return;
+    const at = menuAt(e);
+    const models = await listTabModels(chat).catch(() => []);
+    if (openId !== chat) return;
+    pickMenu = {
+      ...at,
+      items: models.map((m) => ({
+        label: m.name + (m.note ? ` · ${m.note}` : ''),
+        // An ambiguous row matching says "on this model", never "on this row" (§ ModelOption).
+        shortcut: meta?.model && m.display === meta.model ? 'current' : undefined,
+        action: async () => {
+          if (await typeCommand(chat, `/model ${m.value}`)) {
+            // Not stamped on the header: a sent /model can be refused or put behind a dialog.
+            headNote = { chat, text: `Sent /model ${m.value}. The header shows the model the agent next replies on.` };
+          }
+        },
+      })),
+    };
+  }
+  function openEffortPicker(e: MouseEvent) {
+    if (pickMenu) { pickMenu = null; return; }
+    const chat = openId;
+    if (!chat) return;
+    pickMenu = {
+      ...menuAt(e),
+      items: EFFORTS.map((o) => ({
+        label: o.name,
+        shortcut: effortShown === o.value ? 'current' : undefined,
+        action: async () => {
+          if (await typeCommand(chat, `/effort ${o.value}`)) {
+            effortPicked = { ...effortPicked, [chat]: o.value };
+            headNote = null;
+          }
+        },
+      })),
+    };
+  }
+  const fmtTok = (n: number) => (n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
   const ritual = $derived(openId ? overlordStore.ritualProgress.find((r) => r.tabId === openId) ?? null : null);
   const awaiting = $derived(openId ? !!overlordStore.outstandingFor(openId) : false);
   /** Rules that can be run on this agent by hand, as the terminal composer offers them: only
@@ -271,7 +353,24 @@
           <span>{open.workspace} · {open.state === 'permission' ? 'waiting on a permission' : open.asks ? 'waiting on you' : (open.state ?? 'no session')}</span>
         </div>
         <div class="gauges">
-          <span class="ctx" style="--t: {ctxTone(ctx)}"><i><s style="width: {Math.min(100, ctx ?? 0)}%"></s></i><em>{ctx ?? '—'}% context</em></span>
+          {#if meta?.model}
+            {#if claudeChat}
+              <button class="chip model" aria-label="Switch model" aria-haspopup="menu" onclick={openModelPicker}>{meta.model} <span aria-hidden="true">▾</span></button>
+            {:else}
+              <span class="chip model">{meta.model}</span>
+            {/if}
+          {/if}
+          {#if meta?.contextLimit && meta.contextLimit >= 1_000_000 && !/\d\s*m\b/i.test(meta.model ?? '')}
+            <span class="win">{fmtTok(meta.contextLimit)}</span>
+          {/if}
+          {#if claudeChat}
+            <!-- Unknown is common (a resumed session stops recording effort), so it reads as an
+                 offer to set one, never as a value. -->
+            <button class="chip effort" class:unset={!effortShown} aria-label={effortShown ? 'Change reasoning effort' : 'Set reasoning effort'} aria-haspopup="menu" onclick={openEffortPicker}>{effortShown ?? 'set effort'}</button>
+          {:else if effortShown}
+            <span class="chip effort">{effortShown}</span>
+          {/if}
+          <span class="ctx" style="--t: {ctxTone(ctx)}"><i><s style="width: {Math.min(100, ctx ?? 0)}%"></s></i><em>{ctx ?? '—'}% context</em>{#if meta?.contextUsed != null && meta.contextLimit}<span class="tok">{fmtTok(meta.contextUsed)}/{fmtTok(meta.contextLimit)}</span>{/if}</span>
           {#if ritual}<span class="ritual">{ritual.ruleName} · {ritual.step}/{ritual.steps}</span>{/if}
           {#if awaiting && !ritual}
             <span class="await">awaiting reply
@@ -432,6 +531,10 @@
   </aside>
 </div>
 
+{#if pickMenu && openId}
+  <ContextMenu items={pickMenu.items} x={pickMenu.x} y={pickMenu.y} anchor={pickMenu.anchor} onclose={() => (pickMenu = null)} />
+{/if}
+
 {#if triggerMenu && openId}
   <ContextMenu
     items={rules.map((rule) => ({ label: rule.name, shortcut: rule.enabled ? undefined : 'off', action: () => void fire(rule.id, rule.name) }))}
@@ -491,6 +594,26 @@
   .ctx i { display: block; width: 60px; height: 3px; border-radius: 2px; background: var(--bg-light); overflow: hidden; }
   .ctx s { display: block; height: 100%; background: var(--t); }
   .ctx em { font-style: normal; color: var(--t); }
+  .tok { margin-left: 4px; opacity: 0.7; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 2px 6px;
+    color: var(--fg);
+    font: inherit;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+  }
+  button.chip { cursor: pointer; }
+  button.chip:hover, button.chip[aria-haspopup]:focus-visible { border-color: var(--bg-light); background: var(--bg-medium); }
+  .chip span { font-size: 9px; color: var(--fg-dim); }
+  .chip.effort { background: var(--bg-medium); text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; }
+  .chip.effort.unset { color: var(--fg-dim); text-transform: none; letter-spacing: 0; }
+  .win { font-family: var(--font-mono, ui-monospace, monospace); font-size: 9.5px; font-weight: 600; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 3px; padding: 0 4px; }
   .ritual { color: var(--green); }
   .await { display: inline-flex; align-items: center; gap: 6px; color: var(--orange, #ff9e64); }
   .acts { display: flex; gap: 6px; margin-left: auto; }

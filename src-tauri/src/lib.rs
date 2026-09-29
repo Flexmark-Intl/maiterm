@@ -768,6 +768,8 @@ pub fn run() {
             commands::overlord::get_overlord_tab_facts,
             commands::overlord::get_agent_reply_since,
             commands::overlord::get_tab_prompt,
+            commands::overlord::get_tab_meta,
+            commands::overlord::list_tab_models,
             commands::overlord::answer_tab_prompt,
             commands::overlord::answer_tab_prompt_as_human,
             commands::overlord::send_tab_message,
