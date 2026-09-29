@@ -23,8 +23,9 @@
   }
   let { active }: Props = $props();
 
-  /** Every workspace but the Overlord's own: it is the supervisor, not the work. */
-  const all = $derived(workspacesStore.workspaces.filter((w) => !w.overlord));
+  /** Every active workspace but the Overlord's own: it is the supervisor, not the work. A
+   *  suspended workspace is left out; activating it brings it back. */
+  const all = $derived(workspacesStore.workspaces.filter((w) => !w.overlord && !w.suspended));
   const scoped = $derived(
     loomStore.workspaceFilter ? all.filter((w) => w.id === loomStore.workspaceFilter) : all,
   );

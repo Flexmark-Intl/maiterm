@@ -70,7 +70,8 @@ The Loom works with the engine off: it is the human's view, not supervision.
 
 ## Scope
 
-Every workspace in the window but the Overlord's own, or one picked from the filter chips.
+Every active workspace in the window but the Overlord's own, or one picked from the filter
+chips. Suspended workspaces are left out: activate one and it appears.
 
 ## Focus
 
