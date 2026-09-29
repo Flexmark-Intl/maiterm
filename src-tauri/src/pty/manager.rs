@@ -574,7 +574,28 @@ pub fn spawn_pty(
                     let osc_events = {
                         let mut registry = state_reader.terminal_registry.write();
                         if let Some(handle) = registry.get_mut(&pty_id_clone) {
-                            handle.osc_interceptor.process(data)
+                            let events = handle.osc_interceptor.process(data);
+                            for event in &events {
+                                if let OscEvent::ShellIntegration { cmd, exit_code } = event {
+                                    match cmd {
+                                        'D' => {
+                                            handle.dropped_ssh = if *exit_code == Some(255) {
+                                                handle.live_ssh.clone()
+                                            } else {
+                                                None
+                                            };
+                                        }
+                                        // maiTerm's own hooks mark a command start with B; C is
+                                        // the spec's, sent by other integrations.
+                                        'B' | 'C' => {
+                                            handle.live_ssh = None;
+                                            handle.dropped_ssh = None;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            events
                         } else {
                             vec![]
                         }
@@ -942,10 +963,31 @@ pub fn get_pty_info(state: &Arc<AppState>, pty_id: &str) -> Result<PtyInfo, Stri
     let handle = registry.get(pty_id).ok_or("PTY not found")?;
     let pid = handle.child_pid.ok_or("No child PID")?;
 
+    drop(registry);
+
     let cwd = get_cwd_for_pid(pid);
     let foreground_command = get_foreground_command(pid);
+    note_live_ssh(state, pty_id, &foreground_command);
 
     Ok(PtyInfo { cwd, foreground_command })
+}
+
+/// Record an ssh a foreground probe saw holding this terminal (see
+/// `TerminalHandle::live_ssh`). A probe that sees none changes nothing: "at the prompt" is
+/// what a drop looks like.
+///
+/// Deliberately does NOT clear `dropped_ssh`: probes can be served from a ps snapshot up to
+/// 800ms old, which still shows the ssh that just died and would erase the drop recorded
+/// after it. Nothing needs this path to clear it — a reconnect is a new command, and its B
+/// does.
+fn note_live_ssh(state: &AppState, pty_id: &str, foreground: &Option<String>) {
+    let Some(cmd) = foreground else { return };
+    let mut registry = state.terminal_registry.write();
+    if let Some(handle) = registry.get_mut(pty_id) {
+        if handle.live_ssh.as_deref() != Some(cmd.as_str()) {
+            handle.live_ssh = Some(cmd.clone());
+        }
+    }
 }
 
 /// Foreground command only — skips the `lsof` cwd lookup that `get_pty_info`
@@ -985,7 +1027,9 @@ pub fn get_pty_foreground(
         // SSH bridge runs, so this is knowingly left alone rather than half-fixed.
         let _ = fresh;
     }
-    Ok(get_foreground_command(pid))
+    let foreground = get_foreground_command(pid);
+    note_live_ssh(state, pty_id, &foreground);
+    Ok(foreground)
 }
 
 /// The ssh/mosh process holding this PTY's terminal — its pid and full command line — if one

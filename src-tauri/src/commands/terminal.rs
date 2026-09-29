@@ -336,6 +336,8 @@ pub struct ScrollInfo {
     pub total_lines: usize,
     pub viewport_rows: usize,
     pub viewport_cols: usize,
+    /// Raw ssh argv; see `TerminalHandle::dropped_ssh`.
+    pub dropped_ssh: Option<String>,
 }
 
 /// Get scrollback metadata.
@@ -351,6 +353,7 @@ pub fn get_terminal_scrollback_info(
         total_lines: handle.term.grid().total_lines(),
         viewport_rows: handle.term.screen_lines(),
         viewport_cols: handle.term.columns(),
+        dropped_ssh: handle.dropped_ssh.clone(),
     })
 }
 

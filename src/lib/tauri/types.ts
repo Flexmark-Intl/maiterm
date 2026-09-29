@@ -706,6 +706,8 @@ export interface ScrollInfo {
   total_lines: number;
   viewport_rows: number;
   viewport_cols: number;
+  /** Raw argv of an ssh that died with 255 and was not followed by another command. */
+  dropped_ssh: string | null;
 }
 
 export interface SearchMatch {

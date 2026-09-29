@@ -20,10 +20,34 @@ export interface DisconnectInfo {
   at: number;
 }
 
+/**
+ * Unattended reconnects in flight at once. A window reload after an outage finds every
+ * ssh tab dropped at the same moment — hundreds of them — and each reconnect is an
+ * interactive ssh plus a bridge setup ssh to the same host. Four keeps sshd's MaxStartups
+ * and the tunnel's port allocation out of it; one would take minutes.
+ */
+const MAX_CONCURRENT_RECONNECTS = 4;
+
 function createSshDisconnectStore() {
   let disconnected = $state<Map<string, DisconnectInfo>>(new Map());
+  let running = 0;
+  const waiting: (() => void)[] = [];
 
   return {
+    /** Run `fn` once a reconnect slot is free (see MAX_CONCURRENT_RECONNECTS). */
+    async throttle<T>(fn: () => Promise<T>): Promise<T> {
+      if (running >= MAX_CONCURRENT_RECONNECTS) {
+        await new Promise<void>(resolve => waiting.push(resolve));
+      }
+      running++;
+      try {
+        return await fn();
+      } finally {
+        running--;
+        waiting.shift()?.();
+      }
+    },
+
     /** Reactive accessor — reading this in a template/`$derived` tracks changes. */
     get map() { return disconnected; },
 
