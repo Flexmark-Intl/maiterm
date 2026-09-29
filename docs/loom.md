@@ -72,7 +72,11 @@ The Loom works with the engine off: it is the human's view, not supervision.
 ## Scope
 
 Every active workspace in the window but the Overlord's own, or one picked from the filter
-chips. Suspended workspaces are left out: activate one and it appears.
+chips. Suspended workspaces are left out: activate one and it appears. "Active" is the
+sidebar's rule (`workspace/liveness.ts` `workspaceIsLive`: a terminal tab with a live PTY),
+not the `suspended` flag. The flag stays clear on a workspace whose tabs were suspended one by
+one, or that was clicked without resuming anything, and filtering on it listed every one of
+those.
 
 ## Focus
 

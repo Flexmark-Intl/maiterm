@@ -13,6 +13,7 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { decisionsQueue, summarize } from '$lib/loom/model';
+  import { workspaceIsLive } from '$lib/workspace/liveness';
   import LoomView from './LoomView.svelte';
   import DecisionsView from './DecisionsView.svelte';
   import FocusView from './FocusView.svelte';
@@ -23,9 +24,10 @@
   }
   let { active }: Props = $props();
 
-  /** Every active workspace but the Overlord's own: it is the supervisor, not the work. A
-   *  suspended workspace is left out; activating it brings it back. */
-  const all = $derived(workspacesStore.workspaces.filter((w) => !w.overlord && !w.suspended));
+  /** Every awake workspace but the Overlord's own: it is the supervisor, not the work. "Awake"
+   *  is the sidebar's rule (`workspaceIsLive`, a live PTY), not the `suspended` flag, which
+   *  stays clear on a workspace whose tabs were parked one by one. Waking one brings it back. */
+  const all = $derived(workspacesStore.workspaces.filter((w) => !w.overlord && workspaceIsLive(w)));
   const scoped = $derived(
     loomStore.workspaceFilter ? all.filter((w) => w.id === loomStore.workspaceFilter) : all,
   );
