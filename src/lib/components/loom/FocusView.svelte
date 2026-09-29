@@ -146,7 +146,7 @@
     { value: 'xhigh', name: 'Extra high' },
     { value: 'max', name: 'Max' },
   ];
-  let pickMenu = $state<{ x: number; y: number; anchor: HTMLElement; items: { label: string; shortcut?: string; action: () => void }[] } | null>(null);
+  let pickMenu = $state<{ x: number; y: number; anchor: HTMLElement; items: { label: string; shortcut?: string; disabled?: boolean; action: () => void }[] } | null>(null);
   $effect(() => {
     void openId;
     pickMenu = null;
@@ -170,11 +170,14 @@
     if (pickMenu) { pickMenu = null; return; }
     const chat = openId;
     if (!chat) return;
-    const at = menuAt(e);
+    // Open at once and fill in when the list lands, into THIS menu only: a menu closed, or
+    // replaced by another picker or the rule menu, while the list was read stays that way.
+    const opened = { ...menuAt(e), items: [{ label: 'Reading models…', disabled: true, action: () => {} }] };
+    pickMenu = opened;
     const models = await listTabModels(chat).catch(() => []);
-    if (openId !== chat) return;
+    if (pickMenu !== opened || openId !== chat) return;
     pickMenu = {
-      ...at,
+      ...opened,
       items: models.map((m) => ({
         label: m.name + (m.note ? ` · ${m.note}` : ''),
         // An ambiguous row matching says "on this model", never "on this row" (§ ModelOption).
