@@ -84,6 +84,23 @@ part that otherwise scrolls away. Agent turns render through `loom/markdown.ts`,
 instance that never emits HTML it didn't build: a transcript quotes the web into a webview
 that can reach every command. Links open in the browser (WKWebView drops `target=_blank`).
 
+**How the chat reads.** One column at a reading measure (76ch), centered: the agent's prose at
+the left edge, the human's messages as bubbles at the right, and everything that isn't
+conversation set off by a thin left rule so the eye can skip it:
+- tool steps are one quiet line each (verb, then the command cut to one line), the calls on
+  click;
+- task events say what happened and to which task, and tasks added back to back are one block
+  (`chatRows` groups them as an `added` row);
+- peer traffic reads "From <peer>" / "To <peer>" with the message as written, folded to four
+  lines when long;
+- turns the harness wrote as "user" (a subagent's report handed back, a background task's
+  notice: `injectedTurn`) fold to one line, "Subagent report received", with the report on
+  click.
+
+The list and the agent's-work rail are resizable (drag their borders); the widths are kept
+per viewer in `localStorage`. The composer carries the terminal composer's Overlord action: a
+bolt that runs a rule on this agent by hand, when Overlord is on and a rule applies.
+
 Under the chat, in this order:
 - **The prompt the agent is stopped at** (`PromptCard.svelte`): a tool permission with the
   dialog's own rows (read off the screen, `mailink/permission.rs`), an AskUserQuestion with

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { makeTask } from '$lib/tasks/model';
 import type { ChatTurn } from '$lib/tauri/commands';
 import type { Task } from '$lib/tauri/types';
-import { chatRows, decisionsQueue, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
+import { chatRows, decisionsQueue, injectedTurn, focusSections, focusSince, isQuiet, loomAgents, QUIET_MS, summarize, taskEventsFor, toolVerb, unexplainedBlocked } from './model';
 
 const NOW = Date.parse('2026-09-27T18:00:00Z');
 const task = (over: Partial<Task> = {}): Task => ({ ...makeTask({ title: over.title ?? 't' }, '2026-09-27T17:00:00Z'), ...over });
@@ -136,6 +136,17 @@ describe('task events in the chat', () => {
     expect(rows.map((r) => (r.kind === 'task' ? r.event.kind : r.kind))).toEqual(['turn', 'tools', 'asked', 'tools', 'answered', 'note', 'turn']);
   });
 
+  it('gathers tasks added back to back into one block', () => {
+    const made = (id: string, at: string) => task({ id, title: id, tab_id: 'tab', created_at: `2026-09-27T${at}Z`, notes: [] });
+    const rows = chatRows(
+      [turn('u', 'user', at('10:00:00')), turn('a', 'agent', at('10:10:00'))],
+      taskEventsFor('tab', [made('x', '10:01:00'), made('y', '10:01:00'), made('z', '10:02:00')]),
+    );
+    expect(rows.map((r) => r.kind)).toEqual(['turn', 'added', 'turn']);
+    const block = rows[1];
+    expect(block.kind === 'added' && block.events.map((e) => e.taskId)).toEqual(['x', 'y', 'z']);
+  });
+
   it('keys two notes written in the same millisecond apart', () => {
     const same = task({ id: 'd', tab_id: 'tab', notes: [{ at: '2026-09-27T10:05:00Z', text: 'a', by: 'agent' }, { at: '2026-09-27T10:05:00Z', text: 'b', by: 'agent' }] });
     const keys = taskEventsFor('tab', [same]).map((e) => e.key);
@@ -145,6 +156,22 @@ describe('task events in the chat', () => {
   it('puts nothing into a live-screen snapshot', () => {
     const rows = chatRows([turn('ctx_tab', 'system', at('10:30:00'), 'terminal_snapshot')], taskEventsFor('tab', [t]));
     expect(rows.map((r) => r.kind)).toEqual(['turn']);
+  });
+});
+
+describe('turns the harness wrote', () => {
+  it('folds a subagent hand-back to its report', () => {
+    const text = 'Another Claude session sent a message:\n<agent-message from="a1">\n[Subagent hand-back] The text below is framing. The report follows:\n  ## Findings\n\n  **1.** a bug\n</agent-message>\n\nThat "other Claude session" is…';
+    expect(injectedTurn(text)).toEqual({ label: 'Subagent report received', body: '## Findings\n\n**1.** a bug' });
+  });
+
+  it('labels a background task notice by its summary', () => {
+    const text = '<task-notification>\n<task-id>x</task-id>\n<summary>Agent "Review" finished</summary>\n</task-notification>';
+    expect(injectedTurn(text)?.label).toBe('Agent "Review" finished');
+  });
+
+  it('leaves the human alone', () => {
+    expect(injectedTurn('please look at the agent-message handling')).toBeNull();
   });
 });
 

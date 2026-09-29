@@ -155,7 +155,10 @@ export type ChatRow =
   | { kind: 'tools'; key: string; turns: ChatTurn[]; verbs: string[] }
   /** Something that happened that wasn't a message: a peer message or a goal change. */
   | { kind: 'rule'; turn: ChatTurn }
-  | { kind: 'task'; key: string; event: TaskEvent };
+  | { kind: 'task'; key: string; event: TaskEvent }
+  /** Tasks added back to back (an agent planning out loud adds six at once): one block, not
+   *  six rules. */
+  | { kind: 'added'; key: string; events: TaskEvent[] };
 
 /** Fold a transcript into rows: each run of consecutive tool turns becomes one row keyed by its
  *  first msg_id, so a growing run updates in place while the agent streams. Task events are
@@ -171,7 +174,10 @@ export function chatRows(turns: ChatTurn[], events: TaskEvent[] = []): ChatRow[]
   const flush = (upTo: number) => {
     while (ei < pending.length && pending[ei].ts <= upTo) {
       const e = pending[ei++];
-      out.push({ kind: 'task', key: e.key, event: e });
+      const last = out[out.length - 1];
+      if (e.kind === 'added' && last?.kind === 'added') last.events.push(e);
+      else if (e.kind === 'added') out.push({ kind: 'added', key: e.key, events: [e] });
+      else out.push({ kind: 'task', key: e.key, event: e });
     }
   };
   for (const turn of turns) {
@@ -185,6 +191,31 @@ export function chatRows(turns: ChatTurn[], events: TaskEvent[] = []): ChatRow[]
   flush(Infinity);
   for (const r of out) if (r.kind === 'tools') r.verbs = [...new Set(r.turns.map((t) => toolVerb(t.text)))];
   return out;
+}
+
+/** A "user" turn the harness wrote, not the human: a subagent's report handed back, or a
+ *  background task's notice. Shown folded under a plain label, with the body a click away. */
+export interface Injected {
+  label: string;
+  /** The report itself, without the harness's framing. */
+  body: string;
+}
+
+export function injectedTurn(text: string): Injected | null {
+  const t = text.trimStart();
+  if (t.startsWith('Another Claude session sent a message') || t.startsWith('<agent-message')) {
+    const inner = t.match(/<agent-message[^>]*>([\s\S]*?)(<\/agent-message>|$)/)?.[1] ?? t;
+    const after = inner.split(/The report follows:\s*\n/)[1] ?? inner;
+    // The harness indents every line of the report by two spaces.
+    const body = after.replace(/^ {2}/gm, '').trim();
+    const handback = inner.includes('[Subagent hand-back]');
+    return { label: handback ? 'Subagent report received' : 'Message from another session', body };
+  }
+  if (t.startsWith('<task-notification>')) {
+    const summary = t.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.trim();
+    return { label: summary || 'Background task finished', body: t.replace(/<[^>]+>/g, '').trim() };
+  }
+  return null;
 }
 
 // ── Focus: the phone's inbox rules (maiLink inbox-view.ts isFocused / focusSince) ──
