@@ -110,7 +110,11 @@
 
   const rows = $derived(openId ? chatRows(turns, taskEventsFor(openId, tasks)) : []);
   let expanded = $state<string[]>([]);
-  const toggle = (key: string) => (expanded = expanded.includes(key) ? expanded.filter((k) => k !== key) : [...expanded, key]);
+  // A drag that selects text and ends on a fold row is a copy, not a click on the row.
+  const toggle = (key: string) => {
+    if (window.getSelection()?.toString()) return;
+    expanded = expanded.includes(key) ? expanded.filter((k) => k !== key) : [...expanded, key];
+  };
 
   const openAsk = $derived(openId ? asking(openId) : undefined);
   const agentTasks = $derived(openId ? tasks.filter((t) => t.tab_id === openId && !isRetired(t.status) && t.status !== 'backlog') : []);
@@ -504,6 +508,8 @@
   /* The chat reads as one column at a reading measure: prose at the left edge, the human's own
      messages at the right, and everything that isn't conversation (tool steps, task events,
      peer traffic) indented off a thin left rule so the eye can skip it. */
+  /* The app is unselectable by default (app.css); the chat and the rail are read and quoted. */
+  .chat, .rail { -webkit-user-select: text; user-select: text; }
   .chat { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 24px 20px; }
   .column { max-width: 76ch; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; font-size: 13px; line-height: 1.55; }
 
