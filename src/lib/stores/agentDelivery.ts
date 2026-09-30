@@ -157,6 +157,31 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
     return 'delivered';
   }
 
+  /** Inject NOW or not at all — never queue. For a caller that keeps its own durable copy
+   *  and must know the outcome, which `deliver()` can't tell it: a `'queued'` message is
+   *  injected later by the drain with no word back, can't be withdrawn, and is lost on
+   *  restart. Follow-ups (docs/follow-ups.md §6.1) hold theirs on the `Tab` and retry on
+   *  their own tick.
+   *
+   *  Needs no slot and doesn't create one: most tabs a follow-up targets have no bridge or
+   *  mesh. It still shares every guard that keeps two pastes off one PTY — the in-flight
+   *  `injecting` set, a live session, no human prompt open — and, where a slot exists, its
+   *  cooldown and its queue: a bridge message already waiting goes first. It deliberately
+   *  ignores the slot's `ready` flag, which the bridge and mesh own and a reload resets.
+   *
+   *  `'failed'` means the write itself failed (no terminal), as opposed to `'held'`: not now. */
+  async function tryDeliverNow(tabId: string, text: string): Promise<'delivered' | 'held' | 'failed'> {
+    const d = delivery.get(tabId);
+    if (d && (d.queue.length > 0 || d.busy)) return 'held';
+    if (injecting.has(tabId)) return 'held';
+    if (!deps.liveState(tabId) || deps.awaitingHuman(tabId)) return 'held';
+    const ok = await injectExclusive(tabId, text);
+    if (!ok) return 'failed';
+    // Serialize whatever the bridge or mesh sends next behind this, as its own sends are.
+    if (delivery.get(tabId) === d && d) armCooldown(tabId);
+    return 'delivered';
+  }
+
   /** Try to deliver the next queued message to a tab (oldest first). */
   async function flush(tabId: string) {
     const d = delivery.get(tabId);
@@ -245,6 +270,7 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
     },
 
     deliver,
+    tryDeliverNow,
     flush,
 
     destroy() {

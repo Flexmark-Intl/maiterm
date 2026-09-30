@@ -201,3 +201,74 @@ describe('agentDelivery — one slot, two owners (bridge + mesh on the same tab)
     expect(h.ctl.has('B')).toBe(false);
   });
 });
+
+describe('agentDelivery — tryDeliverNow (follow-ups: inject now or not at all)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('delivers to a live tab that has no slot, and creates none', async () => {
+    const h = makeHarness();
+    h.live.add('A');
+
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('delivered');
+    expect(h.textsFor('A')).toEqual(['f1']);
+    expect(h.ctl.has('A')).toBe(false);
+  });
+
+  it('holds — and never queues — when the tab is not live or a human prompt is open', async () => {
+    const h = makeHarness();
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('held');
+    h.live.add('A');
+    h.awaiting.add('A');
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('held');
+
+    // Nothing was kept anywhere: clearing the hold must not deliver it behind the caller's back.
+    h.awaiting.delete('A');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.textsFor('A')).toEqual([]);
+  });
+
+  it('lets a bridge message already waiting go first', async () => {
+    const h = makeHarness();
+    h.ctl.claim('A', 'bridge', true);
+    expect(await h.ctl.deliver('A', 'bridge-1')).toBe('queued'); // not live yet → queued
+    h.live.add('A');
+
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('held');
+    expect(h.textsFor('A')).toEqual([]);
+  });
+
+  it('holds during the slot cooldown, and arms it after its own inject', async () => {
+    const h = makeHarness({ cooldownMs: 1000 });
+    h.live.add('A');
+    h.ctl.claim('A', 'bridge', true);
+
+    expect(await h.ctl.deliver('A', 'bridge-1')).toBe('delivered');
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('held'); // inside bridge-1's cooldown
+
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('delivered');
+    // …and a bridge send right behind it is serialized, not pasted over it.
+    expect(await h.ctl.deliver('A', 'bridge-2')).toBe('queued');
+    expect(h.textsFor('A')).toEqual(['bridge-1', 'f1']);
+  });
+
+  it('ignores the slot ready flag, which the bridge owns and a reload resets', async () => {
+    const h = makeHarness();
+    h.live.add('A');
+    h.ctl.claim('A', 'bridge', false);
+
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('delivered');
+  });
+
+  it("reports 'failed' when the write itself fails, and keeps nothing", async () => {
+    const h = makeHarness();
+    h.live.add('A');
+    h.setInjectResult(false);
+
+    expect(await h.ctl.tryDeliverNow('A', 'f1')).toBe('failed');
+    h.setInjectResult(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.textsFor('A')).toEqual(['f1']); // the one failed attempt, never retried by the controller
+  });
+});
