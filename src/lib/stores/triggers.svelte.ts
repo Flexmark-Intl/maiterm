@@ -5,6 +5,7 @@ import { activityStore } from '$lib/stores/activity.svelte';
 import { writeTerminal, setTabTriggerVariables, getPtyInfo, cleanSshCommand, buildSshCommand, getRemoteBridgeEnv, shellEscapePath, countSessionIdClaimants } from '$lib/tauri/commands';
 import { remoteAccountExport, bindRemoteAccountWhenUp } from '$lib/utils/remoteAccountToken';
 import { stripAnsi } from '$lib/utils/ansi';
+import { pasteSettleMs } from '$lib/utils/agentPrompt';
 import { getCompiledTitlePatterns, getCompiledPatterns, extractDirFromTitle } from '$lib/utils/promptPattern';
 import { dispatch } from './notificationDispatch';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -298,8 +299,13 @@ async function executeActions(
         if (vars) {
           cmd = cmd.replace(/%(\w+)/g, (m, name) => vars.has(name) ? vars.get(name)! : m);
         }
-        const bytes = Array.from(new TextEncoder().encode(cmd + '\n'));
-        await writeTerminal(instance.ptyId, bytes);
+        // Enter is a CR sent as its own keystroke after a settle delay: an agent TUI
+        // reads '\n' (Ctrl+J) as "insert newline", and treats text+CR arriving in one
+        // burst as a paste that swallows the CR. A shell accepts either.
+        const enc = (s: string) => Array.from(new TextEncoder().encode(s));
+        await writeTerminal(instance.ptyId, enc(cmd));
+        await new Promise<void>((r) => setTimeout(r, pasteSettleMs(cmd.length)));
+        await writeTerminal(instance.ptyId, enc('\r'));
       } catch (e) {
         logError(`Trigger "${trigger.name}" failed to send command: ${e}`);
       }
