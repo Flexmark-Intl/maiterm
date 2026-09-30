@@ -59,8 +59,8 @@ export interface AgentTabSession {
   /** Wall-clock ms of the last state change that was ACTIVITY — drives recency sorting (the
    *  Agent Bridge picker, the Loom's Focus list). A session merely starting is not activity:
    *  auto-resume starts every agent at launch, and stamping those used to date weeks-idle chats
-   *  "since yesterday". 0 = no activity seen this run; pair it with the transcript's
-   *  `last_turn_ts` (Overlord facts) for the time before that. */
+   *  "since yesterday". 0 = no activity seen this run; pair it with `getTabsLastActivity` (the
+   *  phone's rule) for the time before that. */
   updatedAt: number;
 }
 

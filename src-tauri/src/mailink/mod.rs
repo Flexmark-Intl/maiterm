@@ -5282,6 +5282,12 @@ fn last_activity_ts(app: &AppState, tab_id: &str, scrollback_ts: Option<u64>, no
         .unwrap_or(now)
 }
 
+/// `last_activity_ts` for one tab, read the way the phone's chat detail reads it — the desktop
+/// Loom's Focus list sorts by this so it agrees with the phone's (a restart does not move it).
+pub(crate) fn tab_last_activity_ms(app: &AppState, tab_id: &str) -> u64 {
+    last_activity_ts(app, tab_id, scrollback_time_for(app, tab_id), now_ms())
+}
+
 /// The tab's `suspended_at` (RFC3339) in unix ms: the last moment it had a live PTY. Only read on
 /// `last_activity_ts`'s fallback arm, so the tab walk is not paid for tabs with a real signal.
 fn suspended_at_ms(app: &AppState, tab_id: &str) -> Option<u64> {

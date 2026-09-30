@@ -766,6 +766,7 @@ pub fn run() {
             commands::mailink::mailink_list_devices,
             commands::mailink::mailink_remove_device,
             commands::overlord::get_overlord_tab_facts,
+            commands::overlord::get_tabs_last_activity,
             commands::overlord::get_agent_reply_since,
             commands::overlord::get_tab_prompt,
             commands::overlord::get_tab_meta,

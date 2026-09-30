@@ -320,6 +320,11 @@ export async function getOverlordTabFacts(tabIds: string[]): Promise<Record<stri
   return invoke('get_overlord_tab_facts', { tabIds });
 }
 
+/** Per-tab last activity (unix ms) by the phone's rule — every requested tab is present. */
+export async function getTabsLastActivity(tabIds: string[]): Promise<Record<string, number>> {
+  return invoke('get_tabs_last_activity', { tabIds });
+}
+
 /** What a tab's agent has said since `sinceMs`, joined oldest-first — how Overlord reads
  *  the answer to a directive it typed. `sinceMs` MUST come from the transcript's own clock
  *  (the tab's previous `last_turn_ts`): an SSH tab's transcript is written on the remote

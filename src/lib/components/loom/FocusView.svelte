@@ -16,7 +16,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
-  import { getTabMeta, getTabTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
+  import { getTabMeta, getTabsLastActivity, getTabTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
   import { chatRows, focusSections, injectedTurn, taskEventsFor, type FocusChat } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
@@ -45,6 +45,29 @@
   const asking = (tabId: string) =>
     tasks.find((t) => t.tab_id === tabId && t.status === 'blocked' && (t.blocker?.kind === 'decision' || t.blocker?.kind === 'action'));
 
+  // ── When each agent tab last did something, by the phone's rule (mailink `last_activity_ts`:
+  // last real transcript turn, else scrollback time, else `suspended_at`, else now). Hook state
+  // alone can't say: it is in memory, and auto-resume restarts every agent at launch. Read here
+  // rather than from Overlord's facts, which are polled only while Overlord is on and never for
+  // exempt tabs. The key is the id list, so a state change doesn't restart the poll.
+  let lastActivity = $state<Record<string, number>>({});
+  const agentTabIds = $derived(
+    workspaces
+      .flatMap((w) => w.panes.flatMap((p) => p.tabs))
+      .filter((t) => t.tab_type === 'terminal' && !t.service_id && claudeStateStore.getState(t.id))
+      .map((t) => t.id)
+      .join(','),
+  );
+  $effect(() => {
+    const ids = agentTabIds ? agentTabIds.split(',') : [];
+    if (!active || !ids.length) return;
+    let alive = true;
+    const poll = () => getTabsLastActivity(ids).then((m) => { if (alive) lastActivity = m; }).catch(() => {});
+    void poll();
+    const timer = setInterval(poll, 10_000);
+    return () => { alive = false; clearInterval(timer); };
+  });
+
   const chats = $derived.by<Chat[]>(() =>
     workspaces.flatMap((w) =>
       w.panes.flatMap((p) =>
@@ -59,9 +82,9 @@
               workspace: w.name,
               state: s?.state ?? null,
               unread: s?.state === 'idle' && s.read === false,
-              // The transcript's last real turn (a resume does not move it — the phone's rule,
-              // mailink `last_activity_ts`), or a hook event seen since, whichever is newer.
-              lastActivity: Math.max(overlordStore.facts.get(t.id)?.last_turn_ts ?? 0, s?.updatedAt ?? 0),
+              // The phone's rule (a resume does not move it), or a hook event seen since,
+              // whichever is newer.
+              lastActivity: Math.max(lastActivity[t.id] ?? 0, s?.updatedAt ?? 0),
               asks: !!ask,
               preview: s?.state === 'permission' ? 'Needs your approval' : ask?.blocker?.question ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : ''),
             };

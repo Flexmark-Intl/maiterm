@@ -38,6 +38,29 @@ pub async fn get_overlord_tab_facts(
     .map_err(|e| format!("overlord facts probe failed to run: {}", e))
 }
 
+/// Batched per-tab last activity (unix ms) for the Loom's Focus list — the phone's own rule
+/// (`mailink::last_activity_ts`: last real transcript turn, else scrollback time, else
+/// `suspended_at`, else now), so a resume does not date a chat. Independent of the Overlord
+/// facts poll, which runs only while Overlord is on and skips exempt tabs.
+#[tauri::command]
+pub async fn get_tabs_last_activity(
+    state: State<'_, Arc<AppState>>,
+    tab_ids: Vec<String>,
+) -> Result<HashMap<String, u64>, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tab_ids
+            .into_iter()
+            .map(|id| {
+                let ts = crate::mailink::tab_last_activity_ms(&app_state, &id);
+                (id, ts)
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("last-activity probe failed to run: {}", e))
+}
+
 /// What the tab's agent has said since `since_ms` — how Overlord harvests the answer to a
 /// directive it typed, rather than depending on the agent volunteering `replyToOverlord`.
 /// Transcript I/O, so it runs on the blocking pool like the facts poll.
