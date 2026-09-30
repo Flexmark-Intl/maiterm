@@ -1611,15 +1611,19 @@ pub(crate) async fn respond_to_prompt(
     choice: Option<&str>,
     answers: Option<&[Answer]>,
 ) -> Value {
+    // Every refusal is logged: an answer that silently didn't go through left nothing to read.
     let Some((kind, cur_id, runtime)) = open_prompt(app, tab_id) else {
+        log::info!("[maiLink] refusing an answer for tab {tab_id}: no prompt is open (asked for {prompt_id:?})");
         return json!({ "ok": false, "reason": "stale" });
     };
     if let Some(pid) = prompt_id {
         if pid != cur_id {
+            log::info!("[maiLink] refusing an answer for tab {tab_id}: it was for {pid}, the open {kind} is {cur_id}");
             return json!({ "ok": false, "reason": "stale" });
         }
     }
     let Some(pty) = pty_for_tab(app, tab_id) else {
+        log::info!("[maiLink] refusing an answer for tab {tab_id}: no terminal");
         return json!({ "ok": false, "reason": "no_pty" });
     };
     match kind {
@@ -1716,11 +1720,15 @@ pub(crate) async fn respond_to_prompt(
         // AskUserQuestion: replay per-question answers into the open selector.
         "question" => {
             let Some(tool_input) = pending_question_for_tab(app, tab_id) else {
+                log::info!("[maiLink] refusing an answer for tab {tab_id}: the question's options are gone");
                 return json!({ "ok": false, "reason": "stale" });
             };
             let answers = match answers {
                 Some(a) if !a.is_empty() => a,
-                _ => return json!({ "ok": false, "reason": "bad_request" }),
+                _ => {
+                    log::info!("[maiLink] refusing an answer for tab {tab_id}: no answers were sent for the question");
+                    return json!({ "ok": false, "reason": "bad_request" });
+                }
             };
             // A SECOND attempt at the same ask is refused, and this is the important guard.
             // Navigation is relative and assumes the highlight starts at row 0, true only for
@@ -4462,7 +4470,16 @@ fn session_states(app: &AppState) -> HashMap<String, SessionState> {
         let candidate = || SessionState {
             state: sess.state,
             runtime: sess.runtime,
-            tool: sess.tool_name.clone(),
+            // An open ask IS the session's tool for every reader here, whatever started since. A
+            // background subagent's hooks carry the parent's session id, so its next call
+            // rewrote `tool_name` while the parent's AskUserQuestion stayed open: the question
+            // vanished from every surface and an answer sent then was refused as stale.
+            // `pending_question` already survives those calls (server.rs, PreToolUse).
+            tool: if sess.pending_question.is_some() {
+                Some("AskUserQuestion".to_string())
+            } else {
+                sess.tool_name.clone()
+            },
             detail: sess.tool_detail.clone(),
             finished: sess.finished_a_turn,
         };
@@ -6361,6 +6378,35 @@ mod tests {
             let c = chats.iter().find(|c| c["tabId"] == json!(t)).unwrap();
             assert_eq!(c["state"], json!("idle"));
         }
+    }
+
+    #[test]
+    fn an_open_ask_stays_the_prompt_while_a_subagent_runs_tools() {
+        use crate::state::app_state::AgentSessionInfo;
+        let app = AppState::new();
+        // The parent's AskUserQuestion is open; a background subagent's Bash call (same session
+        // id) has since rewritten tool_name. The ask must still be what is open.
+        app.agent_sessions.write().insert("s".into(), AgentSessionInfo {
+            runtime: AgentRuntime::Claude,
+            tab_id: "tab".into(),
+            cwd: None,
+            state: AgentSessionState::Active,
+            tool_name: Some("Bash".into()),
+            tool_detail: Some("npm test".into()),
+            pending_question: Some(json!({ "questions": [] })),
+            pending_question_at: Some(123),
+            pending_approvals: Vec::new(),
+            approval_seq: 0,
+            recent_tool_calls: Vec::new(),
+            claude_gate: Default::default(),
+            model: None,
+            transcript_path: None,
+            finished_a_turn: false,
+            connection_id: None,
+        });
+        let (kind, id, _) = current_prompt(&app, "tab").expect("the ask is open");
+        assert_eq!(kind, "question");
+        assert_eq!(id, "q_tab_123");
     }
 
     #[test]

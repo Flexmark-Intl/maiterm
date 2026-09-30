@@ -82,7 +82,12 @@
   );
 
   async function answer(e: MouseEvent, choice: string | null, answers: PromptAnswer[] | null) {
-    if (!prompt || sending || guarded(e)) return;
+    if (!prompt || sending || e.detail > 1) return;
+    // Said, not swallowed: a click that did nothing and said nothing reads as a broken card.
+    if (guarded(e)) {
+      note = 'That prompt only just appeared. Check it, then click again.';
+      return;
+    }
     sending = true;
     note = '';
     const forTab = tabId;
