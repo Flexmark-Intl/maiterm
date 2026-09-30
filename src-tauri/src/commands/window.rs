@@ -202,6 +202,156 @@ pub fn close_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
     Ok(())
 }
 
+/// A window a workspace or tab can be moved to, as the "Move to Window" menus list it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MoveTargetWindow {
+    pub label: String,
+    pub name: Option<String>,
+    /// What an unnamed window is called in its own titlebar: its active workspace's name.
+    pub active_workspace_name: Option<String>,
+    pub is_current: bool,
+    /// Never the Overlord workspace: it lives behind its own accessor row, one per window.
+    pub workspaces: Vec<MoveTargetWorkspace>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MoveTargetWorkspace {
+    pub id: String,
+    pub name: String,
+}
+
+/// Every app window (not Preferences/Help) with its workspaces, in window order.
+#[tauri::command]
+pub fn list_move_targets(window: tauri::Window, state: State<'_, Arc<AppState>>) -> Vec<MoveTargetWindow> {
+    let current = window.label();
+    let app_data = state.app_data.read();
+    app_data.windows.iter()
+        .filter(|w| w.label != "preferences" && w.label != "help")
+        .map(|w| MoveTargetWindow {
+            label: w.label.clone(),
+            name: w.name.clone(),
+            active_workspace_name: w.active_workspace_id.as_ref()
+                .and_then(|id| w.workspaces.iter().find(|ws| &ws.id == id))
+                .map(|ws| ws.name.clone()),
+            is_current: w.label == current,
+            workspaces: w.workspaces.iter()
+                .filter(|ws| !ws.overlord)
+                .map(|ws| MoveTargetWorkspace { id: ws.id.clone(), name: ws.name.clone() })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Move a whole workspace to the bottom of another window's list and make it that window's
+/// active workspace. The record moves as-is — its tabs keep their ids, `pty_id`s, scrollback
+/// and stack — so the live PTYs are reattached by the target webview, not respawned. This is
+/// NOT delete + create: `delete_workspace` wipes every tab's scrollback from SQLite.
+///
+/// The webview handoff (PTYs preserved, per-tab stores passed across) is the frontend's —
+/// `workspacesStore.moveWorkspaceToWindow`. A source left with no workspace besides the
+/// Overlord's gets a fresh "Default", as a new window does.
+#[tauri::command]
+pub fn move_workspace_to_window(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    target_label: String,
+) -> Result<(), String> {
+    let source_label = window.label().to_string();
+    if source_label == target_label {
+        return Err("Workspace is already in that window".to_string());
+    }
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        // Validate both ends before mutating: extracting first would lose the workspace
+        // if the target lookup failed.
+        if app_data.window(&target_label).is_none() {
+            return Err("Target window not found".to_string());
+        }
+        let source = app_data.window_mut(&source_label).ok_or("Window not found")?;
+        let index = source.workspaces.iter().position(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        if source.workspaces[index].overlord {
+            return Err("The Overlord workspace belongs to its window and cannot move".to_string());
+        }
+        let ws = source.workspaces.remove(index);
+
+        if !source.workspaces.iter().any(|w| !w.overlord) {
+            let fresh = Workspace::new("Default".to_string());
+            source.active_workspace_id = Some(fresh.id.clone());
+            source.workspaces.push(fresh);
+        } else if source.active_workspace_id.as_deref() == Some(workspace_id.as_str()) {
+            // The one that slid into its place, else the one before — as delete_workspace
+            // picks — but never the Overlord's, which lives behind its own accessor row.
+            let (before, after) = source.workspaces.split_at(index);
+            let pick = after.iter().chain(before.iter().rev())
+                .find(|w| !w.overlord)
+                .map(|w| w.id.clone());
+            source.active_workspace_id = pick;
+        }
+
+        let target = app_data.window_mut(&target_label).ok_or("Target window not found")?;
+        target.active_workspace_id = Some(ws.id.clone());
+        target.workspaces.push(ws);
+        app_data.clone()
+    };
+    save_state(&data_clone)
+}
+
+/// Move a tab into a workspace of another window: that workspace's first pane, as its
+/// active tab, and the workspace becomes the target window's active one. The tab (and its
+/// PTY) moves as-is, like `move_tab_to_workspace`, whose rules it follows — including
+/// dropping `service_id`, since the stack binding belongs to the workspace it left.
+/// The source pane is left as it falls; the caller cleans up an emptied one, as
+/// `moveTabToWorkspace` does.
+#[tauri::command]
+pub fn move_tab_to_window(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    source_workspace_id: String,
+    source_pane_id: String,
+    tab_id: String,
+    target_label: String,
+    target_workspace_id: String,
+) -> Result<(), String> {
+    let source_label = window.label().to_string();
+    if source_label == target_label {
+        return Err("Same window: use move_tab_to_workspace".to_string());
+    }
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let target_ok = app_data.window(&target_label)
+            .and_then(|w| w.workspaces.iter().find(|ws| ws.id == target_workspace_id))
+            .is_some_and(|ws| !ws.panes.is_empty());
+        if !target_ok {
+            return Err("Target workspace not found".to_string());
+        }
+
+        let source = app_data.window_mut(&source_label).ok_or("Window not found")?;
+        let source_ws = source.workspaces.iter_mut().find(|w| w.id == source_workspace_id)
+            .ok_or("Source workspace not found")?;
+        let source_pane = source_ws.panes.iter_mut().find(|p| p.id == source_pane_id)
+            .ok_or("Source pane not found")?;
+        let tab_pos = source_pane.tabs.iter().position(|t| t.id == tab_id)
+            .ok_or("Tab not found")?;
+        let mut tab: Tab = source_pane.tabs.remove(tab_pos);
+        tab.service_id = None;
+        if source_pane.active_tab_id.as_ref() == Some(&tab_id) {
+            source_pane.active_tab_id = super::workspace::pick_active_after_close(&source_pane.tabs, tab_pos);
+        }
+
+        let target = app_data.window_mut(&target_label).ok_or("Target window not found")?;
+        target.active_workspace_id = Some(target_workspace_id.clone());
+        let target_ws = target.workspaces.iter_mut().find(|w| w.id == target_workspace_id)
+            .ok_or("Target workspace not found")?;
+        let target_pane: &mut Pane = target_ws.panes.first_mut().ok_or("Target workspace has no panes")?;
+        target_pane.active_tab_id = Some(tab.id.clone());
+        target_pane.tabs.push(tab);
+        app_data.clone()
+    };
+    save_state(&data_clone)
+}
+
 /// Name this window (titlebar centre, maiLink, `listWindows`), or clear the name with `None`
 /// or a blank string so those surfaces fall back to their derived text again.
 #[tauri::command]

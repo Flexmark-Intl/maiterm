@@ -20,9 +20,12 @@
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TabListMenu from './TabListMenu.svelte';
-  import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
+  import { tabMoveItem } from '$lib/stores/windowMove';
+  import type { MoveTargetWindow } from '$lib/tauri/types';
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
   import { toastStore } from '$lib/stores/toasts.svelte';
+  import * as commands from '$lib/tauri/commands';
   import { stageRemoteFileTemp } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
 
@@ -547,6 +550,8 @@
   let splitOverlay: HTMLElement | null = null;
   // Tab right-click menu (move to split / other panes)
   let tabContextMenu = $state<{ x: number; y: number; tabId: string } | null>(null);
+  /** Windows/workspaces the menu's "Move to" can send to, fetched as the menu opens. */
+  let moveTargets = $state<MoveTargetWindow[] | null>(null);
 
   const DRAG_THRESHOLD = 5;
   let dragStartX = 0;
@@ -1010,7 +1015,6 @@
     const exposeAll = preferencesStore.mailinkExposeAll;
     const isExcluded = !!tabObj?.mailink_excluded;
     const isNative = !!tabObj?.mailink_native;
-    type MenuItem = { label: string; action: () => void; disabled?: boolean; separator?: boolean };
     // maiLink availability item (docs/mailink-protocol.md). Two modes:
     //  · expose-all (default): agent tabs are available automatically — offer to hold one back.
     //    (A downed agent keeps its runtime, so it stays available for auto-resume from the phone.)
@@ -1121,6 +1125,7 @@
         disabled: onlyTab,
         action: () => workspacesStore.moveTabToSplit(workspaceId, pane.id, tabId, pane.id, 'vertical'),
       },
+      ...(tabObj ? [tabMoveItem(moveTargets, tabObj, workspaceId, pane.id)] : []),
     ];
     if (otherPanes.length > 0) {
       items.push({ label: '', separator: true, action: () => {} });
@@ -1217,6 +1222,8 @@
         if (editingId === tab.id) return; // native menu for the rename input
         e.preventDefault();
         e.stopPropagation();
+        moveTargets = null;
+        commands.listMoveTargets().then((t) => { moveTargets = t; }).catch((err) => logError(`listMoveTargets: ${err}`));
         tabContextMenu = { x: e.clientX, y: e.clientY, tabId: tab.id };
       }}
       onpointerdown={(e) => handlePointerDown(e, tab.id)}

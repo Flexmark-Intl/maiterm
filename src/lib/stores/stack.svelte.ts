@@ -918,6 +918,44 @@ function createStackStore() {
     },
 
     /** Fires once per workspace activation (§5); re-armed by suspend. */
+    /** A workspace is leaving for another window with its service tabs still running. Hand
+     *  over their runtime and forget it here BEFORE the workspace leaves this window's list:
+     *  otherwise `reconcileBindings` finds no tab and files every running service `crashed`
+     *  — and publishes that into the Rust mirror the other window reads (docs/stack.md §6.2). */
+    takeRuntime(workspaceId: string): Array<[string, ServiceRuntime]> {
+      const ids = (workspaceOf(workspaceId)?.stack ?? []).map((s) => s.id);
+      const out: Array<[string, ServiceRuntime]> = [];
+      const next = new Map(runtime);
+      for (const id of ids) {
+        const r = runtime.get(id);
+        if (r) out.push([id, r]);
+        next.delete(id);
+        clearTimeout(restartTimers.get(id));
+        restartTimers.delete(id);
+        scanTails.delete(id);
+      }
+      runtime = next;
+      consoleService.delete(workspaceId);
+      consoleService = new Map(consoleService);
+      consoleVisible.delete(workspaceId);
+      consoleVisible = new Map(consoleVisible);
+      autoStarted.delete(workspaceId);
+      return out;
+    },
+
+    /** Arriving half of `takeRuntime`. Auto-start must be held BEFORE the workspace becomes
+     *  active here (`holdAutoStart`), and the rows adopted only once its service tabs have
+     *  reattached — a row whose `ptyId` has no live instance yet reads as a reload. */
+    holdAutoStart(workspaceId: string) {
+      autoStarted.add(workspaceId);
+    },
+    adoptRuntime(rows: Array<[string, ServiceRuntime]>) {
+      if (rows.length === 0) return;
+      const next = new Map(runtime);
+      for (const [id, r] of rows) next.set(id, r);
+      runtime = next;
+    },
+
     async autoStart(workspaceId: string): Promise<void> {
       const ws = workspaceOf(workspaceId);
       if (!ws || ws.suspended || autoStarted.has(workspaceId)) return;

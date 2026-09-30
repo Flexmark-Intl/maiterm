@@ -27,7 +27,8 @@
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
-  import type { Workspace } from '$lib/tauri/types';
+  import type { MoveTargetWindow, Workspace } from '$lib/tauri/types';
+  import { workspaceMoveItem } from '$lib/stores/windowMove';
   import type { ChangelogEntry } from '$lib/components/ChangelogModal.svelte';
   import type { Update } from '@tauri-apps/plugin-updater';
 
@@ -498,8 +499,18 @@
         requestAnimationFrame(() => stackSections[workspaceId]?.openImport());
       } },
       { label: '', separator: true, action: () => {} },
+      workspaceMoveItem(moveTargets, workspaceId),
       { label: 'Share workspace…', action: () => { shareExportFor = workspaceId; } },
     ];
+  }
+
+  /** Windows the menu's "Move to Window" can send to, fetched as the menu opens. */
+  let moveTargets = $state<MoveTargetWindow[] | null>(null);
+  function openWorkspaceMenu(e: MouseEvent, workspaceId: string) {
+    e.preventDefault();
+    moveTargets = null;
+    commands.listMoveTargets().then((t) => { moveTargets = t; }).catch((err) => logError(`listMoveTargets: ${err}`));
+    workspaceMenu = { x: e.clientX, y: e.clientY, workspaceId };
   }
 
   // Counts what is ON THE DECK, not what the agent has yet to read. `read` is the Overlord
@@ -631,7 +642,7 @@
         class:drop-after={dropTargetIndex === index && dropSide === 'after' && dragWorkspaceId !== workspace.id}
         data-workspace-id={workspace.id}
         onclick={() => handleItemClick(workspace.id)}
-        oncontextmenu={(e) => { e.preventDefault(); workspaceMenu = { x: e.clientX, y: e.clientY, workspaceId: workspace.id }; }}
+        oncontextmenu={(e) => openWorkspaceMenu(e, workspace.id)}
         ondblclick={() => { if (!confirmingDeleteId) startEditing(workspace.id, workspace.name); }}
         onpointerdown={(e) => { if (!confirmingDeleteId) handlePointerDown(e, workspace.id); }}
         onpointermove={handlePointerMove}

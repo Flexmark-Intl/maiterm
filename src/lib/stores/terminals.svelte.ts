@@ -62,6 +62,8 @@ function createTerminalsStore() {
   // not a full app restart). A tab whose persisted pty_id is in here reattaches
   // to the running PTY instead of respawning. Consumed when the tab registers.
   const reattachPtyIds = new Set<string>();
+  // PTY IDs of tabs that arrived from another window still running (see markMovedIn).
+  const movedInPtyIds = new Set<string>();
   // Listeners notified when any terminal's OSC state changes
   const oscListeners = new Set<(tabId: string, osc: OscState) => void>();
   // Dirty tracking: tabs that have received PTY output since last auto-save.
@@ -137,6 +139,19 @@ function createTerminalsStore() {
       for (const id of ptyIds) reattachPtyIds.add(id);
     },
 
+    /** PTYs that arrived live from ANOTHER window (a tab or workspace moved here), so their
+     *  panes reattach instead of spawning. A separate set from the reload one on purpose:
+     *  `shouldReattach` also arms the reload-only dropped-ssh reconnect, which a move must
+     *  never fire (components/terminal/CLAUDE.md). Consumed when the tab registers. */
+    markMovedIn(ptyIds: string[]) {
+      for (const id of ptyIds) movedInPtyIds.add(id);
+    },
+
+    /** Reattach eligibility of either kind: a reload's or a move's. */
+    canReattach(ptyId: string | null | undefined): boolean {
+      return !!ptyId && (reattachPtyIds.has(ptyId) || movedInPtyIds.has(ptyId));
+    },
+
     /** True if this persisted pty_id is still alive in the backend (reload). */
     shouldReattach(ptyId: string | null | undefined): boolean {
       return !!ptyId && reattachPtyIds.has(ptyId);
@@ -181,6 +196,7 @@ function createTerminalsStore() {
       // This PTY is now live in the frontend — consume any reattach eligibility
       // so a later remount (split/move) can't try to reattach a stale ID.
       reattachPtyIds.delete(ptyId);
+      movedInPtyIds.delete(ptyId);
       if (spawningTabs.has(tabId)) {
         const s = new Set(spawningTabs);
         s.delete(tabId);

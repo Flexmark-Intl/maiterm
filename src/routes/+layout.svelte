@@ -616,6 +616,13 @@
       window.location.reload();
     }).then(unlisten => { unlistenStateImported = unlisten; });
 
+    // A workspace or tab arriving from another window with its PTYs live (windowMove.ts).
+    let unlistenWindowMoves: (() => void) | undefined;
+    import('$lib/stores/windowMove')
+      .then(m => m.listenForWindowMoves())
+      .then(unlisten => { unlistenWindowMoves = unlisten; })
+      .catch(e => logError(`windowMove listener: ${e}`));
+
     // Claude Code IDE integration event listeners.
     // Use appWindow.listen() (not global listen) — global listen catches both
     // window-targeted and global events in Tauri 2, causing duplicate callbacks.
@@ -1329,6 +1336,7 @@
       unlistenImportState?.();
       unlistenImportWorkspace?.();
       unlistenShareOpened?.();
+      unlistenWindowMoves?.();
       unlistenStateImported?.();
       unlistenCheckUpdates?.();
       unlistenClearNavHistory?.();

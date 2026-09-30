@@ -781,6 +781,19 @@ function createWorkspacesStore() {
       }
     },
 
+    /** Take this window's workspace list and active workspace from Rust after another
+     *  window changed them (a workspace or tab moved in or out — `windowMove.ts`). Not
+     *  `load()`: that re-seeds the reattach set and every per-window store. */
+    applyWindowData(data: { workspaces: Workspace[]; active_workspace_id: string | null }) {
+      if (activeWorkspaceId && data.active_workspace_id !== activeWorkspaceId) {
+        const updated = new Map(lastSwitchedAt);
+        updated.set(activeWorkspaceId, Date.now());
+        lastSwitchedAt = updated;
+      }
+      workspaces = data.workspaces;
+      activeWorkspaceId = data.active_workspace_id;
+    },
+
     async splitPane(workspaceId: string, targetPaneId: string, direction: SplitDirection) {
       const pane = await commands.splitPane(workspaceId, targetPaneId, direction);
       // Reload workspace to get updated split_root from backend
@@ -2107,7 +2120,20 @@ function createWorkspacesStore() {
       // Move the tab in backend state (preserves PTY, scrollback, everything)
       await commands.moveTabToWorkspaceCmd(sourceWsId, sourcePaneId, sourceTabId, targetWsId);
 
-      // Refresh frontend state from backend
+      await this.settleSourceAfterTabLeft(sourceWsId, sourcePaneId, movedTabWasActive, movedTabIndex);
+
+      // Update the terminal store's workspace/pane references for the moved tab
+      const finalTargetWs = workspaces.find(w => w.id === targetWsId);
+      const finalTargetPane = finalTargetWs?.panes.find(p => p.tabs.some(t => t.id === sourceTabId));
+      if (finalTargetPane) {
+        terminalsStore.updateTabLocation(sourceTabId, targetWsId, finalTargetPane.id);
+      }
+    },
+
+    /** A tab has left `sourcePaneId` in Rust — to another workspace, or another window.
+     *  Refresh from Rust and fix what the backend's pick leaves wrong: the grouping-aware
+     *  active tab, and an emptied pane (removed, or given a fresh tab if it was the last). */
+    async settleSourceAfterTabLeft(sourceWsId: string, sourcePaneId: string, movedTabWasActive: boolean, movedTabIndex: number) {
       const data = await commands.getWindowData();
 
       // Ensure source pane's active_tab_id points to an existing tab
@@ -2146,13 +2172,6 @@ function createWorkspacesStore() {
         workspaces = data2.workspaces;
       } else {
         workspaces = data.workspaces;
-      }
-
-      // Update the terminal store's workspace/pane references for the moved tab
-      const finalTargetWs = workspaces.find(w => w.id === targetWsId);
-      const finalTargetPane = finalTargetWs?.panes.find(p => p.tabs.some(t => t.id === sourceTabId));
-      if (finalTargetPane) {
-        terminalsStore.updateTabLocation(sourceTabId, targetWsId, finalTargetPane.id);
       }
     },
 

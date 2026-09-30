@@ -298,6 +298,16 @@ function createAgentBridgeStore() {
       }
     },
 
+    /** A bridged pair is leaving for another window TOGETHER (its workspace moved). Drop it
+     *  here WITHOUT `disconnect`, which would clear the durable pairing the other window's
+     *  `rehydrate` restores it from. A pair split across windows is not this: that one
+     *  `handleTabClosed`s, since `rehydrate` clears a pairing whose partner it can't see. */
+    forgetMovedTab(tabId: string) {
+      if (!bridges.has(tabId) && !pendingOpeners.has(tabId)) return;
+      cleanup(tabId);
+      bump();
+    },
+
     /** A tab's id changed under us: reload (Cmd+Shift+R) mints a NEW id for the same
      *  resumed session via duplicate-then-delete-original. Carry any bridge from the
      *  old id to the new one and repoint the partner, so the pairing survives the

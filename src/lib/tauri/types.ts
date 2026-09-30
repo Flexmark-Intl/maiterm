@@ -651,6 +651,17 @@ export interface MailinkDevice {
   last_seen_at: number;
 }
 
+/** A window a workspace or tab can be moved to (`list_move_targets`). */
+export interface MoveTargetWindow {
+  label: string;
+  name: string | null;
+  /** What an unnamed window's titlebar shows. */
+  active_workspace_name: string | null;
+  is_current: boolean;
+  /** Never the Overlord workspace. */
+  workspaces: { id: string; name: string }[];
+}
+
 export interface WindowData {
   id: string;
   label: string;

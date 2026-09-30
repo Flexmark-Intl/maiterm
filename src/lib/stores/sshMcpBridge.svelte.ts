@@ -26,7 +26,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
  */
 export type BridgeStatus = 'connected' | 'pending' | 'reconnecting' | 'failed';
 
-interface BridgeState {
+export interface BridgeState {
   hostKey: string;
   remotePort: number;
   status: BridgeStatus;
@@ -981,6 +981,41 @@ export async function disableBridge(tabId: string): Promise<void> {
   } catch (e) {
     logError(`Failed to detach SSH tunnel: ${e}`);
   }
+}
+
+/** A tab's bridge as it crosses to another window (the tab moved, its PTY stayed up). */
+export interface BridgeHandoff {
+  state: BridgeState;
+  injectedPort?: number;
+}
+
+/**
+ * Hand a tab's bridge to another window: forget it HERE without detaching the Rust tunnel,
+ * which is keyed by tab id and so still belongs to the moved tab. What must survive is
+ * `injectedEnvPort` — without it the new window's title loop would type
+ * `export MAITERM_TAB_ID=…` into the live session again (see `consumePreserve`).
+ * A setup still in flight is abandoned (epoch bump) and handed over as `failed`, which
+ * the new window's title loop retries.
+ */
+export function takeBridgeHandoff(tabId: string): BridgeHandoff | null {
+  bridgeEpoch.set(tabId, (bridgeEpoch.get(tabId) ?? 0) + 1);
+  const bridge = bridgeStates.get(tabId);
+  const injectedPort = injectedEnvPort.get(tabId);
+  cleanupListener(tabId);
+  forgetDownTab(tabId);
+  injectedEnvPort.delete(tabId);
+  if (!bridge) return null;
+  bridgeStates.delete(tabId);
+  bridgeStates = new Map(bridgeStates);
+  const status: BridgeStatus = bridge.status === 'connected' ? 'connected' : 'failed';
+  return { state: { ...bridge, status }, injectedPort };
+}
+
+/** The receiving half of `takeBridgeHandoff`. */
+export function adoptBridgeHandoff(tabId: string, handoff: BridgeHandoff): void {
+  bridgeStates = new Map(bridgeStates.set(tabId, handoff.state));
+  if (handoff.injectedPort !== undefined) injectedEnvPort.set(tabId, handoff.injectedPort);
+  if (handoff.state.status === 'connected') void listenForTunnelDown(tabId);
 }
 
 /**

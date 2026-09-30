@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -1030,6 +1030,24 @@ export async function duplicateWindow(tabContexts: TabContext[]): Promise<string
 
 export async function closeWindow(): Promise<void> {
   return invoke('close_window');
+}
+
+export async function listMoveTargets(): Promise<MoveTargetWindow[]> {
+  return invoke('list_move_targets');
+}
+
+export async function moveWorkspaceToWindow(workspaceId: string, targetLabel: string): Promise<void> {
+  return invoke('move_workspace_to_window', { workspaceId, targetLabel });
+}
+
+export async function moveTabToWindow(
+  sourceWorkspaceId: string,
+  sourcePaneId: string,
+  tabId: string,
+  targetLabel: string,
+  targetWorkspaceId: string,
+): Promise<void> {
+  return invoke('move_tab_to_window', { sourceWorkspaceId, sourcePaneId, tabId, targetLabel, targetWorkspaceId });
 }
 
 /** Name this window, or pass null/blank to clear the name and fall back to derived text. */

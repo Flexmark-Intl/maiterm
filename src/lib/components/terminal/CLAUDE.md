@@ -83,6 +83,14 @@ Dragging a terminal tab to another workspace preserves the running PTY instead o
 
 **Reattach sizing**: the new xterm instance is synced to the live alacritty grid size (`getTerminalScrollbackInfo().viewport_cols/rows`) before the refit, so the running TUI never sees an 80×24 transient. The post-layout `resizeTerminal` is a no-op in Rust when the fitted size matches the grid — an unchanged layout sends no SIGWINCH at all.
 
+## Tab / Workspace Move Between Windows
+
+Workspace menu "Move to Window ›" and tab menu "Move to › window › workspace" (`stores/windowMove.ts`). Rust moves the record between `WindowData`s (`move_workspace_to_window` / `move_tab_to_window` — never the delete paths, which wipe SQLite scrollback); the PTYs stay up and the TARGET webview reattaches. What each webview holds in memory is handed across in the `window-move-in` event payload (SSH MCP bridge state incl. `injectedEnvPort`, the lost-ssh badge, a workspace's stack runtime), and the source must `terminalsStore.unregister` the moved tabs — its preserved-PTY `onDestroy` skips that, and a stale instance would be killed by `killAllTerminals` when the source window closes.
+
+- **Moved-in PTYs use `markMovedIn`/`canReattach`, not the reload set.** `shouldReattach` also arms `reconnectIfDropped`, which a move must never fire.
+- **The target mounts EVERY moved live tab** (`activate-tab`), not just the visible one: an unmounted tab with a `pty_id` and no instance reads as suspended, and resuming it would spawn a second shell beside the live one. `+page`'s suspended test excludes `canReattach` PTYs for the same reason.
+- An agent bridge whose partner stays behind is disconnected (a window's `rehydrate` clears a pairing it can't see both halves of). Diff and board tabs, dirty editors and the Overlord workspace don't move.
+
 ## Tab Move Between Panes (Same Workspace)
 
 Same PTY-preservation machinery as workspace moves (the `+page.svelte` keyed each is **per-pane**, so a pane move also destroys/recreates the component). Three entry points, all in `TerminalTabs.svelte`:

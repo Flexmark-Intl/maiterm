@@ -113,7 +113,10 @@
         const isTerminal = tab && (tab.tab_type === 'terminal' || !tab.tab_type);
         // Only treat as suspended if the tab previously had a PTY (pty_id set but no live instance).
         // Brand-new tabs have pty_id === null and should activate immediately.
-        const isSuspended = isTerminal && !!tab?.pty_id && !terminalsStore.get(tabId) && !activatedTabIds.has(tabId);
+        // A PTY still alive in Rust with no pane here yet (a tab that just arrived from another
+        // window) is not suspended: resuming it would spawn a second shell beside the live one.
+        const isSuspended = isTerminal && !!tab?.pty_id && !terminalsStore.get(tabId) && !activatedTabIds.has(tabId)
+          && !terminalsStore.canReattach(tab.pty_id);
 
         if (initialActivationDone && workspaceSwitched && isSuspended && !fullRestore) {
           // Workspace switch landed on a suspended tab — show resume prompt
@@ -638,7 +641,7 @@
                     workspaceId={ws.id}
                     paneId={pane.id}
                     tabId={tab.id}
-                    existingPtyId={(terminalsStore.get(tab.id) || terminalsStore.shouldReattach(tab.pty_id)) ? tab.pty_id : null}
+                    existingPtyId={(terminalsStore.get(tab.id) || terminalsStore.canReattach(tab.pty_id)) ? tab.pty_id : null}
                     visible={inConsole || (meshStage ? agentMeshStore.isMeshMemberTab(tab.id) : (tab.id === pane.active_tab_id && ws.id === workspacesStore.activeWorkspaceId))}
                     restoreCwd={tab.restore_cwd}
                     restoreSshCommand={tab.restore_ssh_command}

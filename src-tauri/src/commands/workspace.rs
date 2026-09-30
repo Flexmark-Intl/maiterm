@@ -341,7 +341,7 @@ pub fn create_tab(
 /// the likeliest neighbour to land on, since services sit at the end of the tab list. The
 /// frontend enforces the same rule in `pickNextActiveTab`; this is the copy that survives
 /// a restart, because `active_tab_id` is persisted from here.
-fn pick_active_after_close(tabs: &[crate::state::Tab], closed_index: usize) -> Option<String> {
+pub(crate) fn pick_active_after_close(tabs: &[crate::state::Tab], closed_index: usize) -> Option<String> {
     if tabs.is_empty() {
         return None;
     }
