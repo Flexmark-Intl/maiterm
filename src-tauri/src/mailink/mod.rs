@@ -4480,7 +4480,8 @@ fn session_states(app: &AppState) -> HashMap<String, SessionState> {
             } else {
                 sess.tool_name.clone()
             },
-            detail: sess.tool_detail.clone(),
+            // The detail belongs to the tool: never the subagent's command beside the ask.
+            detail: if sess.pending_question.is_some() { None } else { sess.tool_detail.clone() },
             finished: sess.finished_a_turn,
         };
         map.entry(sess.tab_id.clone())

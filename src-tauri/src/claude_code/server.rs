@@ -3517,6 +3517,10 @@ async fn hooks_handler(
                     if notification_type == "idle_prompt" {
                         session.claude_gate.prompt_closed();
                         session.claude_gate.agent_ended("");
+                        // An ask cancelled with Esc is a denied call: no PostToolUse clears it,
+                        // and every reader treats `pending_question` as the ask being open.
+                        session.pending_question = None;
+                        session.pending_question_at = None;
                     }
                     // Attribute the prompt to the calls that could be waiting on it
                     // (`claude_code/gate.rs`). The Notification comes 6s after the dialog, so
