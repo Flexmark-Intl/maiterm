@@ -4,7 +4,6 @@
    *  tab's context menu (the `open-follow-ups` event, owned by +layout). */
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { whenText } from '$lib/followUps/model';
 
   interface Props {
@@ -25,7 +24,10 @@
   let heldReasons = $state<Record<string, string>>({});
 
   const open = $derived(tabId !== null);
-  const tab = $derived(tabId ? workspacesStore._locateTab(tabId)?.tab ?? null : null);
+  // The store's own search (archived tabs included), so this can't say "nothing" for a tab the
+  // store can see. `found` null: the tab is gone — closed, or reloaded under a new id.
+  const found = $derived(tabId ? followUpsStore.findTab(tabId) : null);
+  const tab = $derived(found?.tab ?? null);
   const live = $derived(preferencesStore.followUpsLive);
   const rows = $derived.by(() => {
     void now; // re-derive as time passes: statuses move from pending to due to expired
@@ -121,10 +123,15 @@
             Preferences → Overlord.
           </div>
         {/if}
+        {#if found?.archived}
+          <div class="notice">This tab is archived. Its follow-ups are kept and go once it's restored.</div>
+        {/if}
       </div>
 
       <div class="body">
-        {#if rows.length === 0}
+        {#if !found}
+          <p class="status">This tab is gone — closed, or reloaded under a new id. Open Follow-ups… from its tab again.</p>
+        {:else if rows.length === 0}
           <p class="status">Nothing scheduled.</p>
         {:else}
           {#each rows as { v, f } (v.id)}
@@ -134,8 +141,10 @@
                 <span class="when" class:due={v.status === 'due'}>{whenText(f, now)}</span>
                 <span class="dot">·</span>
                 <span>{v.author === 'human' ? 'added by you' : v.author === 'maiterm' ? 'added by maiTerm' : 'scheduled by the agent'}</span>
-                {#if v.status === 'due'}
-                  <span class="dot">·</span><span>waiting for the agent to be free</span>
+                {#if v.status === 'due' && v.waiting}
+                  <span class="dot">·</span><span>{v.waiting}</span>
+                {:else if v.status === 'due'}
+                  <span class="dot">·</span><span>goes at the next check</span>
                 {:else if v.status === 'expired'}
                   <span class="dot">·</span><span>won't be delivered</span>
                 {/if}
@@ -170,7 +179,7 @@
             minutes
           </label>
           <div class="spacer"></div>
-          <button class="btn btn-primary" onclick={add} disabled={busy || !text.trim()}>Add follow-up</button>
+          <button class="btn btn-primary" onclick={add} disabled={busy || !text.trim() || !found}>Add follow-up</button>
         </div>
         {#if addError}<div class="error">{addError}</div>{/if}
       </div>

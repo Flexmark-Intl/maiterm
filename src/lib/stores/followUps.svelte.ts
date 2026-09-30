@@ -37,6 +37,10 @@ export interface FollowUpView {
   due_at: string | null;
   created_at: string;
   expires_at: string | null;
+  /** Only for a `due` one: why it hasn't gone yet, as far as the tab itself shows — the
+   *  synchronous checks only (the input box and liveness are read at delivery). Null when
+   *  nothing about the tab is holding it. */
+  waiting: string | null;
 }
 
 function createFollowUpsStore() {
@@ -87,11 +91,25 @@ function createFollowUpsStore() {
 
   /** Why this tab can't take a follow-up right now, or null. Every check is one a live
    *  delivery has to pass — the order is cheapest first, and the one async probe last. */
-  async function holdReason(tab: Tab): Promise<string | null> {
+  /** The synchronous part of the gate: what the tab itself is doing, in words that are TRUE of
+   *  it. Checked most-absent first — no terminal, then no agent, then a prompt, then busy —
+   *  because "no session" read as "not idle" once told a human with no agent running that it
+   *  would go "when this turn ends". Null: the tab is idle, the async checks decide. */
+  function tabHold(tab: Tab): string | null {
+    if (!terminalsStore.get(tab.id)) return "the tab isn't running (suspended or archived) — it goes once the tab is live again";
+    const st = agentStateStore.getState(tab.id);
+    if (!st) return 'no agent is running in the tab — it goes after an agent starts there';
+    if (st.state === 'permission') return 'the agent is waiting on a permission prompt';
     // Between turns only (§6.1): the delivery controller would deliver mid-turn, which suits a
     // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
-    const st = agentStateStore.getState(tab.id);
-    if (st?.state !== 'idle') return 'the agent is busy — it goes when this turn ends';
+    if (st.state !== 'idle') return 'the agent is busy — it goes when this turn ends';
+    return null;
+  }
+
+  async function holdReason(tab: Tab): Promise<string | null> {
+    const quick = tabHold(tab);
+    if (quick) return quick;
+    const st = agentStateStore.getState(tab.id)!;
     // Typing right now: a keystroke this recent may not have reached the screen yet.
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
     if (typed !== undefined && Date.now() - typed < 2000) return 'someone is typing in the tab';
@@ -114,16 +132,15 @@ function createFollowUpsStore() {
     // lands in a shell. Same evidence the Overlord (replState) and comms rely on — and the same
     // known gap: a remote agent that dies while its ssh stays up still reads as live.
     const inst = terminalsStore.get(tab.id);
-    if (!inst) return 'no terminal';
+    if (!inst) return tabHold(tab) ?? "the tab isn't running";
     try {
       const live = await commands.getAgentLiveness(inst.ptyId);
       if (!(live.agent_running || live.ssh_foreground)) return 'no agent is running in the tab';
     } catch {
       return 'no agent is running in the tab';
     }
-    // The probe awaited; state can move under it.
-    if (agentStateStore.getState(tab.id)?.state !== 'idle') return 'the agent is busy — it goes when this turn ends';
-    return null;
+    // The probe awaited; state can move under it — and say what it moved to.
+    return tabHold(tab);
   }
 
   function recentCreations(tabId: string, now: number): number {
@@ -244,15 +261,31 @@ function createFollowUpsStore() {
     /** This tab's follow-ups, each with where it stands right now. */
     list(tabId: string): FollowUpView[] {
       const now = Date.now();
-      return (locate(tabId)?.tab.follow_ups ?? []).map(f => ({
-        id: f.id,
-        text: f.text,
-        author: f.author,
-        status: statusOf(f, now),
-        due_at: f.due.at ?? null,
-        created_at: f.created_at,
-        expires_at: f.expires_at ?? null,
-      }));
+      const tab = locate(tabId)?.tab;
+      const live = preferencesStore.followUpsLive;
+      return (tab?.follow_ups ?? []).map(f => {
+        const status = statusOf(f, now);
+        const waiting = status !== 'due' ? null : !live ? 'held: follow-ups are off' : tab ? tabHold(tab) : null;
+        return {
+          id: f.id,
+          text: f.text,
+          author: f.author,
+          status,
+          due_at: f.due.at ?? null,
+          created_at: f.created_at,
+          expires_at: f.expires_at ?? null,
+          waiting,
+        };
+      });
+    },
+
+    /** The tab a follow-up list belongs to, live or archived — the same search the store's own
+     *  operations use, so a caller can't show "nothing" for a tab the store can see. */
+    findTab(tabId: string): { tab: Tab; archived: boolean } | null {
+      const loc = locate(tabId);
+      if (!loc) return null;
+      const ws = workspacesStore.workspaces.find(w => w.id === loc.workspaceId);
+      return { tab: loc.tab, archived: !!ws?.archived_tabs.some(t => t.id === tabId) };
     },
 
     /** Remove one from this tab. False if the tab doesn't hold it. */
