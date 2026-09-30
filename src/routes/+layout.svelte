@@ -39,6 +39,7 @@
   import QuickOpen from '$lib/components/QuickOpen.svelte';
   import AgentBridgePicker from '$lib/components/AgentBridgePicker.svelte';
   import CommsMonitorModal from '$lib/components/CommsMonitorModal.svelte';
+  import FollowUpsModal from '$lib/components/followUps/FollowUpsModal.svelte';
   import MeshCockpit from '$lib/components/MeshCockpit.svelte';
   import MeshSetupModal from '$lib/components/MeshSetupModal.svelte';
   import OverlordRuleChangeModal from '$lib/components/overlord/OverlordRuleChangeModal.svelte';
@@ -68,6 +69,7 @@
   let showQuickOpen = $state(false);
   let showAgentBridgePicker = $state(false);
   let commsMonitorTarget = $state<{ workspaceId: string; paneId: string; tabId: string } | null>(null);
+  let followUpsTabId = $state<string | null>(null);
   let showMeshCockpit = $state(false);
   let meshSetupWorkspaceId = $state<string | null>(null);
   let agentBridgeCallerTabId = $state<string | null>(null);
@@ -1308,6 +1310,12 @@
     };
     window.addEventListener('open-comms-monitor', onOpenCommsMonitor);
 
+    // A tab's follow-ups (docs/follow-ups.md §8), opened from its context menu or its badge.
+    const onOpenFollowUps = (e: Event) => {
+      followUpsTabId = (e as CustomEvent<{ tabId: string }>).detail?.tabId ?? null;
+    };
+    window.addEventListener('open-follow-ups', onOpenFollowUps);
+
     // Mesh pre-flight setup modal, opened from the cockpit's Enable Mesh button.
     const onOpenMeshSetup = (e: Event) => { meshSetupWorkspaceId = (e as CustomEvent<string>).detail ?? null; };
     window.addEventListener('open-mesh-setup', onOpenMeshSetup);
@@ -1320,6 +1328,7 @@
       window.removeEventListener('open-agent-bridge-picker', onOpenAgentBridgePicker);
       window.removeEventListener('open-mesh-cockpit', onOpenMeshCockpit);
       window.removeEventListener('open-comms-monitor', onOpenCommsMonitor);
+      window.removeEventListener('open-follow-ups', onOpenFollowUps);
       window.removeEventListener('open-mesh-setup', onOpenMeshSetup);
       window.removeEventListener('keydown', handleKeydown, true);
       window.removeEventListener('keydown', handleKeydownAlt, true);
@@ -1428,6 +1437,7 @@
   tabId={commsMonitorTarget?.tabId ?? null}
   onclose={() => { commsMonitorTarget = null; }}
 />
+<FollowUpsModal tabId={followUpsTabId} onclose={() => { followUpsTabId = null; }} />
 <MeshCockpit
   open={showMeshCockpit}
   onclose={() => {

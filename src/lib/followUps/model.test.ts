@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { FollowUp } from '$lib/tauri/types';
 import {
-  resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText,
+  resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary,
   MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
 } from './model';
 
@@ -126,6 +126,10 @@ describe('envelope', () => {
     expect(text).toContain('at 2026-09-30 14:02 for 2026-09-30 14:22');
   });
 
+  it('says so when the human delivered it early', () => {
+    expect(envelope(fu(), NOW + 5 * MIN, true)).toContain('(delivered early, at your human’s request)');
+  });
+
   it('names a human or maiTerm author for what it is', () => {
     expect(envelope(fu({ author: 'human' }), NOW + 20 * MIN)).toMatch(/^⟦FOLLOW-UP⟧ Your human scheduled this/);
     expect(envelope(fu({ author: 'maiterm' }), NOW + 20 * MIN)).toMatch(/^⟦FOLLOW-UP⟧ maiTerm scheduled this for you/);
@@ -135,6 +139,40 @@ describe('envelope', () => {
     const text = envelope(fu({ text: '/compact' }), NOW + 20 * MIN);
     expect(text.startsWith('/')).toBe(false);
     expect(text.split('\n')[1]).toBe('/compact');
+  });
+});
+
+describe('whenText', () => {
+  it('reads pending, due, expired and unknown kinds for a human', () => {
+    expect(whenText(fu(), NOW)).toBe('in 20m');
+    expect(whenText(fu(), NOW + 23 * MIN)).toBe('due 3m ago');
+    const exp = fu({ expires_at: new Date(NOW + 30 * MIN).toISOString() });
+    expect(whenText(exp, NOW + 150 * MIN)).toBe('expired 2h ago');
+    expect(whenText(fu({ due: { kind: 'when_the_moon_is_full' } }), NOW)).toBe('waiting');
+  });
+});
+
+describe('badgeSummary', () => {
+  it('shows nothing for no follow-ups', () => {
+    expect(badgeSummary([], NOW, true)).toBeNull();
+  });
+
+  it('counts the live ones, names the next, and marks one past due', () => {
+    const b = badgeSummary([fu(), fu({ id: 'b', text: 'later', due: { kind: 'at', at: new Date(NOW + 90 * MIN).toISOString() } })], NOW, true)!;
+    expect(b.count).toBe(2);
+    expect(b.due).toBe(false);
+    expect(b.tooltip).toContain('2 follow-ups — next in 20m: “check the deploy”');
+    expect(badgeSummary([fu()], NOW + 25 * MIN, true)!.due).toBe(true);
+  });
+
+  it('still shows expired and held ones — they need a human to clear or re-enable', () => {
+    const exp = fu({ expires_at: new Date(NOW + 30 * MIN).toISOString() });
+    const b = badgeSummary([exp], NOW + 60 * MIN, true)!;
+    expect(b.count).toBe(0);
+    expect(b.tooltip).toContain('1 expired');
+    const held = badgeSummary([fu()], NOW + 25 * MIN, false)!;
+    expect(held.due).toBe(false);
+    expect(held.tooltip).toContain('held: follow-ups are off');
   });
 });
 

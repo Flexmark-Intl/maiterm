@@ -91,10 +91,10 @@ function createFollowUpsStore() {
     // Between turns only (§6.1): the delivery controller would deliver mid-turn, which suits a
     // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
     const st = agentStateStore.getState(tab.id);
-    if (st?.state !== 'idle') return 'agent not idle';
+    if (st?.state !== 'idle') return 'the agent is busy — it goes when this turn ends';
     // Typing right now: a keystroke this recent may not have reached the screen yet.
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
-    if (typed !== undefined && Date.now() - typed < 2000) return 'your human is typing';
+    if (typed !== undefined && Date.now() - typed < 2000) return 'someone is typing in the tab';
     // And the screen has settled — the same 1.5 s the Overlord's own notices wait for.
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     // No draft in the input box. Typing into an agent's input fires no hook, so nothing reports
@@ -104,9 +104,9 @@ function createFollowUpsStore() {
     // type-ahead during boot slipped through. Timestamps remain only where the screen isn't a
     // layout maiTerm recognises: anything typed since this stretch of idle began holds.
     const box = await commands.agentInputBox(tab.id);
-    if (box === 'has_text') return 'a draft is in the input box';
+    if (box === 'has_text') return "there's a draft in the agent's input box — send or clear it first";
     if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {
-      return 'your human may have a draft (input box not readable)';
+      return 'something was typed in the tab since the agent went idle, and its input box can’t be read';
     }
     if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
     // A session entry is not an agent: it is cleared by the SessionEnd hook, which never comes
@@ -117,12 +117,12 @@ function createFollowUpsStore() {
     if (!inst) return 'no terminal';
     try {
       const live = await commands.getAgentLiveness(inst.ptyId);
-      if (!(live.agent_running || live.ssh_foreground)) return 'no agent running';
+      if (!(live.agent_running || live.ssh_foreground)) return 'no agent is running in the tab';
     } catch {
-      return 'no agent running';
+      return 'no agent is running in the tab';
     }
     // The probe awaited; state can move under it.
-    if (agentStateStore.getState(tab.id)?.state !== 'idle') return 'agent not idle';
+    if (agentStateStore.getState(tab.id)?.state !== 'idle') return 'the agent is busy — it goes when this turn ends';
     return null;
   }
 
@@ -134,9 +134,17 @@ function createFollowUpsStore() {
 
   async function deliverDue(tab: Tab, now: number) {
     const due = (tab.follow_ups ?? []).filter(f => isDue(f, now)).sort((a, b) => (dueAt(a) ?? 0) - (dueAt(b) ?? 0));
-    if (due.length === 0 || delivering.has(tab.id)) return;
+    if (due.length === 0) return;
+    await deliverOne(tab, due[0], now); // one per tab per tick: the next waits for this turn to end
+  }
+
+  /** Deliver one follow-up through the full gate. Null when delivered; otherwise why not, in
+   *  words a human can act on. The tick and the human's "Deliver now" both come through here,
+   *  so the button can never skip a check the tick makes — only the due time is theirs to
+   *  waive. `early`: delivered before it was due, at the human's request. */
+  async function deliverOne(tab: Tab, f: FollowUp, now: number, early = false): Promise<string | null> {
+    if (delivering.has(tab.id)) return 'another follow-up is being delivered to this tab';
     delivering.add(tab.id);
-    const f = due[0]; // one per tab per tick: the next one waits for this one's turn to end
     let held = false; // taken off the tab and not yet delivered or given back
     // Any human keystroke after this moment aborts the delivery. `holdReason` reads the box
     // and then awaits more (the liveness sweep, the take, the trust check); someone who starts
@@ -145,28 +153,31 @@ function createFollowUpsStore() {
     const keysAtGate = terminalsStore.getLastTakeoverInputAt(tab.id);
     const untouched = () => terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
     try {
-      if (await holdReason(tab)) return;
-      if (!untouched()) return;
+      const reason = await holdReason(tab);
+      if (reason) return reason;
+      if (!untouched()) return 'someone is typing in the tab';
       // CLAIM it before typing anything: taken off the tab in Rust, atomically. If a reload has
       // moved it to a replacement tab (or a cancel beat us), the take finds nothing and this
       // tab does nothing — the replacement delivers it. Delivering and then removing is what
       // let one follow-up go out from both tabs.
-      if (!(await take(tab.id, f.id))) return;
+      if (!(await take(tab.id, f.id))) return 'it is no longer on this tab';
       held = true;
-      const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now), untouched);
+      const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now, early), untouched);
       if (r === 'delivered') {
         held = false;
-        logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}`);
-        return;
+        logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}${early ? ' (early, by hand)' : ''}`);
+        return null;
       }
       // Claimed but not typed — the state moved in the gap. Put it back for the next tick.
       await add(tab.id, f);
       held = false;
+      return 'the tab changed state just before delivery — try again';
     } catch (e) {
       // The at-most-once cost, named when it is paid: the tab went away (closed, reloaded, its
       // window shut) between the take and the give-back. Never a generic "failed".
       if (held) logWarn(`follow-ups: ${f.id.slice(0, 8)} LOST — taken from tab ${tab.id.slice(0, 8)} but neither delivered nor given back ("${f.text.slice(0, 60)}"): ${e}`);
       else logError(`follow-ups: delivering ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)} failed: ${e}`);
+      return String(e);
     } finally {
       delivering.delete(tab.id);
     }
@@ -251,7 +262,20 @@ function createFollowUpsStore() {
       return true;
     },
 
-    /** Run the tick now (tests, and "Deliver now" in step 3). */
+    /** The human's "Deliver now": the full gate, only the due time waived. Null when
+     *  delivered; otherwise why it was held. Expired ones stay expired — cancel those. */
+    async deliverNow(tabId: string, id: string): Promise<string | null> {
+      const loc = locate(tabId);
+      const f = loc?.tab.follow_ups?.find(x => x.id === id);
+      if (!loc || !f) return 'it is no longer on this tab';
+      const now = Date.now();
+      if (isExpired(f, now)) return 'it has expired — cancel it, or add a new one';
+      if (!preferencesStore.followUpsLive) return 'follow-ups are off (Preferences → Overlord)';
+      const due = dueAt(f);
+      return deliverOne(loc.tab, f, now, due != null && due > now);
+    },
+
+    /** Run the tick now (tests). */
     tick,
   };
 }

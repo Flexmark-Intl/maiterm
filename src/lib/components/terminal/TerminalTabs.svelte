@@ -22,6 +22,7 @@
   import TabListMenu from './TabListMenu.svelte';
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { tabMoveItem } from '$lib/stores/windowMove';
+  import { badgeSummary } from '$lib/followUps/model';
   import type { MoveTargetWindow } from '$lib/tauri/types';
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
   import { toastStore } from '$lib/stores/toasts.svelte';
@@ -84,6 +85,17 @@
     }
   });
   onDestroy(unsubOsc);
+
+  // Follow-up badges read relative times ("next in 12m") and flip to "due" as time passes;
+  // nothing else re-renders a quiet tab, so tick while this pane has any to show.
+  let followUpNow = $state(Date.now());
+  const paneHasFollowUps = $derived(pane.tabs.some(t => (t.follow_ups?.length ?? 0) > 0));
+  $effect(() => {
+    if (!paneHasFollowUps) return;
+    followUpNow = Date.now();
+    const t = setInterval(() => { followUpNow = Date.now(); }, 30_000);
+    return () => clearInterval(t);
+  });
 
   // Track modifier key for "modifier" tab button style.
   // Only register listeners when the preference is active.
@@ -1081,6 +1093,17 @@
             action: () => window.dispatchEvent(new CustomEvent('open-agent-bridge-picker', { detail: { tabId } })),
           }
       : null;
+    // Follow-ups (docs/follow-ups.md §8): for any agent tab while the feature is live, and for
+    // any tab that already holds some — switched off means held, and held ones must stay
+    // visible and cancellable.
+    const followUpCount = tabObj?.follow_ups?.length ?? 0;
+    const followUpsItem: MenuItem | null =
+      (preferencesStore.followUpsLive && isTerminalTab && (isAgentTab || hasAgentSession)) || followUpCount > 0
+        ? {
+            label: followUpCount > 0 ? `Follow-ups (${followUpCount})…` : 'Follow-ups…',
+            action: () => window.dispatchEvent(new CustomEvent('open-follow-ups', { detail: { tabId } })),
+          }
+        : null;
     // Copy-path items for editor tabs. For SSH files "Copy Full Path" gives the
     // remote real path; "Copy Local Copy Path" stages a local copy on demand.
     const editorFile = tabObj?.tab_type === 'editor' ? tabObj.editor_file : null;
@@ -1114,6 +1137,7 @@
       ...(commsMonitorItem ? [commsMonitorItem] : []),
       ...(commsItem ? [commsItem] : []),
       ...(bridgeItem ? [bridgeItem] : []),
+      ...(followUpsItem ? [followUpsItem] : []),
       { label: '', separator: true, action: () => {} },
       {
         label: 'Move to New Split Right',
@@ -1306,6 +1330,16 @@
           <Tooltip text={`Bound to ${tab.comms_bindings!.length > 1 ? `${tab.comms_bindings!.length} chat threads` : 'a chat thread'} — @mention replies steer this agent. Right-click → End thread binding${tab.comms_bindings!.length > 1 ? 's' : ''} to stop.`}><span class="comms-indicator">@{#if tab.comms_bindings!.length > 1}{tab.comms_bindings!.length}{/if}</span></Tooltip>
         {:else if !isEditor && tab.comms_monitor}
           <Tooltip text={`Chat monitoring ${tab.comms_monitor.channels.length} channel${tab.comms_monitor.channels.length === 1 ? '' : 's'} — @bot summons land here. Right-click → Chat monitoring… to change.`}><span class="comms-indicator comms-monitoring">@</span></Tooltip>
+        {/if}
+        {#if !isEditor}
+          {@const fu = badgeSummary(tab.follow_ups ?? [], followUpNow, preferencesStore.followUpsLive)}
+          {#if fu}
+            <Tooltip text={fu.tooltip}>
+              <span class="follow-up-indicator" class:due={fu.due} class:held={!preferencesStore.followUpsLive || fu.count === 0}>
+                <Icon name="clock" size={11} />{#if fu.count > 1}<span class="follow-up-count">{fu.count}</span>{/if}
+              </span>
+            </Tooltip>
+          {/if}
         {/if}
         <span class="tab-name">{displayName(tab)}</span>
         {@const hasRunningPty = !isEditor && !isDiff && !!terminalsStore.get(tab.id)}
@@ -1640,6 +1674,31 @@
   /* Monitoring-but-idle: listening for summons, no thread bound yet. */
   .comms-indicator.comms-monitoring {
     color: var(--fg-dim);
+  }
+
+  /* Follow-ups pending (docs/follow-ups.md §8). Dim while waiting, accent once one is past
+     its time and waiting for the agent, faded when held (feature off) or only expired. */
+  .follow-up-indicator {
+    flex-shrink: 0;
+    margin-right: 3px;
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    line-height: 1;
+    color: var(--fg-dim);
+  }
+
+  .follow-up-indicator.due {
+    color: var(--accent);
+  }
+
+  .follow-up-indicator.held {
+    opacity: 0.5;
+  }
+
+  .follow-up-count {
+    font-size: 0.7rem;
+    font-weight: 600;
   }
 
   .bridge-indicator {

@@ -162,6 +162,39 @@ export function durationText(ms: number): string {
   return `${m}m`;
 }
 
+/** Where a follow-up stands, for a human: "in 12m", "due 3m ago", "expired 2h ago", or — for a
+ *  trigger kind this build can't time — "waiting". The UI's one phrasing, so the badge and the
+ *  list can't disagree. */
+export function whenText(f: FollowUp, now: number): string {
+  if (isExpired(f, now)) return `expired ${durationText(now - Date.parse(f.expires_at!))} ago`;
+  const t = dueAt(f);
+  if (t == null) return 'waiting';
+  return t > now ? `in ${durationText(t - now)}` : `due ${durationText(now - t)} ago`;
+}
+
+/** What a tab's clock badge says (docs/follow-ups.md §8), or null when there is nothing to
+ *  show. `due`: one is past its time and waiting for the agent. `live`: the feature is on —
+ *  off, they are held, and the badge says so rather than disappearing. */
+export function badgeSummary(
+  fus: FollowUp[],
+  now: number,
+  live: boolean,
+): { count: number; due: boolean; tooltip: string } | null {
+  if (fus.length === 0) return null;
+  const active = fus.filter(f => !isExpired(f, now));
+  const expired = fus.length - active.length;
+  const next = [...active].sort((a, b) => (dueAt(a) ?? Infinity) - (dueAt(b) ?? Infinity))[0];
+  const parts: string[] = [];
+  if (next) {
+    const text = next.text.length > 60 ? `${next.text.slice(0, 57)}…` : next.text;
+    parts.push(`${active.length} follow-up${active.length === 1 ? '' : 's'} — next ${whenText(next, now)}: “${text}”`);
+  }
+  if (expired > 0) parts.push(`${expired} expired`);
+  if (!live) parts.push('held: follow-ups are off (Preferences → Overlord)');
+  parts.push('Right-click → Follow-ups… to manage.');
+  return { count: active.length, due: live && active.some(f => isDue(f, now)), tooltip: parts.join(' · ') };
+}
+
 const pad = (n: number) => String(n).padStart(2, '0');
 
 /** Local wall-clock time, with the date only when it isn't the same day as `now`. */
@@ -179,11 +212,13 @@ export function clockText(ms: number, now: number): string {
  * read as the human having just typed it. The frame is also why a follow-up can't smuggle in a
  * slash command.
  */
-export function envelope(f: FollowUp, now: number): string {
+export function envelope(f: FollowUp, now: number, early = false): string {
   const created = Date.parse(f.created_at);
   const due = dueAt(f) ?? now;
   const late = now - due;
-  const when = late > LATE_AFTER_MS ? `delivered ${durationText(late)} late` : 'delivered on time';
+  const when = early
+    ? 'delivered early, at your human’s request'
+    : late > LATE_AFTER_MS ? `delivered ${durationText(late)} late` : 'delivered on time';
   const scheduled = `at ${clockText(created, now)} for ${clockText(due, now)} (${when})`;
   const who =
     f.author === 'human'
