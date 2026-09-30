@@ -26,6 +26,7 @@
   import ShareExportModal from '$lib/components/share/ShareExportModal.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
+  import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
   import { error as logError } from '@tauri-apps/plugin-log';
   import type { MoveTargetWindow, Workspace } from '$lib/tauri/types';
   import { workspaceMoveItem } from '$lib/stores/windowMove';
@@ -498,6 +499,15 @@
         expandedStacks = new Set(expandedStacks).add(workspaceId);
         requestAnimationFrame(() => stackSections[workspaceId]?.openImport());
       } },
+      { label: '', separator: true, action: () => {} },
+      workspacesStore.workspaces.find((w) => w.id === workspaceId)?.bridge_all
+        ? { label: 'Disable mesh', action: () => run('disable mesh', agentMeshStore.setMeshEnabled(workspaceId, false)) }
+        : { label: 'Enable mesh…', action: async () => {
+            // The setup modal opens the cockpit on success, and the cockpit shows the ACTIVE
+            // workspace — so switch first, as the MESH badge does.
+            if (workspaceId !== workspacesStore.activeWorkspaceId) await handleItemClick(workspaceId);
+            window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: workspaceId }));
+          } },
       { label: '', separator: true, action: () => {} },
       workspaceMoveItem(moveTargets, workspaceId),
       { label: 'Share workspace…', action: () => { shareExportFor = workspaceId; } },
