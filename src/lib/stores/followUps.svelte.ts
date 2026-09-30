@@ -119,10 +119,11 @@ function createFollowUpsStore() {
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     // No draft in the input box. Typing into an agent's input fires no hook, so nothing reports
     // a draft, and a paste plus CR would submit it with the follow-up glued on. The box is READ
-    // off the screen (mailink/input_box.rs): keystroke timestamps were tried first and failed
-    // both ways — a relaunched agent's own `claude -c` held its follow-ups forever, then
-    // type-ahead during boot slipped through. Timestamps remain only where the screen isn't a
-    // layout maiTerm recognises: anything typed since this stretch of idle began holds.
+    // off the screen (mailink/input_box.rs): keystroke timestamps ALONE were tried first and
+    // failed both ways — a relaunched agent's own `claude -c` held its follow-ups forever, then
+    // type-ahead during boot slipped through. They still guard around the read — the 2 s check
+    // above, `deliverOne`'s after-the-gate abort — and decide it where the screen isn't a layout
+    // maiTerm recognises: anything typed since this stretch of idle began holds.
     const box = await commands.agentInputBox(tab.id);
     if (box === 'has_text') return "there's a draft in the agent's input box — send or clear it first";
     if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {

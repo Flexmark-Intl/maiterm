@@ -5,6 +5,8 @@
 //! input fires no hook, so nothing reports a draft. Guessing it from keystroke timestamps was
 //! tried twice and failed both ways — it held a relaunched agent's follow-ups forever, then let
 //! type-ahead during boot through. The screen is the evidence: this reads the box itself.
+//! (Timestamps still guard around this read in `followUps.svelte.ts` — typing in progress, and a
+//! key after the gate — and decide where this answers `Unknown`.)
 //!
 //! Claude Code's layout, from real 2.1.285/2.1.286 screens (see the tests): the input box is a
 //! `❯` line with a horizontal rule directly above it, its text running on until the rule
