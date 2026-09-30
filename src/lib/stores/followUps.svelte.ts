@@ -13,7 +13,7 @@
  * order — type, then remove — delivered one follow-up from two tabs whenever a reload moved it
  * mid-delivery, which is an ordinary event rather than a crash.
  */
-import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
+import { info as logInfo, warn as logWarn, error as logError } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
 import type { FollowUp, Tab } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
@@ -92,13 +92,14 @@ function createFollowUpsStore() {
     // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
     const st = agentStateStore.getState(tab.id);
     if (st?.state !== 'idle') return 'agent not idle';
-    // Nothing typed since the agent's turn ended. Typing into an agent's input box fires no
+    // Nothing typed since this stretch of idle began. Typing into an agent's input box fires no
     // hook, so the tab reads idle while its human composes — and a paste plus CR would submit
-    // their half-written draft with the follow-up glued on. Entering idle stamps updatedAt,
-    // so this holds until they send it (the next turn's end re-stamps) — or cancel/deliver it
-    // by hand. A keystroke that only answered a permission prompt doesn't count.
+    // their half-written draft with the follow-up glued on. Holds until they send it (the next
+    // turn's end starts a new stretch) or cancel/deliver it by hand. A keystroke that only
+    // answered a permission prompt doesn't count, and neither does the command that STARTED the
+    // agent: `idleSince` is stamped at session start too.
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
-    if (typed !== undefined && typed > st.updatedAt) return 'your human is typing';
+    if (typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) return 'your human is typing';
     // And the screen has settled — the same 1.5 s the Overlord's own notices wait for.
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
@@ -130,6 +131,7 @@ function createFollowUpsStore() {
     if (due.length === 0 || delivering.has(tab.id)) return;
     delivering.add(tab.id);
     const f = due[0]; // one per tab per tick: the next one waits for this one's turn to end
+    let held = false; // taken off the tab and not yet delivered or given back
     try {
       if (await holdReason(tab)) return;
       // CLAIM it before typing anything: taken off the tab in Rust, atomically. If a reload has
@@ -137,15 +139,21 @@ function createFollowUpsStore() {
       // tab does nothing — the replacement delivers it. Delivering and then removing is what
       // let one follow-up go out from both tabs.
       if (!(await take(tab.id, f.id))) return;
+      held = true;
       const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now));
       if (r === 'delivered') {
+        held = false;
         logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}`);
         return;
       }
       // Claimed but not typed — the state moved in the gap. Put it back for the next tick.
       await add(tab.id, f);
+      held = false;
     } catch (e) {
-      logError(`follow-ups: delivering ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)} failed: ${e}`);
+      // The at-most-once cost, named when it is paid: the tab went away (closed, reloaded, its
+      // window shut) between the take and the give-back. Never a generic "failed".
+      if (held) logWarn(`follow-ups: ${f.id.slice(0, 8)} LOST — taken from tab ${tab.id.slice(0, 8)} but neither delivered nor given back ("${f.text.slice(0, 60)}"): ${e}`);
+      else logError(`follow-ups: delivering ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)} failed: ${e}`);
     } finally {
       delivering.delete(tab.id);
     }

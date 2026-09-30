@@ -304,10 +304,21 @@ follow-up came back. Every change is now one atomic Rust operation (`add_tab_fol
 
 **The gate before a take** (`holdReason` in `stores/followUps.svelte.ts`), cheapest check first:
 1. The agent is `idle`.
-2. **Nothing has been typed since its turn ended.** Typing into an agent's input box fires no
-   hook, so a tab reads idle while its human composes. A paste plus CR would submit their
-   half-written draft with the follow-up glued on. Entering idle stamps `updatedAt`, so this
-   holds until they send it.
+2. **Nothing has been typed since this stretch of idle began** (`AgentTabSession.idleSince`).
+   Typing into an agent's input box fires no hook, so a tab reads idle while its human
+   composes. A paste plus CR would submit their half-written draft with the follow-up glued on.
+   This holds until they send it. It was first compared against `updatedAt`, which a session
+   start deliberately doesn't stamp. So the keystrokes that relaunched an exited agent by hand
+   (`claude -c`), which is exactly how an agent picks up its follow-ups, counted as a draft, and
+   the follow-ups waited for a turn nobody was going to start. `idleSince` is stamped on every
+   entry into idle, session start and `/clear` included.
+
+   Holds that are safe but may surprise: clearing a draft (Ctrl-U, Esc) holds until the next
+   turn, and so does a local command that starts no turn (`/status`). **Unverified:** a TUI's
+   mouse reports go through xterm's `onData` and are stamped as human input. If a runtime
+   enables mouse tracking, a click or scroll in its tab would hold follow-ups the same way.
+   Excluding them would change what the Overlord's rituals count as a takeover too, so it is
+   left alone until it is seen.
 3. 1.5 s of output quiet.
 4. The delivery controller would inject now (`canDeliverNow`).
 5. **A live agent process** (`getAgentLiveness`). A session entry is cleared by the SessionEnd

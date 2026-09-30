@@ -62,6 +62,13 @@ export interface AgentTabSession {
    *  "since yesterday". 0 = no activity seen this run; pair it with `getTabsLastActivity` (the
    *  phone's rule) for the time before that. */
   updatedAt: number;
+  /** Only while idle: when THIS stretch of idle began — stamped on every entry into idle,
+   *  session start included, which `updatedAt` deliberately is not (a session merely starting
+   *  isn't activity). Follow-ups compare human keystrokes against it (docs/follow-ups.md §6.1):
+   *  typed after it means a draft may be sitting in the input box. Against `updatedAt`, the
+   *  keystrokes that relaunched an agent by hand counted as a draft, and its follow-ups waited
+   *  for a turn nobody was going to start. */
+  idleSince?: number;
 }
 
 /** Validate a hook payload's runtime field, defaulting to Claude. */
@@ -138,8 +145,11 @@ function createAgentStateStore() {
     // Entering idle fresh = unread; staying idle preserves whatever read flag we had.
     const read = state === 'idle' ? (current?.state === 'idle' ? current.read : false) : undefined;
     const updatedAt = activity ? Date.now() : (current?.updatedAt ?? 0);
+    // A new session (start, /clear) is a fresh stretch of idle even when the old one was idle.
+    const sameIdleStretch = state === 'idle' && current?.state === 'idle' && current.sessionId === sessionId;
+    const idleSince = state !== 'idle' ? undefined : sameIdleStretch ? current?.idleSince : Date.now();
     sessions = new Map(sessions);
-    sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt });
+    sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt, idleSince });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
     // Clear alert when leaving permission state (but only if we set it).
