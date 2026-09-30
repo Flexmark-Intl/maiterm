@@ -152,7 +152,8 @@
     { value: 'xhigh', name: 'Extra high' },
     { value: 'max', name: 'Max' },
   ];
-  let pickMenu = $state<{ x: number; y: number; anchor: HTMLElement; items: { label: string; shortcut?: string; disabled?: boolean; action: () => void }[] } | null>(null);
+  let pickSeq = 0;
+  let pickMenu = $state<{ x: number; y: number; anchor: HTMLElement; seq?: number; items: { label: string; shortcut?: string; disabled?: boolean; action: () => void }[] } | null>(null);
   $effect(() => {
     void openId;
     pickMenu = null;
@@ -178,12 +179,15 @@
     if (!chat) return;
     // Open at once and fill in when the list lands, into THIS menu only: a menu closed, or
     // replaced by another picker or the rule menu, while the list was read stays that way.
-    const opened = { ...menuAt(e), items: [{ label: 'Reading models…', disabled: true, action: () => {} }] };
-    pickMenu = opened;
+    // Compared by a number, not by object: `$state` stores a proxy, never the object assigned.
+    const seq = ++pickSeq;
+    const at = menuAt(e);
+    pickMenu = { ...at, seq, items: [{ label: 'Reading models…', disabled: true, action: () => {} }] };
     const models = await listTabModels(chat).catch(() => []);
-    if (pickMenu !== opened || openId !== chat) return;
+    if (pickMenu?.seq !== seq || openId !== chat) return;
     pickMenu = {
-      ...opened,
+      ...at,
+      seq,
       items: models.map((m) => ({
         label: m.name + (m.note ? ` · ${m.note}` : ''),
         // An ambiguous row matching says "on this model", never "on this row" (§ ModelOption).
@@ -196,6 +200,7 @@
         },
       })),
     };
+    if (!models.length) pickMenu = { ...at, seq, items: [{ label: 'Could not read the model list', disabled: true, action: () => {} }] };
   }
   function openEffortPicker(e: MouseEvent) {
     if (pickMenu) { pickMenu = null; return; }
