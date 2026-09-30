@@ -1,6 +1,7 @@
 # maiTerm Follow-ups — an agent's own way to pick the work back up later
 
-> Status: **proposed** 2026-09-26. Not built. Owner: Darryl.
+> Status: **building** from 2026-09-30 (proposed 09-26). Owner: Darryl. Lives under the
+> Overlord: live only when the Overlord and **Enable follow-ups** are both on (§4).
 > Scope: an agent (or its human) schedules a prompt to be delivered back into **its own tab**
 > later — at a time, or when something in the workspace happens. maiTerm holds the schedule,
 > so it works for every runtime, survives the agent exiting and maiTerm restarting, and never
@@ -91,13 +92,18 @@ pub struct FollowUp {
     pub expires_at: Option<String>,
 }
 
-pub enum FollowUpDue {
-    At { at: String },                                   // RFC 3339, wall clock
+/// A STRING kind, never a Rust enum. This is persisted on `Tab`, and an enum variant an older
+/// build doesn't know makes that build fail to parse AppData, load EMPTY state and overwrite
+/// the backup (memory: serde-enum-variant-downgrade-wipe). With a string, an unknown kind
+/// deserializes fine and the follow-up is simply never due on the older build.
+pub struct FollowUpDue {
+    pub kind: String,                    // "at" | "service_ready" | "service_stopped" | "task_done"
+    pub at: Option<String>,              // kind "at": RFC 3339, wall clock
     // Services and tasks are per WORKSPACE, and the tab can move. The condition records the
     // workspace it was set in, so a moved tab's follow-up still looks in the right place.
-    ServiceReady { workspace_id: String, service_id: String },
-    ServiceStopped { workspace_id: String, service_id: String },   // stopped or crashed
-    TaskDone { workspace_id: String, task_id: String },
+    pub workspace_id: Option<String>,
+    pub service_id: Option<String>,      // service_ready / service_stopped (stopped or crashed)
+    pub task_id: Option<String>,         // task_done
 }
 ```
 
@@ -131,14 +137,37 @@ An unmeetable condition is still news to the agent.
 
 ## 4. MCP surface
 
-Three tools, scoped to the calling tab (enforced — §2), gated by a preference like the task
-and stack tools (`follow_ups_enabled`, default on). They are served by the frontend store,
-which is where every tool not handled by `handle_backend_tool` already goes
-(`server.rs` ~2878). The gate is two places: `tool_list_response(tasks_enabled,
-stack_enabled)` (`protocol.rs` ~50) grows a third parameter so the tools disappear from the
-list, and — as the stack tools do (`claudeCode.svelte.ts` ~948), and the task tools don't —
-the handler re-checks the preference when called, so a client holding a stale tool list is
-still refused.
+Three tools, scoped to the calling tab (enforced — §2). They are served by the frontend
+store, which is where every tool not handled by `handle_backend_tool` already goes
+(`server.rs` ~2878).
+
+**Gated under the Overlord (decided 2026-09-30).** The preference is **Preferences → Overlord
+→ Enable follow-ups** (`follow_ups_enabled`, default `true`), sitting under "Enable Overlord"
+in `OverlordRulesSection.svelte` and disabled while the Overlord is off. The feature is live
+only when **both** are on:
+
+```
+follow_ups_live = overlord_enabled && follow_ups_enabled
+```
+
+So turning the Overlord on turns follow-ups on with it, and from then on they are a toggle of
+their own. The point is the same contract the task and stack tools have: **an agent is never
+told about follow-ups, and never carries their schemas, unless the feature is live.** One
+computed value gates all four places, so they can't disagree:
+
+- `tool_list_response(tasks_enabled, stack_enabled)` (`protocol.rs` ~50) takes
+  `follow_ups_live` as a third parameter, so the tools vanish from the list.
+- The handler re-checks it when called, as the stack tools do (`claudeCode.svelte.ts` ~948) —
+  a client holding a stale tool list is still refused.
+- `session_priming_text` (§ Priming below) adds the line only when it is live.
+- The delivery tick holds when it is off. Follow-ups already pending stay on their tabs,
+  visible and cancellable, and deliver when it is turned back on. Turning a feature off
+  is not a reason to throw an agent's notes away.
+
+It is the preference pair, deliberately not "this window has an Overlord workspace" (which
+the Overlord's own priming also checks): the tool list is served per connection, not per
+window, and a feature that appeared and vanished with a workspace would be hard to reason
+about.
 
 | Tool | Does |
 |------|------|
@@ -351,6 +380,8 @@ a usage limit today:
 
 1. `FollowUp` on `Tab` (Rust + TS), the lifecycle table in §3 wired and tested, including the
    duplicate-clears / reload-moves pair (and `cargo check --tests` for the test literal).
+   The `follow_ups_enabled` preference and its toggle under the Overlord (§4), with
+   `follow_ups_live` computed in one place for everything to read.
 2. `tryDeliverNow` on the delivery controller, with tests. Frontend store + tick, time
    trigger only, idle gate. `createFollowUp` / `listFollowUps` / `cancelFollowUp`, with the
    own-tab refusal and `PEER_ADDRESSING_TOOLS` entry in Rust (§2).
