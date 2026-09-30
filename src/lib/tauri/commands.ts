@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -997,6 +997,11 @@ export async function setTabServiceId(
   serviceId: string | null
 ): Promise<void> {
   return invoke('set_tab_service_id', { workspaceId, paneId, tabId, serviceId });
+}
+
+/** Replace one tab's follow-ups (docs/follow-ups.md). Live or archived tab. */
+export async function setTabFollowUps(workspaceId: string, tabId: string, followUps: FollowUp[]): Promise<void> {
+  return invoke('set_tab_follow_ups', { workspaceId, tabId, followUps });
 }
 
 // Sound commands

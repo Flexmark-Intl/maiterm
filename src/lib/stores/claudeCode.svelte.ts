@@ -1,5 +1,7 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
+import { followUpsStore } from '$lib/stores/followUps.svelte';
+import type { CreateArgs } from '$lib/followUps/model';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -235,6 +237,17 @@ function createClaudeCodeStore() {
           break;
         case 'removeService':
           result = await handleRemoveService(args as { tabId?: string; service?: string });
+          break;
+        // Follow-ups (docs/follow-ups.md §4). Rust has already refused any tabId that isn't the
+        // caller's own, so `tabId` here is always the calling tab.
+        case 'createFollowUp':
+          result = await handleCreateFollowUp(args as CreateArgs & { tabId?: string });
+          break;
+        case 'listFollowUps':
+          result = handleListFollowUps(args as { tabId?: string });
+          break;
+        case 'cancelFollowUp':
+          result = await handleCancelFollowUp(args as { tabId?: string; id?: string });
           break;
         // getPreferences, setPreference, createBackup, listWindows handled directly on backend
         case 'replyToOverlord': {
@@ -1120,6 +1133,55 @@ function createClaudeCodeStore() {
       const created = (scope.workspace.stack ?? []).length > before;
       logInfo(`stack: agent ${created ? 'created' : 'reused'} service ${service.name} (tab ${scope.tab.id})`);
       return { service: serviceView(scope.workspace, service), created };
+    } catch (e) {
+      return { error: String(e) };
+    }
+  }
+
+  /** The calling tab, while follow-ups are live. The handler re-checks the preference itself:
+   *  the tool list is the first gate, but a client can hold a list from before it was
+   *  switched off. */
+  function resolveFollowUpTab(tabId?: string): { tab: Tab } | { error: string } {
+    if (!preferencesStore.followUpsLive) {
+      return { error: 'Follow-ups are off (Preferences → Overlord → Enable follow-ups, which needs the Overlord on).' };
+    }
+    const loc = resolveActiveTab(tabId);
+    if ('error' in loc) return loc;
+    return { tab: loc.tab };
+  }
+
+  async function handleCreateFollowUp(args: CreateArgs & { tabId?: string }) {
+    const scope = resolveFollowUpTab(args.tabId);
+    if ('error' in scope) return scope;
+    try {
+      const r = await followUpsStore.create(scope.tab.id, args, 'agent');
+      if (!r.ok) return { error: r.detail, reason: r.reason };
+      logInfo(`follow-ups: tab ${scope.tab.id.slice(0, 8)} scheduled ${r.followUp.id.slice(0, 8)} for ${r.followUp.due.at}`);
+      return {
+        scheduled: true,
+        id: r.followUp.id,
+        due_at: r.followUp.due.at,
+        expires_at: r.followUp.expires_at ?? null,
+        note: 'Delivered back into this tab between turns, framed as ⟦FOLLOW-UP⟧. Cancel with cancelFollowUp if it stops mattering.',
+      };
+    } catch (e) {
+      return { error: String(e) };
+    }
+  }
+
+  function handleListFollowUps(args: { tabId?: string }) {
+    const scope = resolveFollowUpTab(args.tabId);
+    if ('error' in scope) return scope;
+    return { follow_ups: followUpsStore.list(scope.tab.id) };
+  }
+
+  async function handleCancelFollowUp(args: { tabId?: string; id?: string }) {
+    const scope = resolveFollowUpTab(args.tabId);
+    if ('error' in scope) return scope;
+    if (!args.id?.trim()) return { error: 'id is required — from listFollowUps or createFollowUp.' };
+    try {
+      const done = await followUpsStore.cancel(scope.tab.id, args.id.trim());
+      return done ? { cancelled: args.id.trim() } : { error: `No follow-up ${args.id.trim()} on this tab — listFollowUps shows what is pending.` };
     } catch (e) {
       return { error: String(e) };
     }

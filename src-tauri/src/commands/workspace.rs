@@ -1115,6 +1115,36 @@ pub fn publish_stack_runtime(
 /// any other tab in the workspace inside the same write, so no reader ever sees two tabs
 /// claiming it — the same shape as the comms-binding hand-over in
 /// `carry_tab_state_on_reload`.
+/// Replace one tab's follow-ups (docs/follow-ups.md). The frontend follow-ups store owns the
+/// list for its window and writes it whole — create, cancel, and removal after delivery.
+/// Looks in the archive too: an archived tab keeps its follow-ups, and cancelling one there
+/// must still persist.
+#[tauri::command]
+pub fn set_tab_follow_ups(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    tab_id: String,
+    follow_ups: Vec<crate::state::workspace::FollowUp>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    let workspace = win.workspaces.iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    let tab = workspace.panes.iter_mut()
+        .flat_map(|p| p.tabs.iter_mut())
+        .chain(workspace.archived_tabs.iter_mut())
+        .find(|t| t.id == tab_id)
+        .ok_or("Tab not found")?;
+    tab.follow_ups = follow_ups;
+
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
 #[tauri::command]
 pub fn set_tab_service_id(
     window: tauri::Window,

@@ -1,0 +1,141 @@
+import { describe, it, expect } from 'vitest';
+import type { FollowUp } from '$lib/tauri/types';
+import {
+  resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText,
+  MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
+} from './model';
+
+// Local-time fixtures, so clock text is deterministic whatever zone the tests run in.
+const NOW = new Date(2026, 8, 30, 14, 2).getTime(); // 2026-09-30 14:02 local
+const MIN = 60_000;
+
+function ctx(over: Partial<CreateContext> = {}): CreateContext {
+  return { now: NOW, pending: 0, createdLastHour: 0, author: 'agent', newId: () => 'fu-1', ...over };
+}
+
+function fu(over: Partial<FollowUp> = {}): FollowUp {
+  return {
+    id: 'fu-1',
+    text: 'check the deploy',
+    due: { kind: 'at', at: new Date(NOW + 20 * MIN).toISOString() },
+    author: 'agent',
+    created_at: new Date(NOW).toISOString(),
+    expires_at: null,
+    ...over,
+  };
+}
+
+describe('resolveCreate', () => {
+  it('resolves in_minutes to an absolute wall-clock time', () => {
+    const r = resolveCreate({ text: '  check the deploy  ', in_minutes: 20 }, ctx());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.followUp.text).toBe('check the deploy');
+    expect(r.followUp.due).toEqual({ kind: 'at', at: new Date(NOW + 20 * MIN).toISOString() });
+    expect(r.followUp.author).toBe('agent');
+    expect(r.followUp.expires_at).toBeNull();
+  });
+
+  it('accepts an ISO time with a zone, and a numeric string for in_minutes', () => {
+    const at = new Date(NOW + 90 * MIN).toISOString();
+    const a = resolveCreate({ text: 'x', at }, ctx());
+    expect(a.ok && a.followUp.due.at).toBe(at);
+    expect(resolveCreate({ text: 'x', in_minutes: '5' }, ctx()).ok).toBe(true);
+  });
+
+  it('requires exactly one trigger', () => {
+    expect(resolveCreate({ text: 'x' }, ctx())).toMatchObject({ ok: false, reason: 'need_one_trigger' });
+    expect(resolveCreate({ text: 'x', in_minutes: 5, at: new Date(NOW + 5 * MIN).toISOString() }, ctx()))
+      .toMatchObject({ ok: false, reason: 'need_one_trigger' });
+  });
+
+  it('refuses missing text, a bad time, and times outside 1 minute – 7 days', () => {
+    expect(resolveCreate({ in_minutes: 5 }, ctx())).toMatchObject({ reason: 'missing_text' });
+    expect(resolveCreate({ text: '   ', in_minutes: 5 }, ctx())).toMatchObject({ reason: 'missing_text' });
+    expect(resolveCreate({ text: 'x', at: 'tomorrow' }, ctx())).toMatchObject({ reason: 'bad_time' });
+    expect(resolveCreate({ text: 'x', in_minutes: 'soon' }, ctx())).toMatchObject({ reason: 'bad_time' });
+    expect(resolveCreate({ text: 'x', in_minutes: 0.5 }, ctx())).toMatchObject({ reason: 'too_soon' });
+    expect(resolveCreate({ text: 'x', at: new Date(NOW - MIN).toISOString() }, ctx())).toMatchObject({ reason: 'too_soon' });
+    expect(resolveCreate({ text: 'x', in_minutes: 8 * 24 * 60 }, ctx())).toMatchObject({ reason: 'too_far' });
+  });
+
+  it('refuses an expiry that lands before the follow-up is due', () => {
+    expect(resolveCreate({ text: 'x', in_minutes: 30, expires_in_minutes: 10 }, ctx())).toMatchObject({ reason: 'bad_expiry' });
+    expect(resolveCreate({ text: 'x', in_minutes: 30, expires_in_minutes: -1 }, ctx())).toMatchObject({ reason: 'bad_expiry' });
+    const r = resolveCreate({ text: 'x', in_minutes: 30, expires_in_minutes: 120 }, ctx());
+    expect(r.ok && r.followUp.expires_at).toBe(new Date(NOW + 120 * MIN).toISOString());
+  });
+
+  it('enforces the per-tab limits — after the request itself checks out', () => {
+    expect(resolveCreate({ text: 'x', in_minutes: 5 }, ctx({ pending: MAX_PENDING }))).toMatchObject({ reason: 'too_many_pending' });
+    expect(resolveCreate({ text: 'x', in_minutes: 5 }, ctx({ createdLastHour: MAX_CREATED_PER_HOUR }))).toMatchObject({ reason: 'rate_limited' });
+    // A request that is wrong in itself says so, rather than "come back later".
+    expect(resolveCreate({ text: 'x', in_minutes: 0 }, ctx({ pending: MAX_PENDING }))).toMatchObject({ reason: 'too_soon' });
+  });
+});
+
+describe('due, expired, status', () => {
+  it('is due once its time has passed, and not before', () => {
+    const f = fu();
+    expect(isDue(f, NOW)).toBe(false);
+    expect(statusOf(f, NOW)).toBe('pending');
+    expect(isDue(f, NOW + 20 * MIN)).toBe(true);
+    expect(statusOf(f, NOW + 3 * 60 * MIN)).toBe('due');
+  });
+
+  it('an expired follow-up is never due, and says so', () => {
+    const f = fu({ expires_at: new Date(NOW + 30 * MIN).toISOString() });
+    expect(isDue(f, NOW + 25 * MIN)).toBe(true);
+    expect(isExpired(f, NOW + 31 * MIN)).toBe(true);
+    expect(isDue(f, NOW + 31 * MIN)).toBe(false);
+    expect(statusOf(f, NOW + 31 * MIN)).toBe('expired');
+  });
+
+  it('a kind this build does not know is never due, and never throws', () => {
+    // A newer build wrote it. Downgrade safety is the point of the string kind.
+    const f = fu({ due: { kind: 'when_the_moon_is_full' } });
+    expect(isDue(f, NOW + 999 * MIN)).toBe(false);
+    expect(statusOf(f, NOW + 999 * MIN)).toBe('pending');
+  });
+});
+
+describe('envelope', () => {
+  it('frames it as the agent\'s own earlier note, on time', () => {
+    const text = envelope(fu(), NOW + 21 * MIN);
+    expect(text).toBe(
+      '⟦FOLLOW-UP⟧ You scheduled this at 14:02 for 14:22 (delivered on time) — your own earlier note, not a new message from your human:\ncheck the deploy',
+    );
+  });
+
+  it('says how late it is past five minutes, with the date once it is another day', () => {
+    const text = envelope(fu(), NOW + 20 * MIN + (24 * 60 + 72) * MIN);
+    expect(text).toContain('delivered 1d 1h late');
+    expect(text).toContain('at 2026-09-30 14:02 for 2026-09-30 14:22');
+  });
+
+  it('names a human or maiTerm author for what it is', () => {
+    expect(envelope(fu({ author: 'human' }), NOW + 20 * MIN)).toMatch(/^⟦FOLLOW-UP⟧ Your human scheduled this/);
+    expect(envelope(fu({ author: 'maiterm' }), NOW + 20 * MIN)).toMatch(/^⟦FOLLOW-UP⟧ maiTerm scheduled this for you/);
+  });
+
+  it('keeps the prompt on its own line, so a leading slash can\'t become a command', () => {
+    const text = envelope(fu({ text: '/compact' }), NOW + 20 * MIN);
+    expect(text.startsWith('/')).toBe(false);
+    expect(text.split('\n')[1]).toBe('/compact');
+  });
+});
+
+describe('text helpers', () => {
+  it('durationText keeps the two largest units', () => {
+    expect(durationText(30_000)).toBe('1m');
+    expect(durationText(45 * MIN)).toBe('45m');
+    expect(durationText(192 * MIN)).toBe('3h 12m');
+    expect(durationText(120 * MIN)).toBe('2h');
+    expect(durationText((2 * 24 + 3) * 60 * MIN)).toBe('2d 3h');
+  });
+
+  it('clockText adds the date only for another day', () => {
+    expect(clockText(NOW, NOW)).toBe('14:02');
+    expect(clockText(NOW, NOW + 24 * 60 * MIN)).toBe('2026-09-30 14:02');
+  });
+});

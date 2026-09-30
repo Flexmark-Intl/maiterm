@@ -547,7 +547,53 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
         ));
     }
 
+    if let Some(line) = follow_ups_priming(state, tab_id) {
+        out.push_str(&line);
+    }
+
     out
+}
+
+/// The follow-ups line (docs/follow-ups.md §4) — only while the feature is live, so an agent is
+/// never told about tools it has not been given. It lists this tab's pending ones, read from
+/// persisted state: a resumed agent then knows what it already scheduled instead of scheduling
+/// it again. No apostrophes anywhere in priming text (see the SessionStart hook).
+fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
+    let app_data = state.app_data.read();
+    if !app_data.preferences.follow_ups_live() {
+        return None;
+    }
+    let pending: Vec<String> = app_data
+        .windows
+        .iter()
+        .flat_map(|w| w.workspaces.iter())
+        .flat_map(|ws| ws.panes.iter().flat_map(|p| p.tabs.iter()))
+        .find(|t| t.id == tab_id)
+        .map(|t| {
+            t.follow_ups
+                .iter()
+                .map(|f| {
+                    let text: String = f.text.chars().take(80).collect();
+                    let when = f.due.at.as_deref().unwrap_or(f.due.kind.as_str());
+                    format!("{when}: \"{}\"", text.replace('\'', "\u{2019}"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut line = String::from(
+        "\n\nIf you need to come back to something later (check a deploy, re-run a flaky test, \
+         look at CI once it finishes), schedule a follow-up with createFollowUp: maiTerm \
+         delivers the prompt back into this tab between your turns, even if you exit in the \
+         meantime. It fires once.",
+    );
+    if !pending.is_empty() {
+        line.push_str(&format!(
+            " You already have {} pending in this tab, so do not schedule these again: {}.",
+            pending.len(),
+            pending.join("; ")
+        ));
+    }
+    Some(line)
 }
 
 /// "web (ready, http://localhost:5173), api (crashed), db (running, :5432)" for the
@@ -2243,7 +2289,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 30] = [
+const PEER_ADDRESSING_TOOLS: [&str; 33] = [
     // Files leave the machine for the human's phone and land in a named tab's chat. An
     // inferred identity would put one agent's files in a stranger's conversation, which is
     // the "speak as it" side of this line, not the "act on it" side.
@@ -2288,7 +2334,49 @@ const PEER_ADDRESSING_TOOLS: [&str; 30] = [
     "updateService",
     "createService",
     "removeService",
+    // Follow-ups (docs/follow-ups.md §2): a prompt scheduled into a tab is typed into that tab's
+    // agent later, as its own note. On a deduced identity it would land in a stranger's agent —
+    // and even the list is "your own", which a guess can't vouch for.
+    "createFollowUp",
+    "listFollowUps",
+    "cancelFollowUp",
 ];
+
+/// Tools that may only ever address the CALLING tab (docs/follow-ups.md §2). Elsewhere an
+/// explicit `tabId` overrides the connection's own tab — for these it must not, or scheduling
+/// "a prompt to yourself" becomes typing into any agent in the instance, which is `driveTab`
+/// without any of its guards.
+const OWN_TAB_ONLY_TOOLS: [&str; 3] = ["createFollowUp", "listFollowUps", "cancelFollowUp"];
+
+/// Why an own-tab-only call must be refused, or None. `explicit_tab` is a `tabId` the caller
+/// passed itself; `affinity` is the tab its connection is bound to and whether that binding was
+/// STATED (initSession, or a header the session agrees with) or INFERRED by reconnect recovery.
+///
+/// An explicit tabId is accepted only when it names a STATED binding. Elsewhere an explicit
+/// tabId is itself a statement of identity (`refuse_on_inferred_identity` lets it through), but
+/// here the question is whether the caller IS that tab, and a named id proves nothing about the
+/// caller. Found live: a connection whose header named tab A was inferred onto tab B (A already
+/// had a connection, B was the sole unbound one), and `tabId: B` then matched the inferred
+/// binding and scheduled a prompt into B's agent.
+fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: Option<(&str, bool)>) -> Option<String> {
+    if !OWN_TAB_ONLY_TOOLS.contains(&tool_name) {
+        return None;
+    }
+    match (explicit_tab, affinity) {
+        (Some(given), Some((own, true))) if given == own => None,
+        (Some(given), Some((own, true))) if given != own => Some(format!(
+            "{tool_name} only works on your own tab — a follow-up is a prompt to yourself. Leave tabId out."
+        )),
+        // No binding, or only a guessed one: nothing to check a named tab against, so it can't
+        // be shown to be the caller's.
+        (Some(_), _) => Some(format!(
+            "{tool_name} needs to know which tab is yours: run /maiterm init, then call it without a tabId."
+        )),
+        // No tabId: the connection's own binding is used — and an inferred one is refused by
+        // `refuse_on_inferred_identity`, since these are all on PEER_ADDRESSING_TOOLS.
+        (None, _) => None,
+    }
+}
 
 /// Whether to refuse a call because the tab it would act as was DEDUCED rather than stated.
 ///
@@ -2376,11 +2464,11 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let (tasks_enabled, stack_enabled) = {
+            let (tasks_enabled, stack_enabled, follow_ups_live) = {
                 let prefs = &state.app_data.read().preferences;
-                (prefs.tasks_enabled, prefs.stack_enabled)
+                (prefs.tasks_enabled, prefs.stack_enabled, prefs.follow_ups_live())
             };
-            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled));
+            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled, follow_ups_live));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "tools/call" => {
@@ -2784,6 +2872,21 @@ async fn process_message(
                     .get("tabId")
                     .and_then(|v| v.as_str())
                     .is_some_and(|s| !s.is_empty());
+                // Before the inferred-identity check, which an explicit tabId satisfies: for
+                // these tools an explicit tabId is exactly what must not be trusted.
+                if let Some(msg) = own_tab_only_refusal(
+                    &tool_name,
+                    arguments.get("tabId").and_then(|v| v.as_str()).filter(|s| !s.is_empty()),
+                    affinity.as_ref().map(|a| (a.tab_id.as_str(), a.stated)),
+                ) {
+                    log::warn!("Refusing {tool_name} for {}: it named a tab that isn't the caller's",
+                        &connection_id[..connection_id.len().min(11)]);
+                    let resp = JsonRpcResponse::success(
+                        id,
+                        serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                    );
+                    return Some(serde_json::to_string(&resp).unwrap());
+                }
                 if refuse_on_inferred_identity(
                     &tool_name,
                     affinity.as_ref().map(|a| a.stated),
@@ -4145,7 +4248,7 @@ async fn handle_message(
 #[cfg(test)]
 mod tests {
     use super::derive_streamable_connection_id;
-    use super::{recover_affinity, refuse_on_inferred_identity, PEER_ADDRESSING_TOOLS};
+    use super::{own_tab_only_refusal, recover_affinity, refuse_on_inferred_identity, OWN_TAB_ONLY_TOOLS, PEER_ADDRESSING_TOOLS};
     use super::session_start_state;
     use super::{normalize_hook_event, HookPhase};
     use crate::state::AgentRuntime;
@@ -4616,6 +4719,26 @@ mod tests {
         // No affinity at all is a different failure with its own message; this gate is only
         // about affinity that exists but was guessed.
         assert!(!refuse_on_inferred_identity("sendToBridgedAgent", None, false));
+    }
+
+    #[test]
+    fn follow_ups_only_ever_address_the_callers_own_tab() {
+        // Elsewhere an explicit tabId overrides the connection's tab. Here that would make
+        // "a prompt to yourself" a prompt into any agent — driveTab without its guards.
+        for tool in OWN_TAB_ONLY_TOOLS {
+            assert!(own_tab_only_refusal(tool, Some("other"), Some(("mine", true))).is_some(), "{tool}: another tab");
+            assert!(own_tab_only_refusal(tool, Some("other"), None).is_some(), "{tool}: no binding to check against");
+            assert!(own_tab_only_refusal(tool, Some("mine"), Some(("mine", true))).is_none(), "{tool}: naming yourself is fine");
+            assert!(own_tab_only_refusal(tool, None, Some(("mine", true))).is_none(), "{tool}: the normal call");
+            // The live failure: the connection was INFERRED onto the other tab, and naming that
+            // tab matched the guess. A guess vouches for nothing.
+            assert!(own_tab_only_refusal(tool, Some("other"), Some(("other", false))).is_some(), "{tool}: tabId matching an inferred binding");
+            // With no tabId, an inferred binding falls to the peer-addressing refusal instead.
+            assert!(PEER_ADDRESSING_TOOLS.contains(&tool), "{tool} must refuse an inferred identity");
+            assert!(refuse_on_inferred_identity(tool, Some(false), false));
+        }
+        // Every other tool keeps its ordinary tabId behaviour.
+        assert!(own_tab_only_refusal("setTabNotes", Some("other"), Some(("mine", true))).is_none());
     }
 
     #[test]

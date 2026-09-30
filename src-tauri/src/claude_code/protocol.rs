@@ -46,8 +46,10 @@ impl JsonRpcResponse {
 
 /// `tasks_enabled` gates the three task tools (docs/tasks.md §4). An agent that is never
 /// primed to use them shouldn't be carrying their schemas in context either, so the
-/// preference removes the surface rather than just the instruction.
-pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
+/// preference removes the surface rather than just the instruction. Same for the stack, and
+/// for follow-ups, whose flag is `Preferences::follow_ups_live()` — the Overlord AND its
+/// follow-ups toggle.
+pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_live: bool) -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -805,6 +807,39 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool) -> Value {
             "name": "removeService",
             "description": "Remove a service definition. Refused while it is running (stop it first) and refused for a service a human created — you may only retract ones registered by an agent or the importer.",
             "inputSchema": { "type": "object", "properties": { "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" }, "service": { "type": "string", "description": "Service name or id" } }, "required": ["service"] }
+        }
+    ]).as_array().unwrap().clone());
+    }
+
+    if follow_ups_live {
+    // ── Follow-ups (docs/follow-ups.md §4) ──
+    // Frontend-handled, and ONLY ever for the calling tab: server.rs refuses a `tabId` naming
+    // any other, so an agent can schedule a prompt to itself and to nobody else. There is
+    // deliberately no `tabId` in these schemas.
+    tools.extend(serde_json::json!([
+        {
+            "name": "createFollowUp",
+            "description": "Schedule a prompt to be delivered back to YOU, in this tab, later — so you pick the work up again without your human having to remember it. Use it when you have to come back to something: check a deploy in 20 minutes, look at CI once it has rerun, re-test tomorrow morning. maiTerm holds it, not your process: it survives you exiting and maiTerm restarting. It is delivered only between turns, framed as ⟦FOLLOW-UP⟧ so you know it is your own earlier note rather than your human, and removed once delivered. Pass exactly one of `in_minutes` or `at` (ISO 8601 with a zone). Limits: 1 minute to 7 days out, 10 pending per tab. It fires once; to keep checking, schedule the next one when it arrives. Write `text` as the instruction you will need then, with the context you have now — you may not remember why.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "The prompt delivered back to you. Self-contained: say what to check and what to do about it." },
+                    "in_minutes": { "type": "number", "description": "Deliver this many minutes from now (1 – 10080)." },
+                    "at": { "type": "string", "description": "Deliver at this time: ISO 8601 with a zone, e.g. 2026-10-01T09:00:00-05:00." },
+                    "expires_in_minutes": { "type": "number", "description": "Optional. If it can't be delivered within this many minutes from now (you're busy or not running), drop it instead of delivering it late." }
+                },
+                "required": ["text"]
+            }
+        },
+        {
+            "name": "listFollowUps",
+            "description": "Your pending follow-ups in this tab — including ones your human added — each with its status ('pending', 'due' = waiting for your turn to end, 'expired' = missed its expiry and won't be delivered). Check it before scheduling, so a resumed session doesn't schedule the same thing twice.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "cancelFollowUp",
+            "description": "Cancel one of your follow-ups by id (from listFollowUps or createFollowUp) — when the thing it was for has already happened, or no longer matters.",
+            "inputSchema": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }
         }
     ]).as_array().unwrap().clone());
     }

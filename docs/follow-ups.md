@@ -64,10 +64,17 @@ Three decisions carry most of the design:
    **This has to be enforced; it is not the default.** The MCP server fills in `tabId` from
    the connection's affinity only when the caller leaves it out
    (`src-tauri/src/claude_code/server.rs` ~2810): an explicit `tabId` naming any tab in the
-   instance is honoured, for every tool. So the follow-up tools must refuse a `tabId` that
-   differs from the connection's affinity, checked in Rust before the call is forwarded to the
-   frontend, and the write tools go on `PEER_ADDRESSING_TOOLS` (~2240), which already refuses
-   task and stack writes on an identity that was only inferred after a reconnect.
+   instance is honoured, for every tool. So the follow-up tools (`OWN_TAB_ONLY_TOOLS`) accept an
+   explicit `tabId` only when it names the connection's **stated** binding, checked in Rust
+   before the call reaches the frontend (`own_tab_only_refusal`). All three are also on
+   `PEER_ADDRESSING_TOOLS`, which refuses an identity that was only inferred after a
+   reconnect.
+
+   *Stated*, not merely bound, was learned live (2026-09-30). A connection whose header named
+   tab A was inferred onto tab B, because A already had a connection and B was the only unbound
+   one. `tabId: B` then matched that inferred binding and scheduled a prompt into B's agent.
+   Elsewhere an explicit `tabId` counts as a statement of identity. Here the question is
+   whether the caller *is* that tab, and naming an id proves nothing about that.
 2. **One-shot only.** No recurrence. An agent that wants to keep checking re-arms itself when
    the follow-up fires, which means every repetition is a decision it takes with fresh
    context. Recurring, engine-owned schedules already exist: Overlord rituals. A recurring
@@ -229,10 +236,11 @@ second is exactly what §2's "never typed into a shell" rules out.
 ### 6.1 The path
 
 Delivery goes through **`agentDelivery`** (core in `src/lib/stores/agentDelivery.ts`, the
-live instance in `agentDeliveryLive.ts`), the mailbox the bridge and the mesh already share,
-under a third owner tag (`DELIVERY_OWNER_FOLLOWUP` — `owners` is a `Set<string>`, so this is
-free). One mailbox per tab is the point of that module: two controllers would mean two
-`injecting` guards for one PTY, and a follow-up paste could land inside a bridge message. It
+live instance in `agentDeliveryLive.ts`), the mailbox the bridge and the mesh already share.
+Follow-ups take no slot and no owner tag: `tryDeliverNow` works for a tab with no slot at all,
+which is most of them. One mailbox per tab is the point of that module: two controllers would
+mean two `injecting` guards for one PTY, and a follow-up paste could land inside a bridge
+message. It
 already holds while the agent is at a permission or elicitation prompt (Claude: permission or
 an open `AskUserQuestion`; Codex: permission only — `src/lib/agents/adapter.ts`) and
 serializes injections.
