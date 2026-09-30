@@ -293,6 +293,41 @@
       </button>
     </div>
 
+    <!-- A sub-feature of the Overlord (docs/follow-ups.md §4): shown always, so it can be
+         found, but inert until the Overlord is on — its own value is kept, not overwritten. -->
+    <div class="setting" class:inert={!preferencesStore.overlordEnabled}>
+      <div class="setting-copy">
+        <label for="overlord-follow-ups">Enable follow-ups</label>
+        <p class="setting-hint">
+          {#if preferencesStore.overlordEnabled}
+            Agents can schedule a prompt back to themselves — at a time, or when a service
+            comes up or a task finishes — so they pick work up later without you. While this
+            is off, agents aren't told the feature exists.
+          {:else}
+            Lets agents schedule a prompt back to themselves for later. Turn on the Overlord
+            first.
+          {/if}
+        </p>
+      </div>
+      <button
+        id="overlord-follow-ups"
+        class="toggle"
+        class:active={preferencesStore.followUpsLive}
+        disabled={!preferencesStore.overlordEnabled}
+        onclick={() => {
+          // `disabled` alone doesn't hold: WebKit still runs this for a click dispatched at a
+          // disabled button (seen in testing), which flipped the saved value while the switch
+          // showed off — the one thing an inert setting must not do.
+          if (!preferencesStore.overlordEnabled) return;
+          preferencesStore.setFollowUpsEnabled(!preferencesStore.followUpsEnabled);
+        }}
+        aria-pressed={preferencesStore.followUpsLive}
+        aria-label="Toggle follow-ups"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
+
     <div class="status" class:live={preferencesStore.overlordEnabled}>
       <span class="status-led"></span>
       <span class="status-text">
@@ -643,6 +678,11 @@
     transition: transform 0.2s;
   }
   .toggle.active .toggle-knob { transform: translateX(18px); }
+  .toggle:disabled { cursor: not-allowed; }
+
+  /* A setting that depends on another one being on. Dimmed rather than hidden, so it can be
+     found; the switch shows the effective state (off) while it can't take effect. */
+  .setting.inert { opacity: 0.5; }
 
   /* Live status line — a readout, and clearly only a readout. */
   .status {

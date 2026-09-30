@@ -7,7 +7,7 @@ import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte'
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { getCompiledPatterns } from '$lib/utils/promptPattern';
-import { error as logError } from '@tauri-apps/plugin-log';
+import { error as logError, warn as logWarn } from '@tauri-apps/plugin-log';
 import { pendingResumePanes } from '$lib/stores/resumeGate.svelte';
 // Static, not dynamic: archive/restore must patch the task mirror in the same synchronous
 // step the command returns in. tasks.svelte does not import this module, so no cycle.
@@ -137,6 +137,13 @@ function pickNextActiveTab(allTabs: Tab[], closedIndex: number): string | null {
 
 const RECENT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 
+/** Record follow-ups lost with a tab that is going away for good (docs/follow-ups.md §3). */
+function logDroppedFollowUps(tab: Tab | undefined, how: string) {
+  const pending = tab?.follow_ups ?? [];
+  if (pending.length === 0) return;
+  const list = pending.map(f => `"${f.text.slice(0, 60)}"`).join(', ');
+  logWarn(`follow-ups: tab ${tab!.id.slice(0, 8)} ${how} with ${pending.length} pending, dropped: ${list}`);
+}
 
 function createWorkspacesStore() {
   let windowId = $state<string>('');
@@ -1253,6 +1260,15 @@ function createWorkspacesStore() {
       // to recognize its own list and create a second copy of every item. Unassigned rows
       // are reclaimable by title, so the resumed agent picks its work back up.
       import('$lib/stores/tasks.svelte').then(m => m.tasksStore.releaseTab(tabId)).catch(() => {});
+      // Its follow-ups go with it — there is nothing left to deliver them to. Say so: an
+      // agent that scheduled one and never heard back has to be distinguishable from one that
+      // never scheduled it (docs/follow-ups.md §3, §6.3). Logged HERE, not in Rust delete_tab,
+      // because reload removes its original through that command too and would log a false
+      // drop every time — and a reload has already moved them to the replacement.
+      logDroppedFollowUps(
+        workspaces.find(w => w.id === workspaceId)?.panes.find(p => p.id === paneId)?.tabs.find(t => t.id === tabId),
+        'closed',
+      );
 
       // If closing a diff tab with a pending Claude request, respond with rejection
       // so Claude Code doesn't hang waiting for accept/reject.
@@ -1615,6 +1631,8 @@ function createWorkspacesStore() {
     },
 
     async deleteArchivedTab(workspaceId: string, tabId: string) {
+      // An archived tab holds its follow-ups for delivery on restore; deleting it ends that.
+      logDroppedFollowUps(workspaces.find(w => w.id === workspaceId)?.archived_tabs.find(t => t.id === tabId), 'deleted from the archive');
       await commands.deleteArchivedTab(workspaceId, tabId);
       const ws = workspaces.find(w => w.id === workspaceId);
       if (ws) {

@@ -741,6 +741,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
                 // The stack definition travels with the workspace (below), but none of
                 // its services are running in the copy, so no tab in it may claim one.
                 service_id: None,
+                // A follow-up is one agent's note about its own session. The copy is a new
+                // tab with a new agent; carrying them would deliver each one twice.
+                follow_ups: Vec::new(),
                 tab_type: tab.tab_type.clone(),
                 editor_file: tab.editor_file.clone(),
                 last_cwd: tab.last_cwd.clone(),
@@ -903,8 +906,8 @@ fn clone_split_node(node: &SplitNode, id_map: &std::collections::HashMap<String,
 #[cfg(test)]
 mod clone_ids_tests {
     use super::clone_workspace_with_id_mapping;
-    use crate::state::workspace::WorkspaceNote;
-    use crate::state::{Service, Workspace};
+    use crate::state::workspace::{FollowUp, FollowUpDue, WorkspaceNote};
+    use crate::state::{Service, Tab, Workspace};
 
     #[test]
     fn services_and_notes_get_fresh_ids() {
@@ -940,5 +943,39 @@ mod clone_ids_tests {
         assert_eq!(cloned.stack[0].name, "web");
         assert_ne!(cloned.workspace_notes[0].id, "note-1");
         assert_eq!(cloned.workspace_notes[0].content, "hi");
+    }
+
+    #[test]
+    fn a_duplicated_workspace_carries_no_follow_ups() {
+        // The copy's tabs are new tabs with new agents. A follow-up carried into one would be
+        // delivered twice — once to the original agent, once to the copy (docs/follow-ups.md §3).
+        let mut ws = Workspace::new("proj".to_string());
+        ws.panes[0].tabs[0].follow_ups.push(FollowUp {
+            id: "fu-1".to_string(),
+            text: "check the deploy".to_string(),
+            due: FollowUpDue {
+                kind: "at".to_string(),
+                at: Some("2026-10-01T09:00:00Z".to_string()),
+                workspace_id: None,
+                service_id: None,
+                task_id: None,
+            },
+            author: "agent".to_string(),
+            created_at: "2026-09-30T09:00:00Z".to_string(),
+            expires_at: None,
+        });
+
+        let (cloned, _) = clone_workspace_with_id_mapping(&ws, &[]);
+
+        assert_eq!(ws.panes[0].tabs[0].follow_ups.len(), 1, "the original keeps its own");
+        assert!(cloned.panes[0].tabs[0].follow_ups.is_empty());
+    }
+
+    #[test]
+    fn a_fresh_tab_has_no_follow_ups() {
+        // Every frontend duplicate path (duplicateTab, split, copy-to-workspace, new
+        // conversation) builds its tab from these constructors and copies named fields, so this
+        // is what keeps a duplicate from inheriting them.
+        assert!(Tab::new("t".to_string()).follow_ups.is_empty());
     }
 }

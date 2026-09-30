@@ -350,6 +350,13 @@ pub struct Tab {
     /// workspace may name a given service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_id: Option<String>,
+    /// Prompts scheduled to be delivered back into THIS tab's agent later (docs/follow-ups.md).
+    /// Every path that copies a tab has to decide what happens to these (§3): a reload MOVES
+    /// them (carried by the whole-record copy, then cleared on the original in
+    /// `carry_tab_state_on_reload`), and a duplicate or cloned workspace starts empty —
+    /// otherwise two agents would each get every follow-up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<FollowUp>,
     #[serde(default)]
     pub tab_type: TabType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,6 +384,47 @@ pub struct Tab {
     /// `mailink_native` instead). See docs/mailink-protocol.md.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mailink_excluded: bool,
+}
+
+/// A prompt to deliver back into its tab's agent later (docs/follow-ups.md §3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FollowUp {
+    pub id: String,
+    pub text: String,
+    pub due: FollowUpDue,
+    /// "agent" (created over MCP), "human" (from the UI) or "maiterm" (created on the agent's
+    /// behalf, §9). A string for the same reason `FollowUpDue.kind` is one.
+    pub author: String,
+    /// RFC 3339, wall clock.
+    pub created_at: String,
+    /// Deliver no later than this; past it the follow-up is dropped, and the drop is shown
+    /// rather than silent (§6.3). RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+/// When a follow-up comes due.
+///
+/// A struct with a STRING `kind`, never a Rust enum: this is persisted on `Tab`, and an enum
+/// variant an older build doesn't know makes that build fail to parse AppData, load empty
+/// state and overwrite the backup. With a string, an unknown kind still deserializes, and the
+/// follow-up is simply never due on the older build.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FollowUpDue {
+    /// "at" | "service_ready" | "service_stopped" | "task_done"
+    pub kind: String,
+    /// kind "at": RFC 3339, wall clock — compared against now on every tick, never turned
+    /// into a duration, so a machine that slept through it delivers late rather than shifted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// The workspace the condition was set in. Services and tasks are per workspace and the tab
+    /// can move, so a moved tab's follow-up still looks where it was pointed (§3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1565,6 +1613,12 @@ pub struct Preferences {
     /// the human clicks to send, instead of firing autonomously. Default on for trust-building.
     #[serde(default = "default_true")]
     pub overlord_propose_mode: bool,
+    /// Follow-ups (docs/follow-ups.md §4): an agent schedules a prompt back into its own tab.
+    /// A sub-feature of the Overlord — the toggle sits under "Enable Overlord" and does
+    /// nothing while it is off. Default on, so turning the Overlord on brings follow-ups with
+    /// it. Never read this alone: ask `follow_ups_live()`.
+    #[serde(default = "default_true")]
+    pub follow_ups_enabled: bool,
     /// Overlord ruleset. Global across windows; workspace-scoped rules bind via rule.workspaces.
     #[serde(default)]
     pub overlord_rules: Vec<OverlordRule>,
@@ -1888,6 +1942,7 @@ impl Default for Preferences {
             active_account_ids: std::collections::BTreeMap::new(),
             overlord_enabled: false,
             overlord_propose_mode: true,
+            follow_ups_enabled: true,
             overlord_rules: Vec::new(),
             hidden_default_overlord_rules: Vec::new(),
             claude_ide: true,
@@ -1927,6 +1982,16 @@ impl Default for Preferences {
             comms_instructions: None,
             comms_pickup_users: Vec::new(),
         }
+    }
+}
+
+impl Preferences {
+    /// Whether follow-ups are on at all (docs/follow-ups.md §4). THE one place this is
+    /// decided: the tool list, the priming line and the handler all ask here, so none of them
+    /// can disagree about whether an agent was told the feature exists. The frontend mirrors
+    /// it as `preferencesStore.followUpsLive`.
+    pub fn follow_ups_live(&self) -> bool {
+        self.overlord_enabled && self.follow_ups_enabled
     }
 }
 
@@ -1977,6 +2042,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            follow_ups: Vec::new(),
         }
     }
 
@@ -2026,6 +2092,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            follow_ups: Vec::new(),
         }
     }
 
@@ -2075,6 +2142,7 @@ impl Tab {
             comms_monitor: None,
             comms_thread_receipts: Vec::new(),
             service_id: None,
+            follow_ups: Vec::new(),
         }
     }
 }

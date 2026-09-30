@@ -2110,6 +2110,19 @@ pub fn set_tab_comms_monitor(
 /// `..src` carries the WHOLE persisted record; the fields named here are the entire
 /// exception list, and each is named because the REPLACEMENT's own value is the correct
 /// one — never because nobody thought of the field.
+/// What a reload MOVES rather than copies: cleared on the original, which lives on until the
+/// caller deletes it, while `carry_tab_record` hands the snapshot taken before this to the
+/// replacement. Everything here is something two tabs must never hold at once.
+fn release_moved_claims(orig: &mut crate::state::Tab) {
+    // The comms watcher would pick the same summon up twice, or inject one thread reply into
+    // two sessions.
+    orig.comms_bindings.clear();
+    orig.comms_binding = None;
+    orig.comms_monitor = None;
+    // Every follow-up would be delivered twice (docs/follow-ups.md §3).
+    orig.follow_ups.clear();
+}
+
 fn carry_tab_record(src: crate::state::Tab, replacement: &crate::state::Tab) -> crate::state::Tab {
     crate::state::Tab {
         // Identity: the replacement IS a different tab, that is the whole premise of reload.
@@ -2193,9 +2206,7 @@ pub fn carry_tab_state_on_reload(
     // sessions. One write lock covers the release and the hand-over, so no reader sees the
     // overlap.
     if let Some(orig) = pane.tabs.iter_mut().find(|t| t.id == from_tab_id) {
-        orig.comms_bindings.clear();
-        orig.comms_binding = None;
-        orig.comms_monitor = None;
+        release_moved_claims(orig);
     }
 
     let tab = pane
@@ -3255,8 +3266,8 @@ mod active_tab_pick_tests {
 
 #[cfg(test)]
 mod reload_carry_tests {
-    use super::carry_tab_record;
-    use crate::state::workspace::TabType;
+    use super::{carry_tab_record, release_moved_claims};
+    use crate::state::workspace::{FollowUp, FollowUpDue, TabType};
     use crate::state::{CommsBinding, CommsMonitor, CommsMonitorChannel, Tab};
     use std::collections::HashMap;
 
@@ -3355,6 +3366,22 @@ mod reload_carry_tests {
             // stack store, and the original is deleted in the same operation, so the
             // one-tab-per-service rule holds (docs/stack.md §5).
             service_id: Some("svc-web".to_string()),
+            // Carried to the replacement AND cleared off the original — a move, not a copy
+            // (`release_moved_claims`; docs/follow-ups.md §3).
+            follow_ups: vec![FollowUp {
+                id: "fu-1".to_string(),
+                text: "check the deploy".to_string(),
+                due: FollowUpDue {
+                    kind: "at".to_string(),
+                    at: Some("2026-10-01T09:00:00Z".to_string()),
+                    workspace_id: None,
+                    service_id: None,
+                    task_id: None,
+                },
+                author: "agent".to_string(),
+                created_at: "2026-09-30T09:00:00Z".to_string(),
+                expires_at: None,
+            }],
             tab_type: TabType::Terminal,
             editor_file: None,
             diff_context: None,
@@ -3431,6 +3458,22 @@ mod reload_carry_tests {
         assert!(out.pinned && out.custom_name);
         assert_eq!(out.name, "Chat Handler");
         assert!(!out.auto_resume_enabled, "a deliberate disable must not be re-armed");
+    }
+
+    #[test]
+    fn a_reload_moves_follow_ups_so_only_one_tab_ever_holds_them() {
+        // The order carry_tab_state_on_reload uses: snapshot, release the original, carry the
+        // snapshot. Between this and the caller's deleteTab both tabs exist; only one may hold
+        // the follow-ups, or every one is delivered to two agents.
+        let mut orig = fully_populated("old-tab");
+        let snapshot = orig.clone();
+        release_moved_claims(&mut orig);
+        let out = carry_tab_record(snapshot, &replacement());
+
+        assert_eq!(out.follow_ups.len(), 1, "the replacement is the same session and keeps them");
+        assert_eq!(out.follow_ups[0].text, "check the deploy");
+        assert!(orig.follow_ups.is_empty(), "the original, still alive until deleted, holds none");
+        assert!(orig.comms_bindings.is_empty() && orig.comms_monitor.is_none());
     }
 
     #[test]

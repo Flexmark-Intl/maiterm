@@ -64,6 +64,7 @@ function createPreferencesStore() {
   let tasksBacklogVocabularyMigrated = $state(false);
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
+  let followUpsEnabled = $state(true);
   let overlordRules = $state<OverlordRule[]>([]);
   let hiddenDefaultOverlordRules = $state<string[]>([]);
   let claudeCodeIde = $state(false);
@@ -167,6 +168,11 @@ function createPreferencesStore() {
     },
     get overlordEnabled() { return overlordEnabled; },
     get overlordProposeMode() { return overlordProposeMode; },
+    /** The raw toggle — for the Preferences switch only. Everything else asks `followUpsLive`. */
+    get followUpsEnabled() { return followUpsEnabled; },
+    /** Whether follow-ups are on at all: the Overlord AND its follow-ups toggle
+     *  (docs/follow-ups.md §4). Mirrors Rust `Preferences::follow_ups_live`. */
+    get followUpsLive() { return overlordEnabled && followUpsEnabled; },
     get overlordRules() { return overlordRules; },
     get hiddenDefaultOverlordRules() { return hiddenDefaultOverlordRules; },
     get claudeCodeIde() { return claudeCodeIde; },
@@ -272,6 +278,7 @@ function createPreferencesStore() {
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
+      followUpsEnabled = prefs.follow_ups_enabled ?? true;
       overlordRules = prefs.overlord_rules ?? [];
       hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
@@ -617,6 +624,11 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setFollowUpsEnabled(value: boolean) {
+      followUpsEnabled = value;
+      await this.save();
+    },
+
     async setOverlordRules(value: OverlordRule[]) {
       overlordRules = value;
       await this.save();
@@ -886,6 +898,7 @@ function createPreferencesStore() {
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
+      followUpsEnabled = prefs.follow_ups_enabled ?? true;
       overlordRules = prefs.overlord_rules ?? [];
       hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
@@ -983,6 +996,7 @@ function createPreferencesStore() {
         tasks_backlog_vocabulary_migrated: tasksBacklogVocabularyMigrated,
         overlord_enabled: overlordEnabled,
         overlord_propose_mode: overlordProposeMode,
+        follow_ups_enabled: followUpsEnabled,
         overlord_rules: overlordRules,
         hidden_default_overlord_rules: hiddenDefaultOverlordRules,
         claude_ide: claudeCodeIde,

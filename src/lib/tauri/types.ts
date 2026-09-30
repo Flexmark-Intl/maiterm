@@ -27,6 +27,29 @@ export interface AgentBridge {
   turn: number;
 }
 
+/** When a follow-up comes due (docs/follow-ups.md §3). A string `kind` in Rust too — never an
+ *  enum, which an older build would fail to parse and wipe state over. */
+export interface FollowUpDue {
+  kind: 'at' | 'service_ready' | 'service_stopped' | 'task_done' | (string & {});
+  /** kind "at": RFC 3339, wall clock. */
+  at?: string | null;
+  /** The workspace the condition was set in — the tab may have moved since. */
+  workspace_id?: string | null;
+  service_id?: string | null;
+  task_id?: string | null;
+}
+
+/** A prompt to deliver back into its tab's agent later (docs/follow-ups.md). */
+export interface FollowUp {
+  id: string;
+  text: string;
+  due: FollowUpDue;
+  /** "agent" | "human" | "maiterm" */
+  author: string;
+  created_at: string;
+  expires_at?: string | null;
+}
+
 export interface Tab {
   id: string;
   name: string;
@@ -53,6 +76,10 @@ export interface Tab {
   /** The stack service this tab runs (docs/stack.md §3–§5); absent for an ordinary tab.
    *  The binding lives here and nowhere else. */
   service_id?: string | null;
+  /** Prompts scheduled back into this tab's agent (docs/follow-ups.md). Omitted by Rust when
+   *  empty, so read it as `tab.follow_ups ?? []`. A reload moves them; a duplicate starts
+   *  without them. */
+  follow_ups?: FollowUp[];
   /** Exempt from Overlord (docs/overlord.md §11): no rules, probes, proposals, cards or
    *  agent tools touch this tab. `Workspace.overlord_exempt` covers a whole workspace. */
   overlord_exempt?: boolean;
@@ -575,6 +602,9 @@ export interface Preferences {
   overlord_enabled: boolean;
   /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */
   overlord_propose_mode: boolean;
+  /** Follow-ups (docs/follow-ups.md §4) — a sub-feature of the Overlord. Never read alone:
+   *  `preferencesStore.followUpsLive` is the combined answer. */
+  follow_ups_enabled: boolean;
   overlord_rules: OverlordRule[];
   hidden_default_overlord_rules: string[];
   claude_ide: boolean;
