@@ -96,7 +96,9 @@ function createFollowUpsStore() {
    *  because "no session" read as "not idle" once told a human with no agent running that it
    *  would go "when this turn ends". Null: the tab is idle, the async checks decide. */
   function tabHold(tab: Tab): string | null {
-    if (!terminalsStore.get(tab.id)) return "the tab isn't running (suspended or archived) — it goes once the tab is live again";
+    // No instance covers suspended and archived tabs AND an ordinary one not opened since launch
+    // (terminals mount lazily) — so name none of them.
+    if (!terminalsStore.get(tab.id)) return "the tab isn't loaded — it goes once the tab is open and its agent is running";
     const st = agentStateStore.getState(tab.id);
     if (!st) return 'no agent is running in the tab — it goes after an agent starts there';
     if (st.state === 'permission') return 'the agent is waiting on a permission prompt';
