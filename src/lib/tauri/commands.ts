@@ -999,9 +999,15 @@ export async function setTabServiceId(
   return invoke('set_tab_service_id', { workspaceId, paneId, tabId, serviceId });
 }
 
-/** Replace one tab's follow-ups (docs/follow-ups.md). Live or archived tab. */
-export async function setTabFollowUps(workspaceId: string, tabId: string, followUps: FollowUp[]): Promise<void> {
-  return invoke('set_tab_follow_ups', { workspaceId, tabId, followUps });
+/** Add one follow-up to a tab (docs/follow-ups.md). Returns the tab's list as it now stands. */
+export async function addTabFollowUp(workspaceId: string, tabId: string, followUp: FollowUp): Promise<FollowUp[]> {
+  return invoke('add_tab_follow_up', { workspaceId, tabId, followUp });
+}
+
+/** Take one follow-up off a tab — atomically, and only if the tab still holds it. `null` means
+ *  it wasn't there (cancelled, or moved by a reload): don't act on it. Otherwise the new list. */
+export async function takeTabFollowUp(workspaceId: string, tabId: string, followUpId: string): Promise<FollowUp[] | null> {
+  return invoke('take_tab_follow_up', { workspaceId, tabId, followUpId });
 }
 
 // Sound commands

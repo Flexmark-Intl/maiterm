@@ -170,11 +170,20 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
    *  ignores the slot's `ready` flag, which the bridge and mesh own and a reload resets.
    *
    *  `'failed'` means the write itself failed (no terminal), as opposed to `'held'`: not now. */
-  async function tryDeliverNow(tabId: string, text: string): Promise<'delivered' | 'held' | 'failed'> {
+  /** Would `tryDeliverNow` inject right now? Pure — for a caller that must CLAIM its item
+   *  before injecting (follow-ups take theirs off the Tab first) and shouldn't claim, then
+   *  hand back, on every tick the tab is merely busy. Still only advisory: the state can move
+   *  between this and the inject, which `tryDeliverNow` re-checks. */
+  function canDeliverNow(tabId: string): boolean {
     const d = delivery.get(tabId);
-    if (d && (d.queue.length > 0 || d.busy)) return 'held';
-    if (injecting.has(tabId)) return 'held';
-    if (!deps.liveState(tabId) || deps.awaitingHuman(tabId)) return 'held';
+    if (d && (d.queue.length > 0 || d.busy)) return false;
+    if (injecting.has(tabId)) return false;
+    return deps.liveState(tabId) && !deps.awaitingHuman(tabId);
+  }
+
+  async function tryDeliverNow(tabId: string, text: string): Promise<'delivered' | 'held' | 'failed'> {
+    if (!canDeliverNow(tabId)) return 'held';
+    const d = delivery.get(tabId);
     const ok = await injectExclusive(tabId, text);
     if (!ok) return 'failed';
     // Serialize whatever the bridge or mesh sends next behind this, as its own sends are.
@@ -270,6 +279,7 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
     },
 
     deliver,
+    canDeliverNow,
     tryDeliverNow,
     flush,
 

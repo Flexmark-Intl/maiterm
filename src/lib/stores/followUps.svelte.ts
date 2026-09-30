@@ -1,14 +1,17 @@
 /**
  * Follow-ups — prompts scheduled back into a tab's own agent (docs/follow-ups.md).
  *
- * The follow-ups themselves live on `Tab.follow_ups`, persisted: this store holds no copy. It
- * adds and removes them (writing the tab's list whole through `setTabFollowUps`), and runs the
- * delivery tick for THIS window's tabs — every window runs its own, over its own workspaces.
+ * The follow-ups themselves live on `Tab.follow_ups`, persisted, and Rust is the authority for
+ * them: this store changes them only through atomic commands (`addTabFollowUp`,
+ * `takeTabFollowUp`) and mirrors the answer. It also runs the delivery tick for THIS window's
+ * tabs — every window runs its own, over its own workspaces.
  *
  * Delivery (§6.1) goes through `agentDelivery.tryDeliverNow`, never `deliver()`: that one
- * queues, delivers later without a word, can't be withdrawn and forgets on restart. Here the
- * follow-up stays on the tab until an inject has actually succeeded, and is removed then — so a
- * crash in between delivers it twice rather than never, the cheaper failure.
+ * queues, delivers later without a word, can't be withdrawn and forgets on restart. A follow-up
+ * is TAKEN off its tab before it is typed, and put back if the inject doesn't happen. That makes
+ * delivery at-most-once: a crash in the milliseconds between take and inject loses it. The other
+ * order — type, then remove — delivered one follow-up from two tabs whenever a reload moved it
+ * mid-delivery, which is an ordinary event rather than a crash.
  */
 import { info as logInfo, error as logError } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
@@ -17,7 +20,8 @@ import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { agentDelivery } from '$lib/stores/agentDeliveryLive';
-import { resolveCreate, isDue, dueAt, envelope, statusOf, type CreateArgs, type Resolved, type FollowUpStatus } from '$lib/followUps/model';
+import { terminalsStore } from '$lib/stores/terminals.svelte';
+import { resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, type CreateArgs, type Resolved, type FollowUpStatus } from '$lib/followUps/model';
 
 /** How often due follow-ups are looked for. Also runs on focus and visibility, because
  *  WKWebView throttles timers in an occluded window — the wall-clock comparison makes a late
@@ -57,17 +61,62 @@ function createFollowUpsStore() {
     return null;
   }
 
-  /** Persist first, then update the mirror — the store pattern everywhere else. Always derives
-   *  the new list from the tab's CURRENT list, never from a snapshot taken before an await, so a
-   *  cancel and a delivery racing each other can't resurrect what the other removed. */
-  async function update(tabId: string, change: (current: FollowUp[]) => FollowUp[]): Promise<boolean> {
+  /** Mirror what Rust says the list now is. Rust is the authority: every change is one atomic
+   *  command there (add, take), and the mirror only ever takes its answer — a list computed here
+   *  from the mirror and written back is what lost updates when two changes were in flight. */
+  function mirror(tabId: string, list: FollowUp[]) {
+    const loc = locate(tabId);
+    if (loc) loc.tab.follow_ups = list;
+  }
+
+  /** Remove one — atomically, and only if the tab still holds it. False: it wasn't there. */
+  async function take(tabId: string, id: string): Promise<boolean> {
     const loc = locate(tabId);
     if (!loc) return false;
-    const next = change(loc.tab.follow_ups ?? []);
-    await commands.setTabFollowUps(loc.workspaceId, tabId, next);
-    const again = locate(tabId);
-    if (again) again.tab.follow_ups = next;
+    const list = await commands.takeTabFollowUp(loc.workspaceId, tabId, id);
+    if (list === null) return false;
+    mirror(tabId, list);
     return true;
+  }
+
+  async function add(tabId: string, f: FollowUp): Promise<void> {
+    const loc = locate(tabId);
+    if (!loc) throw new Error('maiTerm does not know this tab.');
+    mirror(tabId, await commands.addTabFollowUp(loc.workspaceId, tabId, f));
+  }
+
+  /** Why this tab can't take a follow-up right now, or null. Every check is one a live
+   *  delivery has to pass — the order is cheapest first, and the one async probe last. */
+  async function holdReason(tab: Tab): Promise<string | null> {
+    // Between turns only (§6.1): the delivery controller would deliver mid-turn, which suits a
+    // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
+    const st = agentStateStore.getState(tab.id);
+    if (st?.state !== 'idle') return 'agent not idle';
+    // Nothing typed since the agent's turn ended. Typing into an agent's input box fires no
+    // hook, so the tab reads idle while its human composes — and a paste plus CR would submit
+    // their half-written draft with the follow-up glued on. Entering idle stamps updatedAt,
+    // so this holds until they send it (the next turn's end re-stamps) — or cancel/deliver it
+    // by hand. A keystroke that only answered a permission prompt doesn't count.
+    const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
+    if (typed !== undefined && typed > st.updatedAt) return 'your human is typing';
+    // And the screen has settled — the same 1.5 s the Overlord's own notices wait for.
+    if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
+    if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
+    // A session entry is not an agent: it is cleared by the SessionEnd hook, which never comes
+    // when the process is killed or its ssh tunnel is down. Without a live process the paste
+    // lands in a shell. Same evidence the Overlord (replState) and comms rely on — and the same
+    // known gap: a remote agent that dies while its ssh stays up still reads as live.
+    const inst = terminalsStore.get(tab.id);
+    if (!inst) return 'no terminal';
+    try {
+      const live = await commands.getAgentLiveness(inst.ptyId);
+      if (!(live.agent_running || live.ssh_foreground)) return 'no agent running';
+    } catch {
+      return 'no agent running';
+    }
+    // The probe awaited; state can move under it.
+    if (agentStateStore.getState(tab.id)?.state !== 'idle') return 'agent not idle';
+    return null;
   }
 
   function recentCreations(tabId: string, now: number): number {
@@ -79,17 +128,22 @@ function createFollowUpsStore() {
   async function deliverDue(tab: Tab, now: number) {
     const due = (tab.follow_ups ?? []).filter(f => isDue(f, now)).sort((a, b) => (dueAt(a) ?? 0) - (dueAt(b) ?? 0));
     if (due.length === 0 || delivering.has(tab.id)) return;
-    // The idle gate (§6.1): only between turns. The delivery controller would deliver to a live
-    // session mid-turn, which suits a peer's reply; a follow-up is never urgent, and runtimes
-    // differ in what they do with input typed mid-turn.
-    if (agentStateStore.getState(tab.id)?.state !== 'idle') return;
-    const f = due[0]; // one per tab per tick: the next one waits for this one's turn to end
     delivering.add(tab.id);
+    const f = due[0]; // one per tab per tick: the next one waits for this one's turn to end
     try {
+      if (await holdReason(tab)) return;
+      // CLAIM it before typing anything: taken off the tab in Rust, atomically. If a reload has
+      // moved it to a replacement tab (or a cancel beat us), the take finds nothing and this
+      // tab does nothing — the replacement delivers it. Delivering and then removing is what
+      // let one follow-up go out from both tabs.
+      if (!(await take(tab.id, f.id))) return;
       const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now));
-      if (r !== 'delivered') return; // held or failed: it is still on the tab, next tick retries
-      await update(tab.id, cur => cur.filter(x => x.id !== f.id));
-      logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}`);
+      if (r === 'delivered') {
+        logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}`);
+        return;
+      }
+      // Claimed but not typed — the state moved in the gap. Put it back for the next tick.
+      await add(tab.id, f);
     } catch (e) {
       logError(`follow-ups: delivering ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)} failed: ${e}`);
     } finally {
@@ -142,14 +196,16 @@ function createFollowUpsStore() {
       const now = Date.now();
       const r = resolveCreate(args, {
         now,
-        pending: (loc.tab.follow_ups ?? []).length,
+        // Expired ones will never be delivered, so they don't hold a slot (§6.3).
+        pending: (loc.tab.follow_ups ?? []).filter(f => !isExpired(f, now)).length,
         createdLastHour: recentCreations(tabId, now),
         author,
         newId: () => crypto.randomUUID(),
       });
       if (!r.ok) return r;
-      await update(tabId, cur => [...cur, r.followUp]);
+      // Counted before the await, so two creates in flight can't both slip under the limit.
       createdAt.get(tabId)!.push(now);
+      await add(tabId, r.followUp);
       return r;
     },
 
@@ -169,9 +225,7 @@ function createFollowUpsStore() {
 
     /** Remove one from this tab. False if the tab doesn't hold it. */
     async cancel(tabId: string, id: string): Promise<boolean> {
-      const loc = locate(tabId);
-      if (!loc || !(loc.tab.follow_ups ?? []).some(f => f.id === id)) return false;
-      await update(tabId, cur => cur.filter(f => f.id !== id));
+      if (!(await take(tabId, id))) return false;
       logInfo(`follow-ups: ${id.slice(0, 8)} cancelled on tab ${tabId.slice(0, 8)}`);
       return true;
     },

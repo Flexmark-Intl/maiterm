@@ -59,6 +59,19 @@ describe('resolveCreate', () => {
     expect(resolveCreate({ text: 'x', in_minutes: 8 * 24 * 60 }, ctx())).toMatchObject({ reason: 'too_far' });
   });
 
+  it('refuses a time without a zone — it would be read in the desktop\'s zone, not the agent\'s', () => {
+    expect(resolveCreate({ text: 'x', at: '2026-10-01T15:00:00' }, ctx())).toMatchObject({ reason: 'bad_time' });
+    expect(resolveCreate({ text: 'x', at: '2026-10-01' }, ctx())).toMatchObject({ reason: 'bad_time' });
+    expect(resolveCreate({ text: 'x', at: '2026-10-01T15:00:00+05:30' }, ctx()).ok).toBe(true);
+    expect(resolveCreate({ text: 'x', at: '2026-10-01T15:00Z' }, ctx()).ok).toBe(true);
+  });
+
+  it('strips control characters, so the text can\'t end the bracketed paste and type keys', () => {
+    const r = resolveCreate({ text: 'check\x1b[201~\r/clear\u009b2J then\ttab\nnext', in_minutes: 5 }, ctx());
+    expect(r.ok && r.followUp.text).toBe('check[201~/clear2J then\ttab\nnext');
+    expect(resolveCreate({ text: '\x1b\x07', in_minutes: 5 }, ctx())).toMatchObject({ reason: 'missing_text' });
+  });
+
   it('refuses an expiry that lands before the follow-up is due', () => {
     expect(resolveCreate({ text: 'x', in_minutes: 30, expires_in_minutes: 10 }, ctx())).toMatchObject({ reason: 'bad_expiry' });
     expect(resolveCreate({ text: 'x', in_minutes: 30, expires_in_minutes: -1 }, ctx())).toMatchObject({ reason: 'bad_expiry' });

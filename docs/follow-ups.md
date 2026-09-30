@@ -287,10 +287,36 @@ is the precedent for timers that must not depend on one. It owns the backup and 
 loops for exactly that reason. It wouldn't help much here, though, since delivery needs the
 webview anyway.
 
-**Removed only after the inject succeeds.** A crash between writing the prompt and
-persisting the removal delivers it twice on the next launch; the alternative loses it
-silently. A duplicate "check the deploy" is the cheaper failure. `tryDeliverNow` returning
-`'delivered'` is that success. It means the bytes reached the PTY, not that the agent read
+**Taken, then typed: at-most-once (revised 2026-09-30).** This first said "removed only after
+the inject succeeds", preferring a duplicate to a loss. Review showed the duplicate wasn't
+confined to crashes. A reload MOVES follow-ups to the replacement in Rust, but the frontend
+mirror of the original keeps them until the reload finishes. A tick in between typed one into
+the original's agent, and the replacement then delivered it again. So delivery now **takes**
+the follow-up off its tab in Rust first (`take_tab_follow_up`: atomic, and `None` if the tab no
+longer holds it), types it only if the take succeeded, and puts it back if the inject doesn't
+happen. A crash in the milliseconds between take and inject loses it. That is rarer than a
+reload, and the loss is logged.
+
+The same review retired the whole-list write (`set_tab_follow_ups`). Two changes in flight
+both computed their list from the same mirror, so the second undid the first and a cancelled
+follow-up came back. Every change is now one atomic Rust operation (`add_tab_follow_up`,
+`take_tab_follow_up`), and the mirror only ever takes Rust's answer.
+
+**The gate before a take** (`holdReason` in `stores/followUps.svelte.ts`), cheapest check first:
+1. The agent is `idle`.
+2. **Nothing has been typed since its turn ended.** Typing into an agent's input box fires no
+   hook, so a tab reads idle while its human composes. A paste plus CR would submit their
+   half-written draft with the follow-up glued on. Entering idle stamps `updatedAt`, so this
+   holds until they send it.
+3. 1.5 s of output quiet.
+4. The delivery controller would inject now (`canDeliverNow`).
+5. **A live agent process** (`getAgentLiveness`). A session entry is cleared by the SessionEnd
+   hook, which never arrives when the agent is killed or its ssh tunnel is down, and without a
+   process the paste lands in a shell. This is the evidence the Overlord (`replState`) and comms
+   use, with the same known gap: a remote agent that dies while its ssh stays up still reads as
+   live.
+
+`tryDeliverNow` returning `'delivered'` means the bytes reached the PTY, not that the agent read
 them, which is as far as any delivery here can see.
 
 ### 6.2 When the agent isn't there

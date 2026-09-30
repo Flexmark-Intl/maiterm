@@ -1115,18 +1115,22 @@ pub fn publish_stack_runtime(
 /// any other tab in the workspace inside the same write, so no reader ever sees two tabs
 /// claiming it — the same shape as the comms-binding hand-over in
 /// `carry_tab_state_on_reload`.
-/// Replace one tab's follow-ups (docs/follow-ups.md). The frontend follow-ups store owns the
-/// list for its window and writes it whole — create, cancel, and removal after delivery.
+/// Run `f` on one tab's follow-ups under the write lock and persist (docs/follow-ups.md).
 /// Looks in the archive too: an archived tab keeps its follow-ups, and cancelling one there
 /// must still persist.
-#[tauri::command]
-pub fn set_tab_follow_ups(
-    window: tauri::Window,
-    state: State<'_, Arc<AppState>>,
-    workspace_id: String,
-    tab_id: String,
-    follow_ups: Vec<crate::state::workspace::FollowUp>,
-) -> Result<(), String> {
+///
+/// Rust is the authority for the list, and every change is ONE atomic operation on it — never a
+/// whole list written back from the frontend mirror. That shape lost updates: two operations in
+/// flight both read the same mirror, and the second write undid the first (a cancelled follow-up
+/// came back). It also let a delivery on a reloaded tab's ORIGINAL id land after the reload had
+/// moved the follow-up to the replacement, so both delivered it.
+fn with_tab_follow_ups<R>(
+    window: &tauri::Window,
+    state: &State<'_, Arc<AppState>>,
+    workspace_id: &str,
+    tab_id: &str,
+    f: impl FnOnce(&mut Vec<crate::state::workspace::FollowUp>) -> R,
+) -> Result<(R, Vec<crate::state::workspace::FollowUp>), String> {
     let label = window.label().to_string();
     let mut app_data = state.app_data.write();
     let win = app_data.window_mut(&label).ok_or("Window not found")?;
@@ -1138,11 +1142,50 @@ pub fn set_tab_follow_ups(
         .chain(workspace.archived_tabs.iter_mut())
         .find(|t| t.id == tab_id)
         .ok_or("Tab not found")?;
-    tab.follow_ups = follow_ups;
+    let out = f(&mut tab.follow_ups);
+    let now = tab.follow_ups.clone();
 
     let data_clone = app_data.clone();
     drop(app_data);
-    save_state(&data_clone)
+    save_state(&data_clone)?;
+    Ok((out, now))
+}
+
+/// Add one follow-up to a tab. Returns the tab's list as it now stands, for the mirror.
+#[tauri::command]
+pub fn add_tab_follow_up(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    tab_id: String,
+    follow_up: crate::state::workspace::FollowUp,
+) -> Result<Vec<crate::state::workspace::FollowUp>, String> {
+    let ((), list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
+        if !list.iter().any(|f| f.id == follow_up.id) {
+            list.push(follow_up);
+        }
+    })?;
+    Ok(list)
+}
+
+/// TAKE one follow-up off a tab: remove it if, and only if, the tab still holds it. `None` means
+/// it wasn't there — cancelled, or MOVED by a reload — and the caller must not act on it. This
+/// is what delivery claims with before it types anything: the claim and the removal are one
+/// step, so a follow-up is delivered from exactly one tab.
+#[tauri::command]
+pub fn take_tab_follow_up(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    tab_id: String,
+    follow_up_id: String,
+) -> Result<Option<Vec<crate::state::workspace::FollowUp>>, String> {
+    let (taken, list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
+        let before = list.len();
+        list.retain(|f| f.id != follow_up_id);
+        list.len() < before
+    })?;
+    Ok(taken.then_some(list))
 }
 
 #[tauri::command]

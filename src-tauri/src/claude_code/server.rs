@@ -563,23 +563,38 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
     if !app_data.preferences.follow_ups_live() {
         return None;
     }
-    let pending: Vec<String> = app_data
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // The frontend writes `expires_at` as `toISOString()`, the exact shape this parses; a miss
+    // reads as 0, i.e. "not expired" — the safe direction for a reminder.
+    let expired = |f: &crate::state::workspace::FollowUp| {
+        f.expires_at.as_deref().map(crate::mailink::transcript::rfc3339_to_ms).is_some_and(|t| t > 0 && t < now_ms)
+    };
+    let tab_follow_ups: Vec<&crate::state::workspace::FollowUp> = app_data
         .windows
         .iter()
         .flat_map(|w| w.workspaces.iter())
         .flat_map(|ws| ws.panes.iter().flat_map(|p| p.tabs.iter()))
         .find(|t| t.id == tab_id)
-        .map(|t| {
-            t.follow_ups
-                .iter()
-                .map(|f| {
-                    let text: String = f.text.chars().take(80).collect();
-                    let when = f.due.at.as_deref().unwrap_or(f.due.kind.as_str());
-                    format!("{when}: \"{}\"", text.replace('\'', "\u{2019}"))
-                })
-                .collect()
-        })
+        .map(|t| t.follow_ups.iter().collect())
         .unwrap_or_default();
+    // Expired ones are NOT pending: listing them under "do not schedule these again" told a
+    // resumed agent not to reschedule something that will never fire (§6.3).
+    let n_expired = tab_follow_ups.iter().filter(|f| expired(f)).count();
+    let pending: Vec<String> = tab_follow_ups
+        .iter()
+        .filter(|f| !expired(f))
+        .map(|f| {
+            // Echoed by the hook through sh's `echo`, which reads backslash escapes (`\c` cut the
+            // output short in testing), and inside a single-quoted command: neutralise both.
+            let text: String = f.text.chars().filter(|c| !c.is_control()).take(80).collect();
+            let text = text.replace('\\', "/").replace('\'', "\u{2019}");
+            let when = f.due.at.as_deref().unwrap_or(f.due.kind.as_str());
+            format!("{when}: \"{text}\"")
+        })
+        .collect();
     let mut line = String::from(
         "\n\nIf you need to come back to something later (check a deploy, re-run a flaky test, \
          look at CI once it finishes), schedule a follow-up with createFollowUp: maiTerm \
@@ -591,6 +606,12 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
             " You already have {} pending in this tab, so do not schedule these again: {}.",
             pending.len(),
             pending.join("; ")
+        ));
+    }
+    if n_expired > 0 {
+        line.push_str(&format!(
+            " {n_expired} of your follow-ups expired before they could be delivered and will not \
+             fire; see listFollowUps, reschedule any that still matter, and cancel the rest."
         ));
     }
     Some(line)

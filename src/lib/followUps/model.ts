@@ -46,9 +46,20 @@ function minutes(v: unknown): number | null {
   return typeof n === 'number' && Number.isFinite(n) ? n : null;
 }
 
+/** Control characters, except newline and tab, in both the C0 and the 8-bit C1 range. The text
+ *  is typed into a terminal inside a bracketed paste: an ESC can end that paste early
+ *  (`ESC[201~`) and turn the rest — a trailing `\r/clear`, say — into keystrokes, and an 8-bit
+ *  CSI (0x9B) does the same where a terminal honours it. A prompt has no use for any of them. */
+const CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
+
+/** An ISO 8601 date-time WITH a zone. `Date.parse` accepts one without and reads it in THIS
+ *  desktop's zone (and a date-only string as UTC midnight), so a remote agent on a UTC host
+ *  asking for 15:00 would be served hours off. The schema says a zone is required; hold it. */
+const ZONED_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i;
+
 /** Turn a create request into a follow-up, or say exactly why not. */
 export function resolveCreate(args: CreateArgs, ctx: CreateContext): Resolved {
-  const text = typeof args.text === 'string' ? args.text.trim() : '';
+  const text = typeof args.text === 'string' ? args.text.replace(CONTROL_CHARS, '').trim() : '';
   if (!text) return refuse('missing_text', 'Give the follow-up some `text` — the prompt you want delivered back to you.');
   if (text.length > MAX_TEXT_CHARS) {
     return refuse('text_too_long', `Keep \`text\` under ${MAX_TEXT_CHARS} characters; it is a prompt, not a document.`);
@@ -62,7 +73,8 @@ export function resolveCreate(args: CreateArgs, ctx: CreateContext): Resolved {
 
   let due: number;
   if (hasAt) {
-    due = typeof args.at === 'string' ? Date.parse(args.at) : NaN;
+    const at = typeof args.at === 'string' ? args.at.trim() : '';
+    due = ZONED_DATE_TIME.test(at) ? Date.parse(at) : NaN;
     if (!Number.isFinite(due)) {
       return refuse('bad_time', '`at` must be an ISO 8601 time with a zone, e.g. 2026-10-01T15:30:00-05:00 or …Z.');
     }
