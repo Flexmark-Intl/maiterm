@@ -93,18 +93,24 @@
   let loadedFor = $state<string | null>(null);
   /** Model, effort and context, read with the transcript: the phone's thread header. */
   let meta = $state<TabMeta | null>(null);
+  /** When the reads now shown were ASKED for: a read asked before a send knows nothing of it. */
+  let metaAskedAt = $state(0);
+  let turnsAskedAt = $state(0);
   let reload: () => void = () => {};
   $effect(() => {
     const id = openId;
     turns = [];
     loadedFor = null;
     meta = null;
+    metaAskedAt = 0;
+    turnsAskedAt = 0;
     if (!id || !active) return;
     let alive = true;
     const load = () => {
-      getTabMeta(id).then((m) => { if (alive) meta = m; }).catch(() => {});
+      const asked = Date.now();
+      getTabMeta(id).then((m) => { if (alive) { meta = m; metaAskedAt = asked; } }).catch(() => {});
       return getTabTranscript(id)
-        .then((t) => { if (alive) { turns = t; loadedFor = id; } })
+        .then((t) => { if (alive) { turns = t; loadedFor = id; turnsAskedAt = asked; } })
         .catch(() => { if (alive) loadedFor = id; });
     };
     reload = () => void load();
@@ -255,13 +261,20 @@
   /** Messages sent from here that the transcript hasn't echoed yet, shown as bubbles at the end
    *  of their chat (the phone's `pending`). Without them a message typed while the agent was busy
    *  vanished from the composer and showed nowhere until Claude took it, which reads as lost. */
-  /** `seen` and `lastUser` are the transcript as it stood at send time, so an older turn that
-   *  happens to say the same thing ("ok") can't retire a new message. */
-  interface Outgoing { id: number; chat: string; text: string; sent: boolean; seen: number; lastUser: string | null }
+  /** `seen`, `lastUser` and `lastTurn` are the transcript as it stood at send time, so an older
+   *  turn that happens to say the same thing ("ok") can't retire a new message. `sentAt` is when
+   *  it was typed into the tab; 0 while sending. */
+  interface Outgoing {
+    id: number; chat: string; text: string; sentAt: number;
+    seen: number; lastUser: string | null; lastTurn: string | null;
+  }
   let outgoing = $state<Outgoing[]>([]);
   let outSeq = 0;
   const sameText = (trs: ChatTurn[], t: string) => trs.filter((m) => m.role === 'user' && m.text.trim() === t).length;
   const lastUserTurn = (trs: ChatTurn[]) => trs.findLast((m) => m.role === 'user') ?? null;
+  /** Text the chat never shows as a user turn (the transcript reader's `is_system_noise`, plus
+   *  slash and `!` commands, which Claude records as tags): a bubble for it could never retire. */
+  const neverEchoed = (text: string) => /^\s*([/!<⟦]|\[Request interrupted|Caveat:)/.test(text);
 
   /** Has the transcript caught up on this message? One more exact match than at send time, or a
    *  NEW last user turn containing it: Claude merges a queued message handed back on interrupt
@@ -272,12 +285,22 @@
     const last = lastUserTurn(trs);
     return !!last && last.msg_id !== o.lastUser && last.text.includes(t);
   }
+  /** Or the agent has moved past it: a queue read asked for after the send no longer holds it,
+   *  and the chat has a different last user turn, or has scrolled the send-time chat out of its
+   *  40-turn window entirely. Catches an echo that scrolled out while another chat was open,
+   *  where no match can ever be found. Agent turns alone don't count: the queue read can lag. */
+  function taken(trs: ChatTurn[], o: Outgoing): boolean {
+    if (!o.sentAt || metaAskedAt <= o.sentAt || turnsAskedAt <= o.sentAt) return false;
+    if (queuedTexts.has(o.text.trim())) return false;
+    if ((lastUserTurn(trs)?.msg_id ?? null) !== o.lastUser) return true;
+    return o.lastTurn !== null && !trs.some((m) => m.msg_id === o.lastTurn);
+  }
   // Retire what the open chat's transcript now shows. Only from a transcript read for that chat.
   $effect(() => {
     const chat = loadedFor;
     if (!chat) return;
     const trs = turns;
-    const keep = outgoing.filter((o) => o.chat !== chat || !o.sent || !echoed(trs, o));
+    const keep = outgoing.filter((o) => o.chat !== chat || !o.sentAt || !(echoed(trs, o) || taken(trs, o)));
     if (keep.length !== outgoing.length) outgoing = keep;
   });
   const queuedTexts = $derived(new Set((meta?.queued ?? []).map((q) => q.text.trim())));
@@ -286,16 +309,19 @@
   async function send() {
     const chat = openId;
     const text = chat ? (drafts[chat] ?? '') : '';
-    if (!chat || !text.trim() || sending) return;
+    // Not before the chat's first read: the bubble's baseline is that read.
+    if (!chat || !text.trim() || sending || loadedFor !== chat) return;
     sending = true;
     sendNote = null;
     // The bubble goes up and the composer empties at once; a refusal brings the text back.
     const id = ++outSeq;
-    // The baseline comes from this chat's transcript when it is the one loaded (it always is:
-    // the composer only sends to the open chat); otherwise nothing is known and any echo counts.
-    const base = loadedFor === chat ? turns : [];
-    const last = lastUserTurn(base);
-    outgoing = [...outgoing, { id, chat, text, sent: false, seen: sameText(base, text.trim()), lastUser: last?.msg_id ?? null }];
+    if (!neverEchoed(text)) {
+      const last = lastUserTurn(turns);
+      outgoing = [...outgoing, {
+        id, chat, text, sentAt: 0,
+        seen: sameText(turns, text.trim()), lastUser: last?.msg_id ?? null, lastTurn: turns[turns.length - 1]?.msg_id ?? null,
+      }];
+    }
     drafts = { ...drafts, [chat]: '' };
     pinned = true;
     const fail = (note: string) => {
@@ -306,7 +332,8 @@
     try {
       const r = await sendTabMessage(chat, text);
       if (r.status === 'delivered') {
-        outgoing = outgoing.map((o) => (o.id === id ? { ...o, sent: true } : o));
+        const at = Date.now();
+        outgoing = outgoing.map((o) => (o.id === id ? { ...o, sentAt: at } : o));
         sendNote = r.woke ? { chat, text: `Woke the agent (${r.woke === 'init' ? 're-registered it' : 'resumed it'}) and sent.` } : null;
         reload();
       } else {
@@ -506,10 +533,10 @@
           {/if}
         {/each}
         {#each outgoingHere as o (o.id)}
-          {@const queued = o.sent && queuedTexts.has(o.text.trim())}
-          <div class="you pending" class:sending={!o.sent}>
+          {@const queued = !!o.sentAt && queuedTexts.has(o.text.trim())}
+          <div class="you pending" class:sending={!o.sentAt}>
             {o.text}
-            <span class="state">{!o.sent ? 'Sending…' : queued ? 'Queued · the agent takes it when this turn ends' : 'Delivered'}</span>
+            <span class="state">{!o.sentAt ? 'Sending…' : queued ? 'Queued · the agent takes it when this turn ends' : 'Delivered'}</span>
           </div>
         {/each}
         {#if liveState?.state === 'active'}
@@ -544,7 +571,7 @@
             onkeydown={onComposerKey}
             disabled={sending}
           ></textarea>
-          <button class="send" onclick={() => void send()} disabled={sending || !draft.trim()}>{sending ? 'Sending…' : 'Send'}</button>
+          <button class="send" onclick={() => void send()} disabled={sending || !draft.trim() || loadedFor !== open.tabId}>{sending ? 'Sending…' : 'Send'}</button>
         </div>
         {#if sendNote && sendNote.chat === open.tabId}<p class="hint">{sendNote.text}</p>{/if}
         {#if headNote && headNote.chat === open.tabId}<p class="hint">{headNote.text}</p>{/if}

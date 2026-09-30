@@ -135,7 +135,12 @@ Under the chat, in this order:
   transcript echoes it. A queued message is not in the transcript until Claude takes it, so
   without the bubble it looked lost. The echo must be new since the send (one more matching
   turn, or a new last user turn holding it, which is how Claude records a queued message merged
-  into the next), so an older "ok" can't retire a new one. A refused send puts the text back. It sends
+  into the next), so an older "ok" can't retire a new one. It also retires once the agent has
+  moved past it (a queue read asked after the send doesn't hold it, and the last user turn
+  changed or the send-time chat scrolled out of the 40-turn window): an echo can scroll out
+  while another chat is open. Slash and `!` commands get no bubble, since the chat never shows
+  them as a user turn, and nothing is sent before the chat's first read, which is the baseline.
+  A refused send puts the text back. It sends
   through `send_tab_message`, the phone's `POST /message` rules (an unregistered tab is woken
   first, the trust dialog is never typed at) plus one: **nothing is sent while a prompt is
   open**, because typed text goes into the dialog, a digit picks a row and the rest lands in
