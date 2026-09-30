@@ -168,6 +168,22 @@ fn row(line: &str) -> Option<(usize, &str)> {
     Some((n.parse().ok()?, label.trim()))
 }
 
+/// The unattended-session countdown ("⚠ Claude Code will automatically deny this request in
+/// 1:31, to avoid blocking progress on an unattended session") ticks every second, so with it in
+/// the id changed under every card: each answer was refused as stale and the dialog timed out.
+/// Cut from the joined, whitespace-free text, not by line: in a narrow pane the sentence wraps
+/// and the ticking time lands on a row that doesn't hold the phrase.
+fn without_countdown(mut drawn: String) -> String {
+    const START: &str = "ClaudeCodewillautomaticallydenythisrequest";
+    const END: &str = "unattendedsession";
+    while let Some(s) = drawn.find(START) {
+        let Some(e) = drawn[s..].find(END).map(|e| s + e + END.len()) else { break };
+        let start = if drawn[..s].ends_with('⚠') { s - '⚠'.len_utf8() } else { s };
+        drawn.replace_range(start..e, "");
+    }
+    drawn
+}
+
 /// Parse a screen's text (`terminal::render::screen_text`) for an OPEN permission dialog.
 pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     let lines: Vec<&str> = screen.lines().collect();
@@ -217,17 +233,12 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     if kind == Footer::Plan {
         top = rule_above(top).unwrap_or(0);
     }
-    // Also dropped: the unattended-session countdown ("Claude Code will automatically deny this
-    // request in 1:31"). It ticks every second, so with it in, the id changed under every card:
-    // each answer was refused as stale, and the card's fresh-prompt guard restarted every poll.
     let drawn: String = lines[top..foot]
-        .iter()
-        .filter(|l| !l.contains("automatically deny this request"))
-        .copied()
-        .collect::<String>()
+        .concat()
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '─' | '╌' | '❯'))
         .collect();
+    let drawn = without_countdown(drawn);
     let digest = super::sha256_hex(drawn.as_bytes())[..12].to_string();
     Some(PermissionDialog { options: rows.into_iter().map(|(_, l)| l).collect(), digest })
 }
@@ -324,6 +335,23 @@ mod tests {
         assert_ne!(at("1:31"), TWO_ROWS);
         assert_eq!(parse(&at("1:31")).unwrap().digest, parse(&at("1:30")).unwrap().digest);
         assert_eq!(parse(&at("1:31")).unwrap().options, vec!["Yes", "No"]);
+        // And the dialog is the same one with the countdown gone.
+        assert_eq!(parse(&at("1:31")).unwrap().digest, parse(TWO_ROWS).unwrap().digest);
+    }
+
+    /// In a narrow pane the sentence wraps: the time lands on a row without the phrase, or the
+    /// phrase itself splits. Neither may tick the id.
+    #[test]
+    fn a_wrapped_countdown_does_not_change_the_id() {
+        let wrapped = |rows: &str| TWO_ROWS.replace(" Do you want to create notes.md?", &format!("{rows}\n\n Do you want to create notes.md?"));
+        let at55 = |t: &str| wrapped(&format!(
+            " ⚠ Claude Code will automatically deny this request in\n {t}, to avoid blocking progress on an unattended\n session"));
+        let at45 = |t: &str| wrapped(&format!(
+            " ⚠ Claude Code will automatically deny this\n request in {t}, to avoid blocking progress on\n an unattended session"));
+        for (a, b) in [(at55("1:31"), at55("1:30")), (at45("1:31"), at45("about 45 seconds"))] {
+            assert_eq!(parse(&a).unwrap().digest, parse(&b).unwrap().digest);
+            assert_eq!(parse(&a).unwrap().digest, parse(TWO_ROWS).unwrap().digest);
+        }
     }
 
     /// The plan is what a plan dialog asks, so two plans are two ids: a tap on an old plan's
