@@ -1030,15 +1030,19 @@ impl AppData {
         ids
     }
 
-    /// Every tab with its POSITION: (workspace id, pane id or `"archived"`, tab). Position,
+    /// Every tab with its POSITION: (window, workspace, pane or `"archived"`, tab). Position,
     /// not id, is what says whether an import touched a tab — a moved tab keeps its id, so a
-    /// copy restored into the pane it was moved out of shares that id with the live one.
-    fn tabs_with_position(&self) -> impl Iterator<Item = ((String, String, String), &Tab)> {
-        self.windows.iter().flat_map(|win| win.workspaces.iter()).flat_map(|ws| {
-            ws.panes
-                .iter()
-                .flat_map(move |p| p.tabs.iter().map(move |t| ((ws.id.clone(), p.id.clone(), t.id.clone()), t)))
-                .chain(ws.archived_tabs.iter().map(move |t| ((ws.id.clone(), "archived".to_string(), t.id.clone()), t)))
+    /// copy restored into the pane it was moved out of shares that id with the live one. The
+    /// window is part of it because an import writes only into the first window: a workspace
+    /// that lives in another one is pushed in again whole, ids and all.
+    fn tabs_with_position(&self) -> impl Iterator<Item = (TabPosition, &Tab)> {
+        self.windows.iter().flat_map(|win| {
+            win.workspaces.iter().flat_map(move |ws| {
+                ws.panes
+                    .iter()
+                    .flat_map(move |p| p.tabs.iter().map(move |t| (tab_position(&win.label, &ws.id, &p.id, &t.id), t)))
+                    .chain(ws.archived_tabs.iter().map(move |t| (tab_position(&win.label, &ws.id, "archived", &t.id), t)))
+            })
         })
     }
 
@@ -1079,6 +1083,7 @@ impl AppData {
         // Everything else: first copy wins, later copies lose it. Same traversal order as
         // `tabs_with_position`, open-coded because it needs `&mut`.
         for win in &mut self.windows {
+            let win_label = win.label.clone();
             for ws in &mut win.workspaces {
                 let ws_id = ws.id.clone();
                 let tabs = ws
@@ -1090,7 +1095,7 @@ impl AppData {
                     })
                     .chain(ws.archived_tabs.iter_mut().map(|t| ("archived".to_string(), t)));
                 for (container, tab) in tabs {
-                    if before.positions.contains(&(ws_id.clone(), container, tab.id.clone())) {
+                    if before.positions.contains(&tab_position(&win_label, &ws_id, &container, &tab.id)) {
                         continue;
                     }
                     let had = tab.follow_ups.len();
@@ -1122,8 +1127,15 @@ impl AppData {
 /// follow-up id with the tab holding it, from just before an import.
 #[derive(Default)]
 pub struct FollowUpSnapshot {
-    positions: std::collections::HashSet<(String, String, String)>,
+    positions: std::collections::HashSet<TabPosition>,
     ids: std::collections::HashMap<String, String>,
+}
+
+/// (window label, workspace id, pane id or `"archived"`, tab id) — see `tabs_with_position`.
+type TabPosition = (String, String, String, String);
+
+fn tab_position(window: &str, workspace: &str, container: &str, tab: &str) -> TabPosition {
+    (window.to_string(), workspace.to_string(), container.to_string(), tab.to_string())
 }
 
 fn default_sidebar_width() -> u32 {
@@ -2367,6 +2379,27 @@ mod follow_up_import_tests {
         let ws = &d.windows[0].workspaces[0];
         assert!(ws.panes[0].tabs.iter().find(|t| t.id == "a").unwrap().follow_ups.is_empty(), "the restored copy in P");
         assert_eq!(ws.panes[1].tabs[0].follow_ups.len(), 1, "the live tab in Q keeps F");
+    }
+
+    #[test]
+    fn a_workspace_from_another_window_imported_into_the_first_is_deduplicated() {
+        // W lives in window 2. The import writes only into window 1, finds no W there, and
+        // pushes the backup's W in whole — same workspace, pane and tab ids. Without the window
+        // in the position both copies look pre-existing and both keep F.
+        let mut d = data(vec![]);
+        let mut w2 = WindowData::new("window-2".to_string());
+        let mut ws = Workspace::new("W".to_string());
+        ws.panes[0].tabs = vec![tab("t", &["F"])];
+        w2.workspaces.push(ws.clone());
+        d.windows.push(w2);
+        let pre = d.follow_up_snapshot();
+        d.windows[0].workspaces.push(ws); // the imported copy, ids intact
+
+        d.settle_follow_ups_after_import(&pre);
+
+        let fus = |w: usize| d.windows[w].workspaces.last().unwrap().panes[0].tabs[0].follow_ups.len();
+        assert_eq!(fus(1), 1, "the live copy in window 2 keeps F");
+        assert_eq!(fus(0), 0, "the imported copy in window 1 does not");
     }
 
     #[test]
