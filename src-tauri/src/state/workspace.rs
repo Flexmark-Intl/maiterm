@@ -1029,6 +1029,45 @@ impl AppData {
         }
         ids
     }
+
+    /// After an import has put tabs back, make sure no follow-up is held twice
+    /// (docs/follow-ups.md §3). `pre_existing` is `all_tab_ids()` taken BEFORE the import.
+    ///
+    /// The case: a backup holds tab A with follow-up F; A is then reloaded, which MOVES F to
+    /// A′ and deletes A; the backup is imported, A has no match and is pushed back whole — and
+    /// now A and A′ would each be delivered F. A move keeps a follow-up's id, so the fix is
+    /// exact: a tab the import brought back keeps only the follow-ups no surviving tab already
+    /// holds. One that genuinely went away with A comes back with it.
+    pub fn drop_follow_ups_held_elsewhere(&mut self, pre_existing: &std::collections::HashSet<String>) {
+        let mut held = std::collections::HashSet::new();
+        for win in &self.windows {
+            for ws in &win.workspaces {
+                let tabs = ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter());
+                for tab in tabs.filter(|t| pre_existing.contains(&t.id)) {
+                    held.extend(tab.follow_ups.iter().map(|f| f.id.clone()));
+                }
+            }
+        }
+        if held.is_empty() {
+            return;
+        }
+        for win in &mut self.windows {
+            for ws in &mut win.workspaces {
+                let tabs = ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).chain(ws.archived_tabs.iter_mut());
+                for tab in tabs.filter(|t| !pre_existing.contains(&t.id)) {
+                    let before = tab.follow_ups.len();
+                    tab.follow_ups.retain(|f| !held.contains(&f.id));
+                    if tab.follow_ups.len() < before {
+                        log::info!(
+                            "follow-ups: import restored tab {} holding {} follow-up(s) another tab already has; kept them there only",
+                            &tab.id[..tab.id.len().min(8)],
+                            before - tab.follow_ups.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn default_sidebar_width() -> u32 {
@@ -2184,6 +2223,88 @@ impl Workspace {
             suspended: false,
             pane_sizes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod follow_up_import_tests {
+    use super::*;
+
+    fn follow_up(id: &str) -> FollowUp {
+        FollowUp {
+            id: id.to_string(),
+            text: format!("do {id}"),
+            due: FollowUpDue {
+                kind: "at".to_string(),
+                at: Some("2026-10-01T09:00:00Z".to_string()),
+                workspace_id: None,
+                service_id: None,
+                task_id: None,
+            },
+            author: "agent".to_string(),
+            created_at: "2026-09-30T09:00:00Z".to_string(),
+            expires_at: None,
+        }
+    }
+
+    fn tab(id: &str, follow_ups: &[&str]) -> Tab {
+        let mut t = Tab::new(id.to_string());
+        t.id = id.to_string();
+        t.follow_ups = follow_ups.iter().map(|f| follow_up(f)).collect();
+        t
+    }
+
+    /// One window, one workspace, one pane holding `tabs`.
+    fn data(tabs: Vec<Tab>) -> AppData {
+        let mut ws = Workspace::new("proj".to_string());
+        ws.panes[0].tabs = tabs;
+        let mut win = WindowData::new("main".to_string());
+        win.workspaces.push(ws);
+        AppData { windows: vec![win], ..AppData::default() }
+    }
+
+    fn follow_ups_of(d: &AppData, tab_id: &str) -> Vec<String> {
+        d.windows[0].workspaces[0].panes[0].tabs.iter().find(|t| t.id == tab_id).unwrap()
+            .follow_ups.iter().map(|f| f.id.clone()).collect()
+    }
+
+    #[test]
+    fn a_restored_original_does_not_duplicate_what_its_reload_moved() {
+        // Live: A′ holds F (moved there by a reload). The backup had A holding F, and the
+        // import has just pushed A back beside it.
+        let mut d = data(vec![tab("a-prime", &["F"])]);
+        let pre = d.all_tab_ids();
+        d.windows[0].workspaces[0].panes[0].tabs.push(tab("a", &["F"]));
+
+        d.drop_follow_ups_held_elsewhere(&pre);
+
+        assert_eq!(follow_ups_of(&d, "a-prime"), vec!["F"], "the live holder keeps it");
+        assert!(follow_ups_of(&d, "a").is_empty(), "the restored original must not deliver it again");
+    }
+
+    #[test]
+    fn a_restored_tab_keeps_follow_ups_nobody_else_has() {
+        // Genuinely lost with its tab, and restored with it: that is what a restore is for.
+        let mut d = data(vec![tab("a-prime", &["F"])]);
+        let pre = d.all_tab_ids();
+        d.windows[0].workspaces[0].panes[0].tabs.push(tab("b", &["G", "F"]));
+
+        d.drop_follow_ups_held_elsewhere(&pre);
+
+        assert_eq!(follow_ups_of(&d, "b"), vec!["G"], "G is only here; F is already held");
+    }
+
+    #[test]
+    fn tabs_that_were_already_there_are_never_touched() {
+        // A pre-existing tab the merge only restored notes into must keep its own follow-ups
+        // even though they're "held" — by itself.
+        let mut d = data(vec![tab("a", &["F"]), tab("b", &["G"])]);
+        let pre = d.all_tab_ids();
+
+        d.drop_follow_ups_held_elsewhere(&pre);
+
+        assert_eq!(follow_ups_of(&d, "a"), vec!["F"]);
+        assert_eq!(follow_ups_of(&d, "b"), vec!["G"]);
     }
 }
 

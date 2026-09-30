@@ -194,6 +194,21 @@ pub fn close_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
                 })
             })
             .collect();
+        // Closing a window discards its workspaces, follow-ups included (docs/follow-ups.md
+        // §3). Logged here: no reload goes through this path, so it can't be a false drop.
+        for win in app_data.windows.iter().filter(|w| w.label == label) {
+            for ws in &win.workspaces {
+                for tab in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
+                    if !tab.follow_ups.is_empty() {
+                        log::warn!(
+                            "follow-ups: tab {} closed with its window, {} pending dropped",
+                            &tab.id[..tab.id.len().min(8)],
+                            tab.follow_ups.len()
+                        );
+                    }
+                }
+            }
+        }
         app_data.windows.retain(|w| w.label != label);
         (app_data.clone(), orphan_ids)
     };

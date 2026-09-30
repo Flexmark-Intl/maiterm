@@ -121,7 +121,8 @@ copies or moves a tab** (memory: reload-mints-a-new-tab-id). Each one here is de
 | Archive | Held | Delivered on restore, marked late (§6.3). Archiving is reversible; dropping them would make it not. |
 | Close | **Dropped, logged** | Nothing left to deliver to. Log it from the store's `deleteTab`, **not** from Rust `delete_tab`: reload removes the original through `delete_tab` too, so logging there reports a false drop on every reload. |
 | Delete an archived tab (`delete_archived_tab`, ~2452) | **Dropped, logged** | Same as close. |
-| Backup restore | Restored | Stale by then — the late handling in §6.3 is what keeps that from being a surprise. |
+| Close a pane, a workspace, a window | **Dropped, logged** | Each removes tabs without passing through the store's `deleteTab` — the commonest is the last tab of a split pane, which Cmd+W closes as a *pane*. Pane and workspace log from the store (`deletePane`, `deleteWorkspace`); window close logs in Rust `close_window`, which no reload goes through. |
+| Backup restore | Restored, **deduplicated** | Stale by then — the late handling in §6.3 is what keeps that from being a surprise. A selective import (merge or overwrite) can bring back a tab whose follow-ups a reload has since MOVED to a replacement that still exists, so both would hold them. `AppData::drop_follow_ups_held_elsewhere` runs after the import: a tab the import brought back keeps only follow-ups no surviving tab already holds. A move keeps the follow-up's id, so this is exact. The legacy full-replace import needs nothing, since no old tab survives it. |
 
 The stack-service and task conditions reference ids. A service id survives reload; a task id
 is stable. If the referenced service or task no longer exists when checked, the follow-up

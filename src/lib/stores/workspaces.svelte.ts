@@ -538,7 +538,12 @@ function createWorkspacesStore() {
 
     async deleteWorkspace(workspaceId: string) {
       const oldIndex = workspaces.findIndex(w => w.id === workspaceId);
+      // Captured before, logged after: every live and archived tab goes with the workspace.
+      const doomed = workspaces[oldIndex];
       await commands.deleteWorkspace(workspaceId);
+      for (const t of [...(doomed?.panes.flatMap(p => p.tabs) ?? []), ...(doomed?.archived_tabs ?? [])]) {
+        logDroppedFollowUps(t, 'removed with its workspace');
+      }
       workspaces.splice(oldIndex, 1);
       if (lastSwitchedAt.has(workspaceId)) {
         const updated = new Map(lastSwitchedAt);
@@ -1037,7 +1042,11 @@ function createWorkspacesStore() {
     },
 
     async deletePane(workspaceId: string, paneId: string) {
+      // The pane's tabs go without passing through deleteTab — including the common case, the
+      // last tab of a split pane closed with Cmd+W (closeTabOrPane) or by its shell exiting.
+      const doomed = workspaces.find(w => w.id === workspaceId)?.panes.find(p => p.id === paneId)?.tabs ?? [];
       await commands.deletePane(workspaceId, paneId);
+      for (const t of doomed) logDroppedFollowUps(t, 'closed with its pane');
       // Reload workspace to get updated split_root from backend
       const data = await commands.getWindowData();
       const freshWsPane = data.workspaces.find(w => w.id === workspaceId);
