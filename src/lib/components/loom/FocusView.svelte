@@ -274,7 +274,8 @@
   const lastUserTurn = (trs: ChatTurn[]) => trs.findLast((m) => m.role === 'user') ?? null;
   /** Text the chat never shows as a user turn (the transcript reader's `is_system_noise`, plus
    *  slash and `!` commands, which Claude records as tags): a bubble for it could never retire. */
-  const neverEchoed = (text: string) => /^\s*([/!<⟦]|\[Request interrupted|Caveat:)/.test(text);
+  const neverEchoed = (text: string) =>
+    /^\s*(\/[\w:.-]+(\s|$)|[!<⟦]|\[Request interrupted|Caveat:)/.test(text);
 
   /** Has the transcript caught up on this message? One more exact match than at send time, or a
    *  NEW last user turn containing it: Claude merges a queued message handed back on interrupt
@@ -315,15 +316,20 @@
     sendNote = null;
     // The bubble goes up and the composer empties at once; a refusal brings the text back.
     const id = ++outSeq;
-    if (!neverEchoed(text)) {
-      const last = lastUserTurn(turns);
-      outgoing = [...outgoing, {
-        id, chat, text, sentAt: 0,
-        seen: sameText(turns, text.trim()), lastUser: last?.msg_id ?? null, lastTurn: turns[turns.length - 1]?.msg_id ?? null,
-      }];
-    }
+    const bubble = !neverEchoed(text);
+    // The bubble goes up on the last poll's baseline, then takes a FRESH one before anything is
+    // typed: the poll can be 3 s old, and a user turn written since (a message sent just before,
+    // one from the phone) would otherwise read as this one being taken.
+    const baseline = (trs: ChatTurn[]) => ({
+      seen: sameText(trs, text.trim()), lastUser: lastUserTurn(trs)?.msg_id ?? null, lastTurn: trs[trs.length - 1]?.msg_id ?? null,
+    });
+    if (bubble) outgoing = [...outgoing, { id, chat, text, sentAt: 0, ...baseline(turns) }];
     drafts = { ...drafts, [chat]: '' };
     pinned = true;
+    if (bubble) {
+      const fresh = await getTabTranscript(chat).catch(() => null);
+      if (fresh) outgoing = outgoing.map((o) => (o.id === id ? { ...o, ...baseline(fresh) } : o));
+    }
     const fail = (note: string) => {
       outgoing = outgoing.filter((o) => o.id !== id);
       if (!(drafts[chat] ?? '').trim()) drafts = { ...drafts, [chat]: text };
