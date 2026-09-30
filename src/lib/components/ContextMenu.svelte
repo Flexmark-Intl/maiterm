@@ -74,7 +74,11 @@
     const spaceBelow = vh - MARGIN - y;
     const spaceAbove = y - MARGIN;
     let top: number;
-    if (cappedH <= spaceBelow) top = y;
+    // A flyout slides up instead of flipping above its row: flipped, it detaches from the
+    // item that opened it, and the diagonal path to it crosses sibling rows whose hover
+    // closes it before the pointer arrives.
+    if (flipX !== undefined) top = y;
+    else if (cappedH <= spaceBelow) top = y;
     else if (cappedH <= spaceAbove) top = y - cappedH;
     else top = MARGIN;
     top = Math.max(MARGIN, Math.min(top, vh - cappedH - MARGIN));
