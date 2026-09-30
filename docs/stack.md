@@ -364,6 +364,23 @@ It is absolutely positioned inside `.main-content`, floating over the terminal a
   it becomes visible or when it mounts (it focuses only a terminal the human is looking at,
   which also stops a background session restore pulling the cursor out of your tab). Click
   into the console to type.
+- **It slides, and dims what it covers** (2026-09-19). With neither, it read as a layout
+  change rather than something arriving over your work.
+  - **The animation is on `transform`, never height.** A height animation would fire a PTY
+    resize every frame. Open is a CSS keyframe, because a transition would need a rAF, and
+    WKWebView pauses those in an occluded window. Close is a transition on an `.out` class.
+  - **The scrim is light and `pointer-events: none`.** The tab behind keeps the keyboard, and a
+    click on it has to land.
+- **Open and on-screen are two facts.** Closing is animated, so the drawer outlives the
+  close, and the terminal has to stay VISIBLE while it slides or an empty box slides out. The
+  store therefore holds two things:
+  - `consoleService`, which is open. Escape, the Hide/Show label and `toggleConsole` read it.
+  - `consoleVisible`, which lags a close by 220 ms. `consoleTabId` and `+page`'s `visible` prop
+    read it.
+
+  A drawer-local lag was tried first and failed, because `+page` hid the terminal at t=0. The
+  drawer also blurs the service terminal the moment it starts closing: keeping it visible held
+  back its blur, so a keystroke in those 220 ms went into the service's shell.
 
 **The invariant that makes it safe: a service tab is never `pane.active_tab_id`.** With it,
 every one of the ~40 `workspacesStore.activeTab` consumers is correct without knowing that

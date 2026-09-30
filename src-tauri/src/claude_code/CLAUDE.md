@@ -16,7 +16,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled)` (68 tools; the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled, follow_ups_live)` (the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`, the 3 follow-up tools on `Preferences::follow_ups_live()`), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):
@@ -94,6 +94,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | updateService | Stack: **the agent as writer** — report an observed `port`/`url`, `ready: true`, a `note`; or edit the definition. Refusal list |
 | createService | Stack: register a service (idempotent by name, does NOT start it). With no name and no command returns `suggestions` from the suggester (package.json / Procfile / compose / justfile / Makefile). Refusal list |
 | removeService | Stack: refused while running, refused for human-created services. Refusal list |
+| createFollowUp / listFollowUps / cancelFollowUp | Follow-ups (docs/follow-ups.md): a prompt scheduled back into the CALLER'S OWN tab. Frontend-handled, gated on `follow_ups_live`. **`OWN_TAB_ONLY_TOOLS`**: `own_tab_only_refusal` runs before the inferred-identity check and refuses any explicit `tabId` that isn't the connection's STATED binding — elsewhere an explicit `tabId` is itself a statement of identity, but here the question is whether the caller IS that tab (found live: a header-named connection inferred onto another tab, whose `tabId` then matched the guess). All three are also on the refusal list |
 
 ## Comms Integration (/maiterm resolve)
 

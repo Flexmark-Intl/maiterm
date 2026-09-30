@@ -1,7 +1,9 @@
 # maiTerm Follow-ups — an agent's own way to pick the work back up later
 
-> Status: **building** from 2026-09-30 (proposed 09-26). Owner: Darryl. Lives under the
-> Overlord: live only when the Overlord and **Enable follow-ups** are both on (§4).
+> Status: **steps 1–3 built** 2026-09-30 (time triggers, delivery, MCP tools, the human side);
+> stack/task triggers and resume-then-deliver remain (§10). Proposed 09-26. Owner: Darryl.
+> Lives under the Overlord: live only when the Overlord and **Enable follow-ups** are both on
+> (§4). Not yet released.
 > Scope: an agent (or its human) schedules a prompt to be delivered back into **its own tab**
 > later — at a time, or when something in the workspace happens. maiTerm holds the schedule,
 > so it works for every runtime, survives the agent exiting and maiTerm restarting, and never
@@ -410,14 +412,35 @@ here is the desired property.
 
 ## 8. The human side
 
-- A **clock badge** on a tab with pending follow-ups, with a Tooltip listing them (count, next
-  due, and its text). Never a native `title=`.
-- Tab context menu → **Follow-ups…**: the list, with Cancel, Deliver now, and a way to add
-  one by hand (`author: "human"`). This is Solo's "Set timer", on the tab rather than in a
-  palette.
-- Held rows (§6.2) show why they're held and offer Deliver, which does the resume-then-deliver
-  path on demand.
-- The Overlord board could show pending follow-ups per tab. Not in v1; it is a read of
+**As built (step 3, 2026-09-30):**
+
+- **A clock badge** beside the tab's other indicators (`TerminalTabs.svelte`, text from
+  `badgeSummary` in `followUps/model.ts`, in a `Tooltip`, never a native `title=`):
+  - dim while waiting;
+  - accent once one is past due and waiting for the agent;
+  - faded when held (feature off) or when only expired ones remain.
+  
+  It stays visible while the feature is off: held follow-ups still need seeing.
+- **Tab context menu → Follow-ups…** opens `components/followUps/FollowUpsModal.svelte`
+  through the `open-follow-ups` event, which `+layout` owns. It is offered on any agent tab
+  while the feature is live, and on any tab that already holds follow-ups. Each row shows:
+  - where it stands (`whenText`: "in 12m", "due 3m ago", "expired 2h ago");
+  - who added it;
+  - for a due one, what is holding it.
+  
+  The levers are Deliver now, Cancel (Clear for an expired one), and adding one by hand
+  (`author: "human"`). This is Solo's "Set timer", on the tab rather than in a palette.
+- **Deliver now uses the same gate as the tick.** Both call `deliverOne()`; only the due time
+  is waived. Held, it says why, and the envelope of an early one says "(delivered early, at
+  your human's request)".
+- **Every reason is true of the tab.** The synchronous part of the gate, `tabHold`, is checked
+  most-absent first: no terminal loaded, no agent, a permission prompt, then busy. Review
+  caught "the agent is busy — it goes when this turn ends" shown for a tab with no agent at
+  all ("no session" read as "not idle"). A tab archived while the modal is open is found and
+  noted; one that has gone (closed, or reloaded under a new id) says so rather than showing
+  an empty list.
+- Resume-then-deliver from a held row is step 5.
+- The Overlord board could show pending follow-ups per tab. Not built; it is a read of
   `Tab.follow_ups` when wanted.
 - **maiLink** would need a protocol bump (every wire change does, `docs/mailink-protocol.md`
   §13.5). Not in v1.
@@ -452,6 +475,10 @@ a usage limit today:
   something else; it belongs in the runtime adapter.
 
 ## 10. Build order
+
+Steps 1–3 are **built** (2026-09-30), each reviewed until clean. Step 1 took three review rounds,
+step 2 five (the draft check was rebuilt twice before the screen read), step 3 two. Steps 4–6
+remain.
 
 1. `FollowUp` on `Tab` (Rust + TS), the lifecycle table in §3 wired and tested, including the
    duplicate-clears / reload-moves pair (and `cargo check --tests` for the test literal).

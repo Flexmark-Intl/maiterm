@@ -104,6 +104,7 @@ src-tauri/src/                # Backend (Rust)
   never inferred from the active account**, and an SSH chat's account is served only while the one
   ssh process that received that handoff runs
 - `docs/stack.md` — Workspace Stack (v1 2026-09-11, console drawer 2026-09-15): a workspace's services (dev server, api, db…) as maiTerm-owned tabs that are **not in the tab strip** (§7 — they open in a drawer over the terminal area, and `pane.active_tab_id` is never one of them); a service is a tab whose shell stays up, the binding lives on `Tab.service_id` (never a `tab_id` on the service), status is never persisted (a Rust mirror serves the priming), every PTY write is behind `get_pty_foreground_job` (shell at prompt / recorded pid), agents are writers over MCP (`updateService` reports ports — no socket sniffing), `createService` with no args returns the suggester's list. Read §5 before adding lifecycle paths that copy a `Tab`
+- `docs/follow-ups.md` — Follow-ups (steps 1–3 built 2026-09-30): an agent schedules a prompt back into **its own tab** (`createFollowUp`/`listFollowUps`/`cancelFollowUp`), delivered between turns framed as ⟦FOLLOW-UP⟧. Gated under the Overlord (`follow_ups_live()` = Overlord AND the toggle). Lives on `Tab.follow_ups`, **Rust-authoritative**: every change is one atomic command (`add_tab_follow_up`/`take_tab_follow_up`), never a list written back from the mirror; delivery **takes before it types** (at-most-once). A reload MOVES them (`release_moved_claims`), duplicates start empty, imports settle "no follow-up held twice" by tab POSITION. **Never paste over a human's draft: the agent's input box is READ OFF THE SCREEN** (`mailink/input_box.rs`, `agent_input_box` — Claude's `❯` + rules at column 0); keystroke timestamps were tried twice and failed both ways. Own-tab-only is enforced in Rust (`own_tab_only_refusal`): an explicit `tabId` counts only against a STATED identity. §6.1 is the delivery gate
 - `docs/workspace-share.md` — Workspace Share (2026-09-22): a workspace exported as a `.maiterm-workspace` for ANOTHER user/computer — the sister of backup, carrying structure and never identity. The file is built from an **allowlist** of `Shared*` types (`src-tauri/src/share/`), so a new `Tab` field never reaches it by default — the opposite of reload's whole-record rule, deliberately. Tabs point into repo **roots** (git top level + subpath); import applies one rule to every candidate directory (absent/empty → clone, matching checkout → use, else reject), probes with `git ls-remote`, clones in visible tabs, re-mints every id. Agent tabs start through a one-shot `SplitContext.launchCommand` (never persisted). **An ssh command must be `cleanSshCommand`ed before it reaches the file** — the raw one carries the sender's `MAITERM_AUTH`
 
 ## Commands
@@ -207,6 +208,7 @@ Tab
 ├── tasks_open (per-tab task panel visibility)
 ├── overlord_exempt (per-tab Overlord exemption; the workspace flag covers all its tabs)
 ├── service_id (the stack service this tab runs — carried on reload, never on duplicate; `clone_workspace_with_id_mapping` sets None). **A tab with one is NOT in the tab strip** and is never `pane.active_tab_id`: it is seen in the console drawer (docs/stack.md §7). Anything counting or picking "a tab" must filter it out
+├── follow_ups (docs/follow-ups.md — prompts scheduled back into this tab's agent; MOVED on reload, cleared on duplicate/clone, never in a share file; change only via add/take commands)
 └── trigger_variables (persisted variable map from triggers)
 
 SplitNode = SplitLeaf { pane_id } | SplitBranch { id, direction, ratio, children }
@@ -222,6 +224,7 @@ Preferences
 ├── tasks_enabled (gates the task MCP tools AND the initSession priming), tasks_width
 ├── stack_enabled (gates the eleven stack MCP tools AND the live priming line), stack_console_height
 ├── overlord_enabled, overlord_propose_mode, overlord_rules, hidden_default_overlord_rules
+├── follow_ups_enabled (default on, only counts while overlord_enabled — read `Preferences::follow_ups_live()` / `preferencesStore.followUpsLive`, never the raw flag)
 ├── comms_provider, comms_server_url, comms_bot_token, comms_authorized_users, comms_pickup_users, comms_instructions (Mattermost bot; token + user lists + instructions never in preference_meta)
 ├── accounts_enabled, accounts_setup_complete, active_account_ids, managed_accounts (docs/login.md; **none of the four are in `preference_meta`, so no MCP tool can read them** — §9.3 makes that surface status-only. `managed_accounts` holds label/email/org/plan and `token_minted_at`, NEVER a credential: the remote token lives in the OS keychain via `accounts::vault`)
 └── (see state/workspace.rs for full list)
