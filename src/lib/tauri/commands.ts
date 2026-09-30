@@ -360,14 +360,14 @@ export async function getTabPrompt(tabId: string): Promise<TabPrompt | null> {
   return invoke('get_tab_prompt', { tabId });
 }
 
-/** Whether Claude's workspace-trust dialog is open on this tab. Every automated path that types
- *  into a tab must ask first: an Enter there confirms "No, exit" and Claude quits. */
 /** What the agent's input box on this tab holds, read off the screen (mailink/input_box.rs):
  *  'unknown' when maiTerm doesn't recognise the layout — never read that as empty. */
 export async function agentInputBox(tabId: string): Promise<'empty' | 'has_text' | 'unknown'> {
   return invoke('agent_input_box', { tabId });
 }
 
+/** Whether Claude's workspace-trust dialog is open on this tab. Every automated path that types
+ *  into a tab must ask first: an Enter there confirms "No, exit" and Claude quits. */
 export async function trustDialogOpen(tabId: string): Promise<boolean> {
   return invoke('trust_dialog_open', { tabId });
 }

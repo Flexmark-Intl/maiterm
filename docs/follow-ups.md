@@ -309,9 +309,14 @@ follow-up came back. Every change is now one atomic Rust operation (`add_tab_fol
    `agent_input_box`). Typing into an agent's input fires no hook, so nothing reports a draft,
    and a paste plus CR would submit the human's half-written prompt with the follow-up glued
    on. The parser finds Claude Code's box: the bottom-most `❯` line sitting directly under a
-   horizontal rule, running to the rule below it. Dimmed placeholder text is blanked first
+   horizontal rule, running to the rule below it, with **both the `❯` and the rules at column
+   0**. Claude indents every continuation line of a draft by two columns. Matching after a trim
+   let a draft that itself contained `──` and `❯` (a pasted screen tail) pass for the box and
+   read `empty`; review caught it. Dimmed placeholder text is blanked first
    (`screen_text_undimmed`). A box with text holds delivery; an empty one is safe whatever the
-   keystroke history says.
+   keystroke history says. Also verified on the real grid: that pasted screen tail reads
+   `has_text`, and a long paste collapsed to `[Pasted text #N +M lines]` reads `has_text` (the
+   chip is not drawn dim).
 
    **Why the screen, not timestamps (2026-09-30).** Two timestamp rules were tried, and review
    broke each in a different direction.
@@ -340,6 +345,16 @@ follow-up came back. Every change is now one atomic Rust operation (`add_tab_fol
    process the paste lands in a shell. This is the evidence the Overlord (`replState`) and comms
    use, with the same known gap: a remote agent that dies while its ssh stays up still reads as
    live.
+
+**A keystroke after the gate aborts the delivery.** The gate reads the box and then still
+awaits several things (the liveness sweep, the take, the trust-dialog check). Someone who starts
+typing inside that window would get the paste landed after their keys and submitted with them.
+So the keystroke time is snapshotted when the gate starts and must be unchanged before the take
+and, last, inside `injectPrompt` just before the paste is written (the `beforePaste` predicate).
+If it changed, the follow-up is given back. **What remains:** keys pressed during the paste's
+own settle (about 150 ms for a typical follow-up, capped at 1.2 s), between the paste and its
+CR, are appended to the follow-up and submitted with it. No check made before the paste can see
+them. That is a sub-second overlap, not a draft being submitted.
 
 `tryDeliverNow` returning `'delivered'` means the bytes reached the PTY, not that the agent read
 them, which is as far as any delivery here can see.

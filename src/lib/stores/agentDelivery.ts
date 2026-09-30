@@ -45,7 +45,9 @@ export interface DeliveryState {
 
 export interface DeliveryDeps {
   /** Write framed text to the tab's PTY as a submitted prompt. Resolves true on success. */
-  inject(tabId: string, text: string): Promise<boolean>;
+  /** `beforePaste`, when given, is asked at the LAST moment before the paste is written — after
+   *  every async check the injector makes — and a false aborts the write (resolves false). */
+  inject(tabId: string, text: string, beforePaste?: () => boolean): Promise<boolean>;
   /** Is there a live session that can receive a prompt? (false while dormant/resuming) */
   liveState(tabId: string): boolean;
   /** Is the recipient at a prompt awaiting the HUMAN (permission / interactive elicitation)? */
@@ -122,9 +124,9 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
   /** inject under the in-flight guard — `injecting.has(tabId)` is true for the whole write,
    *  and deliverable() rejects while it is, so no two injections to the same tab can overlap
    *  regardless of what events fire in between. */
-  async function injectExclusive(tabId: string, text: string): Promise<boolean> {
+  async function injectExclusive(tabId: string, text: string, beforePaste?: () => boolean): Promise<boolean> {
     injecting.add(tabId);
-    try { return await deps.inject(tabId, text); }
+    try { return await deps.inject(tabId, text, beforePaste); }
     finally { injecting.delete(tabId); }
   }
 
@@ -157,6 +159,17 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
     return 'delivered';
   }
 
+  /** Would `tryDeliverNow` inject right now? Pure — for a caller that must CLAIM its item
+   *  before injecting (follow-ups take theirs off the Tab first) and shouldn't claim, then
+   *  hand back, on every tick the tab is merely busy. Still only advisory: the state can move
+   *  between this and the inject, which `tryDeliverNow` re-checks. */
+  function canDeliverNow(tabId: string): boolean {
+    const d = delivery.get(tabId);
+    if (d && (d.queue.length > 0 || d.busy)) return false;
+    if (injecting.has(tabId)) return false;
+    return deps.liveState(tabId) && !deps.awaitingHuman(tabId);
+  }
+
   /** Inject NOW or not at all — never queue. For a caller that keeps its own durable copy
    *  and must know the outcome, which `deliver()` can't tell it: a `'queued'` message is
    *  injected later by the drain with no word back, can't be withdrawn, and is lost on
@@ -169,22 +182,15 @@ export function createDeliveryController(deps: DeliveryDeps, opts: DeliveryContr
    *  cooldown and its queue: a bridge message already waiting goes first. It deliberately
    *  ignores the slot's `ready` flag, which the bridge and mesh own and a reload resets.
    *
-   *  `'failed'` means the write itself failed (no terminal), as opposed to `'held'`: not now. */
-  /** Would `tryDeliverNow` inject right now? Pure — for a caller that must CLAIM its item
-   *  before injecting (follow-ups take theirs off the Tab first) and shouldn't claim, then
-   *  hand back, on every tick the tab is merely busy. Still only advisory: the state can move
-   *  between this and the inject, which `tryDeliverNow` re-checks. */
-  function canDeliverNow(tabId: string): boolean {
-    const d = delivery.get(tabId);
-    if (d && (d.queue.length > 0 || d.busy)) return false;
-    if (injecting.has(tabId)) return false;
-    return deps.liveState(tabId) && !deps.awaitingHuman(tabId);
-  }
-
-  async function tryDeliverNow(tabId: string, text: string): Promise<'delivered' | 'held' | 'failed'> {
+   *  `beforePaste` is the caller's last word, asked after every async check the injector makes
+   *  and just before the paste is written (see `DeliveryDeps.inject`).
+   *
+   *  `'failed'` means the write didn't happen (no terminal, trust dialog, `beforePaste`
+   *  declined), as opposed to `'held'`: not now. */
+  async function tryDeliverNow(tabId: string, text: string, beforePaste?: () => boolean): Promise<'delivered' | 'held' | 'failed'> {
     if (!canDeliverNow(tabId)) return 'held';
     const d = delivery.get(tabId);
-    const ok = await injectExclusive(tabId, text);
+    const ok = await injectExclusive(tabId, text, beforePaste);
     if (!ok) return 'failed';
     // Serialize whatever the bridge or mesh sends next behind this, as its own sends are.
     if (delivery.get(tabId) === d && d) armCooldown(tabId);

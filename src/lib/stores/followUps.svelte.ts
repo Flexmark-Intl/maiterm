@@ -138,15 +138,22 @@ function createFollowUpsStore() {
     delivering.add(tab.id);
     const f = due[0]; // one per tab per tick: the next one waits for this one's turn to end
     let held = false; // taken off the tab and not yet delivered or given back
+    // Any human keystroke after this moment aborts the delivery. `holdReason` reads the box
+    // and then awaits more (the liveness sweep, the take, the trust check); someone who starts
+    // typing inside that window would get the paste landed after their keys and submitted with
+    // them. Checked again before the take and, last, just before the paste is written.
+    const keysAtGate = terminalsStore.getLastTakeoverInputAt(tab.id);
+    const untouched = () => terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
     try {
       if (await holdReason(tab)) return;
+      if (!untouched()) return;
       // CLAIM it before typing anything: taken off the tab in Rust, atomically. If a reload has
       // moved it to a replacement tab (or a cancel beat us), the take finds nothing and this
       // tab does nothing — the replacement delivers it. Delivering and then removing is what
       // let one follow-up go out from both tabs.
       if (!(await take(tab.id, f.id))) return;
       held = true;
-      const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now));
+      const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now), untouched);
       if (r === 'delivered') {
         held = false;
         logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}`);

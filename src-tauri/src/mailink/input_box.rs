@@ -26,16 +26,25 @@ pub enum InputBox {
 
 const PROMPT: char = '\u{276F}'; // ❯
 
+/// A box rule: `─` from COLUMN 0. Never trimmed — Claude indents every line of a draft by two
+/// columns, so a `──` line the human typed or pasted sits at column 2 and must not pass for the
+/// box's own rule. Trimming first is what let a pasted screen tail read as an empty box.
 fn is_rule(line: &str) -> bool {
-    let t = line.trim();
-    t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+    let t = line.trim_end();
+    t.starts_with('─') && t.chars().count() >= 10 && t.chars().all(|c| c == '─')
+}
+
+/// The box's own prompt line: `❯` at COLUMN 0, for the same reason. A `❯` inside a draft is
+/// indented; the dialogs' `❯` cursors are indented too.
+fn is_box_prompt(line: &str) -> bool {
+    line.starts_with(PROMPT)
 }
 
 pub fn parse(screen: &str) -> InputBox {
     let lines: Vec<&str> = screen.lines().collect();
     let Some(start) = (1..lines.len())
         .rev()
-        .find(|&i| lines[i].trim_start().starts_with(PROMPT) && is_rule(lines[i - 1]))
+        .find(|&i| is_box_prompt(lines[i]) && is_rule(lines[i - 1]))
     else {
         return InputBox::Unknown;
     };
@@ -44,7 +53,7 @@ pub fn parse(screen: &str) -> InputBox {
     let Some(end) = (start + 1..lines.len()).find(|&i| is_rule(lines[i])) else {
         return InputBox::Unknown;
     };
-    let first = lines[start].trim_start().trim_start_matches(PROMPT);
+    let first = lines[start].trim_start_matches(PROMPT);
     let typed = std::iter::once(first)
         .chain(lines[start + 1..end].iter().copied())
         .any(|l| !l.trim().is_empty());
@@ -128,6 +137,19 @@ mod tests {
         assert_eq!(parse("dMac[~]# ls\nsrc  package.json\ndMac[~]#"), InputBox::Unknown);
         assert_eq!(parse(&screen(&[RULE, "❯ half a frame"])), InputBox::Unknown);
         assert_eq!(parse(""), InputBox::Unknown);
+    }
+
+    #[test]
+    fn a_draft_containing_a_rule_and_a_prompt_is_still_text() {
+        // Review of 295504a: a pasted screen tail inside the draft. Claude indents a draft's
+        // continuation lines, so its `──` and `❯` sit at column 2 — not the box's own. Trimmed
+        // matching took them for the box and answered Empty, and the follow-up would have been
+        // pasted after the draft and submitted with it.
+        let s = screen(&[RULE, "❯ why does it end like this:", "  ──────────────────", "  ❯", RULE, "  status"]);
+        assert_eq!(parse(&s), InputBox::HasText);
+        // Blank first line, then a user rule: the user's `──` must not close the box.
+        let s = screen(&[RULE, "❯", "  ──────────────────", "  notes", RULE, "  status"]);
+        assert_eq!(parse(&s), InputBox::HasText);
     }
 
     #[test]

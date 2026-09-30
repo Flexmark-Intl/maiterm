@@ -28,7 +28,7 @@ export const DELIVERY_OWNER_MESH = 'mesh';
  *  (a 20-line message stages as `[Pasted text]` but never sends). Also used directly for
  *  one-off writes that intentionally bypass the queue (fork re-init directive, disconnect
  *  notice). */
-export async function injectPrompt(tabId: string, text: string): Promise<boolean> {
+export async function injectPrompt(tabId: string, text: string, beforePaste?: () => boolean): Promise<boolean> {
   const inst = terminalsStore.get(tabId);
   if (!inst) {
     logError(`agentDelivery: cannot inject — no terminal instance for tab ${tabId.slice(0, 8)}`);
@@ -43,6 +43,8 @@ export async function injectPrompt(tabId: string, text: string): Promise<boolean
       logInfo(`agentDelivery: ${tabId.slice(0, 8)} is at the workspace-trust dialog — not typing into it`);
       return false;
     }
+    // The caller's last word, with nothing async left between it and the write.
+    if (beforePaste && !beforePaste()) return false;
     await bracketedPasteSubmit(inst.ptyId, text);
     return true;
   } catch (e) {
