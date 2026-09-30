@@ -92,16 +92,22 @@ function createFollowUpsStore() {
     // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
     const st = agentStateStore.getState(tab.id);
     if (st?.state !== 'idle') return 'agent not idle';
-    // Nothing typed since this stretch of idle began. Typing into an agent's input box fires no
-    // hook, so the tab reads idle while its human composes — and a paste plus CR would submit
-    // their half-written draft with the follow-up glued on. Holds until they send it (the next
-    // turn's end starts a new stretch) or cancel/deliver it by hand. A keystroke that only
-    // answered a permission prompt doesn't count, and neither does the command that STARTED the
-    // agent: `idleSince` is stamped at session start too.
+    // Typing right now: a keystroke this recent may not have reached the screen yet.
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
-    if (typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) return 'your human is typing';
+    if (typed !== undefined && Date.now() - typed < 2000) return 'your human is typing';
     // And the screen has settled — the same 1.5 s the Overlord's own notices wait for.
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
+    // No draft in the input box. Typing into an agent's input fires no hook, so nothing reports
+    // a draft, and a paste plus CR would submit it with the follow-up glued on. The box is READ
+    // off the screen (mailink/input_box.rs): keystroke timestamps were tried first and failed
+    // both ways — a relaunched agent's own `claude -c` held its follow-ups forever, then
+    // type-ahead during boot slipped through. Timestamps remain only where the screen isn't a
+    // layout maiTerm recognises: anything typed since this stretch of idle began holds.
+    const box = await commands.agentInputBox(tab.id);
+    if (box === 'has_text') return 'a draft is in the input box';
+    if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {
+      return 'your human may have a draft (input box not readable)';
+    }
     if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
     // A session entry is not an agent: it is cleared by the SessionEnd hook, which never comes
     // when the process is killed or its ssh tunnel is down. Without a live process the paste

@@ -446,6 +446,30 @@ pub fn screen_text<T: EventListener>(term: &Term<T>) -> String {
         .join("\n")
 }
 
+/// `screen_text` with DIM cells blanked. For reading what someone TYPED: an agent's empty input
+/// box can show a dimmed placeholder suggestion, which plain text can't tell from a draft
+/// (`mailink/input_box.rs`).
+pub fn screen_text_undimmed<T: EventListener>(term: &Term<T>) -> String {
+    use alacritty_terminal::index::{Column, Line};
+    let grid = term.grid();
+    let cols = grid.columns();
+    (0..grid.screen_lines())
+        .map(|l| {
+            let row = &grid[Line(l as i32)];
+            let mut s = String::with_capacity(cols);
+            for c in 0..cols {
+                let cell = &row[Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                s.push(if cell.flags.contains(Flags::DIM) { ' ' } else { cell.c });
+            }
+            s.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Plain text of the VISIBLE viewport, one line per row, trailing blanks trimmed.
 ///
 /// Deliberately the viewport and not the buffer: callers use this to ask what is on screen

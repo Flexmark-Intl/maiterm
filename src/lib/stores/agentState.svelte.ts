@@ -139,14 +139,16 @@ function createAgentStateStore() {
     sessions.set(tabId, { ...s, read: true });
   }
 
-  function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string, runtime: AgentRuntime = 'claude', activity = true) {
+  function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string, runtime: AgentRuntime = 'claude', activity = true, freshStart = false) {
     const current = sessions.get(tabId);
-    if (current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
+    // `freshStart` (a SessionStart) never short-circuits: a relaunch that resumes the SAME
+    // session id over a stale idle entry (its SessionEnd never arrived) is still a new start.
+    if (!freshStart && current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
     // Entering idle fresh = unread; staying idle preserves whatever read flag we had.
     const read = state === 'idle' ? (current?.state === 'idle' ? current.read : false) : undefined;
     const updatedAt = activity ? Date.now() : (current?.updatedAt ?? 0);
     // A new session (start, /clear) is a fresh stretch of idle even when the old one was idle.
-    const sameIdleStretch = state === 'idle' && current?.state === 'idle' && current.sessionId === sessionId;
+    const sameIdleStretch = !freshStart && state === 'idle' && current?.state === 'idle' && current.sessionId === sessionId;
     const idleSince = state !== 'idle' ? undefined : sameIdleStretch ? current?.idleSince : Date.now();
     sessions = new Map(sessions);
     sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt, idleSince });
@@ -348,7 +350,7 @@ function createAgentStateStore() {
         // agent really is working, and the next tool event would only have to undo it.
         const started: AgentState = source === 'compact' ? 'active' : 'idle';
         // Only a compaction is activity; a start or resume is not (see `updatedAt`).
-        setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact');
+        setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact', started === 'idle');
         // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
         // seen signal that fills the tab dot and drives the workspace all-done indicator.
         // Coming up at startup is not a result the human missed.

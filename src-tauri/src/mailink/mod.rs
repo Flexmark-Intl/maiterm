@@ -41,6 +41,7 @@ pub(crate) mod shells;
 pub(crate) mod subagents;
 pub(crate) mod trust;
 pub(crate) mod permission;
+pub(crate) mod input_box;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod overlord;
@@ -3981,6 +3982,16 @@ fn trust_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<trust::TrustDial
 /// dialog: a human scrolled up must not hide it.
 fn permission_dialog_for_tab(app: &AppState, tab_id: &str) -> Option<permission::PermissionDialog> {
     permission::parse(&live_screen_text(app, tab_id)?)
+}
+
+/// What the agent's input box on this tab holds, read off the live screen with dimmed
+/// placeholder text blanked (`mailink/input_box.rs`). `Unknown` when there is no terminal or no
+/// box this recognises.
+pub(crate) fn agent_input_box(app: &AppState, tab_id: &str) -> input_box::InputBox {
+    let Some(pty) = pty_for_tab(app, tab_id) else { return input_box::InputBox::Unknown };
+    let registry = app.terminal_registry.read();
+    let Some(handle) = registry.get(&pty) else { return input_box::InputBox::Unknown };
+    input_box::parse(&crate::terminal::render::screen_text_undimmed(&handle.term))
 }
 
 /// The tab's live screen as text (not the scrolled viewport).

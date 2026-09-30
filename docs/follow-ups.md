@@ -304,24 +304,38 @@ follow-up came back. Every change is now one atomic Rust operation (`add_tab_fol
 
 **The gate before a take** (`holdReason` in `stores/followUps.svelte.ts`), cheapest check first:
 1. The agent is `idle`.
-2. **Nothing has been typed since this stretch of idle began** (`AgentTabSession.idleSince`).
-   Typing into an agent's input box fires no hook, so a tab reads idle while its human
-   composes. A paste plus CR would submit their half-written draft with the follow-up glued on.
-   This holds until they send it. It was first compared against `updatedAt`, which a session
-   start deliberately doesn't stamp. So the keystrokes that relaunched an exited agent by hand
-   (`claude -c`), which is exactly how an agent picks up its follow-ups, counted as a draft, and
-   the follow-ups waited for a turn nobody was going to start. `idleSince` is stamped on every
-   entry into idle, session start and `/clear` included.
+2. **No keystroke in the last 2 s**, since it may not have reached the screen yet.
+3. **The input box is empty, read off the screen** (`mailink/input_box.rs`, command
+   `agent_input_box`). Typing into an agent's input fires no hook, so nothing reports a draft,
+   and a paste plus CR would submit the human's half-written prompt with the follow-up glued
+   on. The parser finds Claude Code's box: the bottom-most `❯` line sitting directly under a
+   horizontal rule, running to the rule below it. Dimmed placeholder text is blanked first
+   (`screen_text_undimmed`). A box with text holds delivery; an empty one is safe whatever the
+   keystroke history says.
 
-   Holds that are safe but may surprise: clearing a draft (Ctrl-U, Esc) holds until the next
-   turn, and so does a local command that starts no turn (`/status`). **Unverified:** a TUI's
-   mouse reports go through xterm's `onData` and are stamped as human input. If a runtime
-   enables mouse tracking, a click or scroll in its tab would hold follow-ups the same way.
-   Excluding them would change what the Overlord's rituals count as a takeover too, so it is
-   left alone until it is seen.
-3. 1.5 s of output quiet.
-4. The delivery controller would inject now (`canDeliverNow`).
-5. **A live agent process** (`getAgentLiveness`). A session entry is cleared by the SessionEnd
+   **Why the screen, not timestamps (2026-09-30).** Two timestamp rules were tried, and review
+   broke each in a different direction.
+   - Keystrokes after `updatedAt` held follow-ups forever. A session start doesn't stamp it, so
+     the `claude -c` that relaunched an exited agent counted as a draft, and relaunching is
+     exactly how an agent picks its follow-ups back up.
+   - Keystrokes after a new `idleSince` let **type-ahead** through. Text typed while the agent
+     booted predates the SessionStart that stamps it, so it read as "before idle".
+
+   The screen answers the actual question. Verified on the real grid: empty box → delivered
+   even with recent keystrokes; a draft → held past due, untouched; the draft cleared with
+   Ctrl-U → delivered, with only the follow-up submitted.
+
+   **Where the box isn't recognised** (another runtime, a layout change), the answer is
+   `unknown`, never `empty`. Delivery then falls back to the timestamp rule: anything typed
+   since this stretch of idle began (`AgentTabSession.idleSince`) holds. `idleSince` is stamped
+   on every entry into idle, and a SessionStart always begins a new stretch, even when a
+   relaunch resumes the same session id over a stale entry. The fallback still has the
+   type-ahead gap, which is why it is the fallback. **Unverified:** a TUI's mouse reports go
+   through xterm's `onData` and count as human input, so where the fallback applies, a click in
+   a mouse-tracking TUI would hold follow-ups.
+4. 1.5 s of output quiet.
+5. The delivery controller would inject now (`canDeliverNow`).
+6. **A live agent process** (`getAgentLiveness`). A session entry is cleared by the SessionEnd
    hook, which never arrives when the agent is killed or its ssh tunnel is down, and without a
    process the paste lands in a shell. This is the evidence the Overlord (`replState`) and comms
    use, with the same known gap: a remote agent that dies while its ssh stays up still reads as

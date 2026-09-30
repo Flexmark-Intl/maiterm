@@ -134,6 +134,18 @@ pub fn trust_dialog_open(state: State<'_, Arc<AppState>>, tab_id: String) -> boo
     crate::mailink::trust_dialog_open(state.inner(), &tab_id)
 }
 
+/// What the agent's input box on this tab holds: "empty", "has_text", or "unknown" when the
+/// screen isn't a layout maiTerm recognises (docs/follow-ups.md §6.1, `mailink/input_box.rs`).
+/// Follow-ups ask before typing, so a human's half-written draft is never submitted.
+#[tauri::command]
+pub fn agent_input_box(state: State<'_, Arc<AppState>>, tab_id: String) -> &'static str {
+    match crate::mailink::agent_input_box(state.inner(), &tab_id) {
+        crate::mailink::input_box::InputBox::Empty => "empty",
+        crate::mailink::input_box::InputBox::HasText => "has_text",
+        crate::mailink::input_box::InputBox::Unknown => "unknown",
+    }
+}
+
 /// Answer a tab's open prompt, through the SAME hardened path the phone uses — the
 /// runtime-specific permission keymap, the one-shot selector guard, and the
 /// did-it-actually-submit check. `prompt_id` is the stale-guard: pass the one from
