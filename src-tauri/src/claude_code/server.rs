@@ -2369,6 +2369,36 @@ const PEER_ADDRESSING_TOOLS: [&str; 33] = [
 /// without any of its guards.
 const OWN_TAB_ONLY_TOOLS: [&str; 3] = ["createFollowUp", "listFollowUps", "cancelFollowUp"];
 
+/// Tools gated on the caller BEING the Overlord agent (docs/overlord.md). The gate is judged on
+/// `tabId`, so the caller is always the connection's own STATED tab (`pin_overlord_caller`).
+const OVERLORD_CALLER_TOOLS: [&str; 12] = [
+    "listEscalations",
+    "proposeRuleChanges",
+    "driveTab",
+    "releaseDirective",
+    "getTabPrompt",
+    "answerTabPrompt",
+    "archiveTab",
+    "closeTab",
+    "deleteArchivedTab",
+    "recoverTab",
+    "resumeTab",
+    "resumeWorkspace",
+];
+
+/// The subset whose target is `tab_id` (or `tab_ids`), next to the caller's `tabId`.
+const OVERLORD_TARGETED_TOOLS: [&str; 9] = [
+    "driveTab",
+    "releaseDirective",
+    "getTabPrompt",
+    "answerTabPrompt",
+    "archiveTab",
+    "closeTab",
+    "deleteArchivedTab",
+    "recoverTab",
+    "resumeTab",
+];
+
 /// Why an own-tab-only call must be refused, or None. `explicit_tab` is a `tabId` the caller
 /// passed itself; `affinity` is the tab its connection is bound to and whether that binding was
 /// STATED (initSession, or a header the session agrees with) or INFERRED by reconnect recovery.
@@ -2397,6 +2427,45 @@ fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: O
         // `refuse_on_inferred_identity`, since these are all on PEER_ADDRESSING_TOOLS.
         (None, _) => None,
     }
+}
+
+/// Make an Overlord-gated call act as the connection's own tab, whatever `tabId` it passed.
+/// `own` is the connection's STATED binding (None when unbound or only inferred).
+///
+/// Elsewhere an explicit `tabId` overrides the connection's tab, but here the frontend gates
+/// on that id being in the Overlord workspace, so honouring it went wrong both ways. Found
+/// live: the Overlord put its TARGET in `tabId` instead of `tab_id` (the two sit side by side),
+/// the gate checked the target, and every driveTab came back "available only to the Overlord
+/// agent tab" — the Overlord seemed to lose its authority at random. The reverse was a hole:
+/// any tab naming the Overlord's id in `tabId` was handed its powers.
+///
+/// A misplaced target is moved to `tab_id` when the call named no target of its own, so the
+/// slip just works. Returns the refusal text when there is no stated identity to pin.
+fn pin_overlord_caller(tool_name: &str, arguments: &mut Value, own: Option<&str>) -> Result<(), String> {
+    if !OVERLORD_CALLER_TOOLS.contains(&tool_name) {
+        return Ok(());
+    }
+    let Some(own) = own else {
+        return Err(format!(
+            "{tool_name} acts with the Overlord's authority, so it needs to know which tab is yours: \
+             run /maiterm init, then retry without a tabId."
+        ));
+    };
+    let Some(obj) = arguments.as_object_mut() else {
+        return Ok(());
+    };
+    let given = obj.get("tabId").and_then(|v| v.as_str()).filter(|s| !s.is_empty() && *s != own).map(String::from);
+    if let Some(given) = given {
+        let has_target = |k: &str| obj.get(k).is_some_and(|v| !v.is_null() && v.as_str() != Some(""));
+        if OVERLORD_TARGETED_TOOLS.contains(&tool_name) && !has_target("tab_id") && !has_target("tab_ids") {
+            log::info!("{tool_name}: moved a target passed as tabId into tab_id ({})", &given[..given.len().min(8)]);
+            obj.insert("tab_id".to_string(), Value::String(given));
+        } else {
+            log::warn!("{tool_name}: ignored tabId {} — the caller is the connection's own tab", &given[..given.len().min(8)]);
+        }
+    }
+    obj.insert("tabId".to_string(), Value::String(own.to_string()));
+    Ok(())
 }
 
 /// Whether to refuse a call because the tab it would act as was DEDUCED rather than stated.
@@ -2889,6 +2958,21 @@ async fn process_message(
                     }
                 }
 
+                // Before `tab_id_given`: the pinned tabId is the connection's own stated one, so
+                // it satisfies the inferred-identity check honestly rather than by the caller's say-so.
+                if let Err(msg) = pin_overlord_caller(
+                    &tool_name,
+                    &mut arguments,
+                    affinity.as_ref().filter(|a| a.stated).map(|a| a.tab_id.as_str()),
+                ) {
+                    log::warn!("Refusing {tool_name} for {}: no stated tab identity",
+                        &connection_id[..connection_id.len().min(11)]);
+                    let resp = JsonRpcResponse::success(
+                        id,
+                        serde_json::json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                    );
+                    return Some(serde_json::to_string(&resp).unwrap());
+                }
                 let tab_id_given = arguments
                     .get("tabId")
                     .and_then(|v| v.as_str())
@@ -4271,6 +4355,7 @@ mod tests {
     use super::derive_streamable_connection_id;
     use super::{own_tab_only_refusal, recover_affinity, refuse_on_inferred_identity, OWN_TAB_ONLY_TOOLS, PEER_ADDRESSING_TOOLS};
     use super::session_start_state;
+    use super::{pin_overlord_caller, OVERLORD_CALLER_TOOLS, OVERLORD_TARGETED_TOOLS};
     use super::{normalize_hook_event, HookPhase};
     use crate::state::AgentRuntime;
     use std::collections::HashSet;
@@ -4760,6 +4845,44 @@ mod tests {
         }
         // Every other tool keeps its ordinary tabId behaviour.
         assert!(own_tab_only_refusal("setTabNotes", Some("other"), Some(("mine", true))).is_none());
+    }
+
+    #[test]
+    fn overlord_tools_act_as_the_connections_own_tab() {
+        // The live failure: the Overlord put its target in `tabId`, the gate checked the target.
+        let mut args = serde_json::json!({ "tabId": "target", "kind": "process", "text": "hi" });
+        pin_overlord_caller("driveTab", &mut args, Some("overlord")).unwrap();
+        assert_eq!(args["tabId"], "overlord");
+        assert_eq!(args["tab_id"], "target", "a misplaced target is moved, not lost");
+
+        // The hole: another tab claiming the Overlord's id alongside a real target.
+        let mut args = serde_json::json!({ "tabId": "overlord", "tab_id": "victim" });
+        pin_overlord_caller("closeTab", &mut args, Some("stranger")).unwrap();
+        assert_eq!(args["tabId"], "stranger");
+        assert_eq!(args["tab_id"], "victim", "an explicit target is never overwritten");
+
+        let mut args = serde_json::json!({ "tabId": "x", "tab_ids": ["a", "b"] });
+        pin_overlord_caller("archiveTab", &mut args, Some("overlord")).unwrap();
+        assert_eq!(args["tabId"], "overlord");
+        assert!(args.get("tab_id").is_none(), "a batch already names its targets");
+
+        // Untargeted tools just drop the claim.
+        let mut args = serde_json::json!({ "tabId": "x" });
+        pin_overlord_caller("listEscalations", &mut args, Some("overlord")).unwrap();
+        assert_eq!(args, serde_json::json!({ "tabId": "overlord" }));
+
+        // No stated identity: refused, whatever tabId says.
+        let mut args = serde_json::json!({ "tabId": "overlord", "tab_id": "t" });
+        assert!(pin_overlord_caller("driveTab", &mut args, None).is_err());
+
+        // Every other tool keeps its ordinary tabId behaviour.
+        let mut args = serde_json::json!({ "tabId": "other" });
+        pin_overlord_caller("setTabNotes", &mut args, Some("mine")).unwrap();
+        assert_eq!(args["tabId"], "other");
+
+        for tool in OVERLORD_TARGETED_TOOLS {
+            assert!(OVERLORD_CALLER_TOOLS.contains(&tool), "{tool}");
+        }
     }
 
     #[test]
