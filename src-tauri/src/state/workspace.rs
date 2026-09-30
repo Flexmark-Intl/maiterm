@@ -1030,44 +1030,100 @@ impl AppData {
         ids
     }
 
-    /// After an import has put tabs back, make sure no follow-up is held twice
-    /// (docs/follow-ups.md §3). `pre_existing` is `all_tab_ids()` taken BEFORE the import.
-    ///
-    /// The case: a backup holds tab A with follow-up F; A is then reloaded, which MOVES F to
-    /// A′ and deletes A; the backup is imported, A has no match and is pushed back whole — and
-    /// now A and A′ would each be delivered F. A move keeps a follow-up's id, so the fix is
-    /// exact: a tab the import brought back keeps only the follow-ups no surviving tab already
-    /// holds. One that genuinely went away with A comes back with it.
-    pub fn drop_follow_ups_held_elsewhere(&mut self, pre_existing: &std::collections::HashSet<String>) {
-        let mut held = std::collections::HashSet::new();
-        for win in &self.windows {
-            for ws in &win.workspaces {
-                let tabs = ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter());
-                for tab in tabs.filter(|t| pre_existing.contains(&t.id)) {
-                    held.extend(tab.follow_ups.iter().map(|f| f.id.clone()));
-                }
+    /// Every tab with its POSITION: (workspace id, pane id or `"archived"`, tab). Position,
+    /// not id, is what says whether an import touched a tab — a moved tab keeps its id, so a
+    /// copy restored into the pane it was moved out of shares that id with the live one.
+    fn tabs_with_position(&self) -> impl Iterator<Item = ((String, String, String), &Tab)> {
+        self.windows.iter().flat_map(|win| win.workspaces.iter()).flat_map(|ws| {
+            ws.panes
+                .iter()
+                .flat_map(move |p| p.tabs.iter().map(move |t| ((ws.id.clone(), p.id.clone(), t.id.clone()), t)))
+                .chain(ws.archived_tabs.iter().map(move |t| ((ws.id.clone(), "archived".to_string(), t.id.clone()), t)))
+        })
+    }
+
+    /// Taken just before an import, for `settle_follow_ups_after_import`.
+    pub fn follow_up_snapshot(&self) -> FollowUpSnapshot {
+        let mut snap = FollowUpSnapshot::default();
+        for (pos, tab) in self.tabs_with_position() {
+            snap.positions.insert(pos);
+            for f in &tab.follow_ups {
+                snap.ids.insert(f.id.clone(), tab.id.clone());
             }
         }
-        if held.is_empty() {
-            return;
+        snap
+    }
+
+    /// After an import, restore the one invariant follow-ups depend on — **no follow-up is held
+    /// by two tabs** — and log any the import removed (docs/follow-ups.md §3).
+    ///
+    /// Imports put tabs back as straight clones, follow-ups and all, so a copy can land beside
+    /// the tab its follow-ups have since moved to: A reloaded to A′ and then A restored, or A
+    /// dragged to another pane and then restored into its old one. Each would deliver every
+    /// follow-up twice. A move keeps the follow-up's id, so this is exact: a tab at a position
+    /// that existed before the import keeps what it holds, and a tab the import put somewhere
+    /// keeps only follow-ups nobody else holds yet. One that genuinely went away with its tab
+    /// comes back with it.
+    ///
+    /// The losses are DERIVED, before minus after, rather than enumerated per import mode —
+    /// an overwrite drops tabs created since the backup, a full replace drops everything, and
+    /// neither needs its own bookkeeping to be reported.
+    pub fn settle_follow_ups_after_import(&mut self, before: &FollowUpSnapshot) {
+        // Positions the import didn't create hold first claim.
+        let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (pos, tab) in self.tabs_with_position() {
+            if before.positions.contains(&pos) {
+                held.extend(tab.follow_ups.iter().map(|f| f.id.clone()));
+            }
         }
+        // Everything else: first copy wins, later copies lose it. Same traversal order as
+        // `tabs_with_position`, open-coded because it needs `&mut`.
         for win in &mut self.windows {
             for ws in &mut win.workspaces {
-                let tabs = ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut()).chain(ws.archived_tabs.iter_mut());
-                for tab in tabs.filter(|t| !pre_existing.contains(&t.id)) {
-                    let before = tab.follow_ups.len();
-                    tab.follow_ups.retain(|f| !held.contains(&f.id));
-                    if tab.follow_ups.len() < before {
+                let ws_id = ws.id.clone();
+                let tabs = ws
+                    .panes
+                    .iter_mut()
+                    .flat_map(|p| {
+                        let pid = p.id.clone();
+                        p.tabs.iter_mut().map(move |t| (pid.clone(), t))
+                    })
+                    .chain(ws.archived_tabs.iter_mut().map(|t| ("archived".to_string(), t)));
+                for (container, tab) in tabs {
+                    if before.positions.contains(&(ws_id.clone(), container, tab.id.clone())) {
+                        continue;
+                    }
+                    let had = tab.follow_ups.len();
+                    tab.follow_ups.retain(|f| held.insert(f.id.clone()));
+                    if tab.follow_ups.len() < had {
                         log::info!(
-                            "follow-ups: import restored tab {} holding {} follow-up(s) another tab already has; kept them there only",
+                            "follow-ups: import put tab {} back holding {} follow-up(s) another tab already has; kept them there only",
                             &tab.id[..tab.id.len().min(8)],
-                            before - tab.follow_ups.len()
+                            had - tab.follow_ups.len()
                         );
                     }
                 }
             }
         }
+        // Whatever existed before and exists nowhere now, the import dropped.
+        for (id, tab_id) in &before.ids {
+            if !held.contains(id) {
+                log::warn!(
+                    "follow-ups: follow-up {} on tab {} was dropped by the import",
+                    &id[..id.len().min(8)],
+                    &tab_id[..tab_id.len().min(8)]
+                );
+            }
+        }
     }
+}
+
+/// What `settle_follow_ups_after_import` compares against: every tab position, and every
+/// follow-up id with the tab holding it, from just before an import.
+#[derive(Default)]
+pub struct FollowUpSnapshot {
+    positions: std::collections::HashSet<(String, String, String)>,
+    ids: std::collections::HashMap<String, String>,
 }
 
 fn default_sidebar_width() -> u32 {
@@ -2273,10 +2329,10 @@ mod follow_up_import_tests {
         // Live: A′ holds F (moved there by a reload). The backup had A holding F, and the
         // import has just pushed A back beside it.
         let mut d = data(vec![tab("a-prime", &["F"])]);
-        let pre = d.all_tab_ids();
+        let pre = d.follow_up_snapshot();
         d.windows[0].workspaces[0].panes[0].tabs.push(tab("a", &["F"]));
 
-        d.drop_follow_ups_held_elsewhere(&pre);
+        d.settle_follow_ups_after_import(&pre);
 
         assert_eq!(follow_ups_of(&d, "a-prime"), vec!["F"], "the live holder keeps it");
         assert!(follow_ups_of(&d, "a").is_empty(), "the restored original must not deliver it again");
@@ -2286,12 +2342,44 @@ mod follow_up_import_tests {
     fn a_restored_tab_keeps_follow_ups_nobody_else_has() {
         // Genuinely lost with its tab, and restored with it: that is what a restore is for.
         let mut d = data(vec![tab("a-prime", &["F"])]);
-        let pre = d.all_tab_ids();
+        let pre = d.follow_up_snapshot();
         d.windows[0].workspaces[0].panes[0].tabs.push(tab("b", &["G", "F"]));
 
-        d.drop_follow_ups_held_elsewhere(&pre);
+        d.settle_follow_ups_after_import(&pre);
 
         assert_eq!(follow_ups_of(&d, "b"), vec!["G"], "G is only here; F is already held");
+    }
+
+    #[test]
+    fn a_copy_restored_into_the_pane_its_tab_was_moved_out_of_is_deduplicated() {
+        // A moved from pane P to pane Q keeps its id. A merge import then finds no A in P and
+        // pushes the backup's A back there — same id as the live one, so only POSITION can tell
+        // the two apart. Keyed by id, both counted as "already there" and F survived twice.
+        let mut d = data(vec![]);
+        let mut q = Pane::new("Q".to_string());
+        q.tabs = vec![tab("a", &["F"])];
+        d.windows[0].workspaces[0].panes.push(q);
+        let pre = d.follow_up_snapshot();
+        d.windows[0].workspaces[0].panes[0].tabs.push(tab("a", &["F"])); // restored into P
+
+        d.settle_follow_ups_after_import(&pre);
+
+        let ws = &d.windows[0].workspaces[0];
+        assert!(ws.panes[0].tabs.iter().find(|t| t.id == "a").unwrap().follow_ups.is_empty(), "the restored copy in P");
+        assert_eq!(ws.panes[1].tabs[0].follow_ups.len(), 1, "the live tab in Q keeps F");
+    }
+
+    #[test]
+    fn two_new_copies_of_one_follow_up_keep_exactly_one() {
+        // No live holder at all — the invariant still holds: exactly one tab ends up with it.
+        let mut d = data(vec![]);
+        let pre = d.follow_up_snapshot();
+        d.windows[0].workspaces[0].panes[0].tabs = vec![tab("a", &["F"]), tab("b", &["F"])];
+
+        d.settle_follow_ups_after_import(&pre);
+
+        assert_eq!(follow_ups_of(&d, "a"), vec!["F"]);
+        assert!(follow_ups_of(&d, "b").is_empty());
     }
 
     #[test]
@@ -2299,9 +2387,9 @@ mod follow_up_import_tests {
         // A pre-existing tab the merge only restored notes into must keep its own follow-ups
         // even though they're "held" — by itself.
         let mut d = data(vec![tab("a", &["F"]), tab("b", &["G"])]);
-        let pre = d.all_tab_ids();
+        let pre = d.follow_up_snapshot();
 
-        d.drop_follow_ups_held_elsewhere(&pre);
+        d.settle_follow_ups_after_import(&pre);
 
         assert_eq!(follow_ups_of(&d, "a"), vec!["F"]);
         assert_eq!(follow_ups_of(&d, "b"), vec!["G"]);

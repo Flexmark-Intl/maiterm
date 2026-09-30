@@ -180,6 +180,23 @@ pub fn duplicate_window(
     Ok(new_label)
 }
 
+/// Follow-ups discarded with a window's workspaces (docs/follow-ups.md §3). Logged from these
+/// Rust paths because no reload goes through them, so a drop here is never false; per-tab and
+/// per-pane closes log from the frontend store instead, where reload can be told apart.
+fn log_follow_ups_dropped(workspaces: &[Workspace], how: &str) {
+    for ws in workspaces {
+        for tab in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
+            if !tab.follow_ups.is_empty() {
+                log::warn!(
+                    "follow-ups: tab {} {how}, {} pending dropped",
+                    &tab.id[..tab.id.len().min(8)],
+                    tab.follow_ups.len()
+                );
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub fn close_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let label = window.label().to_string();
@@ -194,20 +211,8 @@ pub fn close_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
                 })
             })
             .collect();
-        // Closing a window discards its workspaces, follow-ups included (docs/follow-ups.md
-        // §3). Logged here: no reload goes through this path, so it can't be a false drop.
-        for win in app_data.windows.iter().filter(|w| w.label == label) {
-            for ws in &win.workspaces {
-                for tab in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
-                    if !tab.follow_ups.is_empty() {
-                        log::warn!(
-                            "follow-ups: tab {} closed with its window, {} pending dropped",
-                            &tab.id[..tab.id.len().min(8)],
-                            tab.follow_ups.len()
-                        );
-                    }
-                }
-            }
+        if let Some(win) = app_data.window(&label) {
+            log_follow_ups_dropped(&win.workspaces, "closed with its window");
         }
         app_data.windows.retain(|w| w.label != label);
         (app_data.clone(), orphan_ids)
@@ -482,6 +487,9 @@ pub fn reset_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
                     .chain(ws.archived_tabs.iter().map(|t| t.id.clone()))
             })
             .collect();
+        // Reached by deleting a window's LAST workspace from the sidebar, and by closing the
+        // last window on macOS — neither goes through deleteWorkspace or close_window.
+        log_follow_ups_dropped(&win.workspaces, "removed when its window was reset");
         win.workspaces.clear();
         win.active_workspace_id = None;
         (app_data.clone(), orphan_ids)

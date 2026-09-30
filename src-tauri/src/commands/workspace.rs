@@ -2784,7 +2784,7 @@ pub fn import_state_selective(
     match config.mode.as_str() {
         "merge" => {
             let mut app_data = state.app_data.write();
-            let pre_existing = app_data.all_tab_ids();
+            let follow_ups_before = app_data.follow_up_snapshot();
             if let Some(target_win) = app_data.windows.first_mut() {
                 for src_win in &imported.windows {
                     for src_ws in &src_win.workspaces {
@@ -2851,7 +2851,7 @@ pub fn import_state_selective(
                 reorder_workspaces_by(&mut target_win.workspaces, &backup_order);
             }
             // A missing tab or pane above is pushed back as a straight clone, follow-ups and all.
-            app_data.drop_follow_ups_held_elsewhere(&pre_existing);
+            app_data.settle_follow_ups_after_import(&follow_ups_before);
             if config.import_preferences {
                 app_data.preferences = imported.preferences;
             }
@@ -2862,7 +2862,7 @@ pub fn import_state_selective(
         _ => {
             // "overwrite" — replace matching workspaces, keep unselected existing ones
             let mut app_data = state.app_data.write();
-            let pre_existing = app_data.all_tab_ids();
+            let follow_ups_before = app_data.follow_up_snapshot();
             if let Some(target_win) = app_data.windows.first_mut() {
                 for src_win in &imported.windows {
                     for ws in &src_win.workspaces {
@@ -2874,9 +2874,9 @@ pub fn import_state_selective(
                 // Restore backup's workspace order, local-only workspaces appended at end
                 reorder_workspaces_by(&mut target_win.workspaces, &backup_order);
             }
-            // The replaced workspace's tabs are gone, but a tab reloaded and then MOVED to
-            // another workspace survives next to its restored original.
-            app_data.drop_follow_ups_held_elsewhere(&pre_existing);
+            // The replaced workspace's tabs are gone — logged as dropped — but a tab moved to
+            // another workspace since the backup survives next to its restored copy.
+            app_data.settle_follow_ups_after_import(&follow_ups_before);
             if config.import_preferences {
                 app_data.preferences = imported.preferences;
             }
@@ -2903,7 +2903,10 @@ pub fn import_state(app: tauri::AppHandle, state: State<'_, Arc<AppState>>, path
 
     {
         let mut app_data = state.app_data.write();
+        let follow_ups_before = app_data.follow_up_snapshot();
         *app_data = imported;
+        // Nothing survives a full replace to be duplicated, but what it drops is still logged.
+        app_data.settle_follow_ups_after_import(&follow_ups_before);
     }
     let data_clone = state.app_data.read().clone();
     save_state(&data_clone)?;
