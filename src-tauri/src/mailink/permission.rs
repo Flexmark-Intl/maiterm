@@ -217,8 +217,14 @@ pub(crate) fn parse(screen: &str) -> Option<PermissionDialog> {
     if kind == Footer::Plan {
         top = rule_above(top).unwrap_or(0);
     }
+    // Also dropped: the unattended-session countdown ("Claude Code will automatically deny this
+    // request in 1:31"). It ticks every second, so with it in, the id changed under every card:
+    // each answer was refused as stale, and the card's fresh-prompt guard restarted every poll.
     let drawn: String = lines[top..foot]
-        .concat()
+        .iter()
+        .filter(|l| !l.contains("automatically deny this request"))
+        .copied()
+        .collect::<String>()
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '─' | '╌' | '❯'))
         .collect();
@@ -306,6 +312,18 @@ mod tests {
         let moved = TWO_ROWS.replace(" ❯ 1. Yes\n   2. No", "   1. Yes\n ❯ 2. No");
         assert_ne!(moved, TWO_ROWS);
         assert_eq!(parse(&moved).unwrap().digest, parse(TWO_ROWS).unwrap().digest);
+    }
+
+    /// The unattended-session countdown ticks every second; the dialog it sits in is the same one.
+    #[test]
+    fn the_auto_deny_countdown_does_not_change_the_id() {
+        let at = |t: &str| TWO_ROWS.replace(
+            " Do you want to create notes.md?",
+            &format!(" ⚠ Claude Code will automatically deny this request in {t}, to avoid blocking progress on an unattended session\n\n Do you want to create notes.md?"),
+        );
+        assert_ne!(at("1:31"), TWO_ROWS);
+        assert_eq!(parse(&at("1:31")).unwrap().digest, parse(&at("1:30")).unwrap().digest);
+        assert_eq!(parse(&at("1:31")).unwrap().options, vec!["Yes", "No"]);
     }
 
     /// The plan is what a plan dialog asks, so two plans are two ids: a tap on an old plan's

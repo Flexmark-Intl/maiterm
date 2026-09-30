@@ -10,6 +10,7 @@
 -->
 <script lang="ts">
   import { answerTabPromptAsHuman, getTabPrompt, type PromptAnswer, type TabPrompt } from '$lib/tauri/commands';
+  import { info as logInfo, warn as logWarn } from '@tauri-apps/plugin-log';
 
   interface Props {
     tabId: string;
@@ -81,18 +82,36 @@
     questions.length > 0 && questions.every((_, i) => (picks[i]?.length ?? 0) > 0 || (others[i] ?? '').trim()),
   );
 
+  /** An answer maiTerm hasn't replied to by now is reported rather than left spinning. */
+  const REPLY_MS = 10_000;
+
   async function answer(e: MouseEvent, choice: string | null, answers: PromptAnswer[] | null) {
-    if (!prompt || sending || e.detail > 1) return;
+    if (!prompt || e.detail > 1) return;
+    // Every click is logged with what became of it: "the answer didn't go through" must be
+    // traceable from the log alone.
+    if (sending) {
+      logInfo(`Loom prompt card: click on ${tabId} ignored, an answer is still being sent`);
+      note = 'Still sending the last answer…';
+      return;
+    }
     // Said, not swallowed: a click that did nothing and said nothing reads as a broken card.
     if (guarded(e)) {
+      logInfo(`Loom prompt card: click on ${tabId} ignored, prompt ${prompt.prompt_id} appeared under 1.5 s ago`);
       note = 'That prompt only just appeared. Check it, then click again.';
       return;
     }
     sending = true;
-    note = '';
+    note = 'Sending…';
     const forTab = tabId;
+    const pid = prompt.prompt_id;
+    logInfo(`Loom prompt card: answering ${prompt.kind} ${pid} on ${forTab} with ${choice ?? 'the question answers'}`);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const r = await answerTabPromptAsHuman(forTab, prompt.prompt_id, choice, answers);
+      const r = await Promise.race([
+        answerTabPromptAsHuman(forTab, pid, choice, answers),
+        new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error('no reply from maiTerm after 10 s')), REPLY_MS); }),
+      ]);
+      logInfo(`Loom prompt card: ${pid} on ${forTab} → ${JSON.stringify(r)}`);
       if (forTab !== tabId) return;
       note = r.ok
         ? 'Sent.'
@@ -100,8 +119,10 @@
           ? (r.detail ? `Not sent: ${r.detail}.` : 'Not sent: that prompt has changed. Here is the current one.')
           : `Not sent (${r.detail ?? r.reason ?? 'unknown'}).`;
     } catch (err) {
-      note = `Not sent: ${err}`;
+      logWarn(`Loom prompt card: ${pid} on ${forTab} failed: ${err}`);
+      if (forTab === tabId) note = `Not sent: ${err instanceof Error ? err.message : err}. Open the tab to answer it.`;
     } finally {
+      clearTimeout(timer);
       sending = false;
       void refresh();
     }
