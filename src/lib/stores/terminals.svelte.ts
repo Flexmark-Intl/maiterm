@@ -142,9 +142,15 @@ function createTerminalsStore() {
     /** PTYs that arrived live from ANOTHER window (a tab or workspace moved here), so their
      *  panes reattach instead of spawning. A separate set from the reload one on purpose:
      *  `shouldReattach` also arms the reload-only dropped-ssh reconnect, which a move must
-     *  never fire (components/terminal/CLAUDE.md). Consumed when the tab registers. */
+     *  never fire (components/terminal/CLAUDE.md). Consumed when the tab registers.
+     *  Also taken OUT of the reload set: the load-time seed is every live PTY in the app,
+     *  not just this window's, so a window opened or reloaded while another window's tab
+     *  was running still holds that tab's id — and would read its arrival as a reload. */
     markMovedIn(ptyIds: string[]) {
-      for (const id of ptyIds) movedInPtyIds.add(id);
+      for (const id of ptyIds) {
+        reattachPtyIds.delete(id);
+        movedInPtyIds.add(id);
+      }
     },
 
     /** Reattach eligibility of either kind: a reload's or a move's. */
