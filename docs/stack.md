@@ -375,8 +375,8 @@ It is absolutely positioned inside `.main-content`, floating over the terminal a
   close, and the terminal has to stay VISIBLE while it slides or an empty box slides out. The
   store therefore holds two things:
   - `consoleService`, which is open. Escape, the Hide/Show label and `toggleConsole` read it.
-  - `consoleVisible`, which lags a close by 220 ms. `consoleTabId` and `+page`'s `visible` prop
-    read it.
+  - `consoleVisible`, which lags a close by 220 ms. `consoleTabId`, `+page`'s `visible` prop and
+    the drawer's own rendering (`consoleVisibleServiceId`) read it.
 
   A drawer-local lag was tried first and failed, because `+page` hid the terminal at t=0. The
   drawer also blurs the service terminal the moment it starts closing: keeping it visible held
