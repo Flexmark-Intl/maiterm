@@ -56,8 +56,11 @@ export interface AgentTabSession {
   /** Only meaningful while idle: false once Claude finishes (unread), true after
    *  the user has viewed the tab. Reset on each fresh transition into idle. */
   read?: boolean;
-  /** Wall-clock ms of the last state change for this tab — drives recency sorting
-   *  (e.g. the Agent Bridge picker lists most-recently-active agents first). */
+  /** Wall-clock ms of the last state change that was ACTIVITY — drives recency sorting (the
+   *  Agent Bridge picker, the Loom's Focus list). A session merely starting is not activity:
+   *  auto-resume starts every agent at launch, and stamping those used to date weeks-idle chats
+   *  "since yesterday". 0 = no activity seen this run; pair it with the transcript's
+   *  `last_turn_ts` (Overlord facts) for the time before that. */
   updatedAt: number;
 }
 
@@ -129,13 +132,14 @@ function createAgentStateStore() {
     sessions.set(tabId, { ...s, read: true });
   }
 
-  function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string, runtime: AgentRuntime = 'claude') {
+  function setState(tabId: string, sessionId: string, state: AgentState, toolName?: string, toolDetail?: string, runtime: AgentRuntime = 'claude', activity = true) {
     const current = sessions.get(tabId);
     if (current?.sessionId === sessionId && current?.state === state && current?.toolName === toolName) return;
     // Entering idle fresh = unread; staying idle preserves whatever read flag we had.
     const read = state === 'idle' ? (current?.state === 'idle' ? current.read : false) : undefined;
+    const updatedAt = activity ? Date.now() : (current?.updatedAt ?? 0);
     sessions = new Map(sessions);
-    sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt: Date.now() });
+    sessions.set(tabId, { runtime, sessionId, state, toolName, toolDetail, read, updatedAt });
 
     // Propagate permission state to activityStore tab state so workspace sidebar shows alert.
     // Clear alert when leaving permission state (but only if we set it).
@@ -333,7 +337,8 @@ function createAgentStateStore() {
         // at an empty prompt. Compaction is the exception — it fires DURING a turn, so the
         // agent really is working, and the next tool event would only have to undo it.
         const started: AgentState = source === 'compact' ? 'active' : 'idle';
-        setState(tab_id, session_id, started, undefined, undefined, runtime);
+        // Only a compaction is activity; a start or resume is not (see `updatedAt`).
+        setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact');
         // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
         // seen signal that fills the tab dot and drives the workspace all-done indicator.
         // Coming up at startup is not a result the human missed.

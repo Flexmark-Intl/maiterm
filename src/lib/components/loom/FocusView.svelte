@@ -59,7 +59,9 @@
               workspace: w.name,
               state: s?.state ?? null,
               unread: s?.state === 'idle' && s.read === false,
-              lastActivity: s?.updatedAt ?? 0,
+              // The transcript's last real turn (a resume does not move it — the phone's rule,
+              // mailink `last_activity_ts`), or a hook event seen since, whichever is newer.
+              lastActivity: Math.max(overlordStore.facts.get(t.id)?.last_turn_ts ?? 0, s?.updatedAt ?? 0),
               asks: !!ask,
               preview: s?.state === 'permission' ? 'Needs your approval' : ask?.blocker?.question ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : ''),
             };
