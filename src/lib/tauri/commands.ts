@@ -391,6 +391,8 @@ export interface TabMeta {
   contextPct?: number;
   contextUsed?: number;
   contextLimit?: number;
+  /** Claude only: messages typed while the agent was busy and not yet taken, in order. */
+  queued?: { text: string; queuedAt: number }[];
 }
 export async function getTabMeta(tabId: string): Promise<TabMeta | null> {
   return invoke('get_tab_meta', { tabId });

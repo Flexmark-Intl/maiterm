@@ -252,24 +252,68 @@
   let sending = $state(false);
   let sendNote = $state<{ chat: string; text: string } | null>(null);
 
+  /** Messages sent from here that the transcript hasn't echoed yet, shown as bubbles at the end
+   *  of their chat (the phone's `pending`). Without them a message typed while the agent was busy
+   *  vanished from the composer and showed nowhere until Claude took it, which reads as lost. */
+  /** `seen` and `lastUser` are the transcript as it stood at send time, so an older turn that
+   *  happens to say the same thing ("ok") can't retire a new message. */
+  interface Outgoing { id: number; chat: string; text: string; sent: boolean; seen: number; lastUser: string | null }
+  let outgoing = $state<Outgoing[]>([]);
+  let outSeq = 0;
+  const sameText = (trs: ChatTurn[], t: string) => trs.filter((m) => m.role === 'user' && m.text.trim() === t).length;
+  const lastUserTurn = (trs: ChatTurn[]) => trs.findLast((m) => m.role === 'user') ?? null;
+
+  /** Has the transcript caught up on this message? One more exact match than at send time, or a
+   *  NEW last user turn containing it: Claude merges a queued message handed back on interrupt
+   *  with the next one into ONE user turn (the phone's `echoedBy`). */
+  function echoed(trs: ChatTurn[], o: Outgoing): boolean {
+    const t = o.text.trim();
+    if (sameText(trs, t) > o.seen) return true;
+    const last = lastUserTurn(trs);
+    return !!last && last.msg_id !== o.lastUser && last.text.includes(t);
+  }
+  // Retire what the open chat's transcript now shows. Only from a transcript read for that chat.
+  $effect(() => {
+    const chat = loadedFor;
+    if (!chat) return;
+    const trs = turns;
+    const keep = outgoing.filter((o) => o.chat !== chat || !o.sent || !echoed(trs, o));
+    if (keep.length !== outgoing.length) outgoing = keep;
+  });
+  const queuedTexts = $derived(new Set((meta?.queued ?? []).map((q) => q.text.trim())));
+  const outgoingHere = $derived(outgoing.filter((o) => o.chat === openId));
+
   async function send() {
     const chat = openId;
     const text = chat ? (drafts[chat] ?? '') : '';
     if (!chat || !text.trim() || sending) return;
     sending = true;
     sendNote = null;
+    // The bubble goes up and the composer empties at once; a refusal brings the text back.
+    const id = ++outSeq;
+    // The baseline comes from this chat's transcript when it is the one loaded (it always is:
+    // the composer only sends to the open chat); otherwise nothing is known and any echo counts.
+    const base = loadedFor === chat ? turns : [];
+    const last = lastUserTurn(base);
+    outgoing = [...outgoing, { id, chat, text, sent: false, seen: sameText(base, text.trim()), lastUser: last?.msg_id ?? null }];
+    drafts = { ...drafts, [chat]: '' };
+    pinned = true;
+    const fail = (note: string) => {
+      outgoing = outgoing.filter((o) => o.id !== id);
+      if (!(drafts[chat] ?? '').trim()) drafts = { ...drafts, [chat]: text };
+      sendNote = { chat, text: note };
+    };
     try {
       const r = await sendTabMessage(chat, text);
       if (r.status === 'delivered') {
-        drafts = { ...drafts, [chat]: '' };
+        outgoing = outgoing.map((o) => (o.id === id ? { ...o, sent: true } : o));
         sendNote = r.woke ? { chat, text: `Woke the agent (${r.woke === 'init' ? 're-registered it' : 'resumed it'}) and sent.` } : null;
-        pinned = true;
         reload();
       } else {
-        sendNote = { chat, text: r.detail ?? `Not sent (${r.reason ?? r.status}).` };
+        fail(r.detail ?? `Not sent (${r.reason ?? r.status}).`);
       }
     } catch (e) {
-      sendNote = { chat, text: `Not sent: ${e}` };
+      fail(`Not sent: ${e}`);
     } finally {
       sending = false;
     }
@@ -461,6 +505,13 @@
             <div class="sys">{r.turn.text}</div>
           {/if}
         {/each}
+        {#each outgoingHere as o (o.id)}
+          {@const queued = o.sent && queuedTexts.has(o.text.trim())}
+          <div class="you pending" class:sending={!o.sent}>
+            {o.text}
+            <span class="state">{!o.sent ? 'Sending…' : queued ? 'Queued · the agent takes it when this turn ends' : 'Delivered'}</span>
+          </div>
+        {/each}
         {#if liveState?.state === 'active'}
           <p class="working"><i></i>{liveState.toolDetail ?? liveState.toolName ?? 'Working…'}</p>
         {/if}
@@ -648,6 +699,9 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  .you.pending { display: flex; flex-direction: column; gap: 3px; }
+  .you.sending { opacity: 0.6; }
+  .you .state { align-self: flex-end; font-size: 10.5px; color: var(--fg-dim); white-space: normal; }
   .agent { overflow-wrap: anywhere; }
   .agent :global(p) { margin: 0 0 8px; }
   .agent :global(p:last-child) { margin-bottom: 0; }

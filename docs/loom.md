@@ -129,7 +129,13 @@ Under the chat, in this order:
   click guards apply: nothing in a prompt's first 1.5 s on screen, never the second click of
   a double-click.
 - **A task question** on one of its tasks, through BlockerCard.
-- **The composer.** Enter sends, Shift+Enter is a newline; drafts are kept per chat. It sends
+- **The composer.** Enter sends, Shift+Enter is a newline; drafts are kept per chat. A sent
+  message stays in the chat as a bubble marked Sending…, then Queued (Claude holds it until the
+  turn ends: `get_tab_meta`'s `queued`, the phone's thread `queued`) or Delivered, until the
+  transcript echoes it. A queued message is not in the transcript until Claude takes it, so
+  without the bubble it looked lost. The echo must be new since the send (one more matching
+  turn, or a new last user turn holding it, which is how Claude records a queued message merged
+  into the next), so an older "ok" can't retire a new one. A refused send puts the text back. It sends
   through `send_tab_message`, the phone's `POST /message` rules (an unregistered tab is woken
   first, the trust dialog is never typed at) plus one: **nothing is sent while a prompt is
   open**, because typed text goes into the dialog, a digit picks a row and the rest lands in

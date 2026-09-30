@@ -5082,10 +5082,19 @@ fn build_meta(app: &AppState, tab_id: &str) -> Option<Value> {
 
 /// A chat's `meta` (§12.1) plus its runtime, for the Loom's chat header. The same read the
 /// phone's thread header gets, so the two never disagree about model, effort or context.
+/// Also `queued`: messages Claude holds but hasn't taken yet (the phone's thread `queued`), so
+/// the Loom can say a sent message is waiting rather than let it look lost.
 pub(crate) fn tab_meta_view(app: &AppState, tab_id: &str) -> Option<Value> {
-    let (rt, _) = resolved_session_for_tab(app, tab_id)?;
+    let (rt, sid) = resolved_session_for_tab(app, tab_id)?;
     let mut m = build_meta(app, tab_id).unwrap_or_else(|| json!({}));
     m["runtime"] = json!(rt.as_key());
+    if rt == AgentRuntime::Claude {
+        let queued: Vec<Value> = transcript::pending_queue(&sid, QUEUE_SCAN_BYTES)
+            .into_iter()
+            .map(|(text, ts)| json!({ "text": text, "queuedAt": ts }))
+            .collect();
+        m["queued"] = json!(queued);
+    }
     Some(m)
 }
 
