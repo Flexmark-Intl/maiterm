@@ -3,8 +3,11 @@
  *
  * The follow-ups themselves live on `Tab.follow_ups`, persisted, and Rust is the authority for
  * them: this store changes them only through atomic commands (`addTabFollowUp`,
- * `takeTabFollowUp`) and mirrors the answer. It also runs the delivery tick for THIS window's
- * tabs — every window runs its own, over its own workspaces.
+ * `takeTabFollowUp`, `meetTabFollowUp`) and mirrors the answer. It also runs the delivery tick
+ * for THIS window's tabs — every window runs its own, over its own workspaces — and watches this
+ * window's stack and tasks for event follow-ups (§5): service edges as they happen, task ends and
+ * vanished targets on the tick. A follow-up due on a tab whose agent has exited restarts it first
+ * (`resumeAgent`, §6.2) — the one place this store types into a shell.
  *
  * Delivery (§6.1) goes through `agentDelivery.tryDeliverNow`, never `deliver()`: that one
  * queues, delivers later without a word, can't be withdrawn and forgets on restart. A follow-up
