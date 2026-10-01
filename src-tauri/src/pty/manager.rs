@@ -1827,7 +1827,9 @@ fn resolve_windows_shell(id: &str) -> String {
 /// The probe is an EMPTY bracketed paste (`ESC[200~ESC[201~`), chosen because it is harmless
 /// wherever it isn't answered: zsh inserts nothing for an empty paste. The wrapper below calls
 /// whatever `bracketed-paste` was (a plugin's included), and when that changed nothing, reports
-/// the line's length with this shell's pid. The shell announces itself once at startup, and only
+/// the line's length with this shell's pid. The length counts `$PREBUFFER` too: at a continuation
+/// prompt (`> `, `for>`, `dquote>`) `$BUFFER` is empty while the lines already entered wait
+/// there, and a resume typed then would become part of that command (review of eb17567). The shell announces itself once at startup, and only
 /// that pid is ever probed — a nested shell without this would take the bytes as input.
 #[cfg(unix)]
 const ZSH_LINE_PROBE: &str = r#"zmodload -i zsh/zleparameter 2>/dev/null
@@ -1836,7 +1838,7 @@ if (( ${+widgets[bracketed-paste]} )) && [[ ${widgets[bracketed-paste]} != user:
   _aiterm_bracketed_paste() {
     local b=$BUFFER c=$CURSOR
     zle _aiterm_orig_bracketed_paste -- "$@"
-    [[ $BUFFER == "$b" && $CURSOR == "$c" ]] && print -n "\e]1337;MaitermLine=$$;${#BUFFER}\a"
+    [[ $BUFFER == "$b" && $CURSOR == "$c" ]] && print -n "\e]1337;MaitermLine=$$;$(( ${#PREBUFFER} + ${#BUFFER} ))\a"
   }
   zle -N bracketed-paste _aiterm_bracketed_paste
   print -n "\e]1337;MaitermLineProbe=$$\a"

@@ -452,8 +452,13 @@ because this is the one place a follow-up types into a shell:
   that, when the paste changed nothing, prints `OSC 1337;MaitermLine=<pid>;<len>`. The shell
   announces `MaitermLineProbe=<pid>` at startup, and Rust probes only when that pid is the
   terminal's current foreground process, so a nested shell without the wrapper never receives
-  it. An empty paste is harmless wherever it isn't answered. Verified on a real zsh: empty line
-  → 0; `git comm` → 8; type-ahead during `sleep` → 18; a real paste → no report. **bash, fish,
+  it. An empty paste is harmless wherever it isn't answered. The length counts `$PREBUFFER`:
+  at a continuation prompt (`> `, `for>`) `$BUFFER` is empty while the earlier lines wait, and
+  a resume would have become part of that command (review of eb17567). oh-my-zsh's
+  `bracketed-paste-magic` holds an answer until the next byte arrives, so Rust sends a second
+  probe when the first gets none. Verified on a real zsh 5.9, with and without that widget:
+  empty line → 0; `git comm` → 8; type-ahead during `sleep` → 18; type-ahead `echo GLUED \⏎`
+  → 13; a real paste → no report. **bash, fish,
   shells spawned before this existed, and no integration all hold**, with "start it yourself".
 - Typed as a plain line plus CR, not a bracketed paste: the shell may not have bracketed paste
   on (macOS bash 3.2).

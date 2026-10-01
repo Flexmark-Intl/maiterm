@@ -386,6 +386,7 @@ function createFollowUpsStore() {
     // (review of 0a090e0: either would have had the resume glued onto it and run). maiTerm's zsh
     // integration answers; any other shell can't, and holds.
     if (fg.pid == null) return `${NO_AGENT}, and maiTerm can't tell which shell is at the prompt — start it yourself`;
+    if (!untouched()) return 'someone is typing in the tab';
     const line = await commands.probeShellLine(inst.ptyId, fg.pid);
     if (!line) return `${NO_AGENT}, and maiTerm can't check that the shell's command line is empty (it can ask zsh with maiTerm's shell integration) — start it yourself`;
     if (line.len > 0) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;

@@ -180,13 +180,18 @@ pub async fn probe_shell_line(
             }
             handle.line_report = None;
         }
-        pty::write_pty(&state, &pty_id, b"\x1b[200~\x1b[201~")?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
-        while std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-            let registry = state.terminal_registry.read();
-            if let Some((pid, len)) = registry.get(&pty_id).and_then(|h| h.line_report) {
-                return Ok((pid == expect_pid).then_some(ShellLine { pid, len }));
+        // Twice if need be. oh-my-zsh's `bracketed-paste-magic` holds the answer until the NEXT
+        // byte reaches the shell, so the first probe's answer comes out only when a second probe
+        // arrives — and it reads the line as it is then, so it is still a current answer.
+        for _ in 0..2 {
+            pty::write_pty(&state, &pty_id, b"\x1b[200~\x1b[201~")?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(700);
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                let registry = state.terminal_registry.read();
+                if let Some((pid, len)) = registry.get(&pty_id).and_then(|h| h.line_report) {
+                    return Ok((pid == expect_pid).then_some(ShellLine { pid, len }));
+                }
             }
         }
         Ok(None)
