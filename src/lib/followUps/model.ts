@@ -226,7 +226,10 @@ export function serviceOutcome(
   if (kind === 'service_ready') return to.status === 'ready' && from !== 'ready' ? 'it came up' : null;
   if (kind !== 'service_stopped' || !UP.has(from)) return null;
   if (to.status === 'crashed') return `it crashed${to.lastExitCode != null ? ` (exit ${to.lastExitCode})` : ''}`;
-  if (to.status === 'stopped') return to.note ? `it stopped (${to.note})` : 'it stopped';
+  // `starting` → `stopped` is a start that never ran or was called off ("not started — node is in
+  // the foreground", "start cancelled") — not a running service stopping. It is what a reloaded
+  // window's auto-start does to a service still running in its reattached tab (review of 8344b6f).
+  if (to.status === 'stopped' && from !== 'starting') return to.note ? `it stopped (${to.note})` : 'it stopped';
   return null;
 }
 

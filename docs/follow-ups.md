@@ -249,7 +249,18 @@ calls `initSession`.
 - **Levels are checked on the tick** (`checkConditions`): a task that has ended, and anything
   that no longer exists — the condition's workspace (closed, or moved to another window, where
   this window could never see it happen), the service, or the task. Tasks wait for
-  `tasksStore.loaded`: an unloaded list is not evidence that a task was deleted.
+  `tasksStore.loaded` AND this workspace's list: an unloaded list is not evidence that a task was
+  deleted. **"Gone" must be seen twice, 10 s apart** (`GONE_CONFIRM_MS`), because ordinary moves
+  leave things briefly in neither place: a workspace moved in from another window arrives before
+  its task list, and an archive lifts a tab's tasks off the board an IPC round trip before they
+  land on the archived tab. Met is permanent, so a false "deleted" could never be taken back.
+- **`starting` → `stopped` is not a stop.** It is a start that never ran or was called off —
+  which is exactly what a reloaded window's auto-start produces for a service still running in its
+  reattached tab (stack runtime isn't persisted, so the reload reads it as stopped). A crash out
+  of `starting` does count. **Known gap:** after a window reload the runtime starts from `stopped`,
+  so a service that was running across the reload and crashes later shows no edge, and its
+  `when_service_stopped` follow-up waits to expiry. Fixing it means the stack store adopting a
+  reattached service's run, which is a stack change, not a follow-up one.
 - **A condition that already holds is refused at creation** (`already_ready`, `not_running`,
   `already_ended`). These fire on the NEXT change, so accepting "when `web` is ready" for a
   ready service would wait for it to go down and come back up. The refusal tells the agent to

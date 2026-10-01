@@ -40,7 +40,11 @@ const HOUR_MS = 60 * 60_000;
  *  replays the transcript, which takes a while for a long session. */
 const RESUME_WAIT_MS = 2 * 60_000;
 /** The hold reason for a tab with no agent — the one reason resume-then-deliver acts on. */
-const NO_AGENT = 'no agent is running in the tab — it goes after an agent starts there';
+/** How long what an event follow-up waits on must stay missing before it counts as gone. Longer
+ *  than any move in flight (a workspace's tabs registering one by one take up to 5 s each), and
+ *  in practice it is one tick and the next. */
+const GONE_CONFIRM_MS = 10_000;
+const NO_AGENT ='no agent is running in the tab — it goes after an agent starts there';
 
 export interface FollowUpView {
   id: string;
@@ -83,6 +87,8 @@ function createFollowUpsStore() {
    *  the tty foreground alone can't tell "at a prompt" from "half a command typed at it". */
   const shellPromptAt = new Map<string, number>();
   const shellBeginAt = new Map<string, number>();
+  /** Event follow-ups whose service, task or workspace was last seen missing, and since when. */
+  const missingSince = new Map<string, number>();
 
   /** Every tab in this window that can hold follow-ups — live, archived, in a suspended workspace.
    *  An event happens whatever the tab is doing; delivery is what waits for the agent. */
@@ -167,24 +173,47 @@ function createFollowUpsStore() {
    *  a week for nothing (§3). Looked up in the workspace the condition was SET in, not the tab's
    *  current one: a moved tab's follow-up still points where it pointed. */
   async function checkConditions(now: number) {
+    const seen = new Set<string>();
     for (const { workspaceId, tab, f } of [...waitingOnEvents(now)]) {
+      seen.add(f.id);
       const ws = workspacesStore.workspaces.find(w => w.id === f.due.workspace_id);
       let outcome: string | null;
+      let gone = false;
       if (!ws) {
         // This window can't see that workspace's stack or tasks, so nothing here could ever meet it.
         outcome = 'the workspace it was in was closed, or moved to another window';
+        gone = true;
       } else if (f.due.kind === 'task_done') {
-        // Not loaded is not "deleted": an absent list is no evidence the task is gone.
-        if (!tasksStore.loaded) continue;
+        // Not loaded is not "deleted": an absent list is no evidence the task is gone — window-wide
+        // (`loaded`) or for this workspace (a moved-in workspace's list arrives last).
+        if (!tasksStore.loaded || !tasksStore.workspaceIds.includes(ws.id)) {
+          missingSince.delete(f.id);
+          continue;
+        }
         const task = tasksStore.find(ws.id, f.due.task_id ?? '')
           // Parked with an archived tab, the task still exists (`archive_tab` lifts it off the board).
           ?? ws.archived_tabs.flatMap(t => t.archived_tasks ?? []).find(t => t.id === f.due.task_id);
         outcome = taskOutcome(task ? task.status : null);
+        gone = !task;
       } else {
-        outcome = (ws.stack ?? []).some(s => s.id === f.due.service_id) ? null : 'the service was removed from the stack';
+        gone = !(ws.stack ?? []).some(s => s.id === f.due.service_id);
+        outcome = gone ? 'the service was removed from the stack' : null;
+      }
+      // "Gone" must be seen twice, GONE_CONFIRM_MS apart. Several ordinary moves leave a thing
+      // briefly in neither place this looks: a workspace moved here arrives before its task list
+      // (`receiveMove` rehydrates tasks last), an archive lifts a tab's tasks off the board an IPC
+      // round trip before they land on the archived tab. Met is permanent — the first observation
+      // stands — so a false "deleted" could never be taken back (review of 8344b6f).
+      if (gone) {
+        const first = missingSince.get(f.id);
+        if (first === undefined) { missingSince.set(f.id, now); continue; }
+        if (now - first < GONE_CONFIRM_MS) continue;
+      } else {
+        missingSince.delete(f.id);
       }
       if (outcome) await meet(workspaceId, tab.id, f, outcome);
     }
+    for (const id of [...missingSince.keys()]) if (!seen.has(id)) missingSince.delete(id);
   }
 
   /** What an event trigger names, looked up in the calling tab's project. Refuses a condition that

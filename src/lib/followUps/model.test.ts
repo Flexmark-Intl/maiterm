@@ -257,6 +257,9 @@ describe('serviceOutcome — edges, never levels', () => {
     expect(serviceOutcome('service_stopped', 'ready', rt('crashed', 1))).toBe('it crashed (exit 1)');
     expect(serviceOutcome('service_stopped', 'running', rt('stopped', null, 'its tab was suspended'))).toBe('it stopped (its tab was suspended)');
     expect(serviceOutcome('service_stopped', 'crashed', rt('stopped'))).toBeNull();
+    // A start refused or called off — a reloaded window's auto-start over a service still running.
+    expect(serviceOutcome('service_stopped', 'starting', rt('stopped', null, 'not started — node is in the foreground'))).toBeNull();
+    expect(serviceOutcome('service_stopped', 'starting', rt('crashed', 127))).toBe('it crashed (exit 127)');
     expect(serviceOutcome('service_stopped', 'stopped', rt('crashed'))).toBeNull();
   });
 });
