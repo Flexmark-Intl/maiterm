@@ -1160,9 +1160,10 @@ pub fn add_tab_follow_up(
     tab_id: String,
     mut follow_up: crate::state::workspace::FollowUp,
 ) -> Result<Vec<crate::state::workspace::FollowUp>, String> {
-    // A watch script's approval is decided HERE, from the approved set and the preference — never
-    // taken from what the frontend sent (§5.1). The same answer for a follow-up put back after a
-    // delivery that didn't happen: it was approved, so its digest is in the set.
+    // A watch script's approval is decided HERE, from the scripts a human approved — never taken
+    // from what the frontend sent (§5.1), and never from the waiver preference, which the runner
+    // reads live. The same answer for a follow-up put back after a delivery that didn't happen:
+    // if a human approved it, its digest is in the set.
     if follow_up.due.kind == "script" {
         if follow_up.due.script.as_ref().is_some_and(|s| s.len() > crate::watch::MAX_SCRIPT_BYTES) {
             return Err(format!("A watch script can be at most {} KB.", crate::watch::MAX_SCRIPT_BYTES / 1024));

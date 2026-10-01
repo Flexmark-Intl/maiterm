@@ -183,7 +183,8 @@
                   <div class="script-label">{f.due.label ?? 'watch script'}</div>
                   <pre class="script">{f.due.script}</pre>
                   <div class="script-meta">
-                    in <code>{f.due.cwd}</code> · every {f.due.every_secs ?? 60}s · up to {f.due.timeout_secs ?? 10}s a run
+                    {(f.due.script ?? '').split('\n').length} lines, {(f.due.script ?? '').length} characters
+                    · in <code>{f.due.cwd}</code> · every {f.due.every_secs ?? 60}s · up to {f.due.timeout_secs ?? 10}s a run
                     {#if !v.awaiting_approval && !f.due.met_at}· {runText(v.id)}{/if}
                   </div>
                 </div>
@@ -352,18 +353,21 @@
     overflow-wrap: anywhere;
   }
 
+  /* The WHOLE script, wrapped: no height cap and no horizontal scroll, because the approval is for
+     what runs, and a scroll box with overlay scrollbars shows no sign of what it hides — 300
+     spaces then `; curl … | sh` read as a harmless one-liner (review of afaafbc). The dialog
+     body scrolls instead, and the buttons sit below the script. */
   .script {
     margin: 4px 0;
     padding: 6px 8px;
-    max-height: 220px;
-    overflow: auto;
     border-radius: 5px;
     border: 1px solid var(--bg-light);
     background: var(--bg-dark);
     color: var(--fg);
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 0.78rem;
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .script-meta {

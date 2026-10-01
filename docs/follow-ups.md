@@ -391,18 +391,27 @@ anything. So:
   clock badge turns yellow and is clickable, and a notification names the tab. The card (in the
   follow-ups dialog) shows the script verbatim, its folder, its schedule, and *Approve and run* /
   *Reject* (reject cancels it). The agent's reply says `approval: "waiting_for_human"`.
+- **The card shows ALL of it, truthfully.** Wrapped, with no height cap and no horizontal scroll —
+  a scroll box with overlay scrollbars showed `test -s x` and hid the `; curl … | sh` 300 spaces
+  to its right — plus its line and character counts. A script holding anything the card can't
+  show as it runs is refused at creation, not cleaned: control characters other than tab and
+  newline (a CR redraws a line over itself) and Unicode format characters (bidi overrides reorder
+  how a line looks; zero-width ones hide). `UNSHOWABLE` in `model.ts`.
 - **Approval is keyed by script AND folder** (`watch::script_hash`, SHA-256 of folder, NUL,
   script). One byte changed is a new script; the same script in another folder is a new approval,
   because `rm -rf build` means what the folder makes it mean. An approved key is remembered
   (`AppData.approved_watch_scripts`, newest 500), so an agent re-arming the same script isn't
   asked again.
 - **Approval is decided in Rust,** never taken from the frontend: `add_tab_follow_up` sets
-  `approved` from the remembered keys and the preference, whatever it was sent, and only
-  `approve_tab_follow_up_script` adds a key. The keys live on `AppData`, not `Preferences`,
+  `approved` from the remembered keys alone, whatever it was sent, and only
+  `approve_tab_follow_up_script` adds a key. `approved` means a HUMAN said yes; the waiver
+  preference is never stored on a script. The keys live on `AppData`, not `Preferences`,
   because the frontend writes preferences back whole and a stale copy would drop one.
 - **A preference, off by default, runs agents' watch scripts without asking** (Preferences →
-  Overlord, "Run watch scripts without asking"). It is read at run time too, so turning it on
-  releases scripts already waiting. It is **not in `preference_meta`**, so no agent can set it over
+  Overlord, "Run watch scripts without asking"). It is read only at run time (`collect`), so
+  turning it on releases scripts already waiting, and turning it OFF withdraws every script it let
+  through: they wait for a card again. (The first build also stored it as `approved`, which
+  approved for good scripts no human had seen — review of afaafbc.) It is **not in `preference_meta`**, so no agent can set it over
   `setPreference`: that would be an agent approving its own scripts.
 - **The script is inline, never a path.** A file the agent could edit after approval would make
   the approval meaningless.

@@ -90,9 +90,12 @@ pub fn script_hash(cwd: &str, script: &str) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Has a HUMAN approved this script, in this folder? The preference that waives approval is NOT
+/// part of the answer: it is read live, where scripts are picked to run (`collect`), so turning it
+/// off withdraws what it let through. Stored as `approved`, it would have approved for good a
+/// script no human ever saw (review of afaafbc).
 pub fn is_approved(app_data: &AppData, cwd: &str, script: &str) -> bool {
-    app_data.preferences.follow_ups_scripts_unattended
-        || app_data.approved_watch_scripts.contains(&script_hash(cwd, script))
+    app_data.approved_watch_scripts.contains(&script_hash(cwd, script))
 }
 
 pub fn remember_approval(app_data: &mut AppData, cwd: &str, script: &str) {
@@ -210,7 +213,8 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
             let (c, ids) = collect(&app_data);
             (app_data.preferences.follow_ups_live(), c, ids)
         };
-        runs().lock().retain(|id, _| ids.contains(id));
+        // A running entry stays until its run ends, so MAX_RUNNING still counts it.
+        runs().lock().retain(|id, r| ids.contains(id) || r.status.running);
         // In line, before this pass starts anything: a sweep running beside the runs could take
         // the files of a follow-up created after the snapshot it was given. It is one small
         // directory listing.
@@ -283,7 +287,10 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
 /// that started the run — and tell that window's frontend.
 fn meet(state: &Arc<AppState>, app: &tauri::AppHandle, c: &Candidate, outcome: String, report: Option<String>) {
     let mut app_data = state.app_data.write();
-    let mut hit: Option<(String, String, Vec<FollowUp>)> = None;
+    // (window label, workspace id, tab id, list) of the tab that holds it NOW. Never `c.tab_id`:
+    // a reload during the run moved the follow-up to a tab with a new id, and an event naming the
+    // old one is mirrored nowhere — the window would never see it met (review of afaafbc).
+    let mut hit: Option<(String, String, String, Vec<FollowUp>)> = None;
     'find: for w in app_data.windows.iter_mut() {
         for ws in w.workspaces.iter_mut() {
             let tab = ws.panes.iter_mut().flat_map(|p| p.tabs.iter_mut())
@@ -293,14 +300,13 @@ fn meet(state: &Arc<AppState>, app: &tauri::AppHandle, c: &Candidate, outcome: S
                 if crate::commands::workspace::meet_follow_up(
                     &mut tab.follow_ups, &c.id, crate::commands::workspace::iso_now(), outcome.clone(), report.clone(),
                 ) {
-                    hit = Some((w.label.clone(), ws.id.clone(), tab.follow_ups.clone()));
+                    hit = Some((w.label.clone(), ws.id.clone(), tab.id.clone(), tab.follow_ups.clone()));
                 }
                 break 'find;
             }
         }
     }
-    let Some((label, workspace_id, list)) = hit else { return };
-    let tab_id = c.tab_id.clone();
+    let Some((label, workspace_id, tab_id, list)) = hit else { return };
     let data_clone = app_data.clone();
     drop(app_data);
     if let Err(e) = crate::state::save_state(&data_clone) {
@@ -591,6 +597,42 @@ mod tests {
         assert_eq!(d.approved_watch_scripts.len(), MAX_APPROVALS);
         assert!(!is_approved(&d, "/a", "x"), "the oldest went first");
         d.preferences.follow_ups_scripts_unattended = true;
-        assert!(is_approved(&d, "/z", "anything"));
+        assert!(!is_approved(&d, "/z", "anything"), "the waiver is not an approval");
+    }
+
+    fn data_with_script(approved: bool, unattended: bool) -> AppData {
+        let mut tab = crate::state::workspace::Tab::new("t".into());
+        tab.follow_ups.push(FollowUp {
+            id: "f".into(),
+            text: "x".into(),
+            due: crate::state::workspace::FollowUpDue {
+                kind: "script".into(),
+                script: Some("exit 1".into()),
+                cwd: Some("/tmp".into()),
+                approved,
+                ..Default::default()
+            },
+            author: "agent".into(),
+            created_at: "2026-10-01T00:00:00Z".into(),
+            expires_at: None,
+        });
+        let mut d = AppData::default();
+        let mut win = crate::state::workspace::WindowData::new("main".into());
+        let mut ws = crate::state::workspace::Workspace::new("w".into());
+        ws.panes[0].tabs.push(tab);
+        win.workspaces.push(ws);
+        d.windows.push(win);
+        d.preferences.follow_ups_scripts_unattended = unattended;
+        d
+    }
+
+    #[test]
+    fn only_an_approval_or_the_live_waiver_runs_a_script() {
+        let runs = |approved, unattended| !collect(&data_with_script(approved, unattended)).0.is_empty();
+        assert!(!runs(false, false), "nobody said yes");
+        assert!(runs(true, false), "the human approved it");
+        assert!(runs(false, true), "the waiver is on");
+        // ...and turning the waiver off withdraws it: nothing was stored on the script.
+        assert!(!runs(false, false));
     }
 }

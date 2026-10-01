@@ -591,7 +591,7 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
             // output short in testing), and inside a single-quoted command: neutralise both —
             // in the label too, which is a service name or task title someone typed.
             let text: String = f.text.chars().take(80).collect();
-            let row = format!("{}: \"{text}\"", follow_up_when(&f.due));
+            let row = format!("{}: \"{text}\"", follow_up_when(&f.due, app_data.preferences.follow_ups_scripts_unattended));
             row.chars().filter(|c| !c.is_control()).collect::<String>().replace('\\', "/").replace('\'', "\u{2019}")
         })
         .collect();
@@ -621,7 +621,9 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
 
 /// When a pending follow-up goes, for the priming: its time, its condition, or "due now" for
 /// one whose condition has happened and is waiting only for the agent.
-fn follow_up_when(due: &crate::state::workspace::FollowUpDue) -> String {
+/// `unattended`: the preference that runs watch scripts without approval, so one waiting for it
+/// isn't described as waiting.
+fn follow_up_when(due: &crate::state::workspace::FollowUpDue, unattended: bool) -> String {
     if due.met_at.is_some() {
         return "due now".to_string();
     }
@@ -631,7 +633,7 @@ fn follow_up_when(due: &crate::state::workspace::FollowUpDue) -> String {
         "service_ready" => format!("when service {label} is ready"),
         "service_stopped" => format!("when service {label} stops"),
         "task_done" => format!("when task \u{201C}{label}\u{201D} ends"),
-        "script" if !due.approved => format!("when your watch script \u{201C}{label}\u{201D} passes (waiting for your human to approve it)"),
+        "script" if !due.approved && !unattended => format!("when your watch script \u{201C}{label}\u{201D} passes (waiting for your human to approve it)"),
         "script" => format!("when your watch script \u{201C}{label}\u{201D} passes"),
         other => other.to_string(),
     }
@@ -4851,14 +4853,16 @@ mod tests {
     fn the_priming_names_an_event_follow_ups_condition() {
         use crate::state::workspace::FollowUpDue;
         let due = |kind: &str| FollowUpDue { kind: kind.into(), label: Some("web".into()), ..Default::default() };
-        assert_eq!(super::follow_up_when(&due("service_ready")), "when service web is ready");
-        assert_eq!(super::follow_up_when(&due("service_stopped")), "when service web stops");
-        assert_eq!(super::follow_up_when(&due("task_done")), "when task \u{201C}web\u{201D} ends");
-        assert!(super::follow_up_when(&due("script")).ends_with("(waiting for your human to approve it)"));
+        assert_eq!(super::follow_up_when(&due("service_ready"), false), "when service web is ready");
+        assert_eq!(super::follow_up_when(&due("service_stopped"), false), "when service web stops");
+        assert_eq!(super::follow_up_when(&due("task_done"), false), "when task \u{201C}web\u{201D} ends");
+        assert!(super::follow_up_when(&due("script"), false).ends_with("(waiting for your human to approve it)"));
+        let passes = "when your watch script \u{201C}web\u{201D} passes";
+        assert_eq!(super::follow_up_when(&due("script"), true), passes, "the waiver releases it");
         let approved = FollowUpDue { approved: true, ..due("script") };
-        assert_eq!(super::follow_up_when(&approved), "when your watch script \u{201C}web\u{201D} passes");
-        let met =FollowUpDue { met_at: Some("2026-09-30T10:00:00Z".into()), ..due("service_ready") };
-        assert_eq!(super::follow_up_when(&met), "due now");
+        assert_eq!(super::follow_up_when(&approved, false), passes);
+        let met = FollowUpDue { met_at: Some("2026-09-30T10:00:00Z".into()), ..due("service_ready") };
+        assert_eq!(super::follow_up_when(&met, false), "due now");
     }
 
     #[test]

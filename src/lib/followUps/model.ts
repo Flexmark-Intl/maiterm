@@ -240,9 +240,15 @@ function seconds(v: unknown, lo: number, hi: number, dflt: number): number | nul
   return n != null && Number.isInteger(n) && n >= lo && n <= hi ? n : null;
 }
 
+/** Characters a script never needs and the approval card could be fooled by: control characters
+ *  other than tab and newline (a CR can redraw a line over itself), and Unicode format characters
+ *  — bidi overrides and isolates (U+202A–202E, U+2066–2069) reorder how a line LOOKS without
+ *  changing what runs, and zero-width ones hide. Refused, never stripped: the human approves the
+ *  bytes that run (review of afaafbc). */
+const UNSHOWABLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\p{Cf}]/u;
+
 /** A watch script (§5.1). Its text is kept EXACTLY as sent — it is code, and the human approves
- *  what will run — except that a NUL is refused: no script needs one, and it would make the card
- *  and the file disagree. */
+ *  what will run — so anything the card couldn't show truthfully is refused, not cleaned. */
 function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext): Resolved {
   const w = args.when_script;
   if (typeof w !== 'object' || w === null || Array.isArray(w)) {
@@ -251,7 +257,9 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
   const o = w as Record<string, unknown>;
   const script = typeof o.script === 'string' ? o.script : '';
   if (!script.trim()) return refuse('bad_script', '`when_script.script` must be the script to run.');
-  if (script.includes('\u0000')) return refuse('bad_script', 'The script contains a NUL character.');
+  if (UNSHOWABLE.test(script)) {
+    return refuse('bad_script', 'The script contains a control or invisible formatting character (a CR, an escape, a bidi or zero-width mark). Your human approves the script as shown, so write it in plain text — use \\r, \\033 and the like as escapes instead.');
+  }
   if (new TextEncoder().encode(script).length > SCRIPT_MAX_BYTES) {
     return refuse('bad_script', `A watch script can be at most ${SCRIPT_MAX_BYTES / 1024} KB. Keep the logic in the script and the data in files.`);
   }
