@@ -35,10 +35,12 @@
     }
   }
 
-  /** Seconds as a human reads them: "15s" under a minute — `durationText` rounds up to whole
-   *  minutes, which turned a 15-second schedule into "every 1m" — else its "2h 5m". */
+  /** Seconds as a human reads them, never rounded: `durationText` rounds to whole minutes, which
+   *  turned a 15-second schedule into "every 1m" and a 90-second one into "every 2m" — and the
+   *  human approves the schedule the card states. Whole minutes only when it IS whole minutes. */
   function secsText(secs: number): string {
-    return secs < 60 ? `${Math.max(0, Math.round(secs))}s` : durationText(secs * 1000);
+    const s = Math.max(0, Math.round(secs));
+    return s < 60 || s % 60 !== 0 ? `${s}s` : durationText(s * 1000);
   }
 
   /** Lines as the script has them: a trailing newline ends the last line, it doesn't add one. */

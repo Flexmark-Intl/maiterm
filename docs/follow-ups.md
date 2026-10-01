@@ -401,7 +401,9 @@ anything. So:
   how a line looks; zero-width ones hide), the line and paragraph separators and every
   default-ignorable code point (WebKit draws them as nothing), and any space but U+0020 — a
   no-break space looks like one, but the shell reads it as part of a word, so `gh<NBSP>pr checks`
-  shows as `gh pr checks` and runs a planted `gh<NBSP>pr`. `UNSHOWABLE` in `model.ts`. Ordinary
+  shows as `gh pr checks` and runs a planted `gh<NBSP>pr`. Plus U+2800, the blank braille cell,
+  which is a symbol to Unicode but an empty cell on screen. `UNSHOWABLE` in `model.ts`; the card
+  states the schedule exactly ("every 90s", never rounded to "2m"). Ordinary
   non-ASCII text (accents, CJK, a ✓) passes; a ZWJ emoji does not, and the refusal says why.
 - **Approval is keyed by script AND folder** (`watch::script_hash`, SHA-256 of folder, NUL,
   script). One byte changed is a new script; the same script in another folder is a new approval,

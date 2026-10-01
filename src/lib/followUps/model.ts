@@ -247,8 +247,10 @@ function seconds(v: unknown, lo: number, hi: number, dflt: number): number | nul
  *  default-ignorable code point (variation selectors, Hangul fillers), which WebKit draws as
  *  nothing, and any space but U+0020: a no-break space LOOKS like one, but the shell reads it as
  *  part of a word, so `gh<NBSP>pr checks` shows as `gh pr checks` and runs a planted `gh<NBSP>pr`
- *  (re-review of bf90a19). Refused, never stripped: the human approves the bytes that run. */
-const UNSHOWABLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]|(?! )\p{Zs}/u;
+ *  (re-review of bf90a19). And U+2800, the blank braille cell: a symbol (So), not a space, so no
+ *  category above catches it, yet it draws as an empty cell — the usual "invisible" username
+ *  character (review of af4e29a). Refused, never stripped: the human approves the bytes that run. */
+const UNSHOWABLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u{2800}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]|(?! )\p{Zs}/u;
 
 /** A watch script (§5.1). Its text is kept EXACTLY as sent — it is code, and the human approves
  *  what will run — so anything the card couldn't show truthfully is refused, not cleaned. */
