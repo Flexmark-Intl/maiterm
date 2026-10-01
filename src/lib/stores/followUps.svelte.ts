@@ -396,9 +396,12 @@ function createFollowUpsStore() {
     // 3.2), and the line is the runtime's own command — no newline, nothing to escape. In bash it
     // goes behind a Ctrl-G (readline's abort): a prefix key typed ahead during the last command —
     // an Esc, a Ctrl-X — draws nothing, so the grid can't see it, and would eat our first keys;
-    // abort cancels it and leaves the line alone (terminal/prompt_line.rs). Not in zsh, where
-    // Ctrl-G aborts the line itself, and where such a prefix makes the probe go unanswered anyway.
-    const prefix = line.shell === 'bash' ? '\x07' : '';
+    // abort cancels it and leaves the line alone (terminal/prompt_line.rs). Then Ctrl-U: with
+    // `stty -ixon` / `-iexten` a typed-ahead C-q / C-v (quoted-insert) reaches readline and would
+    // take the Ctrl-G as a literal ^G — Ctrl-U deletes it, and on an empty line does nothing
+    // (review of 9a58944). Not in zsh, where Ctrl-G aborts the line itself, and where such a
+    // prefix makes the probe resolve into it and read non-empty anyway.
+    const prefix = line.shell === 'bash' ? '\x07\x15' : '';
     await commands.writeTerminal(inst.ptyId, Array.from(new TextEncoder().encode(`${prefix}${text}\r`)));
     resumes.set(tab.id, Date.now());
     logInfo(`follow-ups: restarted the agent in tab ${tab.id.slice(0, 8)}${byHand ? ' (by hand)' : ''} — typed ${JSON.stringify(text)}`);

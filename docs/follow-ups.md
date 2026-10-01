@@ -496,7 +496,11 @@ because this is the one place a follow-up types into a shell:
   readline's `abort`, bound in every emacs keymap — plain, after Esc, after Ctrl-X — which cancels
   a pending prefix or numeric argument and leaves the line as it was. Verified on bash 3.2.57:
   Esc, Ctrl-X, Esc-1 and Esc-Esc typed during `sleep 1`, then Ctrl-G plus a command — it ran
-  intact every time. (Not in zsh: there Ctrl-G aborts the whole line, and a pending prefix makes
+  intact every time. It is followed by a **Ctrl-U**: with `stty -ixon` or `-iexten` (common in a
+  bashrc, to free C-s), a typed-ahead C-q / C-v reaches readline as quoted-insert and takes the
+  Ctrl-G as a literal `^G` — `^Gclaude …` ran (review of 9a58944); Ctrl-U deletes it, and does
+  nothing on an empty line. Reviewed clean: C-x C-u, C-x `(`, Esc Esc, Esc C-x, C-x Esc, C-],
+  M-#, and anything that draws (`(arg: 1)`, `(i-search)`, a bell) holds instead. (Not in zsh: there Ctrl-G aborts the whole line, and a pending prefix makes
   the probe's own bytes resolve into it, which reads non-empty and holds — leaving a few stray
   characters on the line, a known cosmetic cost.) A mark split across two reads is missed and
   holds. zsh's answer likewise counts vi command mode as not empty. Verified against bytes
