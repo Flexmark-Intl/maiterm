@@ -470,11 +470,16 @@ because this is the one place a follow-up types into a shell:
   which has no `READLINE_LINE`, so it can't be asked — and it is a real login shell here (the
   first live run held because every tab was bash). maiTerm's bash `PROMPT_COMMAND` ends PS1 with
   an invisible `\[OSC 1337;MaitermPromptEnd\]` and announces `MaitermPromptMarks=<pid>`. The
-  PTY reader splits each read at those marks and notes where the cursor stood the instant the
-  prompt finished drawing; an OSC 133 B/C forgets it. The line is empty iff the cursor is still
-  exactly there with nothing after it on the row. Type-ahead and pastes are drawn after the mark;
-  a continuation prompt has no mark; a mark split across two reads is missed — all of which read
-  as not empty. Verified against bytes captured from bash 3.2.57: a fresh prompt reads empty,
+  PTY reader splits each read at those marks and at OSC 133 B/C. **The line is empty only while
+  nothing at all has been drawn since the mark**: an idle, empty prompt draws nothing, and every
+  way the line stops being empty draws something — an echoed key, a paste, type-ahead readline
+  redraws after the prompt, a continuation prompt, the `(reverse-i-search)` banner, vi-mode's
+  bell. A redraw of PS1 (Ctrl-L, SIGWINCH) re-prints the mark. The first version compared the
+  cursor's position with where it stood at the mark instead, and review of e1cac85 broke it: once
+  scrollback is at its cap, "history size + screen line" stops naming a row, so a continuation
+  prompt — or a line exactly a multiple of the width long — scrolled the cursor back onto the
+  stored coordinates and read as empty. A mark split across two reads is missed and holds. zsh's
+  answer likewise counts vi command mode as not empty: keys typed there are commands. Verified against bytes captured from bash 3.2.57: a fresh prompt reads empty,
   `git commit -am wip` typed during `sleep 1` reads not empty (tests use those exact bytes).
   **fish, shells spawned before this existed, and no integration all hold**, with "start it
   yourself".

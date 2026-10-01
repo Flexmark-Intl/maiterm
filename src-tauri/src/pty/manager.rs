@@ -1849,7 +1849,9 @@ if (( ${+widgets[bracketed-paste]} )) && [[ ${widgets[bracketed-paste]} != user:
     # paste: highlight it doesn't wait. Cost: pasted text isn't highlighted.
     local -a zle_highlight=(${zle_highlight:#paste:*}); (( $#zle_highlight )) || zle_highlight=(region:standout)
     zle _aiterm_orig_bracketed_paste -- "$@"
-    [[ $BUFFER == "$b" && $CURSOR == "$c" ]] && print -n "\e]1337;MaitermLine=$$;$(( ${#PREBUFFER} + ${#BUFFER} ))\a"
+    # vi command mode counts as not empty: typed keys there are commands, not text.
+    local n=$(( ${#PREBUFFER} + ${#BUFFER} )); [[ $KEYMAP == vicmd ]] && (( n += 1 ))
+    [[ $BUFFER == "$b" && $CURSOR == "$c" ]] && print -n "\e]1337;MaitermLine=$$;$n\a"
   }
   zle -N bracketed-paste _aiterm_bracketed_paste
   print -n "\e]1337;MaitermLineProbe=$$\a"

@@ -3,14 +3,19 @@
 //! maiTerm types an exited agent's resume command into a shell only when the shell's command
 //! line is EMPTY. zsh can be asked (the `ZSH_LINE_PROBE` widget in pty/manager.rs). macOS's
 //! /bin/bash is 3.2, which has no `READLINE_LINE`, so it can't be asked. Instead maiTerm's bash
-//! integration ends PS1 with an invisible mark, and the reader notes where the cursor stood the
-//! instant the prompt finished drawing. The line is empty iff the cursor is still exactly there,
-//! with nothing after it on that row.
+//! integration ends PS1 with an invisible mark, and the reader keeps it ONLY while nothing at all
+//! has been drawn since: **any output byte after the mark voids it.** An idle, empty prompt
+//! draws nothing; every way the line can stop being empty draws something — a typed key's echo,
+//! a paste, type-ahead readline redraws after the prompt, a continuation prompt (PS2), the
+//! `(reverse-i-search)` banner, vi-mode's bell. A redraw that re-prints PS1 (Ctrl-L, SIGWINCH, a
+//! job notice) re-prints the mark too. Erring this way costs a hold (typed, then deleted back to
+//! empty, still holds until the next prompt), never a resume glued onto a command.
 //!
-//! That catches what outside signals missed: type-ahead entered while the previous command ran is
-//! drawn by readline AFTER the prompt (cursor moves on); a paste is drawn after it; a continuation
-//! prompt (PS2) carries no mark, so the cursor is no longer at the last one. Anything unexpected
-//! — a mark split across two reads, scrollback trimmed under it — reads as not empty.
+//! This replaced comparing the cursor's position with where it stood at the mark (review of
+//! e1cac85): once scrollback is at its cap, "history size + screen line" stops naming a row, and
+//! a continuation prompt — or a line exactly a multiple of the width long — scrolled the cursor
+//! onto the stored coordinates and read as empty. The position is still checked, as a sanity
+//! check, but the decision is "nothing drawn since".
 
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
@@ -42,31 +47,54 @@ fn next_mark(data: &[u8], from: usize) -> Option<(usize, bool)> {
     best
 }
 
+/// What is known about the current prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptEnd {
+    /// The prompt finished drawing with the cursor here (absolute row, column), and nothing has
+    /// been drawn since.
+    Marked(i64, usize),
+    /// Something was drawn after the mark: the line is not known to be empty.
+    Drawn,
+}
+
 /// Feed `data` to the terminal, noting the cursor at each prompt-end mark and forgetting it at
-/// each command start — in byte order, so a mark and a B in the same read settle correctly.
+/// each command start — in byte order, so a mark and a B in the same read settle correctly — and
+/// voiding it on ANY byte drawn after it.
 pub fn advance<T: EventListener>(
     processor: &mut Processor,
     term: &mut Term<T>,
-    prompt_end: &mut Option<(i64, usize)>,
+    prompt_end: &mut Option<PromptEnd>,
     data: &[u8],
 ) {
     let mut from = 0;
     while let Some((end, is_prompt)) = next_mark(data, from) {
         processor.advance(term, &data[from..end]);
-        *prompt_end = is_prompt.then(|| cursor_at(term));
+        *prompt_end = is_prompt.then(|| {
+            let (row, col) = cursor_at(term);
+            PromptEnd::Marked(row, col)
+        });
         from = end;
+    }
+    if from < data.len() && prompt_end.is_some() {
+        // Something was drawn after the last mark: whatever it is, the prompt is no longer known
+        // to be untouched.
+        *prompt_end = Some(PromptEnd::Drawn);
     }
     processor.advance(term, &data[from..]);
 }
 
-/// Is the command line empty? `None` when there is no mark to judge by.
-pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<(i64, usize)>) -> Option<bool> {
-    let mark = prompt_end?;
+/// Is the command line empty? `None` when there is no prompt to judge by (no mark yet, or a
+/// command has started since).
+pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<PromptEnd>) -> Option<bool> {
+    let mark = match prompt_end? {
+        PromptEnd::Drawn => return Some(false),
+        PromptEnd::Marked(row, col) => (row, col),
+    };
+    // Nothing has been drawn since the mark, so the cursor can only have moved by input the shell
+    // didn't echo. Still check: a mismatch is never "empty".
     if cursor_at(term) != mark {
         return Some(false);
     }
-    // The cursor is at the mark; anything after it on the row (text left behind by a cursor
-    // moved back with Home or ←) is still on the line.
     let grid = term.grid();
     let row = &grid[grid.cursor.point.line];
     let rest_blank = (mark.1..grid.columns()).all(|c| matches!(row[Column(c)].c, ' ' | '\0'));
@@ -79,7 +107,7 @@ mod tests {
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::term::{test::TermSize, Config};
 
-    fn term() -> (Processor, Term<VoidListener>, Option<(i64, usize)>) {
+    fn term() -> (Processor, Term<VoidListener>, Option<PromptEnd>) {
         (Processor::new(), Term::new(Config::default(), &TermSize::new(40, 5), VoidListener), None)
     }
 
@@ -131,6 +159,43 @@ mod tests {
         advance(&mut p, &mut t, &mut m, b"output\r\n\x1b]133;D;0\x07");
         advance(&mut p, &mut t, &mut m, PROMPT);
         assert_eq!(line_is_empty(&t, m), Some(true));
+    }
+
+    /// Review of e1cac85: scrollback at its cap (none here), prompt on the bottom row — a scroll
+    /// lands the cursor back on the stored coordinates.
+    fn capped_at_bottom() -> (Processor, Term<VoidListener>, Option<PromptEnd>) {
+        let config = Config { scrolling_history: 0, ..Config::default() };
+        let (mut p, mut t, mut m) = (Processor::new(), Term::new(config, &TermSize::new(20, 5), VoidListener), None);
+        advance(&mut p, &mut t, &mut m, b"1\r\n2\r\n3\r\n4\r\n");
+        advance(&mut p, &mut t, &mut m, b"$ \x1b]1337;MaitermPromptEnd\x07");
+        (p, t, m)
+    }
+
+    #[test]
+    fn a_continuation_prompt_on_a_full_scrollback_is_not_empty() {
+        let (mut p, mut t, mut m) = capped_at_bottom();
+        assert_eq!(line_is_empty(&t, m), Some(true));
+        advance(&mut p, &mut t, &mut m, b"make deploy \\\r\n> ");
+        assert_eq!(line_is_empty(&t, m), Some(false));
+    }
+
+    #[test]
+    fn a_line_exactly_the_width_long_on_a_full_scrollback_is_not_empty() {
+        let (mut p, mut t, mut m) = capped_at_bottom();
+        advance(&mut p, &mut t, &mut m, b"aaaaaaaaaaaaaaaaaa \raa");
+        assert_eq!(line_is_empty(&t, m), Some(false));
+    }
+
+    #[test]
+    fn reverse_search_and_the_vi_bell_are_not_an_empty_line() {
+        let (mut p, mut t, mut m) = term();
+        advance(&mut p, &mut t, &mut m, b"0123456789abcdefghij$ \x1b]1337;MaitermPromptEnd\x07");
+        advance(&mut p, &mut t, &mut m, b"\r(reverse-i-search)`': ");
+        assert_eq!(line_is_empty(&t, m), Some(false));
+        let (mut p, mut t, mut m) = term();
+        advance(&mut p, &mut t, &mut m, PROMPT);
+        advance(&mut p, &mut t, &mut m, b"\x07");
+        assert_eq!(line_is_empty(&t, m), Some(false));
     }
 
     #[test]

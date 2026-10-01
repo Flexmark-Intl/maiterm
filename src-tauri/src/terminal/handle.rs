@@ -81,10 +81,9 @@ pub struct TerminalHandle {
     /// (`OSC 1337;MaitermPromptEnd`, appended to PS1 by maiTerm's bash integration). bash before
     /// 4.0 can't report its command line, so for bash the line is read off the grid instead.
     pub prompt_marks_pid: Option<u32>,
-    /// Where the cursor stood the moment the last prompt finished drawing: (absolute row —
-    /// history size + screen line — and column). Cleared when a command starts (OSC 133 B/C).
-    /// The command line is empty iff the cursor is still exactly here with nothing after it.
-    pub prompt_end: Option<(i64, usize)>,
+    /// The last prompt's end: marked (and nothing drawn since), or drawn over. Cleared when a
+    /// command starts (OSC 133 B/C). See `terminal/prompt_line.rs`.
+    pub prompt_end: Option<crate::terminal::prompt_line::PromptEnd>,
 }
 
 impl TerminalHandle {
