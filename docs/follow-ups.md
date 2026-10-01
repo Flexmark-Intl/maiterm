@@ -478,7 +478,13 @@ because this is the one place a follow-up types into a shell:
   cursor's position with where it stood at the mark instead, and review of e1cac85 broke it: once
   scrollback is at its cap, "history size + screen line" stops naming a row, so a continuation
   prompt — or a line exactly a multiple of the width long — scrolled the cursor back onto the
-  stored coordinates and read as empty. A mark split across two reads is missed and holds. zsh's
+  stored coordinates and read as empty. **And nothing written to the PTY since the mark**
+  (review of 5cd717a): with the tty's echo off readline redisplays nothing, and a pending Esc,
+  Ctrl-X or vi-command prefix leaves the line empty but would eat the resume's first keys — both
+  are input that draws nothing, but input all the same, so the mark records the PTY's input byte
+  count and any change voids it. Type-ahead with echo off is written *before* the mark, so the
+  bash `PROMPT_COMMAND` also reports echo-off (`MaitermNoEcho`, via `stty -a`) and that prompt
+  is never empty. A mark split across two reads is missed and holds. zsh's
   answer likewise counts vi command mode as not empty: keys typed there are commands. Verified against bytes captured from bash 3.2.57: a fresh prompt reads empty,
   `git commit -am wip` typed during `sleep 1` reads not empty (tests use those exact bytes).
   **fish, shells spawned before this existed, and no integration all hold**, with "start it

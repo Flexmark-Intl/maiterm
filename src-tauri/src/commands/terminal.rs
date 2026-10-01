@@ -192,7 +192,13 @@ pub async fn probe_shell_line(
                 if handle.prompt_marks_pid != Some(expect_pid) {
                     return Ok(None);
                 }
-                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end);
+                let written = state
+                    .pty_stats
+                    .read()
+                    .get(&pty_id)
+                    .map(|s| s.bytes_written.load(std::sync::atomic::Ordering::Relaxed));
+                let Some(written) = written else { return Ok(None) };
+                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end, written);
                 return Ok(empty.map(|e| ShellLine { pid: expect_pid, len: if e { 0 } else { 1 } }));
             }
             handle.line_report = None;

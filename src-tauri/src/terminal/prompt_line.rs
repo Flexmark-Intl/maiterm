@@ -11,6 +11,13 @@
 //! job notice) re-prints the mark too. Erring this way costs a hold (typed, then deleted back to
 //! empty, still holds until the next prompt), never a resume glued onto a command.
 //!
+//! Input that draws NOTHING is caught by the input side (review of 5cd717a): with the tty's echo
+//! off readline doesn't redisplay at all, and a pending Esc / Ctrl-X / vi-command prefix leaves
+//! the line empty but would eat the resume's first keys. Both are bytes WRITTEN to the PTY, so the
+//! mark records the PTY's input byte count and any change voids it. Type-ahead with echo off was
+//! written before the mark, so the bash integration also reports echo-off before the prompt
+//! (`MaitermNoEcho`), and that prompt is never empty.
+//!
 //! This replaced comparing the cursor's position with where it stood at the mark (review of
 //! e1cac85): once scrollback is at its cap, "history size + screen line" stops naming a row, and
 //! a continuation prompt — or a line exactly a multiple of the width long — scrolled the cursor
@@ -50,29 +57,42 @@ fn next_mark(data: &[u8], from: usize) -> Option<(usize, bool)> {
 /// What is known about the current prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptEnd {
-    /// The prompt finished drawing with the cursor here (absolute row, column), and nothing has
-    /// been drawn since.
-    Marked(i64, usize),
-    /// Something was drawn after the mark: the line is not known to be empty.
+    /// The prompt finished drawing with the cursor here (absolute row, column), when this many
+    /// bytes had been written to the PTY — and nothing has been drawn since.
+    Marked(i64, usize, u64),
+    /// Something was drawn after the mark, or the prompt was drawn with the tty's echo off: the
+    /// line is not known to be empty.
     Drawn,
 }
 
 /// Feed `data` to the terminal, noting the cursor at each prompt-end mark and forgetting it at
 /// each command start — in byte order, so a mark and a B in the same read settle correctly — and
 /// voiding it on ANY byte drawn after it.
+///
+/// `written`: the PTY's input byte count now. Input that draws nothing (keys with the tty's echo
+/// off, a pending Esc / Ctrl-X / vi-command prefix) is caught by comparing it at probe time.
+/// `no_echo`: the shell reported, before this prompt, that the tty's echo is off — keys typed
+/// ahead then sit on the line invisibly, so that prompt is never empty (review of 5cd717a).
 pub fn advance<T: EventListener>(
     processor: &mut Processor,
     term: &mut Term<T>,
     prompt_end: &mut Option<PromptEnd>,
+    no_echo: &mut bool,
+    written: u64,
     data: &[u8],
 ) {
     let mut from = 0;
     while let Some((end, is_prompt)) = next_mark(data, from) {
         processor.advance(term, &data[from..end]);
-        *prompt_end = is_prompt.then(|| {
+        *prompt_end = if !is_prompt {
+            *no_echo = false;
+            None
+        } else if std::mem::take(no_echo) {
+            Some(PromptEnd::Drawn)
+        } else {
             let (row, col) = cursor_at(term);
-            PromptEnd::Marked(row, col)
-        });
+            Some(PromptEnd::Marked(row, col, written))
+        };
         from = end;
     }
     if from < data.len() && prompt_end.is_some() {
@@ -84,11 +104,13 @@ pub fn advance<T: EventListener>(
 }
 
 /// Is the command line empty? `None` when there is no prompt to judge by (no mark yet, or a
-/// command has started since).
-pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<PromptEnd>) -> Option<bool> {
+/// command has started since). `written`: the PTY's input byte count now — anything written
+/// since the mark (a key, a paste, the phone, a focus report) means not known to be empty.
+pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<PromptEnd>, written: u64) -> Option<bool> {
     let mark = match prompt_end? {
         PromptEnd::Drawn => return Some(false),
-        PromptEnd::Marked(row, col) => (row, col),
+        PromptEnd::Marked(_, _, at) if at != written => return Some(false),
+        PromptEnd::Marked(row, col, _) => (row, col),
     };
     // Nothing has been drawn since the mark, so the cursor can only have moved by input the shell
     // didn't echo. Still check: a mismatch is never "empty".
@@ -113,13 +135,41 @@ mod tests {
 
     const PROMPT: &[u8] = b"\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07";
 
+    /// The reader's call with echo on and nothing written to the PTY.
+    fn adv(p: &mut Processor, t: &mut Term<VoidListener>, m: &mut Option<PromptEnd>, data: &[u8]) {
+        advance(p, t, m, &mut false, 0, data);
+    }
+
+    #[test]
+    fn input_that_draws_nothing_still_counts() {
+        // Review of 5cd717a: with the tty's echo off, or a pending Esc / Ctrl-X / vi-command
+        // prefix, keys change the line (or will eat ours) and draw nothing. They were WRITTEN.
+        let (mut p, mut t, mut m) = term();
+        advance(&mut p, &mut t, &mut m, &mut false, 100, PROMPT);
+        assert_eq!(line_is_empty(&t, m, 100), Some(true));
+        assert_eq!(line_is_empty(&t, m, 103), Some(false));
+    }
+
+    #[test]
+    fn a_prompt_drawn_with_echo_off_is_never_empty() {
+        // Type-ahead with echo off sits on the line unseen, written before the mark.
+        let (mut p, mut t, mut m) = term();
+        let mut no_echo = true;
+        advance(&mut p, &mut t, &mut m, &mut no_echo, 0, PROMPT);
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert!(!no_echo, "consumed by the prompt it was reported for");
+        advance(&mut p, &mut t, &mut m, &mut no_echo, 0, b"\r\n\x1b]133;B\x07out\r\n");
+        advance(&mut p, &mut t, &mut m, &mut no_echo, 0, PROMPT);
+        assert_eq!(line_is_empty(&t, m, 0), Some(true), "the next prompt, echo back on, is judged afresh");
+    }
+
     #[test]
     fn a_fresh_prompt_is_empty_and_typing_makes_it_not() {
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, PROMPT);
-        assert_eq!(line_is_empty(&t, m), Some(true));
-        advance(&mut p, &mut t, &mut m, b"git comm");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,PROMPT);
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        adv(&mut p, &mut t, &mut m,b"git comm");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
@@ -128,24 +178,24 @@ mod tests {
         let (mut p, mut t, mut m) = term();
         let mut bytes = PROMPT.to_vec();
         bytes.extend_from_slice(b"git commit -am wip");
-        advance(&mut p, &mut t, &mut m, &bytes);
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,&bytes);
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
     fn text_behind_a_cursor_moved_back_to_the_mark_still_counts() {
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, PROMPT);
-        advance(&mut p, &mut t, &mut m, b"rm -rf out\x1b[10D"); // typed, then Home-ish
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,PROMPT);
+        adv(&mut p, &mut t, &mut m,b"rm -rf out\x1b[10D"); // typed, then Home-ish
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
     fn a_continuation_prompt_is_not_the_marked_prompt() {
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, PROMPT);
-        advance(&mut p, &mut t, &mut m, b"echo a \\\r\n> ");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,PROMPT);
+        adv(&mut p, &mut t, &mut m,b"echo a \\\r\n> ");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
@@ -153,12 +203,12 @@ mod tests {
         let (mut p, mut t, mut m) = term();
         let mut bytes = PROMPT.to_vec();
         bytes.extend_from_slice(b"\r\n\x1b]133;B\x07");
-        advance(&mut p, &mut t, &mut m, &bytes);
-        assert_eq!(line_is_empty(&t, m), None);
+        adv(&mut p, &mut t, &mut m,&bytes);
+        assert_eq!(line_is_empty(&t, m, 0), None);
         // ...and the next prompt is judged on its own mark.
-        advance(&mut p, &mut t, &mut m, b"output\r\n\x1b]133;D;0\x07");
-        advance(&mut p, &mut t, &mut m, PROMPT);
-        assert_eq!(line_is_empty(&t, m), Some(true));
+        adv(&mut p, &mut t, &mut m,b"output\r\n\x1b]133;D;0\x07");
+        adv(&mut p, &mut t, &mut m,PROMPT);
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
     }
 
     /// Review of e1cac85: scrollback at its cap (none here), prompt on the bottom row — a scroll
@@ -166,36 +216,36 @@ mod tests {
     fn capped_at_bottom() -> (Processor, Term<VoidListener>, Option<PromptEnd>) {
         let config = Config { scrolling_history: 0, ..Config::default() };
         let (mut p, mut t, mut m) = (Processor::new(), Term::new(config, &TermSize::new(20, 5), VoidListener), None);
-        advance(&mut p, &mut t, &mut m, b"1\r\n2\r\n3\r\n4\r\n");
-        advance(&mut p, &mut t, &mut m, b"$ \x1b]1337;MaitermPromptEnd\x07");
+        adv(&mut p, &mut t, &mut m,b"1\r\n2\r\n3\r\n4\r\n");
+        adv(&mut p, &mut t, &mut m,b"$ \x1b]1337;MaitermPromptEnd\x07");
         (p, t, m)
     }
 
     #[test]
     fn a_continuation_prompt_on_a_full_scrollback_is_not_empty() {
         let (mut p, mut t, mut m) = capped_at_bottom();
-        assert_eq!(line_is_empty(&t, m), Some(true));
-        advance(&mut p, &mut t, &mut m, b"make deploy \\\r\n> ");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        adv(&mut p, &mut t, &mut m,b"make deploy \\\r\n> ");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
     fn a_line_exactly_the_width_long_on_a_full_scrollback_is_not_empty() {
         let (mut p, mut t, mut m) = capped_at_bottom();
-        advance(&mut p, &mut t, &mut m, b"aaaaaaaaaaaaaaaaaa \raa");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,b"aaaaaaaaaaaaaaaaaa \raa");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
     fn reverse_search_and_the_vi_bell_are_not_an_empty_line() {
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, b"0123456789abcdefghij$ \x1b]1337;MaitermPromptEnd\x07");
-        advance(&mut p, &mut t, &mut m, b"\r(reverse-i-search)`': ");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,b"0123456789abcdefghij$ \x1b]1337;MaitermPromptEnd\x07");
+        adv(&mut p, &mut t, &mut m,b"\r(reverse-i-search)`': ");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, PROMPT);
-        advance(&mut p, &mut t, &mut m, b"\x07");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,PROMPT);
+        adv(&mut p, &mut t, &mut m,b"\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
@@ -204,20 +254,20 @@ mod tests {
         // fresh prompt, then `sleep 1` with `git commit -am wip` typed while it ran — readline
         // redraws the type-ahead after the next prompt's mark.
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]1337;MaitermPromptMarks=23558\x07me@host$ \x1b]1337;MaitermPromptEnd\x07");
-        assert_eq!(line_is_empty(&t, m), Some(true));
-        advance(&mut p, &mut t, &mut m, b"sleep 1\r\n\x1b]133;B\x07git commit -am wip\x1b]133;D;0\x07\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07git commit -am wip");
-        assert_eq!(line_is_empty(&t, m), Some(false));
+        adv(&mut p, &mut t, &mut m,b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]1337;MaitermPromptMarks=23558\x07me@host$ \x1b]1337;MaitermPromptEnd\x07");
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        adv(&mut p, &mut t, &mut m,b"sleep 1\r\n\x1b]133;B\x07git commit -am wip\x1b]133;D;0\x07\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07git commit -am wip");
+        assert_eq!(line_is_empty(&t, m, 0), Some(false));
     }
 
     #[test]
     fn a_redrawn_prompt_moves_the_mark_with_it() {
         // Ctrl-L / SIGWINCH: readline redraws PS1, mark included.
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, PROMPT);
+        adv(&mut p, &mut t, &mut m,PROMPT);
         let mut bytes = b"\x1b[H\x1b[2J".to_vec();
         bytes.extend_from_slice(b"me@host$ \x1b]1337;MaitermPromptEnd\x07");
-        advance(&mut p, &mut t, &mut m, &bytes);
-        assert_eq!(line_is_empty(&t, m), Some(true));
+        adv(&mut p, &mut t, &mut m,&bytes);
+        assert_eq!(line_is_empty(&t, m, 0), Some(true));
     }
 }

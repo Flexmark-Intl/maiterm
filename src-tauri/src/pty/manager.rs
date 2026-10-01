@@ -254,6 +254,9 @@ pub fn spawn_pty(
                             // report its command line, so the reader notes where the cursor is
                             // when PS1 finishes drawing. Re-added if something rewrites PS1.
                             r#" [[ $PS1 == *MaitermPromptEnd* ]] || PS1="$PS1"'\[\e]1337;MaitermPromptEnd\a\]';"#,
+                            // Echo off (a killed password prompt or TUI): keys typed ahead would
+                            // sit on the coming line unseen, so that prompt is never "empty".
+                            r#" [[ $(stty -a 2>/dev/null) =~ (^|[[:space:]])-echo([[:space:]]|$) ]] && printf '\033]1337;MaitermNoEcho\007';"#,
                             r#" [[ -n "$__aiterm_pm" ]] || {{ __aiterm_pm=1; printf '\033]1337;MaitermPromptMarks=%s\007' "$$"; }};"#,
                             r#"{}"#,
                             r#" __aiterm_at_prompt=1"#,
@@ -564,6 +567,10 @@ pub fn spawn_pty(
                 Ok(n) => {
                     // Track bytes read for diagnostics + resize coalescing
                     let mut total_read: u64 = n as u64;
+                    // Input bytes so far — the prompt-end mark records it (terminal/prompt_line.rs).
+                    // Read BEFORE this output is parsed: `write_pty` counts a write before the shell
+                    // can see it, so any key that reaches the shell after the mark is counted later.
+                    let mut written: u64 = 0;
                     {
                         use std::sync::atomic::Ordering;
                         let stats = state_reader.pty_stats.read();
@@ -571,6 +578,7 @@ pub fn spawn_pty(
                             s.bytes_read.fetch_add(n as u64, Ordering::Relaxed);
                             s.last_read_ms.store(epoch_millis(), Ordering::Relaxed);
                             total_read = s.bytes_read.load(Ordering::Relaxed);
+                            written = s.bytes_written.load(Ordering::Relaxed);
                         }
                     }
                     let data = &buf[..n];
@@ -585,6 +593,7 @@ pub fn spawn_pty(
                                     OscEvent::LineProbe { pid } => handle.line_probe_pid = Some(*pid),
                                     OscEvent::LineReport { pid, len } => handle.line_report = Some((*pid, *len)),
                                     OscEvent::PromptMarks { pid } => handle.prompt_marks_pid = Some(*pid),
+                                    OscEvent::NoEcho => handle.prompt_no_echo = true,
                                     _ => {}
                                 }
                                 if let OscEvent::ShellIntegration { cmd, exit_code } = event {
@@ -638,7 +647,7 @@ pub fn spawn_pty(
                                 );
                             }
                             // Recorded on the handle above; `probe_shell_line` reads them.
-                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } | OscEvent::PromptMarks { .. } => {}
+                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } | OscEvent::PromptMarks { .. } | OscEvent::NoEcho => {}
                         }
                     }
 
@@ -650,7 +659,14 @@ pub fn spawn_pty(
                         let mut registry = state_reader.terminal_registry.write();
                         if let Some(handle) = registry.get_mut(&pty_id_clone) {
                             handle.term.selection = handle.selection.take();
-                            crate::terminal::prompt_line::advance(&mut handle.processor, &mut handle.term, &mut handle.prompt_end, data);
+                            crate::terminal::prompt_line::advance(
+                                &mut handle.processor,
+                                &mut handle.term,
+                                &mut handle.prompt_end,
+                                &mut handle.prompt_no_echo,
+                                written,
+                                data,
+                            );
                             handle.selection = handle.term.selection.take();
                             detect_resume_menu(handle, data, total_read)
                         } else {
