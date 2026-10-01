@@ -261,7 +261,7 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
   const script = typeof o.script === 'string' ? o.script : '';
   if (!script.trim()) return refuse('bad_script', '`when_script.script` must be the script to run.');
   if (UNSHOWABLE.test(script)) {
-    return refuse('bad_script', 'The script contains a control or invisible formatting character (a CR, an escape, a bidi or zero-width mark). Your human approves the script as shown, so write it in plain text — use \\r, \\033 and the like as escapes instead.');
+    return refuse('bad_script', 'The script contains a character that would not show truthfully on your human’s approval card: a control character (a CR, an escape), an invisible formatting mark (bidi, zero-width, a variation selector), or a space other than the plain one (a no-break space). Your human approves the script as shown, so write it in plain text — use \\r, \\033 and the like as escapes instead.');
   }
   if (new TextEncoder().encode(script).length > SCRIPT_MAX_BYTES) {
     return refuse('bad_script', `A watch script can be at most ${SCRIPT_MAX_BYTES / 1024} KB. Keep the logic in the script and the data in files.`);

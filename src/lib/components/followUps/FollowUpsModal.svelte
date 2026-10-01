@@ -42,8 +42,9 @@
   }
 
   /** Lines as the script has them: a trailing newline ends the last line, it doesn't add one. */
-  function lineCount(script: string): number {
-    return script.replace(/\n$/, '').split('\n').length;
+  function linesText(script: string): string {
+    const n = script.replace(/\n$/, '').split('\n').length;
+    return `${n} line${n === 1 ? '' : 's'}`;
   }
 
   /** "checked 40s ago: not yet", for a script's row. */
@@ -195,7 +196,7 @@
                   <div class="script-label">{f.due.label ?? 'watch script'}</div>
                   <pre class="script">{f.due.script}</pre>
                   <div class="script-meta">
-                    {lineCount(f.due.script ?? '')} lines, {(f.due.script ?? '').length} characters
+                    {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters
                     · in <code>{f.due.cwd}</code> · every {secsText(f.due.every_secs ?? 60)} · up to {f.due.timeout_secs ?? 10}s a run
                     {#if !v.awaiting_approval && !f.due.met_at}· {runText(v.id)}{/if}
                   </div>
