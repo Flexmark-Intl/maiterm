@@ -422,7 +422,11 @@ the delivery gate's answer is "no agent" (no session entry, or a stale one whose
 liveness probe can't find). It does not call the Overlord's `recoverTab`, whose `stopped` verdict
 comes from the Overlord's own probe cycle and which types a bracketed paste; it reuses the same
 pieces (`resumeCommandFor` + `interpolateVariables`, the `%` refusal) behind a stricter gate,
-because this is the one place a follow-up types into a shell:
+because this is the one place a follow-up types into a shell. **Verified live** (bash 3.2, the
+dev app, a real Claude Haiku): the agent `/exit`ed, the follow-up came due, maiTerm typed the
+resume, and delivered 15 s later; with `echo half-typed` on the shell line the probe read
+non-empty, after Ctrl-U still non-empty, and at a fresh prompt empty. The empty-line check took
+seven review rounds; each one found a way a resume could be glued onto a human's command.
 
 - **Preference `follow_ups_resume_agent`** (Preferences → Overlord → "Restart the agent for a
   follow-up", default on, inert while follow-ups are off). A human's Deliver now restarts it
