@@ -27,7 +27,8 @@ Frontend (xterm.js scrollback=0):
 - `handle.rs` — `TerminalHandle` wraps `Term<AitermEventProxy>`, `OscInterceptor`, VTE `Processor`
 - `event_proxy.rs` — `AitermEventProxy` implements `EventListener`, routes Title/Bell/Clipboard/PtyWrite events
 - `render.rs` — `render_viewport()` iterates grid cells, emits SGR sequences, returns `TerminalFrame`
-- `osc.rs` — `OscInterceptor` state machine scans raw bytes for OSC 7/9/133/633/1337
+- `osc.rs` — `OscInterceptor` state machine scans raw bytes for OSC 7/9/133/633/1337 (incl. maiTerm's own `Maiterm*` 1337 keys for the command-line probe)
+- `prompt_line.rs` — bash's "is the command line empty?" read off the grid against a PS1 prompt-end mark; its `advance` is what the PTY reader feeds bytes through (see Shell Integration)
 - `search.rs` — buffer search using `RegexSearch` (replaces @xterm/addon-search)
 - `serialize.rs` — buffer serialization/restore via VTE parser (replaces @xterm/addon-serialize)
 
@@ -141,6 +142,11 @@ OSC 133 (FinalTerm protocol) detects command start/finish for tab indicators. Co
 **Protocol**: `A` = prompt start, `B` = command start, `D;exitcode` = command finished
 
 **Local hooks** (Rust `pty/manager.rs`): Injected via env vars / ZDOTDIR shim before the shell starts.
+
+**Is the command line empty? (`probe_shell_line`, docs/follow-ups.md §6.2).** Follow-ups' resume-then-deliver types an agent's resume command into the SHELL, and only on a provably empty line — a non-empty one means the resume is glued onto a human's command and run. Seven review rounds shaped this; don't loosen any part without an adversarial test on a real shell.
+- **zsh is asked.** `ZSH_LINE_PROBE` (in the ZDOTDIR shim) wraps whatever `bracketed-paste` widget is bound; an EMPTY bracketed paste (`ESC[200~ESC[201~`) makes it print `OSC 1337;MaitermLine=<pid>;<len>` (`$PREBUFFER` + `$BUFFER`, +1 in vicmd). The shell announces `MaitermLineProbe=<pid>` at startup.
+- **bash is read off the grid** (`terminal/prompt_line.rs`) — macOS `/bin/bash` 3.2 has no `READLINE_LINE`. PROMPT_COMMAND appends an invisible `\[OSC 1337;MaitermPromptEnd\]` to PS1, announces `MaitermPromptMarks=<pid>`, and reports `MaitermPromptUnsafe` before a prompt with echo off or in vi mode. The PTY reader no longer calls `processor.advance` once per read: `prompt_line::advance` splits each read at those marks and at 133 B/C (complete OSC sequences only — alacritty sees identical bytes). The line is empty only while nothing has been DRAWN after the mark and nothing WRITTEN to the PTY (`PtyStats.bytes_written`) since it. The resume goes behind Ctrl-G Ctrl-U, which neutralises a typed-ahead prefix key (Esc, Ctrl-X, quoted-insert) the grid can't see.
+- Rust probes only the PTY's own child shell, only if it announced, and only while a fresh foreground read says it holds the tty. Anything else — fish, a nested shell, a shell spawned before this existed — answers `None` ("can't tell"), never empty.
 
 **Remote hooks** (`src/lib/utils/shellIntegration.ts`): Two context menu modes:
 - **Setup Shell Integration** — sends a one-liner to the current session (temporary). Uses `buildShellIntegrationSnippet()`.
