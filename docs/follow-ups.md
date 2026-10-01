@@ -1,7 +1,8 @@
 # maiTerm Follow-ups — an agent's own way to pick the work back up later
 
 > Status: **steps 1–5 built** 2026-09-30 (time, stack and task triggers, delivery, MCP tools,
-> the human side, resume-then-deliver); only usage-limit continuation remains (§9, §10). Proposed 09-26. Owner: Darryl.
+> the human side, resume-then-deliver). Usage-limit continuation (§9) and watch scripts (§5.1)
+> remain (§10). Proposed 09-26. Owner: Darryl.
 > Lives under the Overlord: live only when the Overlord and **Enable follow-ups** are both on
 > (§4). Not yet released.
 > Scope: an agent (or its human) schedules a prompt to be delivered back into **its own tab**
@@ -268,9 +269,117 @@ calls `initSession`.
 - Event follow-ups always carry an `expires_at`: 7 days, or `expires_in_minutes` up to that.
 - Only the calling tab's project: a task id from another project is refused (`other_project`).
 
-Not in v1, deliberately: file changes, CI, arbitrary shell conditions. Each is either a
-polling loop maiTerm would have to own or a way to run a command on a schedule, and the
-second is exactly what §2's "never typed into a shell" rules out.
+Not in v1, deliberately: file changes, CI, arbitrary shell conditions. Those are what the watch
+script (§5.1, proposed) is for. It is a polling loop maiTerm owns, but the loop runs a script, not
+the model, and nothing is ever typed into the tab's shell, so §2.3 still holds.
+
+### 5.1 Watch scripts (proposed 2026-10-01, step 7)
+
+**The idea.** The agent writes the condition as a script. maiTerm runs it on a schedule, out of
+band, and the follow-up comes due when the script says so. While it waits, no tokens are spent.
+
+**Why not the alternatives:**
+
+- **Not `/loop` or in-session cron.** Those wake the *model* on every check: a turn spent, often
+  to learn there was nothing to do. Here the model wakes once, when there is work.
+- **Not an agent-started background watcher.** That is a long-lived process that the agent's
+  runtime has to clean up. Claude Code now kills background jobs after 30 minutes, apparently
+  because agents left them running, so such a watcher can't outlive a long wait.
+- **A watch script has neither problem.** Each run is short, bounded and owned by maiTerm. The
+  schedule lives on `Tab.follow_ups`, so it survives the agent exiting and maiTerm restarting.
+
+**Scripting is the standard, not built-in predicates.** "A file exists" or "a URL returns 200"
+would cover the easy cases and push everything else back into `/loop`. The value is in *logic*:
+
+- "the CSV is non-empty AND the lock file is gone";
+- "the log has a new ERROR since the last run";
+- "the PR's checks finished, whichever way";
+- "the queue depth fell below 10".
+
+Simple checks are one-line scripts (`test -s out/export.csv`), so they need no feature of their
+own.
+
+```
+createFollowUp({
+  prompt: "The export finished. Import it and report.",
+  when_script: {
+    script: "#!/bin/bash\n...",   // the logic; no shebang → /bin/sh
+    every_seconds: 60,            // floor 15
+    timeout_seconds: 10,          // cap 60
+  },
+  expires_in_minutes: 1440        // the 7-day default and cap, as for event triggers
+})
+```
+
+**What agents are told.** A plain time follow-up stays valid: "come back in 20 minutes" is a
+fine use, and it is still how an agent replaces `/loop`. But when the agent is really waiting on
+a *condition*, the recommendation is a watch script. A time follow-up re-armed to check
+something spends a turn on every check, and that is `/loop` again. The `createFollowUp`
+description and the priming line say this plainly, in roughly these words: *"Waiting for
+something to happen? Prefer `when_script`, so the check runs without waking you. Use a time
+follow-up when you mean a time."*
+
+**The script's contract.** This is what the tool description teaches:
+
+- **Exit codes:**
+  - `0` means the condition is met: the follow-up comes due.
+  - `1` means not yet: run again later.
+  - Anything else, a timeout, or a failure to start means the script is broken. After 3 broken
+    runs in a row, the follow-up comes due with `outcome: "check_broken"`, carrying the stderr
+    tail and the exit code, so a typo is reported to the agent instead of waiting out 7 days.
+- **Stdout on the met run** goes into the envelope (capped, control characters stripped, as
+  `envelope` already does). The script tells the agent *what* it found ("3 new files: a, b, c"),
+  so the agent doesn't spend its first turn looking.
+- **State between runs:** `$MAITERM_WATCH_STATE` is the path of a file the script may read and
+  write, kept for the follow-up's life. "Changed since last time" is then the script's own logic
+  (compare, store, exit `1`), not a maiTerm mode.
+- **Other environment:** `MAITERM_WATCH_RUN` (the run count, from 1) and `MAITERM_TAB_ID`.
+
+**How maiTerm runs it.** All in Rust, not the webview, because an occluded webview is throttled
+when the screens sleep:
+
+- **The script file.** It is written once, at creation, under the app data dir with mode 0700,
+  and run directly (so a shebang works) or by `/bin/sh`.
+- **Each run:**
+  - is its own process group, with stdin set to `/dev/null`;
+  - starts in the tab's cwd as of creation;
+  - gets a minimal environment: `PATH`, `HOME`, `LANG` and the variables above;
+  - never gets the agent's environment, so no account credentials (`CLAUDE_CONFIG_DIR`, tokens)
+    and no `MAITERM_AUTH`;
+  - is killed as a whole group at the timeout.
+- **Load:** at most 4 scripts run at once across the app. A run still going when the next is due
+  is skipped, not queued.
+- **Met is persisted** through the existing `meet_tab_follow_up` (`met_at`, `outcome`). From
+  there it is an ordinary due follow-up: the draft check, the resume of an exited agent (§6.2),
+  late, expired.
+- **The script file and the state file are deleted** when the follow-up is taken, cancelled or
+  expires.
+
+**Where it is refused:**
+
+- **SSH tabs.** A local script would check the wrong machine. Running it over the tab's
+  ControlMaster socket, as the transcript mirror does (`mailink/mirror.rs`), is a later step.
+- **Exempt and archived tabs,** as for every follow-up.
+- **When the Overlord is off,** as for every follow-up (`follow_ups_live`).
+
+**Security: the open decision.** Today every command an agent runs passes its runtime's
+permission check at the moment it runs, while a human could see it. A watch script runs later,
+unattended, as the user, outside that check. A prompt-injected agent could use it to schedule
+anything. The proposal:
+
+- **The human approves each script once.** The tab shows a card with the exact script, and
+  approval is keyed by a hash of its content, so a changed script needs approval again.
+- **Until it is approved, the follow-up waits** and the badge says why. maiLink can approve it
+  too, once the protocol carries it (a version bump).
+- **A preference, off by default, allows running agents' watch scripts without asking.** That is
+  for people whose agents already run with permissions skipped, for whom the card adds nothing.
+- **The script is inline, never a path.** A file the agent could edit after approval would make
+  the approval meaningless.
+
+**Scale.** Like every follow-up, a watch script is one-shot (§2.2): an agent that wants to keep
+watching re-arms when it is delivered. Through the state file, the new script can pick up where
+the old one stopped. Re-arming costs one approval per new script content, so an unchanged script
+re-arms without a card.
 
 ## 6. Delivery
 
@@ -634,6 +743,7 @@ remains.
 4. Stack and task triggers. **Built** (§5 "As built").
 5. Resume-then-deliver (§6.2). **Built** (§6.2 "As built").
 6. Phase 2 (§9), after the signal is proven on real limit events.
+7. Watch scripts (§5.1). **Proposed**: the approval model needs a decision first.
 
 ## 11. Open questions
 
