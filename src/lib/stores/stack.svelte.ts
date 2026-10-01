@@ -199,10 +199,22 @@ function createStackStore() {
     return runtime.get(serviceId) ?? IDLE;
   }
 
+  /** Told of every status CHANGE, after it is applied — follow-ups wait on these (docs/follow-ups.md
+   *  §5). Edges, never levels: status is never persisted and reads `stopped` for a service nothing
+   *  has reported, so only a change this store makes is evidence that something happened. */
+  const transitionListeners = new Set<(serviceId: string, from: ServiceStatus, to: ServiceRuntime) => void>();
+
   function setRt(serviceId: string, patch: Partial<ServiceRuntime>) {
+    const before = rt(serviceId);
+    const after = { ...before, ...patch };
     const next = new Map(runtime);
-    next.set(serviceId, { ...rt(serviceId), ...patch });
+    next.set(serviceId, after);
     runtime = next;
+    if (after.status !== before.status) {
+      for (const fn of transitionListeners) {
+        try { fn(serviceId, before.status, after); } catch (e) { logError(`stack: transition listener: ${e}`); }
+      }
+    }
   }
 
   function workspaceOf(workspaceId: string): Workspace | undefined {
@@ -662,6 +674,11 @@ function createStackStore() {
     /** Runtime state for a service (idle defaults when never started). */
     runtime(serviceId: string): ServiceRuntime { return rt(serviceId); },
     status(serviceId: string): ServiceStatus { return rt(serviceId).status; },
+    /** Hear every status change (`to` is the runtime as it now stands). Returns the unsubscribe. */
+    onTransition(fn: (serviceId: string, from: ServiceStatus, to: ServiceRuntime) => void): () => void {
+      transitionListeners.add(fn);
+      return () => { transitionListeners.delete(fn); };
+    },
     boundTab,
     serviceForTab,
 

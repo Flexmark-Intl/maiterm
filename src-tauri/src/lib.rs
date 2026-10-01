@@ -737,6 +737,7 @@ pub fn run() {
             commands::workspace::set_tab_service_id,
             commands::workspace::add_tab_follow_up,
             commands::workspace::take_tab_follow_up,
+            commands::workspace::meet_tab_follow_up,
             commands::workspace::publish_stack_runtime,
             commands::stack::suggest_stack,
             commands::accounts::list_account_runtimes,

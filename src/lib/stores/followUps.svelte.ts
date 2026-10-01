@@ -21,7 +21,12 @@ import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { agentDelivery } from '$lib/stores/agentDeliveryLive';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
-import { resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, type CreateArgs, type Resolved, type FollowUpStatus } from '$lib/followUps/model';
+import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
+import { tasksStore } from '$lib/stores/tasks.svelte';
+import {
+  resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText,
+  type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type FollowUpStatus,
+} from '$lib/followUps/model';
 
 /** How often due follow-ups are looked for. Also runs on focus and visibility, because
  *  WKWebView throttles timers in an occluded window — the wall-clock comparison makes a late
@@ -34,7 +39,12 @@ export interface FollowUpView {
   text: string;
   author: string;
   status: FollowUpStatus;
+  /** A time one's due time; an event one's, once its event has happened. */
   due_at: string | null;
+  /** An event one's trigger, "when service `web` is ready"; null for a time one. */
+  trigger: string | null;
+  /** What happened, once an event one's condition is met: "it crashed (exit 1)". */
+  outcome: string | null;
   created_at: string;
   expires_at: string | null;
   /** Only for a `due` one: why it hasn't gone yet, as far as the tab itself shows — the
@@ -51,7 +61,17 @@ function createFollowUpsStore() {
   const delivering = new Set<string>();
   let timer: ReturnType<typeof setInterval> | undefined;
   let running = false;
+  let stopTransitions: (() => void) | undefined;
   const onWake = () => { void tick(); };
+
+  /** Every tab in this window that can hold follow-ups — live, archived, in a suspended workspace.
+   *  An event happens whatever the tab is doing; delivery is what waits for the agent. */
+  function* everyTab(): Generator<{ workspaceId: string; tab: Tab }> {
+    for (const ws of workspacesStore.workspaces) {
+      for (const pane of ws.panes) for (const tab of pane.tabs) yield { workspaceId: ws.id, tab };
+      for (const tab of ws.archived_tabs) yield { workspaceId: ws.id, tab };
+    }
+  }
 
   function locate(tabId: string): { workspaceId: string; tab: Tab } | null {
     for (const ws of workspacesStore.workspaces) {
@@ -87,6 +107,101 @@ function createFollowUpsStore() {
     const loc = locate(tabId);
     if (!loc) throw new Error('maiTerm does not know this tab.');
     mirror(tabId, await commands.addTabFollowUp(loc.workspaceId, tabId, f));
+  }
+
+  /** Record that an event follow-up's condition happened (§5) — in Rust, once; the first
+   *  observation stands. From then on it is due like a time one, and waits only for the agent. */
+  async function meet(workspaceId: string, tabId: string, f: FollowUp, outcome: string): Promise<void> {
+    try {
+      const list = await commands.meetTabFollowUp(workspaceId, tabId, f.id, new Date().toISOString(), outcome);
+      if (!list) return; // gone (delivered, cancelled, moved by a reload) or already met
+      mirror(tabId, list);
+      logInfo(`follow-ups: ${f.id.slice(0, 8)} on tab ${tabId.slice(0, 8)} is due — ${f.due.kind} ${f.due.label ?? ''}: ${outcome}`);
+    } catch (e) {
+      logError(`follow-ups: marking ${f.id.slice(0, 8)} met failed: ${e}`);
+    }
+  }
+
+  /** Waiting, unexpired event follow-ups in this window. */
+  function* waitingOnEvents(now: number): Generator<{ workspaceId: string; tab: Tab; f: FollowUp }> {
+    for (const { workspaceId, tab } of everyTab()) {
+      for (const f of tab.follow_ups ?? []) {
+        if (isWaitingOnEvent(f) && !isExpired(f, now)) yield { workspaceId, tab, f };
+      }
+    }
+  }
+
+  /** A stack service changed status. The only evidence a service came up or went down is a change
+   *  this window's stack store made — so these are met here, as they happen, and never by reading
+   *  the status later (it isn't persisted, and reads `stopped` for a service nobody started). */
+  function onServiceTransition(serviceId: string, from: string, to: ServiceRuntime) {
+    for (const { workspaceId, tab, f } of waitingOnEvents(Date.now())) {
+      if (f.due.service_id !== serviceId) continue;
+      const outcome = serviceOutcome(f.due.kind, from, to);
+      if (outcome) void meet(workspaceId, tab.id, f, outcome);
+    }
+  }
+
+  /** The conditions that ARE levels: a task that has ended (tasks are persisted), and anything a
+   *  follow-up waits on that no longer exists — which fires, with the reason, rather than waiting
+   *  a week for nothing (§3). Looked up in the workspace the condition was SET in, not the tab's
+   *  current one: a moved tab's follow-up still points where it pointed. */
+  async function checkConditions(now: number) {
+    for (const { workspaceId, tab, f } of [...waitingOnEvents(now)]) {
+      const ws = workspacesStore.workspaces.find(w => w.id === f.due.workspace_id);
+      let outcome: string | null;
+      if (!ws) {
+        // This window can't see that workspace's stack or tasks, so nothing here could ever meet it.
+        outcome = 'the workspace it was in was closed, or moved to another window';
+      } else if (f.due.kind === 'task_done') {
+        // Not loaded is not "deleted": an absent list is no evidence the task is gone.
+        if (!tasksStore.loaded) continue;
+        const task = tasksStore.find(ws.id, f.due.task_id ?? '')
+          // Parked with an archived tab, the task still exists (`archive_tab` lifts it off the board).
+          ?? ws.archived_tabs.flatMap(t => t.archived_tasks ?? []).find(t => t.id === f.due.task_id);
+        outcome = taskOutcome(task ? task.status : null);
+      } else {
+        outcome = (ws.stack ?? []).some(s => s.id === f.due.service_id) ? null : 'the service was removed from the stack';
+      }
+      if (outcome) await meet(workspaceId, tab.id, f, outcome);
+    }
+  }
+
+  /** What an event trigger names, looked up in the calling tab's project. Refuses a condition that
+   *  already holds: these fire on the NEXT change, so "when `web` is ready" for a service that is
+   *  ready would wait for it to go down and come back — tell the agent now instead. */
+  function resolveEvent(workspaceId: string, kind: EventKind, ref: string): ResolvedEvent {
+    const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
+    if (!ws) return { ok: false, reason: 'tab_not_found', detail: 'maiTerm does not know this tab’s project.' };
+    if (kind === 'task_done') {
+      if (!tasksStore.loaded) return { ok: false, reason: 'not_ready', detail: 'Tasks are still loading — try again in a moment.' };
+      const task = tasksStore.find(ws.id, ref)
+        ?? ws.archived_tabs.flatMap(t => t.archived_tasks ?? []).find(t => t.id === ref);
+      if (!task) {
+        const elsewhere = tasksStore.findAnywhere(ref);
+        return elsewhere
+          ? { ok: false, reason: 'other_project', detail: `Task ${ref} belongs to another project; a follow-up can wait only on this project's tasks.` }
+          : { ok: false, reason: 'unknown_task', detail: `No task ${ref} in this project — pass the full id from listTasks.` };
+      }
+      if (task.status === 'done' || task.status === 'dropped') {
+        return { ok: false, reason: 'already_ended', detail: `“${task.title}” has already ended (${task.status}) — act on it now.` };
+      }
+      return { ok: true, workspace_id: ws.id, task_id: task.id, label: task.title };
+    }
+    const services = ws.stack ?? [];
+    const s = services.find(x => x.id === ref) ?? services.find(x => x.name.toLowerCase() === ref.toLowerCase());
+    if (!s) {
+      const have = services.length ? `it has: ${services.map(x => x.name).join(', ')}` : 'it has none';
+      return { ok: false, reason: 'unknown_service', detail: `No service "${ref}" in this project's stack (${have}). listStack shows them.` };
+    }
+    const st = stackStore.status(s.id);
+    if (kind === 'service_ready' && st === 'ready') {
+      return { ok: false, reason: 'already_ready', detail: `\`${s.name}\` is already ready — act on it now. This trigger waits for the NEXT time it comes up.` };
+    }
+    if (kind === 'service_stopped' && st !== 'starting' && st !== 'running' && st !== 'ready') {
+      return { ok: false, reason: 'not_running', detail: `\`${s.name}\` isn't running (${st}), so it can't stop. Start it, or wait for it with when_service_ready.` };
+    }
+    return { ok: true, workspace_id: ws.id, service_id: s.id, label: s.name };
   }
 
   /** Why this tab can't take a follow-up right now, or null. Every check is one a live
@@ -210,6 +325,7 @@ function createFollowUpsStore() {
     running = true;
     try {
       const now = Date.now();
+      await checkConditions(now);
       for (const ws of workspacesStore.workspaces) {
         // A suspended workspace's tabs have no agents to deliver to; waking one because a
         // timer fired is the human's call (§6.2). Archived tabs wait for their restore.
@@ -229,6 +345,9 @@ function createFollowUpsStore() {
     init() {
       if (timer) return;
       timer = setInterval(() => { void tick(); }, TICK_MS);
+      // Subscribed whether or not the feature is live: an event that happens while follow-ups are
+      // off is still recorded, so it delivers when they are turned back on (§4 — off is held).
+      stopTransitions = stackStore.onTransition(onServiceTransition);
       window.addEventListener('focus', onWake);
       document.addEventListener('visibilitychange', onWake);
       void tick();
@@ -237,6 +356,8 @@ function createFollowUpsStore() {
     destroy() {
       if (timer) clearInterval(timer);
       timer = undefined;
+      stopTransitions?.();
+      stopTransitions = undefined;
       window.removeEventListener('focus', onWake);
       document.removeEventListener('visibilitychange', onWake);
     },
@@ -253,6 +374,7 @@ function createFollowUpsStore() {
         createdLastHour: recentCreations(tabId, now),
         author,
         newId: () => crypto.randomUUID(),
+        resolveEvent: (kind, ref) => resolveEvent(loc.workspaceId, kind, ref),
       });
       if (!r.ok) return r;
       // Counted before the await, so two creates in flight can't both slip under the limit.
@@ -274,7 +396,9 @@ function createFollowUpsStore() {
           text: f.text,
           author: f.author,
           status,
-          due_at: f.due.at ?? null,
+          due_at: f.due.kind === 'at' ? (f.due.at ?? null) : (f.due.met_at ?? null),
+          trigger: triggerText(f),
+          outcome: f.due.outcome ?? null,
           created_at: f.created_at,
           expires_at: f.expires_at ?? null,
           waiting,
@@ -308,7 +432,8 @@ function createFollowUpsStore() {
       if (isExpired(f, now)) return 'it has expired — cancel it, or add a new one';
       if (!preferencesStore.followUpsLive) return 'follow-ups are off (Preferences → Overlord)';
       const due = dueAt(f);
-      return deliverOne(loc.tab, f, now, due != null && due > now);
+      // Early: before its time, or before its event has happened.
+      return deliverOne(loc.tab, f, now, due == null || due > now);
     },
 
     /** Run the tick now (tests). */

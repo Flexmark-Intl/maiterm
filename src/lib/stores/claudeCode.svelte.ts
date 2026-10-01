@@ -1,7 +1,7 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
-import type { CreateArgs } from '$lib/followUps/model';
+import { triggerText, type CreateArgs } from '$lib/followUps/model';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -1156,11 +1156,12 @@ function createClaudeCodeStore() {
     try {
       const r = await followUpsStore.create(scope.tab.id, args, 'agent');
       if (!r.ok) return { error: r.detail, reason: r.reason };
-      logInfo(`follow-ups: tab ${scope.tab.id.slice(0, 8)} scheduled ${r.followUp.id.slice(0, 8)} for ${r.followUp.due.at}`);
+      const trigger = triggerText(r.followUp);
+      logInfo(`follow-ups: tab ${scope.tab.id.slice(0, 8)} scheduled ${r.followUp.id.slice(0, 8)} ${trigger ?? `for ${r.followUp.due.at}`}`);
       return {
         scheduled: true,
         id: r.followUp.id,
-        due_at: r.followUp.due.at,
+        ...(trigger ? { trigger } : { due_at: r.followUp.due.at }),
         expires_at: r.followUp.expires_at ?? null,
         note: 'Delivered back into this tab between turns, framed as ⟦FOLLOW-UP⟧. Cancel with cancelFollowUp if it stops mattering.',
       };

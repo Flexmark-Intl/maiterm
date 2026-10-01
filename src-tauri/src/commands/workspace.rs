@@ -1188,6 +1188,43 @@ pub fn take_tab_follow_up(
     Ok(taken.then_some(list))
 }
 
+/// Mark an event follow-up's condition as MET (docs/follow-ups.md §5): the service came up or
+/// stopped, the task ended, or what it waited on is gone. From then on it is due. Only once —
+/// the first observation stands, so two windows or two ticks racing can't rewrite when it
+/// happened — and never for a time follow-up, whose due time is its own. `None` when nothing
+/// changed: not there (cancelled, delivered, moved by a reload), already met, or a time one.
+#[tauri::command]
+pub fn meet_tab_follow_up(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    tab_id: String,
+    follow_up_id: String,
+    met_at: String,
+    outcome: String,
+) -> Result<Option<Vec<crate::state::workspace::FollowUp>>, String> {
+    let (met, list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
+        meet_follow_up(list, &follow_up_id, met_at, outcome)
+    })?;
+    Ok(met.then_some(list))
+}
+
+fn meet_follow_up(
+    list: &mut [crate::state::workspace::FollowUp],
+    id: &str,
+    met_at: String,
+    outcome: String,
+) -> bool {
+    match list.iter_mut().find(|f| f.id == id) {
+        Some(f) if f.due.kind != "at" && f.due.met_at.is_none() => {
+            f.due.met_at = Some(met_at);
+            f.due.outcome = Some(outcome);
+            true
+        }
+        _ => false,
+    }
+}
+
 #[tauri::command]
 pub fn set_tab_service_id(
     window: tauri::Window,
@@ -3349,7 +3386,7 @@ mod active_tab_pick_tests {
 
 #[cfg(test)]
 mod reload_carry_tests {
-    use super::{carry_tab_record, release_moved_claims};
+    use super::{carry_tab_record, meet_follow_up, release_moved_claims};
     use crate::state::workspace::{FollowUp, FollowUpDue, TabType};
     use crate::state::{CommsBinding, CommsMonitor, CommsMonitorChannel, Tab};
     use std::collections::HashMap;
@@ -3457,9 +3494,7 @@ mod reload_carry_tests {
                 due: FollowUpDue {
                     kind: "at".to_string(),
                     at: Some("2026-10-01T09:00:00Z".to_string()),
-                    workspace_id: None,
-                    service_id: None,
-                    task_id: None,
+                    ..Default::default()
                 },
                 author: "agent".to_string(),
                 created_at: "2026-09-30T09:00:00Z".to_string(),
@@ -3519,6 +3554,32 @@ mod reload_carry_tests {
             serde_json::to_value(&out).unwrap(),
             serde_json::to_value(&expected).unwrap()
         );
+    }
+
+    #[test]
+    fn an_event_follow_up_is_met_once_and_a_time_one_never() {
+        let event = |id: &str| FollowUp {
+            id: id.to_string(),
+            text: "look at the logs".to_string(),
+            due: FollowUpDue { kind: "service_ready".to_string(), service_id: Some("svc".to_string()), ..Default::default() },
+            author: "agent".to_string(),
+            created_at: "2026-09-30T09:00:00Z".to_string(),
+            expires_at: None,
+        };
+        let mut timed = event("t");
+        timed.due = FollowUpDue { kind: "at".to_string(), at: Some("2026-10-01T09:00:00Z".to_string()), ..Default::default() };
+        let mut list = vec![event("e"), timed];
+
+        assert!(meet_follow_up(&mut list, "e", "2026-09-30T10:00:00Z".into(), "it came up".into()));
+        assert!(
+            !meet_follow_up(&mut list, "e", "2026-09-30T11:00:00Z".into(), "it came up again".into()),
+            "the first observation stands"
+        );
+        assert_eq!(list[0].due.met_at.as_deref(), Some("2026-09-30T10:00:00Z"));
+        assert_eq!(list[0].due.outcome.as_deref(), Some("it came up"));
+        assert!(!meet_follow_up(&mut list, "t", "2026-09-30T10:00:00Z".into(), "x".into()), "a time follow-up has its own due");
+        assert!(list[1].due.met_at.is_none());
+        assert!(!meet_follow_up(&mut list, "gone", "2026-09-30T10:00:00Z".into(), "x".into()));
     }
 
     #[test]

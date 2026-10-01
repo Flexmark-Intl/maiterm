@@ -1016,6 +1016,12 @@ export async function takeTabFollowUp(workspaceId: string, tabId: string, follow
   return invoke('take_tab_follow_up', { workspaceId, tabId, followUpId });
 }
 
+/** Mark an event follow-up's condition met — once; the first observation stands. `null` when
+ *  nothing changed (gone, already met, or a time follow-up). Otherwise the new list. */
+export async function meetTabFollowUp(workspaceId: string, tabId: string, followUpId: string, metAt: string, outcome: string): Promise<FollowUp[] | null> {
+  return invoke('meet_tab_follow_up', { workspaceId, tabId, followUpId, metAt, outcome });
+}
+
 // Sound commands
 export async function listSystemSounds(): Promise<string[]> {
   return invoke('list_system_sounds');

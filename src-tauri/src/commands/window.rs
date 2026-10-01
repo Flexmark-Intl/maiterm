@@ -979,9 +979,7 @@ mod clone_ids_tests {
             due: FollowUpDue {
                 kind: "at".to_string(),
                 at: Some("2026-10-01T09:00:00Z".to_string()),
-                workspace_id: None,
-                service_id: None,
-                task_id: None,
+                ..Default::default()
             },
             author: "agent".to_string(),
             created_at: "2026-09-30T09:00:00Z".to_string(),

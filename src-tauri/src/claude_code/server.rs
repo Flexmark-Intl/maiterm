@@ -588,11 +588,11 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         .filter(|f| !expired(f))
         .map(|f| {
             // Echoed by the hook through sh's `echo`, which reads backslash escapes (`\c` cut the
-            // output short in testing), and inside a single-quoted command: neutralise both.
-            let text: String = f.text.chars().filter(|c| !c.is_control()).take(80).collect();
-            let text = text.replace('\\', "/").replace('\'', "\u{2019}");
-            let when = f.due.at.as_deref().unwrap_or(f.due.kind.as_str());
-            format!("{when}: \"{text}\"")
+            // output short in testing), and inside a single-quoted command: neutralise both —
+            // in the label too, which is a service name or task title someone typed.
+            let text: String = f.text.chars().take(80).collect();
+            let row = format!("{}: \"{text}\"", follow_up_when(&f.due));
+            row.chars().filter(|c| !c.is_control()).collect::<String>().replace('\\', "/").replace('\'', "\u{2019}")
         })
         .collect();
     let mut line = String::from(
@@ -615,6 +615,22 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         ));
     }
     Some(line)
+}
+
+/// When a pending follow-up goes, for the priming: its time, its condition, or "due now" for
+/// one whose condition has happened and is waiting only for the agent.
+fn follow_up_when(due: &crate::state::workspace::FollowUpDue) -> String {
+    if due.met_at.is_some() {
+        return "due now".to_string();
+    }
+    let label = due.label.as_deref().unwrap_or("?");
+    match due.kind.as_str() {
+        "at" => due.at.clone().unwrap_or_else(|| "at ?".to_string()),
+        "service_ready" => format!("when service {label} is ready"),
+        "service_stopped" => format!("when service {label} stops"),
+        "task_done" => format!("when task \u{201C}{label}\u{201D} ends"),
+        other => other.to_string(),
+    }
 }
 
 /// "web (ready, http://localhost:5173), api (crashed), db (running, :5432)" for the
@@ -4825,6 +4841,17 @@ mod tests {
         // No affinity at all is a different failure with its own message; this gate is only
         // about affinity that exists but was guessed.
         assert!(!refuse_on_inferred_identity("sendToBridgedAgent", None, false));
+    }
+
+    #[test]
+    fn the_priming_names_an_event_follow_ups_condition() {
+        use crate::state::workspace::FollowUpDue;
+        let due = |kind: &str| FollowUpDue { kind: kind.into(), label: Some("web".into()), ..Default::default() };
+        assert_eq!(super::follow_up_when(&due("service_ready")), "when service web is ready");
+        assert_eq!(super::follow_up_when(&due("service_stopped")), "when service web stops");
+        assert_eq!(super::follow_up_when(&due("task_done")), "when task \u{201C}web\u{201D} ends");
+        let met = FollowUpDue { met_at: Some("2026-09-30T10:00:00Z".into()), ..due("service_ready") };
+        assert_eq!(super::follow_up_when(&met), "due now");
     }
 
     #[test]

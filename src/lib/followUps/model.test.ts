@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { FollowUp } from '$lib/tauri/types';
 import {
   resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary,
-  MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
+  serviceOutcome, taskOutcome, MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
 } from './model';
 
 // Local-time fixtures, so clock text is deterministic whatever zone the tests run in.
@@ -188,5 +188,84 @@ describe('text helpers', () => {
   it('clockText adds the date only for another day', () => {
     expect(clockText(NOW, NOW)).toBe('14:02');
     expect(clockText(NOW, NOW + 24 * 60 * MIN)).toBe('2026-09-30 14:02');
+  });
+});
+
+describe('event triggers (§5)', () => {
+  const svc: CreateContext['resolveEvent'] = (kind, ref) =>
+    ref === 'web' ? { ok: true, workspace_id: 'ws-1', service_id: 'svc-1', label: 'web' }
+    : ref === 'busy' ? { ok: false, reason: 'already_ready', detail: '`busy` is already ready' }
+    : { ok: false, reason: kind === 'task_done' ? 'unknown_task' : 'unknown_service', detail: 'no such thing' };
+
+  function event(over: Partial<FollowUp['due']> = {}): FollowUp {
+    return fu({ due: { kind: 'service_stopped', workspace_id: 'ws-1', service_id: 'svc-1', label: 'web', ...over } });
+  }
+
+  it('records the condition, its workspace and a 7-day expiry', () => {
+    const r = resolveCreate({ text: 'read the crash log', when_service_stopped: 'web' }, ctx({ resolveEvent: svc }));
+    if (!r.ok) throw new Error(r.detail);
+    expect(r.followUp.due).toEqual({ kind: 'service_stopped', workspace_id: 'ws-1', service_id: 'svc-1', task_id: null, label: 'web' });
+    expect(r.followUp.expires_at).toBe(new Date(NOW + 7 * 24 * 60 * MIN).toISOString());
+  });
+
+  it('takes exactly one trigger, events included', () => {
+    const r = resolveCreate({ text: 'x', in_minutes: 5, when_service_ready: 'web' }, ctx({ resolveEvent: svc }));
+    expect(r.ok ? null : r.reason).toBe('need_one_trigger');
+  });
+
+  it('passes the lookup\'s refusal through, and caps the expiry at 7 days', () => {
+    const r = resolveCreate({ text: 'x', when_service_ready: 'busy' }, ctx({ resolveEvent: svc }));
+    expect(r.ok ? null : r.reason).toBe('already_ready');
+    const far = resolveCreate({ text: 'x', when_service_ready: 'web', expires_in_minutes: 7 * 24 * 60 + 1 }, ctx({ resolveEvent: svc }));
+    expect(far.ok ? null : far.reason).toBe('bad_expiry');
+    const none = resolveCreate({ text: 'x', when_task_done: 't-1' }, ctx());
+    expect(none.ok ? null : none.reason).toBe('bad_trigger');
+  });
+
+  it('is never due until met, then due from when it was met', () => {
+    const waiting = event();
+    expect(isDue(waiting, NOW + 999 * MIN)).toBe(false);
+    expect(whenText(waiting, NOW)).toBe('waiting for service `web` to stop');
+    const met = event({ met_at: new Date(NOW + 10 * MIN).toISOString(), outcome: 'it crashed (exit 1)' });
+    expect(isDue(met, NOW + 10 * MIN)).toBe(true);
+    expect(whenText(met, NOW + 13 * MIN)).toBe('due: service `web` stopped 3m ago');
+  });
+
+  it('tells the agent what happened, not only that it did', () => {
+    const met = event({ met_at: new Date(NOW + 10 * MIN).toISOString(), outcome: 'the service was removed from the stack' });
+    expect(envelope(met, NOW + 11 * MIN)).toContain(
+      'at 14:02 for when service `web` stopped — the service was removed from the stack, at 14:12 (delivered on time)',
+    );
+    expect(envelope(event(), NOW + 11 * MIN, true)).toContain('(delivered before it happened, at your human’s request)');
+  });
+
+  it('strips control characters from a typed label before it reaches the paste', () => {
+    const met = event({ label: 'we\u001b[201~b', met_at: new Date(NOW).toISOString(), outcome: 'it stopped' });
+    expect(envelope(met, NOW)).not.toContain('\u001b');
+  });
+});
+
+describe('serviceOutcome — edges, never levels', () => {
+  const rt = (status: string, lastExitCode: number | null = null, note: string | null = null) => ({ status, lastExitCode, note });
+
+  it('meets "ready" on entering ready, from anything else', () => {
+    expect(serviceOutcome('service_ready', 'running', rt('ready'))).toBe('it came up');
+    expect(serviceOutcome('service_ready', 'starting', rt('running'))).toBeNull();
+  });
+
+  it('meets "stopped" only from a running state — the stopped default is not a stop', () => {
+    expect(serviceOutcome('service_stopped', 'ready', rt('crashed', 1))).toBe('it crashed (exit 1)');
+    expect(serviceOutcome('service_stopped', 'running', rt('stopped', null, 'its tab was suspended'))).toBe('it stopped (its tab was suspended)');
+    expect(serviceOutcome('service_stopped', 'crashed', rt('stopped'))).toBeNull();
+    expect(serviceOutcome('service_stopped', 'stopped', rt('crashed'))).toBeNull();
+  });
+});
+
+describe('taskOutcome', () => {
+  it('counts dropped as an ending and says so; a missing task is news too', () => {
+    expect(taskOutcome('done')).toBe('it was done');
+    expect(taskOutcome('dropped')).toBe('it was DROPPED, not done');
+    expect(taskOutcome(null)).toBe('the task was deleted');
+    expect(taskOutcome('active')).toBeNull();
   });
 });

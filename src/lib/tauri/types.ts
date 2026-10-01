@@ -37,6 +37,12 @@ export interface FollowUpDue {
   workspace_id?: string | null;
   service_id?: string | null;
   task_id?: string | null;
+  /** The service's name or the task's title, as it was when the condition was set. */
+  label?: string | null;
+  /** An event condition that has happened (RFC 3339) — due from then on. Set once, in Rust. */
+  met_at?: string | null;
+  /** What happened, for the agent: "it came up", "it was dropped", "the service was removed". */
+  outcome?: string | null;
 }
 
 /** A prompt to deliver back into its tab's agent later (docs/follow-ups.md). */

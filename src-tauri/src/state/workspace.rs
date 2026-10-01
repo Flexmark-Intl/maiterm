@@ -409,7 +409,7 @@ pub struct FollowUp {
 /// variant an older build doesn't know makes that build fail to parse AppData, load empty
 /// state and overwrite the backup. With a string, an unknown kind still deserializes, and the
 /// follow-up is simply never due on the older build.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct FollowUpDue {
     /// "at" | "service_ready" | "service_stopped" | "task_done"
     pub kind: String,
@@ -425,6 +425,21 @@ pub struct FollowUpDue {
     pub service_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    /// What the condition was about, as it was named when set: the service's name or the task's
+    /// title. For the envelope, the list and the priming — the service or task may be renamed or
+    /// gone by the time anyone reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// An event condition that has HAPPENED (RFC 3339): from here on the follow-up is due, and
+    /// waits only for the agent. Persisted, because the event is observed once — a service
+    /// transition isn't seen again after a restart — and delivery may wait hours for the agent.
+    /// Set only through `meet_tab_follow_up`, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub met_at: Option<String>,
+    /// What happened, in words for the agent: "it came up", "it crashed", "it was dropped",
+    /// "the service was removed". Set with `met_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2305,9 +2320,7 @@ mod follow_up_import_tests {
             due: FollowUpDue {
                 kind: "at".to_string(),
                 at: Some("2026-10-01T09:00:00Z".to_string()),
-                workspace_id: None,
-                service_id: None,
-                task_id: None,
+                ..Default::default()
             },
             author: "agent".to_string(),
             created_at: "2026-09-30T09:00:00Z".to_string(),

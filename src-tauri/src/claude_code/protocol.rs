@@ -819,14 +819,17 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
     tools.extend(serde_json::json!([
         {
             "name": "createFollowUp",
-            "description": "Schedule a prompt to be delivered back to YOU, in this tab, later — so you pick the work up again without your human having to remember it. Use it when you have to come back to something: check a deploy in 20 minutes, look at CI once it has rerun, re-test tomorrow morning. maiTerm holds it, not your process: it survives you exiting and maiTerm restarting. It is delivered only between turns, framed as ⟦FOLLOW-UP⟧ so you know it is your own earlier note rather than your human, and removed once delivered. Pass exactly one of `in_minutes` or `at` (ISO 8601 with a zone). Limits: 1 minute to 7 days out, 10 pending per tab. It fires once; to keep checking, schedule the next one when it arrives. Write `text` as the instruction you will need then, with the context you have now — you may not remember why.",
+            "description": "Schedule a prompt to be delivered back to YOU, in this tab, later — so you pick the work up again without your human having to remember it. Use it when you have to come back to something: check a deploy in 20 minutes, look at CI once it has rerun, re-test tomorrow morning. maiTerm holds it, not your process: it survives you exiting and maiTerm restarting. It is delivered only between turns, framed as ⟦FOLLOW-UP⟧ so you know it is your own earlier note rather than your human, and removed once delivered. Pass exactly one trigger: `in_minutes` or `at` (ISO 8601 with a zone) for a time; `when_service_ready` / `when_service_stopped` (a stack service of this project, by name or id) to hear when it next comes up or goes down; or `when_task_done` (a task id) to hear when that task ends — done or dropped. Event triggers fire on the NEXT change, so one already in that state is refused; they wait at most 7 days (or `expires_in_minutes`). If the service or task is removed first, you are told that instead. Limits: 1 minute to 7 days out, 10 pending per tab. It fires once; to keep checking, schedule the next one when it arrives. Write `text` as the instruction you will need then, with the context you have now — you may not remember why.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "The prompt delivered back to you. Self-contained: say what to check and what to do about it." },
                     "in_minutes": { "type": "number", "description": "Deliver this many minutes from now (1 – 10080)." },
                     "at": { "type": "string", "description": "Deliver at this time: ISO 8601 with a zone, e.g. 2026-10-01T09:00:00-05:00." },
-                    "expires_in_minutes": { "type": "number", "description": "Optional. If it can't be delivered within this many minutes from now (you're busy or not running), drop it instead of delivering it late." }
+                    "when_service_ready": { "type": "string", "description": "Deliver when this stack service (name or id, from listStack) next reports ready." },
+                    "when_service_stopped": { "type": "string", "description": "Deliver when this running stack service (name or id) next stops or crashes." },
+                    "when_task_done": { "type": "string", "description": "Deliver when this task (id, from listTasks) ends: done, or dropped — the follow-up says which." },
+                    "expires_in_minutes": { "type": "number", "description": "Optional. If it can't be delivered within this many minutes from now (you're busy or not running, or the event hasn't happened), drop it instead of delivering it late. Event triggers default to 7 days." }
                 },
                 "required": ["text"]
             }

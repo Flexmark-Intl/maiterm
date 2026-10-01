@@ -1,7 +1,7 @@
 # maiTerm Follow-ups — an agent's own way to pick the work back up later
 
-> Status: **steps 1–3 built** 2026-09-30 (time triggers, delivery, MCP tools, the human side);
-> stack/task triggers and resume-then-deliver remain (§10). Proposed 09-26. Owner: Darryl.
+> Status: **steps 1–4 built** 2026-09-30 (time, stack and task triggers, delivery, MCP tools,
+> the human side); resume-then-deliver remains (§10). Proposed 09-26. Owner: Darryl.
 > Lives under the Overlord: live only when the Overlord and **Enable follow-ups** are both on
 > (§4). Not yet released.
 > Scope: an agent (or its human) schedules a prompt to be delivered back into **its own tab**
@@ -113,6 +113,12 @@ pub struct FollowUpDue {
     pub workspace_id: Option<String>,
     pub service_id: Option<String>,      // service_ready / service_stopped (stopped or crashed)
     pub task_id: Option<String>,         // task_done
+    pub label: Option<String>,           // the service name / task title when set, for every reader
+    // An event condition that HAPPENED: set once, in Rust (`meet_tab_follow_up` — the first
+    // observation stands), and from then on the follow-up is due like a time one. Persisted,
+    // because a service transition is seen once and delivery may wait hours for the agent.
+    pub met_at: Option<String>,
+    pub outcome: Option<String>,         // "it came up", "it crashed (exit 1)", "it was DROPPED, not done"…
 }
 ```
 
@@ -228,6 +234,28 @@ calls `initSession`.
   retraction is an ending it needs to know about. (This is the opposite of dependency
   handling, where `dropped` does not satisfy a dependent — there the question is "may I
   start", here it is "tell me what happened".)
+
+**As built (step 4, 2026-09-30):**
+
+- **Transitions come from one place.** `stackStore.setRt` is the only writer of a service's
+  status, and it tells `onTransition` listeners about every change. The follow-up store
+  listens from `init` (whether or not the feature is live: an event that happens while
+  follow-ups are off is still recorded, and delivers when they are back on). `serviceOutcome`
+  in `followUps/model.ts` decides, from `from` → `to`, whether the edge meets the follow-up and
+  what to tell the agent.
+- **Met is persisted.** The store calls `meet_tab_follow_up`, which sets `met_at` + `outcome`
+  once. `dueAt` is then `met_at`, so the delivery gate, the late check, the badge and the list
+  treat it exactly like a time follow-up that has come due.
+- **Levels are checked on the tick** (`checkConditions`): a task that has ended, and anything
+  that no longer exists — the condition's workspace (closed, or moved to another window, where
+  this window could never see it happen), the service, or the task. Tasks wait for
+  `tasksStore.loaded`: an unloaded list is not evidence that a task was deleted.
+- **A condition that already holds is refused at creation** (`already_ready`, `not_running`,
+  `already_ended`). These fire on the NEXT change, so accepting "when `web` is ready" for a
+  ready service would wait for it to go down and come back up. The refusal tells the agent to
+  act now instead.
+- Event follow-ups always carry an `expires_at`: 7 days, or `expires_in_minutes` up to that.
+- Only the calling tab's project: a task id from another project is refused (`other_project`).
 
 Not in v1, deliberately: file changes, CI, arbitrary shell conditions. Each is either a
 polling loop maiTerm would have to own or a way to run a command on a schedule, and the
@@ -476,8 +504,8 @@ a usage limit today:
 
 ## 10. Build order
 
-Steps 1–3 are **built** (2026-09-30), each reviewed until clean. Step 1 took three review rounds,
-step 2 five (the draft check was rebuilt twice before the screen read), step 3 two. Steps 4–6
+Steps 1–4 are **built** (2026-09-30), each reviewed until clean. Step 1 took three review rounds,
+step 2 five (the draft check was rebuilt twice before the screen read), step 3 two. Steps 5–6
 remain.
 
 1. `FollowUp` on `Tab` (Rust + TS), the lifecycle table in §3 wired and tested, including the
@@ -488,7 +516,7 @@ remain.
    trigger only, idle gate. `createFollowUp` / `listFollowUps` / `cancelFollowUp`, with the
    own-tab refusal and `PEER_ADDRESSING_TOOLS` entry in Rust (§2).
 3. The human side: badge, menu, list.
-4. Stack and task triggers.
+4. Stack and task triggers. **Built** (§5 "As built").
 5. Resume-then-deliver (§6.2).
 6. Phase 2 (§9), after the signal is proven on real limit events.
 
