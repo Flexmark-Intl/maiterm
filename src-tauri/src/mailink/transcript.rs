@@ -427,23 +427,28 @@ fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Optio
     // just fails to parse and is skipped, same as every other tail scan here. Claude msg_ids are the
     // per-turn uuids from the JSON, so a tail window (vs the whole file) can't shift them.
     let body = read_tail(&path, TRANSCRIPT_TAIL_BYTES)?;
-    // Walked from the newest line back, until `limit` turns that count are in hand (see
-    // `counts_toward_limit`): a stretch of tool calls is a line or two once folded, and must not
-    // use up the window. The old forward read took a fixed 12 lines per turn, which a tool-heavy
-    // stretch also outran.
-    let mut chunks: Vec<Vec<Value>> = Vec::new();
+    // Walked from the newest line back only to find where to start: until `limit` turns that
+    // count are in hand (see `counts_toward_limit`), since a stretch of tool calls is a line or
+    // two once folded and must not use up the window. The old forward read took a fixed 12 lines
+    // per turn, which a tool-heavy stretch also outran. The lines are then distilled FORWARD into
+    // one list: `push_line_messages` reads the previous row (a message typed mid-turn takes its
+    // place after the work it waited on), so distilling each line alone mis-dated those.
+    let mut kept: Vec<Value> = Vec::new();
     let mut counted = 0;
     for line in body.lines().rev() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        let mut from_line = Vec::new();
-        push_line_messages(&v, tools, &mut from_line);
-        counted += from_line.iter().filter(|m| counts_toward_limit(m)).count();
-        chunks.push(from_line);
+        let mut probe = Vec::new();
+        push_line_messages(&v, tools, &mut probe);
+        counted += probe.iter().filter(|m| counts_toward_limit(m)).count();
+        kept.push(v);
         if counted >= limit {
             break;
         }
     }
-    let msgs: Vec<Value> = chunks.into_iter().rev().flatten().collect();
+    let mut msgs: Vec<Value> = Vec::new();
+    for v in kept.iter().rev() {
+        push_line_messages(v, tools, &mut msgs);
+    }
     Some(keep_last_turns(msgs, limit))
 }
 
