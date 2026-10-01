@@ -3320,19 +3320,6 @@ function createOverlordStore() {
      * losing it because a paste couldn't land would be worse. `told` says what reached the
      * agent, with the same Overlord relay fallback as "Do it".
      */
-    /** Close a task's question without telling the agent (the human answered it in the tab).
-     *  Human-only, like answerBlocker; the task goes back to Active and the log says why. */
-    dismissBlocker(id: string, askedAt: string): { dismissed: boolean; detail?: string } {
-      const hit = tasksStore.findAnywhere(id);
-      if (!hit) return { dismissed: false, detail: 'No such task.' };
-      const { workspaceId, task } = hit;
-      const r = dismissBlockerCheck(task, askedAt);
-      if (!r.ok) return { dismissed: false, detail: r.detail };
-      tasksStore.update(workspaceId, id, { status: 'active', notes: appendNote(task, r.note, 'human') });
-      bumpLive();
-      return { dismissed: true };
-    },
-
     async answerBlocker(
       id: string,
       answer: BlockerAnswer,
@@ -3367,6 +3354,19 @@ function createOverlordStore() {
         task.id,
       );
       return { answered: true, told: 'agent' };
+    },
+
+    /** Close a task's question without telling the agent (the human answered it in the tab).
+     *  Human-only, like answerBlocker; the task goes back to Active and the log says why. */
+    dismissBlocker(id: string, askedAt: string): { dismissed: boolean; detail?: string } {
+      const hit = tasksStore.findAnywhere(id);
+      if (!hit) return { dismissed: false, detail: 'No such task.' };
+      const { workspaceId, task } = hit;
+      const r = dismissBlockerCheck(task, askedAt);
+      if (!r.ok) return { dismissed: false, detail: r.detail };
+      tasksStore.update(workspaceId, id, { status: 'active', notes: appendNote(task, r.note, 'human') });
+      bumpLive();
+      return { dismissed: true };
     },
 
     /**
