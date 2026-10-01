@@ -337,8 +337,9 @@ function createFollowUpsStore() {
         if ((await commands.getAgentLiveness(inst.ptyId)).ssh_foreground) return remote;
       } catch { /* no answer is no evidence of ssh; the folder check still applies */ }
     }
+    // `last_cwd` is often home-relative ("~/repo"); Rust expands a leading `~` when it runs.
     const cwd = terminalsStore.getOsc(tab.id)?.cwd || tab.last_cwd || '';
-    if (!cwd.startsWith('/')) {
+    if (!(cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))) {
       return { ok: false, reason: 'no_folder', detail: 'maiTerm can’t tell which folder this tab is in, so it doesn’t know where to run the script.' };
     }
     return { ok: true, cwd };

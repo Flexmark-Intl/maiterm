@@ -305,6 +305,12 @@ describe('watch scripts (§5.1)', () => {
     const RLO = String.fromCodePoint(0x202e), PDF = String.fromCodePoint(0x202c), ZWSP = String.fromCodePoint(0x200b);
     expect(bad({ script: `test -f ${RLO}hs | live${PDF}` })).toBe('bad_script'); // a bidi override
     expect(bad({ script: `true${ZWSP}; rm x` })).toBe('bad_script');
+    for (const cp of [0x2028, 0x2029, 0xfe0f, 0x3164, 0x115f, 0x00a0, 0x3000]) {
+      // Line/paragraph separators, a variation selector, Hangul fillers, no-break and ideographic
+      // spaces: each draws as nothing, or as an ordinary space the shell doesn't treat as one.
+      expect(bad({ script: `gh${String.fromCodePoint(cp)}pr checks 42` }), cp.toString(16)).toBe('bad_script');
+    }
+    expect(bad({ script: 'echo "café 日本 ✓"; exit 0' })).toBeNull();
     expect(bad({ script: '#!/bin/bash\n\tif true; then exit 0; fi\n' })).toBeNull();
     expect(bad({ script: 'x'.repeat(16 * 1024 + 1) })).toBe('bad_script');
     expect(bad({ script: 'true' }, { in_minutes: 5 })).toBe('need_one_trigger');

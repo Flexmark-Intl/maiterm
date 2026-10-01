@@ -35,11 +35,22 @@
     }
   }
 
+  /** Seconds as a human reads them: "15s" under a minute — `durationText` rounds up to whole
+   *  minutes, which turned a 15-second schedule into "every 1m" — else its "2h 5m". */
+  function secsText(secs: number): string {
+    return secs < 60 ? `${Math.max(0, Math.round(secs))}s` : durationText(secs * 1000);
+  }
+
+  /** Lines as the script has them: a trailing newline ends the last line, it doesn't add one. */
+  function lineCount(script: string): number {
+    return script.replace(/\n$/, '').split('\n').length;
+  }
+
   /** "checked 40s ago: not yet", for a script's row. */
   function runText(id: string): string {
     const s = watch[id];
     if (!s?.last_run_at) return s?.running ? 'first check running' : 'not checked yet';
-    const ago = durationText(Math.max(0, now - Date.parse(s.last_run_at)));
+    const ago = secsText((now - Date.parse(s.last_run_at)) / 1000);
     const result = s.last_result === 'not_yet' ? 'not yet' : s.last_result === 'broken' ? `broken (${s.detail ?? 'unknown'})` : 'passed';
     const streak = s.broken_runs > 1 ? `, ${s.broken_runs} runs in a row` : '';
     return `checked ${ago} ago: ${result}${streak}`;
@@ -64,7 +75,8 @@
     addError = null;
     heldReasons = {};
     void refreshWatch();
-    const t = setInterval(() => { now = Date.now(); void refreshWatch(); }, 15_000);
+    // 5 s, not the list's usual 15: "checked 10s ago" is read in seconds.
+    const t = setInterval(() => { now = Date.now(); void refreshWatch(); }, 5_000);
     // Explicit focus, not `autofocus`: opened from a context menu, the backdrop must hold focus
     // or Escape never reaches it (root CLAUDE.md, "Svelte's autofocus is not focus").
     requestAnimationFrame(() => dialogEl?.focus());
@@ -176,15 +188,15 @@
                 <div class="script-card">
                   {#if v.awaiting_approval}
                     <div class="ask">
-                      The agent wants maiTerm to run this script every {durationText((f.due.every_secs ?? 60) * 1000)}, as you,
+                      The agent wants maiTerm to run this script every {secsText(f.due.every_secs ?? 60)}, as you,
                       without asking again. It runs outside the agent's own permission checks.
                     </div>
                   {/if}
                   <div class="script-label">{f.due.label ?? 'watch script'}</div>
                   <pre class="script">{f.due.script}</pre>
                   <div class="script-meta">
-                    {(f.due.script ?? '').split('\n').length} lines, {(f.due.script ?? '').length} characters
-                    · in <code>{f.due.cwd}</code> · every {f.due.every_secs ?? 60}s · up to {f.due.timeout_secs ?? 10}s a run
+                    {lineCount(f.due.script ?? '')} lines, {(f.due.script ?? '').length} characters
+                    · in <code>{f.due.cwd}</code> · every {secsText(f.due.every_secs ?? 60)} · up to {f.due.timeout_secs ?? 10}s a run
                     {#if !v.awaiting_approval && !f.due.met_at}· {runText(v.id)}{/if}
                   </div>
                 </div>

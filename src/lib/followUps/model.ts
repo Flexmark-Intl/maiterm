@@ -243,9 +243,12 @@ function seconds(v: unknown, lo: number, hi: number, dflt: number): number | nul
 /** Characters a script never needs and the approval card could be fooled by: control characters
  *  other than tab and newline (a CR can redraw a line over itself), and Unicode format characters
  *  — bidi overrides and isolates (U+202A–202E, U+2066–2069) reorder how a line LOOKS without
- *  changing what runs, and zero-width ones hide. Refused, never stripped: the human approves the
- *  bytes that run (review of afaafbc). */
-const UNSHOWABLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\p{Cf}]/u;
+ *  changing what runs, and zero-width ones hide. Also the line and paragraph separators and every
+ *  default-ignorable code point (variation selectors, Hangul fillers), which WebKit draws as
+ *  nothing, and any space but U+0020: a no-break space LOOKS like one, but the shell reads it as
+ *  part of a word, so `gh<NBSP>pr checks` shows as `gh pr checks` and runs a planted `gh<NBSP>pr`
+ *  (re-review of bf90a19). Refused, never stripped: the human approves the bytes that run. */
+const UNSHOWABLE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]|(?! )\p{Zs}/u;
 
 /** A watch script (§5.1). Its text is kept EXACTLY as sent — it is code, and the human approves
  *  what will run — so anything the card couldn't show truthfully is refused, not cleaned. */

@@ -352,8 +352,8 @@ occluded webview is throttled when the screens sleep. One loop, every 5 s:
   tab holds any more; a reload keeps the id, so it keeps its state.
 - **Each run:**
   - is its own process group, with stdin from `/dev/null`;
-  - starts in the tab's folder as of creation (its OSC 7 cwd, else `last_cwd`). A folder that has
-    gone is a broken run;
+  - starts in the tab's folder as of creation (its OSC 7 cwd, else `last_cwd`, whose leading `~`
+    is expanded at run time). A folder that has gone is a broken run;
   - gets `env_clear()` and then only `PATH`, `HOME`, `LANG`, `USER`, `LOGNAME`, `TMPDIR`,
     `SHELL` and the variables above — never maiTerm's environment or the agent's, so no account
     credentials (`CLAUDE_CONFIG_DIR`, tokens) and no `MAITERM_AUTH`;
@@ -397,8 +397,12 @@ anything. So:
   a scroll box with overlay scrollbars showed `test -s x` and hid the `; curl … | sh` 300 spaces
   to its right — plus its line and character counts. A script holding anything the card can't
   show as it runs is refused at creation, not cleaned: control characters other than tab and
-  newline (a CR redraws a line over itself) and Unicode format characters (bidi overrides reorder
-  how a line looks; zero-width ones hide). `UNSHOWABLE` in `model.ts`.
+  newline (a CR redraws a line over itself), Unicode format characters (bidi overrides reorder
+  how a line looks; zero-width ones hide), the line and paragraph separators and every
+  default-ignorable code point (WebKit draws them as nothing), and any space but U+0020 — a
+  no-break space looks like one, but the shell reads it as part of a word, so `gh<NBSP>pr checks`
+  shows as `gh pr checks` and runs a planted `gh<NBSP>pr`. `UNSHOWABLE` in `model.ts`. Ordinary
+  non-ASCII text (accents, CJK, a ✓) passes; a ZWJ emoji does not, and the refusal says why.
 - **Approval is keyed by script AND folder** (`watch::script_hash`, SHA-256 of folder, NUL,
   script). One byte changed is a new script; the same script in another folder is a new approval,
   because `rm -rf build` means what the folder makes it mean. An approved key is remembered
@@ -788,7 +792,13 @@ remains.
 4. Stack and task triggers. **Built** (§5 "As built").
 5. Resume-then-deliver (§6.2). **Built** (§6.2 "As built").
 6. Phase 2 (§9), after the signal is proven on real limit events.
-7. Watch scripts (§5.1). **Built** 2026-10-01.
+7. Watch scripts (§5.1). **Built** 2026-10-01, two review rounds. **Verified live** the same day
+   in the dev app, with a real Claude session in the tab. The agent created a script and was told
+   `waiting_for_human`, and the badge turned yellow. The card showed the script verbatim, and
+   clicking *Approve and run* wrote the 0700 script and its state file. The script returned "not
+   yet" until the flag file appeared. Rust then met it 15 s later ("it passed"), and the tick
+   delivered it 12 s after that. The agent received the note followed by "Your watch script
+   printed: found: 42 rows", and answered from it.
 
 ## 11. Open questions
 

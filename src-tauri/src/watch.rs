@@ -368,6 +368,14 @@ async fn login_path() -> String {
     .clone()
 }
 
+/// A tab's recorded folder is often home-relative (`last_cwd` = "~/repo").
+fn expand_home(cwd: &str) -> PathBuf {
+    match (cwd.strip_prefix('~'), dirs::home_dir()) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(cwd),
+    }
+}
+
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: Option<R>) -> Vec<u8> {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
@@ -404,7 +412,8 @@ async fn execute(c: &Candidate, dir: &Path) -> Outcome {
         let _ = std::fs::write(&state_path, b"");
         let _ = std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o600));
     }
-    if !Path::new(&c.cwd).is_dir() {
+    let cwd = expand_home(&c.cwd);
+    if !cwd.is_dir() {
         return Outcome::Broken(format!("its folder {} no longer exists", c.cwd));
     }
 
@@ -416,7 +425,7 @@ async fn execute(c: &Candidate, dir: &Path) -> Outcome {
         cmd.arg(&script_path);
         cmd
     };
-    cmd.current_dir(&c.cwd)
+    cmd.current_dir(&cwd)
         .env_clear()
         .env("PATH", login_path().await)
         .env("LANG", std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".into()))
@@ -574,6 +583,15 @@ mod tests {
         let o = execute(&c, &dir).await;
         cleanup(&dir);
         assert!(matches!(o, Outcome::Broken(ref s) if s.contains("no longer exists")));
+    }
+
+    #[test]
+    fn a_home_relative_folder_is_expanded() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/repo"), home.join("repo"));
+        assert_eq!(expand_home("/abs"), PathBuf::from("/abs"));
+        assert_eq!(expand_home("~bob/x"), PathBuf::from("~bob/x"), "another user's home is not ours");
     }
 
     #[test]
