@@ -420,6 +420,25 @@ export function answerBlocker(task: Task, answer: BlockerAnswer): AnswerResult {
   };
 }
 
+/** The log line a dismissed question leaves. */
+export const DISMISSED_NOTE = 'Handled in the tab by the human';
+
+/**
+ * Close a question without answering it: the human already dealt with it in the agent's own
+ * tab, so nothing is typed to the agent and the task goes back to Active. Same stale guard as
+ * `answerBlocker`: a question asked since this one was shown is not dismissed with it.
+ */
+export function dismissBlocker(task: Task, askedAt: string): { ok: true; note: string } | { ok: false; detail: string } {
+  const b = task.blocker;
+  if (!b || task.status !== 'blocked') {
+    return { ok: false, detail: 'This task is not waiting on anything. It may already have been answered or moved on.' };
+  }
+  if (b.asked_at !== askedAt) {
+    return { ok: false, detail: 'The agent has asked something new since this was shown. Read the new question first.' };
+  }
+  return { ok: true, note: DISMISSED_NOTE };
+}
+
 /** Map a runtime's own vocabulary onto ours (importer + MCP callers, which speak
  *  Claude's pending/in_progress/completed). Anything unrecognized lands in backlog. */
 export function statusFromAgent(status: string | undefined, blocked?: boolean): TaskStatus {

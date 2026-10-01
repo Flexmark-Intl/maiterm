@@ -24,6 +24,8 @@ import {
   TASK_STATUSES,
   BLOCKER_OPTION_CAP,
   answerBlocker,
+  dismissBlocker,
+  DISMISSED_NOTE,
   parseBlocker,
   settleBlocker,
 } from './model';
@@ -92,6 +94,12 @@ describe('a blocker says what a Blocked task is waiting for', () => {
     it('refuses an option that was not offered, and an empty decision', () => {
       expect(answerBlocker(decision, { asked_at: at, option: 5 })).toMatchObject({ ok: false, reason: 'bad_answer' });
       expect(answerBlocker(decision, { asked_at: at, text: '  ' })).toMatchObject({ ok: false, reason: 'bad_answer' });
+    });
+
+    it('dismisses the question on screen, and only that one', () => {
+      expect(dismissBlocker(decision, at)).toEqual({ ok: true, note: DISMISSED_NOTE });
+      expect(dismissBlocker(decision, '2026-09-26T00:00:00Z').ok).toBe(false);
+      expect(dismissBlocker({ ...decision, status: 'active' }, at).ok).toBe(false);
     });
 
     it('takes free text for a decision without options', () => {

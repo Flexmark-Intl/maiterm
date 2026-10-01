@@ -130,7 +130,7 @@ export interface TaskEvent {
 }
 
 const ASKED = /^(Waiting on your decision|Needs you|Waiting outside): /;
-const ANSWERED = /^(Decided: |Done by the human|Cleared by the human)/;
+const ANSWERED = /^(Decided: |Done by the human|Cleared by the human|Handled in the tab by the human)/;
 
 /** Task events for one tab: each task it carries being added, and every line of its log,
  *  classified by the prefixes `blockerNote` and `answerBlocker` write. */

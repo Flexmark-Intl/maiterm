@@ -7,6 +7,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
+  import Tooltip from '$lib/components/Tooltip.svelte';
   import type { Task } from '$lib/tauri/types';
 
   interface Props {
@@ -88,11 +89,29 @@
       sending = false;
     }
   }
+
+  /** Close the question without answering: the human dealt with it in the agent's tab. It
+   *  answers nothing, but it does close whatever question is showing, so it takes the same two
+   *  guards as a click answer. */
+  function dismiss(e: MouseEvent) {
+    if (!b || sending || secondClick(e)) return;
+    if (isFresh()) {
+      onnote?.('The agent just changed its question. Read it again before dismissing it.');
+      return;
+    }
+    const r = overlordStore.dismissBlocker(task.id, b.asked_at);
+    onnote?.(r.dismissed ? 'Dismissed and moved to Active. Nothing was sent to the agent.' : (r.detail ?? 'Could not dismiss.'));
+  }
 </script>
 
 {#if b}
   <div class="blocker {variant}" data-kind={b.kind}>
-    <span class="kind">{BLOCKER_LABEL[b.kind]} · {fmtAge(b.asked_at)}</span>
+    <div class="head">
+      <span class="kind">{BLOCKER_LABEL[b.kind]} · {fmtAge(b.asked_at)}</span>
+      <Tooltip text="Already handled in the tab: close this without sending the agent anything">
+        <button class="dismiss" disabled={sending} onclick={dismiss}>Dismiss</button>
+      </Tooltip>
+    </div>
     <span class="q">{b.question}</span>
     {#if b.context}<span class="ctx">{b.context}</span>{/if}
     {#if b.options?.length}
@@ -165,6 +184,18 @@
     letter-spacing: 0.06em;
   }
   .card .kind { font-size: 10.5px; }
+  .head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .dismiss {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--fg-dim);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .card .dismiss { font-size: 11px; }
+  .dismiss:hover:not(:disabled), .dismiss:focus-visible { color: var(--fg); text-decoration: underline; }
+  .dismiss:disabled { opacity: 0.4; cursor: default; }
   .q { color: var(--fg); font-weight: 600; }
   .card .q { font-size: 15px; line-height: 1.3; }
   .ctx { color: var(--fg-dim); }

@@ -370,6 +370,13 @@ tapping, and an answer delivered against a different question is worse than none
 panel, the Loom's decisions queue and the phone (`POST /tasks/{id}/answer`, protocol 0.13)
 all answer through this one method.
 
+**Dismissing** (`overlordStore.dismissBlocker`, desktop only) closes a question the human
+already dealt with in the agent's own tab: the task goes to Active with the note "Handled in
+the tab by the human", and **nothing is typed to the agent**, which already has its answer.
+Same `asked_at` stale guard, and BlockerCard gives it the same two click guards as an answer,
+since it closes whatever question is showing. The phone has no dismiss yet (it would be a wire
+change).
+
 ## 4. Workstreams
 
 One agent tab is routinely asked to do two unrelated things. A **workstream** is a named
