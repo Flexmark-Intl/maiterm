@@ -13,10 +13,16 @@
 //!
 //! Input that draws NOTHING is caught by the input side (review of 5cd717a): with the tty's echo
 //! off readline doesn't redisplay at all, and a pending Esc / Ctrl-X / vi-command prefix leaves
-//! the line empty but would eat the resume's first keys. Both are bytes WRITTEN to the PTY, so the
-//! mark records the PTY's input byte count and any change voids it. Type-ahead with echo off was
-//! written before the mark, so the bash integration also reports echo-off before the prompt
-//! (`MaitermNoEcho`), and that prompt is never empty.
+//! the line empty but would eat the resume's first keys. Those are bytes WRITTEN to the PTY, so
+//! the line is empty only if nothing has been written since a BASELINE (`InputBaseline`) — and
+//! the baseline can't be the mark: a prefix key typed ahead while the previous command ran was
+//! written before the mark, draws nothing after it, and still eats our keys (review of 072d75b).
+//! So it is the start of the last command (OSC 133 B/C): anything typed after that is either
+//! still waiting for the shell or was read by the command. The one command whose input we know
+//! was consumed is the agent's own — so when the agent reports its end (Claude's SessionEnd hook,
+//! sent while it still owns the terminal), the baseline moves up to that moment: keys typed INTO
+//! the agent don't count, keys typed after it let go do. Echo-off is also reported by the bash
+//! integration before the prompt (`MaitermNoEcho`), and that prompt is never empty.
 //!
 //! This replaced comparing the cursor's position with where it stood at the mark (review of
 //! e1cac85): once scrollback is at its cap, "history size + screen line" stops naming a row, and
@@ -57,27 +63,44 @@ fn next_mark(data: &[u8], from: usize) -> Option<(usize, bool)> {
 /// What is known about the current prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptEnd {
-    /// The prompt finished drawing with the cursor here (absolute row, column), when this many
-    /// bytes had been written to the PTY — and nothing has been drawn since.
-    Marked(i64, usize, u64),
+    /// The prompt finished drawing with the cursor here (absolute row, column), and nothing has
+    /// been drawn since.
+    Marked(i64, usize),
     /// Something was drawn after the mark, or the prompt was drawn with the tty's echo off: the
     /// line is not known to be empty.
     Drawn,
+}
+
+/// The PTY's input byte count at the points that bound "input nobody has read yet".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InputBaseline {
+    /// At the last command start (OSC 133 B/C) — keys before it were the command line itself.
+    pub at_begin: u64,
+    /// When the agent last reported its end (Claude's SessionEnd), if that came after the last
+    /// command start — keys before it went to the agent.
+    pub at_agent_end: Option<u64>,
+}
+
+impl InputBaseline {
+    fn count(&self) -> u64 {
+        self.at_agent_end.unwrap_or(self.at_begin)
+    }
 }
 
 /// Feed `data` to the terminal, noting the cursor at each prompt-end mark and forgetting it at
 /// each command start — in byte order, so a mark and a B in the same read settle correctly — and
 /// voiding it on ANY byte drawn after it.
 ///
-/// `written`: the PTY's input byte count now. Input that draws nothing (keys with the tty's echo
-/// off, a pending Esc / Ctrl-X / vi-command prefix) is caught by comparing it at probe time.
-/// `no_echo`: the shell reported, before this prompt, that the tty's echo is off — keys typed
-/// ahead then sit on the line invisibly, so that prompt is never empty (review of 5cd717a).
+/// `written`: the PTY's input byte count as this read began — becomes the baseline at a command
+/// start. `no_echo`: the shell reported, before this prompt, that the tty's echo is off — keys
+/// typed ahead then sit on the line invisibly, so that prompt is never empty (review of 5cd717a).
+#[allow(clippy::too_many_arguments)]
 pub fn advance<T: EventListener>(
     processor: &mut Processor,
     term: &mut Term<T>,
     prompt_end: &mut Option<PromptEnd>,
     no_echo: &mut bool,
+    baseline: &mut InputBaseline,
     written: u64,
     data: &[u8],
 ) {
@@ -86,12 +109,14 @@ pub fn advance<T: EventListener>(
         processor.advance(term, &data[from..end]);
         *prompt_end = if !is_prompt {
             *no_echo = false;
+            // Read at the START of this read: a key written during it lands after, and counts.
+            *baseline = InputBaseline { at_begin: written, at_agent_end: None };
             None
         } else if std::mem::take(no_echo) {
             Some(PromptEnd::Drawn)
         } else {
             let (row, col) = cursor_at(term);
-            Some(PromptEnd::Marked(row, col, written))
+            Some(PromptEnd::Marked(row, col))
         };
         from = end;
     }
@@ -105,12 +130,17 @@ pub fn advance<T: EventListener>(
 
 /// Is the command line empty? `None` when there is no prompt to judge by (no mark yet, or a
 /// command has started since). `written`: the PTY's input byte count now — anything written
-/// since the mark (a key, a paste, the phone, a focus report) means not known to be empty.
-pub fn line_is_empty<T: EventListener>(term: &Term<T>, prompt_end: Option<PromptEnd>, written: u64) -> Option<bool> {
+/// since the baseline (a key, a paste, the phone, a focus report) means not known to be empty.
+pub fn line_is_empty<T: EventListener>(
+    term: &Term<T>,
+    prompt_end: Option<PromptEnd>,
+    baseline: InputBaseline,
+    written: u64,
+) -> Option<bool> {
     let mark = match prompt_end? {
         PromptEnd::Drawn => return Some(false),
-        PromptEnd::Marked(_, _, at) if at != written => return Some(false),
-        PromptEnd::Marked(row, col, _) => (row, col),
+        PromptEnd::Marked(..) if written != baseline.count() => return Some(false),
+        PromptEnd::Marked(row, col) => (row, col),
     };
     // Nothing has been drawn since the mark, so the cursor can only have moved by input the shell
     // didn't echo. Still check: a mismatch is never "empty".
@@ -137,7 +167,7 @@ mod tests {
 
     /// The reader's call with echo on and nothing written to the PTY.
     fn adv(p: &mut Processor, t: &mut Term<VoidListener>, m: &mut Option<PromptEnd>, data: &[u8]) {
-        advance(p, t, m, &mut false, 0, data);
+        advance(p, t, m, &mut false, &mut InputBaseline::default(), 0, data);
     }
 
     #[test]
@@ -145,9 +175,39 @@ mod tests {
         // Review of 5cd717a: with the tty's echo off, or a pending Esc / Ctrl-X / vi-command
         // prefix, keys change the line (or will eat ours) and draw nothing. They were WRITTEN.
         let (mut p, mut t, mut m) = term();
-        advance(&mut p, &mut t, &mut m, &mut false, 100, PROMPT);
-        assert_eq!(line_is_empty(&t, m, 100), Some(true));
-        assert_eq!(line_is_empty(&t, m, 103), Some(false));
+        let mut base = InputBaseline::default();
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 100, b"make\r\n\x1b]133;B\x07");
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 100, PROMPT);
+        assert_eq!(line_is_empty(&t, m, base, 100), Some(true));
+        assert_eq!(line_is_empty(&t, m, base, 101), Some(false), "Esc typed at the prompt");
+    }
+
+    #[test]
+    fn a_prefix_key_typed_ahead_during_the_last_command_counts() {
+        // Review of 072d75b: Esc typed while `sleep` ran is written BEFORE the mark and draws
+        // nothing after it — but it was written after the command started.
+        let (mut p, mut t, mut m) = term();
+        let mut base = InputBaseline::default();
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 10, b"sleep 1\r\n\x1b]133;B\x07");
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 11, b"^[\x1b]133;D;0\x07");
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 11, PROMPT);
+        assert_eq!(line_is_empty(&t, m, base, 11), Some(false));
+    }
+
+    #[test]
+    fn keys_typed_into_the_agent_do_not_count_once_it_reports_its_end() {
+        let (mut p, mut t, mut m) = term();
+        let mut base = InputBaseline::default();
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 30, b"claude\r\n\x1b]133;B\x07");
+        // ...the human types 500 bytes into the agent, then /exit; SessionEnd arrives:
+        base.at_agent_end = Some(530);
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 530, b"\x1b]133;D;0\x07");
+        advance(&mut p, &mut t, &mut m, &mut false, &mut base, 530, PROMPT);
+        assert_eq!(line_is_empty(&t, m, base, 530), Some(true));
+        assert_eq!(line_is_empty(&t, m, base, 531), Some(false), "a key after the agent let go");
+        // Without the agent's end, those keys count: a killed agent holds.
+        let killed = InputBaseline { at_begin: 30, at_agent_end: None };
+        assert_eq!(line_is_empty(&t, m, killed, 530), Some(false));
     }
 
     #[test]
@@ -155,21 +215,22 @@ mod tests {
         // Type-ahead with echo off sits on the line unseen, written before the mark.
         let (mut p, mut t, mut m) = term();
         let mut no_echo = true;
-        advance(&mut p, &mut t, &mut m, &mut no_echo, 0, PROMPT);
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        let mut base = InputBaseline::default();
+        advance(&mut p, &mut t, &mut m, &mut no_echo, &mut base, 0, PROMPT);
+        assert_eq!(line_is_empty(&t, m, base, 0), Some(false));
         assert!(!no_echo, "consumed by the prompt it was reported for");
-        advance(&mut p, &mut t, &mut m, &mut no_echo, 0, b"\r\n\x1b]133;B\x07out\r\n");
-        advance(&mut p, &mut t, &mut m, &mut no_echo, 0, PROMPT);
-        assert_eq!(line_is_empty(&t, m, 0), Some(true), "the next prompt, echo back on, is judged afresh");
+        advance(&mut p, &mut t, &mut m, &mut no_echo, &mut base, 0, b"\r\n\x1b]133;B\x07out\r\n");
+        advance(&mut p, &mut t, &mut m, &mut no_echo, &mut base, 0, PROMPT);
+        assert_eq!(line_is_empty(&t, m, base, 0), Some(true), "the next prompt, echo back on, is judged afresh");
     }
 
     #[test]
     fn a_fresh_prompt_is_empty_and_typing_makes_it_not() {
         let (mut p, mut t, mut m) = term();
         adv(&mut p, &mut t, &mut m,PROMPT);
-        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(true));
         adv(&mut p, &mut t, &mut m,b"git comm");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -179,7 +240,7 @@ mod tests {
         let mut bytes = PROMPT.to_vec();
         bytes.extend_from_slice(b"git commit -am wip");
         adv(&mut p, &mut t, &mut m,&bytes);
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -187,7 +248,7 @@ mod tests {
         let (mut p, mut t, mut m) = term();
         adv(&mut p, &mut t, &mut m,PROMPT);
         adv(&mut p, &mut t, &mut m,b"rm -rf out\x1b[10D"); // typed, then Home-ish
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -195,7 +256,7 @@ mod tests {
         let (mut p, mut t, mut m) = term();
         adv(&mut p, &mut t, &mut m,PROMPT);
         adv(&mut p, &mut t, &mut m,b"echo a \\\r\n> ");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -204,11 +265,11 @@ mod tests {
         let mut bytes = PROMPT.to_vec();
         bytes.extend_from_slice(b"\r\n\x1b]133;B\x07");
         adv(&mut p, &mut t, &mut m,&bytes);
-        assert_eq!(line_is_empty(&t, m, 0), None);
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), None);
         // ...and the next prompt is judged on its own mark.
         adv(&mut p, &mut t, &mut m,b"output\r\n\x1b]133;D;0\x07");
         adv(&mut p, &mut t, &mut m,PROMPT);
-        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(true));
     }
 
     /// Review of e1cac85: scrollback at its cap (none here), prompt on the bottom row — a scroll
@@ -224,16 +285,16 @@ mod tests {
     #[test]
     fn a_continuation_prompt_on_a_full_scrollback_is_not_empty() {
         let (mut p, mut t, mut m) = capped_at_bottom();
-        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(true));
         adv(&mut p, &mut t, &mut m,b"make deploy \\\r\n> ");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
     fn a_line_exactly_the_width_long_on_a_full_scrollback_is_not_empty() {
         let (mut p, mut t, mut m) = capped_at_bottom();
         adv(&mut p, &mut t, &mut m,b"aaaaaaaaaaaaaaaaaa \raa");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -241,11 +302,11 @@ mod tests {
         let (mut p, mut t, mut m) = term();
         adv(&mut p, &mut t, &mut m,b"0123456789abcdefghij$ \x1b]1337;MaitermPromptEnd\x07");
         adv(&mut p, &mut t, &mut m,b"\r(reverse-i-search)`': ");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
         let (mut p, mut t, mut m) = term();
         adv(&mut p, &mut t, &mut m,PROMPT);
         adv(&mut p, &mut t, &mut m,b"\x07");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -255,9 +316,9 @@ mod tests {
         // redraws the type-ahead after the next prompt's mark.
         let (mut p, mut t, mut m) = term();
         adv(&mut p, &mut t, &mut m,b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]1337;MaitermPromptMarks=23558\x07me@host$ \x1b]1337;MaitermPromptEnd\x07");
-        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(true));
         adv(&mut p, &mut t, &mut m,b"sleep 1\r\n\x1b]133;B\x07git commit -am wip\x1b]133;D;0\x07\x1b]133;A\x07me@host$ \x1b]1337;MaitermPromptEnd\x07git commit -am wip");
-        assert_eq!(line_is_empty(&t, m, 0), Some(false));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(false));
     }
 
     #[test]
@@ -268,6 +329,6 @@ mod tests {
         let mut bytes = b"\x1b[H\x1b[2J".to_vec();
         bytes.extend_from_slice(b"me@host$ \x1b]1337;MaitermPromptEnd\x07");
         adv(&mut p, &mut t, &mut m,&bytes);
-        assert_eq!(line_is_empty(&t, m, 0), Some(true));
+        assert_eq!(line_is_empty(&t, m, InputBaseline::default(), 0), Some(true));
     }
 }

@@ -481,10 +481,16 @@ because this is the one place a follow-up types into a shell:
   stored coordinates and read as empty. **And nothing written to the PTY since the mark**
   (review of 5cd717a): with the tty's echo off readline redisplays nothing, and a pending Esc,
   Ctrl-X or vi-command prefix leaves the line empty but would eat the resume's first keys — both
-  are input that draws nothing, but input all the same, so the mark records the PTY's input byte
-  count and any change voids it. Type-ahead with echo off is written *before* the mark, so the
-  bash `PROMPT_COMMAND` also reports echo-off (`MaitermNoEcho`, via `stty -a`) and that prompt
-  is never empty. A mark split across two reads is missed and holds. zsh's
+  are input that draws nothing, but input all the same, so nothing may have been written to the
+  PTY since a **baseline** (the `bytes_written` counter `write_pty` keeps). The baseline can't be
+  the mark: a prefix key typed ahead while the previous command ran is written before the mark
+  and draws nothing after it (review of 072d75b). It is the last command start (OSC 133 B/C) —
+  except that keys typed INTO the agent were read by it, so Claude's SessionEnd hook (sent while
+  it still owns the terminal) moves the baseline up to that moment (`pty::note_agent_end`). A
+  killed agent sends none, so its typed keys count and the resume holds; `/clear` also sends
+  one, which only moves the line earlier. Echo-off type-ahead is written before the mark too, so
+  the bash `PROMPT_COMMAND` also reports echo-off (`MaitermNoEcho`, via `stty -a`) and that
+  prompt is never empty. A mark split across two reads is missed and holds. zsh's
   answer likewise counts vi command mode as not empty: keys typed there are commands. Verified against bytes captured from bash 3.2.57: a fresh prompt reads empty,
   `git commit -am wip` typed during `sleep 1` reads not empty (tests use those exact bytes).
   **fish, shells spawned before this existed, and no integration all hold**, with "start it

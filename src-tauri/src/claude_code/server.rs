@@ -3705,6 +3705,21 @@ async fn hooks_handler(
 
             log::info!("Claude hook: session {} ended (tab {:?})", session_id, tab_id);
 
+            // The agent is letting go of the terminal: keys typed before now went to IT, keys after
+            // reach the shell. The follow-up resume's empty-line check (terminal/prompt_line.rs)
+            // counts input from here, not from the agent's launch. Only from this real hook — a
+            // synthesized end comes after the process is gone, too late to draw that line.
+            if let Some(tid) = tab_id.as_deref() {
+                let pty_id = srv.state.app_data.read().windows.iter()
+                    .flat_map(|w| w.workspaces.iter())
+                    .flat_map(|ws| ws.panes.iter().flat_map(|p| p.tabs.iter()))
+                    .find(|t| t.id == tid)
+                    .and_then(|t| t.pty_id.clone());
+                if let Some(pty_id) = pty_id {
+                    crate::pty::note_agent_end(&srv.state, &pty_id);
+                }
+            }
+
             emit_dual(&srv.app_handle, "agent-hook-session-end", "claude-hook-session-end", serde_json::json!({
                 "runtime": runtime_key,
                 "session_id": session_id,

@@ -664,6 +664,7 @@ pub fn spawn_pty(
                                 &mut handle.term,
                                 &mut handle.prompt_end,
                                 &mut handle.prompt_no_echo,
+                                &mut handle.input_baseline,
                                 written,
                                 data,
                             );
@@ -762,6 +763,17 @@ pub fn write_pty(state: &Arc<AppState>, pty_id: &str, data: &[u8]) -> Result<(),
         .sender
         .send(PtyCommand::Write(data.to_vec()))
         .map_err(|e| e.to_string())
+}
+
+/// The agent in this PTY reported its end (Claude's SessionEnd hook): input written before now
+/// was the agent's; input after it is the shell's to read. Moves the follow-up resume's input
+/// baseline up to here (terminal/prompt_line.rs). The next command start resets it.
+pub fn note_agent_end(state: &Arc<AppState>, pty_id: &str) {
+    use std::sync::atomic::Ordering;
+    let Some(written) = state.pty_stats.read().get(pty_id).map(|s| s.bytes_written.load(Ordering::Relaxed)) else { return };
+    if let Some(handle) = state.terminal_registry.write().get_mut(pty_id) {
+        handle.input_baseline.at_agent_end = Some(written);
+    }
 }
 
 /// Output within this window means a TUI is actively drawing — resizes are
