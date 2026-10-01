@@ -1550,6 +1550,11 @@ so the contract is exercised, not just asserted.
   turn. Streams `agent`/`tool`/`system`; **never** the phone's own `role:"user"` turns. Frame fields are
   byte-identical to `GET`'s `turns_for_session(sid, 40, Marker)`, so the phone dedups the streamed frame
   and any REST re-fetch to one entry. Latency win (≤400ms vs the old 1.5-2s re-pull), turn-granular by design.
+- **The 40-turn window counts conversation, not tool calls** (2026-09-30): the transcript holds the
+  last 40 turns that are not `role:"tool"`, plus every tool turn among and after them
+  (`transcript::keep_last_turns`). Counting tool calls let a busy stretch (the phone and the Loom
+  fold a run of them into one line) push the conversation out after a handful of messages. Same
+  shape on the wire, so no version bump; a transcript can now carry many more than 40 entries.
 - **Context-compaction divider — DONE** (`3d96159`): a `compact_boundary` entry (`type:"system"`,
   `subtype:"compact_boundary"`, fields TOP-LEVEL — no nested `message`) becomes one `role:"system"` turn
   `Context compacted · <pre> → <post>` (prefix `Auto-compacted` when `compactMetadata.trigger=="auto"`;

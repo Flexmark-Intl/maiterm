@@ -427,19 +427,47 @@ fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Optio
     // just fails to parse and is skipped, same as every other tail scan here. Claude msg_ids are the
     // per-turn uuids from the JSON, so a tail window (vs the whole file) can't shift them.
     let body = read_tail(&path, TRANSCRIPT_TAIL_BYTES)?;
-    // A turn is a handful of lines, so ~12× headroom is plenty.
-    let lines: Vec<&str> = body.lines().collect();
-    let start = lines.len().saturating_sub(limit * 12 + 64);
-    let mut msgs: Vec<Value> = Vec::new();
-    for line in &lines[start..] {
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            push_line_messages(&v, tools, &mut msgs);
+    // Walked from the newest line back, until `limit` turns that count are in hand (see
+    // `counts_toward_limit`): a stretch of tool calls is a line or two once folded, and must not
+    // use up the window. The old forward read took a fixed 12 lines per turn, which a tool-heavy
+    // stretch also outran.
+    let mut chunks: Vec<Vec<Value>> = Vec::new();
+    let mut counted = 0;
+    for line in body.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let mut from_line = Vec::new();
+        push_line_messages(&v, tools, &mut from_line);
+        counted += from_line.iter().filter(|m| counts_toward_limit(m)).count();
+        chunks.push(from_line);
+        if counted >= limit {
+            break;
         }
     }
-    if msgs.len() > limit {
-        msgs = msgs.split_off(msgs.len() - limit);
+    let msgs: Vec<Value> = chunks.into_iter().rev().flatten().collect();
+    Some(keep_last_turns(msgs, limit))
+}
+
+/// Whether a turn uses up the transcript window. Tool calls don't: every client folds a run of
+/// them into one line, so counting them let a busy stretch push the conversation out of reach
+/// (the phone's chat and the Loom's Focus both ended a few messages back).
+fn counts_toward_limit(m: &Value) -> bool {
+    m.get("role").and_then(|r| r.as_str()) != Some("tool")
+}
+
+/// The last `limit` counted turns, with every tool turn among or after them.
+fn keep_last_turns(mut msgs: Vec<Value>, limit: usize) -> Vec<Value> {
+    let mut counted = 0;
+    let mut start = msgs.len();
+    for (i, m) in msgs.iter().enumerate().rev() {
+        if counts_toward_limit(m) {
+            if counted == limit {
+                break;
+            }
+            counted += 1;
+        }
+        start = i;
     }
-    Some(msgs)
+    msgs.split_off(start)
 }
 
 /// Live per-agent telemetry read from the tail of a Claude session's transcript JSONL: the model id
@@ -1374,10 +1402,7 @@ fn codex_turns_for_session(session_id: &str, limit: usize, tools: ToolRender) ->
             push_codex_line_messages(line_start, &v, tools, &mut msgs);
         }
     }
-    if msgs.len() > limit {
-        msgs = msgs.split_off(msgs.len() - limit);
-    }
-    Some(msgs)
+    Some(keep_last_turns(msgs, limit))
 }
 
 /// Turn one rollout line into zero or more maiLink messages, appended to `out`. `line_no` is the
@@ -2048,6 +2073,21 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_calls_do_not_use_up_the_window() {
+        let t = |id: &str, role: &str| json!({ "msg_id": id, "role": role });
+        // Oldest first: a message, then a long run of tools, then three more messages.
+        let mut msgs = vec![t("u0", "user"), t("a0", "agent")];
+        msgs.extend((0..50).map(|i| t(&format!("t{i}"), "tool")));
+        msgs.extend([t("u1", "user"), t("a1", "agent"), t("t50", "tool")]);
+        let kept = keep_last_turns(msgs, 3);
+        let ids: Vec<&str> = kept.iter().map(|m| m["msg_id"].as_str().unwrap()).collect();
+        // Three counted turns (a0, u1, a1), and every tool turn after the oldest of them.
+        assert_eq!(ids.first(), Some(&"a0"));
+        assert_eq!(ids.len(), 3 + 51);
+        assert_eq!(ids.last(), Some(&"t50"));
+    }
 
     #[test]
     fn locate_jsonl_falls_back_to_the_shadow_mirror_dir() {
