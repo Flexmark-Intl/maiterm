@@ -7,7 +7,6 @@
   import { tick, onMount, onDestroy } from 'svelte';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import type { UnlistenFn } from '@tauri-apps/api/event';
-  import { readText as clipboardReadText, readImage as clipboardReadImage } from '@tauri-apps/plugin-clipboard-manager';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
@@ -15,10 +14,11 @@
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { fireRefusal } from '$lib/overlord/format';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
-  import { writeTerminal, terminalBracketedPaste, readClipboardFilePaths, saveClipboardImage, getPtyInfo } from '$lib/tauri/commands';
+  import { writeTerminal, terminalBracketedPaste, getPtyInfo } from '$lib/tauri/commands';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
-  import { encodeClipboardImage } from '$lib/utils/clipboardImage';
   import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
+  import { fromPaths, mergeAttachments, pasteCarriesFiles, readPaste, type ComposerAttachment } from '$lib/composer/attachments';
+  import AttachmentChips from '$lib/components/composer/AttachmentChips.svelte';
   import { isModKey, modLabel } from '$lib/utils/platform';
   import { error as logError } from '@tauri-apps/plugin-log';
   import Tooltip from '$lib/components/Tooltip.svelte';
@@ -30,15 +30,6 @@
   }
 
   let { tabId, draft }: Props = $props();
-
-  interface ComposerAttachment {
-    /** Local absolute path (pasted screenshots are materialized to a temp file). */
-    path: string;
-    name: string;
-    /** Small data: URL preview — only for pasted screenshots, where the pixels
-        are already in hand. Dropped/copied files get a generic icon. */
-    thumb?: string;
-  }
 
   // Initial value only — the component is keyed per tab, so a tab switch remounts
   // it with that tab's persisted draft; live edits flow through `value`.
@@ -91,18 +82,12 @@
   }
 
   function addAttachments(items: ComposerAttachment[]) {
-    // Dedupe by path — re-pasting the same Finder selection shouldn't stack chips.
-    const existing = new Set(attachments.map(a => a.path));
-    setAttachments([...attachments, ...items.filter(a => !existing.has(a.path))]);
+    setAttachments(mergeAttachments(attachments, items));
   }
 
   function removeAttachment(index: number) {
     setAttachments(attachments.filter((_, i) => i !== index));
     textareaEl?.focus();
-  }
-
-  function basename(p: string): string {
-    return p.split('/').pop() ?? p;
   }
 
   let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -201,20 +186,6 @@
     terminalsStore.get(tabId)?.terminal?.focus();
   }
 
-  /** Downscaled data: URL for the chip preview (≤48px tall, 2x for retina). */
-  async function makeThumb(rgba: Uint8Array, width: number, height: number): Promise<string> {
-    const src = new OffscreenCanvas(width, height);
-    src.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
-    const scale = Math.min(1, 48 / height);
-    const dst = new OffscreenCanvas(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
-    dst.getContext('2d')!.drawImage(src, 0, 0, dst.width, dst.height);
-    const blob = await dst.convertToBlob({ type: 'image/png' });
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return `data:image/png;base64,${btoa(binary)}`;
-  }
-
   function insertAtCursor(text: string) {
     const el = textareaEl;
     if (!el) {
@@ -231,27 +202,9 @@
       chip with preview; otherwise plain text into the textarea. */
   async function pasteIntoComposer() {
     try {
-      const paths = await readClipboardFilePaths();
-      if (paths.length > 0) {
-        addAttachments(paths.map(p => ({ path: p, name: basename(p) })));
-        return;
-      }
-      try {
-        const image = await clipboardReadImage();
-        const { width, height } = await image.size();
-        if (width > 0 && height > 0) {
-          const rgba = await image.rgba();
-          const { base64, ext } = await encodeClipboardImage(rgba, width, height);
-          const localPath = await saveClipboardImage(base64, ext);
-          const thumb = await makeThumb(rgba, width, height);
-          addAttachments([{ path: localPath, name: basename(localPath), thumb }]);
-          return;
-        }
-      } catch {
-        // No image on clipboard — fall through to text
-      }
-      const text = await clipboardReadText();
-      if (text) insertAtCursor(text);
+      const r = await readPaste();
+      if (r?.kind === 'attachments') addAttachments(r.items);
+      else if (r?.kind === 'text') insertAtCursor(r.text);
     } catch (e) {
       logError(`Composer paste failed: ${e}`);
     }
@@ -259,11 +212,7 @@
 
   function onPaste(e: ClipboardEvent) {
     // Cmd+V is intercepted in onKeydown; this catches menu/context pastes.
-    // Only divert when the clipboard carries files/images — plain text keeps
-    // the default textarea paste (preserves undo stack).
-    const cd = e.clipboardData;
-    const hasFile = !!cd && (cd.files.length > 0 || [...cd.items].some(i => i.kind === 'file'));
-    if (hasFile) {
+    if (pasteCarriesFiles(e)) {
       e.preventDefault();
       void pasteIntoComposer();
     }
@@ -392,7 +341,7 @@
           isDragOver = false;
           if (!wasOver) return;
           const { paths } = event.payload;
-          addAttachments(paths.map(p => ({ path: p, name: basename(p) })));
+          addAttachments(fromPaths(paths));
           textareaEl?.focus();
         } else {
           isDragOver = false;
@@ -411,24 +360,7 @@
      hand-rolled. inert blocks focus/input while collapsed. -->
 <div class="composer-shell" class:open inert={!open} bind:this={shellEl}>
   <div class="composer-dock" class:drag-over={isDragOver}>
-    {#if attachments.length > 0}
-      <div class="composer-chips">
-        {#each attachments as att, i (att.path)}
-          <div class="chip" title={att.path}>
-            {#if att.thumb}
-              <img class="chip-thumb" src={att.thumb} alt={att.name} />
-            {:else}
-              <svg class="chip-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round">
-                <path d="M4 1.5h5.5L13 5v9.5H4z"/>
-                <path d="M9.5 1.5V5H13"/>
-              </svg>
-            {/if}
-            <span class="chip-name">{att.name}</span>
-            <button class="chip-remove" onclick={() => removeAttachment(i)} aria-label="Remove {att.name}">&times;</button>
-          </div>
-        {/each}
-      </div>
-    {/if}
+    <AttachmentChips {attachments} onremove={removeAttachment} />
     <div class="composer-row">
       <!-- Everything that is not Send sits left of the input, so the right-hand button is
            only ever the one that sends. Collapse is outermost. -->
@@ -523,62 +455,6 @@
     display: flex;
     align-items: flex-end;
     gap: 8px;
-  }
-
-  .composer-chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-
-  .chip {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    max-width: 240px;
-    padding: 3px 4px 3px 8px;
-    background: var(--bg-dark);
-    border: 1px solid var(--bg-light);
-    border-radius: 6px;
-    color: var(--fg);
-    font-size: 0.846rem;
-  }
-
-  .chip-thumb {
-    height: 24px;
-    max-width: 48px;
-    object-fit: cover;
-    border-radius: 3px;
-  }
-
-  .chip-icon {
-    flex-shrink: 0;
-    color: var(--fg-dim);
-  }
-
-  .chip-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .chip-remove {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    color: var(--fg-dim);
-    border-radius: 4px;
-    font-size: 1rem;
-    line-height: 1;
-    transition: background 0.1s, color 0.1s;
-  }
-
-  .chip-remove:hover {
-    background: var(--bg-light);
-    color: var(--fg);
   }
 
   .composer-input {

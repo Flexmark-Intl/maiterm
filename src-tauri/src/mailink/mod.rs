@@ -1296,8 +1296,9 @@ pub(crate) async fn send_tab_message(
     handle: Option<&tauri::AppHandle>,
     tab_id: &str,
     text: &str,
+    files: &[String],
 ) -> Value {
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && files.is_empty() {
         return json!({ "status": "empty" });
     }
     // Any dialog at all, not only a prompt the hooks reported: a picker or a question the hooks
@@ -1325,7 +1326,20 @@ pub(crate) async fn send_tab_message(
     if let Some(kind) = prompt_up() {
         return refuse(kind);
     }
-    match inject_text(app, &pty, text, true).await {
+    let typed = if files.is_empty() {
+        inject_text(app, &pty, text, true).await
+    } else {
+        let paths = match stage_files_for_tab(app, tab_id, &pty, files).await {
+            Ok(p) => p,
+            Err(refusal) => return refusal,
+        };
+        // Staging a large file can take a while: once more, the last look before typing.
+        if let Some(kind) = prompt_up() {
+            return refuse(kind);
+        }
+        inject_paths_then_text(app, &pty, &paths, text, true).await
+    };
+    match typed {
         Ok(()) => json!({ "status": "delivered", "woke": woke }),
         Err(e) => {
             log::warn!("[loom] message to tab {tab_id} failed: {e}");
@@ -3499,6 +3513,18 @@ async fn inject_image_paths_and_text(
     paths: &[String],
     body: &MessageBody,
 ) -> Result<(), String> {
+    inject_paths_then_text(app, pty_id, paths, &body.text, body.submit).await
+}
+
+/// Type file paths one at a time (each settles into its attachment chip before the next), then
+/// the text. Shared by the phone's image send and the Loom composer's attachments.
+async fn inject_paths_then_text(
+    app: &Arc<AppState>,
+    pty_id: &str,
+    paths: &[String],
+    text: &str,
+    submit: bool,
+) -> Result<(), String> {
     for (i, path) in paths.iter().enumerate() {
         if i > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(IMAGE_SETTLE_MS)).await;
@@ -3510,7 +3536,49 @@ async fn inject_image_paths_and_text(
     // Let the TUI finish attaching the final image before the caption + CR land.
     tokio::time::sleep(std::time::Duration::from_millis(IMAGE_SETTLE_MS)).await;
     // Caption may be empty — an empty bracketed paste + CR just submits the images alone.
-    inject_text(app, pty_id, &body.text, body.submit).await
+    inject_text(app, pty_id, text, submit).await
+}
+
+/// The largest single file the Loom composer copies to an SSH tab's host.
+const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The paths to type for a Loom composer's attachments: the local files as they are, or on an
+/// SSH tab, copies staged on the remote host over the bridge (the phone's image route, for any
+/// file). The remote copy keeps the file's name after a unique prefix, so the agent sees a
+/// recognisable name and Claude still sniffs images by extension.
+async fn stage_files_for_tab(app: &Arc<AppState>, tab_id: &str, pty: &str, files: &[String]) -> Result<Vec<String>, Value> {
+    let is_ssh = crate::pty::get_pty_info(app, pty).map(|i| i.foreground_command.is_some()).unwrap_or(false);
+    if !is_ssh {
+        return Ok(files.to_vec());
+    }
+    let tunnel = {
+        let tunnels = app.ssh_tunnels.read();
+        tunnels.values().find(|t| t.tab_ids.contains(&tab_id.to_string())).map(|t| (t.host_key.clone(), t.ssh_args.clone()))
+    };
+    let Some((host_key, ssh_args)) = tunnel else {
+        return Err(json!({ "status": "unsupported", "reason": "unsupported_ssh",
+            "detail": "Attachments to a remote tab need the maiTerm SSH bridge, which isn't connected for this tab." }));
+    };
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        let path = std::path::Path::new(f);
+        let too_big = std::fs::metadata(path).map(|m| m.len() > MAX_ATTACHMENT_BYTES).unwrap_or(false);
+        if too_big {
+            return Err(json!({ "status": "failed", "detail": format!("{} is over 50 MB, too large to copy to the remote host.", path.display()) }));
+        }
+        let bytes = std::fs::read(path)
+            .map_err(|e| json!({ "status": "failed", "detail": format!("Couldn't read {}: {e}", path.display()) }))?;
+        // Only characters every shell and Claude's path detection take as they are.
+        let name: String = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            .chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+        let remote = format!("/tmp/maiterm-loom-{}-{name}", &uuid::Uuid::new_v4().to_string()[..8]);
+        push_bytes_remote(&host_key, &ssh_args, &bytes, &remote).await.map_err(|e| {
+            log::warn!("[loom] staging {} on {host_key} failed: {e}", path.display());
+            json!({ "status": "failed", "detail": "Couldn't copy the attachments to the remote host." })
+        })?;
+        out.push(remote);
+    }
+    Ok(out)
 }
 
 /// The temp-file extension for an image mime. Claude Code sniffs images BY EXTENSION, so unknown

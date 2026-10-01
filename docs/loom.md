@@ -129,6 +129,15 @@ Under the chat, in this order:
   click guards apply: nothing in a prompt's first 1.5 s on screen, never the second click of
   a double-click.
 - **A task question** on one of its tasks, through BlockerCard.
+- **Attachments**, captured exactly as the terminal's composer dock captures them (one module,
+  `lib/composer/attachments.ts`, and one `AttachmentChips` component, shared by both): Cmd+V of
+  a screenshot (a temp PNG with a preview) or of Finder files, a menu paste, or files dropped on
+  the composer; kept per chat. Only the capture is shared: the dock types into its own PTY,
+  while Focus sends through `send_tab_message` with the paths, so the prompt refusal and the
+  wake still apply. That types each path and lets it settle into its chip before the text (the
+  phone's image route, `inject_paths_then_text`). On an SSH tab each file is first copied to the
+  host over the bridge (`stage_files_for_tab`, the phone's `push_bytes_remote`; 50 MB a file),
+  and a tab without the bridge refuses rather than typing paths the remote agent can't open.
 - **The composer.** Enter sends, Shift+Enter is a newline; drafts are kept per chat. A sent
   message stays in the chat as a bubble marked Sending…, then Queued (Claude holds it until the
   turn ends: `get_tab_meta`'s `queued`, the phone's thread `queued`) or Delivered, until the

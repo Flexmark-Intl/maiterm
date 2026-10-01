@@ -468,9 +468,10 @@ export interface SendResult {
 }
 
 /** Type a message into a tab's agent, under the phone's rules: an unregistered tab is woken
- *  first, the trust dialog is never typed at, and nothing is sent while a prompt is open. */
-export async function sendTabMessage(tabId: string, text: string): Promise<SendResult> {
-  return invoke('send_tab_message', { tabId, text });
+ *  first, the trust dialog is never typed at, and nothing is sent while a prompt is open.
+ *  `files`: local paths typed ahead of the text (an SSH tab gets copies staged on its host). */
+export async function sendTabMessage(tabId: string, text: string, files: string[] = []): Promise<SendResult> {
+  return invoke('send_tab_message', { tabId, text, files });
 }
 
 /** Append entries to this window's Overlord ledger (ring-buffered backend-side). */

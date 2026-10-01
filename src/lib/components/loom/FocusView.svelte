@@ -28,6 +28,10 @@
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import PromptCard from './PromptCard.svelte';
+  import AttachmentChips from '$lib/components/composer/AttachmentChips.svelte';
+  import { fromPaths, mergeAttachments, pasteCarriesFiles, readPaste, type ComposerAttachment } from '$lib/composer/attachments';
+  import { isModKey } from '$lib/utils/platform';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { open as shellOpen } from '@tauri-apps/plugin-shell';
   import type { Task, Workspace } from '$lib/tauri/types';
 
@@ -337,16 +341,72 @@
   const queuedTexts = $derived(new Set((meta?.queued ?? []).map((q) => q.text.trim())));
   const outgoingHere = $derived(outgoing.filter((o) => o.chat === openId));
 
+  // ── Attachments: the terminal composer's (lib/composer/attachments.ts) — Cmd+V of a screenshot
+  //    or Finder files, a menu paste, a drop onto the composer — kept per chat like drafts. ──
+  let attached = $state<Record<string, ComposerAttachment[]>>({});
+  const attachedHere = $derived(openId ? (attached[openId] ?? []) : []);
+  const attach = (chat: string, items: ComposerAttachment[]) =>
+    (attached = { ...attached, [chat]: mergeAttachments(attached[chat] ?? [], items) });
+  const unattach = (chat: string, index: number) =>
+    (attached = { ...attached, [chat]: (attached[chat] ?? []).filter((_, i) => i !== index) });
+  let composerEl = $state<HTMLTextAreaElement | null>(null);
+  let dockEl = $state<HTMLElement | null>(null);
+  let dragOver = $state(false);
+
+  async function pasteInto(chat: string) {
+    try {
+      const r = await readPaste();
+      if (r?.kind === 'attachments') attach(chat, r.items);
+      else if (r?.kind === 'text' && composerEl && openId === chat) {
+        composerEl.setRangeText(r.text, composerEl.selectionStart, composerEl.selectionEnd, 'end');
+        drafts = { ...drafts, [chat]: composerEl.value };
+      }
+    } catch (e) {
+      sendNote = { chat, text: `Couldn't paste: ${e}` };
+    }
+  }
+  function onComposerPaste(e: ClipboardEvent) {
+    // Cmd+V is handled in onComposerKey; this catches a menu paste carrying files.
+    if (openId && pasteCarriesFiles(e)) {
+      e.preventDefault();
+      void pasteInto(openId);
+    }
+  }
+  // A drop lands on the chat it was dropped on, while Focus is on screen. The webview's drop
+  // event is window-wide (HTML5 drop is off under Tauri), so it is bounds-checked to the dock.
+  $effect(() => {
+    if (!active) return;
+    let unlisten: (() => void) | undefined;
+    let gone = false;
+    void getCurrentWebview().onDragDropEvent((ev) => {
+      const p = ev.payload;
+      const inside = (pos: { x: number; y: number }) => {
+        const r = dockEl?.getBoundingClientRect();
+        return !!r && pos.x >= r.left && pos.x <= r.right && pos.y >= r.top && pos.y <= r.bottom;
+      };
+      if (p.type === 'over') dragOver = inside(p.position);
+      else if (p.type === 'drop') {
+        const was = dragOver;
+        dragOver = false;
+        if (was && openId) { attach(openId, fromPaths(p.paths)); composerEl?.focus(); }
+      } else dragOver = false;
+    }).then((u) => { if (gone) u(); else unlisten = u; });
+    return () => { gone = true; unlisten?.(); dragOver = false; };
+  });
+
   async function send() {
     const chat = openId;
     const text = chat ? (drafts[chat] ?? '') : '';
+    const files = chat ? (attached[chat] ?? []) : [];
     // Not before the chat's first read: the bubble's baseline is that read.
-    if (!chat || !text.trim() || sending || loadedFor !== chat) return;
+    if (!chat || (!text.trim() && !files.length) || sending || loadedFor !== chat) return;
     sending = true;
     sendNote = null;
     // The bubble goes up and the composer empties at once; a refusal brings the text back.
     const id = ++outSeq;
-    const bubble = !neverEchoed(text);
+    // Attachments alone get no bubble: there is no text to recognise the echo by.
+    const bubble = !!text.trim() && !neverEchoed(text);
+    attached = { ...attached, [chat]: [] };
     // The bubble goes up on the last poll's baseline, then takes a FRESH one before anything is
     // typed: the poll can be 3 s old, and a user turn written since (a message sent just before,
     // one from the phone) would otherwise read as this one being taken.
@@ -363,14 +423,18 @@
     const fail = (note: string) => {
       outgoing = outgoing.filter((o) => o.id !== id);
       if (!(drafts[chat] ?? '').trim()) drafts = { ...drafts, [chat]: text };
+      if (files.length) attach(chat, files);
       sendNote = { chat, text: note };
     };
     try {
-      const r = await sendTabMessage(chat, text);
+      const r = await sendTabMessage(chat, text, files.map((f) => f.path));
       if (r.status === 'delivered') {
         const at = Date.now();
         outgoing = outgoing.map((o) => (o.id === id ? { ...o, sentAt: at } : o));
-        sendNote = r.woke ? { chat, text: `Woke the agent (${r.woke === 'init' ? 're-registered it' : 'resumed it'}) and sent.` } : null;
+        const sentFiles = files.length ? `Sent ${files.length === 1 ? files[0].name : `${files.length} files`}.` : '';
+        sendNote = r.woke
+          ? { chat, text: `Woke the agent (${r.woke === 'init' ? 're-registered it' : 'resumed it'}) and sent.` }
+          : sentFiles && !bubble ? { chat, text: sentFiles } : null;
         reload();
       } else {
         fail(r.detail ?? `Not sent (${r.reason ?? r.status}).`);
@@ -385,6 +449,11 @@
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       void send();
+    } else if (isModKey(e) && !e.shiftKey && e.key.toLowerCase() === 'v' && openId) {
+      // The native pasteboard, as the terminal composer reads it: WKWebView's clipboardData
+      // misses Finder file copies and screenshots.
+      e.preventDefault();
+      void pasteInto(openId);
     } else if (e.key === 'Escape') {
       (e.currentTarget as HTMLElement).blur();
     }
@@ -581,7 +650,7 @@
         </div>
       </div>
 
-      <div class="dock">
+      <div class="dock" bind:this={dockEl}>
         <PromptCard tabId={open.tabId} {active} pulse={liveState?.state} />
         {#if openAsk}
           {@const chat = open.tabId}
@@ -590,7 +659,8 @@
           {/key}
         {/if}
         {#if outcome && outcome.chat === open.tabId}<p class="hint">{outcome.text}</p>{/if}
-        <div class="composer">
+        <AttachmentChips attachments={attachedHere} onremove={(i) => { unattach(open.tabId, i); composerEl?.focus(); }} />
+        <div class="composer" class:drag-over={dragOver}>
           {#if rules.length}
             <!-- The terminal composer's Overlord action: run a rule on this agent by hand. -->
             <IconButton tooltip="Run an Overlord rule on this agent" size={30} onclick={openTrigger} active={!!triggerMenu} aria-label="Run an Overlord rule" aria-haspopup="menu">
@@ -600,14 +670,16 @@
             </IconButton>
           {/if}
           <textarea
+            bind:this={composerEl}
             rows="2"
-            placeholder={`Message ${open.name}…`}
+            placeholder={`Message ${open.name}… (paste or drop files to attach)`}
             value={draft}
             oninput={(e) => (drafts = { ...drafts, [open.tabId]: (e.currentTarget as HTMLTextAreaElement).value })}
             onkeydown={onComposerKey}
+            onpaste={onComposerPaste}
             disabled={sending}
           ></textarea>
-          <button class="send" onclick={() => void send()} disabled={sending || !draft.trim() || loadedFor !== open.tabId}>{sending ? 'Sending…' : 'Send'}</button>
+          <button class="send" onclick={() => void send()} disabled={sending || (!draft.trim() && !attachedHere.length) || loadedFor !== open.tabId}>{sending ? 'Sending…' : 'Send'}</button>
         </div>
         {#if sendNote && sendNote.chat === open.tabId}<p class="hint">{sendNote.text}</p>{/if}
         {#if headNote && headNote.chat === open.tabId}<p class="hint">{headNote.text}</p>{/if}
@@ -860,7 +932,8 @@
   .working i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; animation: pulse 1.2s ease-in-out infinite; }
 
   .dock { display: flex; flex-direction: column; gap: 8px; padding: 10px 18px 14px; border-top: 1px solid var(--bg-light); background: var(--bg-dark); }
-  .composer { display: flex; gap: 8px; align-items: flex-end; }
+  .composer { display: flex; gap: 8px; align-items: flex-end; border-radius: 8px; }
+  .composer.drag-over textarea { border-color: var(--accent); background: var(--bg-light); }
   .composer textarea {
     flex: 1;
     min-width: 0;

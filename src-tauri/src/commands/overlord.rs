@@ -210,16 +210,19 @@ pub async fn answer_tab_prompt_as_human(
 
 /// Type a message into a tab's agent from the Loom's composer: the phone's `POST /message`
 /// rules (wake an unregistered tab, never type at the trust dialog) plus a refusal while a
-/// prompt is open. See `mailink::send_tab_message`.
+/// prompt is open. See `mailink::send_tab_message`. `files` are local paths (pasted
+/// screenshots are already temp files); an SSH tab gets copies staged on its host.
 #[tauri::command]
 pub async fn send_tab_message(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
     tab_id: String,
     text: String,
+    files: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let app = state.inner().clone();
-    Ok(crate::mailink::send_tab_message(&app, Some(&app_handle), &tab_id, &text).await)
+    let files = files.unwrap_or_default();
+    Ok(crate::mailink::send_tab_message(&app, Some(&app_handle), &tab_id, &text, &files).await)
 }
 
 /// Append entries to this window's Overlord ledger (verbatim injection record —
