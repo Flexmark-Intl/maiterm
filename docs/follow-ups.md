@@ -368,7 +368,9 @@ occluded webview is throttled when the screens sleep. One loop, every 5 s:
   is skipped, not queued.
 - **Met is persisted** by the same `meet_follow_up` the frontend uses (`met_at`, `outcome`, and
   `report` for stdout), found wherever the tab now is, and the new list goes to the window as
-  `follow-ups-changed`. From there it is an ordinary due follow-up: the draft check, the resume of
+  `follow-ups-changed`, naming the tab it was FOUND on: a reload during the run gave the tab a new
+  id, and an event naming the old one is mirrored nowhere (review of afaafbc). From there it is
+  an ordinary due follow-up: the draft check, the resume of
   an exited agent (§6.2), late, expired.
 - **What the human sees of the runs:** `follow_up_watch_status` (in memory, since this launch):
   last run, last result, broken runs in a row. The list shows "checked 40s ago: not yet".
