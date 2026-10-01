@@ -568,9 +568,11 @@ pub fn spawn_pty(
                 Ok(n) => {
                     // Track bytes read for diagnostics + resize coalescing
                     let mut total_read: u64 = n as u64;
-                    // Input bytes so far — the prompt-end mark records it (terminal/prompt_line.rs).
-                    // Read BEFORE this output is parsed: `write_pty` counts a write before the shell
-                    // can see it, so any key that reaches the shell after the mark is counted later.
+                    // Input bytes so far — the prompt-end mark records it (terminal/prompt_line.rs), and
+                    // a key WRITTEN after the mark then shows as a changed count. Keys written before
+                    // it but read by the shell after (type-ahead) are not caught here: printing ones
+                    // are drawn after the mark, and a non-printing prefix is neutralised by the
+                    // resume's leading Ctrl-G Ctrl-U instead.
                     let mut written: u64 = 0;
                     {
                         use std::sync::atomic::Ordering;
