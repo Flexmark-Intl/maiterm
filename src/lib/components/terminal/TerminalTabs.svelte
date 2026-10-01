@@ -1332,10 +1332,23 @@
           <Tooltip text={`Chat monitoring ${tab.comms_monitor.channels.length} channel${tab.comms_monitor.channels.length === 1 ? '' : 's'} — @bot summons land here. Right-click → Chat monitoring… to change.`}><span class="comms-indicator comms-monitoring">@</span></Tooltip>
         {/if}
         {#if !isEditor}
-          {@const fu = badgeSummary(tab.follow_ups ?? [], followUpNow, preferencesStore.followUpsLive)}
+          {@const fu = badgeSummary(tab.follow_ups ?? [], followUpNow, preferencesStore.followUpsLive, preferencesStore.followUpsScriptsUnattended)}
           {#if fu}
             <Tooltip text={fu.tooltip}>
-              <span class="follow-up-indicator" class:due={fu.due} class:held={!preferencesStore.followUpsLive || fu.count === 0}>
+              <!-- svelte-ignore a11y_click_events_have_key_events -->
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <span
+                class="follow-up-indicator"
+                class:due={fu.due}
+                class:approval={fu.approval}
+                class:held={!preferencesStore.followUpsLive || fu.count === 0}
+                onclick={(e) => {
+                  // The list, and a watch script's approval card, one click from the tab — not
+                  // a tab switch.
+                  e.stopPropagation();
+                  window.dispatchEvent(new CustomEvent('open-follow-ups', { detail: { tabId: tab.id } }));
+                }}
+              >
                 <Icon name="clock" size={11} />{#if fu.count > 1}<span class="follow-up-count">{fu.count}</span>{/if}
               </span>
             </Tooltip>
@@ -1690,6 +1703,14 @@
 
   .follow-up-indicator.due {
     color: var(--accent);
+  }
+
+  .follow-up-indicator {
+    cursor: pointer;
+  }
+
+  .follow-up-indicator.approval {
+    color: var(--yellow, #e0af68);
   }
 
   .follow-up-indicator.held {

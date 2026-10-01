@@ -30,7 +30,7 @@ export interface AgentBridge {
 /** When a follow-up comes due (docs/follow-ups.md §3). A string `kind` in Rust too — never an
  *  enum, which an older build would fail to parse and wipe state over. */
 export interface FollowUpDue {
-  kind: 'at' | 'service_ready' | 'service_stopped' | 'task_done' | (string & {});
+  kind: 'at' | 'service_ready' | 'service_stopped' | 'task_done' | 'script' | (string & {});
   /** kind "at": RFC 3339, wall clock. */
   at?: string | null;
   /** The workspace the condition was set in — the tab may have moved since. */
@@ -43,6 +43,25 @@ export interface FollowUpDue {
   met_at?: string | null;
   /** What happened, for the agent: "it came up", "it was dropped", "the service was removed". */
   outcome?: string | null;
+  /** kind "script" (§5.1): the watch script, inline; the folder it runs in; its schedule. */
+  script?: string | null;
+  cwd?: string | null;
+  every_secs?: number | null;
+  timeout_secs?: number | null;
+  /** kind "script": approved to run. Set only in Rust — whatever is sent here is ignored. */
+  approved?: boolean;
+  /** kind "script": what the met run printed. */
+  report?: string | null;
+}
+
+/** What the watch-script runner knows about one script's runs since this launch. */
+export interface WatchStatus {
+  last_run_at: string | null;
+  /** "met" | "not_yet" | "broken" */
+  last_result: string | null;
+  detail: string | null;
+  broken_runs: number;
+  running: boolean;
 }
 
 /** A prompt to deliver back into its tab's agent later (docs/follow-ups.md). */
@@ -613,6 +632,8 @@ export interface Preferences {
   follow_ups_enabled: boolean;
   /** A due follow-up on a tab whose agent has exited relaunches it, then delivers (§6.2). */
   follow_ups_resume_agent: boolean;
+  /** Run agents' watch scripts without asking (§5.1). Off by default; never settable over MCP. */
+  follow_ups_scripts_unattended: boolean;
   overlord_rules: OverlordRule[];
   hidden_default_overlord_rules: string[];
   claude_ide: boolean;

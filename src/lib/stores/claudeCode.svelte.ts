@@ -1,7 +1,7 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
-import { triggerText, type CreateArgs } from '$lib/followUps/model';
+import { needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -1158,12 +1158,19 @@ function createClaudeCodeStore() {
       if (!r.ok) return { error: r.detail, reason: r.reason };
       const trigger = triggerText(r.followUp);
       logInfo(`follow-ups: tab ${scope.tab.id.slice(0, 8)} scheduled ${r.followUp.id.slice(0, 8)} ${trigger ?? `for ${r.followUp.due.at}`}`);
+      const script = r.followUp.due.kind === 'script';
+      const awaiting = needsApproval(r.followUp, preferencesStore.followUpsScriptsUnattended);
       return {
         scheduled: true,
         id: r.followUp.id,
         ...(trigger ? { trigger } : { due_at: r.followUp.due.at }),
+        ...(script ? { approval: awaiting ? 'waiting_for_human' : 'approved', runs_in: r.followUp.due.cwd } : {}),
         expires_at: r.followUp.expires_at ?? null,
-        note: 'Delivered back into this tab between turns, framed as ⟦FOLLOW-UP⟧. Cancel with cancelFollowUp if it stops mattering.',
+        note: awaiting
+          ? 'Your human has been asked to approve the script; it does not run until they do. Carry on with other work, or end your turn — you are not woken until it passes. Cancel with cancelFollowUp if it stops mattering.'
+          : script
+            ? 'The script runs on its schedule without waking you; you are woken, between turns, only when it passes (or breaks). Cancel with cancelFollowUp if it stops mattering.'
+            : 'Delivered back into this tab between turns, framed as ⟦FOLLOW-UP⟧. Cancel with cancelFollowUp if it stops mattering.',
       };
     } catch (e) {
       return { error: String(e) };

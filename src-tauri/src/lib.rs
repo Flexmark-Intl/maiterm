@@ -7,6 +7,7 @@ mod pty;
 mod state;
 mod share;
 mod terminal;
+mod watch;
 
 pub const APP_DISPLAY_NAME: &str = if cfg!(debug_assertions) { "maiTermDev" } else { "maiTerm" };
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -544,6 +545,10 @@ pub fn run() {
             // tabs persist on disk so this doubles as restart rehydration.
             tauri::async_runtime::spawn(comms::watcher_loop(app_state.clone(), app.handle().clone()));
 
+            // Follow-up watch scripts (docs/follow-ups.md §5.1). Always spawned, like the comms
+            // watcher: it idles when no script is waiting, and the scripts persist on their tabs.
+            tauri::async_runtime::spawn(watch::watch_loop(app_state.clone(), app.handle().clone()));
+
             // Background tasks owned by Rust (independent of any webview's
             // event loop). See commands/scheduler.rs for the rationale.
             commands::scheduler::spawn_backup_scheduler(app_state.clone());
@@ -739,6 +744,8 @@ pub fn run() {
             commands::workspace::add_tab_follow_up,
             commands::workspace::take_tab_follow_up,
             commands::workspace::meet_tab_follow_up,
+            commands::workspace::approve_tab_follow_up_script,
+            commands::workspace::follow_up_watch_status,
             commands::workspace::publish_stack_runtime,
             commands::stack::suggest_stack,
             commands::accounts::list_account_runtimes,

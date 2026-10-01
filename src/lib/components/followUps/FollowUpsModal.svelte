@@ -4,7 +4,9 @@
    *  tab's context menu (the `open-follow-ups` event, owned by +layout). */
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { whenText } from '$lib/followUps/model';
+  import { whenText, durationText } from '$lib/followUps/model';
+  import * as commands from '$lib/tauri/commands';
+  import type { WatchStatus } from '$lib/tauri/types';
 
   interface Props {
     tabId: string | null;
@@ -22,6 +24,26 @@
   let addError = $state<string | null>(null);
   /** Per follow-up: why "Deliver now" didn't deliver, until the next attempt. */
   let heldReasons = $state<Record<string, string>>({});
+  /** How each watch script's runs have gone (Rust, since this launch), refreshed while open. */
+  let watch = $state<Record<string, WatchStatus>>({});
+
+  async function refreshWatch() {
+    try {
+      watch = await commands.followUpWatchStatus();
+    } catch {
+      watch = {};
+    }
+  }
+
+  /** "checked 40s ago: not yet", for a script's row. */
+  function runText(id: string): string {
+    const s = watch[id];
+    if (!s?.last_run_at) return s?.running ? 'first check running' : 'not checked yet';
+    const ago = durationText(Math.max(0, now - Date.parse(s.last_run_at)));
+    const result = s.last_result === 'not_yet' ? 'not yet' : s.last_result === 'broken' ? `broken (${s.detail ?? 'unknown'})` : 'passed';
+    const streak = s.broken_runs > 1 ? `, ${s.broken_runs} runs in a row` : '';
+    return `checked ${ago} ago: ${result}${streak}`;
+  }
 
   const open = $derived(tabId !== null);
   // The store's own search (archived tabs included), so this can't say "nothing" for a tab the
@@ -41,7 +63,8 @@
     text = '';
     addError = null;
     heldReasons = {};
-    const t = setInterval(() => { now = Date.now(); }, 15_000);
+    void refreshWatch();
+    const t = setInterval(() => { now = Date.now(); void refreshWatch(); }, 15_000);
     // Explicit focus, not `autofocus`: opened from a context menu, the backdrop must hold focus
     // or Escape never reaches it (root CLAUDE.md, "Svelte's autofocus is not focus").
     requestAnimationFrame(() => dialogEl?.focus());
@@ -54,6 +77,17 @@
     try {
       const reason = await followUpsStore.deliverNow(tabId, id);
       heldReasons = { ...heldReasons, [id]: reason ?? '' };
+    } finally {
+      busy = false;
+      now = Date.now();
+    }
+  }
+
+  async function approve(id: string) {
+    if (!tabId) return;
+    busy = true;
+    try {
+      await followUpsStore.approve(tabId, id);
     } finally {
       busy = false;
       now = Date.now();
@@ -135,7 +169,25 @@
           <p class="status">Nothing scheduled.</p>
         {:else}
           {#each rows as { v, f } (v.id)}
-            <div class="row" class:expired={v.status === 'expired'}>
+            <div class="row" class:expired={v.status === 'expired'} class:asking={v.awaiting_approval}>
+              {#if f.due.kind === 'script'}
+                <!-- The approval card (docs/follow-ups.md §5.1): EXACTLY what will run, where, and
+                     how often — the approval is for this text in this folder. -->
+                <div class="script-card">
+                  {#if v.awaiting_approval}
+                    <div class="ask">
+                      The agent wants maiTerm to run this script every {durationText((f.due.every_secs ?? 60) * 1000)}, as you,
+                      without asking again. It runs outside the agent's own permission checks.
+                    </div>
+                  {/if}
+                  <div class="script-label">{f.due.label ?? 'watch script'}</div>
+                  <pre class="script">{f.due.script}</pre>
+                  <div class="script-meta">
+                    in <code>{f.due.cwd}</code> · every {f.due.every_secs ?? 60}s · up to {f.due.timeout_secs ?? 10}s a run
+                    {#if !v.awaiting_approval && !f.due.met_at}· {runText(v.id)}{/if}
+                  </div>
+                </div>
+              {/if}
               <div class="row-text">{v.text}</div>
               <div class="row-meta">
                 <span class="when" class:due={v.status === 'due'}>{whenText(f, now)}</span>
@@ -153,12 +205,17 @@
                 <div class="held">Not delivered: {heldReasons[v.id]}</div>
               {/if}
               <div class="row-actions">
-                {#if v.status !== 'expired'}
-                  <button class="btn btn-small" onclick={() => deliverNow(v.id)} disabled={busy || !live}>Deliver now</button>
+                {#if v.awaiting_approval && v.status !== 'expired'}
+                  <button class="btn btn-small btn-primary" onclick={() => approve(v.id)} disabled={busy}>Approve and run</button>
+                  <button class="btn btn-small" onclick={() => cancel(v.id)} disabled={busy}>Reject</button>
+                {:else}
+                  {#if v.status !== 'expired'}
+                    <button class="btn btn-small" onclick={() => deliverNow(v.id)} disabled={busy || !live}>Deliver now</button>
+                  {/if}
+                  <button class="btn btn-small" onclick={() => cancel(v.id)} disabled={busy}>
+                    {v.status === 'expired' ? 'Clear' : 'Cancel'}
+                  </button>
                 {/if}
-                <button class="btn btn-small" onclick={() => cancel(v.id)} disabled={busy}>
-                  {v.status === 'expired' ? 'Clear' : 'Cancel'}
-                </button>
               </div>
             </div>
           {/each}
@@ -271,6 +328,52 @@
 
   .row.expired .row-text {
     color: var(--fg-dim);
+  }
+
+  .row.asking {
+    background: var(--bg-dark);
+  }
+
+  .script-card {
+    margin-bottom: 6px;
+  }
+
+  .ask {
+    margin-bottom: 6px;
+    font-size: 0.8rem;
+    color: var(--yellow, #e0af68);
+    line-height: 1.4;
+  }
+
+  .script-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--fg);
+    overflow-wrap: anywhere;
+  }
+
+  .script {
+    margin: 4px 0;
+    padding: 6px 8px;
+    max-height: 220px;
+    overflow: auto;
+    border-radius: 5px;
+    border: 1px solid var(--bg-light);
+    background: var(--bg-dark);
+    color: var(--fg);
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.78rem;
+    white-space: pre;
+  }
+
+  .script-meta {
+    font-size: 0.75rem;
+    color: var(--fg-dim);
+    overflow-wrap: anywhere;
+  }
+
+  .script-meta code {
+    font-size: 0.75rem;
   }
 
   .row-text {

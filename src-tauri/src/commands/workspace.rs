@@ -1158,8 +1158,21 @@ pub fn add_tab_follow_up(
     state: State<'_, Arc<AppState>>,
     workspace_id: String,
     tab_id: String,
-    follow_up: crate::state::workspace::FollowUp,
+    mut follow_up: crate::state::workspace::FollowUp,
 ) -> Result<Vec<crate::state::workspace::FollowUp>, String> {
+    // A watch script's approval is decided HERE, from the approved set and the preference — never
+    // taken from what the frontend sent (§5.1). The same answer for a follow-up put back after a
+    // delivery that didn't happen: it was approved, so its digest is in the set.
+    if follow_up.due.kind == "script" {
+        if follow_up.due.script.as_ref().is_some_and(|s| s.len() > crate::watch::MAX_SCRIPT_BYTES) {
+            return Err(format!("A watch script can be at most {} KB.", crate::watch::MAX_SCRIPT_BYTES / 1024));
+        }
+        let app_data = state.app_data.read();
+        follow_up.due.approved = match (&follow_up.due.cwd, &follow_up.due.script) {
+            (Some(cwd), Some(script)) => crate::watch::is_approved(&app_data, cwd, script),
+            _ => false,
+        };
+    }
     let ((), list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
         if !list.iter().any(|f| f.id == follow_up.id) {
             list.push(follow_up);
@@ -1204,25 +1217,76 @@ pub fn meet_tab_follow_up(
     outcome: String,
 ) -> Result<Option<Vec<crate::state::workspace::FollowUp>>, String> {
     let (met, list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
-        meet_follow_up(list, &follow_up_id, met_at, outcome)
+        meet_follow_up(list, &follow_up_id, met_at, outcome, None)
     })?;
     Ok(met.then_some(list))
 }
 
-fn meet_follow_up(
+/// Also how the watch-script runner meets one (`watch.rs`), with what the script printed as
+/// `report`.
+pub(crate) fn meet_follow_up(
     list: &mut [crate::state::workspace::FollowUp],
     id: &str,
     met_at: String,
     outcome: String,
+    report: Option<String>,
 ) -> bool {
     match list.iter_mut().find(|f| f.id == id) {
         Some(f) if f.due.kind != "at" && f.due.met_at.is_none() => {
             f.due.met_at = Some(met_at);
             f.due.outcome = Some(outcome);
+            f.due.report = report;
             true
         }
         _ => false,
     }
+}
+
+/// Approve a watch script (docs/follow-ups.md §5.1): the human read it on the card and said yes.
+/// Marks this follow-up approved, and records the script's digest so an agent re-arming the SAME
+/// script, in the same folder, isn't asked about again. Returns the tab's list as it now stands;
+/// `None` when the follow-up isn't there, or isn't a script.
+#[tauri::command]
+pub fn approve_tab_follow_up_script(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    tab_id: String,
+    follow_up_id: String,
+) -> Result<Option<Vec<crate::state::workspace::FollowUp>>, String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let win = app_data.window_mut(&label).ok_or("Window not found")?;
+    let workspace = win.workspaces.iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    let tab = workspace.panes.iter_mut()
+        .flat_map(|p| p.tabs.iter_mut())
+        .chain(workspace.archived_tabs.iter_mut())
+        .find(|t| t.id == tab_id)
+        .ok_or("Tab not found")?;
+    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && f.due.kind == "script") else {
+        return Ok(None);
+    };
+    let (Some(script), Some(cwd)) = (f.due.script.clone(), f.due.cwd.clone()) else {
+        return Ok(None);
+    };
+    f.due.approved = true;
+    let list = tab.follow_ups.clone();
+    crate::watch::remember_approval(&mut app_data, &cwd, &script);
+    log::info!("follow-ups: watch script {} on tab {} approved", &follow_up_id[..8.min(follow_up_id.len())], &tab_id[..8.min(tab_id.len())]);
+
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)?;
+    Ok(Some(list))
+}
+
+/// What the watch-script runner knows about each script's runs (in memory, since this launch),
+/// for the human's list.
+#[tauri::command]
+pub fn follow_up_watch_status() -> std::collections::HashMap<String, crate::watch::WatchStatus> {
+    crate::watch::status()
 }
 
 #[tauri::command]
@@ -3570,16 +3634,17 @@ mod reload_carry_tests {
         timed.due = FollowUpDue { kind: "at".to_string(), at: Some("2026-10-01T09:00:00Z".to_string()), ..Default::default() };
         let mut list = vec![event("e"), timed];
 
-        assert!(meet_follow_up(&mut list, "e", "2026-09-30T10:00:00Z".into(), "it came up".into()));
+        assert!(meet_follow_up(&mut list, "e", "2026-09-30T10:00:00Z".into(), "it came up".into(), None));
         assert!(
-            !meet_follow_up(&mut list, "e", "2026-09-30T11:00:00Z".into(), "it came up again".into()),
+            !meet_follow_up(&mut list, "e", "2026-09-30T11:00:00Z".into(), "it came up again".into(), Some("x".into())),
             "the first observation stands"
         );
         assert_eq!(list[0].due.met_at.as_deref(), Some("2026-09-30T10:00:00Z"));
         assert_eq!(list[0].due.outcome.as_deref(), Some("it came up"));
-        assert!(!meet_follow_up(&mut list, "t", "2026-09-30T10:00:00Z".into(), "x".into()), "a time follow-up has its own due");
+        assert!(list[0].due.report.is_none(), "nor does a second report land");
+        assert!(!meet_follow_up(&mut list, "t", "2026-09-30T10:00:00Z".into(), "x".into(), None), "a time follow-up has its own due");
         assert!(list[1].due.met_at.is_none());
-        assert!(!meet_follow_up(&mut list, "gone", "2026-09-30T10:00:00Z".into(), "x".into()));
+        assert!(!meet_follow_up(&mut list, "gone", "2026-09-30T10:00:00Z".into(), "x".into(), None));
     }
 
     #[test]

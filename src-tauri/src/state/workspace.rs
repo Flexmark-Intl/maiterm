@@ -411,7 +411,7 @@ pub struct FollowUp {
 /// follow-up is simply never due on the older build.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct FollowUpDue {
-    /// "at" | "service_ready" | "service_stopped" | "task_done"
+    /// "at" | "service_ready" | "service_stopped" | "task_done" | "script"
     pub kind: String,
     /// kind "at": RFC 3339, wall clock — compared against now on every tick, never turned
     /// into a duration, so a machine that slept through it delivers late rather than shifted.
@@ -440,6 +440,26 @@ pub struct FollowUpDue {
     /// "the service was removed". Set with `met_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
+    /// kind "script" (§5.1): the watch script itself, inline — never a path, which could be
+    /// edited after the human approved what it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+    /// kind "script": the folder it runs in, the tab's as of creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// kind "script": seconds between runs, and how long one run may take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    /// kind "script": the human has approved it (or the preference waives approval). Set ONLY
+    /// in Rust — by `add_tab_follow_up` from the approved set, or by the approve command — never
+    /// taken from what the frontend sends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approved: bool,
+    /// kind "script": what the met run printed, for the envelope. Set with `met_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -995,6 +1015,13 @@ pub struct AppData {
     /// restore never consults scrollback timestamps again.
     #[serde(default)]
     pub tab_liveness_reconciled: bool,
+    /// Watch-script approvals (docs/follow-ups.md §5.1), as `watch::script_hash` digests: a script
+    /// the human approved once re-arms without asking again. Newest last, capped
+    /// (`watch::MAX_APPROVALS`). Here, not in `Preferences`, because the frontend writes
+    /// preferences back whole and a stale copy would drop an approval. Written only by the
+    /// approve command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved_watch_scripts: Vec<String>,
 }
 
 impl AppData {
@@ -1746,6 +1773,12 @@ pub struct Preferences {
     /// A preference because it starts a session, and spends quota, without the human there.
     #[serde(default = "default_true")]
     pub follow_ups_resume_agent: bool,
+    /// Run agents' watch scripts (docs/follow-ups.md §5.1) without asking the human to approve
+    /// each one. Off by default: a watch script runs later, unattended, outside the agent
+    /// runtime's own permission check. NEVER in `preference_meta` — an agent that could set this
+    /// over setPreference could approve its own scripts.
+    #[serde(default)]
+    pub follow_ups_scripts_unattended: bool,
     /// Overlord ruleset. Global across windows; workspace-scoped rules bind via rule.workspaces.
     #[serde(default)]
     pub overlord_rules: Vec<OverlordRule>,
@@ -2071,6 +2104,7 @@ impl Default for Preferences {
             overlord_propose_mode: true,
             follow_ups_enabled: true,
             follow_ups_resume_agent: true,
+            follow_ups_scripts_unattended: false,
             overlord_rules: Vec::new(),
             hidden_default_overlord_rules: Vec::new(),
             claude_ide: true,

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -1033,6 +1033,15 @@ export async function agentSessionIsLocal(runtime: string, sessionId: string): P
  *  nothing changed (gone, already met, or a time follow-up). Otherwise the new list. */
 export async function meetTabFollowUp(workspaceId: string, tabId: string, followUpId: string, metAt: string, outcome: string): Promise<FollowUp[] | null> {
   return invoke('meet_tab_follow_up', { workspaceId, tabId, followUpId, metAt, outcome });
+}
+
+/** The human approved a watch script (docs/follow-ups.md §5.1). Null: not there, or not a script. */
+export async function approveTabFollowUpScript(workspaceId: string, tabId: string, followUpId: string): Promise<FollowUp[] | null> {
+  return invoke('approve_tab_follow_up_script', { workspaceId, tabId, followUpId });
+}
+
+export async function followUpWatchStatus(): Promise<Record<string, WatchStatus>> {
+  return invoke('follow_up_watch_status');
 }
 
 // Sound commands

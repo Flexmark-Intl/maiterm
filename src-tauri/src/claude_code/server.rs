@@ -599,7 +599,9 @@ fn follow_ups_priming(state: &Arc<AppState>, tab_id: &str) -> Option<String> {
         "\n\nIf you need to come back to something later (check a deploy, re-run a flaky test, \
          look at CI once it finishes), schedule a follow-up with createFollowUp: maiTerm \
          delivers the prompt back into this tab between your turns, even if you exit in the \
-         meantime. It fires once.",
+         meantime. It fires once. When you are waiting for something to happen rather than for a \
+         time, prefer a watch script (when_script): maiTerm runs the check without waking you, \
+         so nothing is spent until there is something to do.",
     );
     if !pending.is_empty() {
         line.push_str(&format!(
@@ -629,6 +631,8 @@ fn follow_up_when(due: &crate::state::workspace::FollowUpDue) -> String {
         "service_ready" => format!("when service {label} is ready"),
         "service_stopped" => format!("when service {label} stops"),
         "task_done" => format!("when task \u{201C}{label}\u{201D} ends"),
+        "script" if !due.approved => format!("when your watch script \u{201C}{label}\u{201D} passes (waiting for your human to approve it)"),
+        "script" => format!("when your watch script \u{201C}{label}\u{201D} passes"),
         other => other.to_string(),
     }
 }
@@ -4850,7 +4854,10 @@ mod tests {
         assert_eq!(super::follow_up_when(&due("service_ready")), "when service web is ready");
         assert_eq!(super::follow_up_when(&due("service_stopped")), "when service web stops");
         assert_eq!(super::follow_up_when(&due("task_done")), "when task \u{201C}web\u{201D} ends");
-        let met = FollowUpDue { met_at: Some("2026-09-30T10:00:00Z".into()), ..due("service_ready") };
+        assert!(super::follow_up_when(&due("script")).ends_with("(waiting for your human to approve it)"));
+        let approved = FollowUpDue { approved: true, ..due("script") };
+        assert_eq!(super::follow_up_when(&approved), "when your watch script \u{201C}web\u{201D} passes");
+        let met =FollowUpDue { met_at: Some("2026-09-30T10:00:00Z".into()), ..due("service_ready") };
         assert_eq!(super::follow_up_when(&met), "due now");
     }
 

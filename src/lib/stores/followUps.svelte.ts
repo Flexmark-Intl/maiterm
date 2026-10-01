@@ -17,8 +17,10 @@
  * mid-delivery, which is an ordinary event rather than a crash.
  */
 import { info as logInfo, warn as logWarn, error as logError } from '@tauri-apps/plugin-log';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as commands from '$lib/tauri/commands';
 import type { FollowUp, Tab } from '$lib/tauri/types';
+import { dispatch as notify } from '$lib/stores/notificationDispatch';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
@@ -32,7 +34,8 @@ import { interpolateVariables } from '$lib/stores/triggers.svelte';
 import { sessionIdVar } from '$lib/agents/resume';
 import {
   resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText, clockText,
-  type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type FollowUpStatus,
+  needsApproval,
+  type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type ResolvedScriptHome, type FollowUpStatus,
 } from '$lib/followUps/model';
 
 /** How often due follow-ups are looked for. Also runs on focus and visibility, because
@@ -43,12 +46,12 @@ const HOUR_MS = 60 * 60_000;
 /** How long a relaunched agent gets to come up before maiTerm says it didn't (§6.2). A resume
  *  replays the transcript, which takes a while for a long session. */
 const RESUME_WAIT_MS = 2 * 60_000;
-/** The hold reason for a tab with no agent — the one reason resume-then-deliver acts on. */
 /** How long what an event follow-up waits on must stay missing before it counts as gone. Longer
  *  than any move in flight (a workspace's tabs registering one by one take up to 5 s each), and
  *  in practice it is one tick and the next. */
 const GONE_CONFIRM_MS = 10_000;
-const NO_AGENT ='no agent is running in the tab — it goes after an agent starts there';
+/** The hold reason for a tab with no agent — the one reason resume-then-deliver acts on. */
+const NO_AGENT = 'no agent is running in the tab — it goes after an agent starts there';
 
 export interface FollowUpView {
   id: string;
@@ -57,8 +60,10 @@ export interface FollowUpView {
   status: FollowUpStatus;
   /** A time one's due time; an event one's, once its event has happened. */
   due_at: string | null;
-  /** An event one's trigger, "when service `web` is ready"; null for a time one. */
+  /** A condition one's trigger, "when service `web` is ready"; null for a time one. */
   trigger: string | null;
+  /** A watch script waiting for the human to approve it (§5.1) — it does not run until then. */
+  awaiting_approval: boolean;
   /** What happened, once an event one's condition is met: "it crashed (exit 1)". */
   outcome: string | null;
   created_at: string;
@@ -78,6 +83,8 @@ function createFollowUpsStore() {
   let timer: ReturnType<typeof setInterval> | undefined;
   let running = false;
   let stopTransitions: (() => void) | undefined;
+  let stopRustChanges: UnlistenFn | undefined;
+  let destroyed = false;
   const stopShellFeed: (() => void)[] = [];
   const onWake = () => { void tick(); };
   /** Resumes maiTerm typed, by tab: typed ONCE, then watched — never retyped every tick. Cleared
@@ -314,6 +321,29 @@ function createFollowUpsStore() {
     return tabHold(tab);
   }
 
+  /** Where a watch script from this tab would run (§5.1), or why it can't have one. Its folder is
+   *  the tab's now; it is fixed at creation, because the script was written against it. */
+  async function scriptHome(workspaceId: string, tab: Tab): Promise<ResolvedScriptHome> {
+    const ws = workspacesStore.workspaces.find(w => w.id === workspaceId);
+    if (tab.overlord_exempt || ws?.overlord_exempt) {
+      return { ok: false, reason: 'exempt', detail: 'This tab is exempt from the Overlord, so maiTerm runs no watch scripts for it.' };
+    }
+    // A script runs on THIS machine; in an ssh tab the condition is on the other one.
+    const remote = { ok: false as const, reason: 'remote_tab', detail: 'This tab runs over ssh, and a watch script would run on this machine instead of the remote one. Use a time follow-up, or a service or task trigger.' };
+    if (tab.restore_ssh_command || tab.auto_resume_ssh_command) return remote;
+    const inst = terminalsStore.get(tab.id);
+    if (inst) {
+      try {
+        if ((await commands.getAgentLiveness(inst.ptyId)).ssh_foreground) return remote;
+      } catch { /* no answer is no evidence of ssh; the folder check still applies */ }
+    }
+    const cwd = terminalsStore.getOsc(tab.id)?.cwd || tab.last_cwd || '';
+    if (!cwd.startsWith('/')) {
+      return { ok: false, reason: 'no_folder', detail: 'maiTerm can’t tell which folder this tab is in, so it doesn’t know where to run the script.' };
+    }
+    return { ok: true, cwd };
+  }
+
   function recentCreations(tabId: string, now: number): number {
     const kept = (createdAt.get(tabId) ?? []).filter(t => now - t < HOUR_MS);
     createdAt.set(tabId, kept);
@@ -510,6 +540,12 @@ function createFollowUpsStore() {
         activityStore.onShellPrompt((_tabId, ptyId) => { shellPromptAt.set(ptyId, Date.now()); }),
         activityStore.onCommandBegin((_tabId, ptyId) => { shellBeginAt.set(ptyId, Date.now()); }),
       );
+      // A watch script is met in Rust (`watch.rs`), which says so with the tab's new list. Any
+      // window may hear it; `mirror` touches only a tab this window has.
+      destroyed = false;
+      void listen<{ tab_id: string; follow_ups: FollowUp[] }>('follow-ups-changed', (e) => {
+        mirror(e.payload.tab_id, e.payload.follow_ups);
+      }).then(un => { if (destroyed) un(); else stopRustChanges = un; });
       window.addEventListener('focus', onWake);
       document.addEventListener('visibilitychange', onWake);
       void tick();
@@ -518,6 +554,9 @@ function createFollowUpsStore() {
     destroy() {
       if (timer) clearInterval(timer);
       timer = undefined;
+      destroyed = true;
+      stopRustChanges?.();
+      stopRustChanges = undefined;
       stopTransitions?.();
       stopTransitions = undefined;
       for (const stop of stopShellFeed.splice(0)) stop();
@@ -527,6 +566,10 @@ function createFollowUpsStore() {
 
     /** Schedule one. `author` is "agent" over MCP, "human" from the UI. */
     async create(tabId: string, args: CreateArgs, author: 'agent' | 'human'): Promise<Resolved> {
+      const before = locate(tabId);
+      if (!before) return { ok: false, reason: 'tab_not_found', detail: 'maiTerm does not know this tab.' };
+      // Settled before the pure resolve, which can't await: only a script asks.
+      const home = args.when_script != null ? await scriptHome(before.workspaceId, before.tab) : null;
       const loc = locate(tabId);
       if (!loc) return { ok: false, reason: 'tab_not_found', detail: 'maiTerm does not know this tab.' };
       const now = Date.now();
@@ -538,12 +581,35 @@ function createFollowUpsStore() {
         author,
         newId: () => crypto.randomUUID(),
         resolveEvent: (kind, ref) => resolveEvent(loc.workspaceId, kind, ref),
+        resolveScriptHome: home ? () => home : undefined,
       });
       if (!r.ok) return r;
       // Counted before the await, so two creates in flight can't both slip under the limit.
       createdAt.get(tabId)!.push(now);
       await add(tabId, r.followUp);
-      return r;
+      // Rust decided the approval; the stored copy says what it decided.
+      const stored = locate(tabId)?.tab.follow_ups?.find(f => f.id === r.followUp.id) ?? r.followUp;
+      if (needsApproval(stored, preferencesStore.followUpsScriptsUnattended)) {
+        const tabName = locate(tabId)?.tab.name ?? 'a tab';
+        void notify(
+          'A watch script needs your approval',
+          `The agent in “${tabName}” wants maiTerm to run a script on a schedule (${stored.due.label ?? 'watch script'}). Click its tab’s clock badge to review it.`,
+          'info',
+          { tabId },
+        );
+      }
+      return { ok: true, followUp: stored };
+    },
+
+    /** The human approved a watch script on its card (§5.1). False: it is no longer there. */
+    async approve(tabId: string, id: string): Promise<boolean> {
+      const loc = locate(tabId);
+      if (!loc) return false;
+      const list = await commands.approveTabFollowUpScript(loc.workspaceId, tabId, id);
+      if (!list) return false;
+      mirror(tabId, list);
+      logInfo(`follow-ups: watch script ${id.slice(0, 8)} on tab ${tabId.slice(0, 8)} approved`);
+      return true;
     },
 
     /** This tab's follow-ups, each with where it stands right now. */
@@ -561,6 +627,7 @@ function createFollowUpsStore() {
           status,
           due_at: f.due.kind === 'at' ? (f.due.at ?? null) : (f.due.met_at ?? null),
           trigger: triggerText(f),
+          awaiting_approval: needsApproval(f, preferencesStore.followUpsScriptsUnattended),
           outcome: f.due.outcome ?? null,
           created_at: f.created_at,
           expires_at: f.expires_at ?? null,

@@ -23,9 +23,24 @@ export interface CreateArgs {
   when_service_ready?: unknown;
   when_service_stopped?: unknown;
   when_task_done?: unknown;
+  /** A watch script (§5.1): `{ script, label?, every_seconds?, timeout_seconds? }`. */
+  when_script?: unknown;
   /** Deliver no later than this many minutes from now, or drop it. */
   expires_in_minutes?: unknown;
 }
+
+/** §5.1 limits, mirrored in `watch.rs` (which clamps again — this is where the agent hears why). */
+export const SCRIPT_MAX_BYTES = 16 * 1024;
+export const SCRIPT_EVERY_MIN_S = 15;
+export const SCRIPT_EVERY_MAX_S = 24 * 60 * 60;
+export const SCRIPT_EVERY_DEFAULT_S = 60;
+export const SCRIPT_TIMEOUT_MAX_S = 60;
+export const SCRIPT_TIMEOUT_DEFAULT_S = 10;
+const SCRIPT_LABEL_CHARS = 80;
+
+/** Where a watch script would run, or why this tab can't have one — the store decides, since only
+ *  it can see the tab (its folder, ssh, exemption). */
+export type ResolvedScriptHome = { ok: true; cwd: string } | { ok: false; reason: string; detail: string };
 
 export type EventKind = 'service_ready' | 'service_stopped' | 'task_done';
 
@@ -51,6 +66,8 @@ export interface CreateContext {
   newId: () => string;
   /** Look up an event trigger's service or task. Absent: event triggers are refused. */
   resolveEvent?: (kind: EventKind, ref: string) => ResolvedEvent;
+  /** Where a watch script runs. Absent: watch scripts are refused. */
+  resolveScriptHome?: () => ResolvedScriptHome;
 }
 
 export type Resolved =
@@ -59,6 +76,17 @@ export type Resolved =
 
 export function isEventKind(kind: string): kind is EventKind {
   return kind === 'service_ready' || kind === 'service_stopped' || kind === 'task_done';
+}
+
+/** A follow-up that waits on a condition — an event or a watch script — and is due once `met_at`
+ *  is set. Scripts are met in Rust (`watch.rs`); events by this window's store. */
+export function isConditionKind(kind: string): boolean {
+  return isEventKind(kind) || kind === 'script';
+}
+
+/** A watch script still waiting for the human to say it may run. */
+export function needsApproval(f: FollowUp, unattended: boolean): boolean {
+  return f.due.kind === 'script' && !f.due.met_at && !f.due.approved && !unattended;
 }
 
 function refuse(reason: string, detail: string): Resolved {
@@ -91,14 +119,16 @@ export function resolveCreate(args: CreateArgs, ctx: CreateContext): Resolved {
 
   const hasAt = given(args.at);
   const hasIn = given(args.in_minutes);
+  const hasScript = given(args.when_script);
   const events = EVENT_ARGS.filter(([arg]) => given(args[arg]));
-  if (Number(hasAt) + Number(hasIn) + events.length !== 1) {
+  if (Number(hasAt) + Number(hasIn) + Number(hasScript) + events.length !== 1) {
     return refuse(
       'need_one_trigger',
-      'Pass exactly one trigger: `at` (an ISO 8601 time), `in_minutes`, `when_service_ready`, `when_service_stopped` or `when_task_done`.',
+      'Pass exactly one trigger: `at` (an ISO 8601 time), `in_minutes`, `when_script`, `when_service_ready`, `when_service_stopped` or `when_task_done`.',
     );
   }
 
+  if (hasScript) return resolveScriptCreate(text, args, ctx);
   if (events.length === 1) return resolveEventCreate(text, events[0], args, ctx);
 
   let due: number;
@@ -169,13 +199,8 @@ function resolveEventCreate(text: string, [arg, kind]: [keyof CreateArgs, EventK
   const ev = ctx.resolveEvent(kind, ref);
   if (!ev.ok) return refuse(ev.reason, ev.detail);
 
-  let expiresMs = MAX_DELAY_MS;
-  if (given(args.expires_in_minutes)) {
-    const m = minutes(args.expires_in_minutes);
-    if (m == null || m <= 0) return refuse('bad_expiry', '`expires_in_minutes` must be a positive number.');
-    if (m * 60_000 > MAX_DELAY_MS) return refuse('bad_expiry', 'An event follow-up can wait at most 7 days (`expires_in_minutes` ≤ 10080).');
-    expiresMs = m * 60_000;
-  }
+  const expiresMs = conditionExpiry(args);
+  if (typeof expiresMs !== 'number') return expiresMs;
 
   const limited = limits(ctx);
   if (limited) return limited;
@@ -199,6 +224,74 @@ function resolveEventCreate(text: string, [arg, kind]: [keyof CreateArgs, EventK
   };
 }
 
+/** How long a condition follow-up may wait, in ms: 7 days, or `expires_in_minutes` up to that. */
+function conditionExpiry(args: CreateArgs): number | Resolved {
+  if (!given(args.expires_in_minutes)) return MAX_DELAY_MS;
+  const m = minutes(args.expires_in_minutes);
+  if (m == null || m <= 0) return refuse('bad_expiry', '`expires_in_minutes` must be a positive number.');
+  if (m * 60_000 > MAX_DELAY_MS) return refuse('bad_expiry', 'An event or script follow-up can wait at most 7 days (`expires_in_minutes` ≤ 10080).');
+  return m * 60_000;
+}
+
+/** A whole number of seconds in [lo, hi], `dflt` when not given; null when given and not that. */
+function seconds(v: unknown, lo: number, hi: number, dflt: number): number | null {
+  if (!given(v)) return dflt;
+  const n = minutes(v); // the same "a number, or a numeric string" reading
+  return n != null && Number.isInteger(n) && n >= lo && n <= hi ? n : null;
+}
+
+/** A watch script (§5.1). Its text is kept EXACTLY as sent — it is code, and the human approves
+ *  what will run — except that a NUL is refused: no script needs one, and it would make the card
+ *  and the file disagree. */
+function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext): Resolved {
+  const w = args.when_script;
+  if (typeof w !== 'object' || w === null || Array.isArray(w)) {
+    return refuse('bad_script', '`when_script` must be an object: { script, label?, every_seconds?, timeout_seconds? }.');
+  }
+  const o = w as Record<string, unknown>;
+  const script = typeof o.script === 'string' ? o.script : '';
+  if (!script.trim()) return refuse('bad_script', '`when_script.script` must be the script to run.');
+  if (script.includes('\u0000')) return refuse('bad_script', 'The script contains a NUL character.');
+  if (new TextEncoder().encode(script).length > SCRIPT_MAX_BYTES) {
+    return refuse('bad_script', `A watch script can be at most ${SCRIPT_MAX_BYTES / 1024} KB. Keep the logic in the script and the data in files.`);
+  }
+  const every = seconds(o.every_seconds, SCRIPT_EVERY_MIN_S, SCRIPT_EVERY_MAX_S, SCRIPT_EVERY_DEFAULT_S);
+  if (every == null) return refuse('bad_script', `\`every_seconds\` must be a whole number from ${SCRIPT_EVERY_MIN_S} to ${SCRIPT_EVERY_MAX_S}.`);
+  const timeout = seconds(o.timeout_seconds, 1, SCRIPT_TIMEOUT_MAX_S, SCRIPT_TIMEOUT_DEFAULT_S);
+  if (timeout == null) return refuse('bad_script', `\`timeout_seconds\` must be a whole number from 1 to ${SCRIPT_TIMEOUT_MAX_S}. A watch script checks and exits — it never waits.`);
+  const label = (typeof o.label === 'string' ? o.label : '').replace(CONTROL_CHARS, ' ').trim().slice(0, SCRIPT_LABEL_CHARS)
+    || scriptLabel(script);
+
+  if (!ctx.resolveScriptHome) return refuse('bad_trigger', 'Watch scripts are not available here.');
+  const home = ctx.resolveScriptHome();
+  if (!home.ok) return refuse(home.reason, home.detail);
+
+  const expiresMs = conditionExpiry(args);
+  if (typeof expiresMs !== 'number') return expiresMs;
+
+  const limited = limits(ctx);
+  if (limited) return limited;
+
+  return {
+    ok: true,
+    followUp: {
+      id: ctx.newId(),
+      text,
+      due: { kind: 'script', script, cwd: home.cwd, every_secs: every, timeout_secs: timeout, label },
+      author: ctx.author,
+      created_at: new Date(ctx.now).toISOString(),
+      expires_at: new Date(ctx.now + expiresMs).toISOString(),
+    },
+  };
+}
+
+/** A label for a script the agent didn't name: its first line of code. */
+function scriptLabel(script: string): string {
+  const line = script.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('#')) ?? 'watch script';
+  const clean = line.replace(CONTROL_CHARS, ' ');
+  return clean.length > 60 ? `${clean.slice(0, 57)}…` : clean;
+}
+
 function given(v: unknown): boolean {
   return v != null && v !== '';
 }
@@ -207,7 +300,7 @@ function given(v: unknown): boolean {
  *  happened. Null while an event one waits — and for any kind this build doesn't know (a newer
  *  build wrote it). An unknown kind is never due here, never an error. */
 export function dueAt(f: FollowUp): number | null {
-  const stamp = f.due.kind === 'at' ? f.due.at : isEventKind(f.due.kind) ? f.due.met_at : null;
+  const stamp = f.due.kind === 'at' ? f.due.at : isConditionKind(f.due.kind) ? f.due.met_at : null;
   if (!stamp) return null;
   const t = Date.parse(stamp);
   return Number.isFinite(t) ? t : null;
@@ -243,7 +336,8 @@ export function taskOutcome(status: string | null): string | null {
   return null;
 }
 
-/** Waiting on an event that hasn't happened yet (and isn't expired). */
+/** Waiting on an event that hasn't happened yet (and isn't expired). Events only: a watch script
+ *  waits too, but Rust checks it — nothing in this window's stack or tasks can meet one. */
 export function isWaitingOnEvent(f: FollowUp): boolean {
   return isEventKind(f.due.kind) && !f.due.met_at;
 }
@@ -255,13 +349,14 @@ function conditionText(f: FollowUp, tense: 'wait' | 'past' | 'when'): string {
     f.due.kind === 'service_ready' ? [`service \`${label}\``, 'to be ready', 'was ready', 'is ready']
     : f.due.kind === 'service_stopped' ? [`service \`${label}\``, 'to stop', 'stopped', 'stops']
     : f.due.kind === 'task_done' ? [`task “${label}”`, 'to end', 'ended', 'ends']
+    : f.due.kind === 'script' ? [`watch script “${label}”`, 'to pass', 'passed', 'passes']
     : [f.due.kind, '', '', ''];
   return `${what} ${tense === 'wait' ? wait : tense === 'past' ? past : when}`.trim();
 }
 
-/** An event follow-up's trigger, "when service `web` is ready"; null for a time one. */
+/** A condition follow-up's trigger, "when service `web` is ready"; null for a time one. */
 export function triggerText(f: FollowUp): string | null {
-  return isEventKind(f.due.kind) ? `when ${conditionText(f, 'when')}` : null;
+  return isConditionKind(f.due.kind) ? `when ${conditionText(f, 'when')}` : null;
 }
 
 export function isExpired(f: FollowUp, now: number): boolean {
@@ -300,10 +395,10 @@ export function durationText(ms: number): string {
  *  list can't disagree. */
 export function whenText(f: FollowUp, now: number): string {
   if (isExpired(f, now)) return `expired ${durationText(now - Date.parse(f.expires_at!))} ago`;
-  if (isWaitingOnEvent(f)) return `waiting for ${conditionText(f, 'wait')}`;
+  if (isConditionKind(f.due.kind) && !f.due.met_at) return `waiting for ${conditionText(f, 'wait')}`;
   const t = dueAt(f);
   if (t == null) return 'waiting';
-  if (isEventKind(f.due.kind)) return `due: ${conditionText(f, 'past')} ${durationText(now - t)} ago`;
+  if (isConditionKind(f.due.kind)) return `due: ${conditionText(f, 'past')} ${durationText(now - t)} ago`;
   return t > now ? `in ${durationText(t - now)}` : `due ${durationText(now - t)} ago`;
 }
 
@@ -314,20 +409,28 @@ export function badgeSummary(
   fus: FollowUp[],
   now: number,
   live: boolean,
-): { count: number; due: boolean; tooltip: string } | null {
+  unattended = false,
+): { count: number; due: boolean; approval: boolean; tooltip: string } | null {
   if (fus.length === 0) return null;
   const active = fus.filter(f => !isExpired(f, now));
   const expired = fus.length - active.length;
+  const asking = active.filter(f => needsApproval(f, unattended)).length;
   const next = [...active].sort((a, b) => (dueAt(a) ?? Infinity) - (dueAt(b) ?? Infinity))[0];
   const parts: string[] = [];
+  if (asking > 0) parts.push(`${asking} watch script${asking === 1 ? '' : 's'} waiting for your approval to run`);
   if (next) {
     const text = next.text.length > 60 ? `${next.text.slice(0, 57)}…` : next.text;
     parts.push(`${active.length} follow-up${active.length === 1 ? '' : 's'} — next ${whenText(next, now)}: “${text}”`);
   }
   if (expired > 0) parts.push(`${expired} expired`);
   if (!live) parts.push('held: follow-ups are off (Preferences → Overlord)');
-  parts.push('Right-click → Follow-ups… to manage.');
-  return { count: active.length, due: live && active.some(f => isDue(f, now)), tooltip: parts.join(' · ') };
+  parts.push(asking > 0 ? 'Click to review.' : 'Click, or right-click → Follow-ups…, to manage.');
+  return {
+    count: active.length,
+    due: live && active.some(f => isDue(f, now)),
+    approval: live && asking > 0,
+    tooltip: parts.join(' · '),
+  };
 }
 
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -351,17 +454,24 @@ export function envelope(f: FollowUp, now: number, early = false): string {
   const created = Date.parse(f.created_at);
   const due = dueAt(f) ?? now;
   const late = now - due;
-  const event = isEventKind(f.due.kind);
+  const event = isConditionKind(f.due.kind);
+  const script = f.due.kind === 'script';
   const when = early
     ? event ? 'delivered before it happened, at your human’s request' : 'delivered early, at your human’s request'
     : late > LATE_AFTER_MS ? `delivered ${durationText(late)} late` : 'delivered on time';
   // An event one names its condition and what actually happened — "it crashed" and "the service
-  // was removed" are both an end to "when `web` stops", and the agent needs to know which.
+  // was removed" are both an end to "when `web` stops", and the agent needs to know which. A
+  // script's is "it passed" or "it BROKE instead", so it reads in the present: "when your watch
+  // script … passes — it BROKE instead".
+  const condition = script ? `your ${conditionText(f, 'when')}` : conditionText(f, 'past');
   const target = !event
     ? clockText(due, now)
     : early || !f.due.met_at
-      ? `when ${conditionText(f, 'past')}`
-      : `when ${conditionText(f, 'past')} — ${f.due.outcome ?? 'it happened'}, at ${clockText(due, now)}`;
+      ? `when ${condition}`
+      : `when ${condition} — ${f.due.outcome ?? 'it happened'}, at ${clockText(due, now)}`;
+  // What the script printed is the agent's answer to "what did it find" — after the note, so the
+  // note still reads first.
+  const report = script && f.due.report && !early ? `\n\nYour watch script printed:\n${f.due.report}` : '';
   const scheduled = `at ${clockText(created, now)} for ${target} (${when})`;
   const who =
     f.author === 'human'
@@ -371,5 +481,5 @@ export function envelope(f: FollowUp, now: number, early = false): string {
         : `You scheduled this ${scheduled} — your own earlier note, not a new message from your human:`;
   // The label is a service name or task title someone typed; strip the whole thing, not only the
   // text, before it reaches a bracketed paste (see CONTROL_CHARS).
-  return `⟦FOLLOW-UP⟧ ${who}\n${f.text}`.replace(CONTROL_CHARS, '');
+  return `⟦FOLLOW-UP⟧ ${who}\n${f.text}${report}`.replace(CONTROL_CHARS, '');
 }

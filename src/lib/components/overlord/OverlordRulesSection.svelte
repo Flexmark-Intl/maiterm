@@ -354,6 +354,33 @@
       </button>
     </div>
 
+    <div class="setting" class:inert={!preferencesStore.followUpsLive}>
+      <div class="setting-copy">
+        <label for="overlord-follow-ups-scripts">Run watch scripts without asking</label>
+        <p class="setting-hint">
+          An agent can wait on a condition by writing a script that maiTerm runs on a schedule.
+          It runs later, as you, outside the agent's own permission checks, so each new script
+          asks you first. On: they run without asking. Only for agents you already let run
+          commands unattended.
+        </p>
+      </div>
+      <button
+        id="overlord-follow-ups-scripts"
+        class="toggle"
+        class:active={preferencesStore.followUpsLive && preferencesStore.followUpsScriptsUnattended}
+        disabled={!preferencesStore.followUpsLive}
+        onclick={() => {
+          // Same as above: a click on a disabled button still lands in WebKit.
+          if (!preferencesStore.followUpsLive) return;
+          preferencesStore.setFollowUpsScriptsUnattended(!preferencesStore.followUpsScriptsUnattended);
+        }}
+        aria-pressed={preferencesStore.followUpsLive && preferencesStore.followUpsScriptsUnattended}
+        aria-label="Toggle running watch scripts without asking"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
+
     <div class="status" class:live={preferencesStore.overlordEnabled}>
       <span class="status-led"></span>
       <span class="status-text">

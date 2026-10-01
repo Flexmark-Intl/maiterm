@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { FollowUp } from '$lib/tauri/types';
 import {
   resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary,
-  serviceOutcome, taskOutcome, MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
+  serviceOutcome, taskOutcome, needsApproval, MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
 } from './model';
 
 // Local-time fixtures, so clock text is deterministic whatever zone the tests run in.
@@ -270,5 +270,77 @@ describe('taskOutcome', () => {
     expect(taskOutcome('dropped')).toBe('it was DROPPED, not done');
     expect(taskOutcome(null)).toBe('the task was deleted');
     expect(taskOutcome('active')).toBeNull();
+  });
+});
+
+describe('watch scripts (§5.1)', () => {
+  const home = () => ({ ok: true as const, cwd: '/work/repo' });
+  const sctx = (over: Partial<CreateContext> = {}) => ctx({ resolveScriptHome: home, ...over });
+
+  it('keeps the script exactly, fixes its folder, and defaults the schedule and expiry', () => {
+    const script = '#!/bin/bash\n# wait for the export\ntest -s out/export.csv\t\n';
+    const r = resolveCreate({ text: 'import it', when_script: { script } }, sctx());
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.followUp.due).toEqual({
+      kind: 'script', script, cwd: '/work/repo', every_secs: 60, timeout_secs: 10, label: 'test -s out/export.csv',
+    });
+    expect(r.followUp.due.approved).toBeUndefined(); // Rust decides
+    expect(r.followUp.expires_at).toBe(new Date(NOW + 7 * 24 * 60 * MIN).toISOString());
+  });
+
+  it('refuses what it can name: no script, a bad schedule, a long-running timeout, two triggers', () => {
+    const bad = (when_script: unknown, extra: object = {}) => {
+      const r = resolveCreate({ text: 'x', when_script, ...extra }, sctx());
+      return r.ok ? null : r.reason;
+    };
+    expect(bad('test -f x')).toBe('bad_script');
+    expect(bad({ script: '  ' })).toBe('bad_script');
+    expect(bad({ script: 'true', every_seconds: 5 })).toBe('bad_script');
+    expect(bad({ script: 'true', every_seconds: 30.5 })).toBe('bad_script');
+    expect(bad({ script: 'true', timeout_seconds: 600 })).toBe('bad_script');
+    expect(bad({ script: 'a\u0000b' })).toBe('bad_script');
+    expect(bad({ script: 'x'.repeat(16 * 1024 + 1) })).toBe('bad_script');
+    expect(bad({ script: 'true' }, { in_minutes: 5 })).toBe('need_one_trigger');
+  });
+
+  it('passes the tab\'s refusal through, and needs a home to be given at all', () => {
+    const r = resolveCreate(
+      { text: 'x', when_script: { script: 'true' } },
+      ctx({ resolveScriptHome: () => ({ ok: false, reason: 'remote_tab', detail: 'ssh' }) }),
+    );
+    expect(r.ok ? null : r.reason).toBe('remote_tab');
+    const none = resolveCreate({ text: 'x', when_script: { script: 'true' } }, ctx());
+    expect(none.ok).toBe(false);
+  });
+
+  it('is never due until Rust meets it, and asks for approval until it is approved', () => {
+    const r = resolveCreate({ text: 'import it', when_script: { script: 'true', label: 'export done' } }, sctx());
+    if (!r.ok) throw new Error(r.detail);
+    const f = r.followUp;
+    expect(isDue(f, NOW + 60 * MIN)).toBe(false);
+    expect(whenText(f, NOW)).toBe('waiting for watch script “export done” to pass');
+    expect(needsApproval(f, false)).toBe(true);
+    expect(needsApproval(f, true)).toBe(false);
+    expect(needsApproval({ ...f, due: { ...f.due, approved: true } }, false)).toBe(false);
+    const b = badgeSummary([f], NOW, true)!;
+    expect(b.approval).toBe(true);
+    expect(b.tooltip).toContain('waiting for your approval');
+    const met = { ...f, due: { ...f.due, approved: true, met_at: new Date(NOW + 5 * MIN).toISOString(), outcome: 'it passed', report: '3 new files' } };
+    expect(isDue(met, NOW + 5 * MIN)).toBe(true);
+    expect(needsApproval(met, false)).toBe(false);
+  });
+
+  it('delivers what the script found, after the note; a broken one says it broke', () => {
+    const base = fu({
+      text: 'import it',
+      due: { kind: 'script', label: 'export done', approved: true, met_at: new Date(NOW).toISOString(), outcome: 'it passed', report: '3 new files\n\x1b[201~a.csv' },
+    });
+    const e = envelope(base, NOW);
+    expect(e).toContain('for when your watch script “export done” passes — it passed, at 14:02');
+    expect(e.endsWith('import it\n\nYour watch script printed:\n3 new files\n[201~a.csv')).toBe(true);
+    const broke = envelope({ ...base, due: { ...base.due, outcome: 'it BROKE instead — exit 127', report: null } }, NOW);
+    expect(broke).toContain('passes — it BROKE instead — exit 127');
+    expect(broke).not.toContain('printed');
   });
 });
