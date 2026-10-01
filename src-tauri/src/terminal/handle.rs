@@ -70,6 +70,13 @@ pub struct TerminalHandle {
     /// the shell lives on; the remounted pane reconnects from this (TerminalPane
     /// `reconnectIfDropped`). A 255 with no ssh seen is not a drop, whatever else it was.
     pub dropped_ssh: Option<String>,
+    /// The pid of a shell in this terminal that can report its command line (maiTerm's zsh
+    /// integration announces it at startup — `probe_shell_line`). Only that exact process is
+    /// ever probed: a nested shell without the integration would take the probe as input.
+    pub line_probe_pid: Option<u32>,
+    /// The last command-line report: (shell pid, characters on the line). Cleared before
+    /// each probe, so a report is always an answer to the probe that read it.
+    pub line_report: Option<(u32, u32)>,
 }
 
 impl TerminalHandle {
@@ -170,5 +177,7 @@ pub fn create_terminal(
         xterm_dims: None,
         live_ssh: None,
         dropped_ssh: None,
+        line_probe_pid: None,
+        line_report: None,
     }
 }

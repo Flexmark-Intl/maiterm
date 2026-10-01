@@ -411,6 +411,19 @@ pub(crate) fn claude_transcript_path(session_id: &str) -> Option<PathBuf> {
     locate_jsonl(session_id)
 }
 
+/// Does this session's transcript live on THIS machine? A session id recorded over ssh names a
+/// remote session, and resuming it in a local shell would be the wrong machine
+/// (docs/follow-ups.md §6.2). A mirrored remote transcript doesn't count: it is a local copy of a
+/// remote session. Gemini has no transcript maiTerm can find, so it is never "local" here.
+pub(crate) fn session_is_local(runtime: &str, session_id: &str) -> bool {
+    match runtime {
+        "claude" => locate_jsonl(session_id)
+            .is_some_and(|p| super::mirror::shadow_dir().is_none_or(|shadow| !p.starts_with(shadow))),
+        "codex" => locate_codex_jsonl(session_id).is_some(),
+        _ => false,
+    }
+}
+
 /// Parsed transcript lines from the last `max_bytes` of a Claude session's JSONL, oldest first.
 /// For consumers that need the raw entries rather than distilled turns (the background-shell
 /// roster). A truncated leading line simply fails to parse and is skipped, as everywhere else.

@@ -576,6 +576,11 @@ pub fn spawn_pty(
                         if let Some(handle) = registry.get_mut(&pty_id_clone) {
                             let events = handle.osc_interceptor.process(data);
                             for event in &events {
+                                match event {
+                                    OscEvent::LineProbe { pid } => handle.line_probe_pid = Some(*pid),
+                                    OscEvent::LineReport { pid, len } => handle.line_report = Some((*pid, *len)),
+                                    _ => {}
+                                }
                                 if let OscEvent::ShellIntegration { cmd, exit_code } = event {
                                     match cmd {
                                         'D' => {
@@ -626,6 +631,8 @@ pub fn spawn_pty(
                                     serde_json::json!({ "cwd": cwd, "host": null }),
                                 );
                             }
+                            // Recorded on the handle above; `probe_shell_line` reads them.
+                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } => {}
                         }
                     }
 
@@ -1812,6 +1819,30 @@ fn resolve_windows_shell(id: &str) -> String {
     }
 }
 
+/// The command-line probe (docs/follow-ups.md §6.2). maiTerm may type an agent's resume command
+/// into a shell only if the shell's command line is EMPTY, and nothing outside the shell knows
+/// that: keystroke timestamps miss pastes and drops, and type-ahead entered while a command ran
+/// lands on the next prompt before that prompt's own mark. So ask the line editor itself.
+///
+/// The probe is an EMPTY bracketed paste (`ESC[200~ESC[201~`), chosen because it is harmless
+/// wherever it isn't answered: zsh inserts nothing for an empty paste. The wrapper below calls
+/// whatever `bracketed-paste` was (a plugin's included), and when that changed nothing, reports
+/// the line's length with this shell's pid. The shell announces itself once at startup, and only
+/// that pid is ever probed — a nested shell without this would take the bytes as input.
+#[cfg(unix)]
+const ZSH_LINE_PROBE: &str = r#"zmodload -i zsh/zleparameter 2>/dev/null
+if (( ${+widgets[bracketed-paste]} )) && [[ ${widgets[bracketed-paste]} != user:_aiterm_bracketed_paste ]]; then
+  zle -A bracketed-paste _aiterm_orig_bracketed_paste
+  _aiterm_bracketed_paste() {
+    local b=$BUFFER c=$CURSOR
+    zle _aiterm_orig_bracketed_paste -- "$@"
+    [[ $BUFFER == "$b" && $CURSOR == "$c" ]] && print -n "\e]1337;MaitermLine=$$;${#BUFFER}\a"
+  }
+  zle -N bracketed-paste _aiterm_bracketed_paste
+  print -n "\e]1337;MaitermLineProbe=$$\a"
+fi
+"#;
+
 /// Create zsh integration directory with shim files that source the user's
 /// real config and add precmd hooks for title and/or command completion.
 #[cfg(unix)]
@@ -1848,6 +1879,7 @@ fi
         hooks.push_str("  print -Pn '\\e]133;B\\a'\n");
         hooks.push_str("}\n");
         hooks.push_str("add-zsh-hook preexec _aiterm_osc133_preexec\n");
+        hooks.push_str(ZSH_LINE_PROBE);
     }
 
     if title {

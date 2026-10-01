@@ -430,11 +430,31 @@ because this is the one place a follow-up types into a shell:
 - **Not for** an Overlord-exempt tab (or workspace), an archived tab, or a tab that has run ssh
   (`restore_ssh_command` / `auto_resume_ssh_command`): a remote agent can't be seen from here,
   and resuming its session locally is the wrong machine.
+- **The session must be on this machine** (`agent_session_is_local`: its transcript is under
+  the local `~/.claude/projects` — not the ssh mirror — or `~/.codex/sessions`). A session id
+  recorded while the agent ran over a hand-typed `ssh` sets no ssh field on the tab, and once
+  the connection is gone the shell is local. Gemini has no findable transcript, so it holds.
 - **Evidence of an empty shell prompt**, all of it: no agent process and no ssh in the
   foreground (`getAgentLiveness`); the shell in the foreground (`get_pty_foreground_job`); the
-  shell's own OSC 133 prompt (A) as the last thing it did, with no command begun (B/C) since; and
-  **no keystroke since that prompt** — a half-typed command would get the resume glued onto it.
-  No shell integration means no prompt mark, which holds: "start it yourself".
+  shell's own OSC 133 prompt (A) as the last thing it did, with no command begun (B/C) since; no
+  keystroke since that prompt; and, last and decisive, **the shell's own answer that its command
+  line is empty** (`probe_shell_line`).
+
+  **Why ask the shell (review of 0a090e0).** Every outside signal had a hole that would have
+  glued the resume onto a command and run it. A paste (Cmd+V) or a dropped file writes to the
+  PTY without stamping a keystroke. And **type-ahead** — keys typed while `make` ran — lands on
+  the next prompt's line *before* that prompt's own mark, so "nothing typed since the prompt"
+  read true with `git commit -am wip` sitting on the line. It is the draft check's lesson again
+  (§6.1): stop inferring, read the fact.
+
+  The probe is an **empty bracketed paste**, `ESC[200~ESC[201~`, answered by maiTerm's zsh
+  integration: a wrapper around whatever `bracketed-paste` widget is bound (plugins included)
+  that, when the paste changed nothing, prints `OSC 1337;MaitermLine=<pid>;<len>`. The shell
+  announces `MaitermLineProbe=<pid>` at startup, and Rust probes only when that pid is the
+  terminal's current foreground process, so a nested shell without the wrapper never receives
+  it. An empty paste is harmless wherever it isn't answered. Verified on a real zsh: empty line
+  → 0; `git comm` → 8; type-ahead during `sleep` → 18; a real paste → no report. **bash, fish,
+  shells spawned before this existed, and no integration all hold**, with "start it yourself".
 - Typed as a plain line plus CR, not a bracketed paste: the shell may not have bracketed paste
   on (macOS bash 3.2).
 - **Typed once, then watched.** For two minutes the row says it is coming up; after that, "it

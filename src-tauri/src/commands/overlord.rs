@@ -146,6 +146,15 @@ pub fn agent_input_box(state: State<'_, Arc<AppState>>, tab_id: String) -> &'sta
     }
 }
 
+/// Is this agent session's transcript on THIS machine — i.e. could a resume typed into a local
+/// shell find it? False for a session recorded over ssh (docs/follow-ups.md §6.2).
+#[tauri::command]
+pub async fn agent_session_is_local(runtime: String, session_id: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || crate::mailink::transcript::session_is_local(&runtime, &session_id))
+        .await
+        .unwrap_or(false)
+}
+
 /// Answer a tab's open prompt, through the SAME hardened path the phone uses — the
 /// runtime-specific permission keymap, the one-shot selector guard, and the
 /// did-it-actually-submit check. `prompt_id` is the stale-guard: pass the one from

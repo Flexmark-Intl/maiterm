@@ -26,6 +26,7 @@ import { tasksStore } from '$lib/stores/tasks.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { resumeCommandFor } from '$lib/stores/agentState.svelte';
 import { interpolateVariables } from '$lib/stores/triggers.svelte';
+import { sessionIdVar } from '$lib/agents/resume';
 import {
   resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText, clockText,
   type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type FollowUpStatus,
@@ -367,10 +368,27 @@ function createFollowUpsStore() {
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
     if (typed !== undefined && typed > promptAt) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
-    const text = interpolateVariables(tab.id, resumeCommandFor(workspacesStore.getTabRuntime(tab.id)));
+    const runtime = workspacesStore.getTabRuntime(tab.id);
+    const text = interpolateVariables(tab.id, resumeCommandFor(runtime));
     // A `%` left after substitution is a session id the tab never recorded: refuse rather than
     // type a broken command (the Overlord's `no_session_id`).
     if (text.includes('%')) return `${NO_AGENT}, and it has no saved session to resume — start it yourself`;
+    // The session must be one THIS machine has. A session id recorded while the agent ran over
+    // ssh (typed by hand, so no ssh field on the tab says so) names a remote session, and the
+    // tab's shell is now local: resuming it here is the wrong machine (review of 0a090e0).
+    const sessionId = interpolateVariables(tab.id, `%${sessionIdVar(runtime)}`);
+    if (sessionId.includes('%') || !(await commands.agentSessionIsLocal(runtime, sessionId))) {
+      return `${NO_AGENT}, and its session isn't on this machine (it may have run over ssh) — start it yourself`;
+    }
+    // LAST, nearest the write: ask the shell itself whether its command line is empty. Nothing
+    // outside the shell knows — a paste or a dropped file stamps no keystroke, and type-ahead
+    // entered while the previous command ran lands on this prompt before this prompt's own mark
+    // (review of 0a090e0: either would have had the resume glued onto it and run). maiTerm's zsh
+    // integration answers; any other shell can't, and holds.
+    if (fg.pid == null) return `${NO_AGENT}, and maiTerm can't tell which shell is at the prompt — start it yourself`;
+    const line = await commands.probeShellLine(inst.ptyId, fg.pid);
+    if (!line) return `${NO_AGENT}, and maiTerm can't check that the shell's command line is empty (it can ask zsh with maiTerm's shell integration) — start it yourself`;
+    if (line.len > 0) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
     if (!untouched() || stKey(agentStateStore.getState(tab.id)) !== stKey(stBefore)) return 'the tab changed state just before the restart — try again';
     // A plain line, not a bracketed paste: the shell may not have bracketed paste on (macOS bash
     // 3.2), and the line is the runtime's own command — no newline, nothing to escape.
@@ -445,6 +463,13 @@ function createFollowUpsStore() {
     running = true;
     try {
       const now = Date.now();
+      // A restarted agent that registered has come up. Forget the restart now, while its session
+      // entry is there to see: a clean exit later removes the entry, and the stale stamp would
+      // read as "it did not come up" (review of 0a090e0).
+      for (const [tabId, at] of [...resumes]) {
+        const s = agentStateStore.getState(tabId);
+        if (s && Math.max(s.updatedAt, s.idleSince ?? 0) > at) resumes.delete(tabId);
+      }
       await checkConditions(now);
       for (const ws of workspacesStore.workspaces) {
         // A suspended workspace's tabs have no agents to deliver to; waking one because a

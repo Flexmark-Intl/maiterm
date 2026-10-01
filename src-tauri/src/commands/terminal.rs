@@ -150,6 +150,51 @@ pub fn write_terminal(
     pty::write_pty(&*state, &pty_id, &data)
 }
 
+/// A shell's answer to the command-line probe: which process answered, and how many characters
+/// were on its command line.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ShellLine {
+    pub pid: u32,
+    pub len: u32,
+}
+
+/// Ask the shell in this terminal how much is on its command line (docs/follow-ups.md §6.2).
+/// `None`: no shell here announced the probe (no integration, another shell, an older shell
+/// spawned before it existed), or it didn't answer in time — the caller must treat that as
+/// "can't tell", never as empty. Probes only when the announcing shell's pid is `expect_pid`
+/// (the terminal's foreground process as the caller just read it): any other process would take
+/// the probe's bytes as input.
+#[tauri::command]
+pub async fn probe_shell_line(
+    state: State<'_, Arc<AppState>>,
+    pty_id: String,
+    expect_pid: u32,
+) -> Result<Option<ShellLine>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        {
+            let mut registry = state.terminal_registry.write();
+            let Some(handle) = registry.get_mut(&pty_id) else { return Ok(None) };
+            if handle.line_probe_pid != Some(expect_pid) {
+                return Ok(None);
+            }
+            handle.line_report = None;
+        }
+        pty::write_pty(&state, &pty_id, b"\x1b[200~\x1b[201~")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let registry = state.terminal_registry.read();
+            if let Some((pid, len)) = registry.get(&pty_id).and_then(|h| h.line_report) {
+                return Ok((pid == expect_pid).then_some(ShellLine { pid, len }));
+            }
+        }
+        Ok(None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn resize_terminal(
     app_handle: AppHandle,

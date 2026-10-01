@@ -1016,6 +1016,18 @@ export async function takeTabFollowUp(workspaceId: string, tabId: string, follow
   return invoke('take_tab_follow_up', { workspaceId, tabId, followUpId });
 }
 
+/** Ask the shell in a terminal how much is on its command line (maiTerm's zsh integration answers
+ *  an empty bracketed paste). Probes only if the shell that announced the probe is `expectPid`.
+ *  `null` = can't tell — never read it as empty. */
+export async function probeShellLine(ptyId: string, expectPid: number): Promise<{ pid: number; len: number } | null> {
+  return invoke('probe_shell_line', { ptyId, expectPid });
+}
+
+/** Whether an agent session's transcript is on this machine (false for one recorded over ssh). */
+export async function agentSessionIsLocal(runtime: string, sessionId: string): Promise<boolean> {
+  return invoke('agent_session_is_local', { runtime, sessionId });
+}
+
 /** Mark an event follow-up's condition met — once; the first observation stands. `null` when
  *  nothing changed (gone, already met, or a time follow-up). Otherwise the new list. */
 export async function meetTabFollowUp(workspaceId: string, tabId: string, followUpId: string, metAt: string, outcome: string): Promise<FollowUp[] | null> {

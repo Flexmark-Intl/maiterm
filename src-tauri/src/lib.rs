@@ -638,6 +638,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::terminal::spawn_terminal,
             commands::terminal::write_terminal,
+            commands::terminal::probe_shell_line,
             commands::terminal::resize_terminal,
             commands::terminal::kill_terminal,
             commands::terminal::get_pty_info,
@@ -779,6 +780,7 @@ pub fn run() {
             commands::overlord::send_tab_message,
             commands::overlord::trust_dialog_open,
             commands::overlord::agent_input_box,
+            commands::overlord::agent_session_is_local,
             commands::overlord::get_tab_transcript,
             commands::overlord::append_overlord_ledger,
             commands::overlord::publish_overlord_snapshot,

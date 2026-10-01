@@ -10,6 +10,12 @@ pub enum OscEvent {
     Notification { message: String },
     /// OSC 1337: iTerm2 CurrentDir
     CurrentDir { cwd: String },
+    /// OSC 1337 `MaitermLineProbe=<pid>`: maiTerm's zsh integration, announcing that this shell
+    /// answers a command-line probe (`probe_shell_line`).
+    LineProbe { pid: u32 },
+    /// OSC 1337 `MaitermLine=<pid>;<len>`: the answer — how many characters are on the shell's
+    /// command line right now.
+    LineReport { pid: u32, len: u32 },
 }
 
 /// Lightweight state machine that scans raw PTY bytes for OSC sequences.
@@ -118,13 +124,20 @@ impl OscInterceptor {
                 })
             }
             1337 => {
-                // OSC 1337: iTerm2 extensions — only handle CurrentDir
+                // OSC 1337: iTerm2 extensions — CurrentDir, and maiTerm's own line probe
                 if let Some(cwd) = data.strip_prefix("CurrentDir=") {
                     if !cwd.is_empty() {
                         return Some(OscEvent::CurrentDir {
                             cwd: cwd.to_string(),
                         });
                     }
+                }
+                if let Some(pid) = data.strip_prefix("MaitermLineProbe=") {
+                    return pid.trim().parse().ok().map(|pid| OscEvent::LineProbe { pid });
+                }
+                if let Some(rest) = data.strip_prefix("MaitermLine=") {
+                    let (pid, len) = rest.split_once(';')?;
+                    return Some(OscEvent::LineReport { pid: pid.trim().parse().ok()?, len: len.trim().parse().ok()? });
                 }
                 None
             }
@@ -195,4 +208,20 @@ fn percent_decode(s: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod line_probe_tests {
+    use super::*;
+
+    #[test]
+    fn the_zsh_line_probe_announcement_and_answer_parse() {
+        let mut i = OscInterceptor::new();
+        let ev = i.process(b"\x1b]1337;MaitermLineProbe=4242\x07\x1b]1337;MaitermLine=4242;18\x07");
+        assert!(matches!(ev[0], OscEvent::LineProbe { pid: 4242 }));
+        assert!(matches!(ev[1], OscEvent::LineReport { pid: 4242, len: 18 }));
+        // Malformed answers are not answers — never read as an empty line.
+        assert!(i.process(b"\x1b]1337;MaitermLine=4242\x07").is_empty());
+        assert!(i.process(b"\x1b]1337;MaitermLine=x;0\x07").is_empty());
+    }
 }
