@@ -3547,9 +3547,30 @@ const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 /// file). The remote copy keeps the file's name after a unique prefix, so the agent sees a
 /// recognisable name and Claude still sniffs images by extension.
 async fn stage_files_for_tab(app: &Arc<AppState>, tab_id: &str, pty: &str, files: &[String]) -> Result<Vec<String>, Value> {
+    // Typed paths become attachments only in Claude's input box (the phone's image gate).
+    if runtime_for_tab(app, tab_id) != Some(AgentRuntime::Claude) {
+        return Err(json!({ "status": "unsupported", "reason": "unsupported_runtime",
+            "detail": "This agent can't take attachments yet." }));
+    }
+    let safe_name = |path: &std::path::Path| -> String {
+        // Only characters every shell and Claude's path detection take as they are.
+        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            .chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect()
+    };
     let is_ssh = crate::pty::get_pty_info(app, pty).map(|i| i.foreground_command.is_some()).unwrap_or(false);
     if !is_ssh {
-        return Ok(files.to_vec());
+        // A path is typed raw, and a space would end it early ("Screenshot … at 10.45.png"), so
+        // such a file is attached through a temp copy with a plain name.
+        return files.iter().map(|f| {
+            if !f.chars().any(char::is_whitespace) {
+                return Ok(f.clone());
+            }
+            let src = std::path::Path::new(f);
+            let copy = std::env::temp_dir().join(format!("maiterm-loom-{}-{}", &uuid::Uuid::new_v4().to_string()[..8], safe_name(src)));
+            std::fs::copy(src, &copy)
+                .map(|_| copy.to_string_lossy().to_string())
+                .map_err(|e| json!({ "status": "failed", "detail": format!("Couldn't read {}: {e}", src.display()) }))
+        }).collect();
     }
     let tunnel = {
         let tunnels = app.ssh_tunnels.read();
@@ -3568,10 +3589,7 @@ async fn stage_files_for_tab(app: &Arc<AppState>, tab_id: &str, pty: &str, files
         }
         let bytes = std::fs::read(path)
             .map_err(|e| json!({ "status": "failed", "detail": format!("Couldn't read {}: {e}", path.display()) }))?;
-        // Only characters every shell and Claude's path detection take as they are.
-        let name: String = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-            .chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
-        let remote = format!("/tmp/maiterm-loom-{}-{name}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let remote = format!("/tmp/maiterm-loom-{}-{}", &uuid::Uuid::new_v4().to_string()[..8], safe_name(path));
         push_bytes_remote(&host_key, &ssh_args, &bytes, &remote).await.map_err(|e| {
             log::warn!("[loom] staging {} on {host_key} failed: {e}", path.display());
             json!({ "status": "failed", "detail": "Couldn't copy the attachments to the remote host." })
