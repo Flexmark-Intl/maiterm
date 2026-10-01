@@ -328,6 +328,32 @@
       </button>
     </div>
 
+    <div class="setting" class:inert={!preferencesStore.followUpsLive}>
+      <div class="setting-copy">
+        <label for="overlord-follow-ups-resume">Restart the agent for a follow-up</label>
+        <p class="setting-hint">
+          When a follow-up comes due and its tab's agent has exited, type the agent's own resume
+          command at the shell prompt, then deliver. This starts a session, and uses your
+          plan, while you're away. Off: the follow-up waits until you start the agent.
+        </p>
+      </div>
+      <button
+        id="overlord-follow-ups-resume"
+        class="toggle"
+        class:active={preferencesStore.followUpsLive && preferencesStore.followUpsResumeAgent}
+        disabled={!preferencesStore.followUpsLive}
+        onclick={() => {
+          // Same as above: a click on a disabled button still lands in WebKit.
+          if (!preferencesStore.followUpsLive) return;
+          preferencesStore.setFollowUpsResumeAgent(!preferencesStore.followUpsResumeAgent);
+        }}
+        aria-pressed={preferencesStore.followUpsLive && preferencesStore.followUpsResumeAgent}
+        aria-label="Toggle restarting the agent for a follow-up"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
+
     <div class="status" class:live={preferencesStore.overlordEnabled}>
       <span class="status-led"></span>
       <span class="status-text">

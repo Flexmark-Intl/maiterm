@@ -1,7 +1,7 @@
 # maiTerm Follow-ups — an agent's own way to pick the work back up later
 
-> Status: **steps 1–4 built** 2026-09-30 (time, stack and task triggers, delivery, MCP tools,
-> the human side); resume-then-deliver remains (§10). Proposed 09-26. Owner: Darryl.
+> Status: **steps 1–5 built** 2026-09-30 (time, stack and task triggers, delivery, MCP tools,
+> the human side, resume-then-deliver); only usage-limit continuation remains (§9, §10). Proposed 09-26. Owner: Darryl.
 > Lives under the Overlord: live only when the Overlord and **Enable follow-ups** are both on
 > (§4). Not yet released.
 > Scope: an agent (or its human) schedules a prompt to be delivered back into **its own tab**
@@ -406,6 +406,33 @@ stored `auto_resume_command`, which is free text a user (or an imported workspac
 have edited into anything. It is still worth a preference (`follow_ups_resume_agent`,
 default on) because it starts a session — and spends quota — without the human there.
 
+**As built (step 5, 2026-09-30)** — `resumeAgent` in `stores/followUps.svelte.ts`, reached when
+the delivery gate's answer is "no agent" (no session entry, or a stale one whose process the
+liveness probe can't find). It does not call the Overlord's `recoverTab`, whose `stopped` verdict
+comes from the Overlord's own probe cycle and which types a bracketed paste; it reuses the same
+pieces (`resumeCommandFor` + `interpolateVariables`, the `%` refusal) behind a stricter gate,
+because this is the one place a follow-up types into a shell:
+
+- **Preference `follow_ups_resume_agent`** (Preferences → Overlord → "Restart the agent for a
+  follow-up", default on, inert while follow-ups are off). A human's Deliver now restarts it
+  whatever the preference: the click is the consent.
+- **Not for** an Overlord-exempt tab (or workspace), an archived tab, or a tab that has run ssh
+  (`restore_ssh_command` / `auto_resume_ssh_command`): a remote agent can't be seen from here,
+  and resuming its session locally is the wrong machine.
+- **Evidence of an empty shell prompt**, all of it: no agent process and no ssh in the
+  foreground (`getAgentLiveness`); the shell in the foreground (`get_pty_foreground_job`); the
+  shell's own OSC 133 prompt (A) as the last thing it did, with no command begun (B/C) since; and
+  **no keystroke since that prompt** — a half-typed command would get the resume glued onto it.
+  No shell integration means no prompt mark, which holds: "start it yourself".
+- Typed as a plain line plus CR, not a bracketed paste: the shell may not have bracketed paste
+  on (macOS bash 3.2).
+- **Typed once, then watched.** For two minutes the row says it is coming up; after that, "it
+  did not come up — start it, or Deliver now to try again". It is never retyped on its own. Once
+  an agent registers in the tab again, the slate is clean.
+- Then the ordinary gate delivers it: idle, empty input box, quiet. A follow-up the human asked
+  for EARLY is remembered across the restart (`wantedEarly`), since the tick would otherwise leave
+  a not-yet-due one alone.
+
 ### 6.3 Late, expired, and orphaned
 
 - **Late** — delivered more than 5 minutes after due. The envelope says by how much, so the
@@ -467,7 +494,7 @@ here is the desired property.
   all ("no session" read as "not idle"). A tab archived while the modal is open is found and
   noted; one that has gone (closed, or reloaded under a new id) says so rather than showing
   an empty list.
-- Resume-then-deliver from a held row is step 5.
+- Deliver now on a tab whose agent has exited restarts it, then delivers (§6.2).
 - The Overlord board could show pending follow-ups per tab. Not built; it is a read of
   `Tab.follow_ups` when wanted.
 - **maiLink** would need a protocol bump (every wire change does, `docs/mailink-protocol.md`
@@ -504,9 +531,9 @@ a usage limit today:
 
 ## 10. Build order
 
-Steps 1–4 are **built** (2026-09-30), each reviewed until clean. Step 1 took three review rounds,
-step 2 five (the draft check was rebuilt twice before the screen read), step 3 two. Steps 5–6
-remain.
+Steps 1–5 are **built** (2026-09-30), each reviewed until clean. Step 1 took three review rounds,
+step 2 five (the draft check was rebuilt twice before the screen read), step 3 two. Step 6
+remains.
 
 1. `FollowUp` on `Tab` (Rust + TS), the lifecycle table in §3 wired and tested, including the
    duplicate-clears / reload-moves pair (and `cargo check --tests` for the test literal).
@@ -517,7 +544,7 @@ remain.
    own-tab refusal and `PEER_ADDRESSING_TOOLS` entry in Rust (§2).
 3. The human side: badge, menu, list.
 4. Stack and task triggers. **Built** (§5 "As built").
-5. Resume-then-deliver (§6.2).
+5. Resume-then-deliver (§6.2). **Built** (§6.2 "As built").
 6. Phase 2 (§9), after the signal is proven on real limit events.
 
 ## 11. Open questions

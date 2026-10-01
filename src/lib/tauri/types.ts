@@ -611,6 +611,8 @@ export interface Preferences {
   /** Follow-ups (docs/follow-ups.md §4) — a sub-feature of the Overlord. Never read alone:
    *  `preferencesStore.followUpsLive` is the combined answer. */
   follow_ups_enabled: boolean;
+  /** A due follow-up on a tab whose agent has exited relaunches it, then delivers (§6.2). */
+  follow_ups_resume_agent: boolean;
   overlord_rules: OverlordRule[];
   hidden_default_overlord_rules: string[];
   claude_ide: boolean;

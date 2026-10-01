@@ -23,8 +23,11 @@ import { agentDelivery } from '$lib/stores/agentDeliveryLive';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { tasksStore } from '$lib/stores/tasks.svelte';
+import { activityStore } from '$lib/stores/activity.svelte';
+import { resumeCommandFor } from '$lib/stores/agentState.svelte';
+import { interpolateVariables } from '$lib/stores/triggers.svelte';
 import {
-  resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText,
+  resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText, clockText,
   type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type FollowUpStatus,
 } from '$lib/followUps/model';
 
@@ -33,6 +36,11 @@ import {
  *  tick merely late, never wrong. */
 const TICK_MS = 15_000;
 const HOUR_MS = 60 * 60_000;
+/** How long a relaunched agent gets to come up before maiTerm says it didn't (§6.2). A resume
+ *  replays the transcript, which takes a while for a long session. */
+const RESUME_WAIT_MS = 2 * 60_000;
+/** The hold reason for a tab with no agent — the one reason resume-then-deliver acts on. */
+const NO_AGENT = 'no agent is running in the tab — it goes after an agent starts there';
 
 export interface FollowUpView {
   id: string;
@@ -62,7 +70,19 @@ function createFollowUpsStore() {
   let timer: ReturnType<typeof setInterval> | undefined;
   let running = false;
   let stopTransitions: (() => void) | undefined;
+  const stopShellFeed: (() => void)[] = [];
   const onWake = () => { void tick(); };
+  /** Resumes maiTerm typed, by tab: typed ONCE, then watched — never retyped every tick. Cleared
+   *  once the tab is seen with an agent again. In memory: a restart may try once more. */
+  const resumes = new Map<string, number>();
+  /** Follow-ups the human asked for early on a tab whose agent had to be restarted first: the tick
+   *  delivers them once it is up, as it would a due one. */
+  const wantedEarly = new Set<string>();
+  /** The shell's own OSC 133 marks, per PTY: when it last showed its prompt (A) and last began a
+   *  command (B/C). The evidence that a tab is at an EMPTY shell prompt, which a resume needs —
+   *  the tty foreground alone can't tell "at a prompt" from "half a command typed at it". */
+  const shellPromptAt = new Map<string, number>();
+  const shellBeginAt = new Map<string, number>();
 
   /** Every tab in this window that can hold follow-ups — live, archived, in a suspended workspace.
    *  An event happens whatever the tab is doing; delivery is what waits for the agent. */
@@ -215,7 +235,7 @@ function createFollowUpsStore() {
     // (terminals mount lazily) — so name none of them.
     if (!terminalsStore.get(tab.id)) return "the tab isn't loaded — it goes once the tab is open and its agent is running";
     const st = agentStateStore.getState(tab.id);
-    if (!st) return 'no agent is running in the tab — it goes after an agent starts there';
+    if (!st) return NO_AGENT;
     if (st.state === 'permission') return 'the agent is waiting on a permission prompt';
     // Between turns only (§6.1): the delivery controller would deliver mid-turn, which suits a
     // peer's reply; a follow-up is never urgent, and runtimes differ on input typed mid-turn.
@@ -253,9 +273,9 @@ function createFollowUpsStore() {
     if (!inst) return tabHold(tab) ?? "the tab isn't running";
     try {
       const live = await commands.getAgentLiveness(inst.ptyId);
-      if (!(live.agent_running || live.ssh_foreground)) return 'no agent is running in the tab';
+      if (!(live.agent_running || live.ssh_foreground)) return NO_AGENT;
     } catch {
-      return 'no agent is running in the tab';
+      return NO_AGENT;
     }
     // The probe awaited; state can move under it — and say what it moved to.
     return tabHold(tab);
@@ -267,17 +287,84 @@ function createFollowUpsStore() {
     return kept.length;
   }
 
+  /**
+   * Resume-then-deliver (§6.2): the tab's agent has exited, so relaunch it with its runtime's OWN
+   * resume command for this tab's session, and let the tick deliver once it is up. Null when the
+   * resume was typed; otherwise why not, in words a human can act on.
+   *
+   * It types into a SHELL, which is everything §2 forbids a follow-up's own text, so every check
+   * is evidence that the shell is sitting at an empty prompt of its own: no agent process, no ssh
+   * (a remote agent can't be seen, and a local resume of its session is the wrong machine), the
+   * shell in the foreground, its own OSC 133 prompt as the last thing it did, and nothing typed
+   * since that prompt — a half-typed command would get the resume glued onto it. Never the tab's
+   * stored `auto_resume_command`: that is free text a user or an imported workspace file set.
+   */
+  async function resumeAgent(tab: Tab, byHand: boolean, untouched: () => boolean): Promise<string | null> {
+    if (!byHand && !preferencesStore.followUpsResumeAgent) return `${NO_AGENT} (restarting it for follow-ups is off)`;
+    // A session entry can outlive its process (no SessionEnd when it is killed), so "no agent"
+    // here may come from the liveness probe with a stale entry still present. Snapshot it, so a
+    // REAL change in the gap below — an agent registering — stops the resume.
+    const stBefore = agentStateStore.getState(tab.id);
+    const stKey = (s: typeof stBefore) => (s ? `${s.sessionId}|${s.state}|${s.updatedAt}|${s.idleSince}` : '');
+    // `updatedAt` is not stamped by a session merely starting; `idleSince` is.
+    const seenAt = (s: typeof stBefore) => Math.max(s?.updatedAt ?? 0, s?.idleSince ?? 0);
+    let typedAt = resumes.get(tab.id);
+    // An agent registered after that resume — it came up, and has exited again since.
+    if (typedAt !== undefined && stBefore && seenAt(stBefore) > typedAt) {
+      resumes.delete(tab.id);
+      typedAt = undefined;
+    }
+    if (typedAt !== undefined) {
+      const ago = Date.now() - typedAt;
+      if (ago < RESUME_WAIT_MS) return 'maiTerm restarted the agent — it goes once the agent is up';
+      // Typed once and watched; it never came up. Saying so beats typing it again every tick.
+      if (!byHand) return `maiTerm restarted the agent at ${clockText(typedAt, Date.now())} and it did not come up — start it, or Deliver now to try again`;
+    }
+    const loc = locate(tab.id);
+    const ws = loc && workspacesStore.workspaces.find(w => w.id === loc.workspaceId);
+    if (!ws || ws.archived_tabs.some(t => t.id === tab.id)) return NO_AGENT;
+    if (tab.overlord_exempt || ws.overlord_exempt) return `${NO_AGENT} (the tab is exempt from the Overlord, so maiTerm won't restart it)`;
+    if (tab.restore_ssh_command || tab.auto_resume_ssh_command) return `${NO_AGENT} — it ran over ssh, so start it on the remote host`;
+    const inst = terminalsStore.get(tab.id);
+    if (!inst) return tabHold(tab) ?? "the tab isn't running";
+    const live = await commands.getAgentLiveness(inst.ptyId);
+    if (live.agent_running) return 'an agent process is running in the tab but has not registered with maiTerm — run /maiterm init there';
+    if (live.ssh_foreground) return "ssh is running in the tab, and maiTerm can't see whether the agent on the far side is up";
+    const fg = await commands.getPtyForegroundJob(inst.ptyId);
+    if (fg.shell_at_prompt !== true) return `${NO_AGENT}, and the tab isn't at a shell prompt${fg.executable ? ` (${fg.executable} is running)` : ''}`;
+    const promptAt = shellPromptAt.get(inst.ptyId);
+    if (promptAt === undefined) return `${NO_AGENT}, and maiTerm can't see the shell's prompt (no shell integration) — start it yourself`;
+    if ((shellBeginAt.get(inst.ptyId) ?? 0) > promptAt) return 'a command is running in the tab';
+    const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
+    if (typed !== undefined && typed > promptAt) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
+    if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
+    const text = interpolateVariables(tab.id, resumeCommandFor(workspacesStore.getTabRuntime(tab.id)));
+    // A `%` left after substitution is a session id the tab never recorded: refuse rather than
+    // type a broken command (the Overlord's `no_session_id`).
+    if (text.includes('%')) return `${NO_AGENT}, and it has no saved session to resume — start it yourself`;
+    if (!untouched() || stKey(agentStateStore.getState(tab.id)) !== stKey(stBefore)) return 'the tab changed state just before the restart — try again';
+    // A plain line, not a bracketed paste: the shell may not have bracketed paste on (macOS bash
+    // 3.2), and the line is the runtime's own command — no newline, nothing to escape.
+    await commands.writeTerminal(inst.ptyId, Array.from(new TextEncoder().encode(`${text}\r`)));
+    resumes.set(tab.id, Date.now());
+    logInfo(`follow-ups: restarted the agent in tab ${tab.id.slice(0, 8)}${byHand ? ' (by hand)' : ''} — typed ${JSON.stringify(text)}`);
+    return null;
+  }
+
   async function deliverDue(tab: Tab, now: number) {
-    const due = (tab.follow_ups ?? []).filter(f => isDue(f, now)).sort((a, b) => (dueAt(a) ?? 0) - (dueAt(b) ?? 0));
+    const due = (tab.follow_ups ?? [])
+      .filter(f => isDue(f, now) || (wantedEarly.has(f.id) && !isExpired(f, now)))
+      .sort((a, b) => (dueAt(a) ?? now) - (dueAt(b) ?? now));
     if (due.length === 0) return;
-    await deliverOne(tab, due[0], now); // one per tab per tick: the next waits for this turn to end
+    const f = due[0]; // one per tab per tick: the next waits for this turn to end
+    await deliverOne(tab, f, now, !isDue(f, now));
   }
 
   /** Deliver one follow-up through the full gate. Null when delivered; otherwise why not, in
    *  words a human can act on. The tick and the human's "Deliver now" both come through here,
    *  so the button can never skip a check the tick makes — only the due time is theirs to
    *  waive. `early`: delivered before it was due, at the human's request. */
-  async function deliverOne(tab: Tab, f: FollowUp, now: number, early = false): Promise<string | null> {
+  async function deliverOne(tab: Tab, f: FollowUp, now: number, early = false, byHand = false): Promise<string | null> {
     if (delivering.has(tab.id)) return 'another follow-up is being delivered to this tab';
     delivering.add(tab.id);
     let held = false; // taken off the tab and not yet delivered or given back
@@ -289,6 +376,8 @@ function createFollowUpsStore() {
     const untouched = () => terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
     try {
       const reason = await holdReason(tab);
+      // The agent has exited: restart it (§6.2), and the tick delivers once it is up.
+      if (reason === NO_AGENT) return (await resumeAgent(tab, byHand, untouched)) ?? 'maiTerm restarted the agent — it goes once the agent is up';
       if (reason) return reason;
       if (!untouched()) return 'someone is typing in the tab';
       // CLAIM it before typing anything: taken off the tab in Rust, atomically. If a reload has
@@ -300,6 +389,8 @@ function createFollowUpsStore() {
       const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now, early), untouched);
       if (r === 'delivered') {
         held = false;
+        wantedEarly.delete(f.id);
+        resumes.delete(tab.id);
         logInfo(`follow-ups: delivered ${f.id.slice(0, 8)} to tab ${tab.id.slice(0, 8)}${early ? ' (early, by hand)' : ''}`);
         return null;
       }
@@ -348,6 +439,10 @@ function createFollowUpsStore() {
       // Subscribed whether or not the feature is live: an event that happens while follow-ups are
       // off is still recorded, so it delivers when they are turned back on (§4 — off is held).
       stopTransitions = stackStore.onTransition(onServiceTransition);
+      stopShellFeed.push(
+        activityStore.onShellPrompt((_tabId, ptyId) => { shellPromptAt.set(ptyId, Date.now()); }),
+        activityStore.onCommandBegin((_tabId, ptyId) => { shellBeginAt.set(ptyId, Date.now()); }),
+      );
       window.addEventListener('focus', onWake);
       document.addEventListener('visibilitychange', onWake);
       void tick();
@@ -358,6 +453,7 @@ function createFollowUpsStore() {
       timer = undefined;
       stopTransitions?.();
       stopTransitions = undefined;
+      for (const stop of stopShellFeed.splice(0)) stop();
       window.removeEventListener('focus', onWake);
       document.removeEventListener('visibilitychange', onWake);
     },
@@ -418,6 +514,7 @@ function createFollowUpsStore() {
     /** Remove one from this tab. False if the tab doesn't hold it. */
     async cancel(tabId: string, id: string): Promise<boolean> {
       if (!(await take(tabId, id))) return false;
+      wantedEarly.delete(id);
       logInfo(`follow-ups: ${id.slice(0, 8)} cancelled on tab ${tabId.slice(0, 8)}`);
       return true;
     },
@@ -433,7 +530,12 @@ function createFollowUpsStore() {
       if (!preferencesStore.followUpsLive) return 'follow-ups are off (Preferences → Overlord)';
       const due = dueAt(f);
       // Early: before its time, or before its event has happened.
-      return deliverOne(loc.tab, f, now, due == null || due > now);
+      const early = due == null || due > now;
+      const held = await deliverOne(loc.tab, f, now, early, true);
+      // The agent had to be restarted first. A due one goes on the next tick anyway; an early one
+      // the tick would leave alone, so remember that the human asked for it.
+      if (held && early && resumes.has(tabId)) wantedEarly.add(id);
+      return held;
     },
 
     /** Run the tick now (tests). */

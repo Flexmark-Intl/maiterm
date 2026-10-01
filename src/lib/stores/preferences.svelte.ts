@@ -65,6 +65,7 @@ function createPreferencesStore() {
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
   let followUpsEnabled = $state(true);
+  let followUpsResumeAgent = $state(true);
   let overlordRules = $state<OverlordRule[]>([]);
   let hiddenDefaultOverlordRules = $state<string[]>([]);
   let claudeCodeIde = $state(false);
@@ -173,6 +174,8 @@ function createPreferencesStore() {
     /** Whether follow-ups are on at all: the Overlord AND its follow-ups toggle
      *  (docs/follow-ups.md §4). Mirrors Rust `Preferences::follow_ups_live`. */
     get followUpsLive() { return overlordEnabled && followUpsEnabled; },
+    /** A due follow-up relaunches an exited agent, then delivers (docs/follow-ups.md §6.2). */
+    get followUpsResumeAgent() { return followUpsResumeAgent; },
     get overlordRules() { return overlordRules; },
     get hiddenDefaultOverlordRules() { return hiddenDefaultOverlordRules; },
     get claudeCodeIde() { return claudeCodeIde; },
@@ -279,6 +282,7 @@ function createPreferencesStore() {
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       followUpsEnabled = prefs.follow_ups_enabled ?? true;
+      followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       overlordRules = prefs.overlord_rules ?? [];
       hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
@@ -629,6 +633,11 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setFollowUpsResumeAgent(value: boolean) {
+      followUpsResumeAgent = value;
+      await this.save();
+    },
+
     async setOverlordRules(value: OverlordRule[]) {
       overlordRules = value;
       await this.save();
@@ -899,6 +908,7 @@ function createPreferencesStore() {
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
       followUpsEnabled = prefs.follow_ups_enabled ?? true;
+      followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       overlordRules = prefs.overlord_rules ?? [];
       hiddenDefaultOverlordRules = prefs.hidden_default_overlord_rules ?? [];
       claudeCodeIde = prefs.claude_ide ?? false;
@@ -997,6 +1007,7 @@ function createPreferencesStore() {
         overlord_enabled: overlordEnabled,
         overlord_propose_mode: overlordProposeMode,
         follow_ups_enabled: followUpsEnabled,
+        follow_ups_resume_agent: followUpsResumeAgent,
         overlord_rules: overlordRules,
         hidden_default_overlord_rules: hiddenDefaultOverlordRules,
         claude_ide: claudeCodeIde,

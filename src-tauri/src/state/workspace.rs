@@ -1741,6 +1741,11 @@ pub struct Preferences {
     /// it. Never read this alone: ask `follow_ups_live()`.
     #[serde(default = "default_true")]
     pub follow_ups_enabled: bool,
+    /// A follow-up that comes due while its tab's agent has exited relaunches the agent (its
+    /// runtime's own resume command) and is delivered once it is up (docs/follow-ups.md §6.2).
+    /// A preference because it starts a session, and spends quota, without the human there.
+    #[serde(default = "default_true")]
+    pub follow_ups_resume_agent: bool,
     /// Overlord ruleset. Global across windows; workspace-scoped rules bind via rule.workspaces.
     #[serde(default)]
     pub overlord_rules: Vec<OverlordRule>,
@@ -2065,6 +2070,7 @@ impl Default for Preferences {
             overlord_enabled: false,
             overlord_propose_mode: true,
             follow_ups_enabled: true,
+            follow_ups_resume_agent: true,
             overlord_rules: Vec::new(),
             hidden_default_overlord_rules: Vec::new(),
             claude_ide: true,
