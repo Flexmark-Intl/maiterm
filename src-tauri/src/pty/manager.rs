@@ -254,9 +254,10 @@ pub fn spawn_pty(
                             // report its command line, so the reader notes where the cursor is
                             // when PS1 finishes drawing. Re-added if something rewrites PS1.
                             r#" [[ $PS1 == *MaitermPromptEnd* ]] || PS1="$PS1"'\[\e]1337;MaitermPromptEnd\a\]';"#,
-                            // Echo off (a killed password prompt or TUI): keys typed ahead would
-                            // sit on the coming line unseen, so that prompt is never "empty".
-                            r#" [[ $(stty -a 2>/dev/null) =~ (^|[[:space:]])-echo([[:space:]]|$) ]] && printf '\033]1337;MaitermNoEcho\007';"#,
+                            // A prompt that can't be judged: echo off (a killed password prompt
+                            // or TUI — keys typed ahead would sit on the line unseen) or vi
+                            // editing mode (keys at an empty prompt are commands).
+                            r#" {{ [[ $(stty -a 2>/dev/null) =~ (^|[[:space:]])-echo([[:space:]]|$) ]] || [[ $(bind -v 2>/dev/null) == *"editing-mode vi"* ]]; }} && printf '\033]1337;MaitermPromptUnsafe\007';"#,
                             r#" [[ -n "$__aiterm_pm" ]] || {{ __aiterm_pm=1; printf '\033]1337;MaitermPromptMarks=%s\007' "$$"; }};"#,
                             r#"{}"#,
                             r#" __aiterm_at_prompt=1"#,
@@ -593,7 +594,7 @@ pub fn spawn_pty(
                                     OscEvent::LineProbe { pid } => handle.line_probe_pid = Some(*pid),
                                     OscEvent::LineReport { pid, len } => handle.line_report = Some((*pid, *len)),
                                     OscEvent::PromptMarks { pid } => handle.prompt_marks_pid = Some(*pid),
-                                    OscEvent::NoEcho => handle.prompt_no_echo = true,
+                                    OscEvent::PromptUnsafe => handle.prompt_unsafe = true,
                                     _ => {}
                                 }
                                 if let OscEvent::ShellIntegration { cmd, exit_code } = event {
@@ -647,7 +648,7 @@ pub fn spawn_pty(
                                 );
                             }
                             // Recorded on the handle above; `probe_shell_line` reads them.
-                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } | OscEvent::PromptMarks { .. } | OscEvent::NoEcho => {}
+                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } | OscEvent::PromptMarks { .. } | OscEvent::PromptUnsafe => {}
                         }
                     }
 
@@ -663,8 +664,7 @@ pub fn spawn_pty(
                                 &mut handle.processor,
                                 &mut handle.term,
                                 &mut handle.prompt_end,
-                                &mut handle.prompt_no_echo,
-                                &mut handle.input_baseline,
+                                &mut handle.prompt_unsafe,
                                 written,
                                 data,
                             );
@@ -763,17 +763,6 @@ pub fn write_pty(state: &Arc<AppState>, pty_id: &str, data: &[u8]) -> Result<(),
         .sender
         .send(PtyCommand::Write(data.to_vec()))
         .map_err(|e| e.to_string())
-}
-
-/// The agent in this PTY reported its end (Claude's SessionEnd hook): input written before now
-/// was the agent's; input after it is the shell's to read. Moves the follow-up resume's input
-/// baseline up to here (terminal/prompt_line.rs). The next command start resets it.
-pub fn note_agent_end(state: &Arc<AppState>, pty_id: &str) {
-    use std::sync::atomic::Ordering;
-    let Some(written) = state.pty_stats.read().get(pty_id).map(|s| s.bytes_written.load(Ordering::Relaxed)) else { return };
-    if let Some(handle) = state.terminal_registry.write().get_mut(pty_id) {
-        handle.input_baseline.at_agent_end = Some(written);
-    }
 }
 
 /// Output within this window means a TUI is actively drawing — resizes are

@@ -20,9 +20,10 @@ pub enum OscEvent {
     /// shell marks the end of each prompt. (The mark itself, `MaitermPromptEnd`, is located by
     /// byte position in the reader, since it has to be tied to where the cursor is then.)
     PromptMarks { pid: u32 },
-    /// OSC 1337 `MaitermNoEcho`: the bash integration, before a prompt, saying the tty's echo is
-    /// off — keys typed ahead would sit on that prompt's line unseen.
-    NoEcho,
+    /// OSC 1337 `MaitermPromptUnsafe`: the bash integration, before a prompt, saying it can't be
+    /// judged — the tty's echo is off (keys typed ahead would sit on the line unseen) or readline
+    /// is in vi mode (keys at an empty prompt are commands).
+    PromptUnsafe,
 }
 
 /// Lightweight state machine that scans raw PTY bytes for OSC sequences.
@@ -139,8 +140,8 @@ impl OscInterceptor {
                         });
                     }
                 }
-                if data == "MaitermNoEcho" {
-                    return Some(OscEvent::NoEcho);
+                if data == "MaitermPromptUnsafe" {
+                    return Some(OscEvent::PromptUnsafe);
                 }
                 if let Some(pid) = data.strip_prefix("MaitermPromptMarks=") {
                     return pid.trim().parse().ok().map(|pid| OscEvent::PromptMarks { pid });

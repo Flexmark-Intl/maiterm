@@ -479,20 +479,29 @@ because this is the one place a follow-up types into a shell:
   scrollback is at its cap, "history size + screen line" stops naming a row, so a continuation
   prompt — or a line exactly a multiple of the width long — scrolled the cursor back onto the
   stored coordinates and read as empty. **And nothing written to the PTY since the mark**
-  (review of 5cd717a): with the tty's echo off readline redisplays nothing, and a pending Esc,
-  Ctrl-X or vi-command prefix leaves the line empty but would eat the resume's first keys — both
-  are input that draws nothing, but input all the same, so nothing may have been written to the
-  PTY since a **baseline** (the `bytes_written` counter `write_pty` keeps). The baseline can't be
-  the mark: a prefix key typed ahead while the previous command ran is written before the mark
-  and draws nothing after it (review of 072d75b). It is the last command start (OSC 133 B/C) —
-  except that keys typed INTO the agent were read by it, so Claude's SessionEnd hook (sent while
-  it still owns the terminal) moves the baseline up to that moment (`pty::note_agent_end`). A
-  killed agent sends none, so its typed keys count and the resume holds; `/clear` also sends
-  one, which only moves the line earlier. Echo-off type-ahead is written before the mark too, so
-  the bash `PROMPT_COMMAND` also reports echo-off (`MaitermNoEcho`, via `stty -a`) and that
-  prompt is never empty. A mark split across two reads is missed and holds. zsh's
-  answer likewise counts vi command mode as not empty: keys typed there are commands. Verified against bytes captured from bash 3.2.57: a fresh prompt reads empty,
-  `git commit -am wip` typed during `sleep 1` reads not empty (tests use those exact bytes).
+  (review of 5cd717a): a key that draws nothing (an Esc, a Ctrl-X, anything with echo off) was
+  still written, and the mark records the PTY's `bytes_written` count (`write_pty` counts every
+  write before the shell can read it). Before the prompt, the bash `PROMPT_COMMAND` reports a
+  prompt that can't be judged — echo off (`stty -a`; type-ahead would sit on the line unseen) or
+  vi editing mode (`bind -v`; keys at an empty prompt are commands) — as `MaitermPromptUnsafe`,
+  and that prompt is never empty.
+
+  **A prefix key typed ahead during the previous command is neutralised, not detected.** It is
+  written before the mark and draws nothing after it (review of 072d75b), then eats the resume's
+  first keys (`Esc` + `c` is capitalize-word: `laude --resume …` ran). Two ways of detecting it
+  failed review: counting input from the command start held every resume after an interactive
+  agent session (the human's keys into the agent counted), and moving that count to Claude's
+  SessionEnd hook was wrong both ways (Claude stops reading stdin *before* it sends the hook, and
+  a headless `claude -p` in the tab sends one too). So bash's resume is typed behind a **Ctrl-G**,
+  readline's `abort`, bound in every emacs keymap — plain, after Esc, after Ctrl-X — which cancels
+  a pending prefix or numeric argument and leaves the line as it was. Verified on bash 3.2.57:
+  Esc, Ctrl-X, Esc-1 and Esc-Esc typed during `sleep 1`, then Ctrl-G plus a command — it ran
+  intact every time. (Not in zsh: there Ctrl-G aborts the whole line, and a pending prefix makes
+  the probe's own bytes resolve into it, which reads non-empty and holds — leaving a few stray
+  characters on the line, a known cosmetic cost.) A mark split across two reads is missed and
+  holds. zsh's answer likewise counts vi command mode as not empty. Verified against bytes
+  captured from bash 3.2.57: a fresh prompt reads empty, `git commit -am wip` typed during
+  `sleep 1` reads not empty (tests use those exact bytes).
   **fish, shells spawned before this existed, and no integration all hold**, with "start it
   yourself".
 - Typed as a plain line plus CR, not a bracketed paste: the shell may not have bracketed paste

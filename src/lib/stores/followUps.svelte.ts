@@ -393,8 +393,13 @@ function createFollowUpsStore() {
     if (line.len > 0) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
     if (!untouched() || stKey(agentStateStore.getState(tab.id)) !== stKey(stBefore)) return 'the tab changed state just before the restart — try again';
     // A plain line, not a bracketed paste: the shell may not have bracketed paste on (macOS bash
-    // 3.2), and the line is the runtime's own command — no newline, nothing to escape.
-    await commands.writeTerminal(inst.ptyId, Array.from(new TextEncoder().encode(`${text}\r`)));
+    // 3.2), and the line is the runtime's own command — no newline, nothing to escape. In bash it
+    // goes behind a Ctrl-G (readline's abort): a prefix key typed ahead during the last command —
+    // an Esc, a Ctrl-X — draws nothing, so the grid can't see it, and would eat our first keys;
+    // abort cancels it and leaves the line alone (terminal/prompt_line.rs). Not in zsh, where
+    // Ctrl-G aborts the line itself, and where such a prefix makes the probe go unanswered anyway.
+    const prefix = line.shell === 'bash' ? '\x07' : '';
+    await commands.writeTerminal(inst.ptyId, Array.from(new TextEncoder().encode(`${prefix}${text}\r`)));
     resumes.set(tab.id, Date.now());
     logInfo(`follow-ups: restarted the agent in tab ${tab.id.slice(0, 8)}${byHand ? ' (by hand)' : ''} — typed ${JSON.stringify(text)}`);
     return null;

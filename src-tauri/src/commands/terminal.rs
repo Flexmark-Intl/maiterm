@@ -156,6 +156,10 @@ pub fn write_terminal(
 pub struct ShellLine {
     pub pid: u32,
     pub len: u32,
+    /// Which answered: "zsh" (asked) or "bash" (read off the grid). The caller types bash's
+    /// resume behind a Ctrl-G, which cancels a typed-ahead prefix key (terminal/prompt_line.rs);
+    /// in zsh Ctrl-G is send-break, which would abort the line instead.
+    pub shell: &'static str,
 }
 
 /// Ask the shell in this terminal how much is on its command line (docs/follow-ups.md §6.2).
@@ -198,8 +202,8 @@ pub async fn probe_shell_line(
                     .get(&pty_id)
                     .map(|s| s.bytes_written.load(std::sync::atomic::Ordering::Relaxed));
                 let Some(written) = written else { return Ok(None) };
-                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end, handle.input_baseline, written);
-                return Ok(empty.map(|e| ShellLine { pid: expect_pid, len: if e { 0 } else { 1 } }));
+                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end, written);
+                return Ok(empty.map(|e| ShellLine { pid: expect_pid, len: if e { 0 } else { 1 }, shell: "bash" }));
             }
             handle.line_report = None;
         }
@@ -213,7 +217,7 @@ pub async fn probe_shell_line(
                 std::thread::sleep(std::time::Duration::from_millis(25));
                 let registry = state.terminal_registry.read();
                 if let Some((pid, len)) = registry.get(&pty_id).and_then(|h| h.line_report) {
-                    return Ok((pid == expect_pid).then_some(ShellLine { pid, len }));
+                    return Ok((pid == expect_pid).then_some(ShellLine { pid, len, shell: "zsh" }));
                 }
             }
         }

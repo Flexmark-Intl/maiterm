@@ -84,12 +84,9 @@ pub struct TerminalHandle {
     /// The last prompt's end: marked (and nothing drawn since), or drawn over. Cleared when a
     /// command starts (OSC 133 B/C). See `terminal/prompt_line.rs`.
     pub prompt_end: Option<crate::terminal::prompt_line::PromptEnd>,
-    /// The bash integration reported the tty's echo off just before the coming prompt
-    /// (`OSC 1337;MaitermNoEcho`): that prompt is never read as empty.
-    pub prompt_no_echo: bool,
-    /// The PTY's input byte count at the last command start, and at the agent's reported end —
-    /// input since then hasn't been read by anything, so a prompt is empty only if there is none.
-    pub input_baseline: crate::terminal::prompt_line::InputBaseline,
+    /// The bash integration reported the coming prompt can't be judged — echo off, or vi mode
+    /// (`OSC 1337;MaitermPromptUnsafe`): that prompt is never read as empty.
+    pub prompt_unsafe: bool,
 }
 
 impl TerminalHandle {
@@ -194,7 +191,6 @@ pub fn create_terminal(
         line_report: None,
         prompt_marks_pid: None,
         prompt_end: None,
-        prompt_no_echo: false,
-        input_baseline: Default::default(),
+        prompt_unsafe: false,
     }
 }
