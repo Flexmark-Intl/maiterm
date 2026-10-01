@@ -180,9 +180,9 @@ pub async fn probe_shell_line(
             }
             handle.line_report = None;
         }
-        // Twice if need be. oh-my-zsh's `bracketed-paste-magic` holds the answer until the NEXT
-        // byte reaches the shell, so the first probe's answer comes out only when a second probe
-        // arrives — and it reads the line as it is then, so it is still a current answer.
+        // Twice if need be: a slow shell. (oh-my-zsh's `bracketed-paste-magic` used to hold the
+        // answer until the next byte; the zsh wrapper now stops it doing that, because a human's
+        // paste arriving first released a "0" that no longer described the line.)
         for _ in 0..2 {
             pty::write_pty(&state, &pty_id, b"\x1b[200~\x1b[201~")?;
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(700);

@@ -1837,6 +1837,11 @@ if (( ${+widgets[bracketed-paste]} )) && [[ ${widgets[bracketed-paste]} != user:
   zle -A bracketed-paste _aiterm_orig_bracketed_paste
   _aiterm_bracketed_paste() {
     local b=$BUFFER c=$CURSOR
+    # bracketed-paste-magic (oh-my-zsh) highlights a paste by blocking for the NEXT key before
+    # it returns, so the answer came out only when another byte arrived — and a Cmd+V landing in
+    # that wait released a "0" that no longer described the line (review of 197ebbf). Without a
+    # paste: highlight it doesn't wait. Cost: pasted text isn't highlighted.
+    local -a zle_highlight=(${zle_highlight:#paste:*}); (( $#zle_highlight )) || zle_highlight=(region:standout)
     zle _aiterm_orig_bracketed_paste -- "$@"
     [[ $BUFFER == "$b" && $CURSOR == "$c" ]] && print -n "\e]1337;MaitermLine=$$;$(( ${#PREBUFFER} + ${#BUFFER} ))\a"
   }

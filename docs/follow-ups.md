@@ -455,8 +455,12 @@ because this is the one place a follow-up types into a shell:
   it. An empty paste is harmless wherever it isn't answered. The length counts `$PREBUFFER`:
   at a continuation prompt (`> `, `for>`) `$BUFFER` is empty while the earlier lines wait, and
   a resume would have become part of that command (review of eb17567). oh-my-zsh's
-  `bracketed-paste-magic` holds an answer until the next byte arrives, so Rust sends a second
-  probe when the first gets none. Verified on a real zsh 5.9, with and without that widget:
+  `bracketed-paste-magic` highlights a paste by blocking for the next key before returning, so
+  the answer came out only when another byte arrived — and a human's Cmd+V arriving first (it
+  writes to the PTY without stamping a keystroke) released a "0" while the pasted text sat on the
+  line (review of 197ebbf). The wrapper drops the `paste:` highlight for the call, so the answer
+  is immediate; the cost is that pasted text isn't highlighted in maiTerm's zsh. Rust still sends
+  a second probe if the first gets no answer (a slow shell). Verified on a real zsh 5.9, with and without that widget:
   empty line → 0; `git comm` → 8; type-ahead during `sleep` → 18; type-ahead `echo GLUED \⏎`
   → 13; a real paste → no report. **bash, fish,
   shells spawned before this existed, and no integration all hold**, with "start it yourself".
