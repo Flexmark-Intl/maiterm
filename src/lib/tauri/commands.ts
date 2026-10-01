@@ -1017,10 +1017,10 @@ export async function takeTabFollowUp(workspaceId: string, tabId: string, follow
 }
 
 /** Ask the shell in a terminal how much is on its command line (maiTerm's zsh integration answers
- *  an empty bracketed paste). Probes only if the shell that announced the probe is `expectPid`.
- *  `null` = can't tell — never read it as empty. */
-export async function probeShellLine(ptyId: string, expectPid: number): Promise<{ pid: number; len: number } | null> {
-  return invoke('probe_shell_line', { ptyId, expectPid });
+ *  an empty bracketed paste). Probes only the tab's own shell, when it announced the probe and
+ *  holds the terminal right now. `null` = can't tell — never read it as empty. */
+export async function probeShellLine(ptyId: string): Promise<{ pid: number; len: number } | null> {
+  return invoke('probe_shell_line', { ptyId });
 }
 
 /** Whether an agent session's transcript is on this machine (false for one recorded over ssh). */

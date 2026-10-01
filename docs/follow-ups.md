@@ -450,9 +450,11 @@ because this is the one place a follow-up types into a shell:
   The probe is an **empty bracketed paste**, `ESC[200~ESC[201~`, answered by maiTerm's zsh
   integration: a wrapper around whatever `bracketed-paste` widget is bound (plugins included)
   that, when the paste changed nothing, prints `OSC 1337;MaitermLine=<pid>;<len>`. The shell
-  announces `MaitermLineProbe=<pid>` at startup, and Rust probes only when that pid is the
-  terminal's current foreground process, so a nested shell without the wrapper never receives
-  it. An empty paste is harmless wherever it isn't answered. The length counts `$PREBUFFER`:
+  announces `MaitermLineProbe=<pid>` at startup, and Rust probes only the PTY's own shell (its
+  child process), only when that shell announced, and only when a fresh foreground read says
+  that shell holds the terminal — so a nested shell or a program it started never receives it.
+  (The first live run held on "can't tell which shell": at a bare prompt the foreground read
+  names no pid, so the check has to be made in Rust against the PTY's child.) An empty paste is harmless wherever it isn't answered. The length counts `$PREBUFFER`:
   at a continuation prompt (`> `, `for>`) `$BUFFER` is empty while the earlier lines wait, and
   a resume would have become part of that command (review of eb17567). oh-my-zsh's
   `bracketed-paste-magic` highlights a paste by blocking for the next key before returning, so

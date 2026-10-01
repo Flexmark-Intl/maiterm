@@ -160,18 +160,29 @@ pub struct ShellLine {
 
 /// Ask the shell in this terminal how much is on its command line (docs/follow-ups.md §6.2).
 /// `None`: no shell here announced the probe (no integration, another shell, an older shell
-/// spawned before it existed), or it didn't answer in time — the caller must treat that as
-/// "can't tell", never as empty. Probes only when the announcing shell's pid is `expect_pid`
-/// (the terminal's foreground process as the caller just read it): any other process would take
-/// the probe's bytes as input.
+/// spawned before it existed), the terminal's own shell isn't at its prompt, or it didn't answer
+/// in time — the caller must treat that as "can't tell", never as empty.
+///
+/// Probes only the PTY's OWN shell (its child process), only when that shell is the one that
+/// announced the probe, and only when it holds the terminal right now (a fresh foreground read):
+/// any other process — a nested shell, a program it started — would take the probe's bytes as
+/// input. (At a prompt the foreground read names no pid, so the caller can't supply one.)
 #[tauri::command]
 pub async fn probe_shell_line(
     state: State<'_, Arc<AppState>>,
     pty_id: String,
-    expect_pid: u32,
 ) -> Result<Option<ShellLine>, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let shell_pid = {
+            let registry = state.pty_registry.read();
+            let Some(pid) = registry.get(&pty_id).and_then(|h| h.child_pid) else { return Ok(None) };
+            pid
+        };
+        if pty::get_pty_foreground_job(&state, &pty_id, true)?.shell_at_prompt != Some(true) {
+            return Ok(None);
+        }
+        let expect_pid = shell_pid;
         {
             let mut registry = state.terminal_registry.write();
             let Some(handle) = registry.get_mut(&pty_id) else { return Ok(None) };
