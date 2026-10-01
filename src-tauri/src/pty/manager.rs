@@ -250,6 +250,11 @@ pub fn spawn_pty(
                             r#"[[ -z "$__aiterm_trap" ]] && __aiterm_trap=1 &&"#,
                             r#" trap '[[ "$__aiterm_at_prompt" == 1 ]] && __aiterm_at_prompt= && printf "\033]133;B\007"' DEBUG;"#,
                             r#" printf '\033]133;D;%d\007' "$__aiterm_ec"; printf '\033]133;A\007';"#,
+                            // The prompt-end mark (terminal/prompt_line.rs): bash 3.2 can't
+                            // report its command line, so the reader notes where the cursor is
+                            // when PS1 finishes drawing. Re-added if something rewrites PS1.
+                            r#" [[ $PS1 == *MaitermPromptEnd* ]] || PS1="$PS1"'\[\e]1337;MaitermPromptEnd\a\]';"#,
+                            r#" [[ -n "$__aiterm_pm" ]] || {{ __aiterm_pm=1; printf '\033]1337;MaitermPromptMarks=%s\007' "$$"; }};"#,
                             r#"{}"#,
                             r#" __aiterm_at_prompt=1"#,
                         ),
@@ -579,6 +584,7 @@ pub fn spawn_pty(
                                 match event {
                                     OscEvent::LineProbe { pid } => handle.line_probe_pid = Some(*pid),
                                     OscEvent::LineReport { pid, len } => handle.line_report = Some((*pid, *len)),
+                                    OscEvent::PromptMarks { pid } => handle.prompt_marks_pid = Some(*pid),
                                     _ => {}
                                 }
                                 if let OscEvent::ShellIntegration { cmd, exit_code } = event {
@@ -632,7 +638,7 @@ pub fn spawn_pty(
                                 );
                             }
                             // Recorded on the handle above; `probe_shell_line` reads them.
-                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } => {}
+                            OscEvent::LineProbe { .. } | OscEvent::LineReport { .. } | OscEvent::PromptMarks { .. } => {}
                         }
                     }
 
@@ -644,7 +650,7 @@ pub fn spawn_pty(
                         let mut registry = state_reader.terminal_registry.write();
                         if let Some(handle) = registry.get_mut(&pty_id_clone) {
                             handle.term.selection = handle.selection.take();
-                            handle.processor.advance(&mut handle.term, data);
+                            crate::terminal::prompt_line::advance(&mut handle.processor, &mut handle.term, &mut handle.prompt_end, data);
                             handle.selection = handle.term.selection.take();
                             detect_resume_menu(handle, data, total_read)
                         } else {

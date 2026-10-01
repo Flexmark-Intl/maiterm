@@ -77,6 +77,14 @@ pub struct TerminalHandle {
     /// The last command-line report: (shell pid, characters on the line). Cleared before
     /// each probe, so a report is always an answer to the probe that read it.
     pub line_report: Option<(u32, u32)>,
+    /// The pid of a bash in this terminal that marks the END of its prompt
+    /// (`OSC 1337;MaitermPromptEnd`, appended to PS1 by maiTerm's bash integration). bash before
+    /// 4.0 can't report its command line, so for bash the line is read off the grid instead.
+    pub prompt_marks_pid: Option<u32>,
+    /// Where the cursor stood the moment the last prompt finished drawing: (absolute row —
+    /// history size + screen line — and column). Cleared when a command starts (OSC 133 B/C).
+    /// The command line is empty iff the cursor is still exactly here with nothing after it.
+    pub prompt_end: Option<(i64, usize)>,
 }
 
 impl TerminalHandle {
@@ -179,5 +187,7 @@ pub fn create_terminal(
         dropped_ssh: None,
         line_probe_pid: None,
         line_report: None,
+        prompt_marks_pid: None,
+        prompt_end: None,
     }
 }

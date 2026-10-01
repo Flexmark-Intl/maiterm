@@ -187,7 +187,13 @@ pub async fn probe_shell_line(
             let mut registry = state.terminal_registry.write();
             let Some(handle) = registry.get_mut(&pty_id) else { return Ok(None) };
             if handle.line_probe_pid != Some(expect_pid) {
-                return Ok(None);
+                // bash: nothing to ask, so read the line off the grid against the prompt-end
+                // mark (terminal/prompt_line.rs). Not empty reads as 1 — the length is unknown.
+                if handle.prompt_marks_pid != Some(expect_pid) {
+                    return Ok(None);
+                }
+                let empty = crate::terminal::prompt_line::line_is_empty(&handle.term, handle.prompt_end);
+                return Ok(empty.map(|e| ShellLine { pid: expect_pid, len: if e { 0 } else { 1 } }));
             }
             handle.line_report = None;
         }

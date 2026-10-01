@@ -464,8 +464,20 @@ because this is the one place a follow-up types into a shell:
   is immediate; the cost is that pasted text isn't highlighted in maiTerm's zsh. Rust still sends
   a second probe if the first gets no answer (a slow shell). Verified on a real zsh 5.9, with and without that widget:
   empty line → 0; `git comm` → 8; type-ahead during `sleep` → 18; type-ahead `echo GLUED \⏎`
-  → 13; a real paste → no report. **bash, fish,
-  shells spawned before this existed, and no integration all hold**, with "start it yourself".
+  → 13; a real paste → no report.
+
+  **bash is read off the grid instead** (`terminal/prompt_line.rs`). macOS's `/bin/bash` is 3.2,
+  which has no `READLINE_LINE`, so it can't be asked — and it is a real login shell here (the
+  first live run held because every tab was bash). maiTerm's bash `PROMPT_COMMAND` ends PS1 with
+  an invisible `\[OSC 1337;MaitermPromptEnd\]` and announces `MaitermPromptMarks=<pid>`. The
+  PTY reader splits each read at those marks and notes where the cursor stood the instant the
+  prompt finished drawing; an OSC 133 B/C forgets it. The line is empty iff the cursor is still
+  exactly there with nothing after it on the row. Type-ahead and pastes are drawn after the mark;
+  a continuation prompt has no mark; a mark split across two reads is missed — all of which read
+  as not empty. Verified against bytes captured from bash 3.2.57: a fresh prompt reads empty,
+  `git commit -am wip` typed during `sleep 1` reads not empty (tests use those exact bytes).
+  **fish, shells spawned before this existed, and no integration all hold**, with "start it
+  yourself".
 - Typed as a plain line plus CR, not a bracketed paste: the shell may not have bracketed paste
   on (macOS bash 3.2).
 - **Typed once, then watched.** For two minutes the row says it is coming up; after that, "it

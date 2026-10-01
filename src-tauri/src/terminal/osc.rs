@@ -16,6 +16,10 @@ pub enum OscEvent {
     /// OSC 1337 `MaitermLine=<pid>;<len>`: the answer — how many characters are on the shell's
     /// command line right now.
     LineReport { pid: u32, len: u32 },
+    /// OSC 1337 `MaitermPromptMarks=<pid>`: maiTerm's bash integration, announcing that this
+    /// shell marks the end of each prompt. (The mark itself, `MaitermPromptEnd`, is located by
+    /// byte position in the reader, since it has to be tied to where the cursor is then.)
+    PromptMarks { pid: u32 },
 }
 
 /// Lightweight state machine that scans raw PTY bytes for OSC sequences.
@@ -131,6 +135,9 @@ impl OscInterceptor {
                             cwd: cwd.to_string(),
                         });
                     }
+                }
+                if let Some(pid) = data.strip_prefix("MaitermPromptMarks=") {
+                    return pid.trim().parse().ok().map(|pid| OscEvent::PromptMarks { pid });
                 }
                 if let Some(pid) = data.strip_prefix("MaitermLineProbe=") {
                     return pid.trim().parse().ok().map(|pid| OscEvent::LineProbe { pid });

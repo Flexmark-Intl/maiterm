@@ -389,7 +389,7 @@ function createFollowUpsStore() {
     // Rust probes only the tab's own shell, only if it announced the probe, and only while it
     // holds the terminal (a fresh foreground read at the moment of probing).
     const line = await commands.probeShellLine(inst.ptyId);
-    if (!line) return `${NO_AGENT}, and maiTerm can't check that the shell's command line is empty (it can ask zsh with maiTerm's shell integration) — start it yourself`;
+    if (!line) return `${NO_AGENT}, and maiTerm can't check that the shell's command line is empty (it can for zsh and bash with maiTerm's shell integration, in a tab opened since it was added) — start it yourself`;
     if (line.len > 0) return `${NO_AGENT}, and something is typed at the shell prompt — maiTerm won't add to it`;
     if (!untouched() || stKey(agentStateStore.getState(tab.id)) !== stKey(stBefore)) return 'the tab changed state just before the restart — try again';
     // A plain line, not a bracketed paste: the shell may not have bracketed paste on (macOS bash
