@@ -1110,11 +1110,6 @@ pub fn publish_stack_runtime(
     Ok(())
 }
 
-/// Bind a tab to a stack service, or clear the binding (docs/stack.md §3–§5). At most one
-/// tab in a workspace may name a given service: binding one clears the same service from
-/// any other tab in the workspace inside the same write, so no reader ever sees two tabs
-/// claiming it — the same shape as the comms-binding hand-over in
-/// `carry_tab_state_on_reload`.
 /// Run `f` on one tab's follow-ups under the write lock and persist (docs/follow-ups.md).
 /// Looks in the archive too: an archived tab keeps its follow-ups, and cancelling one there
 /// must still persist.
@@ -1290,6 +1285,11 @@ pub fn follow_up_watch_status() -> std::collections::HashMap<String, crate::watc
     crate::watch::status()
 }
 
+/// Bind a tab to a stack service, or clear the binding (docs/stack.md §3–§5). At most one
+/// tab in a workspace may name a given service: binding one clears the same service from
+/// any other tab in the workspace inside the same write, so no reader ever sees two tabs
+/// claiming it — the same shape as the comms-binding hand-over in
+/// `carry_tab_state_on_reload`.
 #[tauri::command]
 pub fn set_tab_service_id(
     window: tauri::Window,
