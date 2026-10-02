@@ -101,6 +101,8 @@ const FIRST_PROMPT_WAIT_MS = 12000;
  *  that has already disowned it leaves a running service nothing can stop. */
 const BEGIN_WAIT_MS = 30000;
 const MOUNT_WAIT_MS = 15000;
+/** How long the shell must sit at its prompt, with nothing begun, before a start types. */
+const PROMPT_SETTLE_MS = 750;
 /** The two ways a bound tab loses the shell our command ran in; reconcileSuspended
  *  corrects the first into the second when the workspace turns out to be suspended. */
 const RELOADED_NOTE = 'its tab was reloaded — start it again';
@@ -502,7 +504,12 @@ function createStackStore() {
       : false;
     if (aborted(serviceId)) return 'stopped';
     if (integrated) {
-      const idle = await waitForFact(ptyId, (x) => promptSince(x.lastBeginAt) || cancelled(), wasLive ? 4000 : 0);
+      // At a prompt AND settled there: a fresh shell's first A is not its last — bash's
+      // PROMPT_COMMAND runs a B/D;0/A cycle of its own right behind it, and a line typed
+      // into that gap has the cycle's B taken for our command's and its D;0 for our exit
+      // (seen at launch, when every service starts in a just-spawned shell).
+      const settled = (x: ShellFacts) => promptSince(x.lastBeginAt) && Date.now() - (x.lastPromptAt ?? 0) >= PROMPT_SETTLE_MS;
+      const idle = await waitForFact(ptyId, (x) => settled(x) || cancelled(), 4000);
       if (aborted(serviceId)) return 'stopped';
       if (!idle) {
         const fg = await probeForeground(instance.ptyId);
