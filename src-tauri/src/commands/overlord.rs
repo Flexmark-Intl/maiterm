@@ -119,12 +119,17 @@ pub async fn list_tab_models(
 /// What is currently blocking a tab: a tool permission gate, or an AskUserQuestion the agent
 /// raised. `None` when nothing is open. Overlord needs the distinction to decide whether it
 /// may answer or must put the decision to the human.
+/// Off the main thread: it reads the screen and can read a transcript tail, and the Loom
+/// polls it every 2 s.
 #[tauri::command]
-pub fn get_tab_prompt(
+pub async fn get_tab_prompt(
     state: State<'_, Arc<AppState>>,
     tab_id: String,
 ) -> Result<Option<Value>, String> {
-    Ok(crate::mailink::tab_prompt_view(state.inner(), &tab_id))
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || crate::mailink::tab_prompt_view(&app, &tab_id))
+        .await
+        .map_err(|e| format!("prompt read failed to run: {}", e))
 }
 
 /// Whether Claude's workspace-trust dialog is open on this tab (mailink/trust.rs). Every

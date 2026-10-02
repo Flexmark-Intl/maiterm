@@ -1745,11 +1745,11 @@ pub(crate) async fn respond_to_prompt(
                     return json!({ "ok": false, "reason": "bad_request" });
                 }
             };
-            // The selector must be what is on screen, as the permission and trust paths check:
-            // a question record can outlive its dialog, and the Down/Enter keys that answer it
-            // would pick a row in whatever else is open (a permission dialog: approve or deny).
+            // THIS question must be what is on screen, as the permission and trust paths check:
+            // a question record can outlive its dialog (or belong to a dead session), and the
+            // Down/Enter keys that answer it would pick a row in whatever else is open.
             let screen = live_screen_text(app, tab_id).unwrap_or_default();
-            if !permission::any_dialog_open(&screen) || permission::dialog_open(&screen) {
+            if !question_on_screen(&tool_input, &screen) {
                 log::info!("[maiLink] refusing an answer for tab {tab_id}: no question selector on screen");
                 return json!({ "ok": false, "reason": "stale",
                     "detail": "that question is no longer open in the terminal" });
@@ -4824,6 +4824,38 @@ fn pending_question_for_tab(app: &AppState, tab_id: &str) -> Option<Value> {
     open_question(app, tab_id).map(|(q, _)| q)
 }
 
+/// Whether this AskUserQuestion's selector is what the screen shows: its first question's text
+/// (compared without whitespace, so a wrap in a narrow pane doesn't matter) with no permission
+/// or plan dialog drawn below it. Not the footer: its "Enter to select · … · Esc to cancel" line
+/// wraps in a narrow pane, and a footer can't say WHICH question is up.
+fn question_on_screen(tool_input: &Value, screen: &str) -> bool {
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let q0 = tool_input.get("questions").and_then(|q| q.get(0));
+    let Some(first) = q0.and_then(|q| q.get("question")).and_then(|q| q.as_str()) else {
+        return false;
+    };
+    // Its first option must be drawn below it too, as selector row 1: the same question text left
+    // higher up the screen (an earlier ask, answered or dead) sits above a different selector,
+    // and an answered ask shows its choice without the row number.
+    let option: String = q0
+        .and_then(|q| q.get("options"))
+        .and_then(|o| o.get(0))
+        .and_then(|o| o.get("label"))
+        .and_then(|l| l.as_str())
+        .map(|l| format!("1.{}", squash(l).chars().take(24).collect::<String>()))
+        .unwrap_or_default();
+    // A prefix: a very long question may be cut short on screen.
+    let want: String = squash(first).chars().take(40).collect();
+    if want.is_empty() {
+        return false;
+    }
+    let shown = squash(screen);
+    let Some(at) = shown.rfind(&want) else { return false };
+    let below = &shown[at + want.len()..];
+    (option.is_empty() || below.contains(&option))
+        && !["Doyouwant", "Wouldyoulike", "ctrl+gtoeditin"].iter().any(|p| below.contains(p))
+}
+
 /// The tab's open AskUserQuestion and when it was asked, from the tab's CURRENT session only.
 /// Whether a question is open, its id and its options all come from here, so they can't
 /// disagree. Picking a session by state rank let a stale same-rank session (left over after a
@@ -6515,6 +6547,24 @@ mod tests {
             let c = chats.iter().find(|c| c["tabId"] == json!(t)).unwrap();
             assert_eq!(c["state"], json!("idle"));
         }
+    }
+
+    #[test]
+    fn a_question_is_answered_only_while_its_own_selector_is_on_screen() {
+        let ask = json!({ "questions": [{ "question": "Which database should the new service use for its queue?",
+            "options": [{ "label": "Postgres" }, { "label": "Redis" }] }] });
+        let selector = "● Thinking…\n\n Which database should the new service use for its queue?\n\n ❯ 1. Postgres\n   2. Redis\n   3. Type something.\n\n Enter to select · ↑/↓ to navigate · Esc to cancel\n";
+        assert!(question_on_screen(&ask, selector));
+        // A narrow pane wraps the question and the footer; the text still matches.
+        let narrow = " Which database should the new\n service use for its queue?\n\n ❯ 1. Postgres\n   2. Redis\n\n Enter to select · ↑/↓ to\n navigate · Esc to cancel\n";
+        assert!(question_on_screen(&ask, narrow));
+        // The question left above a permission dialog is not an open selector.
+        let perm = format!("{selector}\n────────\n Bash command\n   rm -rf build\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel · Tab to amend\n");
+        assert!(!question_on_screen(&ask, &perm));
+        // Nor is it when a different question's selector is the one drawn below it.
+        let other = " Which database should the new service use for its queue?\n\n ⎿ Postgres\n\n Deploy to staging now?\n ❯ 1. Yes\n   2. Later\n\n Enter to select · Esc to cancel\n";
+        assert!(!question_on_screen(&ask, other));
+        assert!(!question_on_screen(&ask, "$ \n"));
     }
 
     #[test]
