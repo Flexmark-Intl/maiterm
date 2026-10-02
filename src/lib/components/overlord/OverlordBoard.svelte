@@ -478,7 +478,9 @@
       </div>
       <div class="readout">
         <span class="ov-mono readout-value" style:color={needsYou ? 'var(--ov-warn)' : undefined}>{needsYou}</span>
-        <span class="ov-label">needs you</span>
+        <!-- The Triage queue's count, named after its tab: "needs you" sat over the Loom's own
+             "N need you" (questions actually waiting on the human) and disagreed by hundreds. -->
+        <span class="ov-label">to triage</span>
       </div>
       <div class="readout">
         <span class="ov-mono readout-value">{sentToday}</span>
