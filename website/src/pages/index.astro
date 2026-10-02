@@ -42,21 +42,27 @@ const description =
  */
 const KEY_FEATURES = [
   {
+    id: 'loom',
+    // "Without opening their terminals" is the promise and it is literal: Focus reads each
+    // agent's transcript the way the phone does (get_tab_transcript), answers the prompt it
+    // is stopped at off the screen, and sends through send_tab_message. It does not replace
+    // the terminal — the tab is still there — so don't say "never".
+    title: 'Workstream Loom',
+    blurb:
+      'Talk to every agent in the window from one place — read it, answer it, send it work — without opening a single terminal.',
+    new: true,
+  },
+  {
     id: 'accounts',
     // Not "two". There is no cap — managed_accounts is an unbounded list and every
     // active one is handed to the tabs that ask for it — so naming a number both
     // undersells the feature and invites the question of where the limit is.
-    title: 'Run as many Claude Code accounts as you need',
+    title: 'Claude Code accounts',
     // NOT "an account per client". There is no per-tab or per-workspace binding —
     // one account per runtime is active at a time (Preferences.active_account_ids)
-    // and a tab reads it at spawn. Two can run at once because each tab keeps what
-    // it started with; the pairing is recorded only for the life of that shell
-    // (accounts/tab_record.rs, what maiLink shows), and tabs that respawn
-    // come back under whatever is active then. Promise the simultaneity, not an
-    // assignment the app does not store.
-    blurb:
-      'Claude Code has one login slot, shared by every terminal you open. Hold as many as you like and choose which one each new tab starts under.',
-    new: true,
+    // and a tab reads it at spawn. Promise the simultaneity, not an assignment the
+    // app does not store. No number either: managed_accounts is unbounded.
+    blurb: 'As many logins as you need, side by side',
   },
   { id: 'stack', title: 'Workspace stack', blurb: 'One dev server, however many agents' },
   { id: 'board', title: 'Task board', blurb: 'A real kanban board, shared with them' },
@@ -64,6 +70,7 @@ const KEY_FEATURES = [
   { id: 'mesh', title: 'Mesh workspace', blurb: 'Specialists that ask each other' },
   { id: 'mailink', title: 'maiLink companion', blurb: 'Your agents in your pocket, no cloud' },
   { id: 'comms', title: 'Chat threads', blurb: 'Answer where the report landed' },
+  { id: 'follow-ups', title: 'Follow-ups', blurb: 'Agents that come back on their own' },
 ];
 
 const EVERYTHING = [
@@ -77,11 +84,11 @@ const EVERYTHING = [
   },
   {
     title: 'Workspaces per project',
-    body: 'Group terminals by project, each with its own pane layout and context. Suspend the inactive ones to free resources; they resume with full state.',
+    body: 'Group terminals by project, each with its own pane layout and context. Suspend the inactive ones to free resources; they resume with full state. Move a workspace or a single tab to another window and everything in it keeps running.',
   },
   {
     title: 'Hand a workspace to a teammate',
-    body: 'Share a workspace as one file. Whoever opens it gets the same tabs in the same repositories — cloned for them where they don’t have them, services and agents included — and none of your accounts, scrollback or secrets.',
+    body: 'Share a workspace as one file. Whoever opens it gets the same tabs in the same repositories — cloned for them where they don’t have them, services and agents included — and none of your accounts, scrollback or secrets. On their side, every command it would run is listed word for word first, and only the ones they approve ever run.',
   },
   {
     title: 'Bridge two agents',
@@ -176,10 +183,63 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ---------------------------------------------------------------- Loom */}
+  {/* The release slot: the hero rail's top entry links here. --raised because it sits
+      in the one churn-free spot right after the --flush hero, and the Accounts band
+      below it stays a plain ln-band, so nothing further down flips.
+
+      No screenshot yet: a real Focus view is a list of real tab names and transcripts.
+      A staged one belongs here once the screenshot playbook has been run for it. */}
+  <section class="ln-band ln-band--raised" id="loom">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Workstream Loom</p>
+      <h2 class="ln-h2 ln-h2--wide">Every agent in the window. None of their terminals.</h2>
+      <p class="ln-lead">
+        Ten agents means ten terminals to visit: scroll back to find what one asked, answer it,
+        move on to the next, and miss the one that stopped while you were reading. Press
+        <code>Cmd+Shift+J</code> and the Loom puts all of them in one place, across every
+        workspace in the window.
+      </p>
+      <p class="ln-lead">
+        <strong>Focus</strong> is where you talk to them. The agents that need you come first;
+        open one and its conversation reads like a chat — tool runs folded away, the work it is
+        doing beside it — with whatever it is stopped at answerable right there: a permission
+        prompt by its real options, a question, a task waiting on your decision. Then reply —
+        and, to a Claude Code agent, paste a screenshot in or switch its model and effort —
+        without ever finding its tab.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Focus</h3>
+          <p>
+            A condensed chat per agent, a composer, and its prompts answered in place. The
+            header carries its state, its context and anything Overlord is running at it.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Weave</h3>
+          <p>
+            Agents strung to the tasks they are working, by workstream: who is on what, what
+            is waiting and on what, and what has quietly gone still.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Decisions</h3>
+          <p>
+            Every question an agent has stopped on, oldest first. Pick an option or answer in
+            your own words, and the answer is typed back to the agent that asked.
+          </p>
+        </div>
+      </div>
+      <a class="ln-cta-link" href="/features/loom/">How the Loom works</a>
+    </div>
+  </section>
+
   {/* ------------------------------------------------------------ Accounts */}
-  {/* Sits first because the hero links straight into it, and because it is the
-      one band on this page that solves a problem the visitor had this morning —
-      no agent orchestration required to care about it.
+  {/* Sits right under the Loom because it is the one band on this page that solves
+      a problem the visitor had this morning — no agent orchestration required to
+      care about it.
 
       No screenshot on purpose: the Accounts pane is a list of real email
       addresses and organisation names. Every honest shot of it leaks an identity,
@@ -236,7 +296,7 @@ const EVERYTHING = [
           </p>
         </div>
       </div>
-      <p class="ln-note accounts-note">
+      <p class="ln-note band-note">
         Off until you turn it on. macOS and Linux for now, and Claude Code today; the other
         runtimes are named as not yet available rather than half-wired. SSH tabs can run as the
         active account too, on the hosts you choose — the one place maiTerm does hold a token,
@@ -398,6 +458,12 @@ const EVERYTHING = [
         </ol>
 
         <p class="ln-lead">
+          When an agent needs a decision, it <strong>asks on the row</strong> and stops:
+          the question, the options, why it matters. Answer it on the board, in the
+          <a href="#loom">Loom</a> or from your phone, and the answer is typed straight back to
+          that agent, which picks up where it left off.
+        </p>
+        <p class="ln-lead">
           Open it with <code>Cmd+Shift+E</code>: add, retitle, annotate, park, reassign, or hand
           a row over with <strong>Do it</strong>. The agent sees every one of those edits
           through the same tools it writes with — and none of the three lets it delete a row.
@@ -448,9 +514,10 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>An operations deck</h3>
           <p>
+            <a href="#loom"><strong>Loom</strong></a> is where you work with the agents.
             <strong>Triage</strong> is one severity-ordered queue of everything wanting a
-            person. <strong>Fleet</strong> is a card per agent. <strong>Ledger</strong> is a
-            verbatim record of every directive sent and what came back.
+            person. <strong>Ledger</strong> is a verbatim record of every directive sent and
+            what came back.
           </p>
         </div>
         <div class="ln-card">
@@ -507,6 +574,12 @@ const EVERYTHING = [
           A phone app that connects <strong>directly to maiTerm on your own computer</strong>.
           Watch agents work, answer their questions, approve permissions, and interrupt a
           runaway turn — from the couch, the garden, anywhere in the house.
+        </p>
+        <p class="ln-lead">
+          A permission card shows the options actually on the agent's screen, not a generic
+          yes or no. A task an agent has stopped on arrives as a question you answer with a tap.
+          Even Claude's folder-trust check — the “Quick safety check” that stops a session
+          before it starts — is a card you can answer from the phone.
         </p>
         <p class="ln-lead">
           It writes, too: work the shared board — move a card between lanes, retitle or
@@ -602,6 +675,62 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ---------------------------------------------------------- Follow-ups */}
+  {/* Plain ln-band in the churn-free spot before the --sunken compat strip: Chat
+      threads above it is --raised, and the sunken strip resets parity below.
+      Follow-ups only run while the Overlord is on (Preferences.follow_ups_live()),
+      so the note says so rather than letting the band read as always-on. */}
+  <section class="ln-band" id="follow-ups">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Follow-ups</p>
+      <h2 class="ln-h2 ln-h2--wide">An agent that comes back to it, without you remembering to ask.</h2>
+      <p class="ln-lead">
+        “I'll check the deploy in twenty minutes” is a promise no agent can keep. It stops,
+        and the check happens only if you remember it. In maiTerm the agent
+        <strong>schedules its own next prompt</strong>, into its own tab: at a time, when a
+        service in the workspace comes up or goes down, or when a task on the board is done.
+      </p>
+      <p class="ln-lead">
+        Waiting on something else — CI finishing, a file appearing, an error showing up in a
+        log? The agent writes the check as a short script, and maiTerm runs it on a schedule
+        <strong>without waking the agent</strong>, so nothing is spent while nothing has
+        changed. The prompt arrives when the check passes, carrying what it found.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>The same session, picked up</h3>
+          <p>
+            It lands in the tab the agent is already in — its transcript, your local services,
+            your files — between turns, labelled as its own earlier note. Exited since? maiTerm
+            relaunches it at an empty prompt, then delivers.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Nothing runs you haven't read</h3>
+          <p>
+            A watch script runs only after you approve it, on a card that shows the whole
+            script and the folder it runs in. And it never types over a message you are still
+            writing.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Yours to see and cancel</h3>
+          <p>
+            A clock on the tab says one is pending. <strong>Follow-ups…</strong> on its menu
+            lists them, with when each is due and anything holding it — deliver one now, cancel
+            it, or add your own.
+          </p>
+        </div>
+      </div>
+      <p class="ln-note band-note">
+        Part of Overlord, so it is live while Overlord is on. Claude Code and Codex alike, and
+        it survives maiTerm restarting.
+      </p>
+      <a class="ln-cta-link" href="/features/follow-ups/">How follow-ups work</a>
+    </div>
+  </section>
+
   {/* ------------------------------------------------------ Compatibility */}
   <section class="ln-band ln-band--sunken ln-band--tight">
     <div class="ln-inner compat">
@@ -648,8 +777,8 @@ const EVERYTHING = [
       <p class="ln-eyebrow">What it costs</p>
       <h2 class="ln-h2 ln-h2--wide">Free. All of it. There is no tier above this one.</h2>
       <p class="ln-lead">
-        Not free-for-four-projects, not free-until-you-need-the-good-part. Overlord, mesh,
-        the shared board, chat threads, the phone companion, SSH — every feature on this page
+        Not free-for-four-projects, not free-until-you-need-the-good-part. Overlord, the Loom,
+        mesh, the shared board, follow-ups, chat threads, the phone companion, SSH — every feature on this page
         is in the build you download, and there is nothing to buy later.
       </p>
 
@@ -896,9 +1025,9 @@ const EVERYTHING = [
     text-transform: uppercase;
   }
 
-  /* --- Accounts ---------------------------------------------------------- */
+  /* --- Band footnote (Accounts, Follow-ups) ------------------------------- */
 
-  .accounts-note {
+  .band-note {
     margin-top: 1.75rem;
     max-width: 62ch;
     line-height: 1.55;

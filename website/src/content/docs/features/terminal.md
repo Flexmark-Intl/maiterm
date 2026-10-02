@@ -88,6 +88,8 @@ A backup is *your* machine: importing its preferences brings your accounts and c
 
 When an SSH session drops because of a network blip — not a clean `exit` — maiTerm notices the difference. Instead of resetting the tab to a bare local shell, it preserves the remote title and shows a **disconnected** badge in the tab bar. Click it to reconnect: maiTerm replays the same connection and drops you back into the directory you were in, so a flaky network doesn't cost you your place. A clean logout you did on purpose is left alone.
 
+That holds across **Window › Reload Current Window** too. A reload rebuilds the window but keeps its shells, so after an outage every SSH tab whose connection dropped gets its **disconnected** badge back — and one whose dropped connection was to the host it auto-resumes on reconnects by itself, a few tabs at a time. Its resume command is typed only once the connection has actually reached the host, never into the local shell behind a connection that's still failing.
+
 ## Auto-Resume
 
 Pin auto-resume settings so they survive across restarts. Configure SSH reconnection, remote CWD, and the resume command — maiTerm handles the rest. Edit settings anytime via context menu or replay with `Cmd+Opt+R`.

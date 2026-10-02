@@ -37,6 +37,24 @@ A prerequisite that was [archived along with its tab](#archiving-carries-the-wor
 
 For agents, the same edges are readable and writable one at a time: `listTasks` returns each blocker as a title, a lane and whether it's met, waiting, parked or gone, and `blocking` names what's waiting on *this* task — the thing an agent needs to know before it goes idle. Edits are incremental (`block_on` / `unblock_from`) rather than a whole-array replace, so two agents editing dependencies on the same board don't clobber each other. maiTerm refuses an unknown prerequisite and a task blocked on itself: both record an edge that reads as real and either does nothing or parks the row forever.
 
+## When an agent stops on a question
+
+Waiting on another task is one kind of Blocked. The other is waiting on **you** — a decision, a password only you can type, a sign-off — and that used to be a lane plus a line in the agent's chat output, which scrolled away the moment it carried on with something else.
+
+Now an agent that stops on something only you can settle puts the question **on the task**. The task moves to Blocked carrying it, in one of three kinds:
+
+| Shown as | Means | Comes with |
+|----------|-------|------------|
+| **Waiting on your decision** | You have to choose | Up to six options, one marked *recommended* — or none, for an answer in your own words |
+| **Needs you** | Only you can do it: a `sudo`, a login, a payment | The exact command, when there is one |
+| **Waiting outside** | Something outside maiTerm: a review, CI, another person | The question says what |
+
+The question appears on the row in the task panel, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them). Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
+
+Already dealt with it in the agent's own tab? **Dismiss** closes the question without sending the agent anything: the task goes back to Active, and the log says it was handled in the tab.
+
+Moving the task out of Blocked by any other route — a drag on the board, the status chip, the agent itself — also clears the question, so nothing is left asking about work that has moved on.
+
 ## An append-only log per task
 
 A row sitting in **Blocked** with nothing on it saying why is the most useless card on the board. The task's **description** is a spec — edited, rewritten, replaced — so an agent that wanted to record *why* it stalled had to destroy whatever was already there.
@@ -79,7 +97,7 @@ Every agent tab — Claude Code, Codex, local or over SSH — gets three tools:
 |------|-------------|
 | `listTasks` | List this project's tasks, grouped by workstream. `scope: 'tab'` for just this tab's work, `'workspace'` (default) for the whole project |
 | `createTasks` | Create a batch of tasks, optionally into a named workstream |
-| `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, and an appended note |
+| `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, an appended note, and a [question for you](#when-an-agent-stops-on-a-question) |
 
 They're batched to keep both round trips and token cost down, and every call is scoped to the **calling tab's workspace**, so an agent can never read or write another project's list.
 

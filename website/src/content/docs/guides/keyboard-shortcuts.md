@@ -48,6 +48,7 @@ description: Complete list of maiTerm keyboard shortcuts.
 | `Cmd+Shift+C` | Toggle composer dock |
 | `Cmd+E` | Toggle notes panel |
 | `Cmd+Shift+E` | Toggle task panel ([Tasks](/features/tasks/)) |
+| `Cmd+Shift+J` | Open the [Workstream Loom](/features/loom/); press again to go back |
 | `Cmd+B` | Toggle sidebar |
 | `Cmd+F` | Find in terminal |
 | `Cmd+K` | Clear terminal + scrollback |

@@ -62,7 +62,7 @@ Promoting and demoting agents this way never reflows or respawns a terminal — 
 
 ## Enabling a mesh + readiness
 
-Enabling a mesh opens a **pre-flight readiness modal** that inventories every tab in the workspace and tells you exactly where each one stands:
+Right-click a workspace in the sidebar and choose **Enable mesh…** to turn it into a mesh; on a mesh workspace the same item reads **Disable mesh**. Enabling a mesh opens a **pre-flight readiness modal** that inventories every tab in the workspace and tells you exactly where each one stands:
 
 - **Ready** — registered and good to go.
 - **Not registered** — an agent is running there but isn't bound to maiTerm, so nothing routes to it. Offers to **Send `/maiterm init`** as the repair. Registration is otherwise automatic (see [acting as the right tab](/features/agents/#acting-as-the-right-tab)), so this row means something went wrong rather than that a step was skipped.

@@ -41,7 +41,11 @@ const FAQS = [
   },
   {
     q: 'Do my agents get to change things without me?',
-    a: 'Only what you allow. Overlord ships in propose mode: every directive is held for your approval showing the exact words it would send, and your own keystrokes abort a sequence in progress. The rule guards are human-only and cannot be edited by an agent. Agents can mark a task done but there is deliberately no delete tool.',
+    a: 'Only what you allow. Overlord ships in propose mode: every directive is held for your approval showing the exact words it would send, and your own keystrokes abort a sequence in progress. The rule guards are human-only and cannot be edited by an agent. Agents can mark a task done but there is deliberately no delete tool. A script an agent asks maiTerm to run for it later runs only once you have approved that exact script.',
+  },
+  {
+    q: 'Claude Code can already schedule things. Why follow-ups?',
+    a: 'Its own schedules either live inside the running Claude process or start a fresh session in the cloud, on a clone of your repo. A maiTerm follow-up is held by maiTerm and delivered back into the same tab — the same session, your local services and files, your SSH hosts — and it survives the agent exiting and maiTerm restarting. It can wait on your workspace, not only the clock: a service coming up, a task finishing, or a check the agent wrote. It works for Codex too, and you can see and cancel every one that is pending.',
   },
   {
     q: 'What does it cost?',

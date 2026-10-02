@@ -48,6 +48,8 @@ export default defineConfig({
             { label: 'Deshittification', slug: 'features/deshittification' },
             { label: 'Tasks', slug: 'features/tasks' },
             { label: 'Overlord', slug: 'features/overlord' },
+            { label: 'Workstream Loom', slug: 'features/loom' },
+            { label: 'Follow-ups', slug: 'features/follow-ups' },
             { label: 'Agent Bridge', slug: 'features/agent-bridge' },
             { label: 'Mesh Workspace', slug: 'features/mesh-workspace' },
             { label: 'maiLink Companion', slug: 'features/mailink' },

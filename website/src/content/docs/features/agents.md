@@ -174,6 +174,16 @@ Every agent session is also told what the workspace runs and what's up right now
 
 Files land in that tab's chat on the phone and in a cross-chat **Files** list. Any file type, up to 1 GB each; each path succeeds or fails on its own, so one bad path doesn't sink the batch. An agent on an SSH tab passes its own remote paths and maiTerm fetches them back over the bridge tunnel. The bytes are copied at the moment of sending, so rewriting the file afterwards can't retroactively change what you were already given.
 
+### Follow-ups
+
+| Tool | Description |
+|------|-------------|
+| `createFollowUp` | Schedule a prompt back into this tab — at a time, when a stack service comes up or stops, when a task ends, or when a watch script passes |
+| `listFollowUps` | This tab's pending follow-ups |
+| `cancelFollowUp` | Cancel one of this tab's follow-ups |
+
+An agent's way to pick work back up later without you having to remember it — delivered between turns, into its own tab only. A watch script runs only after you approve it. Available while [Overlord](/features/overlord/) and **Preferences → Overlord → Enable follow-ups** are both on. See [Follow-ups](/features/follow-ups/).
+
 ### Supervision
 
 If [Overlord](/features/overlord/) is enabled and this window has an Overlord workspace, every supervised agent also gets `replyToOverlord`, and the supervisor agent gets a set of tools of its own — driving another tab, answering a prompt it's stuck at, proposing rule changes, and putting a finished session away. See [Overlord](/features/overlord/).
@@ -207,6 +217,7 @@ maiTerm integrates with each agent's hook system for real-time session awareness
 - **Auto-resume** — automatically captures session IDs and reconnects on tab restore (see [Auto-resume](#auto-resume) below)
 - **Multi-agent awareness** — `getClaudeSessions` lets any session discover other active agent sessions across tabs for coordination, and [Agent Bridge](/features/agent-bridge/) lets two sessions talk to each other directly
 - **Compaction notifications** — alerts during and after context compaction
+- **Model switches without the extra confirm** — newer Claude Code builds stop a `/model` switch at a "Switch model?" confirmation when the current model's cache is warm, which a switch from your phone or the [Loom](/features/loom/) can't see. maiTerm answers it for sessions running in its own tabs, so the switch you asked for goes through; a Claude session in another terminal keeps its confirm, and a Claude Code too old to know the hook isn't given it
 
 ## Agent State Indicators
 

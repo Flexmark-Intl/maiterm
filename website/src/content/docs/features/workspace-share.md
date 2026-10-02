@@ -75,6 +75,12 @@ Before anything is created, maiTerm asks each repository's remote whether you ca
 
 The check can't answer a passphrase or a two-factor prompt, so when one of those is what's in the way it only says it couldn't check — the clone itself will ask.
 
+### Commands it will run
+
+A shared file is someone else's, and it opens on a double-click — so nothing in it runs without being shown to you first. Under **Commands it will run**, the import lists every command it would type, exactly as it will be typed, and where: each SSH connection, each agent it would start (and, in a mesh, the role it would be told), and each tab's auto-resume command. Untick anything you don't want run — the tab still opens, it just doesn't run it. An agent or resume on a remote host is only offered while the connection to that host is ticked. Each stack service shows its own **Starts by itself when the workspace opens** box, so you decide whether it auto-starts too.
+
+Some fields in the file are pasted into commands but were never meant to be commands — an SSH host, a remote directory, a session id, a git URL or branch. A file whose fields carry shell syntax or options that would run something locally has those parts left out, and the import tells you which: *Parts of this file would have run something on this computer, so they were left out*. And if the file changes on disk after you've reviewed it, the import refuses to build from it.
+
 ### Cloning
 
 Click **Set up workspace**. Each clone runs in an ordinary terminal tab you can see, one at a time — so if git wants your SSH passphrase, a security key touch or a new host key, you're right there to give it. A clone that finishes closes its tab; one that fails leaves the tab open with git's own error in it, and a **Retry** beside it.

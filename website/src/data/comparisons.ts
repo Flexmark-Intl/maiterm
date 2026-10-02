@@ -75,7 +75,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Many agents at once',
         maiterm:
-          'The design centre: a shared kanban board, a rules-driven supervisor per window, and agent-to-agent messaging across repositories.',
+          'The design centre: one view to talk to every agent without opening its terminal, a shared kanban board, a rules-driven supervisor per window, and agent-to-agent messaging across repositories.',
         theirs: 'Supported, with its own multi-agent features; oriented around Warp’s own agent.',
       },
       {
@@ -167,7 +167,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Supervision',
         maiterm:
-          'Overlord watches every agent tab in a window and acts on rules you write — deterministic, no model in the loop, every directive held for approval by default.',
+          'Overlord watches every agent tab in a window and acts on rules you write — deterministic, no model in the loop, every directive held for approval by default. The Loom puts every agent’s conversation and open prompts in one view, answerable without visiting its terminal.',
         theirs:
           'Heuristic status detection — working, idle, waiting for permission, blocked — with optional auto-summaries, unread badges and an attention-jump shortcut.',
       },
@@ -177,6 +177,13 @@ export const COMPARISONS: Comparison[] = [
           'Mesh: every agent in a workspace addresses any other by role, across repositories, with topics and loop caps.',
         theirs:
           'Agent spawning: a lead agent spawns others, even in a different harness, waits for them and collects the result.',
+      },
+      {
+        dimension: 'Coming back later',
+        maiterm:
+          'Follow-ups: the agent schedules its own next prompt into its own tab — at a time, when a service comes up or stops, when a task ends, or when a check script it wrote (and you approved) passes. Held by maiTerm, so it survives a restart, and an exited agent is relaunched to receive it.',
+        theirs:
+          '“Set timer” gives a running agent a delayed prompt, set by you from the command palette.',
       },
       {
         dimension: 'Remote hosts',
