@@ -4234,7 +4234,9 @@ fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String,
     };
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
-    if s.tool.as_deref() == Some("AskUserQuestion") {
+    // Read from any of the tab's sessions (`open_question`), not only the one `session_states`
+    // ranked first, so the answer is the same on every poll.
+    if s.tool.as_deref() == Some("AskUserQuestion") || open_question(app, tab_id).is_some() {
         Some(("question", question_prompt_id(app, tab_id), s.runtime))
     } else if map_state(s.state) == "permission" {
         Some(("permission", permission_prompt_id(app, tab_id), s.runtime))
@@ -4810,23 +4812,27 @@ fn resolved_session_for_tab(app: &AppState, tab_id: &str) -> Option<(AgentRuntim
 /// The captured AskUserQuestion `tool_input` for a tab (most attention-worthy session), if an
 /// elicitation is currently open. Mirrors how `live_session_for_tab` resolves the tab's session.
 fn pending_question_for_tab(app: &AppState, tab_id: &str) -> Option<Value> {
+    open_question(app, tab_id).map(|(q, _)| q)
+}
+
+/// The tab's open AskUserQuestion and when it was asked, from whichever of its sessions holds
+/// one (the newest ask if several do). Whether a question is open, its id and its options all
+/// come from here, so they can't disagree: picking a session by state rank first let a stale
+/// session left over from a resume, at the same rank, hide the question on one poll and show
+/// it on the next, and the Loom card was rebuilt under the human's typing each time.
+fn open_question(app: &AppState, tab_id: &str) -> Option<(Value, i64)> {
     let sessions = app.agent_sessions.read();
     sessions
-        .iter()
-        .filter(|(_, s)| s.tab_id == tab_id)
-        .max_by_key(|(_, s)| rank(s.state))
-        .and_then(|(_, s)| s.pending_question.clone())
+        .values()
+        .filter(|s| s.tab_id == tab_id)
+        .filter_map(|s| s.pending_question.clone().map(|q| (q, s.pending_question_at.unwrap_or(0))))
+        .max_by_key(|(_, at)| *at)
 }
 
 /// Unix-ms when the tab's open AskUserQuestion was captured. Display-only on the phone
 /// ("asked 2m ago"); expiry is derived from `question_expires_at`, never from this.
 fn pending_question_at_for_tab(app: &AppState, tab_id: &str) -> Option<i64> {
-    let sessions = app.agent_sessions.read();
-    sessions
-        .iter()
-        .filter(|(_, s)| s.tab_id == tab_id)
-        .max_by_key(|(_, s)| rank(s.state))
-        .and_then(|(_, s)| s.pending_question_at)
+    open_question(app, tab_id).map(|(_, at)| at)
 }
 
 /// Millis until an unanswered AskUserQuestion auto-resolves, given the session's Claude Code

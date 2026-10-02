@@ -34,11 +34,28 @@
   let note = $state('');
   let sending = $state(false);
 
-  async function refresh() {
+  /** Empty reads in a row while a prompt is showing. */
+  let misses = 0;
+
+  /** `settled`: after this card's own answer, a prompt that is gone is gone at once. */
+  async function refresh(settled = false) {
     const forTab = tabId;
     const p = await getTabPrompt(forTab).catch(() => null);
     // A read started for the previous chat must not paint its prompt into this one.
     if (forTab !== tabId) return;
+    // The card is left alone unless the prompt really changed. Replacing it on every poll, or
+    // dropping it for one empty read, rebuilt the inputs under the human's typing: the text
+    // survived (it lives in `others`) but focus did not, so typing an answer kept breaking off.
+    if (p && prompt && p.prompt_id === prompt.prompt_id && p.kind === prompt.kind
+      && JSON.stringify(p) === JSON.stringify(prompt)) {
+      misses = 0;
+      return;
+    }
+    if (!p && prompt && !settled && ++misses < 2) return;
+    misses = 0;
+    if ((p?.prompt_id ?? null) !== (prompt?.prompt_id ?? null) || p?.kind !== prompt?.kind) {
+      logInfo(`Loom prompt card: ${forTab} ${prompt ? `${prompt.kind} ${prompt.prompt_id}` : 'none'} → ${p ? `${p.kind} ${p.prompt_id}` : 'none'}`);
+    }
     prompt = p;
     if (p && p.prompt_id !== seenAt.id) {
       seenAt = { id: p.prompt_id, at: Date.now() };
@@ -51,6 +68,7 @@
   $effect(() => {
     void tabId;
     prompt = null;
+    misses = 0;
     note = '';
     if (!active) return;
     void refresh();
@@ -124,7 +142,7 @@
     } finally {
       clearTimeout(timer);
       sending = false;
-      void refresh();
+      void refresh(true);
     }
   }
 
