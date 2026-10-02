@@ -28,7 +28,7 @@ None of this is stored as a maiTerm preference. Each toggle reads the agent's re
 
 ## Default-on rules
 
-**Disable Remote Control** is the one rule maiTerm turns on without being asked. It's applied once, the first time a maiTerm with the rule launches; after that it's like every other rule. Switch it off and it stays off — maiTerm remembers it already did its one apply and never re-asserts it.
+**Disable Remote Control** is the one rule maiTerm turns on without being asked. It's applied once, the first time a maiTerm with the rule launches; after that it's like every other rule. Switch it off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already switched Remote Control on yourself, the default leaves your choice alone.
 
 ## Your repo's own hooks still run
 

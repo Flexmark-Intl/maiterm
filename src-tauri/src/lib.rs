@@ -281,6 +281,11 @@ pub fn run() {
             // otherwise squat its remote port for as long as the machine stays up.
             commands::ssh_tunnel::kill_orphaned_tunnels();
 
+            // Default-on deshittification rules, once per user account. The "already
+            // settled" marker lives beside ~/.claude, not in AppData, so it needs no
+            // state-loaded gate.
+            commands::deshittify::seed_default_rules();
+
             // Account config roots no account claims (docs/login.md §10). Removing an account
             // deletes its root, but a runtime process launched under it holds CLAUDE_CONFIG_DIR
             // for its whole life and RECREATES the directory on its next write — by which point
@@ -299,21 +304,6 @@ pub fn run() {
             // second `preserve_corrupt` was saving the file so the user could recover. Same
             // reasoning as `save_state`'s backup guard, which uses the same flag; the difference
             // is that a clobbered backup is recoverable and a deleted config root is not.
-            // Default-on deshittification rules, once per install. Same gate as the prune
-            // below: a state that failed to load has an empty seeded list that means
-            // "unknown", and re-seeding from it would undo a rule the user switched off.
-            if state::state_loaded_successfully() {
-                let seeded = app_state.app_data.read().deshittify_seeded.clone();
-                let added = commands::deshittify::seed_default_rules(&seeded);
-                if !added.is_empty() {
-                    let mut data = app_state.app_data.write();
-                    data.deshittify_seeded.extend(added);
-                    if let Err(e) = state::save_state(&data) {
-                        log::warn!("Could not persist deshittify seeding: {e}");
-                    }
-                }
-            }
-
             if !state::state_loaded_successfully() {
                 log::warn!(
                     "Skipping account root prune: state did not load, so an empty account \

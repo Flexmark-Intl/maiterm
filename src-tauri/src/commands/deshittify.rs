@@ -32,9 +32,37 @@ const RULE_COMMIT_HOOK: &str = "cc_commit_msg_hook";
 /// `~/.claude/settings.json`.
 const RULE_REMOTE_CONTROL: &str = "cc_disable_remote_control";
 
-/// Rules maiTerm applies on its own, once per install (`seed_default_rules`). After
-/// that the usual rule holds — disk is the toggle — so switching one off sticks.
+/// Rules maiTerm applies on its own, once per user account (`seed_default_rules`).
+/// After that the usual rule holds — disk is the toggle — so switching one off sticks.
 const DEFAULT_ON_RULES: &[&str] = &[RULE_REMOTE_CONTROL];
+
+/// Which default-on rules have been settled: seeded by maiTerm, or toggled by the
+/// user. One rule id per line. Lives beside the state it protects rather than in
+/// `AppData`, and is deliberately not dev/prod-suffixed, for the same reason as the
+/// hooks directory: settings.json is one file shared by every maiTerm build, and a
+/// per-install marker is lost to a backup import, a downgrade, or the other build —
+/// each of which would switch a rule the user turned off back on.
+fn seeded_marker_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".maiterm").join("deshittify-seeded"))
+}
+
+fn read_seeded(path: &std::path::Path) -> Vec<String> {
+    fs::read_to_string(path)
+        .map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+fn mark_seeded(path: &std::path::Path, id: &str) -> Result<(), String> {
+    let mut ids = read_seeded(path);
+    if ids.iter().any(|s| s == id) {
+        return Ok(());
+    }
+    ids.push(id.to_string());
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+    }
+    fs::write(path, ids.join("\n") + "\n").map_err(|e| format!("Cannot write {}: {e}", path.display()))
+}
 
 #[derive(Serialize, Clone, Debug)]
 pub struct DeshittifyRuleStatus {
@@ -162,6 +190,13 @@ fn set_co_authored(enabled: bool) -> Result<(), String> {
 /// the feature outright (claude.ai/code, `claude remote-control`, `--rc`, the
 /// in-session command), `remoteControlAtStartup: false` overrides the auto-start
 /// an org or rollout default can switch on even where the feature stays allowed.
+/// The user's own explicit opt-in — Remote Control switched on by hand. The seed
+/// leaves such a file alone: a default is for people who never chose.
+fn remote_control_chosen_on(settings: &serde_json::Value) -> bool {
+    settings.get("disableRemoteControl") == Some(&serde_json::Value::Bool(false))
+        || settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(true))
+}
+
 fn remote_control_applied(settings: &serde_json::Value) -> bool {
     settings.get("disableRemoteControl") == Some(&serde_json::Value::Bool(true))
         && settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(false))
@@ -176,9 +211,15 @@ fn set_remote_control(enabled: bool) -> Result<(), String> {
         obj.insert("disableRemoteControl".into(), serde_json::Value::Bool(true));
         obj.insert("remoteControlAtStartup".into(), serde_json::Value::Bool(false));
     } else {
-        // Absent is Claude Code's default for both.
-        obj.remove("disableRemoteControl");
-        obj.remove("remoteControlAtStartup");
+        // Absent is Claude Code's default for both. Remove only our values: a
+        // `remoteControlAtStartup: true` is the user's, and dropping it would
+        // silently switch their auto-start off.
+        if obj.get("disableRemoteControl") == Some(&serde_json::Value::Bool(true)) {
+            obj.remove("disableRemoteControl");
+        }
+        if obj.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(false)) {
+            obj.remove("remoteControlAtStartup");
+        }
     }
     write_claude_settings(&settings)
 }
@@ -531,7 +572,21 @@ fn build_status() -> DeshittifyStatus {
     DeshittifyStatus { rules }
 }
 
+/// Apply or revert one rule. A default-on rule the user has moved either way is
+/// settled for good, so the next launch's seed leaves it where they put it.
 fn apply_rule(id: &str, enabled: bool) -> Result<(), String> {
+    apply_rule_inner(id, enabled)?;
+    if DEFAULT_ON_RULES.contains(&id) {
+        if let Some(path) = seeded_marker_path() {
+            if let Err(e) = mark_seeded(&path, id) {
+                log::warn!("Deshittify: could not record {id} as settled: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_rule_inner(id: &str, enabled: bool) -> Result<(), String> {
     if let Some((_, key)) = ENV_RULES.iter().find(|(rid, _)| *rid == id) {
         return set_env_var(enabled, key);
     }
@@ -582,8 +637,10 @@ if d["remoteControl"]=="set":
     s["disableRemoteControl"]=True
     s["remoteControlAtStartup"]=False
 else:
-    s.pop("disableRemoteControl",None)
-    s.pop("remoteControlAtStartup",None)
+    if s.get("disableRemoteControl") is True:
+        s.pop("disableRemoteControl")
+    if s.get("remoteControlAtStartup") is False:
+        s.pop("remoteControlAtStartup")
 if json.dumps(s,sort_keys=True)!=before:
     open(p,"w").write(json.dumps(s,indent=2))"#;
 
@@ -692,24 +749,25 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
     lines.join("\n")
 }
 
-/// The script that carries these rules to a bridged SSH host. Empty string when
-/// there is nothing to do.
-/// Apply each default-on rule this install hasn't seeded yet. `seeded` is the list
-/// of rule ids already handled (persisted in `AppData`); returns the ids to add to
-/// it. A rule that is blocked or fails to apply is left unseeded so the next launch
-/// tries again — an unreadable settings file is not the user saying no. A rule
-/// already on disk counts as seeded without a write.
-pub fn seed_default_rules(seeded: &[String]) -> Vec<String> {
+/// Apply each default-on rule not yet settled (see `seeded_marker_path`). A rule
+/// that is blocked or fails to apply stays unsettled so the next launch tries again
+/// — an unreadable settings file is not the user saying no. A rule already on disk,
+/// or one the user has explicitly chosen the other way, is settled without a write.
+pub fn seed_default_rules() {
+    let Some(marker) = seeded_marker_path() else {
+        return;
+    };
+    let seeded = read_seeded(&marker);
     let pending: Vec<&str> = DEFAULT_ON_RULES
         .iter()
         .copied()
         .filter(|id| !seeded.iter().any(|s| s == id))
         .collect();
     if pending.is_empty() {
-        return Vec::new();
+        return;
     }
     let status = build_status();
-    let mut done = Vec::new();
+    let settings = read_claude_settings().unwrap_or_else(|_| serde_json::json!({}));
     for id in pending {
         let Some(rule) = status.rules.iter().find(|r| r.id == id) else {
             continue;
@@ -718,18 +776,21 @@ pub fn seed_default_rules(seeded: &[String]) -> Vec<String> {
             log::warn!("Deshittify: default rule {id} is blocked, will retry next launch");
             continue;
         }
-        if !rule.applied {
-            if let Err(e) = apply_rule(id, true) {
-                log::warn!("Deshittify: could not apply default rule {id}: {e}");
-                continue;
+        if rule.applied || (id == RULE_REMOTE_CONTROL && remote_control_chosen_on(&settings)) {
+            if let Err(e) = mark_seeded(&marker, id) {
+                log::warn!("Deshittify: could not record {id} as settled: {e}");
             }
-            log::info!("Deshittify: applied default rule {id}");
+            continue;
         }
-        done.push(id.to_string());
+        match apply_rule(id, true) {
+            Ok(()) => log::info!("Deshittify: applied default rule {id}"),
+            Err(e) => log::warn!("Deshittify: could not apply default rule {id}: {e}"),
+        }
     }
-    done
 }
 
+/// The script that carries these rules to a bridged SSH host. Empty string when
+/// there is nothing to do.
 #[tauri::command]
 pub async fn build_deshittify_setup_script() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(render_remote_setup_script)
@@ -1124,6 +1185,39 @@ mod tests {
         assert_eq!(git_global(&home, "core.hooksPath"), "", "core.hooksPath survived the undo");
 
         let _ = fs::remove_dir_all(&home);
+    }
+
+    /// Switching Remote Control's rule off removes only OUR values — a remote whose
+    /// owner set `remoteControlAtStartup: true` keeps it on every connect.
+    #[test]
+    fn remote_script_keeps_a_users_own_remote_control_choice() {
+        let home = scratch("remote-rc");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        fs::write(&settings, "{\"remoteControlAtStartup\":true}").unwrap();
+        let out = run_remote_script(&render_remote_setup_script_from(&status_with(false), true), &home);
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(fs::read_to_string(&settings).unwrap(), "{\"remoteControlAtStartup\":true}");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn seeded_marker_round_trips_and_dedupes() {
+        let dir = scratch("seeded");
+        let path = dir.join("nested").join("deshittify-seeded");
+        assert!(read_seeded(&path).is_empty());
+        mark_seeded(&path, RULE_REMOTE_CONTROL).unwrap();
+        mark_seeded(&path, RULE_REMOTE_CONTROL).unwrap();
+        assert_eq!(read_seeded(&path), vec![RULE_REMOTE_CONTROL.to_string()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_explicit_remote_control_opt_in_is_recognised() {
+        assert!(remote_control_chosen_on(&serde_json::json!({"remoteControlAtStartup": true})));
+        assert!(remote_control_chosen_on(&serde_json::json!({"disableRemoteControl": false})));
+        assert!(!remote_control_chosen_on(&serde_json::json!({})));
+        assert!(!remote_control_chosen_on(&serde_json::json!({"remoteControlAtStartup": false})));
     }
 
     /// A host whose owner set their own core.hooksPath, and a user who never
