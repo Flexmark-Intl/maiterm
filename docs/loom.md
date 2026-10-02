@@ -81,7 +81,11 @@ those.
 ## Focus
 
 The maiLink inbox rules (`focusSections`): needs you (a permission, or a question on one of
-its tasks) → working now → unread or active since the start of yesterday. The chosen chat is
+its tasks) → working now → unread or active since the start of yesterday. How far back that
+last section reaches is a picker on its own heading (Today, Since yesterday, 3, 7 or 30 days;
+`FOCUS_WINDOWS`), kept per viewer in `localStorage` like the column widths. It is a view filter
+changed where it is used, so it isn't a preference, and the section is drawn even when empty
+so the picker is always there to widen it. Needs-you and working chats show whatever it is. The chosen chat is
 `get_tab_transcript` polled every 3 s, folded by `chatRows`, with **task events** from the
 tasks' own records (`taskEventsFor`: added, asked, answered, notes) placed by time and keyed
 by their position in the log. The phone's transcript doesn't carry those, and they are the

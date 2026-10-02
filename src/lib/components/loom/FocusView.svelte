@@ -17,7 +17,7 @@
   import { tabDisplayName, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { getTabMeta, getTabsLastActivity, getTabTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
-  import { chatRows, focusSections, injectedTurn, taskEventsFor, type FocusChat } from '$lib/loom/model';
+  import { chatRows, FOCUS_WINDOWS, focusSections, injectedTurn, taskEventsFor, type FocusChat } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
   import { fireRefusal, fmtAge } from '$lib/overlord/format';
@@ -101,7 +101,27 @@
       ),
     ),
   );
-  const sections = $derived(focusSections(chats, now, loomStore.focusChatTabId));
+  /** How far back idle chats are listed: a view filter, changed where it is used and kept per
+   *  viewer like the column widths. Needs-you and working chats show whatever it is. */
+  const DAYS_KEY = 'maiterm.loom.focus.days';
+  let windowDays = $state<number>(1);
+  try {
+    const saved = Number(localStorage.getItem(DAYS_KEY));
+    if (FOCUS_WINDOWS.some((w) => w.days === saved) && localStorage.getItem(DAYS_KEY) !== null) windowDays = saved;
+  } catch { /* the default */ }
+  const windowLabel = $derived(FOCUS_WINDOWS.find((w) => w.days === windowDays)?.label ?? 'Since yesterday');
+  let windowMenu = $state<{ x: number; y: number; anchor: HTMLElement } | null>(null);
+  function openWindowMenu(e: MouseEvent) {
+    if (windowMenu) { windowMenu = null; return; }
+    const anchor = e.currentTarget as HTMLElement;
+    const r = anchor.getBoundingClientRect();
+    windowMenu = { x: r.left, y: r.bottom + 4, anchor };
+  }
+  function setWindow(days: number) {
+    windowDays = days;
+    try { localStorage.setItem(DAYS_KEY, String(days)); } catch { /* not kept */ }
+  }
+  const sections = $derived(focusSections(chats, now, loomStore.focusChatTabId, windowDays));
   const listed = $derived([...sections.needsYou, ...sections.working, ...sections.recent]);
 
   /** The open chat: the one picked, else the first that needs you. The fallback is written back
@@ -504,6 +524,11 @@
       {#if list.length}
         <section>
           <h4 class:needs><span>{title}</span><span>{list.length}</span></h4>
+          {@render chatRowsFor(list)}
+        </section>
+      {/if}
+    {/snippet}
+    {#snippet chatRowsFor(list: Chat[])}
           {#each list as c (c.tabId)}
             {@const pct = overlordStore.facts.get(c.tabId)?.context_pct ?? null}
             <button class="row" aria-pressed={openId === c.tabId} onclick={() => loomStore.openChat(c.tabId)}>
@@ -514,12 +539,17 @@
               {#if c.preview}<span class="pv" class:ask={c.asks || c.state === 'permission'}>{c.preview}</span>{/if}
             </button>
           {/each}
-        </section>
-      {/if}
     {/snippet}
     {@render section('Needs you', sections.needsYou, true)}
     {@render section('Working now', sections.working)}
-    {@render section('Since yesterday', sections.recent)}
+    <!-- Always drawn, empty or not: its heading is where the window is widened. -->
+    <section>
+      <h4>
+        <button class="window" aria-haspopup="menu" aria-label="How far back to list chats" onclick={openWindowMenu}>{windowLabel} <span aria-hidden="true">▾</span></button>
+        <span>{sections.recent.length || ''}</span>
+      </h4>
+      {@render chatRowsFor(sections.recent)}
+    </section>
     {#if !listed.length}<p class="hint">No agent chats in scope right now.</p>{/if}
   </aside>
   <Resizer direction="horizontal" onresize={(d) => (listW = clampW(listW + d, 170, 480))} onresizeend={saveWidths} />
@@ -720,6 +750,16 @@
   </aside>
 </div>
 
+{#if windowMenu}
+  <ContextMenu
+    items={FOCUS_WINDOWS.map((w) => ({ label: w.label, shortcut: w.days === windowDays ? 'current' : undefined, action: () => setWindow(w.days) }))}
+    x={windowMenu.x}
+    y={windowMenu.y}
+    anchor={windowMenu.anchor}
+    onclose={() => (windowMenu = null)}
+  />
+{/if}
+
 {#if pickMenu && openId}
   <ContextMenu items={pickMenu.items} x={pickMenu.x} y={pickMenu.y} anchor={pickMenu.anchor} onclose={() => (pickMenu = null)} />
 {/if}
@@ -744,6 +784,9 @@
   .list { padding: 12px 10px; display: flex; flex-direction: column; gap: 14px; }
   section { display: flex; flex-direction: column; gap: 2px; }
   h4 { margin: 0 4px 4px; display: flex; justify-content: space-between; font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim); }
+  .window { background: none; border: 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+  .window span { font-size: 8px; }
+  .window:hover, .window:focus-visible { color: var(--fg); }
   h4.needs { color: var(--orange, #ff9e64); }
   .row {
     display: grid;

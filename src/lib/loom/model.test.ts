@@ -182,6 +182,16 @@ describe('Focus', () => {
     expect(NOW - d.getTime()).toBeLessThanOrEqual(48 * 3600 * 1000);
   });
 
+  it('widens and narrows the recent window by whole local days', () => {
+    const today = new Date(focusSince(NOW, 0));
+    expect([today.getHours(), today.getMinutes()]).toEqual([0, 0]);
+    expect(NOW - today.getTime()).toBeLessThanOrEqual(24 * 3600 * 1000);
+    expect(focusSince(NOW, 6)).toBeLessThan(focusSince(NOW, 1));
+    const threeDaysAgo = chat('old', { lastActivity: NOW - 3 * 24 * 3600 * 1000 });
+    expect(focusSections([threeDaysAgo], NOW, null, 1).recent).toEqual([]);
+    expect(focusSections([threeDaysAgo], NOW, null, 6).recent.map((c) => c.tabId)).toEqual(['old']);
+  });
+
   it('pins what needs you, then working, then recent; old read chats drop out', () => {
     const s = focusSections(
       [

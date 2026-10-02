@@ -218,14 +218,24 @@ export function injectedTurn(text: string): Injected | null {
 
 // ── Focus: the phone's inbox rules (maiLink inbox-view.ts isFocused / focusSince) ──
 
-/** Local midnight at the start of yesterday: the oldest activity Focus still counts as recent.
- *  Day first, then midnight, so a zone whose DST starts at midnight can't carry an hour back. */
-export function focusSince(now: number): number {
+/** Local midnight `daysBack` days ago (default 1: the start of yesterday, the phone's rule): the
+ *  oldest activity Focus still counts as recent. 0 is the start of today. Day first, then
+ *  midnight, so a zone whose DST starts at midnight can't carry an hour back. */
+export function focusSince(now: number, daysBack = 1): number {
   const d = new Date(now);
-  d.setDate(d.getDate() - 1);
+  d.setDate(d.getDate() - daysBack);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
 }
+
+/** How far back Focus lists idle chats, as offered in its picker. */
+export const FOCUS_WINDOWS = [
+  { days: 0, label: 'Today' },
+  { days: 1, label: 'Since yesterday' },
+  { days: 2, label: 'Last 3 days' },
+  { days: 6, label: 'Last 7 days' },
+  { days: 29, label: 'Last 30 days' },
+] as const;
 
 export interface FocusChat {
   tabId: string;
@@ -246,8 +256,8 @@ export interface FocusSections<T extends FocusChat> {
  *  unread or active since the start of yesterday. Opening a chat never removes it: `openId`
  *  is always listed (in recent when it qualifies for nothing else), so a chat answered after
  *  its agent exited keeps a row to come back to. */
-export function focusSections<T extends FocusChat>(chats: T[], now: number, openId?: string | null): FocusSections<T> {
-  const since = focusSince(now);
+export function focusSections<T extends FocusChat>(chats: T[], now: number, openId?: string | null, daysBack = 1): FocusSections<T> {
+  const since = focusSince(now, daysBack);
   const needsYou = chats.filter((c) => c.state === 'permission' || c.asks);
   const working = chats.filter((c) => !needsYou.includes(c) && c.state === 'active');
   const recent = chats
