@@ -296,6 +296,11 @@
           hint: 'Sets disableRemoteControl: true and remoteControlAtStartup: false. Stops your sessions being exposed to claude.ai/code and the mobile app, and stops the bridge auto-starting. On by default — maiTerm applies it once; switch it off and it stays off.',
         },
         {
+          id: 'cc_allow_memory_writes',
+          label: 'Stop asking to write memory',
+          hint: 'Adds a PermissionRequest hook (~/.maiterm/claude-hooks/approve-memory-writes) that approves writes to Markdown files in Claude Code\'s own memory directory. Claude Code means to allow these itself, but misses them wherever its config directory runs through a symlink — every maiTerm account does — so each memory asks, and auto mode refuses. Checks where the path really leads; anything else still prompts. On by default — maiTerm applies it once; switch it off and it stays off.',
+        },
+        {
           id: 'cc_include_co_authored_by',
           label: 'No Co-Authored-By in commits',
           hint: 'Sets includeCoAuthoredBy: false, so Claude Code never writes the trailer in the first place. Anthropic controls this switch, so pair it with the commit-msg hook below.',

@@ -17,6 +17,7 @@ There's one group today, **Claude Code**. maiTerm edits the agent's *own* config
 | **Remove the `/feedback` command** | The command stops being offered |
 | **Suppress feedback surveys** | Stops the in-session survey prompts |
 | **Disable Remote Control** | Sets `disableRemoteControl: true` and `remoteControlAtStartup: false`, so your sessions aren't exposed to claude.ai/code or the mobile app and the bridge never auto-starts. **On by default** |
+| **Stop asking to write memory** | A permission hook approves Claude Code's writes to Markdown files in its own memory directory, which it otherwise asks about one by one, and refuses outright in auto mode, wherever its config directory runs through a symlink. Anything that doesn't really lead into a memory directory still prompts. **On by default** |
 | **No `Co-Authored-By` in commits** | Claude Code stops writing the trailer in the first place |
 | **Strip agent credit at commit time** | A `commit-msg` hook deletes `Co-Authored-By: Claude` and `Generated with Claude Code` lines from your commit messages |
 
@@ -28,7 +29,7 @@ None of this is stored as a maiTerm preference. Each toggle reads the agent's re
 
 ## Default-on rules
 
-**Disable Remote Control** is the one rule maiTerm turns on without being asked. It's applied once, the first time a maiTerm with the rule launches; after that it's like every other rule. Switch it off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already switched Remote Control on yourself, the default leaves your choice alone.
+**Disable Remote Control** and **Stop asking to write memory** are the rules maiTerm turns on without being asked. Each is applied once, the first time a maiTerm with that rule launches; after that it's like every other rule. Switch one off and it stays off — maiTerm remembers the rule is settled (in `~/.maiterm/`, so a backup restore or a second maiTerm build doesn't forget) and never re-asserts it. If you'd already switched Remote Control on yourself, the default leaves your choice alone.
 
 ## Your repo's own hooks still run
 
@@ -43,7 +44,7 @@ Two limits worth knowing:
 
 An agent on a remote server gets the same treatment. The rules are applied on each [SSH bridge](/features/agents/#ssh-mcp-bridge) connect, so a host you work on through maiTerm matches your Mac. Your Mac is the source of truth in both directions: switch a rule off here and it's removed there on the next connect, so an undo actually travels.
 
-Deshittification never gates a bridge — a rule that can't be applied on a remote host doesn't stop the connection or fail the setup. A host you only ever `ssh` into by hand is never touched. A bridged host gets the default-on rule like your Mac does, and nothing else unless you switch it on.
+Deshittification never gates a bridge — a rule that can't be applied on a remote host doesn't stop the connection or fail the setup. A host you only ever `ssh` into by hand is never touched. A bridged host gets the default-on rules like your Mac does, and nothing else unless you switch it on.
 
 ## When a rule can't be applied
 
