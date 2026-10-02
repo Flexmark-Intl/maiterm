@@ -90,6 +90,8 @@ Two more things maiTerm refuses to do:
 
 Runtime state is never written to disk, so a workspace can't come back from a restart claiming something crashed while you were away. What *is* remembered is the binding: after a tab reload or a workspace suspend the service is filed as stopped with a note saying which of the two happened, and starting it again picks up the same tab.
 
+**The stack comes back as you left it.** A service that was running when you quit maiTerm starts again when it next launches — in every workspace, not only the one on screen — and one that was running when you suspended a workspace starts again when you resume it. A service you stopped stays stopped: **Stop**, **Stop stack**, or a `^C` or clean exit in its console all count as you stopping it, while a crash, a suspend or quitting maiTerm don't. Reloading a window isn't a relaunch, so a service still running underneath it is left alone.
+
 **Start with the workspace** brings a service up when its workspace becomes active — once per activation, so switching back and forth doesn't restart anything.
 
 ## What your agents get

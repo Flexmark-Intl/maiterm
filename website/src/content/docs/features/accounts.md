@@ -83,6 +83,8 @@ Relocating an agent's configuration directory relocates *everything* in it — h
 
 It doesn't. Those are shared into every account, so a tab running as one behaves exactly like a tab that isn't. It is a different login, not a different setup.
 
+One thing Claude Code itself gets wrong here: it is meant to write to its own memory without asking, but it misses that whenever its configuration directory runs through a link — which an account's always does — so every memory write would ask for permission, and auto mode would refuse it. The [Deshittification](/features/deshittification/) rule **Stop asking to write memory** approves those writes and nothing else, and it is on by default.
+
 ## SSH hosts
 
 An SSH tab runs its agent on another machine, and that machine has its own single login slot. Left alone, a remote agent is whoever that host was last signed in as, no matter which account is active on your side.

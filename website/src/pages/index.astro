@@ -76,7 +76,7 @@ const KEY_FEATURES = [
 const EVERYTHING = [
   {
     title: 'Restart without losing anything',
-    body: 'Reboot the machine and every tab comes back as it was — scrollback, layout, SSH sessions, agent sessions — each resumed agent reconnected to its tab with nothing typed by anyone.',
+    body: 'Reboot the machine and every tab comes back as it was — scrollback, layout, SSH sessions, agent sessions — each resumed agent reconnected to its tab with nothing typed by anyone, and the dev servers you left running started again.',
   },
   {
     title: 'Know what is in every tab',
@@ -104,7 +104,7 @@ const EVERYTHING = [
   },
   {
     title: 'Deshittify your agent',
-    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, and the <code>Co-Authored-By</code> trailer in your history.',
+    body: 'One Preferences section switches off the parts of a coding agent that serve its vendor: telemetry, error uploads, feedback nags, Remote Control (off by default), and the <code>Co-Authored-By</code> trailer in your history.',
   },
   {
     title: 'A Rust terminal underneath',
@@ -214,7 +214,8 @@ const EVERYTHING = [
           <h3>Focus</h3>
           <p>
             A condensed chat per agent, a composer, and its prompts answered in place. The
-            header carries its state, its context and anything Overlord is running at it.
+            header carries its state, its context and anything Overlord is running at it, and
+            what Overlord or maiTerm typed for you is folded apart from what you said.
           </p>
         </div>
         <div class="ln-card">
@@ -275,7 +276,8 @@ const EVERYTHING = [
           <p>
             Your hooks, skills, commands, permissions and MCP servers are shared into every
             account, so a tab running as one behaves exactly like a tab that isn't. It is a
-            different login, not a different setup.
+            different login, not a different setup. Even the memory writes Claude Code asks
+            about wherever its config runs through a link go through without a prompt.
           </p>
         </div>
         <div class="ln-card">

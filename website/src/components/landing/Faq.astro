@@ -61,7 +61,7 @@ const FAQS = [
   },
   {
     q: 'Does it phone home?',
-    a: 'Only the update check, and it is counted. That check reaches a small Cloudflare Worker which records one row per unique user per day — a salted hash of IP and user-agent, where the salt is random, rotates daily and is then discarded, so it cannot be reversed or linked across days. No IP, user-agent, cookie or device ID is stored, and nothing about your projects, tabs, terminal output or agents ever leaves the machine. There is no other analytics, no error uploads and no account. maiTerm also ships a Preferences section that switches off the telemetry and error reporting in the agent CLIs it launches.',
+    a: 'Only the update check, and it is counted. That check reaches a small Cloudflare Worker which records one row per unique user per day — a salted hash of IP and user-agent, where the salt is random, rotates daily and is then discarded, so it cannot be reversed or linked across days. No IP, user-agent, cookie or device ID is stored, and nothing about your projects, tabs, terminal output or agents ever leaves the machine. There is no other analytics, no error uploads and no account. maiTerm also ships a Preferences section that switches off the telemetry and error reporting in the agent CLIs it launches, and it turns Claude Code’s Remote Control off by default, so your sessions are not exposed to claude.ai or the Claude mobile app unless you switch it back on.',
   },
   {
     q: 'How do updates work?',

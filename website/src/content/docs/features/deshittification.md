@@ -1,9 +1,9 @@
 ---
 title: Deshittification
-description: Switch off the parts of a coding agent that serve its vendor rather than you — telemetry, feedback nags, and self-promotion in your commit history.
+description: Switch off the parts of a coding agent that serve its vendor rather than you — telemetry, feedback nags, Remote Control, self-promotion in your commit history, and the memory-write prompts Claude Code asks by mistake.
 ---
 
-Coding agents ship with behaviour that works for the vendor rather than for you: usage telemetry, uploaded error reports, in-session feedback surveys, and a `Co-Authored-By: Claude` trailer stamped into your commit history. **Preferences → Deshittification** switches those off — one rule at a time, or the whole group with a single toggle.
+Coding agents ship with behaviour that works for the vendor rather than for you: usage telemetry, uploaded error reports, in-session feedback surveys, Remote Control exposing your sessions to claude.ai and the mobile app, and a `Co-Authored-By: Claude` trailer stamped into your commit history — plus a permission prompt for every memory Claude Code writes, which it never meant to ask. **Preferences → Deshittification** switches those off — one rule at a time, or the whole group with a single toggle.
 
 There's one group today, **Claude Code**. maiTerm edits the agent's *own* configuration — `~/.claude/settings.json` and your global git config — so the rules hold in every terminal you run the agent in, not just maiTerm's. Claude Code picks them up on its next session.
 

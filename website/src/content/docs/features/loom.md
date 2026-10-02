@@ -23,9 +23,9 @@ Every **awake** workspace in the window — the sidebar's idea of awake, one wit
 
 Focus is the work area: the chat list on the left, the chosen agent's conversation in the middle, and that agent's work on the right. Drag either border to resize the columns; the widths are remembered.
 
-**The chat list** follows the same rules as the [maiLink](/features/mailink/) inbox, in three groups: **Needs you** (a permission prompt, or a question on one of its tasks), **Working now**, and **Since yesterday**. Each row shows how long ago the agent last did anything, and a line saying what it's waiting on you for or what it's doing right now.
+**The chat list** follows the same rules as the [maiLink](/features/mailink/) inbox, in three groups: **Needs you** (a permission prompt, or a question on one of its tasks), **Working now**, and the agents active recently. How far back that last group reaches is a menu on its own heading — **Today**, **Since yesterday** (the default), **Last 3 days**, **Last 7 days** or **Last 30 days** — and your choice is remembered. Agents that need you or are working show up whatever it's set to. Each row shows how long ago the agent last did anything, and a line saying what it's waiting on you for or what it's doing right now.
 
-**The chat** is a condensed transcript — the same one your phone gets — in one readable column. The agent's replies on the left, yours as bubbles on the right, and everything that isn't conversation set off so the eye can skip it: each tool step is one quiet line (click for the calls), messages to and from [peers](/features/mesh-workspace/) say who they're from, and a subagent's report folds to one line. Task events are woven in where they happened — a task added, a question asked, an answer given — because those are exactly the parts that otherwise scroll away. Clicking one opens the task in the Weave. You can select and copy anything in the chat.
+**The chat** is a condensed transcript — the same one your phone gets — in one readable column. The agent's replies on the left, yours as bubbles on the right, and everything that isn't conversation set off so the eye can skip it: each tool step is one quiet line (click for the calls), messages to and from [peers](/features/mesh-workspace/) say who they're from, and a subagent's report folds to one line. So does a message maiTerm typed into the agent rather than you — an Overlord rule's directive reads **Overlord**, followed by the rule's name, and a task answer or anything else sent on your behalf reads **Sent for you** — so your own bubbles hold only your own words. Click one to read what was sent. Task events are woven in where they happened — a task added, a question asked, an answer given — because those are exactly the parts that otherwise scroll away. Clicking one opens the task in the Weave. You can select and copy anything in the chat.
 
 **The header** shows the agent's state, its model, reasoning effort and a context gauge, any Overlord sequence running on it, and **Open the tab** to go to its terminal. On a Claude Code chat the model and the effort are menus: pick one and maiTerm sends `/model` or `/effort` for you, the same way the phone does. The header changes when the agent replies on the new model, not when you pick it, since Claude Code can refuse a switch. When a directive is waiting for an answer that isn't coming, **Release** sits beside *awaiting reply*.
 
@@ -34,11 +34,11 @@ Focus is the work area: the chat list on the left, the chosen agent's conversati
 Whatever the agent is stopped at appears under the chat, answerable in place:
 
 - **A permission prompt**, with the rows Claude Code is actually showing — read off the screen, so the choice you click is the one that's pressed.
-- **A question** (`AskUserQuestion`), with its options and a field to answer in your own words.
+- **A question** (`AskUserQuestion`), single- or multi-select, with its options and a field to answer in your own words. Your answer goes in only while that question's own selector is on screen; if something else has replaced it, the answer is refused rather than typed into whatever is there now.
 - **Claude's workspace-trust dialog** — *Trust this folder?* — which a resumed agent can stop at before it has a session at all.
 - **A question on one of its tasks** — see [blockers](/features/tasks/#when-an-agent-stops-on-a-question).
 
-A card ignores clicks in its first moments on screen, so a prompt that appears under your pointer as you click can't be answered by accident.
+A card ignores clicks in its first moments on screen, so a prompt that appears under your pointer as you click can't be answered by accident. It also holds still while it's up: it is redrawn only when the prompt actually changes, so typing an answer isn't interrupted.
 
 ### The composer
 
