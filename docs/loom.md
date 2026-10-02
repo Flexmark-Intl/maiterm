@@ -136,8 +136,18 @@ Under the chat, in this order:
   the trust refusal that keeps the Overlord AGENT from trusting folders. It is a separate
   command so nothing an agent's tool call reaches can carry the exemption. BlockerCard's two
   click guards apply: nothing in a prompt's first 1.5 s on screen, never the second click of
-  a double-click.
-- **A task question** on one of its tasks, through BlockerCard.
+  a double-click (a refused click now says so, and every click and its outcome is logged).
+  **The card must not be rebuilt while it is up:** a poll returning the same prompt changes
+  nothing, one empty read is ignored, and out-of-order reads are dropped. Rebuilding it on every
+  poll took focus out of the "answer in your own words" field every few seconds. The prompt's
+  identity has to be stable for the same reason: the open question comes from the tab's CURRENT
+  session only (`current_session_id`), and a permission's digest leaves out Claude's ticking
+  auto-deny countdown (`permission::without_countdown`), which otherwise changed the id every
+  second so every answer was refused and the dialog timed out. A question is typed into only
+  while its own text and row 1 are on screen (`question_on_screen`; multiSelect rows carry a
+  `[ ]` checkbox).
+- **A task question** on one of its tasks, through BlockerCard, which can also be **dismissed**
+  without an answer when the human already handled it in the tab (docs/tasks.md §3.1).
 - **Attachments**, captured exactly as the terminal's composer dock captures them (one module,
   `lib/composer/attachments.ts`, and one `AttachmentChips` component, shared by both): Cmd+V of
   a screenshot (a temp PNG with a preview) or of Finder files, a menu paste, or files dropped on

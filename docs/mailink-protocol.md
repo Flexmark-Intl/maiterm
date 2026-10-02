@@ -1089,7 +1089,12 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
   transfer never types half a batch). `{status:"unsupported", reason:"unsupported_ssh"}` now means
   only "no usable bridge" (tunnel down/disabled, mosh) or "staging failed" — render it as the same
   in-app notice as before; a retry after the bridge reconnects can succeed.
-- **Answer a permission/question** (`POST .../respond {choice, prompt_id}`): Claude's TUI
+- **Answer a permission/question** (`POST .../respond {choice, prompt_id}`). Two guards since
+  2026-09-30/10-02, same wire: a permission's `prompt_id` digest leaves out the unattended-session
+  auto-deny countdown (it ticks every second, so the id changed under every card), and a
+  question is answered only while its own text and first option row are on screen, else `stale`
+  ("that question is no longer open in the terminal"); its `q_` id comes from the tab's current
+  session only. Claude's TUI
   answers permission with the digit of a numbered row, and **the rows vary by request** (two
   rows on a Write to a project file; up to four on Bash, one of which switches to auto mode;
   No listed FIRST on a dialog that defaults to it; the plan dialog's row 1 is "Yes, auto-accept
