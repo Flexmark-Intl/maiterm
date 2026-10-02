@@ -74,12 +74,17 @@ function parseReleaseBody(body: string): ChangelogItem[] {
     .map(p => ({ kind: 'bullet' as const, text: p.replace(/`([^`]+)`/g, '$1'), depth: 0 }));
 }
 
+/** How long restart() waits for its state flush before relaunching regardless. */
+const RESTART_FLUSH_TIMEOUT_MS = 15_000;
+
 function createUpdaterStore() {
   let checking = $state(false);
   let downloading = $state(false);
   let installed = $state(false);
   /** Download done, the bundle swap under way — the phase a hang would sit in. */
   let installing = $state(false);
+  /** restart() is flushing state / relaunching — set once, cleared only if relaunch fails. */
+  let restarting = $state(false);
   let downloadedBytes = $state(0);
   /** Null when the server sent no Content-Length. */
   let totalBytes = $state<number | null>(null);
@@ -224,24 +229,48 @@ function createUpdaterStore() {
    * (tab names, scrollback, geometry) is lost across the update.
    */
   async function restart() {
+    // Re-entry guard: the flush below takes seconds with many tabs, and every extra click
+    // used to start another one racing the first.
+    if (restarting) return;
+    restarting = true;
+    dismissed = false;
+    const flush = (async () => {
+      try {
+        // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
+        // refuses it — never fabricate a count here, or the update plants a layout the
+        // user never arranged under a real monitor-count key.
+        const monitorCount = await commands.getMonitorCount().catch(() => 0);
+        await commands.saveWindowGeometry(monitorCount).catch(() => {});
+        // This window's own terminals (also sets the shutting-down flag that
+        // suppresses per-tab autosave races).
+        await terminalsStore.saveAllScrollback();
+        // Every OTHER window's terminals too: terminalsStore is per-webview, so the
+        // call above only covered this window. Rust owns all buffers and flushes
+        // them globally — without this a secondary window returns with blank tabs.
+        await commands.saveAllScrollback().catch((e) => logError(`save_all_scrollback failed: ${e}`));
+        await invoke('sync_state');
+      } catch (e) {
+        logError(`Pre-relaunch state flush failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })();
+    // A hung save must not strand the app at "Restarting…" — the update is already on
+    // disk, and a relaunch with slightly stale state beats one that never happens.
+    const timedOut = await Promise.race([
+      flush.then(() => false),
+      new Promise<boolean>(resolve => setTimeout(() => resolve(true), RESTART_FLUSH_TIMEOUT_MS)),
+    ]);
+    if (timedOut) logError(`Pre-relaunch state flush still running after ${RESTART_FLUSH_TIMEOUT_MS}ms, relaunching anyway`);
+    logInfo('Update: relaunching');
     try {
-      // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
-      // refuses it — never fabricate a count here, or the update plants a layout the
-      // user never arranged under a real monitor-count key.
-      const monitorCount = await commands.getMonitorCount().catch(() => 0);
-      await commands.saveWindowGeometry(monitorCount).catch(() => {});
-      // This window's own terminals (also sets the shutting-down flag that
-      // suppresses per-tab autosave races).
-      await terminalsStore.saveAllScrollback();
-      // Every OTHER window's terminals too: terminalsStore is per-webview, so the
-      // call above only covered this window. Rust owns all buffers and flushes
-      // them globally — without this a secondary window returns with blank tabs.
-      await commands.saveAllScrollback().catch((e) => logError(`save_all_scrollback failed: ${e}`));
-      await invoke('sync_state');
+      await relaunch();
     } catch (e) {
-      logError(`Pre-relaunch state flush failed: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      logError(`Relaunch failed: ${msg}`);
+      // The flush set the shutting-down flag, so autosave is off from here: quitting is
+      // the right advice, not another Restart click.
+      toastStore.addToast('Restart Failed', `${msg}. Quit and reopen maiTerm to finish the update.`, 'error');
+      restarting = false;
     }
-    relaunch();
   }
 
   return {
@@ -249,6 +278,7 @@ function createUpdaterStore() {
     get downloading() { return downloading; },
     get installed() { return installed; },
     get installing() { return installing; },
+    get restarting() { return restarting; },
     get downloadedBytes() { return downloadedBytes; },
     get totalBytes() { return totalBytes; },
     get currentUpdate() { return currentUpdate; },

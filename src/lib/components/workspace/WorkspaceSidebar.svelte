@@ -780,8 +780,12 @@
 
   {#if updaterStore.showBanner}
     <div class="update-banner">
-      <button class="update-dismiss" onclick={() => updaterStore.dismiss()} aria-label="Dismiss">&times;</button>
-      {#if updaterStore.installed}
+      {#if !updaterStore.restarting}
+        <button class="update-dismiss" onclick={() => updaterStore.dismiss()} aria-label="Dismiss">&times;</button>
+      {/if}
+      {#if updaterStore.restarting}
+        <div class="update-text">Saving state and restarting…</div>
+      {:else if updaterStore.installed}
         <div class="update-text">Update installed</div>
         <button class="update-action" onclick={() => updaterStore.restart()}>Restart</button>
       {:else if updaterStore.installing}
@@ -842,9 +846,9 @@
   version={appVersion}
   entries={whatsNewEntries}
   title="What's New"
-  oninstall={updaterStore.currentUpdate && !updaterStore.installed ? handleInstallFromModal : undefined}
-  installLabel={rechecking ? 'Checking…' : updaterStore.installing ? 'Installing…' : updaterStore.downloading ? 'Downloading…' : updaterStore.installed ? 'Restarting…' : 'Install & Restart'}
-  installDisabled={rechecking || updaterStore.downloading || updaterStore.installed}
+  oninstall={updaterStore.installed ? () => updaterStore.restart() : updaterStore.currentUpdate ? handleInstallFromModal : undefined}
+  installLabel={updaterStore.restarting ? 'Restarting…' : updaterStore.installed ? 'Restart Now' : rechecking ? 'Checking…' : updaterStore.installing ? 'Installing…' : updaterStore.downloading ? 'Downloading…' : 'Install & Restart'}
+  installDisabled={rechecking || updaterStore.downloading || updaterStore.restarting}
   {newerVersionPrompt}
   oninstallLatest={handleInstallLatest}
   oninstallOriginal={handleInstallOriginal}
