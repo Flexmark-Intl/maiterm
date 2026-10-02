@@ -4,6 +4,12 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.14 changelog** (2026-10-02). Additive: **`Turn.typedBy`** marks a `user` turn maiTerm typed
+> rather than the human: `{ by: 'overlord' | 'maiterm', rule? }`. An Overlord rule's directive
+> ("If the current work is multi-step, track it…") and a task answer maiTerm typed both arrive
+> as ordinary user turns, so the thread drew them as the human's own words. Draw a tagged turn
+> apart from the human's bubbles (the desktop's Loom folds it to one line naming who sent it).
+>
 > **v0.13 changelog** (2026-09-28). Additive: the questions agents stop on reach the phone.
 > - **`MaitermTask.blocker`** (§4.3): what a Blocked task waits for when it isn't another task:
 >   a `decision` (with options), an `action` only the human can do (with the command), or an
@@ -1703,6 +1709,13 @@ export interface Turn {
   author?: Participant;         // absent => the human/user
   role: 'agent' | 'user' | 'tool' | 'system';
   kind?: 'terminal_snapshot' | 'peer_message' | 'goal_status';  // typed turns (see below); absent => distilled turn
+  typedBy?: {                   // 0.14, role:'user' only: maiTerm typed this, not the human
+    by: 'overlord' | 'maiterm'; //   'overlord': an Overlord rule or its supervisor agent typed it;
+                                //   'maiterm': sent FOR the human (a task answer, "Do it", a rule run by hand)
+    rule?: string;              //   the rule's name, when one sent it
+  };                            // Absent = the human's own words (or unknown). Matched by text against the
+                                // window's Overlord ledger, any rule's step text, or the "[maiTerm]" prefix.
+                                // Draw it apart from the human's bubbles; GET only, not on WS frames.
   goal?: {                      // present iff kind === 'goal_status'
     event: 'set' | 'blocked' | 'met' | 'failed' | 'cleared';
     condition: string;
@@ -2151,7 +2164,7 @@ Retire-spent-tab, triage and checkpoint are desktop verbs and are deliberately n
 
 ### 13.5 Version on the wire — `GET /heartbeat`
 
-`{ ok, now, server_name, fp, protocolVersion: "0.13" }`. The second breaking change in a week
+`{ ok, now, server_name, fp, protocolVersion: "0.14" }`. The second breaking change in a week
 found there was no version anywhere on the wire. A client gates its compatibility shims on this,
 not on a calendar; absent means pre-0.5.
 
@@ -2174,6 +2187,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.11` | adds `GET /push-prefs` and `POST /push-prefs` (§6.2), per-device push mutes |
 | `0.12` | Claude's workspace-trust dialog as a `permission` card on an UNREGISTERED tab (`prompt_id` `t_<tabId>_<folder digest>`, `options` in screen order), rung as `permission`; `reason:"trust_dialog"` from `/wake` and `POST /message`; adds `POST /chats/{tabId}/keys` |
 | `0.13` | adds `MaitermTask.blocker` (explicit `null` when none), `Chat.asks`, and `POST /tasks/{id}/answer` |
+| `0.14` | adds `Turn.typedBy` on user turns maiTerm typed (an Overlord directive, or a message sent for the human) |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

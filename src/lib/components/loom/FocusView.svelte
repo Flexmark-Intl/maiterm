@@ -647,6 +647,21 @@
             </div>
           {:else if r.turn.kind === 'terminal_snapshot'}
             <pre class="snap">{r.turn.text}</pre>
+          {:else if r.turn.role === 'user' && r.turn.typedBy}
+            <!-- Typed by maiTerm, not the human: an Overlord directive, or a message sent for
+                 them. Folded and named, so the human's own bubbles are only their words. -->
+            {@const tb = r.turn.typedBy}
+            {@const shown = expanded.includes(r.turn.msg_id)}
+            <div class="act">
+              <button class="act-line" aria-expanded={shown} onclick={() => toggle(r.turn.msg_id)}>
+                <span class="act-verb">{tb.by === 'overlord' ? 'Overlord' : 'Sent for you'}{tb.rule ? ` · ${tb.rule}` : ''}</span>
+                {#if !shown}<span class="act-what plain">{r.turn.text}</span>{/if}
+                <span class="chev" aria-hidden="true">{shown ? '▾' : '▸'}</span>
+              </button>
+              {#if shown}
+                <p class="typed">{r.turn.text}</p>
+              {/if}
+            </div>
           {:else if r.turn.role === 'user' && injectedTurn(r.turn.text)}
             {@const inj = injectedTurn(r.turn.text)!}
             {@const shown = expanded.includes(r.turn.msg_id)}
@@ -920,6 +935,8 @@
   .act-verb { flex: none; }
   .act-what { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; opacity: 0.8; }
   .chev { flex: none; font-size: 10px; }
+  .act-what.plain { font-family: inherit; font-size: 11.5px; }
+  .typed { margin: 6px 0 4px 12px; padding-left: 10px; border-left: 2px solid var(--bg-light); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg-dim); }
   .report { margin: 6px 0 4px 12px; padding-left: 10px; border-left: 2px solid var(--bg-light); font-size: 12.5px; }
   .calls { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 2px 12px; }
   .calls code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--fg-dim); white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -100,6 +100,11 @@ conversation set off by a thin left rule so the eye can skip it:
   click;
 - task events say what happened and to which task, and tasks added back to back are one block
   (`chatRows` groups them as an `added` row);
+- a message maiTerm typed rather than the human (an Overlord rule's directive, a task answer,
+  "Do it") folds to one line, "Overlord · <rule>" or "Sent for you", with the text on click. The
+  transcript holds it as an ordinary user turn, so it used to sit in the human's bubble; the
+  desktop now marks it (`typedBy`, protocol 0.14, `mailink::tag_typed_turns`, matched against
+  the Overlord ledger) for the phone and the Loom alike;
 - peer traffic reads "From <peer>" / "To <peer>" with the message as written, folded to four
   lines when long;
 - a subagent's report handed back arrives as a "user" turn the harness wrote ("Another Claude

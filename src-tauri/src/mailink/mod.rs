@@ -503,7 +503,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.13";
+const PROTOCOL_VERSION: &str = "0.14";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -5081,7 +5081,68 @@ pub(crate) fn tab_transcript(app: &AppState, tab_id: &str) -> Vec<Value> {
         turns.extend(sent);
         turns.sort_by_key(|t| t.get("ts").and_then(|v| v.as_u64()).unwrap_or(0));
     }
+    tag_typed_turns(app, tab_id, &mut turns);
     turns
+}
+
+/// Mark the "user" turns maiTerm typed rather than the human (§12 `typedBy`): an Overlord
+/// rule's directive, or a message maiTerm sent for the human (a task answer, "Do it", a rule run
+/// by hand). In the transcript they are ordinary user turns, so the phone and the Loom drew them
+/// as the human's own words, and in a chat being steered the human couldn't tell what they had
+/// said from what was said for them.
+///
+/// Matched by text, newest first: the window's Overlord ledger (every injection, verbatim, for
+/// this tab), then any defined rule's step text (a ledger entry may have rolled out of its 500),
+/// then the `[maiTerm]` prefix maiTerm's own messages carry.
+fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !turns.iter().any(|t| t.get("role").and_then(|r| r.as_str()) == Some("user")) {
+        return;
+    }
+    let data = app.app_data.read();
+    let rule_name = |id: &str| data.preferences.overlord_rules.iter().find(|r| r.id == id).map(|r| r.name.clone());
+    // (text, by, rule) per ledger entry for this tab, newest last.
+    let ledger: Vec<(String, &'static str, Option<String>)> = data
+        .windows
+        .iter()
+        .flat_map(|w| &w.overlord_ledger)
+        .filter(|e| e.get("tab_id").and_then(|v| v.as_str()) == Some(tab_id))
+        .filter(|e| e.get("outcome").and_then(|v| v.as_str()) == Some("sent"))
+        .filter_map(|e| {
+            let text = norm(e.get("text")?.as_str()?);
+            let by = if e.get("origin").and_then(|v| v.as_str()) == Some("human") { "maiterm" } else { "overlord" };
+            let rule = e.get("rule_id").and_then(|v| v.as_str()).and_then(rule_name);
+            Some((text, by, rule))
+        })
+        .collect();
+    for t in turns.iter_mut() {
+        if t.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let Some(text) = t.get("text").and_then(|v| v.as_str()).map(norm) else { continue };
+        if text.is_empty() {
+            continue;
+        }
+        let tag = ledger
+            .iter()
+            .rev()
+            .find(|(l, _, _)| *l == text)
+            .map(|(_, by, rule)| (*by, rule.clone()))
+            .or_else(|| {
+                data.preferences
+                    .overlord_rules
+                    .iter()
+                    .find(|r| r.sequence.iter().any(|s| norm(&s.text) == text))
+                    .map(|r| ("overlord", Some(r.name.clone())))
+            })
+            .or_else(|| text.starts_with("[maiTerm]").then_some(("maiterm", None)));
+        if let Some((by, rule)) = tag {
+            t["typedBy"] = match rule {
+                Some(r) => json!({ "by": by, "rule": r }),
+                None => json!({ "by": by }),
+            };
+        }
+    }
 }
 
 fn build_transcript(app: &AppState, tab_id: &str, now: u64) -> Vec<Value> {
@@ -6551,6 +6612,44 @@ mod tests {
             let c = chats.iter().find(|c| c["tabId"] == json!(t)).unwrap();
             assert_eq!(c["state"], json!("idle"));
         }
+    }
+
+    #[test]
+    fn turns_maiterm_typed_are_marked_and_the_humans_are_not() {
+        let app = AppState::new();
+        {
+            let mut data = app.app_data.write();
+            let mut win = crate::state::WindowData::new("main".into());
+            win.overlord_ledger = vec![
+                json!({ "tab_id": "tab", "origin": "rule", "rule_id": "r1", "outcome": "sent", "text": "Checkpoint now:\n  commit your work." }),
+                json!({ "tab_id": "tab", "origin": "human", "rule_id": null, "outcome": "sent", "text": "go ahead" }),
+                json!({ "tab_id": "other", "origin": "rule", "rule_id": "r1", "outcome": "sent", "text": "only elsewhere" }),
+                json!({ "tab_id": "tab", "origin": "rule", "rule_id": "r1", "outcome": "blocked_busy", "text": "never typed" }),
+            ];
+            data.windows.push(win);
+            data.preferences.overlord_rules = serde_json::from_value(json!([{
+                "id": "r1", "name": "Checkpoint", "enabled": true, "workspaces": [], "cooldown": 0,
+                "when": { "event": "turn_end" },
+                "guards": { "require_live_repl": true, "only_if_no_outstanding": true },
+                "sequence": [{ "kind": "process", "text": "Checkpoint now:\n  commit your work." }]
+            }])).unwrap();
+        }
+        let u = |id: &str, text: &str| json!({ "msg_id": id, "role": "user", "text": text, "ts": 0 });
+        let mut turns = vec![
+            u("a", "Checkpoint now: commit your work."),
+            u("b", "go ahead"),
+            u("c", "only elsewhere"),
+            u("d", "never typed"),
+            u("e", "[maiTerm] The human answered your question."),
+            json!({ "msg_id": "f", "role": "agent", "text": "go ahead", "ts": 0 }),
+        ];
+        tag_typed_turns(&app, "tab", &mut turns);
+        assert_eq!(turns[0]["typedBy"], json!({ "by": "overlord", "rule": "Checkpoint" }));
+        assert_eq!(turns[1]["typedBy"], json!({ "by": "maiterm" }));
+        assert!(turns[2].get("typedBy").is_none(), "another tab's injection");
+        assert!(turns[3].get("typedBy").is_none(), "an injection that was never typed");
+        assert_eq!(turns[4]["typedBy"], json!({ "by": "maiterm" }));
+        assert!(turns[5].get("typedBy").is_none(), "only user turns");
     }
 
     #[test]

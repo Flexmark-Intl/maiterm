@@ -385,6 +385,9 @@ export interface ChatTurn {
   ts: number;
   goal?: { event: 'set' | 'blocked' | 'met' | 'failed' | 'cleared'; condition?: string };
   peer?: { direction: 'in' | 'out'; name?: string; topic?: string };
+  /** A user turn maiTerm typed rather than the human (protocol 0.14): an Overlord directive,
+   *  or a message sent for the human. */
+  typedBy?: { by: 'overlord' | 'maiterm'; rule?: string };
 }
 
 /** A tab's chat as the phone sees it, for the Workstream Loom's Focus view. */
