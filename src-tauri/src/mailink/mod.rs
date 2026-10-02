@@ -5091,18 +5091,24 @@ pub(crate) fn tab_transcript(app: &AppState, tab_id: &str) -> Vec<Value> {
 /// as the human's own words, and in a chat being steered the human couldn't tell what they had
 /// said from what was said for them.
 ///
-/// Matched by text, newest first: the window's Overlord ledger (every injection, verbatim, for
-/// this tab), then any defined rule's step text (a ledger entry may have rolled out of its 500),
-/// then the `[maiTerm]` prefix maiTerm's own messages carry.
+/// Matched by text AND time: a ledger entry for this tab (every injection, verbatim) typed
+/// within 15 min before the turn was recorded (a queued message waits for the turn to end) or
+/// 2 min after (a remote host's clock), the nearest one, each entry naming one turn. So a rule
+/// and a hand run of the same text keep their own origins, and the human typing the same words
+/// at another time isn't tagged. Past the ledger's reach (500 entries, about 11 days here) the
+/// fixed openings maiTerm's own messages carry still identify them, and a rule's step text
+/// does when it is long enough (40+ characters) that nobody types it by chance.
 fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
+    const BEFORE_MS: i64 = 15 * 60 * 1000;
+    const AFTER_MS: i64 = 2 * 60 * 1000;
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     if !turns.iter().any(|t| t.get("role").and_then(|r| r.as_str()) == Some("user")) {
         return;
     }
     let data = app.app_data.read();
     let rule_name = |id: &str| data.preferences.overlord_rules.iter().find(|r| r.id == id).map(|r| r.name.clone());
-    // (text, by, rule) per ledger entry for this tab, newest last.
-    let ledger: Vec<(String, &'static str, Option<String>)> = data
+    // (text, at, by, rule) per ledger entry for this tab.
+    let ledger: Vec<(String, i64, &'static str, Option<String>)> = data
         .windows
         .iter()
         .flat_map(|w| &w.overlord_ledger)
@@ -5110,11 +5116,13 @@ fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
         .filter(|e| e.get("outcome").and_then(|v| v.as_str()) == Some("sent"))
         .filter_map(|e| {
             let text = norm(e.get("text")?.as_str()?);
+            let at = transcript::rfc3339_to_ms(e.get("ts")?.as_str()?);
             let by = if e.get("origin").and_then(|v| v.as_str()) == Some("human") { "maiterm" } else { "overlord" };
             let rule = e.get("rule_id").and_then(|v| v.as_str()).and_then(rule_name);
-            Some((text, by, rule))
+            Some((text, at, by, rule))
         })
         .collect();
+    let mut used = vec![false; ledger.len()];
     for t in turns.iter_mut() {
         if t.get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
@@ -5123,19 +5131,37 @@ fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
         if text.is_empty() {
             continue;
         }
-        let tag = ledger
+        let ts = t.get("ts").and_then(|v| v.as_i64()).unwrap_or(0);
+        let hit = ledger
             .iter()
-            .rev()
-            .find(|(l, _, _)| *l == text)
-            .map(|(_, by, rule)| (*by, rule.clone()))
-            .or_else(|| {
-                data.preferences
-                    .overlord_rules
-                    .iter()
-                    .find(|r| r.sequence.iter().any(|s| norm(&s.text) == text))
-                    .map(|r| ("overlord", Some(r.name.clone())))
+            .enumerate()
+            .filter(|(i, (l, at, _, _))| !used[*i] && *l == text && *at > 0 && ts > 0 && *at >= ts - BEFORE_MS && *at <= ts + AFTER_MS)
+            .min_by_key(|(_, (_, at, _, _))| (ts - at).abs())
+            .map(|(i, _)| i);
+        let tag = hit
+            .map(|i| {
+                used[i] = true;
+                (ledger[i].2, ledger[i].3.clone())
             })
-            .or_else(|| text.starts_with("[maiTerm]").then_some(("maiterm", None)));
+            .or_else(|| {
+                // maiTerm's own messages: task answers, "Do it", the task-tracking check.
+                if text.starts_with("[maiTerm]") || text.starts_with("Board update:") {
+                    Some(("maiterm", None))
+                } else if text.starts_with("Overlord check —") {
+                    Some(("overlord", None))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                (text.chars().count() >= 40).then(|| {
+                    data.preferences
+                        .overlord_rules
+                        .iter()
+                        .find(|r| r.sequence.iter().any(|s| norm(&s.text) == text))
+                        .map(|r| ("overlord", Some(r.name.clone())))
+                })?
+            });
         if let Some((by, rule)) = tag {
             t["typedBy"] = match rule {
                 Some(r) => json!({ "by": by, "rule": r }),
@@ -6620,36 +6646,55 @@ mod tests {
         {
             let mut data = app.app_data.write();
             let mut win = crate::state::WindowData::new("main".into());
+            let e = |at: &str, tab: &str, origin: &str, rule: Option<&str>, outcome: &str, text: &str| json!({
+                "ts": format!("2026-10-02T{at}.000Z"), "tab_id": tab, "origin": origin,
+                "rule_id": rule, "outcome": outcome, "text": text });
+            const STEP: &str = "Prepare for compaction: commit your work and update the task board.";
             win.overlord_ledger = vec![
-                json!({ "tab_id": "tab", "origin": "rule", "rule_id": "r1", "outcome": "sent", "text": "Checkpoint now:\n  commit your work." }),
-                json!({ "tab_id": "tab", "origin": "human", "rule_id": null, "outcome": "sent", "text": "go ahead" }),
-                json!({ "tab_id": "other", "origin": "rule", "rule_id": "r1", "outcome": "sent", "text": "only elsewhere" }),
-                json!({ "tab_id": "tab", "origin": "rule", "rule_id": "r1", "outcome": "blocked_busy", "text": "never typed" }),
+                e("10:00:00", "tab", "rule", Some("r1"), "sent", STEP),
+                // The same rule run by hand.
+                e("11:00:00", "tab", "human", Some("r1"), "sent", STEP),
+                e("12:00:00", "tab", "human", None, "sent", "go ahead"),
+                e("12:00:00", "other", "rule", Some("r1"), "sent", "only elsewhere"),
+                e("12:00:00", "tab", "rule", Some("r1"), "blocked_busy", "never typed"),
             ];
             data.windows.push(win);
-            data.preferences.overlord_rules = serde_json::from_value(json!([{
-                "id": "r1", "name": "Checkpoint", "enabled": true, "workspaces": [], "cooldown": 0,
-                "when": { "event": "turn_end" },
-                "guards": { "require_live_repl": true, "only_if_no_outstanding": true },
-                "sequence": [{ "kind": "process", "text": "Checkpoint now:\n  commit your work." }]
-            }])).unwrap();
+            data.preferences.overlord_rules = serde_json::from_value(json!([
+                { "id": "r1", "name": "Compaction", "enabled": true, "workspaces": [], "cooldown": 0,
+                  "when": { "event": "turn_end" }, "guards": { "require_live_repl": true, "only_if_no_outstanding": true },
+                  "sequence": [{ "kind": "process", "text": STEP }] },
+                { "id": "r2", "name": "Nudge", "enabled": true, "workspaces": [], "cooldown": 0,
+                  "when": { "event": "turn_end" }, "guards": { "require_live_repl": true, "only_if_no_outstanding": true },
+                  "sequence": [{ "kind": "process", "text": "Continue." }] }
+            ])).unwrap();
         }
-        let u = |id: &str, text: &str| json!({ "msg_id": id, "role": "user", "text": text, "ts": 0 });
+        let ms = |at: &str| transcript::rfc3339_to_ms(&format!("2026-10-02T{at}.000Z"));
+        let u = |id: &str, at: &str, text: &str| json!({ "msg_id": id, "role": "user", "text": text, "ts": ms(at) });
         let mut turns = vec![
-            u("a", "Checkpoint now: commit your work."),
-            u("b", "go ahead"),
-            u("c", "only elsewhere"),
-            u("d", "never typed"),
-            u("e", "[maiTerm] The human answered your question."),
-            json!({ "msg_id": "f", "role": "agent", "text": "go ahead", "ts": 0 }),
+            u("a", "10:00:05", "Prepare for compaction:\n  commit your work and update the task board."),
+            u("b", "11:00:03", "Prepare for compaction: commit your work and update the task board."),
+            u("c", "12:00:01", "go ahead"),
+            u("d", "15:00:00", "go ahead"),
+            u("e", "12:00:01", "only elsewhere"),
+            u("f", "12:00:01", "never typed"),
+            u("g", "12:30:00", "[maiTerm] The human answered your question."),
+            u("h", "12:31:00", "Continue."),
+            u("i", "20:00:00", "Prepare for compaction: commit your work and update the task board."),
+            json!({ "msg_id": "j", "role": "agent", "text": "go ahead", "ts": ms("12:00:01") }),
         ];
         tag_typed_turns(&app, "tab", &mut turns);
-        assert_eq!(turns[0]["typedBy"], json!({ "by": "overlord", "rule": "Checkpoint" }));
-        assert_eq!(turns[1]["typedBy"], json!({ "by": "maiterm" }));
-        assert!(turns[2].get("typedBy").is_none(), "another tab's injection");
-        assert!(turns[3].get("typedBy").is_none(), "an injection that was never typed");
-        assert_eq!(turns[4]["typedBy"], json!({ "by": "maiterm" }));
-        assert!(turns[5].get("typedBy").is_none(), "only user turns");
+        // A rule run and a hand run of the same text keep their own origins.
+        assert_eq!(turns[0]["typedBy"], json!({ "by": "overlord", "rule": "Compaction" }));
+        assert_eq!(turns[1]["typedBy"], json!({ "by": "maiterm", "rule": "Compaction" }));
+        assert_eq!(turns[2]["typedBy"], json!({ "by": "maiterm" }));
+        assert!(turns[3].get("typedBy").is_none(), "the human saying the same words hours later");
+        assert!(turns[4].get("typedBy").is_none(), "another tab's injection");
+        assert!(turns[5].get("typedBy").is_none(), "an injection that was never typed");
+        assert_eq!(turns[6]["typedBy"], json!({ "by": "maiterm" }));
+        assert!(turns[7].get("typedBy").is_none(), "a short rule step the human can type themselves");
+        // Past the ledger, a long rule step still identifies it.
+        assert_eq!(turns[8]["typedBy"], json!({ "by": "overlord", "rule": "Compaction" }));
+        assert!(turns[9].get("typedBy").is_none(), "only user turns");
     }
 
     #[test]
