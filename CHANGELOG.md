@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.1.0
+
+Two Claude Code annoyances switched off by default, a steadier Loom, and services that come back as you left them.
+
+### Deshittification
+
+Two new rules, both **on by default**. maiTerm applies each one once; switch it off in **Preferences → Deshittification** and it stays off. Both are applied on hosts you've bridged over SSH as well.
+
+- **Stop asking to write memory.** Claude Code is meant to write to its own memory without asking, but it misses this whenever its config folder runs through a symlink — which every maiTerm account does. So it asked about every memory, and refused outright in auto mode. maiTerm now approves those writes. Anything that doesn't really lead into a memory folder still asks.
+- **Disable Remote Control.** Your sessions aren't exposed to claude.ai/code or the Claude mobile app, and Remote Control never starts by itself. If you'd already turned Remote Control on, maiTerm leaves your choice alone.
+
+### Workstream Loom
+
+- **What maiTerm typed is told apart from what you typed.** In Focus, messages the Overlord sent or maiTerm sent on your behalf fold away from your own.
+- **Choose how far back idle chats are listed**, from today to the last 30 days, on the section heading in Focus.
+- **The prompt card holds still while you type an answer**, instead of being redrawn under you.
+- **Questions are answered more safely.** An answer goes in only while that question's own options are on screen, never into whatever replaced it.
+- **The Overlord header's Triage count reads "to triage"**, so it no longer looks like a second "needs you" count.
+
+### Workspace stack
+
+- **Your services come back as you left them.** One that was running when you quit maiTerm starts again at launch, in every workspace, and one running when you suspended a workspace starts again when you resume it. One you stopped stays stopped.
+- **Reloading a window no longer leaves running services marked stopped** and unable to start again.
+- **A service started right as its shell opens is no longer recorded as having exited** straight away.
+
 ## v3.0.0
 
 Work with every agent from one screen, and let them come back to the work on their own.
