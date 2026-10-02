@@ -1,5 +1,53 @@
 # Changelog
 
+## v3.0.0
+
+Work with every agent from one screen, and let them come back to the work on their own.
+
+### Workstream Loom
+
+**Cmd+Shift+J** opens the Loom, the new home view of the Overlord deck. It spans the whole window, and a filter narrows it to one workspace.
+
+- **Focus — talk to your agents without their terminals.** It lists the chats that need you, the ones working now and the recently active ones, the way the phone does. Pick one to see its conversation condensed and the work it's carrying alongside. Reply from a composer that takes attachments. Answer its permission prompt, its question or Claude's folder-trust check where you are, and switch its model and effort from the chat header.
+- **Weave — who is working on what.** Each agent is strung to the tasks it carries: moving while it works, waiting when it's stuck, dotted to what a task depends on. Work that claims to be moving but hasn't been touched in two weeks fades.
+- **Decisions — every question waiting on you**, oldest first, answered in place.
+
+The Fleet view is folded into Focus: an agent's state, context, running ritual and **Release** now sit in its chat header.
+
+### Agents ask, and you answer once
+
+- **A blocked task says what it's waiting for.** Agents can put a question on a Blocked task — a decision with options, something only you can do, or something outside maiTerm. You see it on the task, in Decisions and on your phone.
+- **Your answer goes straight back to the agent**, and the task moves back to Active. You can also dismiss a question without answering.
+
+### Follow-ups
+
+Agents can schedule their own next prompt into their own tab:
+
+- **When it fires:** at a time, when a service comes up or stops, or when a task finishes. An agent can also write a **watch script** that checks a condition without waking the agent, which is the recommended way to wait on something. A watch script runs only after you approve it on a card that shows exactly what will run.
+- **How it arrives:** between the agent's turns, and never over something you're typing. If the agent has exited, maiTerm restarts it first, but only at an empty shell prompt.
+- **Where you see them:** a clock badge on the tab, and **Follow-ups…** in the tab menu, where you can deliver one now, cancel one or add your own.
+
+They're on by default and work while the Overlord is on: **Preferences → Overlord → Enable follow-ups**.
+
+### Windows and workspaces
+
+- **Move a workspace or a tab to another window** with its processes still running: **Move to Window** on the workspace menu, **Move to** on the tab menu.
+- **Window → Reload Current Window brings back SSH tabs that dropped.** After an outage, tabs whose connection was to the host they resume on reconnect by themselves; the rest get their disconnected badge back, rather than sitting at a local prompt.
+- **Turn the mesh on or off from the workspace menu.**
+
+### From your phone
+
+- **Claude's "Is this a project you trust?" check is now a card you can answer**, instead of a dead end that the Initialize button turned into "No, exit".
+- **Permission cards show the options Claude is actually offering.** Previously a tap on "Yes, don't ask again" could reject an edit when Claude offered only Yes and No.
+- **Answer the questions agents are blocked on.** Needs the matching maiLink update.
+- **Switching model no longer stops at Claude's "Switch model?" confirmation**, which the phone couldn't see.
+
+### Fixes
+
+- **Opening a shared workspace runs nothing you haven't reviewed.** The import lists every command it would run — agent starts, SSH connections, services that start on their own — and runs only the ones you approve.
+- **Approving a permission during an Overlord ritual no longer aborts the ritual.**
+- **A trigger's Send Command now runs in an agent's input** instead of sitting there unsent.
+
 ## v2.7.0
 
 Permission prompts that reach your phone, and an Overlord that no longer gets stuck waiting.
