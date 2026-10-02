@@ -1,0 +1,4 @@
+# Terminal screens captured byte-for-byte from a real PTY. A Windows checkout with autocrlf
+# turned their LF into CRLF, so a test's `.replace("…\n…")` matched nothing and the Test
+# workflow failed on Windows only. Never convert them.
+src-tauri/src/mailink/testdata/** -text
