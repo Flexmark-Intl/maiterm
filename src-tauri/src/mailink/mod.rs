@@ -1745,6 +1745,15 @@ pub(crate) async fn respond_to_prompt(
                     return json!({ "ok": false, "reason": "bad_request" });
                 }
             };
+            // The selector must be what is on screen, as the permission and trust paths check:
+            // a question record can outlive its dialog, and the Down/Enter keys that answer it
+            // would pick a row in whatever else is open (a permission dialog: approve or deny).
+            let screen = live_screen_text(app, tab_id).unwrap_or_default();
+            if !permission::any_dialog_open(&screen) || permission::dialog_open(&screen) {
+                log::info!("[maiLink] refusing an answer for tab {tab_id}: no question selector on screen");
+                return json!({ "ok": false, "reason": "stale",
+                    "detail": "that question is no longer open in the terminal" });
+            }
             // A SECOND attempt at the same ask is refused, and this is the important guard.
             // Navigation is relative and assumes the highlight starts at row 0, true only for
             // an untouched selector. After a failed attempt the highlight is wherever the
@@ -4234,9 +4243,9 @@ fn current_prompt(app: &AppState, tab_id: &str) -> Option<(&'static str, String,
     };
     // AskUserQuestion first: it coincides with a permission_prompt state (see build_chat_detail),
     // but the open ask is the structured question — the stale-guard must agree with what was shown.
-    // Read from any of the tab's sessions (`open_question`), not only the one `session_states`
-    // ranked first, so the answer is the same on every poll.
-    if s.tool.as_deref() == Some("AskUserQuestion") || open_question(app, tab_id).is_some() {
+    // Read from the tab's current session (`open_question`), not whichever record
+    // `session_states` ranked first, so the answer is the same on every poll.
+    if open_question(app, tab_id).is_some() {
         Some(("question", question_prompt_id(app, tab_id), s.runtime))
     } else if map_state(s.state) == "permission" {
         Some(("permission", permission_prompt_id(app, tab_id), s.runtime))
@@ -4815,18 +4824,36 @@ fn pending_question_for_tab(app: &AppState, tab_id: &str) -> Option<Value> {
     open_question(app, tab_id).map(|(q, _)| q)
 }
 
-/// The tab's open AskUserQuestion and when it was asked, from whichever of its sessions holds
-/// one (the newest ask if several do). Whether a question is open, its id and its options all
-/// come from here, so they can't disagree: picking a session by state rank first let a stale
-/// session left over from a resume, at the same rank, hide the question on one poll and show
-/// it on the next, and the Loom card was rebuilt under the human's typing each time.
+/// The tab's open AskUserQuestion and when it was asked, from the tab's CURRENT session only.
+/// Whether a question is open, its id and its options all come from here, so they can't
+/// disagree. Picking a session by state rank let a stale same-rank session (left over after a
+/// resume) hide the question on one poll and show it on the next, and the Loom card was rebuilt
+/// under the human's typing each time. Reading ANY session's question instead let a dead one
+/// (its SessionEnd lost with an ssh link) win over the live session's real prompt, so an answer
+/// to it drove keys into the live session's permission dialog.
 fn open_question(app: &AppState, tab_id: &str) -> Option<(Value, i64)> {
+    let current = current_session_id(app, tab_id)?;
     let sessions = app.agent_sessions.read();
+    let s = sessions.get(&current)?;
+    s.pending_question.clone().map(|q| (q, s.pending_question_at.unwrap_or(0)))
+}
+
+/// The tab's current agent session: the one its agent last started as (the session id saved on
+/// the tab at SessionStart, which `--resume` uses), when that session has a record; else the
+/// highest-ranked record, ties broken by id so every poll agrees.
+fn current_session_id(app: &AppState, tab_id: &str) -> Option<String> {
+    let saved = persisted_session_for_tab(app, tab_id).map(|(_, id)| id);
+    let sessions = app.agent_sessions.read();
+    if let Some(id) = saved {
+        if sessions.get(&id).is_some_and(|s| s.tab_id == tab_id) {
+            return Some(id);
+        }
+    }
     sessions
-        .values()
-        .filter(|s| s.tab_id == tab_id)
-        .filter_map(|s| s.pending_question.clone().map(|q| (q, s.pending_question_at.unwrap_or(0))))
-        .max_by_key(|(_, at)| *at)
+        .iter()
+        .filter(|(_, s)| s.tab_id == tab_id)
+        .max_by(|(a, x), (b, y)| rank(x.state).cmp(&rank(y.state)).then_with(|| a.cmp(b)))
+        .map(|(id, _)| id.clone())
 }
 
 /// Unix-ms when the tab's open AskUserQuestion was captured. Display-only on the phone
