@@ -62,6 +62,9 @@ function createTerminalsStore() {
   // not a full app restart). A tab whose persisted pty_id is in here reattaches
   // to the running PTY instead of respawning. Consumed when the tab registers.
   const reattachPtyIds = new Set<string>();
+  // The same load-time snapshot, never consumed: "this shell was already running when
+  // this webview loaded", which outlives the tab registering (docs/stack.md §5).
+  const liveAtLoadPtyIds = new Set<string>();
   // PTY IDs of tabs that arrived from another window still running (see markMovedIn).
   const movedInPtyIds = new Set<string>();
   // Listeners notified when any terminal's OSC state changes
@@ -136,7 +139,8 @@ function createTerminalsStore() {
     /** Seed the set of backend-alive PTY IDs (from listLivePtys at load). */
     seedReattachPtyIds(ptyIds: string[]) {
       reattachPtyIds.clear();
-      for (const id of ptyIds) reattachPtyIds.add(id);
+      liveAtLoadPtyIds.clear();
+      for (const id of ptyIds) { reattachPtyIds.add(id); liveAtLoadPtyIds.add(id); }
     },
 
     /** PTYs that arrived live from ANOTHER window (a tab or workspace moved here), so their
@@ -151,6 +155,11 @@ function createTerminalsStore() {
         reattachPtyIds.delete(id);
         movedInPtyIds.add(id);
       }
+    },
+
+    /** The PTY was alive in Rust when this webview loaded — a window reload, not a launch. */
+    wasLiveAtLoad(ptyId: string | null | undefined): boolean {
+      return !!ptyId && liveAtLoadPtyIds.has(ptyId);
     },
 
     /** Reattach eligibility of either kind: a reload's or a move's. */

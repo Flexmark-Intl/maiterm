@@ -136,6 +136,10 @@ function createStackStore() {
   const CONSOLE_CLOSE_MS = 220;
   /** Workspaces whose auto_start already fired for this activation. Cleared on suspend. */
   const autoStarted = new Set<string>();
+  /** The window's state has finished loading (`onLoaded`). Auto-start waits for it: the
+   *  active workspace id is set BEFORE `load()` learns which PTYs survived a reload, and a
+   *  start decided in that gap types into — or is refused by — a still-running service. */
+  let loaded = false;
   const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Starts in flight, by service. The status alone cannot guard re-entry: `start` does
    *  four IPC round trips before it can set `starting`, and a double-click or two parallel
@@ -258,6 +262,15 @@ function createStackStore() {
     } catch (e) {
       logError(`stack: persist failed for workspace ${workspaceId}: ${e}`);
     }
+  }
+
+  /** A window RELOAD, not a launch: the service's shell survived (its PTY is still live in
+   *  Rust) and is most likely still running it. A start would wait out the guard and file
+   *  it `stopped` while it serves — and with no live status, neither Stop nor a Ctrl-C
+   *  could clear its intent after (docs/stack.md §12.8). */
+  function survivedReload(workspaceId: string, serviceId: string): boolean {
+    const tab = boundTab(workspaceId, serviceId)?.tab;
+    return !!tab && terminalsStore.wasLiveAtLoad(tab.pty_id);
   }
 
   /** Record whether the human wants this service up (`Service.was_running`). Only the
@@ -999,8 +1012,8 @@ function createStackStore() {
      *  `auto_start` services and every one that was left running. */
     async autoStart(workspaceId: string): Promise<void> {
       const ws = workspaceOf(workspaceId);
-      if (!ws || ws.suspended || autoStarted.has(workspaceId)) return;
-      const due = (s: Service) => (s.auto_start ?? true) || !!s.was_running;
+      if (!loaded || !ws || ws.suspended || autoStarted.has(workspaceId)) return;
+      const due = (s: Service) => ((s.auto_start ?? true) || !!s.was_running) && !survivedReload(workspaceId, s.id);
       if (!(ws.stack ?? []).some(due)) return;
       autoStarted.add(workspaceId);
       for (const s of this.services(workspaceId)) {
@@ -1009,14 +1022,19 @@ function createStackStore() {
       }
     },
 
-    /** At launch: bring back what was running when the app quit, in EVERY workspace of
-     *  this window — a service left running in a background workspace was running, whether
-     *  or not anyone looks at it. `auto_start` alone still waits for activation (§12.4). */
-    async resumeLeftRunning(): Promise<void> {
+    /** Once `load()` has resolved: the active workspace's auto-start, held until now, and
+     *  what was running when the app quit, in EVERY workspace of this window — a service
+     *  left running in a background workspace was running, whether or not anyone looks at
+     *  it. `auto_start` alone still waits for activation (§12.4). */
+    async onLoaded(): Promise<void> {
+      loaded = true;
+      const active = workspacesStore.activeWorkspaceId;
+      if (active) await this.autoStart(active).catch((e) => logError(`stack: auto-start ${active}: ${e}`));
       for (const ws of workspacesStore.workspaces) {
         if (ws.suspended) continue;
         for (const s of ws.stack ?? []) {
           if (!s.was_running) continue;
+          if (survivedReload(ws.id, s.id)) continue;
           try { await start(ws.id, s.id); } catch (e) { logError(`stack: resume ${s.name}: ${e}`); }
         }
       }

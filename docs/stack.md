@@ -203,12 +203,14 @@ once the pane registers. No navigation, no fallback.
 - **Workspace open / resume** → `auto_start` services start, serially, before other tabs —
   and so does every service with `was_running`.
 - **App launch** → every `was_running` service in the window starts, background workspaces
-  included (`resumeLeftRunning`, after session restore begins). The stack comes back as it
+  included (`stackStore.onLoaded`, after session restore begins; activation auto-start is held until then). The stack comes back as it
   was left: a service you started comes back, one you stopped stays stopped (unless it is
   `auto_start`, which still starts on activation). `was_running` is the one persisted runtime fact, and it is the human's
-  intent, not a status — a start sets it; Stop, Stop stack, Cmd+W or a Ctrl-C/exit 0 in the
+  intent, not a status — a start sets it; Stop, Stop stack or a Ctrl-C/exit 0 in the
   console clear it; a crash, a suspend and quitting the app do not. A duplicated workspace
   and a share import start with it clear (the copy would fight the source for its port).
+  A window RELOAD is not a launch: a service whose tab's PTY survived (`wasLiveAtLoad`) is
+  skipped, since starting it would be refused against its own running process (§12.8).
 - **Suspend** → all services `stopped` (the PTYs die with the workspace). Not `crashed`.
 - **Crash** → `restart: on_crash` re-sends the command with backoff (1s, 2s, 4s… cap 30s)
   and a **ceiling of 5 in 10 minutes**, after which the service stays `crashed` and the

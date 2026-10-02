@@ -352,7 +352,7 @@
 
       // Stack services that were running when the app quit come back, in every workspace
       // of this window — a stopped one stays stopped (docs/stack.md §5).
-      void stackStore.resumeLeftRunning();
+      void stackStore.onLoaded();
 
       // Seed navigation history with the initial active tab
       const ws = workspacesStore.activeWorkspace;
