@@ -38,11 +38,18 @@
   let misses = 0;
 
   /** `settled`: after this card's own answer, a prompt that is gone is gone at once. */
+  /** Reads are numbered: they run off the main thread and can land out of order, and a poll
+   *  issued before an answer must not repaint the prompt that answer just closed. */
+  let reqSeq = 0;
+  let appliedSeq = 0;
+
   async function refresh(settled = false) {
     const forTab = tabId;
+    const n = ++reqSeq;
     const p = await getTabPrompt(forTab).catch(() => null);
     // A read started for the previous chat must not paint its prompt into this one.
-    if (forTab !== tabId) return;
+    if (forTab !== tabId || n < appliedSeq) return;
+    appliedSeq = n;
     // The card is left alone unless the prompt really changed. Replacing it on every poll, or
     // dropping it for one empty read, rebuilt the inputs under the human's typing: the text
     // survived (it lives in `others`) but focus did not, so typing an answer kept breaking off.

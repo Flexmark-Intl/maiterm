@@ -4842,14 +4842,18 @@ fn question_on_screen(tool_input: &Value, screen: &str) -> bool {
         .and_then(|o| o.get(0))
         .and_then(|o| o.get("label"))
         .and_then(|l| l.as_str())
-        .map(|l| format!("1.{}", squash(l).chars().take(24).collect::<String>()))
+        // 12 characters: a label wrapped beside an option preview interleaves the preview's
+        // text into the squashed screen after its first line.
+        .map(|l| format!("1.{}", squash(l).chars().take(12).collect::<String>()))
         .unwrap_or_default();
     // A prefix: a very long question may be cut short on screen.
     let want: String = squash(first).chars().take(40).collect();
     if want.is_empty() {
         return false;
     }
-    let shown = squash(screen);
+    // A multiSelect row draws a checkbox between number and label ("1. [ ] Postgres", ticked
+    // "[✓]"); without it every row reads like a single-select one.
+    let shown = squash(screen).replace("[]", "").replace("[✓]", "");
     let Some(at) = shown.rfind(&want) else { return false };
     let below = &shown[at + want.len()..];
     (option.is_empty() || below.contains(&option))
@@ -6565,6 +6569,10 @@ mod tests {
         let other = " Which database should the new service use for its queue?\n\n ⎿ Postgres\n\n Deploy to staging now?\n ❯ 1. Yes\n   2. Later\n\n Enter to select · Esc to cancel\n";
         assert!(!question_on_screen(&ask, other));
         assert!(!question_on_screen(&ask, "$ \n"));
+        // A multiSelect selector draws a checkbox in each row, ticked or not.
+        let multi = " Which database should the new service use for its queue?\n\n ❯ 1. [ ] Postgres\n   2. [✓] Redis\n   3. Submit\n\n Enter to select · Esc to cancel\n";
+        assert!(question_on_screen(&ask, multi));
+        assert!(question_on_screen(&ask, &multi.replace("[ ] Postgres", "[✓] Postgres")));
     }
 
     #[test]
