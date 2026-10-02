@@ -300,9 +300,10 @@
         <label for="overlord-follow-ups">Enable follow-ups</label>
         <p class="setting-hint">
           {#if preferencesStore.overlordEnabled}
-            Agents can schedule a prompt back to themselves — at a time, or when a service
-            comes up or a task finishes — so they pick work up later without you. While this
-            is off, agents aren't told the feature exists.
+            Agents can schedule a prompt back to themselves — at a time, when a service
+            comes up or a task finishes, or when a check they wrote passes (it runs only once
+            you approve it) — so they pick work up later without you. While this is off,
+            agents aren't told the feature exists.
           {:else}
             Lets agents schedule a prompt back to themselves for later. Turn on the Overlord
             first.

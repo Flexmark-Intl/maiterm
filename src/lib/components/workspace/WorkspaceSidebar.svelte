@@ -599,13 +599,13 @@
     <span style="margin-left:auto"><IconButton tooltip="Collapse sidebar ({modSymbol}B)" size={20} style="font-size: 1.231rem" onclick={() => workspacesStore.toggleSidebar()}>&#x2039;</IconButton></span>
   </div>
   {#if preferencesStore.overlordEnabled}
+    <Tooltip block text={overlordAttention > 0
+      ? `Overlord — ${overlordAttention} item${overlordAttention === 1 ? '' : 's'} waiting on you`
+      : 'Overlord — the Loom, triage, board and ledger'}>
     <button
       class="overlord-row"
       class:active={workspacesStore.activeWorkspace?.overlord}
       onclick={handleOverlordClick}
-      title={overlordAttention > 0
-        ? `Overlord — ${overlordAttention} item${overlordAttention === 1 ? '' : 's'} waiting on you`
-        : 'Overlord — supervisor board, fleet and ledger'}
     >
       <span class="overlord-glyph">♔</span>
       <span class="overlord-title">Overlord</span>
@@ -616,6 +616,7 @@
         <span class="overlord-badge" class:urgent={overlordUrgent}>{overlordAttention}</span>
       {/if}
     </button>
+    </Tooltip>
   {/if}
   <div class="sidebar-header">
     <span class="title">WORKSPACES</span>
