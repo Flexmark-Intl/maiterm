@@ -893,6 +893,8 @@ pub(crate) fn clone_workspace_with_id_mapping(
             .iter()
             .map(|s| crate::state::Service {
                 id: uuid::Uuid::new_v4().to_string(),
+                // Nothing runs in the copy; starting it there would fight the source for its port.
+                was_running: false,
                 ..s.clone()
             })
             .collect(),
@@ -944,6 +946,7 @@ mod clone_ids_tests {
             env: Vec::new(),
             ssh_command: None,
             auto_start: false,
+            was_running: false,
             restart: "on_crash".to_string(),
             ready_pattern: None,
             port: None,

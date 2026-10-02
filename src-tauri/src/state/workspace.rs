@@ -604,6 +604,13 @@ pub struct Service {
     /// Start with the workspace.
     #[serde(default)]
     pub auto_start: bool,
+    /// The human's last word on whether it runs: set by a start, cleared by a stop (or a
+    /// Ctrl-C in its console), and NOT cleared by a crash, a suspend or the app quitting.
+    /// A relaunch and a workspace resume start every service that has it, so the stack
+    /// comes back as it was left (docs/stack.md §5). Intent, not status — status is still
+    /// never persisted.
+    #[serde(default)]
+    pub was_running: bool,
     /// "never" | "on_crash". ("on_change" needs a file watcher — v3.)
     #[serde(default = "default_restart_policy")]
     pub restart: String,

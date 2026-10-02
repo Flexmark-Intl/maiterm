@@ -71,6 +71,9 @@ pub struct Service {
     /// so a remote service is a flag flip, not a schema change.
     pub ssh_command: Option<String>,
     pub auto_start: bool,             // start with the workspace
+    /// Intent, not status: set by a start, cleared by a stop or a clean exit; a crash,
+    /// suspend or app quit leave it. Launch and resume start every service that has it.
+    pub was_running: bool,
     /// "never" | "on_crash". "on_change" is v3 (needs a file watcher).
     pub restart: String,
     /// Regex over the tab's stripped output; first match → status ready. Optional named
@@ -197,7 +200,15 @@ once the pane registers. No navigation, no fallback.
 
 ## 5. Lifecycle rules
 
-- **Workspace open / resume** → `auto_start` services start, serially, before other tabs.
+- **Workspace open / resume** → `auto_start` services start, serially, before other tabs —
+  and so does every service with `was_running`.
+- **App launch** → every `was_running` service in the window starts, background workspaces
+  included (`resumeLeftRunning`, after session restore begins). The stack comes back as it
+  was left: a service you started comes back, one you stopped stays stopped (unless it is
+  `auto_start`, which still starts on activation). `was_running` is the one persisted runtime fact, and it is the human's
+  intent, not a status — a start sets it; Stop, Stop stack, Cmd+W or a Ctrl-C/exit 0 in the
+  console clear it; a crash, a suspend and quitting the app do not. A duplicated workspace
+  and a share import start with it clear (the copy would fight the source for its port).
 - **Suspend** → all services `stopped` (the PTYs die with the workspace). Not `crashed`.
 - **Crash** → `restart: on_crash` re-sends the command with backoff (1s, 2s, 4s… cap 30s)
   and a **ceiling of 5 in 10 minutes**, after which the service stays `crashed` and the
@@ -522,6 +533,8 @@ file, socket-based port discovery if anything ever needs it.
 4. **Auto-start fires on activation, not at boot.** A background workspace's services start
    the first time it becomes active this session (`autoStarted` set, cleared by suspend).
    Starting every workspace's stack at launch is a preference waiting for someone to want it.
+   (A service that was RUNNING at quit is different: it comes back at launch wherever it
+   lives — `was_running`, §5.)
 5. ~~Shell integration on the service tab~~ — built: no A within 12s of the start (or the
    preference off) → the tty-foreground fallback, with `watchNoIntegration` polling every 2s
    for the job leaving the tty. Coarser than OSC 133 and blind to the exit code, by design.

@@ -327,6 +327,8 @@ export interface Service {
   /** Mirrors `Tab.auto_resume_ssh_command`; always null in v1. */
   ssh_command?: string | null;
   auto_start?: boolean;
+  /** Set by a start, cleared by a stop; a relaunch/resume starts the services that have it. */
+  was_running?: boolean;
   restart?: ServiceRestart;
   /** Regex over stripped output; first match → ready. Optional named group `port`. */
   ready_pattern?: string | null;

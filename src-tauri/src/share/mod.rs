@@ -1322,6 +1322,7 @@ pub fn build_workspace(file: &ShareFile, opts: &ImportOptions) -> ImportResult {
                 ssh_command: None,
                 // Starting on its own is the one way a service runs without a click (§4.2).
                 auto_start: s.auto_start && opts.approved.contains(&service_start_key(i)),
+                was_running: false,
                 restart: s.restart.clone(),
                 ready_pattern: s.ready_pattern.clone(),
                 port: None,

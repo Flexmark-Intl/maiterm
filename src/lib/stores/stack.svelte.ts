@@ -260,6 +260,17 @@ function createStackStore() {
     }
   }
 
+  /** Record whether the human wants this service up (`Service.was_running`). Only the
+   *  verbs and a clean exit write it: a crash, a suspend or the app quitting leave it set,
+   *  which is what lets the next launch put the stack back the way it was left. Not a
+   *  definition edit, so `updated_at` is left alone. */
+  function markIntent(workspaceId: string, serviceId: string, on: boolean) {
+    const stack = workspaceOf(workspaceId)?.stack ?? [];
+    const current = stack.find((s) => s.id === serviceId);
+    if (!current || (current.was_running ?? false) === on) return;
+    void persist(workspaceId, stack.map((s) => (s.id === serviceId ? { ...s, was_running: on } : s)));
+  }
+
   // ── Runtime transitions ────────────────────────────────────────────────────────
 
   async function probeForeground(ptyId: string) {
@@ -334,6 +345,9 @@ function createStackStore() {
     if (crashed) {
       logWarn(`stack: ${service.name} crashed with exit ${exitCode}`);
       scheduleRestart(workspaceId, service);
+    } else {
+      // A Ctrl-C in the console, or the program finishing on its own: off is the answer.
+      markIntent(workspaceId, service.id, false);
     }
   }
 
@@ -425,6 +439,7 @@ function createStackStore() {
     if (!service) throw new Error('Service not found');
     const ws = workspaceOf(workspaceId)!;
     if (ws.suspended) throw new Error('Workspace is suspended — resume it first');
+    markIntent(workspaceId, serviceId, true);
     const pending = startsInFlight.get(serviceId);
     if (pending) return pending;
     const stopping = stopsInFlight.get(serviceId);
@@ -598,6 +613,7 @@ function createStackStore() {
   async function stop(workspaceId: string, serviceId: string): Promise<ServiceStatus> {
     const service = serviceOf(workspaceId, serviceId);
     if (!service) throw new Error('Service not found');
+    markIntent(workspaceId, serviceId, false);
     const pending = stopsInFlight.get(serviceId);
     if (pending) return pending;
     const starting = startsInFlight.get(serviceId);
@@ -941,7 +957,6 @@ function createStackStore() {
       }
     },
 
-    /** Fires once per workspace activation (§5); re-armed by suspend. */
     /** A workspace is leaving for another window with its service tabs still running. Hand
      *  over their runtime and forget it here BEFORE the workspace leaves this window's list:
      *  otherwise `reconcileBindings` finds no tab and files every running service `crashed`
@@ -980,12 +995,31 @@ function createStackStore() {
       runtime = next;
     },
 
+    /** Fires once per workspace activation (§5); re-armed by suspend. Starts the
+     *  `auto_start` services and every one that was left running. */
     async autoStart(workspaceId: string): Promise<void> {
       const ws = workspaceOf(workspaceId);
       if (!ws || ws.suspended || autoStarted.has(workspaceId)) return;
-      if (!(ws.stack ?? []).some((s) => s.auto_start ?? true)) return;
+      const due = (s: Service) => (s.auto_start ?? true) || !!s.was_running;
+      if (!(ws.stack ?? []).some(due)) return;
       autoStarted.add(workspaceId);
-      await this.startStack(workspaceId);
+      for (const s of this.services(workspaceId)) {
+        if (!due(s)) continue;
+        try { await start(workspaceId, s.id); } catch (e) { logError(`stack: start ${s.name}: ${e}`); }
+      }
+    },
+
+    /** At launch: bring back what was running when the app quit, in EVERY workspace of
+     *  this window — a service left running in a background workspace was running, whether
+     *  or not anyone looks at it. `auto_start` alone still waits for activation (§12.4). */
+    async resumeLeftRunning(): Promise<void> {
+      for (const ws of workspacesStore.workspaces) {
+        if (ws.suspended) continue;
+        for (const s of ws.stack ?? []) {
+          if (!s.was_running) continue;
+          try { await start(ws.id, s.id); } catch (e) { logError(`stack: resume ${s.name}: ${e}`); }
+        }
+      }
     },
 
     /** Resolve when the service is READY — it announced where it is serving — or when it

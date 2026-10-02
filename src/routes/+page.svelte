@@ -350,6 +350,10 @@
       // Fire-and-forget — nav history + bridge/mesh rehydrate below run now.
       runSessionRestore();
 
+      // Stack services that were running when the app quit come back, in every workspace
+      // of this window — a stopped one stays stopped (docs/stack.md §5).
+      void stackStore.resumeLeftRunning();
+
       // Seed navigation history with the initial active tab
       const ws = workspacesStore.activeWorkspace;
       const pane = ws?.panes.find(p => p.id === ws.active_pane_id);
