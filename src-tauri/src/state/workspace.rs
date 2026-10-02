@@ -1022,6 +1022,12 @@ pub struct AppData {
     /// approve command.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approved_watch_scripts: Vec<String>,
+    /// Default-on deshittification rules already applied once on this install
+    /// (`deshittify::seed_default_rules`). Remembered so a rule the user switches
+    /// off is not switched back on at the next launch — after the first apply,
+    /// what is on disk is the toggle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deshittify_seeded: Vec<String>,
 }
 
 impl AppData {

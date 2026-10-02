@@ -28,6 +28,13 @@ const ENV_VALUE: &str = "1";
 const RULE_CO_AUTHORED: &str = "cc_include_co_authored_by";
 /// Rule id for the global `commit-msg` hook that strips agent co-authorship trailers.
 const RULE_COMMIT_HOOK: &str = "cc_commit_msg_hook";
+/// Rule id for `disableRemoteControl: true` + `remoteControlAtStartup: false` in
+/// `~/.claude/settings.json`.
+const RULE_REMOTE_CONTROL: &str = "cc_disable_remote_control";
+
+/// Rules maiTerm applies on its own, once per install (`seed_default_rules`). After
+/// that the usual rule holds — disk is the toggle — so switching one off sticks.
+const DEFAULT_ON_RULES: &[&str] = &[RULE_REMOTE_CONTROL];
 
 #[derive(Serialize, Clone, Debug)]
 pub struct DeshittifyRuleStatus {
@@ -147,6 +154,31 @@ fn set_co_authored(enabled: bool) -> Result<(), String> {
     } else {
         // Absent means Claude Code's default (true) — no need to write it back.
         obj.remove("includeCoAuthoredBy");
+    }
+    write_claude_settings(&settings)
+}
+
+/// Both keys, because they cover different ground: `disableRemoteControl` removes
+/// the feature outright (claude.ai/code, `claude remote-control`, `--rc`, the
+/// in-session command), `remoteControlAtStartup: false` overrides the auto-start
+/// an org or rollout default can switch on even where the feature stays allowed.
+fn remote_control_applied(settings: &serde_json::Value) -> bool {
+    settings.get("disableRemoteControl") == Some(&serde_json::Value::Bool(true))
+        && settings.get("remoteControlAtStartup") == Some(&serde_json::Value::Bool(false))
+}
+
+fn set_remote_control(enabled: bool) -> Result<(), String> {
+    let mut settings = read_claude_settings()?;
+    let obj = settings
+        .as_object_mut()
+        .ok_or("~/.claude/settings.json is not a JSON object")?;
+    if enabled {
+        obj.insert("disableRemoteControl".into(), serde_json::Value::Bool(true));
+        obj.insert("remoteControlAtStartup".into(), serde_json::Value::Bool(false));
+    } else {
+        // Absent is Claude Code's default for both.
+        obj.remove("disableRemoteControl");
+        obj.remove("remoteControlAtStartup");
     }
     write_claude_settings(&settings)
 }
@@ -488,6 +520,12 @@ fn build_status() -> DeshittifyStatus {
         blocked: settings_err.is_some(),
         detail: settings_err.clone(),
     });
+    rules.push(DeshittifyRuleStatus {
+        id: RULE_REMOTE_CONTROL.into(),
+        applied: settings_err.is_none() && remote_control_applied(&settings),
+        blocked: settings_err.is_some(),
+        detail: settings_err.clone(),
+    });
     rules.push(commit_hook_status());
 
     DeshittifyStatus { rules }
@@ -500,6 +538,7 @@ fn apply_rule(id: &str, enabled: bool) -> Result<(), String> {
     match id {
         RULE_CO_AUTHORED => set_co_authored(enabled),
         RULE_COMMIT_HOOK => set_commit_hook(enabled),
+        RULE_REMOTE_CONTROL => set_remote_control(enabled),
         other => Err(format!("Unknown deshittification rule: {other}")),
     }
 }
@@ -539,6 +578,12 @@ if d["coAuthored"]=="set":
     s["includeCoAuthoredBy"]=False
 else:
     s.pop("includeCoAuthoredBy",None)
+if d["remoteControl"]=="set":
+    s["disableRemoteControl"]=True
+    s["remoteControlAtStartup"]=False
+else:
+    s.pop("disableRemoteControl",None)
+    s.pop("remoteControlAtStartup",None)
 if json.dumps(s,sort_keys=True)!=before:
     open(p,"w").write(json.dumps(s,indent=2))"#;
 
@@ -586,6 +631,7 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
             "envSet": env_set,
             "envUnset": env_unset,
             "coAuthored": if applied(RULE_CO_AUTHORED) { "set" } else { "unset" },
+            "remoteControl": if applied(RULE_REMOTE_CONTROL) { "set" } else { "unset" },
         });
         let escaped = payload.to_string().replace('\'', r"'\''");
         lines.push(format!("__desh='{escaped}'"));
@@ -648,6 +694,42 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
 
 /// The script that carries these rules to a bridged SSH host. Empty string when
 /// there is nothing to do.
+/// Apply each default-on rule this install hasn't seeded yet. `seeded` is the list
+/// of rule ids already handled (persisted in `AppData`); returns the ids to add to
+/// it. A rule that is blocked or fails to apply is left unseeded so the next launch
+/// tries again — an unreadable settings file is not the user saying no. A rule
+/// already on disk counts as seeded without a write.
+pub fn seed_default_rules(seeded: &[String]) -> Vec<String> {
+    let pending: Vec<&str> = DEFAULT_ON_RULES
+        .iter()
+        .copied()
+        .filter(|id| !seeded.iter().any(|s| s == id))
+        .collect();
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    let status = build_status();
+    let mut done = Vec::new();
+    for id in pending {
+        let Some(rule) = status.rules.iter().find(|r| r.id == id) else {
+            continue;
+        };
+        if rule.blocked {
+            log::warn!("Deshittify: default rule {id} is blocked, will retry next launch");
+            continue;
+        }
+        if !rule.applied {
+            if let Err(e) = apply_rule(id, true) {
+                log::warn!("Deshittify: could not apply default rule {id}: {e}");
+                continue;
+            }
+            log::info!("Deshittify: applied default rule {id}");
+        }
+        done.push(id.to_string());
+    }
+    done
+}
+
 #[tauri::command]
 pub async fn build_deshittify_setup_script() -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(render_remote_setup_script)
@@ -934,7 +1016,7 @@ mod tests {
                 detail: None,
             })
             .collect();
-        for id in [RULE_CO_AUTHORED, RULE_COMMIT_HOOK] {
+        for id in [RULE_CO_AUTHORED, RULE_COMMIT_HOOK, RULE_REMOTE_CONTROL] {
             rules.push(DeshittifyRuleStatus {
                 id: id.into(),
                 applied: all_on,
@@ -995,6 +1077,8 @@ mod tests {
         assert_eq!(s["env"]["DISABLE_TELEMETRY"], "1");
         assert_eq!(s["env"]["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"], "1");
         assert_eq!(s["includeCoAuthoredBy"], serde_json::Value::Bool(false));
+        assert_eq!(s["disableRemoteControl"], serde_json::Value::Bool(true));
+        assert_eq!(s["remoteControlAtStartup"], serde_json::Value::Bool(false));
 
         // Hooks installed and pointed at.
         let gh = home.join(".maiterm/githooks");
@@ -1034,6 +1118,8 @@ mod tests {
         assert_eq!(s["model"], "opus");
         assert!(s.get("env").is_none(), "env keys survived the undo: {s}");
         assert!(s.get("includeCoAuthoredBy").is_none(), "includeCoAuthoredBy survived the undo");
+        assert!(s.get("disableRemoteControl").is_none(), "disableRemoteControl survived the undo");
+        assert!(s.get("remoteControlAtStartup").is_none(), "remoteControlAtStartup survived the undo");
         assert!(!home.join(".maiterm/githooks").exists(), "managed hooks survived the undo");
         assert_eq!(git_global(&home, "core.hooksPath"), "", "core.hooksPath survived the undo");
 

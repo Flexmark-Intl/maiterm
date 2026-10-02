@@ -16,6 +16,7 @@ There's one group today, **Claude Code**. maiTerm edits the agent's *own* config
 | **Remove the `/bug` command** | The command stops being offered |
 | **Remove the `/feedback` command** | The command stops being offered |
 | **Suppress feedback surveys** | Stops the in-session survey prompts |
+| **Disable Remote Control** | Sets `disableRemoteControl: true` and `remoteControlAtStartup: false`, so your sessions aren't exposed to claude.ai/code or the mobile app and the bridge never auto-starts. **On by default** |
 | **No `Co-Authored-By` in commits** | Claude Code stops writing the trailer in the first place |
 | **Strip agent credit at commit time** | A `commit-msg` hook deletes `Co-Authored-By: Claude` and `Generated with Claude Code` lines from your commit messages |
 
@@ -24,6 +25,10 @@ The last two are deliberately a pair. The setting is Anthropic's to honour; the 
 ## The toggle *is* the state on disk
 
 None of this is stored as a maiTerm preference. Each toggle reads the agent's real configuration every time you open the section, so what's on disk is what you see: undo a rule by hand somewhere else and it reads back as off here, with nothing to re-assert it behind your back.
+
+## Default-on rules
+
+**Disable Remote Control** is the one rule maiTerm turns on without being asked. It's applied once, the first time a maiTerm with the rule launches; after that it's like every other rule. Switch it off and it stays off — maiTerm remembers it already did its one apply and never re-asserts it.
 
 ## Your repo's own hooks still run
 
@@ -38,7 +43,7 @@ Two limits worth knowing:
 
 An agent on a remote server gets the same treatment. The rules are applied on each [SSH bridge](/features/agents/#ssh-mcp-bridge) connect, so a host you work on through maiTerm matches your Mac. Your Mac is the source of truth in both directions: switch a rule off here and it's removed there on the next connect, so an undo actually travels.
 
-Deshittification never gates a bridge — a rule that can't be applied on a remote host doesn't stop the connection or fail the setup. A host you only ever `ssh` into by hand is never touched, and neither is one belonging to a user who never opens the section.
+Deshittification never gates a bridge — a rule that can't be applied on a remote host doesn't stop the connection or fail the setup. A host you only ever `ssh` into by hand is never touched. A bridged host gets the default-on rule like your Mac does, and nothing else unless you switch it on.
 
 ## When a rule can't be applied
 

@@ -299,6 +299,21 @@ pub fn run() {
             // second `preserve_corrupt` was saving the file so the user could recover. Same
             // reasoning as `save_state`'s backup guard, which uses the same flag; the difference
             // is that a clobbered backup is recoverable and a deleted config root is not.
+            // Default-on deshittification rules, once per install. Same gate as the prune
+            // below: a state that failed to load has an empty seeded list that means
+            // "unknown", and re-seeding from it would undo a rule the user switched off.
+            if state::state_loaded_successfully() {
+                let seeded = app_state.app_data.read().deshittify_seeded.clone();
+                let added = commands::deshittify::seed_default_rules(&seeded);
+                if !added.is_empty() {
+                    let mut data = app_state.app_data.write();
+                    data.deshittify_seeded.extend(added);
+                    if let Err(e) = state::save_state(&data) {
+                        log::warn!("Could not persist deshittify seeding: {e}");
+                    }
+                }
+            }
+
             if !state::state_loaded_successfully() {
                 log::warn!(
                     "Skipping account root prune: state did not load, so an empty account \

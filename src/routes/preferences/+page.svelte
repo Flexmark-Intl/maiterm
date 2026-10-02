@@ -291,6 +291,11 @@
           hint: 'Sets CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1. Stops the in-session survey prompts.',
         },
         {
+          id: 'cc_disable_remote_control',
+          label: 'Disable Remote Control',
+          hint: 'Sets disableRemoteControl: true and remoteControlAtStartup: false. Stops your sessions being exposed to claude.ai/code and the mobile app, and stops the bridge auto-starting. On by default — maiTerm applies it once; switch it off and it stays off.',
+        },
+        {
           id: 'cc_include_co_authored_by',
           label: 'No Co-Authored-By in commits',
           hint: 'Sets includeCoAuthoredBy: false, so Claude Code never writes the trailer in the first place. Anthropic controls this switch, so pair it with the commit-msg hook below.',
