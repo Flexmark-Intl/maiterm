@@ -1240,9 +1240,11 @@ pub(crate) fn meet_follow_up(
 
 /// What the agent is told when its human declines a watch script: the outcome of a script that
 /// was met by being refused. Reads after "when your watch script … passes —", like "it BROKE
-/// instead", and steers the agent away from re-arming the same script in a loop.
+/// instead", and steers the agent away from re-arming the same script in a loop. Says "will not
+/// run", never "never ran": a script that ran under the unattended waiver asks again once the
+/// waiver is turned off, and can be declined then.
 pub(crate) const DECLINED_OUTCOME: &str =
-    "your human DECLINED it instead — it never ran, so the condition was never checked. Don't schedule the same script again; ask your human if you still need to wait on this";
+    "your human DECLINED it instead — it will not run, so nothing is checking the condition. Don't schedule the same script again; ask your human if you still need to wait on this";
 
 /// Decline a watch script (docs/follow-ups.md §5.1): the human read it and said no. It is MET
 /// with `DECLINED_OUTCOME` rather than removed, so ordinary delivery tells the agent — through
