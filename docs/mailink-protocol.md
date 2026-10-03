@@ -455,7 +455,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
-| `POST /chats/{tabId}/scripts/{id}/approve` | Approve a watch script the human read on its card (v0.15, `ScriptApproval`). It starts running on maiTerm's next pass (≤5 s) — unless follow-ups are off, or the workspace is suspended or Overlord-exempt (or the tab is exempt), when it waits for that to change — and an agent re-arming the same script in the same folder isn't asked again | `{scriptHash}` → `{ok:true, scriptApprovals}` (the chat's waiting scripts now) \| `{ok:false, reason}` when the card is stale: no longer waiting (approved or rejected elsewhere, expired, delivered, cancelled), or `scriptHash` isn't the stored script's. Show `reason` verbatim and re-read the chat. `404` not designated |
+| `POST /chats/{tabId}/scripts/{id}/approve` | Approve a watch script the human read on its card (v0.15, `ScriptApproval`). It starts running on maiTerm's next pass (≤5 s) — unless follow-ups are off, or the workspace is suspended or Overlord-exempt (or the tab is exempt), when it waits for that to change — and an agent re-arming the same script in the same folder isn't asked again | `{scriptHash}` → `{ok:true, scriptApprovals}` (the chat's waiting scripts now) \| `{ok:false, reason}` when the card is stale: no longer waiting (approved or rejected elsewhere, expired, delivered, cancelled), or `scriptHash` doesn't match the stored follow-up. Show `reason` verbatim and re-read the chat. `404` not designated |
 | `POST /chats/{tabId}/scripts/{id}/reject` | Reject it: the script is cancelled and never runs. The agent is not told (the desktop's Reject doesn't tell it either) | `{scriptHash}` → same as approve |
 | `POST /chats/{tabId}/queue/cancel` | Pull back the ONE message waiting in the input queue (§5) | `{}` → `{ok:true, cancelled:true, text, composerCleared}` \| `{ok:true, cancelled:false, reason}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
@@ -775,9 +775,10 @@ interface ScriptApproval {
   author: 'agent' | 'human' | 'maiterm';
   createdAt: string;        // RFC 3339
   expiresAt: string | null; // RFC 3339; past it the script never runs and leaves this list
-  scriptHash: string;       // send back verbatim on approve/reject: SHA-256 of folder, NUL, script.
-                            //   A mismatch is refused, so an approval can't land on text the human
-                            //   didn't read
+  scriptHash: string;       // send back verbatim on approve/reject. Opaque: a digest of everything
+                            //   the card shows the human to agree to (folder, script, everySecs,
+                            //   timeoutSecs, message). A mismatch is refused, so an approval can't
+                            //   land on anything the human didn't read
 }
 // msg_id identity guarantee: the id POST /message returns IS the id later emitted on the
 // `message{role:'user'}` WS echo for that turn (mints at accept-time, reused for both) —

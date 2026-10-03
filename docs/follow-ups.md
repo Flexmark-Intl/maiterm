@@ -428,8 +428,9 @@ anything. So:
   Approval keeps scheduling out of reach of an agent that ISN'T trusted that far; it is not a
   sandbox.
 - **The phone approves too** (maiLink 0.15, `mailink/follow_ups.rs`): the chat carries the waiting
-  scripts, and its card has the same rules as the desktop's. The phone sends back the hash of the
-  script it showed, and a hash that doesn't match the stored script is refused. A decision there
+  scripts, and its card has the same rules as the desktop's. The phone sends back a hash of the
+  card it showed (folder, script, schedule, run limit and message), and one that doesn't match the
+  stored follow-up is refused. That is not the remembered key, which stays folder + script. A decision there
   is announced as `follow-ups-changed`, so the desktop's card closes too.
 
 **Scale.** Like every follow-up, a watch script is one-shot (§2.2): an agent that wants to keep

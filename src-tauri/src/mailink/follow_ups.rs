@@ -8,9 +8,9 @@
 //! The rules the desktop card keeps hold here too:
 //! - **Approval is decided in Rust,** from a human's act. The phone's approve is that act; it
 //!   goes through the same `watch::remember_approval` as the desktop's.
-//! - **The approval is for the text the human READ.** The phone sends back the `scriptHash` of the
-//!   script it showed (`watch::script_hash`: folder, NUL, script), and a hash that doesn't match
-//!   the stored script is refused. A follow-up's script never changes under its id today; the
+//! - **The approval is for what the human READ.** The phone sends back the `scriptHash` of the card
+//!   it showed (`card_hash`: folder, script, schedule, run limit and message), and one that doesn't
+//!   match the stored follow-up is refused. Nothing changes those under a follow-up's id today; the
 //!   check keeps "what was shown is what runs" from resting on that.
 //! - **Designation is a gate.** Only a designated tab's scripts are served or answerable.
 //! - **A backend write needs a frontend event:** the window's follow-ups store mirrors its tabs'
@@ -70,22 +70,47 @@ pub(crate) fn waiting_by_tab(app: &AppState) -> HashMap<String, usize> {
     out
 }
 
+/// The digest of everything the card asks the human to agree to: the folder and script (what
+/// `watch::script_hash` remembers an approval by), plus the schedule, the run limit and the
+/// message the agent gets. Nothing edits those under a follow-up's id today; covering them means
+/// an approval can't land on a schedule or message the human didn't read even if something does.
+/// Not the remembered key: re-arming the same script on another schedule isn't asked again (§5.1).
+fn card_hash(f: &FollowUp) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(crate::watch::script_hash(f.due.cwd.as_deref().unwrap_or(""), f.due.script.as_deref().unwrap_or("")));
+    h.update([0u8]);
+    h.update(every_secs(f).to_string());
+    h.update([0u8]);
+    h.update(timeout_secs(f).to_string());
+    h.update([0u8]);
+    h.update(f.text.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// As the card states them — the runner's own defaults for an unset one.
+fn every_secs(f: &FollowUp) -> u32 {
+    f.due.every_secs.unwrap_or(60)
+}
+
+fn timeout_secs(f: &FollowUp) -> u32 {
+    f.due.timeout_secs.unwrap_or(10)
+}
+
 /// One waiting script, as the phone's card draws it (`ScriptApproval`, protocol §4.3).
 fn to_json(f: &FollowUp) -> Value {
-    let script = f.due.script.as_deref().unwrap_or("");
-    let cwd = f.due.cwd.as_deref().unwrap_or("");
     json!({
         "id": f.id,
         "label": f.due.label,
-        "script": script,
-        "folder": cwd,
-        "everySecs": f.due.every_secs.unwrap_or(60),
-        "timeoutSecs": f.due.timeout_secs.unwrap_or(10),
+        "script": f.due.script.as_deref().unwrap_or(""),
+        "folder": f.due.cwd.as_deref().unwrap_or(""),
+        "everySecs": every_secs(f),
+        "timeoutSecs": timeout_secs(f),
         "message": f.text,
         "author": f.author,
         "createdAt": f.created_at,
         "expiresAt": f.expires_at,
-        "scriptHash": crate::watch::script_hash(cwd, script),
+        "scriptHash": card_hash(f),
     })
 }
 
@@ -156,10 +181,10 @@ pub(crate) fn decide(
             if !awaits_approval(f, unattended, now) {
                 return Err(Refusal::Stale("That watch script isn't waiting for approval any more."));
             }
-            let (script, cwd) = (f.due.script.clone().unwrap_or_default(), f.due.cwd.clone().unwrap_or_default());
-            if crate::watch::script_hash(&cwd, &script) != script_hash {
+            if card_hash(f) != script_hash {
                 return Err(Refusal::Stale("The script changed since you read it. Refresh and read it again."));
             }
+            let (script, cwd) = (f.due.script.clone().unwrap_or_default(), f.due.cwd.clone().unwrap_or_default());
             match decision {
                 Decision::Approve => tab.follow_ups[pos].due.approved = true,
                 Decision::Reject => {
@@ -242,9 +267,21 @@ mod tests {
 
     #[test]
     fn the_card_carries_the_hash_of_what_it_shows() {
-        let v = to_json(&script(false));
-        assert_eq!(v["scriptHash"], crate::watch::script_hash("/repo", "gh pr checks 12"));
+        let f = script(false);
+        let v = to_json(&f);
+        assert_eq!(v["scriptHash"], card_hash(&f));
         assert_eq!(v["everySecs"], 90);
         assert_eq!(v["expiresAt"], Value::Null);
+        // Every part the human reads moves the hash: the script, the folder, the schedule, the
+        // run limit and the message.
+        let mut changed = vec![f.clone(), f.clone(), f.clone(), f.clone(), f.clone()];
+        changed[0].due.script = Some("gh pr checks 13".into());
+        changed[1].due.cwd = Some("/other".into());
+        changed[2].due.every_secs = Some(91);
+        changed[3].due.timeout_secs = Some(11);
+        changed[4].text = "check CI now".into();
+        for c in &changed {
+            assert_ne!(card_hash(c), card_hash(&f));
+        }
     }
 }
