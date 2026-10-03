@@ -1779,8 +1779,11 @@ export interface Turn {
     by: 'overlord' | 'maiterm'; //   'overlord': an Overlord rule or its supervisor agent typed it;
                                 //   'maiterm': sent FOR the human (a task answer, "Do it", a rule run by hand)
     rule?: string;              //   the rule's name, when one sent it
-  };                            // Absent = the human's own words (or unknown). Matched by text against the
-                                // window's Overlord ledger, any rule's step text, or the "[maiTerm]" prefix.
+  };                            // Absent = the human's own words (or unknown). Matched against this tab's
+                                // Overlord ledger entries by text AND time, or by maiTerm's own prefixes
+                                // ("[maiTerm]"). A long rule step's text counts only for a turn older than
+                                // the ledger's oldest entry (it is a ring); inside it, the human typing a
+                                // rule step's exact words is still the human.
                                 // Draw it apart from the human's bubbles; GET only, not on WS frames.
   goal?: {                      // present iff kind === 'goal_status'
     event: 'set' | 'blocked' | 'met' | 'failed' | 'cleared';

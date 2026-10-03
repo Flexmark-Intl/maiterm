@@ -5199,6 +5199,21 @@ fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
             Some((text, at, by, rule))
         })
         .collect();
+    // Where the ledger still reaches. It is a per-window ring (LEDGER_MAX), so an old directive's
+    // entry may be gone, and only for a turn OLDER than its oldest entry does the rule-step
+    // fallback below get a say. Inside it, no entry means maiTerm didn't type it: a human who
+    // sends a rule step's exact text by hand is still the human (maiLink review of 0.14).
+    let ledger_from: Option<i64> = data
+        .windows
+        .iter()
+        .find(|w| w.workspaces.iter().any(|ws| ws.panes.iter().flat_map(|p| p.tabs.iter()).any(|t| t.id == tab_id)))
+        .and_then(|w| {
+            w.overlord_ledger
+                .iter()
+                .filter_map(|e| e.get("ts").and_then(|v| v.as_str()).map(transcript::rfc3339_to_ms))
+                .filter(|&ms| ms > 0)
+                .min()
+        });
     let mut used = vec![false; ledger.len()];
     for t in turns.iter_mut() {
         if t.get("role").and_then(|r| r.as_str()) != Some("user") {
@@ -5231,7 +5246,8 @@ fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
                 }
             })
             .or_else(|| {
-                (text.chars().count() >= 40).then(|| {
+                let before_ledger = ledger_from.is_none_or(|from| ts > 0 && ts < from);
+                (before_ledger && text.chars().count() >= 40).then(|| {
                     data.preferences
                         .overlord_rules
                         .iter()
@@ -6749,6 +6765,12 @@ mod tests {
                 e("12:00:00", "other", "rule", Some("r1"), "sent", "only elsewhere"),
                 e("12:00:00", "tab", "rule", Some("r1"), "blocked_busy", "never typed"),
             ];
+            // The tab lives in this window, so this ledger is the one that speaks for it.
+            let mut ws = crate::state::Workspace::new("W".into());
+            let mut tab = crate::state::workspace::Tab::new("t".into());
+            tab.id = "tab".into();
+            ws.panes[0].tabs.push(tab);
+            win.workspaces.push(ws);
             data.windows.push(win);
             data.preferences.overlord_rules = serde_json::from_value(json!([
                 { "id": "r1", "name": "Compaction", "enabled": true, "workspaces": [], "cooldown": 0,
@@ -6772,6 +6794,7 @@ mod tests {
             u("h", "12:31:00", "Continue."),
             u("i", "20:00:00", "Prepare for compaction: commit your work and update the task board."),
             json!({ "msg_id": "j", "role": "agent", "text": "go ahead", "ts": ms("12:00:01") }),
+            u("k", "09:00:00", "Prepare for compaction: commit your work and update the task board."),
         ];
         tag_typed_turns(&app, "tab", &mut turns);
         // A rule run and a hand run of the same text keep their own origins.
@@ -6783,9 +6806,13 @@ mod tests {
         assert!(turns[5].get("typedBy").is_none(), "an injection that was never typed");
         assert_eq!(turns[6]["typedBy"], json!({ "by": "maiterm" }));
         assert!(turns[7].get("typedBy").is_none(), "a short rule step the human can type themselves");
-        // Past the ledger, a long rule step still identifies it.
-        assert_eq!(turns[8]["typedBy"], json!({ "by": "overlord", "rule": "Compaction" }));
+        // Inside the time the ledger covers, no entry means the human typed it — even a rule step's
+        // exact words.
+        assert!(turns[8].get("typedBy").is_none(), "the human sending a rule step's text by hand");
         assert!(turns[9].get("typedBy").is_none(), "only user turns");
+        // Older than the ledger's oldest entry (rolled out of the ring), a long rule step still
+        // identifies it.
+        assert_eq!(turns[10]["typedBy"], json!({ "by": "overlord", "rule": "Compaction" }));
     }
 
     #[test]
