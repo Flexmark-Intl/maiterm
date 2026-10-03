@@ -59,7 +59,10 @@ The Loom works with the engine off: it is the human's view, not supervision.
   are.
 - **Chat** (Focus): `get_tab_transcript` serves `mailink::tab_transcript`, the same turns
   the phone's thread gets. `loom/model.ts` `chatRows` folds tool runs with the phone's
-  vocabulary (`toolVerb`), and `focusSections` applies the phone's Focus rules.
+  vocabulary (`toolVerb`), and `focusSections` applies the phone's Focus rules. A chat with a
+  watch script waiting to be allowed is pinned in Needs you like one with a task question (the
+  phone's `scriptsWaiting`), previews "Allow a watch script?", and shows its cards in the dock
+  under the task question, answered in place.
 
 ## The weave
 

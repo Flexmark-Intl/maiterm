@@ -242,7 +242,8 @@ export interface FocusChat {
   state: AgentState | null;
   unread: boolean;
   lastActivity: number;
-  /** An open decision or action blocker on one of its tasks. */
+  /** An open decision or action blocker on one of its tasks, or a watch script waiting to be
+   *  allowed. */
   asks: boolean;
 }
 

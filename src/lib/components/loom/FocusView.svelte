@@ -22,6 +22,8 @@
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
   import { fireRefusal, fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
+  import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
+  import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svelte';
   import ContextMenu from '$lib/components/ContextMenu.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Resizer from '$lib/components/Resizer.svelte';
@@ -48,6 +50,18 @@
 
   const asking = (tabId: string) =>
     tasks.find((t) => t.tab_id === tabId && t.status === 'blocked' && (t.blocker?.kind === 'decision' || t.blocker?.kind === 'action'));
+
+  /** Watch scripts waiting to be allowed, by tab (docs/follow-ups.md §5.1). They wait on the human
+   *  exactly as a task question does, so they pin a chat in Needs you too — the phone does
+   *  (`scriptsWaiting`) and the Loom's header counts them. */
+  const scriptsByTab = $derived.by(() => {
+    const m = new Map<string, PendingApproval[]>();
+    for (const a of followUpsStore.pendingApprovals) {
+      if (a.archived) continue;
+      m.set(a.tabId, [...(m.get(a.tabId) ?? []), a]);
+    }
+    return m;
+  });
 
   // ── When each agent tab last did something, by the phone's rule (mailink `last_activity_ts`:
   // last real transcript turn, else scrollback time, else `suspended_at`, else now). Hook state
@@ -80,6 +94,8 @@
           .map((t) => {
             const s = claudeStateStore.getState(t.id);
             const ask = asking(t.id);
+            const scripts = scriptsByTab.get(t.id)?.length ?? 0;
+            const scriptAsk = !scripts ? null : scripts === 1 ? 'Allow a watch script?' : `Allow ${scripts} watch scripts?`;
             return {
               tabId: t.id,
               name: tabDisplayName(t.id),
@@ -89,8 +105,8 @@
               // The phone's rule (a resume does not move it), or a hook event seen since,
               // whichever is newer.
               lastActivity: Math.max(lastActivity[t.id] ?? 0, s?.updatedAt ?? 0),
-              asks: !!ask,
-              preview: s?.state === 'permission' ? 'Needs your approval' : ask?.blocker?.question ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : ''),
+              asks: !!ask || scripts > 0,
+              preview: s?.state === 'permission' ? 'Needs your approval' : ask?.blocker?.question ?? scriptAsk ?? (s?.state === 'active' ? (s.toolDetail ?? s.toolName ?? 'Working…') : ''),
             };
           })
           // The open chat stays listed even when it stops qualifying. Answering the question on
@@ -177,6 +193,16 @@
   };
 
   const openAsk = $derived(openId ? asking(openId) : undefined);
+  /** The open chat's waiting scripts, answered in place like its task question. */
+  const openScripts = $derived(openId ? scriptsByTab.get(openId) ?? [] : []);
+  /** When those cards last changed, for their click guard: one inserted above or answered moves
+   *  the rest (ScriptApprovalCard). */
+  let scriptsChangedAt = $state(0);
+  const openScriptIds = $derived(openScripts.map((a) => a.followUp.id).join('|'));
+  $effect(() => {
+    void openScriptIds;
+    scriptsChangedAt = Date.now();
+  });
   const agentTasks = $derived(openId ? tasks.filter((t) => t.tab_id === openId && !isRetired(t.status) && t.status !== 'backlog') : []);
   /** The last answer's outcome, for the chat it was given in. Keyed to the CHAT, not the task:
    *  the answer moves the task out of Blocked before the note arrives, so the question is gone
@@ -724,6 +750,10 @@
             <BlockerCard task={openAsk} variant="card" onnote={(text) => (outcome = { chat, text })} />
           {/key}
         {/if}
+        {#each openScripts as a (a.followUp.id)}
+          {@const chat = open.tabId}
+          <ScriptApprovalCard tabId={chat} followUp={a.followUp} listChangedAt={scriptsChangedAt} onnote={(text) => (outcome = { chat, text })} />
+        {/each}
         {#if outcome && outcome.chat === open.tabId}<p class="hint">{outcome.text}</p>{/if}
         <AttachmentChips attachments={attachedHere} onremove={(i) => { unattach(open.tabId, i); composerEl?.focus(); }} />
         <div class="composer" class:drag-over={dragOver}>
