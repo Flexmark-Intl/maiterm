@@ -9,6 +9,11 @@
  * vanished targets on the tick. A follow-up due on a tab whose agent has exited restarts it first
  * (`resumeAgent`, §6.2) — the one place this store types into a shell.
  *
+ * Watch scripts (§5.1) are RUN and met in Rust (`watch.rs`); this store mirrors that through
+ * `follow-ups-changed`. It also owns the human's side of their approval: `pendingApprovals` is
+ * the script half of the Loom's Decisions queue, `approve` / `reject` answer it, and ONE request
+ * toast announces whatever is waiting (`announceApprovals`, settled on every mirror and tick).
+ *
  * Delivery (§6.1) goes through `agentDelivery.tryDeliverNow`, never `deliver()`: that one
  * queues, delivers later without a word, can't be withdrawn and forgets on restart. A follow-up
  * is TAKEN off its tab before it is typed, and put back if the inject doesn't happen. That makes

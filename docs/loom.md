@@ -48,6 +48,15 @@ The Loom works with the engine off: it is the human's view, not supervision.
   - nothing sent without visible typed text (an option, "I've done it", Enter in an empty
     field) is accepted while the question is under 1.5 s old, measured from its own
     `asked_at`. A card can mount with a new question right under the pointer.
+- **Watch scripts waiting to be allowed** (`docs/follow-ups.md` §5.1) are the queue's second
+  kind, merged oldest-first with the blockers, and counted in the Decisions badge and "need
+  you". They are not tasks: `followUpsStore.pendingApprovals` reads them off the follow-ups, and
+  `components/followUps/ScriptApprovalCard.svelte` answers them — maiTerm acts on Allow / Don't
+  allow itself, nothing is typed to the agent. Unlike the tasks they are NOT limited to awake
+  workspaces (a parked workspace's script still waits, and its notification opens this view).
+  The card's 1.5 s guard also runs from its own mount and from the queue's last change
+  (`listChangedAt`): scripts can be inserted above the card being read, which blockers never
+  are.
 - **Chat** (Focus): `get_tab_transcript` serves `mailink::tab_transcript`, the same turns
   the phone's thread gets. `loom/model.ts` `chatRows` folds tool runs with the phone's
   vocabulary (`toolVerb`), and `focusSections` applies the phone's Focus rules.
