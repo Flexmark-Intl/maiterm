@@ -53,7 +53,13 @@ Watch scripts run on your computer, so they're refused in a tab running over SSH
 
 Every command an agent normally runs passes its own permission check at the moment it runs, while you can see it. A watch script runs later, unattended, as you — so **each new script asks you first**.
 
-The tab's clock badge turns yellow and a notification names the tab. The approval card shows the script **exactly** as it will run — the whole thing, wrapped, with its line and character count — the folder it runs in, and its schedule, with **Approve and run** and **Reject**. A script containing anything the card can't show truthfully, like invisible characters or a look-alike space, is refused when the agent creates it.
+A script waiting for you is a question, so it's asked where your other questions are: a card titled **Allow this watch script?** in the [Loom's Decisions](/features/loom/#decisions), in the tab's task panel, and at the top of the tab's follow-ups list. It's the same card everywhere, and answering it in one place answers it in all of them. A notification — **Allow a watch script?** and the tab's name — announces it, and inside maiTerm that notice stays up until the script is answered anywhere, your phone included; click it to open Decisions. Several scripts waiting share one notice.
+
+The card shows the script **exactly** as it will run — the whole thing, wrapped, never clipped — with its name and schedule above it, and below it the folder it runs in, how long a run may take, and its line and character count. **What the agent is told when it passes** opens to show the message it will be woken with. Then **Allow** or **Don't allow**. A card ignores clicks in its first moments on screen, and for a moment after anything above it moves it, so a card that slides under your pointer as you click can't be answered by accident.
+
+**Don't allow** means it will not run, and the agent is told so — the follow-up comes due saying you declined the script, rather than vanishing and leaving the agent waiting on a check nobody is running.
+
+A script containing anything the card can't show truthfully, like invisible characters or a look-alike space, is refused when the agent creates it.
 
 Approval is for that script **in that folder**: change one character and it's a new script, and the same script in another folder is a new approval. An agent re-arming a script you've already approved isn't asked again.
 
@@ -71,10 +77,10 @@ A suspended or archived tab holds its follow-ups — an archived one delivers th
 
 ## Seeing and managing them
 
-A tab holding follow-ups shows a **clock badge** beside its name: dim while they wait, accent once one is due and waiting for the agent, yellow when a watch script needs your approval, faded while follow-ups are off. Hover it for what's next.
+A tab holding follow-ups shows a **clock badge** beside its name: dim while they wait, accent once one is due and waiting for the agent, yellow when a watch script is waiting for you, faded while follow-ups are off. Hover it for what's next.
 
-Click the badge, or right-click the tab and choose **Follow-ups…**, to see the list. Each row says when it's due, who added it, and — for one that's due but not delivered — what's holding it. **Deliver now** sends one early, through the same checks as the schedule (and restarts an exited agent whatever the preference: the click is the consent); **Cancel** removes one; **Clear** removes an expired one. You can add one yourself too: a prompt, in so many minutes.
+Click the badge, or right-click the tab and choose **Follow-ups…**, to see the list. A script waiting for you sits at the top as its approval card. Every other row leads with what it waits for — "in 12m", "waiting for service `web` to be ready", "due 3m ago" — then the prompt, who added it, and, for one that's due but not delivered, what's holding it. A watch script's code is folded under a line giving its schedule and how its last check went. **Send now** sends one early, through the same checks as the schedule (and restarts an exited agent whatever the preference: the click is the consent); **Remove** takes one off the list, expired ones included. **Schedule one yourself** opens a form to add your own: a prompt, in so many minutes.
 
 :::note
-Follow-ups don't reach your phone yet: [maiLink](/features/mailink/) can't list or approve them.
+From your phone, [maiLink](/features/mailink/) shows a waiting watch script as a card you can **Allow** or **Don't allow**, under the same rules as the desktop's. It doesn't list the rest of a tab's follow-ups.
 :::

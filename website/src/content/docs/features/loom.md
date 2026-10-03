@@ -68,8 +68,10 @@ Select a task to see it on the right: lane, workstream, agent and age; its quest
 
 Every question waiting on you, across the window, oldest first — decisions to make and actions only you can take — each answerable in place, with **Talk to the agent** and **Open the tab** beside it.
 
+A [watch script](/features/follow-ups/#you-approve-each-script-first) an agent wants maiTerm to run for it waits here too, as **Allow this watch script?** with the whole script shown, and counts toward Decisions and toward what needs you. Unlike the rest of the Loom, these include scripts from suspended workspaces and archived tabs: the question is still waiting even though the tab isn't. The notification announcing a script opens this view.
+
 Below the queue is **Blocked with no reason recorded**: tasks sitting in Blocked with no question on them and nothing they're waiting on, so whatever they stopped on is only in the agent's chat. **Ask for the reason** types one question at the agent, and its answer comes back here as a proper question.
 
 :::note
-The Loom reads the same [task board](/features/tasks/) your agents write to and the same transcripts [maiLink](/features/mailink/) shows on your phone. A question answered on the phone, in the task panel or in the Loom is answered once — whichever you get to first.
+The Loom reads the same [task board](/features/tasks/) your agents write to and the same transcripts [maiLink](/features/mailink/) shows on your phone. A question answered on the phone, in the task panel or in the Loom is answered once — whichever you get to first. The same goes for a watch script, which can also be allowed from the tab's follow-ups list.
 :::
