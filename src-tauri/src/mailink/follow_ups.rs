@@ -152,7 +152,7 @@ pub(crate) enum Refusal {
 }
 
 /// The human approved or rejected a waiting watch script from the phone. Reject declines it as
-/// the desktop's does: it never runs, and the agent is told (`decline_follow_up_script`).
+/// the desktop's does: it will not run, and the agent is told (`decline_follow_up_script`).
 pub(crate) fn decide(
     app: &AppState,
     tab_id: &str,

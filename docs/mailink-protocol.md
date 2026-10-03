@@ -14,7 +14,7 @@
 > - **`ChatDetail.scriptApprovals: ScriptApproval[]`** (§4.3): the scripts themselves. Always
 >   present, `[]` when none.
 > - **`POST /chats/{tabId}/scripts/{id}/approve`** and **`…/reject`** (§4.1), body
->   `{ scriptHash }`: the hash of the card the human read. Reject declines the script: it never runs, and the agent is told.
+>   `{ scriptHash }`: the hash of the card the human read. Reject declines the script: it will not run, and the agent is told.
 > - **The card must show the whole script, truthfully** (§4.3 `ScriptApproval`). The approval is
 >   for what runs, so a card that clips, caps or side-scrolls the script approves text nobody saw.
 > - No push yet, as with `asks`: a new doorbell kind needs relay copy.
@@ -456,7 +456,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
 | `POST /chats/{tabId}/scripts/{id}/approve` | Approve a watch script the human read on its card (v0.15, `ScriptApproval`). It starts running on maiTerm's next pass (≤5 s) — unless follow-ups are off, or the workspace is suspended or Overlord-exempt (or the tab is exempt), when it waits for that to change — and an agent re-arming the same script in the same folder isn't asked again | `{scriptHash}` → `{ok:true, scriptApprovals}` (the chat's waiting scripts now) \| `{ok:false, reason}` when the card is stale: no longer waiting (approved or rejected elsewhere, expired, delivered, cancelled), or `scriptHash` doesn't match the stored follow-up. Show `reason` verbatim and re-read the chat. `404` not designated |
-| `POST /chats/{tabId}/scripts/{id}/reject` | Reject it: the script never runs, and its agent is told — it leaves the waiting list and is delivered to the agent as declined, as the desktop's Don't allow does. Say "The agent will be told" on the receipt | `{scriptHash}` → same as approve |
+| `POST /chats/{tabId}/scripts/{id}/reject` | Reject it: the script will not run (again — one that ran under the desktop's unattended waiver can be declined once the waiver is off), and its agent is told — it leaves the waiting list and is delivered to the agent as declined, as the desktop's Don't allow does. Say "The agent will be told" on the receipt | `{scriptHash}` → same as approve |
 | `POST /chats/{tabId}/queue/cancel` | Pull back the ONE message waiting in the input queue (§5) | `{}` → `{ok:true, cancelled:true, text, composerCleared}` \| `{ok:true, cancelled:false, reason}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
 | `GET  /chats/archived` | Archived (recoverable) tabs across all workspaces | → `ArchivedChat[]` |

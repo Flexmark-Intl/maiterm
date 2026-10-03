@@ -2349,7 +2349,7 @@ async fn post_script_approve(
 }
 
 /// `POST /chats/{tabId}/scripts/{id}/reject` (v0.15): decline the watch script, as the desktop's
-/// Don't allow does. It never runs, and the agent is told, there and here.
+/// Don't allow does. It will not run, and the agent is told, there and here.
 async fn post_script_reject(
     State(s): State<ApiState>,
     headers: HeaderMap,
