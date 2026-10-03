@@ -491,9 +491,22 @@
   // Keep the newest turn in view as the chat grows, unless the human scrolled up to read.
   let chatEl = $state<HTMLElement | null>(null);
   let pinned = true;
+  const toBottom = () => { if (chatEl && pinned) chatEl.scrollTop = chatEl.scrollHeight; };
+  // Every new read, not `rows.length`: at the 40-turn window a new turn pushes an old one out
+  // and the count doesn't move.
   $effect(() => {
-    void rows.length;
-    if (chatEl && pinned) requestAnimationFrame(() => chatEl && (chatEl.scrollTop = chatEl.scrollHeight));
+    void rows;
+    if (chatEl && pinned) requestAnimationFrame(toBottom);
+  });
+  // The chat's OWN height changes too: a prompt card opening (or resizing) in the dock below
+  // shrinks it, which leaves the newest lines under the edge — and the next scroll event (scroll
+  // anchoring as content changes) then read that as the human having scrolled up, unpinning it.
+  $effect(() => {
+    const el = chatEl;
+    if (!el) return;
+    const ro = new ResizeObserver(toBottom);
+    ro.observe(el);
+    return () => ro.disconnect();
   });
   const onChatScroll = () => { if (chatEl) pinned = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 40; };
 
