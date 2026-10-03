@@ -216,6 +216,12 @@
       preferencesStore.applyFromBackend(event.payload);
     }).then(unlisten => { unlistenPrefs = unlisten; });
 
+    // The updater is per-process, this webview's updater store is not: mirror the other
+    // windows' download/install/restart so none of them offers a second install.
+    let stopUpdaterSync: (() => void) | undefined;
+    updaterStore.initSync().then(stop => { stopUpdaterSync = stop; })
+      .catch((e: unknown) => logError(`Updater sync failed to start: ${e}`));
+
     const appWindow = getCurrentWindow();
 
     // Non-terminal windows (e.g. preferences) skip terminal lifecycle and shortcuts
@@ -225,6 +231,7 @@
         window.removeEventListener('unhandledrejection', onUnhandledRejection);
         cleanupSmartQuotes();
         unlistenPrefs?.();
+        stopUpdaterSync?.();
         detachConsole?.();
       };
     }
@@ -1379,6 +1386,7 @@
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       cleanupSmartQuotes();
       unlistenPrefs?.();
+      stopUpdaterSync?.();
       detachConsole?.();
     };
   });

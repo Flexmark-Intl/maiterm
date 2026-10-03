@@ -100,8 +100,9 @@
   }
 
   async function proceedWithInstall() {
-    await updaterStore.downloadAndInstall();
-    if (updaterStore.installed) {
+    // Only on THIS install: `installed` may be left over from an earlier one (the banner's),
+    // and restarting on it after this download failed would land the older version.
+    if (await updaterStore.downloadAndInstall()) {
       updaterStore.restart();
     }
   }
@@ -789,10 +790,10 @@
         <div class="update-text">Update installed</div>
         <button class="update-action" onclick={() => updaterStore.restart()}>Restart</button>
       {:else if updaterStore.installing}
-        <div class="update-text">Installing v{updaterStore.currentUpdate?.version}…</div>
+        <div class="update-text">Installing v{updaterStore.version}…</div>
       {:else if updaterStore.downloading}
         <div class="update-text">
-          Downloading v{updaterStore.currentUpdate?.version}…
+          Downloading v{updaterStore.version}…
           {#if updaterStore.totalBytes}
             {Math.floor(updaterStore.downloadedBytes / updaterStore.totalBytes * 100)}%
           {:else if updaterStore.downloadedBytes}
@@ -801,7 +802,7 @@
         </div>
       {:else}
         <div class="update-text">
-          v{updaterStore.currentUpdate?.version} available
+          v{updaterStore.version} available
           <button class="update-link" onclick={openWhatsNew}>What's new</button>
         </div>
         <button class="update-action" onclick={() => updaterStore.downloadAndInstall()}>Install</button>

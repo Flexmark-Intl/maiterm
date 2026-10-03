@@ -2,6 +2,7 @@ import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { toastStore } from './toasts.svelte';
 import { terminalsStore } from './terminals.svelte';
 import * as commands from '$lib/tauri/commands';
@@ -77,6 +78,31 @@ function parseReleaseBody(body: string): ChangelogItem[] {
 /** How long restart() waits for its state flush before relaunching regardless. */
 const RESTART_FLUSH_TIMEOUT_MS = 15_000;
 
+/**
+ * The updater is one per PROCESS (a single install, a single relaunch) but this store is one
+ * per webview, so each window broadcasts its phase changes and the others mirror them —
+ * otherwise a second window still offers Install after the first has installed, and
+ * clicking it downloads the whole update again.
+ */
+const SYNC_EVENT = 'updater-sync';
+/** A window that just opened asks; any window mid-update answers with its state. */
+const SYNC_REQUEST_EVENT = 'updater-sync-request';
+/** Progress is re-broadcast at most this often — a chunk event per window per chunk is noise. */
+const SYNC_PROGRESS_INTERVAL_MS = 250;
+
+type SyncPhase = 'idle' | 'downloading' | 'installing' | 'installed' | 'restarting';
+
+interface UpdaterSync {
+  origin: string;
+  phase: SyncPhase;
+  version: string | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
+}
+
+/** Tells this webview's own broadcasts apart from other windows' (emit reaches the sender too). */
+const SYNC_ORIGIN = crypto.randomUUID();
+
 function createUpdaterStore() {
   let checking = $state(false);
   let downloading = $state(false);
@@ -85,6 +111,12 @@ function createUpdaterStore() {
   let installing = $state(false);
   /** restart() is flushing state / relaunching — set once, cleared only if relaunch fails. */
   let restarting = $state(false);
+  /** The version being downloaded/installed/installed — set here or by another window's
+   *  broadcast, so it is known even in a window whose own check never ran. */
+  let activeVersion = $state<string | null>(null);
+  let lastProgressBroadcast = 0;
+  /** This window ran the download or the restart itself, rather than mirroring one. */
+  let ownsUpdate = false;
   let downloadedBytes = $state(0);
   /** Null when the server sent no Content-Length. */
   let totalBytes = $state<number | null>(null);
@@ -100,7 +132,16 @@ function createUpdaterStore() {
       // banner had been dismissed, nothing on screen said an install was running.
       if (!silent) {
         dismissed = false;
-        toastStore.addToast('Update In Progress', `v${currentUpdate?.version} is still ${installing ? 'installing' : 'downloading'}.`, 'info');
+        toastStore.addToast('Update In Progress', `v${activeVersion ?? currentUpdate?.version} is still ${installing ? 'installing' : 'downloading'}.`, 'info');
+      }
+      return null;
+    }
+    if (installed) {
+      // Installed (here or in another window): a check would only find the same update
+      // and offer to install it again.
+      if (!silent) {
+        dismissed = false;
+        toastStore.addToast('Update Installed', `v${activeVersion ?? currentUpdate?.version} is installed — restart to apply it.`, 'info');
       }
       return null;
     }
@@ -184,22 +225,103 @@ function createUpdaterStore() {
     currentUpdate = update;
   }
 
-  async function downloadAndInstall() {
-    if (!currentUpdate || downloading) return;
+  /** This window's phase as the other windows should mirror it. */
+  function syncPhase(): SyncPhase {
+    if (restarting) return 'restarting';
+    if (installing) return 'installing';
+    if (downloading) return 'downloading';
+    if (installed) return 'installed';
+    return 'idle';
+  }
+
+  function broadcast() {
+    lastProgressBroadcast = Date.now();
+    const payload: UpdaterSync = {
+      origin: SYNC_ORIGIN,
+      phase: syncPhase(),
+      version: activeVersion,
+      downloadedBytes,
+      totalBytes,
+    };
+    emit(SYNC_EVENT, payload).catch((e) => logError(`updater sync broadcast failed: ${e}`));
+  }
+
+  /** Clears a mirrored download whose window went away mid-download (closed, reloaded) —
+   *  without it every other window would read "Downloading…" until the app restarts. */
+  let mirrorWatchdog: ReturnType<typeof setTimeout> | undefined;
+  /** Progress arrives every 250ms while downloading; the bundle swap after it is the long
+   *  silent stretch, and it takes seconds, not minutes. */
+  const MIRROR_STALE_MS = 120_000;
+
+  function applySync(s: UpdaterSync) {
+    if (s.origin === SYNC_ORIGIN) return;
+    clearTimeout(mirrorWatchdog);
+    if (s.version) activeVersion = s.version;
+    downloading = s.phase === 'downloading' || s.phase === 'installing';
+    installing = s.phase === 'installing';
+    downloadedBytes = s.downloadedBytes;
+    totalBytes = s.totalBytes;
+    // An install is never undone (a later failed download leaves the earlier one on disk),
+    // so a mirror only ever sets this.
+    if (s.phase === 'installed' || s.phase === 'restarting') installed = true;
+    restarting = s.phase === 'restarting';
+    if (s.phase !== 'idle') dismissed = false;
+    if (downloading) {
+      mirrorWatchdog = setTimeout(() => {
+        logInfo('Update: no word from the installing window, clearing its mirrored download');
+        downloading = false;
+        installing = false;
+      }, MIRROR_STALE_MS);
+    }
+  }
+
+  let syncUnlisteners: UnlistenFn[] = [];
+
+  /** Start mirroring the other windows' updater state. Idempotent; returns a cleanup. */
+  async function initSync(): Promise<() => void> {
+    if (syncUnlisteners.length === 0) {
+      syncUnlisteners = await Promise.all([
+        listen<UpdaterSync>(SYNC_EVENT, (e) => applySync(e.payload)),
+        listen<string>(SYNC_REQUEST_EVENT, (e) => {
+          // A download in flight is answered only first-hand (a mirror's copy may be stale);
+          // an install is never undone, so any window holding one may answer for it.
+          const phase = syncPhase();
+          if (e.payload !== SYNC_ORIGIN && phase !== 'idle' && (ownsUpdate || phase === 'installed')) broadcast();
+        }),
+      ]);
+      emit(SYNC_REQUEST_EVENT, SYNC_ORIGIN).catch(() => {});
+    }
+    return () => {
+      syncUnlisteners.forEach((u) => u());
+      syncUnlisteners = [];
+      clearTimeout(mirrorWatchdog);
+    };
+  }
+
+  /** Returns true only when THIS call downloaded and installed the update — a caller that
+   *  restarts on success must not restart on an install some earlier call made. */
+  async function downloadAndInstall(): Promise<boolean> {
+    if (!currentUpdate || downloading || restarting) return false;
     downloading = true;
     installing = false;
     downloadedBytes = 0;
     totalBytes = null;
+    ownsUpdate = true;
     const version = currentUpdate.version;
+    activeVersion = version;
+    broadcast();
     logInfo(`Update v${version}: download started`);
     try {
       await currentUpdate.downloadAndInstall((event) => {
         if (event.event === 'Started') {
           totalBytes = event.data.contentLength ?? null;
+          broadcast();
         } else if (event.event === 'Progress') {
           downloadedBytes += event.data.chunkLength;
+          if (Date.now() - lastProgressBroadcast >= SYNC_PROGRESS_INTERVAL_MS) broadcast();
         } else if (event.event === 'Finished') {
           installing = true;
+          broadcast();
           logInfo(`Update v${version}: downloaded ${downloadedBytes} bytes, installing`);
         }
       });
@@ -208,13 +330,16 @@ function createUpdaterStore() {
       // would otherwise hide it, leaving an installed update that only a quit reveals.
       dismissed = false;
       logInfo(`Update v${version}: installed`);
+      return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logError(`Update install failed: ${msg}`);
       toastStore.addToast('Update Failed', msg, 'error');
+      return false;
     } finally {
       downloading = false;
       installing = false;
+      broadcast();
     }
   }
 
@@ -233,7 +358,9 @@ function createUpdaterStore() {
     // used to start another one racing the first.
     if (restarting) return;
     restarting = true;
+    ownsUpdate = true;
     dismissed = false;
+    broadcast();
     const flush = (async () => {
       try {
         // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
@@ -270,6 +397,7 @@ function createUpdaterStore() {
       // the right advice, not another Restart click.
       toastStore.addToast('Restart Failed', `${msg}. Quit and reopen maiTerm to finish the update.`, 'error');
       restarting = false;
+      broadcast();
     }
   }
 
@@ -279,6 +407,8 @@ function createUpdaterStore() {
     get installed() { return installed; },
     get installing() { return installing; },
     get restarting() { return restarting; },
+    /** The version in flight or installed, else the one on offer. */
+    get version() { return activeVersion ?? currentUpdate?.version ?? null; },
     get downloadedBytes() { return downloadedBytes; },
     get totalBytes() { return totalBytes; },
     get currentUpdate() { return currentUpdate; },
@@ -286,7 +416,7 @@ function createUpdaterStore() {
     get releaseNotes() { return releaseNotes; },
     get loadingNotes() { return loadingNotes; },
     /** True when the banner should be visible */
-    get showBanner() { return (currentUpdate !== null || installed) && !dismissed; },
+    get showBanner() { return (currentUpdate !== null || installed || downloading || restarting) && !dismissed; },
     /** True when a toast click requested showing the What's New modal */
     get showWhatsNewRequested() { return showWhatsNewRequested; },
     checkForUpdates,
@@ -296,6 +426,7 @@ function createUpdaterStore() {
     fetchReleaseNotes,
     dismiss,
     restart,
+    initSync,
     requestShowWhatsNew() { showWhatsNewRequested = true; },
     clearShowWhatsNewRequest() { showWhatsNewRequested = false; },
   };
