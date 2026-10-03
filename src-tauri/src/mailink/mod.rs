@@ -44,6 +44,7 @@ pub(crate) mod permission;
 pub(crate) mod input_box;
 pub(crate) mod tasks;
 pub(crate) mod board;
+pub(crate) mod follow_ups;
 pub(crate) mod overlord;
 pub(crate) mod rpc;
 pub(crate) mod transcript;
@@ -405,6 +406,15 @@ fn build_router(api: ApiState) -> Router {
             post(post_shell_stop),
         )
         .route("/mailink/v1/chats/{tab_id}/wake", post(post_wake))
+        // v0.15: a watch script's approval card (docs/follow-ups.md §5.1).
+        .route(
+            "/mailink/v1/chats/{tab_id}/scripts/{follow_up_id}/approve",
+            post(post_script_approve),
+        )
+        .route(
+            "/mailink/v1/chats/{tab_id}/scripts/{follow_up_id}/reject",
+            post(post_script_reject),
+        )
         .route(
             "/mailink/v1/chats/{tab_id}/queue/cancel",
             post(post_queue_cancel),
@@ -503,7 +513,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.14";
+const PROTOCOL_VERSION: &str = "0.15";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -2319,6 +2329,64 @@ async fn post_rename(
     Ok(Json(json!({ "ok": true, "title": title })))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScriptDecisionBody {
+    /// The `scriptHash` of the card the human read. Required: the approval is for that text.
+    script_hash: String,
+}
+
+/// `POST /chats/{tabId}/scripts/{id}/approve` (v0.15): the human read a watch script on the
+/// phone's card and said yes. Synchronous, written in Rust like the desktop's approve.
+async fn post_script_approve(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((tab_id, follow_up_id)): Path<(String, String)>,
+    Json(body): Json<ScriptDecisionBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    script_decision(&s, &tab_id, &follow_up_id, &body.script_hash, follow_ups::Decision::Approve)
+}
+
+/// `POST /chats/{tabId}/scripts/{id}/reject` (v0.15): cancel the watch script, as the desktop's
+/// Reject does. The agent is not told, there or here.
+async fn post_script_reject(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path((tab_id, follow_up_id)): Path<(String, String)>,
+    Json(body): Json<ScriptDecisionBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    script_decision(&s, &tab_id, &follow_up_id, &body.script_hash, follow_ups::Decision::Reject)
+}
+
+/// `{ ok: true, scriptApprovals }` (the tab's waiting scripts now), or `{ ok: false, reason }`
+/// when the card is stale — show `reason` verbatim and re-read. 404 for a tab the phone can't see.
+fn script_decision(
+    s: &ApiState,
+    tab_id: &str,
+    follow_up_id: &str,
+    script_hash: &str,
+    decision: follow_ups::Decision,
+) -> Result<Json<Value>, StatusCode> {
+    match follow_ups::decide(&s.app, tab_id, follow_up_id, script_hash, decision) {
+        Ok(d) => {
+            // The window's follow-ups store mirrors its tabs' lists: without this its card stays
+            // up, and its next operation on the tab works from the old list.
+            if let Some(h) = &s.app_handle {
+                let _ = h.emit_to(
+                    d.window_label.as_str(),
+                    crate::watch::CHANGED_EVENT,
+                    json!({ "workspace_id": d.workspace_id, "tab_id": tab_id, "follow_ups": d.follow_ups }),
+                );
+            }
+            Ok(Json(json!({ "ok": true, "scriptApprovals": follow_ups::waiting_for_tab(&s.app, tab_id) })))
+        }
+        Err(follow_ups::Refusal::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(follow_ups::Refusal::Stale(reason)) => Ok(Json(json!({ "ok": false, "reason": reason }))),
+    }
+}
+
 /// Find the terminal tab `tab_id` across all windows and set its name + `custom_name`, persisting
 /// eagerly (like the frontend `rename_tab` command). Returns false if the tab id isn't found.
 fn set_tab_name(app: &AppState, tab_id: &str, name: &str) -> bool {
@@ -2729,6 +2797,8 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
     // v0.13 `asks`: questions on a tab's tasks. Diffed like the other roster flags, not folded
     // into `attn_key` (that key is the doorbell's edge rule and splits positionally).
     let mut asks: HashMap<String, u64> = HashMap::new();
+    // v0.15 `scriptsWaiting`: watch scripts waiting for approval. Same treatment as `asks`.
+    let mut scripts: HashMap<String, u64> = HashMap::new();
     // Per-tab last-seen registration flag. A tab registering (or losing its registration) changes
     // the re-initialize affordance without moving state/prompt, so it needs its own diff.
     let mut registered: HashMap<String, bool> = HashMap::new();
@@ -2787,6 +2857,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
         suspended.insert(tab.clone(), c["workspaceSuspended"].as_bool().unwrap_or(false));
         mesh.insert(tab.clone(), c["mesh"].as_bool().unwrap_or(false));
         asks.insert(tab.clone(), c["asks"].as_u64().unwrap_or(0));
+        scripts.insert(tab.clone(), c["scriptsWaiting"].as_u64().unwrap_or(0));
         registered.insert(tab.clone(), c["registered"].as_bool().unwrap_or(true));
         tools.insert(tab.clone(), tool_key(&c));
         last.insert(tab, key);
@@ -2914,6 +2985,12 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         roster_changed = true;
                     }
                     asks.insert(tab.clone(), n_asks);
+                    // A watch script asked for (or approved, rejected, delivered) — same reason.
+                    let n_scripts = c["scriptsWaiting"].as_u64().unwrap_or(0);
+                    if prev.is_some() && scripts.get(&tab) != Some(&n_scripts) {
+                        roster_changed = true;
+                    }
+                    scripts.insert(tab.clone(), n_scripts);
                     // Registration flips when an agent finally re-registers (or a restart drops
                     // its session entry) — the phone must re-render the re-initialize control.
                     let reg = c["registered"].as_bool().unwrap_or(true);
@@ -2979,7 +3056,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                 let removed: Vec<String> = last.keys().filter(|k| !current_ids.contains(*k)).cloned().collect();
                 if !removed.is_empty() {
                     roster_changed = true;
-                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); asks.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); }
+                    for k in removed { last.remove(&k); titles.remove(&k); suspended.remove(&k); mesh.remove(&k); asks.remove(&k); scripts.remove(&k); registered.remove(&k); tools.remove(&k); account_keys.remove(&k); }
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
@@ -5571,6 +5648,7 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
     let states = session_states(app);
     let now = now_ms();
     let asks = board::asks_by_tab(app);
+    let scripts = follow_ups::waiting_by_tab(app);
     designated_tabs(app)
         .into_iter()
         .map(|t| {
@@ -5578,6 +5656,8 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
             json!({
                 // v0.13, diffed by the WS ticker as a roster change (chats_changed).
                 "asks": asks.get(&t.tab_id).copied().unwrap_or(0),
+                // v0.15, diffed the same way.
+                "scriptsWaiting": scripts.get(&t.tab_id).copied().unwrap_or(0),
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspaceSuspended": t.workspace_suspended,
@@ -5614,6 +5694,7 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let ms_scrollback = ph.elapsed().as_millis(); // scrollback_db mutex + one SQLite query
     let tab_count = tabs.len();
     let asks = board::asks_by_tab(app);
+    let scripts = follow_ups::waiting_by_tab(app);
     let ph = std::time::Instant::now();
     let chats: Vec<Value> = tabs
         .into_iter()
@@ -5649,6 +5730,10 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 // working on something else while a question on one of its tasks waits. The
                 // phone pins `asks > 0` in "Needs you".
                 "asks": asks.get(&t.tab_id).copied().unwrap_or(0),
+                // v0.15: how many of this tab's watch scripts wait for the human to approve them
+                // (docs/follow-ups.md §5.1). Pinned in "Needs you" like `asks`: a script does
+                // nothing until approved, and the agent has moved on meanwhile.
+                "scriptsWaiting": scripts.get(&t.tab_id).copied().unwrap_or(0),
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
                 // NOT plain `state == "idle"`. Since a starting session registers as idle, that
@@ -5767,6 +5852,12 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // v0.5: the importer already folds that board into these rows, so serving both showed the
     // same work twice. mailink/board.rs.
     detail["tasks"] = json!(board::tasks_for_tab(app, tab_id));
+
+    // v0.15: the tab's watch scripts waiting for the human's approval, each the whole script the
+    // card must show. ALWAYS present (`[]`), for the same reason as `tasks`. mailink/follow_ups.rs.
+    let scripts = follow_ups::waiting_for_tab(app, tab_id);
+    detail["scriptsWaiting"] = json!(scripts.len());
+    detail["scriptApprovals"] = json!(scripts);
 
     // Messages typed while the agent was busy and NOT yet consumed. The phone renders these as
     // genuinely "queued" rather than a spinner, and it's the precondition for offering to pull one

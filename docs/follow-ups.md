@@ -426,7 +426,11 @@ anything. So:
 - **What approval does not cover:** an agent that can already run any command unattended (a
   skipped permission mode) can edit maiTerm's state file or the user's shell profile directly.
   Approval keeps scheduling out of reach of an agent that ISN'T trusted that far; it is not a
-  sandbox. maiLink cannot approve yet (that is a protocol bump).
+  sandbox.
+- **The phone approves too** (maiLink 0.15, `mailink/follow_ups.rs`): the chat carries the waiting
+  scripts, and its card has the same rules as the desktop's. The phone sends back the hash of the
+  script it showed, and a hash that doesn't match the stored script is refused. A decision there
+  is announced as `follow-ups-changed`, so the desktop's card closes too.
 
 **Scale.** Like every follow-up, a watch script is one-shot (§2.2): an agent that wants to keep
 watching re-arms when it is delivered. An unchanged script in the same folder re-arms without a

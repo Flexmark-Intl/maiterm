@@ -4,6 +4,21 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.15 changelog** (2026-10-02). Additive: **a watch script's approval card** (maiTerm
+> docs/follow-ups.md §5.1). An agent can ask maiTerm to run a script on a schedule and wake it
+> when the script passes. The script runs as the user, unattended, outside the agent's own
+> permission checks, so nothing runs until a human has read it and approved it. Until now only
+> the desktop could do that.
+> - **`Chat.scriptsWaiting`**: how many of a chat's watch scripts wait for approval. Pin
+>   `scriptsWaiting > 0` in "Needs you", like `asks`. A change fires `chats_changed`.
+> - **`ChatDetail.scriptApprovals: ScriptApproval[]`** (§4.3): the scripts themselves. Always
+>   present, `[]` when none.
+> - **`POST /chats/{tabId}/scripts/{id}/approve`** and **`…/reject`** (§4.1), body
+>   `{ scriptHash }`: the hash of the card the human read. Reject cancels the script.
+> - **The card must show the whole script, truthfully** (§4.3 `ScriptApproval`). The approval is
+>   for what runs, so a card that clips, caps or side-scrolls the script approves text nobody saw.
+> - No push yet, as with `asks`: a new doorbell kind needs relay copy.
+>
 > **v0.14 changelog** (2026-10-02). Additive: **`Turn.typedBy`** marks a `user` turn maiTerm typed
 > rather than the human: `{ by: 'overlord' | 'maiterm', rule? }`. An Overlord rule's directive
 > ("If the current work is multi-step, track it…") and a task answer maiTerm typed both arrive
@@ -440,6 +455,8 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
+| `POST /chats/{tabId}/scripts/{id}/approve` | Approve a watch script the human read on its card (v0.15, `ScriptApproval`). It starts running on maiTerm's next pass (≤5 s), and an agent re-arming the same script in the same folder isn't asked again | `{scriptHash}` → `{ok:true, scriptApprovals}` (the chat's waiting scripts now) \| `{ok:false, reason}` when the card is stale: no longer waiting (approved or rejected elsewhere, expired, delivered, cancelled), or `scriptHash` isn't the stored script's. Show `reason` verbatim and re-read the chat. `404` not designated |
+| `POST /chats/{tabId}/scripts/{id}/reject` | Reject it: the script is cancelled and never runs. The agent is not told (the desktop's Reject doesn't tell it either) | `{scriptHash}` → same as approve |
 | `POST /chats/{tabId}/queue/cancel` | Pull back the ONE message waiting in the input queue (§5) | `{}` → `{ok:true, cancelled:true, text, composerCleared}` \| `{ok:true, cancelled:false, reason}` |
 | `POST /chats/{tabId}/mesh-init` | Initialize-all for the mesh workspace that owns this tab | `{}` → `{ok, initiated, workspaceId?, reason?}` |
 | `GET  /chats/archived` | Archived (recoverable) tabs across all workspaces | → `ArchivedChat[]` |
@@ -628,6 +645,10 @@ interface Chat {
                             //   neither `state` nor `prompt` moves. Pin `asks > 0` in "Needs you".
                             //   A change fires `chats_changed`; the questions themselves are on
                             //   the chat's tasks (`blocker`).
+  scriptsWaiting: number;   // 0.15: how many of this chat's watch scripts wait for the human to
+                            //   approve them (`ChatDetail.scriptApprovals`). Like `asks`, moves
+                            //   neither `state` nor `prompt`: pin `> 0` in "Needs you". A change
+                            //   fires `chats_changed`.
   preview: string;          // last line(s) of distilled context
   tool: string | null;      // the tool the agent is running RIGHT NOW, and its primary argument
   detail: string | null;    //   ("Bash" / "npm test", "Edit" / "src/lib.rs"). From the PreToolUse
@@ -658,6 +679,10 @@ interface ChatDetail extends Chat {
                             // an idle tab. Live updates ride the WS `tasks` event (full replace).
                             // v0.5 REPLACED the Claude session board (`AgentTask`) here — see the
                             // changelog for why, and `MaitermTask` for the rules.
+  scriptApprovals: ScriptApproval[];
+                            // 0.15: watch scripts waiting for approval, oldest first. ALWAYS
+                            //   present, `[]` when none. Re-read the chat when `scriptsWaiting`
+                            //   changes (the desktop may have approved or rejected one).
   queued?: { text: string; queuedAt: number }[];
                             // messages typed while the agent was BUSY and not yet consumed, oldest
                             //   first. Render these as genuinely "queued" (the agent is busy),
@@ -718,6 +743,41 @@ interface ChatDetail extends Chat {
                             // Sent only when the CC build+settings actually expire it (§11);
                             // absent ⇒ no countdown, answerable until the prompt clears.
   };
+}
+// 0.15. A watch script waiting for the human's approval (maiTerm docs/follow-ups.md §5.1). The
+// agent asked maiTerm to run `script` every `everySecs` in `folder`, as the user, unattended and
+// OUTSIDE the agent's own permission checks, and to type `message` back to the agent once a run
+// exits 0. Nothing runs until a human approves. Desktop card copy, for parity: "The agent wants
+// maiTerm to run this script every 90s, as you, without asking again. It runs outside the agent's
+// own permission checks." Buttons: "Approve and run" / "Reject".
+//
+// THE CARD MUST SHOW ALL OF THE SCRIPT, AS IT WILL RUN. The approval is for what runs:
+// - The whole script, wrapped (pre-wrap + break anywhere), monospace. NO height cap, NO
+//   horizontal scroll, no "show more", no truncation: a scroll box hid `; curl … | sh` 300 spaces
+//   to the right of `test -s x` on the desktop's first build. Let the screen scroll instead, with
+//   the buttons BELOW the script.
+// - Its line and character counts: "3 lines, 84 characters". Lines as the script has them (a
+//   trailing newline ends the last line, it doesn't add one); characters as JS `.length`.
+// - The folder, verbatim, and the schedule EXACTLY: "every 90s", never rounded to "every 2m".
+//   Seconds under 60 or not a whole minute → "Ns"; whole minutes → minutes. Plus "up to Ns a run".
+// - Render `script` as TEXT, never markdown or HTML. maiTerm refuses at creation any script holding
+//   characters a screen can't show as they run (controls other than tab/newline, bidi and
+//   zero-width format characters, non-U+0020 spaces, U+2800), so what arrives is drawable as is —
+//   don't "clean" it either, which would show something other than what runs.
+interface ScriptApproval {
+  id: string;               // the follow-up's id; the route's `{id}`
+  label: string | null;     // the agent's name for it, "CI on PR 12". Desktop shows "watch script" for null
+  script: string;           // the WHOLE script, exactly as it will run
+  folder: string;           // where it runs (the tab's folder when it was asked for)
+  everySecs: number;        // seconds between runs
+  timeoutSecs: number;      // how long one run may take
+  message: string;          // what is typed to the agent when a run passes
+  author: 'agent' | 'human' | 'maiterm';
+  createdAt: string;        // RFC 3339
+  expiresAt: string | null; // RFC 3339; past it the script never runs and leaves this list
+  scriptHash: string;       // send back verbatim on approve/reject: SHA-256 of folder, NUL, script.
+                            //   A mismatch is refused, so an approval can't land on text the human
+                            //   didn't read
 }
 // msg_id identity guarantee: the id POST /message returns IS the id later emitted on the
 // `message{role:'user'}` WS echo for that turn (mints at accept-time, reused for both) —
@@ -2193,6 +2253,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.12` | Claude's workspace-trust dialog as a `permission` card on an UNREGISTERED tab (`prompt_id` `t_<tabId>_<folder digest>`, `options` in screen order), rung as `permission`; `reason:"trust_dialog"` from `/wake` and `POST /message`; adds `POST /chats/{tabId}/keys` |
 | `0.13` | adds `MaitermTask.blocker` (explicit `null` when none), `Chat.asks`, and `POST /tasks/{id}/answer` |
 | `0.14` | adds `Turn.typedBy` on user turns maiTerm typed (an Overlord directive, or a message sent for the human) |
+| `0.15` | adds `Chat.scriptsWaiting`, `ChatDetail.scriptApprovals` (`ScriptApproval[]`), and `POST /chats/{tabId}/scripts/{id}/approve` + `/reject` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,
