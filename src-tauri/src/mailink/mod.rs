@@ -9,7 +9,7 @@
 //! can be validated end-to-end. Pairing/auth and `/chats` land in P2b. Full contract:
 //! `docs/mailink-protocol.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -513,7 +513,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.15";
+const PROTOCOL_VERSION: &str = "0.16";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -2681,7 +2681,7 @@ const UNATTRIBUTED_PERMISSION_TEXT: &str = "Permission requested";
 
 /// Every `kind` the doorbell can ring (docs §6.2). The phone shows one switch per entry, so a
 /// kind belongs here only once something in this build actually rings it.
-const DOORBELL_KINDS: &[&str] = &["permission", "question", "idle_done", "escalation", "account"];
+const DOORBELL_KINDS: &[&str] = &["permission", "question", "idle_done", "escalation", "account", "ask", "script"];
 
 fn push_prefs_json(muted: &[String]) -> Value {
     json!({ "kinds": DOORBELL_KINDS, "muted": muted })
@@ -6114,6 +6114,9 @@ async fn doorbell_loop(app: Arc<AppState>) {
     // does the tab's session row first appearing, which is a registration edge rather than a
     // finished turn.
     let mut last: HashMap<String, (String, bool)> = HashMap::new();
+    // tab_id → the task questions / watch scripts waiting on the human last tick (v0.16).
+    let mut last_asks: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut last_scripts: HashMap<String, HashSet<String>> = HashMap::new();
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2000));
     // Anything queued for a loop that wasn't running is stale by definition — an escalation
     // raised while maiLink was off has been sitting on the desktop board since. Discard, don't
@@ -6168,9 +6171,29 @@ async fn doorbell_loop(app: Arc<AppState>) {
         // scrollback + per-tab transcript reads for 100 tabs, every 2s, holding the scrollback
         // mutex ~40% of wall-clock so every human-initiated fetch queued behind it.
         let chats = build_chat_summaries(&app);
+        // v0.16: what waits on the human without moving the tab's prompt — a task question, a
+        // watch script to allow. Rung for a key not seen last tick, never for a count: one
+        // answered and another asked inside a tick leaves the count where it was.
+        let mut asks = board::ask_keys_by_tab(&app);
+        let mut scripts = follow_ups::waiting_ids_by_tab(&app);
         let mut current = std::collections::HashSet::new();
         for c in &chats {
             let tab = c["tabId"].as_str().unwrap_or_default().to_string();
+            let tab_asks = asks.remove(&tab).unwrap_or_default();
+            let tab_scripts = scripts.remove(&tab).unwrap_or_default();
+            // A first sighting baselines silently, like the attention key: what was already
+            // waiting when maiLink came up (or the tab became designated) is not news.
+            let prev_asks = last_asks.insert(tab.clone(), tab_asks.clone());
+            let prev_scripts = last_scripts.insert(tab.clone(), tab_scripts.clone());
+            if !covered {
+                let title = c["title"].as_str().unwrap_or_default();
+                if has_new_key(prev_asks.as_ref(), &tab_asks) {
+                    ring_devices(&client, &app, &relay_url, &tab, title, "ask").await;
+                }
+                if has_new_key(prev_scripts.as_ref(), &tab_scripts) {
+                    ring_devices(&client, &app, &relay_url, &tab, title, "script").await;
+                }
+            }
             let key = attn_key(
                 c["state"].as_str().unwrap_or_default(),
                 c["prompt"].as_str(),
@@ -6200,7 +6223,14 @@ async fn doorbell_loop(app: Arc<AppState>) {
             }
         }
         last.retain(|k, _| current.contains(k));
+        last_asks.retain(|k, _| current.contains(k));
+        last_scripts.retain(|k, _| current.contains(k));
     }
+}
+
+/// Did something start waiting since last tick? `None` = first sighting, which baselines.
+fn has_new_key(prev: Option<&HashSet<String>>, now: &HashSet<String>) -> bool {
+    prev.is_some_and(|p| now.iter().any(|k| !p.contains(k)))
 }
 
 /// POST the content-free wake to the shared relay, once per paired device that registered BOTH a
@@ -6827,6 +6857,18 @@ mod tests {
         // Older than the ledger's oldest entry (rolled out of the ring), a long rule step still
         // identifies it.
         assert_eq!(turns[11]["typedBy"], json!({ "by": "overlord", "rule": "Compaction" }));
+    }
+
+    #[test]
+    fn the_doorbell_rings_for_a_new_wait_not_a_count() {
+        let set = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+        // First sighting baselines silently.
+        assert!(!has_new_key(None, &set(&["a"])));
+        assert!(has_new_key(Some(&set(&[])), &set(&["a"])));
+        assert!(!has_new_key(Some(&set(&["a", "b"])), &set(&["a"])), "one answered");
+        // One answered and another asked in the same tick: same count, still new.
+        assert!(has_new_key(Some(&set(&["a"])), &set(&["b"])));
+        assert!(!has_new_key(Some(&set(&["a"])), &set(&["a"])));
     }
 
     #[test]

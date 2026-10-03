@@ -160,15 +160,23 @@ fn asks_human(t: &Task) -> bool {
 /// is a separate fact from the tab's prompt, and the phone pins a chat with `asks > 0` in
 /// "Needs you" the way it pins an open prompt.
 pub(crate) fn asks_by_tab(app: &AppState) -> HashMap<String, usize> {
+    ask_keys_by_tab(app).into_iter().map(|(tab, keys)| (tab, keys.len())).collect()
+}
+
+/// The same questions, each as `task id @ asked_at`: the doorbell rings for a key it hasn't seen,
+/// so a question answered and a new one asked inside one tick still rings, and a question asked
+/// AGAIN on the same task (a new `asked_at`) is new.
+pub(crate) fn ask_keys_by_tab(app: &AppState) -> HashMap<String, HashSet<String>> {
     let designated = designated_set(app);
     let data = app.app_data.read();
-    let mut out: HashMap<String, usize> = HashMap::new();
+    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
     for win in &data.windows {
         for ws in &win.workspaces {
             for t in &ws.tasks {
                 let Some(tab) = t.tab_id.as_deref() else { continue };
                 if designated.contains(tab) && asks_human(t) {
-                    *out.entry(tab.to_string()).or_default() += 1;
+                    let asked = t.blocker.as_ref().map(|b| b.asked_at.as_str()).unwrap_or_default();
+                    out.entry(tab.to_string()).or_default().insert(format!("{}@{asked}", t.id));
                 }
             }
         }

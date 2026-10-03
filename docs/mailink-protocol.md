@@ -4,6 +4,14 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.16 changelog** (2026-10-03). Additive: **pushes for the waits that open no prompt.** A
+> task question (`Chat.asks`, 0.13) and a watch script to allow (`Chat.scriptsWaiting`, 0.15) now
+> ring the doorbell (§6) when one starts waiting and no phone holds the WS: kind `ask` ("Has a
+> question for you") and kind `script` ("Wants to run a watch script"), with the tab's title like
+> every push. Rung per NEW question or script (a task's question by `asked_at`, a script by id),
+> never by a count, and not for what was already waiting when maiLink came up. Both are in
+> `/push-prefs` `kinds`, so a phone can mute them. Open the chat on tap, like `permission`.
+>
 > **v0.15 changelog** (2026-10-02). Additive: **a watch script's approval card** (maiTerm
 > docs/follow-ups.md §5.1). An agent can ask maiTerm to run a script on a schedule and wake it
 > when the script passes. The script runs as the user, unattended, outside the agent's own
@@ -17,7 +25,7 @@
 >   `{ scriptHash }`: the hash of the card the human read. Reject declines the script: it will not run, and the agent is told.
 > - **The card must show the whole script, truthfully** (§4.3 `ScriptApproval`). The approval is
 >   for what runs, so a card that clips, caps or side-scrolls the script approves text nobody saw.
-> - No push yet, as with `asks`: a new doorbell kind needs relay copy.
+> - No push in 0.15; 0.16 adds kind `script`.
 >
 > **v0.14 changelog** (2026-10-02). Additive: **`Turn.typedBy`** marks a `user` turn maiTerm typed
 > rather than the human: `{ by: 'overlord' | 'maiterm', rule? }`. An Overlord rule's directive
@@ -33,7 +41,7 @@
 >   other work meanwhile, so neither `state` nor `prompt` moves; pin `asks > 0` in "Needs you".
 >   A change fires `chats_changed`.
 > - **`POST /tasks/{id}/answer`** (§13.3): answer it. `askedAt` is the required stale guard.
->   No push yet: a new doorbell kind needs relay copy, and the relay deploy is itself waiting on
+>   (0.16 adds the push, kind `ask`.) No push yet: a new doorbell kind needs relay copy, and the relay deploy is itself waiting on
 >   a human decision.
 >
 > **v0.12 changelog** (2026-09-27). Additive, both for screens that come before any session:
@@ -1374,7 +1382,9 @@ payload either way; `cap` is the per-device capability (below).
   `@capacitor/push-notifications` does register a `UNUserNotificationCenterDelegate`, but it only
   reads `content.title`/`.body` and never builds a `UNMutableNotificationContent`. iOS renders the
   relay's `body` verbatim and the phone cannot correct it. `permission` → "Needs your approval", `question` → "Needs your answer",
-  `idle_done` → "Agent finished", and **an unrecognised kind falls back to "Needs you" at
+  `idle_done` → "Agent finished", `escalation` → "Needs your decision", `account` → "Agent account
+  not applied", `ask` → "Has a question for you", `script` → "Wants to run a watch script"
+  (0.16), and **an unrecognised kind falls back to "Needs you" at
   time-sensitive**, never to "Agent finished". A kind this relay doesn't know is one the desktop
   grew after it shipped; defaulting to "finished" would announce the opposite of a human being
   waited on. Only `idle_done` is an FYI.
@@ -1448,7 +1458,8 @@ interface PushPrefs {
 
 - **The device is its bearer token**, as on `/push-register`. The dev token has no device record,
   so it gets `409`.
-- `kinds` today is `permission`, `question`, `idle_done`, `escalation`, `account`. A client builds
+- `kinds` today is `permission`, `question`, `idle_done`, `escalation`, `account`, `ask` and
+  `script` (0.16). A client builds
   its switches from this list rather than from its own, so it never offers a switch that does
   nothing.
 - **`muted` is stored verbatim, unknown kinds included** (trimmed, with blanks and duplicates
@@ -2266,6 +2277,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.13` | adds `MaitermTask.blocker` (explicit `null` when none), `Chat.asks`, and `POST /tasks/{id}/answer` |
 | `0.14` | adds `Turn.typedBy` on user turns maiTerm typed (an Overlord directive, or a message sent for the human) |
 | `0.15` | adds `Chat.scriptsWaiting`, `ChatDetail.scriptApprovals` (`ScriptApproval[]`), and `POST /chats/{tabId}/scripts/{id}/approve` + `/reject` |
+| `0.16` | adds doorbell kinds `ask` (a new task question) and `script` (a new watch script to allow), also in `/push-prefs` `kinds` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

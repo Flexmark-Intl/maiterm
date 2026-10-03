@@ -51,6 +51,11 @@ fn designated_set(app: &AppState) -> HashSet<String> {
 /// tab id → how many of its watch scripts wait for approval, designated tabs only.
 /// `Chat.scriptsWaiting` on the roster; the WS ticker diffs it like `asks`.
 pub(crate) fn waiting_by_tab(app: &AppState) -> HashMap<String, usize> {
+    waiting_ids_by_tab(app).into_iter().map(|(tab, ids)| (tab, ids.len())).collect()
+}
+
+/// The same scripts by follow-up id, for the doorbell: it rings for an id it hasn't seen.
+pub(crate) fn waiting_ids_by_tab(app: &AppState) -> HashMap<String, HashSet<String>> {
     let designated = designated_set(app);
     let data = app.app_data.read();
     let unattended = data.preferences.follow_ups_scripts_unattended;
@@ -61,9 +66,14 @@ pub(crate) fn waiting_by_tab(app: &AppState) -> HashMap<String, usize> {
             if !designated.contains(&tab.id) {
                 continue;
             }
-            let n = tab.follow_ups.iter().filter(|f| awaits_approval(f, unattended, now)).count();
-            if n > 0 {
-                out.insert(tab.id.clone(), n);
+            let ids: HashSet<String> = tab
+                .follow_ups
+                .iter()
+                .filter(|f| awaits_approval(f, unattended, now))
+                .map(|f| f.id.clone())
+                .collect();
+            if !ids.is_empty() {
+                out.insert(tab.id.clone(), ids);
             }
         }
     }

@@ -203,6 +203,10 @@ const KIND_BODY = {
   // would carry host names and an email through this public relay onto a lock screen.
   escalation: "Needs your decision",
   account: "Agent account not applied",
+  // maiLink 0.16: waits that don't open a prompt in the terminal — a question on one of the
+  // agent's tasks, and a watch script it wants maiTerm to run.
+  ask: "Has a question for you",
+  script: "Wants to run a watch script",
 };
 
 // `Object.hasOwn`, not `??`: `kind` arrives over the network, and a plain object literal answers
