@@ -4,7 +4,7 @@
 > the human side, resume-then-deliver); watch scripts (§5.1, step 7) 2026-10-01. Usage-limit
 > continuation (§9) remains (§10). Proposed 09-26. Owner: Darryl.
 > Lives under the Overlord: live only when the Overlord and **Enable follow-ups** are both on
-> (§4). Not yet released.
+> (§4). Released in v3.1.0; the approval-as-a-Decision redesign (§5.1, 2026-10-02) is not yet.
 > Scope: an agent (or its human) schedules a prompt to be delivered back into **its own tab**
 > later — at a time, or when something in the workspace happens. maiTerm holds the schedule,
 > so it works for every runtime, survives the agent exiting and maiTerm restarting, and never
