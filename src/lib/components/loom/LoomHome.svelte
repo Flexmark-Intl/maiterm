@@ -49,11 +49,14 @@
   });
 
   const summary = $derived(summarize(tasks, now, workspacesStore.parkedTaskIds));
-  /** Watch scripts waiting to be allowed, in scope: the other half of the Decisions queue. */
-  const scripts = $derived.by(() => {
-    const ids = new Set(scoped.map((w) => w.id));
-    return followUpsStore.pendingApprovals.filter((a) => ids.has(a.workspaceId)).length;
-  });
+  /** Watch scripts waiting to be allowed: the other half of the Decisions queue. NOT limited to
+   *  awake workspaces, unlike the tasks: a script is a question put to the human, and a parked
+   *  workspace's is still waiting — its notification opens this view, which must show it
+   *  (review of d56ac45). Only an explicit workspace filter narrows it. */
+  const approvals = $derived(
+    followUpsStore.pendingApprovals.filter((a) => !loomStore.workspaceFilter || a.workspaceId === loomStore.workspaceFilter),
+  );
+  const scripts = $derived(approvals.length);
   const decisions = $derived(decisionsQueue(tasks).length + scripts);
   /** Agents stopped at a permission prompt, in scope. */
   const permissions = $derived(
@@ -103,7 +106,7 @@
     {:else if loomStore.mode === 'weave'}
       <LoomView workspaces={scoped} {tasks} {now} multi={scoped.length > 1} />
     {:else}
-      <DecisionsView workspaces={scoped} {tasks} />
+      <DecisionsView workspaces={scoped} {tasks} {approvals} />
     {/if}
   </div>
 </section>

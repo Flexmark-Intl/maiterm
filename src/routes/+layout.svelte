@@ -858,6 +858,8 @@
      *  Cmd+Shift+J. For a notification that asks for a decision (`open-loom`). */
     async function openLoom(mode: LoomMode) {
       const ow = await workspacesStore.ensureOverlordWorkspace();
+      // The whole window: a filter left on another workspace would hide what was asked for.
+      loomStore.setWorkspaceFilter(null);
       loomStore.show(mode);
       for (const p of (workspacesStore.workspaces.find((w) => w.id === ow.id) ?? ow).panes) {
         const t = p.tabs.find((x) => x.tab_type === 'board');

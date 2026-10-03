@@ -22,13 +22,16 @@
   }
   let { tabId, followUp: f, onnote, variant = 'card' }: Props = $props();
 
-  /** Nothing is decided in a card's first moments on screen: it can appear right under the
-   *  pointer (the queue closes up when the card above is answered). Same rule as BlockerCard,
-   *  measured from when the agent asked. */
+  /** Nothing is decided in a card's first moments: not just after the agent asked (BlockerCard's
+   *  rule), but after THIS card appeared. Unlike task blockers, scripts don't only arrive at the
+   *  end of the queue: a workspace waking up (launch respawn, a move in from another window)
+   *  inserts its older scripts ABOVE the card being read, and pushes a different card's Allow
+   *  under the pointer — one whose `created_at` is long past (review of d56ac45). */
   const FRESH_MS = 1500;
+  const shownAt = Date.now();
   const isFresh = () => {
     const age = Date.now() - Date.parse(f.created_at);
-    return age >= 0 && age < FRESH_MS;
+    return (age >= 0 && age < FRESH_MS) || Date.now() - shownAt < FRESH_MS;
   };
   /** The second click of a double-click is never a decision. */
   const secondClick = (e: MouseEvent) => e.detail > 1;
@@ -38,6 +41,12 @@
   /** Exact seconds unless it is whole minutes — the human allows the schedule stated here. */
   function every(secs: number): string {
     return secs < 60 || secs % 60 !== 0 ? `${secs} seconds` : secs === 60 ? 'minute' : durationText(secs * 1000);
+  }
+
+  /** A trailing newline ends the last line; it doesn't add one. */
+  function linesText(script: string): string {
+    const n = script.replace(/\n$/, '').split('\n').length;
+    return `${n} line${n === 1 ? '' : 's'}`;
   }
 
   async function decide(allow: boolean, e: MouseEvent) {
@@ -78,7 +87,9 @@
     </figcaption>
     <!-- Wrapped and never clipped: the approval is for every character of it. -->
     <pre>{f.due.script}</pre>
-    <div class="where">in {f.due.cwd}</div>
+    <!-- Everything the approval covers: the folder, the run limit, and how much script there is
+         (so a script padded past the screen can't pass for a short one). -->
+    <div class="where">in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run · {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters</div>
   </figure>
 
   <details class="then">

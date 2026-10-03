@@ -45,9 +45,22 @@ function createToastStore() {
   // Reactive signal bumped on every timer state change so isActive() triggers re-renders
   let timerVersion = $state(0);
 
-  /** Returns the active (index 0) toast id, or null. */
+  /** The toast whose countdown runs: the oldest one that HAS one. A sticky toast (progress, a
+   *  request waiting on the human) has no timer, and as the head it used to stall every toast
+   *  behind it — a request waits hours, so nothing else ever auto-dismissed. */
   function activeId(): string | null {
-    return toasts.length > 0 ? toasts[0].id : null;
+    return toasts.find(t => !t.sticky)?.id ?? null;
+  }
+
+  /** Keep to MAX_VISIBLE by dropping the oldest toast that isn't a request. A request is
+   *  removed only by its owner or the human: evicted, it would be gone while its question still
+   *  waits, and it is announced once. */
+  function evictOverflow() {
+    while (toasts.length > MAX_VISIBLE) {
+      const victim = toasts.find(t => !t.request);
+      if (!victim) break;
+      removeToast(victim.id);
+    }
   }
 
   function startTimer(id: string, ms: number) {
@@ -139,18 +152,14 @@ function createToastStore() {
     if (focused !== undefined) windowFocused = focused;
     const isFocused = windowFocused;
 
-    // Only the first toast (active) gets a running timer, and only if focused
-    const isFirst = toasts.length === 1;
-    if (isFirst && isFocused) {
+    // Only the active toast gets a running timer, and only if focused
+    if (activeId() === id && isFocused) {
       startTimer(id, durationMs);
     } else {
       createPausedTimer(id, durationMs);
     }
 
-    // Evict oldest if over max
-    while (toasts.length > MAX_VISIBLE) {
-      removeToast(toasts[0].id);
-    }
+    evictOverflow();
   }
 
   /** A request that waits for the human: no timer, no progress bar, and it stays until its
@@ -164,9 +173,7 @@ function createToastStore() {
       duration: 0, sticky: true, request: true, source: opts.source, action: opts.action,
     };
     toasts = [...toasts, toast];
-    while (toasts.length > MAX_VISIBLE) {
-      removeToast(toasts[0].id);
-    }
+    evictOverflow();
     return id;
   }
 
@@ -191,9 +198,7 @@ function createToastStore() {
     };
     toasts = [...toasts, toast];
     // Sticky toasts get no timer — they persist until updated/removed.
-    while (toasts.length > MAX_VISIBLE) {
-      removeToast(toasts[0].id);
-    }
+    evictOverflow();
     return id;
   }
 

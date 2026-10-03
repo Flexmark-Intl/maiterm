@@ -59,6 +59,8 @@ export interface PendingApproval {
   workspaceId: string;
   tabId: string;
   tabName: string;
+  /** On an archived tab: it can be decided, but the tab can't be opened until it is restored. */
+  archived: boolean;
   followUp: FollowUp;
 }
 
@@ -147,11 +149,18 @@ function createFollowUpsStore() {
 
   function pendingApprovals(): PendingApproval[] {
     const unattended = preferencesStore.followUpsScriptsUnattended;
+    const now = Date.now();
     const out: PendingApproval[] = [];
-    for (const { workspaceId, tab } of everyTab()) {
-      for (const f of tab.follow_ups ?? []) {
-        if (needsApproval(f, unattended) && !isExpired(f, Date.now())) {
-          out.push({ workspaceId, tabId: tab.id, tabName: tab.name, followUp: f });
+    for (const ws of workspacesStore.workspaces) {
+      const tabs = [
+        ...ws.panes.flatMap(p => p.tabs).map(tab => ({ tab, archived: false })),
+        ...ws.archived_tabs.map(tab => ({ tab, archived: true })),
+      ];
+      for (const { tab, archived } of tabs) {
+        for (const f of tab.follow_ups ?? []) {
+          if (needsApproval(f, unattended) && !isExpired(f, now)) {
+            out.push({ workspaceId: ws.id, tabId: tab.id, tabName: tab.name, archived, followUp: f });
+          }
         }
       }
     }
@@ -164,7 +173,9 @@ function createFollowUpsStore() {
   function announceApprovals() {
     if (!preferencesStore.followUpsLive) return;
     for (const p of pendingApprovals()) {
-      if (announced.has(p.followUp.id)) continue;
+      // An archived tab's: not yet. The notice can't be shown for it (`dispatch` only serves tabs
+      // in a pane), and marked announced it never would be — it is announced once restored.
+      if (p.archived || announced.has(p.followUp.id)) continue;
       announced.add(p.followUp.id);
       void notify('Allow a watch script?', p.tabName, 'info', { tabId: p.tabId }, {
         key: approvalKey(p.followUp.id),

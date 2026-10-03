@@ -13,26 +13,26 @@
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
-  import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svelte';
+  import type { PendingApproval } from '$lib/stores/followUps.svelte';
   import type { Task, Workspace } from '$lib/tauri/types';
 
   interface Props {
     workspaces: Workspace[];
     tasks: Task[];
+    /** Watch scripts waiting to be allowed, already scoped by LoomHome (see there: not limited
+     *  to awake workspaces). */
+    approvals: PendingApproval[];
   }
-  let { workspaces, tasks }: Props = $props();
+  let { workspaces, tasks, approvals }: Props = $props();
 
   type Item = { kind: 'task'; at: number; task: Task } | { kind: 'script'; at: number; approval: PendingApproval };
   /** Blockers and scripts, oldest first: the order they should be answered in. */
-  const queue = $derived.by((): Item[] => {
-    const inScope = new Set(workspaces.map((w) => w.id));
-    return [
+  const queue = $derived.by((): Item[] =>
+    [
       ...decisionsQueue(tasks).map((task): Item => ({ kind: 'task', at: Date.parse(task.blocker!.asked_at), task })),
-      ...followUpsStore.pendingApprovals
-        .filter((a) => inScope.has(a.workspaceId))
-        .map((approval): Item => ({ kind: 'script', at: Date.parse(approval.followUp.created_at), approval })),
-    ].sort((a, b) => a.at - b.at);
-  });
+      ...approvals.map((approval): Item => ({ kind: 'script', at: Date.parse(approval.followUp.created_at), approval })),
+    ].sort((a, b) => a.at - b.at),
+  );
   const unexplained = $derived(unexplainedBlocked(tasks, workspacesStore.parkedTaskIds));
   /** Receipts for "Ask for the reason", by task id. */
   let asked = $state<Record<string, string>>({});
@@ -107,7 +107,7 @@
       {@const a = item.approval}
       <article class="card">
         <div class="who">
-          <span>{tabDisplayName(a.tabId)}</span>
+          <span>{a.tabName}{a.archived ? ' (archived)' : ''}</span>
           <span>watch script</span>
           <span>waiting {fmtAge(a.followUp.created_at)}</span>
         </div>
@@ -116,10 +116,13 @@
           followUp={a.followUp}
           onnote={(text) => (answered = [{ id: a.followUp.id, title: a.followUp.due.label ?? 'Watch script', text }, ...answered.filter((x) => x.id !== a.followUp.id)].slice(0, 5))}
         />
-        <div class="actions">
-          <button onclick={() => { loomStore.openChat(a.tabId); loomStore.show('focus'); }}>Talk to the agent</button>
-          <button onclick={() => void navigateToTab(a.tabId)}>Open the tab</button>
-        </div>
+        {#if !a.archived}
+          <!-- An archived tab can't be opened or talked to until it is restored. -->
+          <div class="actions">
+            <button onclick={() => { loomStore.openChat(a.tabId); loomStore.show('focus'); }}>Talk to the agent</button>
+            <button onclick={() => void navigateToTab(a.tabId)}>Open the tab</button>
+          </div>
+        {/if}
       </article>
     {/if}
   {:else}
