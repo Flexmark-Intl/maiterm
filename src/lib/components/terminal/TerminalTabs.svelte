@@ -1337,10 +1337,9 @@
           {@const fu = badgeSummary(tab.follow_ups ?? [], followUpNow, preferencesStore.followUpsLive, preferencesStore.followUpsScriptsUnattended)}
           {#if fu}
             <Tooltip text={fu.tooltip}>
-              <!-- svelte-ignore a11y_click_events_have_key_events -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
-              <span
+              <button
                 class="follow-up-indicator"
+                aria-label="Follow-ups"
                 class:due={fu.due}
                 class:approval={fu.approval}
                 class:held={!preferencesStore.followUpsLive || fu.count === 0}
@@ -1352,7 +1351,7 @@
                 }}
               >
                 <Icon name="clock" size={11} />{#if fu.count > 1}<span class="follow-up-count">{fu.count}</span>{/if}
-              </span>
+              </button>
             </Tooltip>
           {/if}
         {/if}
@@ -1707,8 +1706,21 @@
     color: var(--accent);
   }
 
+  /* A button (so the tab's drag skips it and a click reaches it), drawn as the indicator it was. */
   .follow-up-indicator {
     cursor: pointer;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    border-radius: 3px;
+  }
+
+  .follow-up-indicator:hover,
+  .follow-up-indicator:focus-visible {
+    color: var(--fg);
+    outline: 1px solid var(--bg-light);
+    outline-offset: 1px;
   }
 
   .follow-up-indicator.approval {

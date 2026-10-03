@@ -389,10 +389,33 @@ permission check at the moment it runs, while a human could see it. A watch scri
 unattended, as the user, outside that check. A prompt-injected agent could use it to schedule
 anything. So:
 
-- **The human approves each script once, on a card that shows exactly what will run.** The tab's
-  clock badge turns yellow and is clickable, and a notification names the tab. The card (in the
-  follow-ups dialog) shows the script verbatim, its folder, its schedule, and *Approve and run* /
-  *Reject* (reject cancels it). The agent's reply says `approval: "waiting_for_human"`.
+- **The human approves each script once, on a card that shows exactly what will run.** The
+  agent's reply says `approval: "waiting_for_human"`.
+- **A waiting script is a DECISION, in the queue the human already answers** (redesigned
+  2026-10-02, after Darryl's first real use). The first build had its own path: a passing
+  notification that told him to click the tab's clock badge, a badge that couldn't be clicked
+  (the tab's drag took the pointer), and a card inside the follow-ups manager, whose "Deliver
+  now", "Cancel" and add-a-follow-up form read as next steps once he'd approved. maiTerm already
+  had a place for "something only the human can settle": the Loom's Decisions. So:
+  - **One card, `components/followUps/ScriptApprovalCard.svelte`, on every surface:** the
+    Loom's Decisions (in the same oldest-first queue as task blockers, and in its count and
+    "need you"), the tab's task panel, and the top of the tab's follow-ups list. It asks "Allow
+    this watch script?", draws the script as a small pane — name and schedule in its title bar,
+    the folder under it — and answers with *Allow* / *Don't allow*. The text the agent will get
+    is folded under it. It carries BlockerCard's two click guards (nothing in its first 1.5 s,
+    never the second click of a double-click).
+  - **Not a task.** A task's blocker is answered by typing text to the agent, and the agent can
+    rewrite a task with `updateTasks`. An approval is acted on by maiTerm, and the card reads
+    the follow-up itself (`followUpsStore.pendingApprovals`), which no agent can edit after
+    asking. *Don't allow* removes it (`followUpsStore.reject`); nothing is sent to the agent.
+  - **The notification waits.** "Allow a watch script?" with the tab's name — a request toast
+    (`toastStore.addRequest`, yellow-edged, no countdown) that stays until the script is
+    answered anywhere, the phone included (`settleApprovalNotices` runs on every mirror and
+    tick). Clicking it opens the Loom's Decisions (`open-loom`). Each script is announced once a
+    run, including ones left waiting when maiTerm last closed.
+  - **The clock badge is a button**, yellow while a script waits, and opens the tab's list with
+    the card on top. A click on any control inside a tab used to be swallowed: the tab's
+    pointerdown takes pointer capture for dragging, which retargets the click to the tab.
 - **The card shows ALL of it, truthfully.** Wrapped, with no height cap and no horizontal scroll —
   a scroll box with overlay scrollbars showed `test -s x` and hid the `; curl … | sh` 300 spaces
   to its right — plus its line and character counts. A script holding anything the card can't
@@ -736,8 +759,12 @@ here is the desired property.
   - who added it;
   - for a due one, what is holding it.
   
-  The levers are Deliver now, Cancel (Clear for an expired one), and adding one by hand
-  (`author: "human"`). This is Solo's "Set timer", on the tab rather than in a palette.
+  The levers are Send now and Remove, and adding one by hand (`author: "human"`), folded behind
+  "Schedule one yourself" — left open, the form read as the next step. This is Solo's "Set
+  timer", on the tab rather than in a palette. Each row leads with what it waits for; a watch
+  script's code is folded under "Watch script, every 15s · checked 10s ago: not yet". A script
+  waiting to be allowed is the approval card at the top instead (§5.1). (Renamed 2026-10-02 from
+  Deliver now / Cancel; the code and older notes still say `deliverNow`.)
 - **Deliver now uses the same gate as the tick.** Both call `deliverOne()`; only the due time
   is waived. Held, it says why, and the envelope of an early one says "(delivered early, at
   your human's request)".

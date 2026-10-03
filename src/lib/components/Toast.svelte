@@ -21,6 +21,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -- toast dismiss is decorative, close button provides keyboard access -->
       <div
         class="toast toast-{toast.type}"
+        class:request={!!toast.request}
         class:clickable={!!toast.action || !!toast.source?.tabId}
         in:fly={{ x: 300, duration: 250 }}
         out:fade={{ duration: 150 }}
@@ -47,7 +48,9 @@
             aria-label="Dismiss notification"
           >&times;</button>
         {/if}
-        {#if toast.sticky}
+        {#if toast.request}
+          <!-- Waiting on the human: no countdown, nothing filling up. -->
+        {:else if toast.sticky}
           {#if toast.indeterminate}
             <div class="toast-progress indeterminate"></div>
           {:else}
@@ -106,6 +109,11 @@
 
   .toast-info {
     border-left: 3px solid var(--cyan, #7dcfff);
+  }
+
+  /* Waiting on the human: the same yellow as the card it opens. */
+  .toast.request {
+    border-left: 3px solid var(--yellow, #e0af68);
   }
 
   .toast-content {

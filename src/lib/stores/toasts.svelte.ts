@@ -22,6 +22,10 @@ export interface Toast {
   indeterminate?: boolean;
   /** Optional callback for a Cancel button (replaces the close × on progress toasts). */
   onCancel?: () => void;
+  /** A request waiting on the human (`addRequest`): sticky, with no bar of any kind. */
+  request?: boolean;
+  /** What the toast is about, for `removeByKey`. */
+  key?: string;
 }
 
 const MAX_VISIBLE = 3;
@@ -149,6 +153,27 @@ function createToastStore() {
     }
   }
 
+  /** A request that waits for the human: no timer, no progress bar, and it stays until its
+   *  owner removes it (`removeByKey`) or the human dismisses it. `key` names what it is about,
+   *  so asking again replaces the old one instead of stacking a second. */
+  function addRequest(opts: { key: string; title: string; body: string; source?: ToastSource; action?: () => void }): string {
+    removeByKey(opts.key);
+    const id = crypto.randomUUID();
+    const toast: Toast = {
+      id, key: opts.key, title: opts.title, body: opts.body, type: 'info', createdAt: Date.now(),
+      duration: 0, sticky: true, request: true, source: opts.source, action: opts.action,
+    };
+    toasts = [...toasts, toast];
+    while (toasts.length > MAX_VISIBLE) {
+      removeToast(toasts[0].id);
+    }
+    return id;
+  }
+
+  function removeByKey(key: string) {
+    for (const t of toasts.filter((x) => x.key === key)) removeToast(t.id);
+  }
+
   /** Add a sticky progress toast (no auto-dismiss). Returns its id for updateToast/removeToast. */
   function addProgressToast(opts: { title: string; body: string; onCancel?: () => void }): string {
     const id = crypto.randomUUID();
@@ -224,6 +249,8 @@ function createToastStore() {
   return {
     get toasts() { return toasts; },
     addToast,
+    addRequest,
+    removeByKey,
     addProgressToast,
     updateToast,
     removeToast,

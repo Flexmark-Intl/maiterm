@@ -1,12 +1,18 @@
 <script lang="ts">
-  /** A tab's follow-ups (docs/follow-ups.md §8): what is pending, why one that is due hasn't
-   *  gone, and the human's three levers — deliver now, cancel, add one by hand. Opened from the
-   *  tab's context menu (the `open-follow-ups` event, owned by +layout). */
+  /** A tab's follow-ups (docs/follow-ups.md §8): what this tab's agent will be sent back later.
+   *  Opened from the tab's clock badge or its context menu (the `open-follow-ups` event, owned by
+   *  +layout).
+   *
+   *  It is a LIST first. A watch script waiting to be allowed is a decision, so it sits on top as
+   *  the same ScriptApprovalCard the Decisions queue shows; everything else is one row per
+   *  follow-up, led by what it waits for. Scheduling one by hand is folded away until asked for:
+   *  open by default, that form read as the next step after approving a script. */
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { whenText, durationText } from '$lib/followUps/model';
   import * as commands from '$lib/tauri/commands';
   import type { WatchStatus } from '$lib/tauri/types';
+  import ScriptApprovalCard from './ScriptApprovalCard.svelte';
 
   interface Props {
     tabId: string | null;
@@ -18,12 +24,15 @@
   let dialogEl = $state<HTMLDivElement | null>(null);
   /** The list reads relative times ("in 12m"); tick while open so they don't go stale. */
   let now = $state(Date.now());
+  let adding = $state(false);
   let text = $state('');
   let minutes = $state(30);
   let busy = $state(false);
   let addError = $state<string | null>(null);
-  /** Per follow-up: why "Deliver now" didn't deliver, until the next attempt. */
+  /** Per follow-up: why "Send now" didn't send, until the next attempt. */
   let heldReasons = $state<Record<string, string>>({});
+  /** The outcome of the last approval answered here; its card leaves once answered. */
+  let approvalNote = $state<string | null>(null);
   /** How each watch script's runs have gone (Rust, since this launch), refreshed while open. */
   let watch = $state<Record<string, WatchStatus>>({});
 
@@ -36,17 +45,10 @@
   }
 
   /** Seconds as a human reads them, never rounded: `durationText` rounds to whole minutes, which
-   *  turned a 15-second schedule into "every 1m" and a 90-second one into "every 2m" — and the
-   *  human approves the schedule the card states. Whole minutes only when it IS whole minutes. */
+   *  turned a 15-second schedule into "every 1m" and a 90-second one into "every 2m". */
   function secsText(secs: number): string {
     const s = Math.max(0, Math.round(secs));
     return s < 60 || s % 60 !== 0 ? `${s}s` : durationText(s * 1000);
-  }
-
-  /** Lines as the script has them: a trailing newline ends the last line, it doesn't add one. */
-  function linesText(script: string): string {
-    const n = script.replace(/\n$/, '').split('\n').length;
-    return `${n} line${n === 1 ? '' : 's'}`;
   }
 
   /** "checked 40s ago: not yet", for a script's row. */
@@ -70,13 +72,17 @@
     const all = tab?.follow_ups ?? [];
     return tabId ? followUpsStore.list(tabId).map(v => ({ v, f: all.find(f => f.id === v.id)! })).filter(r => r.f) : [];
   });
+  const asking = $derived(rows.filter(r => r.v.awaiting_approval && r.v.status !== 'expired'));
+  const listed = $derived(rows.filter(r => !(r.v.awaiting_approval && r.v.status !== 'expired')));
 
   $effect(() => {
     if (!open) return;
     now = Date.now();
+    adding = false;
     text = '';
     addError = null;
     heldReasons = {};
+    approvalNote = null;
     void refreshWatch();
     // 5 s, not the list's usual 15: "checked 10s ago" is read in seconds.
     const t = setInterval(() => { now = Date.now(); void refreshWatch(); }, 5_000);
@@ -86,7 +92,7 @@
     return () => clearInterval(t);
   });
 
-  async function deliverNow(id: string) {
+  async function sendNow(id: string) {
     if (!tabId) return;
     busy = true;
     try {
@@ -98,18 +104,7 @@
     }
   }
 
-  async function approve(id: string) {
-    if (!tabId) return;
-    busy = true;
-    try {
-      await followUpsStore.approve(tabId, id);
-    } finally {
-      busy = false;
-      now = Date.now();
-    }
-  }
-
-  async function cancel(id: string) {
+  async function remove(id: string) {
     if (!tabId) return;
     busy = true;
     try {
@@ -125,8 +120,10 @@
     addError = null;
     try {
       const r = await followUpsStore.create(tabId, { text, in_minutes: minutes }, 'human');
-      if (r.ok) text = '';
-      else addError = r.detail;
+      if (r.ok) {
+        text = '';
+        adding = false;
+      } else addError = r.detail;
     } catch (e) {
       addError = String(e);
     } finally {
@@ -160,107 +157,93 @@
     tabindex="-1"
   >
     <div class="palette">
-      <div class="header">
-        <div class="title">Follow-ups</div>
-        <div class="subtitle">
-          Prompts scheduled back into {#if tab}<strong>{tab.name}</strong>{:else}this tab{/if}'s agent.
-          Each goes between turns, when nothing is typed in its input box, and only once.
-        </div>
+      <header>
+        <h2>Follow-ups{#if tab}<span class="tab-name">{tab.name}</span>{/if}</h2>
+        <p>What this tab's agent will be sent later, between its turns.</p>
         {#if !live}
-          <div class="notice">
-            Follow-ups are off, so these are held, not delivered. Turn them on in
-            Preferences → Overlord.
-          </div>
+          <p class="notice">Follow-ups are off, so nothing here is sent or checked. Turn them on in Preferences → Overlord.</p>
         {/if}
         {#if found?.archived}
-          <div class="notice">This tab is archived. Its follow-ups are kept and go once it's restored.</div>
+          <p class="notice">This tab is archived. Its follow-ups are kept and go once it's restored.</p>
         {/if}
-      </div>
+      </header>
 
       <div class="body">
         {#if !found}
-          <p class="status">This tab is gone — closed, or reloaded under a new id. Open Follow-ups… from its tab again.</p>
-        {:else if rows.length === 0}
-          <p class="status">Nothing scheduled.</p>
+          <p class="status">This tab is gone — closed, or reloaded under a new id. Open Follow-ups from its tab again.</p>
         {:else}
-          {#each rows as { v, f } (v.id)}
-            <div class="row" class:expired={v.status === 'expired'} class:asking={v.awaiting_approval}>
-              {#if f.due.kind === 'script'}
-                <!-- The approval card (docs/follow-ups.md §5.1): EXACTLY what will run, where, and
-                     how often — the approval is for this text in this folder. -->
-                <div class="script-card">
-                  {#if v.awaiting_approval}
-                    <div class="ask">
-                      The agent wants maiTerm to run this script every {secsText(f.due.every_secs ?? 60)}, as you,
-                      without asking again. It runs outside the agent's own permission checks.
-                    </div>
-                  {/if}
-                  <div class="script-label">{f.due.label ?? 'watch script'}</div>
-                  <pre class="script">{f.due.script}</pre>
-                  <div class="script-meta">
-                    {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters
-                    · in <code>{f.due.cwd}</code> · every {secsText(f.due.every_secs ?? 60)} · up to {f.due.timeout_secs ?? 10}s a run
-                    {#if !v.awaiting_approval && !f.due.met_at}· {runText(v.id)}{/if}
-                  </div>
-                </div>
-              {/if}
-              <div class="row-text">{v.text}</div>
-              <div class="row-meta">
-                <span class="when" class:due={v.status === 'due'}>{whenText(f, now)}</span>
-                <span class="dot">·</span>
-                <span>{v.author === 'human' ? 'added by you' : v.author === 'maiterm' ? 'added by maiTerm' : 'scheduled by the agent'}</span>
-                {#if v.status === 'due' && v.waiting}
-                  <span class="dot">·</span><span>{v.waiting}</span>
-                {:else if v.status === 'due'}
-                  <span class="dot">·</span><span>goes at the next check</span>
-                {:else if v.status === 'expired'}
-                  <span class="dot">·</span><span>won't be delivered</span>
-                {/if}
-              </div>
-              {#if heldReasons[v.id]}
-                <div class="held">Not delivered: {heldReasons[v.id]}</div>
-              {/if}
-              <div class="row-actions">
-                {#if v.awaiting_approval && v.status !== 'expired'}
-                  <button class="btn btn-small btn-primary" onclick={() => approve(v.id)} disabled={busy}>Approve and run</button>
-                  <button class="btn btn-small" onclick={() => cancel(v.id)} disabled={busy}>Reject</button>
-                {:else}
-                  {#if v.status !== 'expired'}
-                    <button class="btn btn-small" onclick={() => deliverNow(v.id)} disabled={busy || !live}>Deliver now</button>
-                  {/if}
-                  <button class="btn btn-small" onclick={() => cancel(v.id)} disabled={busy}>
-                    {v.status === 'expired' ? 'Clear' : 'Cancel'}
-                  </button>
-                {/if}
-              </div>
-            </div>
+          {#each asking as { f } (f.id)}
+            <ScriptApprovalCard tabId={tabId!} followUp={f} onnote={(t) => (approvalNote = t)} />
           {/each}
+          {#if approvalNote}<p class="outcome">{approvalNote}</p>{/if}
+
+          {#if listed.length === 0 && asking.length === 0}
+            <p class="status">Nothing scheduled.</p>
+          {/if}
+
+          {#if listed.length}
+            <ul class="list">
+              {#each listed as { v, f } (v.id)}
+                <li class="row" class:expired={v.status === 'expired'}>
+                  <div class="when" class:due={v.status === 'due'}>{whenText(f, now)}</div>
+                  <p class="text">{v.text}</p>
+                  {#if f.due.kind === 'script'}
+                    <details class="script">
+                      <summary>
+                        {f.due.met_at ? 'Watch script' : `Watch script, every ${secsText(f.due.every_secs ?? 60)} · ${runText(v.id)}`}
+                      </summary>
+                      <pre>{f.due.script}</pre>
+                      <div class="where">in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run</div>
+                    </details>
+                  {/if}
+                  <div class="meta">
+                    {v.author === 'human' ? 'Added by you' : v.author === 'maiterm' ? 'Added by maiTerm' : 'Scheduled by the agent'}{#if v.status === 'due'}{v.waiting ? `. Waiting: ${v.waiting}` : '. Goes at the next check'}{:else if v.status === 'expired'}. Expired, won't be sent{/if}
+                  </div>
+                  {#if heldReasons[v.id]}
+                    <div class="held">Not sent: {heldReasons[v.id]}</div>
+                  {/if}
+                  <div class="actions">
+                    {#if v.status !== 'expired'}
+                      <button class="btn" onclick={() => sendNow(v.id)} disabled={busy || !live}>Send now</button>
+                    {/if}
+                    <button class="btn" onclick={() => remove(v.id)} disabled={busy}>Remove</button>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+          {/if}
         {/if}
       </div>
 
-      <div class="add">
-        <textarea
-          bind:value={text}
-          rows="2"
-          placeholder="A prompt to deliver back to the agent later…"
-          disabled={busy}
-        ></textarea>
-        <div class="add-row">
-          <label class="minutes">
-            in
-            <input type="number" min="1" max="10080" bind:value={minutes} disabled={busy} />
-            minutes
-          </label>
-          <div class="spacer"></div>
-          <button class="btn btn-primary" onclick={add} disabled={busy || !text.trim() || !found}>Add follow-up</button>
+      {#if adding}
+        <div class="add">
+          <textarea
+            bind:value={text}
+            rows="2"
+            placeholder="What should the agent be sent?"
+            disabled={busy}
+          ></textarea>
+          <div class="add-row">
+            <label class="minutes">
+              in
+              <input type="number" min="1" max="10080" bind:value={minutes} disabled={busy} />
+              minutes
+            </label>
+            <div class="spacer"></div>
+            <button class="btn" onclick={() => { adding = false; addError = null; }} disabled={busy}>Cancel</button>
+            <button class="btn btn-primary" onclick={add} disabled={busy || !text.trim() || !found}>Schedule</button>
+          </div>
+          {#if addError}<div class="error">{addError}</div>{/if}
         </div>
-        {#if addError}<div class="error">{addError}</div>{/if}
-      </div>
+      {/if}
 
-      <div class="footer">
+      <footer>
+        {#if !adding && found}
+          <button class="link" onclick={() => (adding = true)}>Schedule one yourself</button>
+        {/if}
         <div class="spacer"></div>
         <button class="btn" onclick={onclose}>Close</button>
-      </div>
+      </footer>
     </div>
   </div>
 {/if}
@@ -272,7 +255,7 @@
     background: rgba(0, 0, 0, 0.4);
     display: flex;
     justify-content: center;
-    padding-top: 12vh;
+    padding-top: 10vh;
     z-index: 1000;
     outline: none;
   }
@@ -281,160 +264,99 @@
     background: var(--bg-medium);
     border: 1px solid var(--bg-light);
     border-radius: 8px;
-    width: min(520px, calc(100vw - 32px));
-    max-height: 70vh;
+    width: min(540px, calc(100vw - 32px));
+    max-height: 78vh;
     display: flex;
     flex-direction: column;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
     align-self: flex-start;
   }
 
-  .header {
-    padding: 12px 14px 10px;
+  header {
+    padding: 12px 16px 10px;
     border-bottom: 1px solid var(--bg-light);
   }
-
-  .title {
+  h2 {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 10px;
     font-size: 1rem;
     font-weight: 600;
     color: var(--fg);
   }
-
-  .subtitle {
-    margin-top: 3px;
-    font-size: 0.8rem;
-    color: var(--fg-dim);
-    line-height: 1.4;
-  }
-
-  .subtitle strong {
-    color: var(--accent);
-    font-weight: 600;
-  }
-
-  .notice {
+  .tab-name { font-size: 0.85rem; font-weight: 500; color: var(--accent); overflow-wrap: anywhere; }
+  header p { margin: 3px 0 0; font-size: 0.8rem; color: var(--fg-dim); line-height: 1.4; }
+  header .notice {
     margin-top: 8px;
     padding: 6px 8px;
     border-radius: 5px;
     background: var(--bg-dark);
-    font-size: 0.8rem;
     color: var(--yellow, #e0af68);
   }
 
   .body {
     flex: 1;
     overflow-y: auto;
-    padding: 6px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
   }
+  .status { margin: 4px 0; font-size: 0.85rem; color: var(--fg-dim); }
+  .outcome { margin: 0; font-size: 0.8rem; color: var(--fg-dim); }
 
-  .status {
-    padding: 12px;
-    font-size: 0.85rem;
+  .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  .row { padding: 10px 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .row + .row { border-top: 1px solid var(--bg-light); }
+  .row:first-child { padding-top: 0; }
+
+  /* What it waits for leads: that is what tells two follow-ups apart at a glance. */
+  .when { font-size: 0.82rem; font-weight: 600; color: var(--fg); overflow-wrap: anywhere; }
+  .when.due { color: var(--accent); }
+  .expired .when, .expired .text { color: var(--fg-dim); }
+  .text {
+    margin: 0;
+    font-size: 0.82rem;
     color: var(--fg-dim);
-  }
-
-  .row {
-    padding: 8px 10px;
-    border-radius: 6px;
-  }
-
-  .row + .row {
-    border-top: 1px solid var(--bg-light);
-  }
-
-  .row.expired .row-text {
-    color: var(--fg-dim);
-  }
-
-  .row.asking {
-    background: var(--bg-dark);
-  }
-
-  .script-card {
-    margin-bottom: 6px;
-  }
-
-  .ask {
-    margin-bottom: 6px;
-    font-size: 0.8rem;
-    color: var(--yellow, #e0af68);
-    line-height: 1.4;
-  }
-
-  .script-label {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: var(--fg);
+    line-height: 1.45;
+    white-space: pre-wrap;
     overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 
-  /* The WHOLE script, wrapped: no height cap and no horizontal scroll, because the approval is for
-     what runs, and a scroll box with overlay scrollbars shows no sign of what it hides — 300
-     spaces then `; curl … | sh` read as a harmless one-liner (review of afaafbc). The dialog
-     body scrolls instead, and the buttons sit below the script. */
-  .script {
-    margin: 4px 0;
+  .script summary { cursor: pointer; font-size: 0.76rem; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .script summary:hover, .script summary:focus-visible { color: var(--fg); }
+  .script pre {
+    margin: 6px 0 0;
     padding: 6px 8px;
     border-radius: 5px;
     border: 1px solid var(--bg-light);
     background: var(--bg-dark);
     color: var(--fg);
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  .where { margin-top: 3px; font-size: 0.72rem; color: var(--fg-dim); overflow-wrap: anywhere; }
 
-  .script-meta {
-    font-size: 0.75rem;
-    color: var(--fg-dim);
-    overflow-wrap: anywhere;
-  }
-
-  .script-meta code {
-    font-size: 0.75rem;
-  }
-
-  .row-text {
-    font-size: 0.88rem;
-    color: var(--fg);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .row-meta {
-    margin-top: 3px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    font-size: 0.75rem;
-    color: var(--fg-dim);
-  }
-
-  .when.due {
-    color: var(--accent);
-  }
-
-  .held {
-    margin-top: 4px;
-    font-size: 0.78rem;
-    color: var(--yellow, #e0af68);
-  }
-
-  .row-actions {
-    margin-top: 6px;
-    display: flex;
-    gap: 6px;
-  }
+  .meta { font-size: 0.74rem; color: var(--fg-dim); overflow-wrap: anywhere; }
+  .held { font-size: 0.78rem; color: var(--yellow, #e0af68); }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 
   .add {
-    padding: 10px 14px;
+    padding: 10px 16px;
     border-top: 1px solid var(--bg-light);
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
-
   textarea {
     resize: vertical;
     min-height: 44px;
@@ -446,22 +368,8 @@
     font: inherit;
     font-size: 0.85rem;
   }
-
-  .add-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .minutes {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.8rem;
-    color: var(--fg-dim);
-  }
-
+  .add-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .minutes { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--fg-dim); }
   .minutes input {
     width: 70px;
     padding: 3px 6px;
@@ -471,55 +379,40 @@
     color: var(--fg);
     font: inherit;
   }
+  .error { font-size: 0.8rem; color: var(--error, #f7768e); }
 
-  .error {
-    font-size: 0.8rem;
-    color: var(--error, #f7768e);
-  }
-
-  .footer {
+  footer {
     display: flex;
+    align-items: center;
     gap: 8px;
-    padding: 10px 14px;
+    padding: 10px 16px;
     border-top: 1px solid var(--bg-light);
   }
+  .spacer { flex: 1; }
 
-  .spacer {
-    flex: 1;
+  .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 0.8rem;
+    color: var(--fg-dim);
+    cursor: pointer;
   }
+  .link:hover, .link:focus-visible { color: var(--fg); text-decoration: underline; }
 
   .btn {
-    padding: 5px 14px;
+    padding: 4px 12px;
     border-radius: 6px;
     border: 1px solid var(--bg-light);
     background: var(--bg-dark);
     color: var(--fg);
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     cursor: pointer;
   }
-
-  .btn-small {
-    padding: 3px 10px;
-    font-size: 0.78rem;
-  }
-
-  .btn:hover:not(:disabled) {
-    background: var(--bg-light);
-  }
-
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .btn-primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--bg-dark);
-  }
-
-  .btn-primary:hover:not(:disabled) {
-    background: var(--accent);
-    filter: brightness(1.1);
-  }
+  .btn:hover:not(:disabled) { background: var(--bg-light); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  .btn:focus-visible, .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--bg-dark); }
+  .btn-primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
 </style>

@@ -1,7 +1,8 @@
 <!--
   Every question waiting on the human, oldest first: decisions to make and things only the
-  human can do. Each card answers in place through BlockerCard, which types the answer back
-  into the agent's tab.
+  human can do. Two kinds, in one queue: a task's blocker, answered through BlockerCard, which
+  types the answer back into the agent's tab; and a watch script waiting to be allowed
+  (docs/follow-ups.md §5.1), answered through ScriptApprovalCard, which maiTerm acts on itself.
 -->
 <script lang="ts">
   import { loomStore } from '$lib/stores/loom.svelte';
@@ -11,6 +12,8 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
+  import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
+  import { followUpsStore, type PendingApproval } from '$lib/stores/followUps.svelte';
   import type { Task, Workspace } from '$lib/tauri/types';
 
   interface Props {
@@ -19,7 +22,17 @@
   }
   let { workspaces, tasks }: Props = $props();
 
-  const queue = $derived(decisionsQueue(tasks));
+  type Item = { kind: 'task'; at: number; task: Task } | { kind: 'script'; at: number; approval: PendingApproval };
+  /** Blockers and scripts, oldest first: the order they should be answered in. */
+  const queue = $derived.by((): Item[] => {
+    const inScope = new Set(workspaces.map((w) => w.id));
+    return [
+      ...decisionsQueue(tasks).map((task): Item => ({ kind: 'task', at: Date.parse(task.blocker!.asked_at), task })),
+      ...followUpsStore.pendingApprovals
+        .filter((a) => inScope.has(a.workspaceId))
+        .map((approval): Item => ({ kind: 'script', at: Date.parse(approval.followUp.created_at), approval })),
+    ].sort((a, b) => a.at - b.at);
+  });
   const unexplained = $derived(unexplainedBlocked(tasks, workspacesStore.parkedTaskIds));
   /** Receipts for "Ask for the reason", by task id. */
   let asked = $state<Record<string, string>>({});
@@ -67,27 +80,48 @@
       {/each}
     </div>
   {/if}
-  {#each queue as t (t.id)}
-    <article class="card">
-      <div class="who">
-        <span>{t.tab_id ? tabDisplayName(t.tab_id) : 'unassigned'}</span>
-        <span>{streamName(t)}</span>
-        <span>waiting {fmtAge(t.blocker!.asked_at)}</span>
-      </div>
-      <h3>{t.title}</h3>
-      <BlockerCard
-        task={t}
-        variant="card"
-        onnote={(text) => (answered = [{ id: t.id, title: t.title, text }, ...answered.filter((a) => a.id !== t.id)].slice(0, 5))}
-      />
-      <div class="actions">
-        <button onclick={() => loomStore.show('weave', t.id)}>Show in the weave</button>
-        {#if t.tab_id}
-          <button onclick={() => { loomStore.openChat(t.tab_id!); loomStore.show('focus'); }}>Talk to the agent</button>
-          <button onclick={() => void navigateToTab(t.tab_id!)}>Open the tab</button>
-        {/if}
-      </div>
-    </article>
+  {#each queue as item (item.kind === 'task' ? item.task.id : item.approval.followUp.id)}
+    {#if item.kind === 'task'}
+      {@const t = item.task}
+      <article class="card">
+        <div class="who">
+          <span>{t.tab_id ? tabDisplayName(t.tab_id) : 'unassigned'}</span>
+          <span>{streamName(t)}</span>
+          <span>waiting {fmtAge(t.blocker!.asked_at)}</span>
+        </div>
+        <h3>{t.title}</h3>
+        <BlockerCard
+          task={t}
+          variant="card"
+          onnote={(text) => (answered = [{ id: t.id, title: t.title, text }, ...answered.filter((a) => a.id !== t.id)].slice(0, 5))}
+        />
+        <div class="actions">
+          <button onclick={() => loomStore.show('weave', t.id)}>Show in the weave</button>
+          {#if t.tab_id}
+            <button onclick={() => { loomStore.openChat(t.tab_id!); loomStore.show('focus'); }}>Talk to the agent</button>
+            <button onclick={() => void navigateToTab(t.tab_id!)}>Open the tab</button>
+          {/if}
+        </div>
+      </article>
+    {:else}
+      {@const a = item.approval}
+      <article class="card">
+        <div class="who">
+          <span>{tabDisplayName(a.tabId)}</span>
+          <span>watch script</span>
+          <span>waiting {fmtAge(a.followUp.created_at)}</span>
+        </div>
+        <ScriptApprovalCard
+          tabId={a.tabId}
+          followUp={a.followUp}
+          onnote={(text) => (answered = [{ id: a.followUp.id, title: a.followUp.due.label ?? 'Watch script', text }, ...answered.filter((x) => x.id !== a.followUp.id)].slice(0, 5))}
+        />
+        <div class="actions">
+          <button onclick={() => { loomStore.openChat(a.tabId); loomStore.show('focus'); }}>Talk to the agent</button>
+          <button onclick={() => void navigateToTab(a.tabId)}>Open the tab</button>
+        </div>
+      </article>
+    {/if}
   {:else}
     <p class="empty">Nothing is waiting on you. When an agent stops on a question, it shows up here.</p>
   {/each}

@@ -13,6 +13,7 @@
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { decisionsQueue, summarize } from '$lib/loom/model';
+  import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { workspaceIsLive } from '$lib/workspace/liveness';
   import LoomView from './LoomView.svelte';
   import DecisionsView from './DecisionsView.svelte';
@@ -48,7 +49,12 @@
   });
 
   const summary = $derived(summarize(tasks, now, workspacesStore.parkedTaskIds));
-  const decisions = $derived(decisionsQueue(tasks).length);
+  /** Watch scripts waiting to be allowed, in scope: the other half of the Decisions queue. */
+  const scripts = $derived.by(() => {
+    const ids = new Set(scoped.map((w) => w.id));
+    return followUpsStore.pendingApprovals.filter((a) => ids.has(a.workspaceId)).length;
+  });
+  const decisions = $derived(decisionsQueue(tasks).length + scripts);
   /** Agents stopped at a permission prompt, in scope. */
   const permissions = $derived(
     scoped.reduce(
@@ -77,7 +83,7 @@
     </nav>
     <span class="summary">
       <span><i style="background: var(--green)"></i>{summary.active} active</span>
-      <span><i style="background: var(--orange, #ff9e64)"></i>{summary.needsYou + permissions} need you</span>
+      <span><i style="background: var(--orange, #ff9e64)"></i>{summary.needsYou + scripts + permissions} need you</span>
       <span><i style="background: var(--yellow)"></i>{summary.waiting} waiting</span>
       <span><i style="background: var(--fg-dim)"></i>{summary.quiet} quiet 14d+</span>
     </span>

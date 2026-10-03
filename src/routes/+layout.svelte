@@ -7,7 +7,7 @@
   import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
   import { wakeTab, type WakeAction } from '$lib/agents/wake';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
-  import { loomStore } from '$lib/stores/loom.svelte';
+  import { loomStore, type LoomMode } from '$lib/stores/loom.svelte';
   import { retryDownBridgesNow } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
   import ShareImportWizard from '$lib/components/share/ShareImportWizard.svelte';
@@ -854,6 +854,17 @@
       if (target) await workspacesStore.setActiveTab(ow.id, target.paneId, target.tabId);
     }
 
+    /** Open the Overlord workspace on the Loom in one mode — never toggling back, unlike
+     *  Cmd+Shift+J. For a notification that asks for a decision (`open-loom`). */
+    async function openLoom(mode: LoomMode) {
+      const ow = await workspacesStore.ensureOverlordWorkspace();
+      loomStore.show(mode);
+      for (const p of (workspacesStore.workspaces.find((w) => w.id === ow.id) ?? ow).panes) {
+        const t = p.tabs.find((x) => x.tab_type === 'board');
+        if (t) { await workspacesStore.setActiveTab(ow.id, p.id, t.id); return; }
+      }
+    }
+
     function handleKeydown(e: KeyboardEvent) {
       const isMeta = isModKey(e);
       const activeTabIsEditor = workspacesStore.activeTab?.tab_type === 'editor';
@@ -1323,6 +1334,13 @@
     };
     window.addEventListener('open-follow-ups', onOpenFollowUps);
 
+    // A notification asking for a decision opens the queue it lives in (a watch script waiting
+    // to be allowed opens the Loom's Decisions — docs/follow-ups.md §5.1).
+    const onOpenLoom = (e: Event) => {
+      void openLoom((e as CustomEvent<{ mode?: LoomMode }>).detail?.mode ?? 'focus');
+    };
+    window.addEventListener('open-loom', onOpenLoom);
+
     // Mesh pre-flight setup modal, opened from the cockpit's Enable Mesh button.
     const onOpenMeshSetup = (e: Event) => { meshSetupWorkspaceId = (e as CustomEvent<string>).detail ?? null; };
     window.addEventListener('open-mesh-setup', onOpenMeshSetup);
@@ -1336,6 +1354,7 @@
       window.removeEventListener('open-mesh-cockpit', onOpenMeshCockpit);
       window.removeEventListener('open-comms-monitor', onOpenCommsMonitor);
       window.removeEventListener('open-follow-ups', onOpenFollowUps);
+      window.removeEventListener('open-loom', onOpenLoom);
       window.removeEventListener('open-mesh-setup', onOpenMeshSetup);
       window.removeEventListener('keydown', handleKeydown, true);
       window.removeEventListener('keydown', handleKeydownAlt, true);

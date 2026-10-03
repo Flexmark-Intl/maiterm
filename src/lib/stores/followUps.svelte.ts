@@ -21,6 +21,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as commands from '$lib/tauri/commands';
 import type { FollowUp, Tab } from '$lib/tauri/types';
 import { dispatch as notify } from '$lib/stores/notificationDispatch';
+import { toastStore } from '$lib/stores/toasts.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
@@ -52,6 +53,14 @@ const RESUME_WAIT_MS = 2 * 60_000;
 const GONE_CONFIRM_MS = 10_000;
 /** The hold reason for a tab with no agent — the one reason resume-then-deliver acts on. */
 const NO_AGENT = 'no agent is running in the tab — it goes after an agent starts there';
+
+/** A watch script waiting for the human to allow it. */
+export interface PendingApproval {
+  workspaceId: string;
+  tabId: string;
+  tabName: string;
+  followUp: FollowUp;
+}
 
 export interface FollowUpView {
   id: string;
@@ -128,6 +137,50 @@ function createFollowUpsStore() {
   function mirror(tabId: string, list: FollowUp[]) {
     const loc = locate(tabId);
     if (loc) loc.tab.follow_ups = list;
+    // Answered anywhere — here, the phone, a cancel — its waiting notification goes with it.
+    settleApprovalNotices();
+  }
+
+  const approvalKey = (id: string) => `script-approval:${id}`;
+  /** Approvals already announced this run, so each is announced once. */
+  const announced = new Set<string>();
+
+  function pendingApprovals(): PendingApproval[] {
+    const unattended = preferencesStore.followUpsScriptsUnattended;
+    const out: PendingApproval[] = [];
+    for (const { workspaceId, tab } of everyTab()) {
+      for (const f of tab.follow_ups ?? []) {
+        if (needsApproval(f, unattended) && !isExpired(f, Date.now())) {
+          out.push({ workspaceId, tabId: tab.id, tabName: tab.name, followUp: f });
+        }
+      }
+    }
+    return out.sort((a, b) => Date.parse(a.followUp.created_at) - Date.parse(b.followUp.created_at));
+  }
+
+  /** Tell the human about each script waiting for them, once: a notification that stays until
+   *  the script is answered, and opens the Decisions queue. Also at launch, for scripts left
+   *  waiting when maiTerm last closed. */
+  function announceApprovals() {
+    if (!preferencesStore.followUpsLive) return;
+    for (const p of pendingApprovals()) {
+      if (announced.has(p.followUp.id)) continue;
+      announced.add(p.followUp.id);
+      void notify('Allow a watch script?', p.tabName, 'info', { tabId: p.tabId }, {
+        key: approvalKey(p.followUp.id),
+        action: () => window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } })),
+      });
+    }
+  }
+
+  function settleApprovalNotices() {
+    const waiting = new Set(pendingApprovals().map(p => p.followUp.id));
+    for (const id of [...announced]) {
+      if (!waiting.has(id)) {
+        toastStore.removeByKey(approvalKey(id));
+        announced.delete(id);
+      }
+    }
   }
 
   /** Remove one — atomically, and only if the tab still holds it. False: it wasn't there. */
@@ -501,6 +554,10 @@ function createFollowUpsStore() {
   }
 
   async function tick() {
+    // Scripts waiting for the human: announced once (incl. ones left waiting at launch), and
+    // their notices cleared when the waiver preference or an expiry ended the wait.
+    announceApprovals();
+    settleApprovalNotices();
     // Off means held, not discarded: pending follow-ups stay on their tabs, visible and
     // cancellable, and go out once the feature is back on (§4).
     if (running || !preferencesStore.followUpsLive) return;
@@ -590,16 +647,25 @@ function createFollowUpsStore() {
       await add(tabId, r.followUp);
       // Rust decided the approval; the stored copy says what it decided.
       const stored = locate(tabId)?.tab.follow_ups?.find(f => f.id === r.followUp.id) ?? r.followUp;
-      if (needsApproval(stored, preferencesStore.followUpsScriptsUnattended)) {
-        const tabName = locate(tabId)?.tab.name ?? 'a tab';
-        void notify(
-          'A watch script needs your approval',
-          `The agent in “${tabName}” wants maiTerm to run a script on a schedule (${stored.due.label ?? 'watch script'}). Click its tab’s clock badge to review it.`,
-          'info',
-          { tabId },
-        );
-      }
+      announceApprovals();
       return { ok: true, followUp: stored };
+    },
+
+    /** Every watch script in this window waiting for the human to allow it, oldest first: the
+     *  script half of the Decisions queue (docs/follow-ups.md §5.1). Archived tabs included — a
+     *  script on one waits too, and allowing it now lets it run once the tab is restored. */
+    get pendingApprovals(): PendingApproval[] {
+      return pendingApprovals();
+    },
+
+    /** The human declined a watch script: it is removed, and never runs. Nothing is sent to the
+     *  agent. False: it was no longer there. */
+    async reject(tabId: string, id: string): Promise<boolean> {
+      if (!(await take(tabId, id))) return false;
+      wantedEarly.delete(id);
+      toastStore.removeByKey(approvalKey(id));
+      logInfo(`follow-ups: watch script ${id.slice(0, 8)} on tab ${tabId.slice(0, 8)} declined`);
+      return true;
     },
 
     /** The human approved a watch script on its card (§5.1). False: it is no longer there. */

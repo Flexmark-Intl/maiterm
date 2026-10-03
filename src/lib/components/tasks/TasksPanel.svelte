@@ -26,6 +26,8 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskAddModal from './TaskAddModal.svelte';
   import BlockerCard from './BlockerCard.svelte';
+  import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
+  import { followUpsStore } from '$lib/stores/followUps.svelte';
 
   interface Props {
     tabId: string;
@@ -314,6 +316,12 @@
    *  through the same quiescence guards and the same ledger as every other injection. What
    *  it is NOT is a supervisor action — the human clicked it, so it works with Overlord
    *  switched off; only the relay-if-unreachable fallback needs a supervisor. */
+  /** This tab's watch scripts waiting to be allowed (docs/follow-ups.md §5.1): a decision this
+   *  agent is waiting on, so it sits above its tasks, like a blocked task's question. */
+  const approvals = $derived(followUpsStore.pendingApprovals.filter((a) => a.tabId === tabId));
+  /** The outcome of the last one answered here; the card itself leaves once answered. */
+  let approvalNote = $state<string | null>(null);
+
   /** One-row receipt, cleared after a few seconds. */
   function note(id: string, text: string) {
     startedNote = { id, text };
@@ -424,7 +432,14 @@
   </div>
 
   <div class="lists">
-    {#if groups.length === 0}
+    {#each approvals as a (a.followUp.id)}
+      <div class="approval-slot">
+        <ScriptApprovalCard variant="inline" {tabId} followUp={a.followUp} onnote={(text) => (approvalNote = text)} />
+      </div>
+    {/each}
+    {#if approvalNote}<p class="approval-note">{approvalNote}</p>{/if}
+
+    {#if groups.length === 0 && approvals.length === 0}
       <p class="empty">
         {#if mine.length}
           Nothing in flight on this tab — the counts above hold the rest.
@@ -726,6 +741,9 @@
     line-height: 1.5;
     margin: 10px 10px 0;
   }
+
+  .approval-slot { margin: 6px 8px 4px; }
+  .approval-note { margin: 4px 10px 6px; font-size: 11px; color: var(--fg-dim); line-height: 1.4; }
 
   .group-loose { font-style: italic; opacity: 0.7; text-transform: none; letter-spacing: 0; }
 

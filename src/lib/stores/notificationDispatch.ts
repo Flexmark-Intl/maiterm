@@ -119,6 +119,9 @@ export async function dispatch(
   body: string,
   type: Toast['type'] = 'info',
   source?: ToastSource,
+  /** A request that waits for the human (`toastStore.addRequest`): the in-app toast stays until
+   *  its owner removes it by `key`, and clicking it runs `action`. */
+  request?: { key: string; action?: () => void },
 ): Promise<void> {
   const mode = preferencesStore.notificationMode;
 
@@ -136,16 +139,21 @@ export async function dispatch(
     return;
   }
 
+  const toast = (focused?: boolean) => {
+    if (request) toastStore.addRequest({ key: request.key, title, body, source, action: request.action });
+    else toastStore.addToast(title, body, type, source, focused);
+  };
+
   if (mode === 'in_app') {
     logInfo(`Notification (in-app): ${body}`);
-    toastStore.addToast(title, body, type, source);
+    toast();
     return;
   }
 
   // mode === 'auto': always toast, additionally OS notification when unfocused
   try {
     const focused = await getCurrentWindow().isFocused();
-    toastStore.addToast(title, body, type, source, focused);
+    toast(focused);
     if (focused) {
       logInfo(`Notification (auto/in-app): ${body}`);
     } else {
@@ -154,6 +162,6 @@ export async function dispatch(
     }
   } catch {
     // Fallback to in-app if focus check fails
-    toastStore.addToast(title, body, type, source);
+    toast();
   }
 }
