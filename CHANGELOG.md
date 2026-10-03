@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.2.1
+
+- **Your phone rings when an agent asks a question on one of its tasks, or wants a watch script allowed.** Once per new question or script, and you can turn either off per phone like the other kinds of push.
+- **Loom Focus pins a chat with a watch script waiting** under Needs you, previews it, and lets you allow it right there.
+
 ## v3.2.0
 
 Watch scripts are asked like every other question, and you can allow them from your phone.
