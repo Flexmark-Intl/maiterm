@@ -2391,9 +2391,25 @@ pub fn carry_tab_state_on_reload(
         .ok_or("Replacement tab not found")?;
     *tab = carry_tab_record(src, tab);
 
+    // The Overlord ledger records what was typed into the tab by its id. The replacement resumes
+    // the same session, so its transcript holds those turns: without this, maiLink's `typedBy`
+    // finds no entry for them and draws the Overlord's directives as the human's own words.
+    if let Some(win) = app_data.window_mut(&label) {
+        remap_ledger_tab(&mut win.overlord_ledger, &from_tab_id, &to_tab_id);
+    }
+
     let data_clone = app_data.clone();
     drop(app_data);
     save_state(&data_clone)
+}
+
+/// Point a window's Overlord ledger entries for `from` at `to` (a reload's new id).
+pub(crate) fn remap_ledger_tab(ledger: &mut [serde_json::Value], from: &str, to: &str) {
+    for e in ledger.iter_mut() {
+        if e.get("tab_id").and_then(|v| v.as_str()) == Some(from) {
+            e["tab_id"] = serde_json::Value::String(to.to_string());
+        }
+    }
 }
 
 /// Replace a mesh workspace's topic registry wholesale. The frontend `agentMesh` store is
