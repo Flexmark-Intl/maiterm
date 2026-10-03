@@ -9,7 +9,8 @@
 > ring the doorbell (§6) when one starts waiting and no phone holds the WS: kind `ask` ("Has a
 > question for you") and kind `script` ("Wants to run a watch script"), with the tab's title like
 > every push. Rung per NEW question or script (a task's question by `asked_at`, a script by id),
-> never by a count, and not for what was already waiting when maiLink came up. Both are in
+> never by a count, and not for what was already waiting when maiLink came up or for one that
+> merely moved to another tab (a reload re-mints the tab id; remembered 10 minutes). Both are in
 > `/push-prefs` `kinds`, so a phone can mute them. Open the chat on tap, like `permission`.
 >
 > **v0.15 changelog** (2026-10-02). Additive: **a watch script's approval card** (maiTerm
@@ -41,8 +42,7 @@
 >   other work meanwhile, so neither `state` nor `prompt` moves; pin `asks > 0` in "Needs you".
 >   A change fires `chats_changed`.
 > - **`POST /tasks/{id}/answer`** (§13.3): answer it. `askedAt` is the required stale guard.
->   (0.16 adds the push, kind `ask`.) No push yet: a new doorbell kind needs relay copy, and the relay deploy is itself waiting on
->   a human decision.
+>   No push in 0.13; 0.16 adds it, kind `ask`.
 >
 > **v0.12 changelog** (2026-09-27). Additive, both for screens that come before any session:
 > - **Claude's workspace-trust dialog is a permission card.** `claude` in an untrusted folder

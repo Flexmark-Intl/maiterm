@@ -6114,9 +6114,12 @@ async fn doorbell_loop(app: Arc<AppState>) {
     // does the tab's session row first appearing, which is a registration edge rather than a
     // finished turn.
     let mut last: HashMap<String, (String, bool)> = HashMap::new();
-    // tab_id → the task questions / watch scripts waiting on the human last tick (v0.16).
-    let mut last_asks: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut last_scripts: HashMap<String, HashSet<String>> = HashMap::new();
+    // v0.16: every task question / watch script seen waiting, on ANY tab, and when last seen. Keyed
+    // by the wait, never by its tab: a reload mints the tab a new id first and moves its tasks
+    // and follow-ups onto it later, so a per-tab comparison saw them arrive on the new tab and
+    // rang for something that had been waiting all along (review of 7e4fc49).
+    let mut seen_asks: HashMap<String, u64> = HashMap::new();
+    let mut seen_scripts: HashMap<String, u64> = HashMap::new();
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2000));
     // Anything queued for a loop that wasn't running is stale by definition — an escalation
     // raised while maiLink was off has been sitting on the desktop board since. Discard, don't
@@ -6176,21 +6179,26 @@ async fn doorbell_loop(app: Arc<AppState>) {
         // answered and another asked inside a tick leaves the count where it was.
         let mut asks = board::ask_keys_by_tab(&app);
         let mut scripts = follow_ups::waiting_ids_by_tab(&app);
+        let tick_ms = now_ms();
+        seen_asks.retain(|_, at| tick_ms.saturating_sub(*at) < WAIT_SEEN_TTL_MS);
+        seen_scripts.retain(|_, at| tick_ms.saturating_sub(*at) < WAIT_SEEN_TTL_MS);
         let mut current = std::collections::HashSet::new();
         for c in &chats {
             let tab = c["tabId"].as_str().unwrap_or_default().to_string();
             let tab_asks = asks.remove(&tab).unwrap_or_default();
             let tab_scripts = scripts.remove(&tab).unwrap_or_default();
-            // A first sighting baselines silently, like the attention key: what was already
-            // waiting when maiLink came up (or the tab became designated) is not news.
-            let prev_asks = last_asks.insert(tab.clone(), tab_asks.clone());
-            let prev_scripts = last_scripts.insert(tab.clone(), tab_scripts.clone());
+            // A tab's first sighting records what it holds without ringing, like the attention
+            // key: what was already waiting when maiLink came up (or the tab became designated)
+            // is not news. `last` is filled further down this iteration, so this is last tick's.
+            let first_sighting = !last.contains_key(&tab);
+            let new_ask = note_waits(first_sighting, &tab_asks, &mut seen_asks, tick_ms);
+            let new_script = note_waits(first_sighting, &tab_scripts, &mut seen_scripts, tick_ms);
             if !covered {
                 let title = c["title"].as_str().unwrap_or_default();
-                if has_new_key(prev_asks.as_ref(), &tab_asks) {
+                if new_ask {
                     ring_devices(&client, &app, &relay_url, &tab, title, "ask").await;
                 }
-                if has_new_key(prev_scripts.as_ref(), &tab_scripts) {
+                if new_script {
                     ring_devices(&client, &app, &relay_url, &tab, title, "script").await;
                 }
             }
@@ -6223,14 +6231,24 @@ async fn doorbell_loop(app: Arc<AppState>) {
             }
         }
         last.retain(|k, _| current.contains(k));
-        last_asks.retain(|k, _| current.contains(k));
-        last_scripts.retain(|k, _| current.contains(k));
     }
 }
 
-/// Did something start waiting since last tick? `None` = first sighting, which baselines.
-fn has_new_key(prev: Option<&HashSet<String>>, now: &HashSet<String>) -> bool {
-    prev.is_some_and(|p| now.iter().any(|k| !p.contains(k)))
+/// How long a wait the doorbell has seen is remembered after it was last seen anywhere: longer
+/// than any reload's gap between minting the new tab and moving the wait onto it (an account
+/// switch reloads many tabs back to back).
+const WAIT_SEEN_TTL_MS: u64 = 10 * 60 * 1000;
+
+/// Record a tab's waits as seen now. True when one of them is NEW — not seen on any tab within
+/// the TTL — and this isn't the tab's first sighting, which only records.
+fn note_waits(first_sighting: bool, keys: &HashSet<String>, seen: &mut HashMap<String, u64>, now: u64) -> bool {
+    let mut new = false;
+    for k in keys {
+        if seen.insert(k.clone(), now).is_none() && !first_sighting {
+            new = true;
+        }
+    }
+    new
 }
 
 /// POST the content-free wake to the shared relay, once per paired device that registered BOTH a
@@ -6862,13 +6880,17 @@ mod tests {
     #[test]
     fn the_doorbell_rings_for_a_new_wait_not_a_count() {
         let set = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
-        // First sighting baselines silently.
-        assert!(!has_new_key(None, &set(&["a"])));
-        assert!(has_new_key(Some(&set(&[])), &set(&["a"])));
-        assert!(!has_new_key(Some(&set(&["a", "b"])), &set(&["a"])), "one answered");
+        let mut seen = HashMap::new();
+        // A tab's first sighting records without ringing.
+        assert!(!note_waits(true, &set(&["a"]), &mut seen, 1));
+        assert!(!note_waits(false, &set(&["a"]), &mut seen, 2), "still waiting");
+        assert!(note_waits(false, &set(&["a", "b"]), &mut seen, 3));
+        assert!(!note_waits(false, &set(&["a"]), &mut seen, 4), "one answered");
         // One answered and another asked in the same tick: same count, still new.
-        assert!(has_new_key(Some(&set(&["a"])), &set(&["b"])));
-        assert!(!has_new_key(Some(&set(&["a"])), &set(&["a"])));
+        assert!(note_waits(false, &set(&["c"]), &mut seen, 5));
+        // A reload: the new tab is first seen empty, then the same wait lands on it.
+        assert!(!note_waits(true, &set(&[]), &mut seen, 6));
+        assert!(!note_waits(false, &set(&["a"]), &mut seen, 7), "moved, not new");
     }
 
     #[test]
