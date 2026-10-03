@@ -321,6 +321,13 @@
   const approvals = $derived(followUpsStore.pendingApprovals.filter((a) => a.tabId === tabId));
   /** The outcome of the last one answered here; the card itself leaves once answered. */
   let approvalNote = $state<string | null>(null);
+  /** When the cards last changed, for their click guard (ScriptApprovalCard). */
+  let approvalsChangedAt = $state(0);
+  const approvalIds = $derived(approvals.map((a) => a.followUp.id).join('|'));
+  $effect(() => {
+    void approvalIds;
+    approvalsChangedAt = Date.now();
+  });
 
   /** One-row receipt, cleared after a few seconds. */
   function note(id: string, text: string) {
@@ -434,7 +441,7 @@
   <div class="lists">
     {#each approvals as a (a.followUp.id)}
       <div class="approval-slot">
-        <ScriptApprovalCard variant="inline" {tabId} followUp={a.followUp} onnote={(text) => (approvalNote = text)} />
+        <ScriptApprovalCard variant="inline" {tabId} followUp={a.followUp} listChangedAt={approvalsChangedAt} onnote={(text) => (approvalNote = text)} />
       </div>
     {/each}
     {#if approvalNote}<p class="approval-note">{approvalNote}</p>{/if}

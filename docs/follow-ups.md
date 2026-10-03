@@ -404,10 +404,11 @@ anything. So:
     the folder under it — and answers with *Allow* / *Don't allow*. The text the agent will get
     is folded under it, and its foot gives the folder, the run limit and the script's line and
     character counts. It carries BlockerCard's two click guards (nothing in its first 1.5 s,
-    never the second click of a double-click), with one difference: the 1.5 s also runs from
-    when the CARD appeared. Blockers only join the end of the queue; a workspace waking up
-    inserts its older scripts above the one being read and pushes another card's Allow under
-    the pointer, with an old `created_at` (review of d56ac45).
+    never the second click of a double-click), with one difference: the 1.5 s runs from the
+    latest of the agent asking, the card appearing, and its LIST last changing
+    (`listChangedAt`, stamped by each surface on any change to the ids it shows). Blockers only
+    join the end of the queue; an older script inserted above, or a card above answered, moves
+    a card that has been on screen for minutes under the pointer (reviews of d56ac45, 30b4844).
   - **Decisions shows every waiting script in the window**, awake workspace or not (the tasks
     beside them are limited to awake workspaces): a parked workspace's script is still a
     question, and its notification opens this view. Only an explicit workspace filter narrows
@@ -417,14 +418,18 @@ anything. So:
     rewrite a task with `updateTasks`. An approval is acted on by maiTerm, and the card reads
     the follow-up itself (`followUpsStore.pendingApprovals`), which no agent can edit after
     asking. *Don't allow* removes it (`followUpsStore.reject`); nothing is sent to the agent.
-  - **The notification waits.** "Allow a watch script?" with the tab's name — a request toast
+  - **The notification waits, and there is one.** "Allow a watch script?" with the tab's name
+    ("Allow 3 watch scripts?" and where, for several, re-worded in place as they are answered;
+    a new one rings again) — a single request toast
     (`toastStore.addRequest`, yellow-edged, no countdown) that stays until the script is
     answered anywhere, the phone included (`settleApprovalNotices` runs on every mirror and
     tick). Clicking it opens the Loom's Decisions (`open-loom`). Each script is announced once a
     run, including ones left waiting when maiTerm last closed. The toast queue had to learn
     about it: the countdown ran only on the head toast, so a request at the head stalled every
     toast behind it, and overflow evicted the head — the request, for good. Now the active toast
-    is the oldest with a countdown, and overflow never evicts a request.
+    is the oldest with a countdown, and requests neither count against the visible limit nor
+    are evicted (counting them, three waiting requests made every new toast — an upload's
+    progress and Cancel included — the one evicted the moment it was added).
   - **The clock badge is a button**, yellow while a script waits, and opens the tab's list with
     the card on top. A click on any control inside a tab used to be swallowed: the tab's
     pointerdown takes pointer capture for dragging, which retargets the click to the tab.

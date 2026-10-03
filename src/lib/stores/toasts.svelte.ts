@@ -52,14 +52,14 @@ function createToastStore() {
     return toasts.find(t => !t.sticky)?.id ?? null;
   }
 
-  /** Keep to MAX_VISIBLE by dropping the oldest toast that isn't a request. A request is
-   *  removed only by its owner or the human: evicted, it would be gone while its question still
-   *  waits, and it is announced once. */
+  /** Keep the ordinary toasts to MAX_VISIBLE by dropping the oldest. Requests don't count and are
+   *  never dropped: one is removed only by its owner or the human — evicted, it would be gone
+   *  while its question still waits, and it is announced once. Counting them, three waiting
+   *  requests made every new toast the only candidate, removed the moment it was added (review
+   *  of 30b4844). Owners keep requests few: follow-ups use ONE for all its waiting scripts. */
   function evictOverflow() {
-    while (toasts.length > MAX_VISIBLE) {
-      const victim = toasts.find(t => !t.request);
-      if (!victim) break;
-      removeToast(victim.id);
+    while (toasts.filter(t => !t.request).length > MAX_VISIBLE) {
+      removeToast(toasts.find(t => !t.request)!.id);
     }
   }
 
@@ -181,6 +181,19 @@ function createToastStore() {
     for (const t of toasts.filter((x) => x.key === key)) removeToast(t.id);
   }
 
+  /** Is a toast with this key showing (the human may have dismissed it)? */
+  function hasKey(key: string): boolean {
+    return toasts.some((x) => x.key === key);
+  }
+
+  /** Re-word a showing toast in place, silently. */
+  function updateByKey(key: string, patch: { title?: string; body?: string }) {
+    for (const t of toasts.filter((x) => x.key === key)) {
+      if (patch.title !== undefined) t.title = patch.title;
+      if (patch.body !== undefined) t.body = patch.body;
+    }
+  }
+
   /** Add a sticky progress toast (no auto-dismiss). Returns its id for updateToast/removeToast. */
   function addProgressToast(opts: { title: string; body: string; onCancel?: () => void }): string {
     const id = crypto.randomUUID();
@@ -256,6 +269,8 @@ function createToastStore() {
     addToast,
     addRequest,
     removeByKey,
+    hasKey,
+    updateByKey,
     addProgressToast,
     updateToast,
     removeToast,

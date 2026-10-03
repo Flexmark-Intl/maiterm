@@ -33,6 +33,14 @@
       ...approvals.map((approval): Item => ({ kind: 'script', at: Date.parse(approval.followUp.created_at), approval })),
     ].sort((a, b) => a.at - b.at),
   );
+  /** When the queue last changed — an item in, out or reordered — for the script cards' click
+   *  guard: any change can move a card under the pointer. Written, never read, here. */
+  let listChangedAt = $state(0);
+  const signature = $derived(queue.map((i) => (i.kind === 'task' ? i.task.id : i.approval.followUp.id)).join('|'));
+  $effect(() => {
+    void signature;
+    listChangedAt = Date.now();
+  });
   const unexplained = $derived(unexplainedBlocked(tasks, workspacesStore.parkedTaskIds));
   /** Receipts for "Ask for the reason", by task id. */
   let asked = $state<Record<string, string>>({});
@@ -114,6 +122,7 @@
         <ScriptApprovalCard
           tabId={a.tabId}
           followUp={a.followUp}
+          {listChangedAt}
           onnote={(text) => (answered = [{ id: a.followUp.id, title: a.followUp.due.label ?? 'Watch script', text }, ...answered.filter((x) => x.id !== a.followUp.id)].slice(0, 5))}
         />
         {#if !a.archived}

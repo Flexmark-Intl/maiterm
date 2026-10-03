@@ -19,19 +19,23 @@
     onnote?: (text: string) => void;
     /** 'card' for the Decisions queue and the follow-ups list; 'inline' for the narrow task panel. */
     variant?: 'card' | 'inline';
+    /** When the list holding this card last changed (ms). Anything inserted or removed ABOVE a
+     *  card moves it, so a card already on screen can be pushed under the pointer. */
+    listChangedAt?: number;
   }
-  let { tabId, followUp: f, onnote, variant = 'card' }: Props = $props();
+  let { tabId, followUp: f, onnote, variant = 'card', listChangedAt = 0 }: Props = $props();
 
-  /** Nothing is decided in a card's first moments: not just after the agent asked (BlockerCard's
-   *  rule), but after THIS card appeared. Unlike task blockers, scripts don't only arrive at the
-   *  end of the queue: a workspace waking up (launch respawn, a move in from another window)
-   *  inserts its older scripts ABOVE the card being read, and pushes a different card's Allow
-   *  under the pointer — one whose `created_at` is long past (review of d56ac45). */
+  /** Nothing is decided in a card's first moments, counted from the latest of: the agent asking
+   *  (BlockerCard's rule), this card appearing, and its list last changing. The list matters
+   *  because, unlike task blockers, scripts don't only arrive at the end of the queue: an older
+   *  one inserted above, or a card above answered or removed, moves this card — and a card that
+   *  has been on screen for minutes can land under the pointer (reviews of d56ac45, 30b4844). */
   const FRESH_MS = 1500;
   const shownAt = Date.now();
   const isFresh = () => {
     const age = Date.now() - Date.parse(f.created_at);
-    return (age >= 0 && age < FRESH_MS) || Date.now() - shownAt < FRESH_MS;
+    const settled = Date.now() - Math.max(shownAt, listChangedAt);
+    return (age >= 0 && age < FRESH_MS) || settled < FRESH_MS;
   };
   /** The second click of a double-click is never a decision. */
   const secondClick = (e: MouseEvent) => e.detail > 1;
@@ -52,7 +56,7 @@
   async function decide(allow: boolean, e: MouseEvent) {
     if (busy || secondClick(e)) return;
     if (isFresh()) {
-      onnote?.('This just appeared. Read it, then choose.');
+      onnote?.('This just appeared or moved. Read it, then choose.');
       return;
     }
     busy = true;

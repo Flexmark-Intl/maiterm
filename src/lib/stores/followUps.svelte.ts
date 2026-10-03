@@ -143,7 +143,9 @@ function createFollowUpsStore() {
     settleApprovalNotices();
   }
 
-  const approvalKey = (id: string) => `script-approval:${id}`;
+  /** ONE notification for every waiting script, not one each: requests are never evicted, so a
+   *  toast per script would let a handful of them fill the corner for hours (review of 30b4844). */
+  const APPROVALS_KEY = 'script-approvals';
   /** Approvals already announced this run, so each is announced once. */
   const announced = new Set<string>();
 
@@ -172,26 +174,35 @@ function createFollowUpsStore() {
    *  waiting when maiTerm last closed. */
   function announceApprovals() {
     if (!preferencesStore.followUpsLive) return;
-    for (const p of pendingApprovals()) {
-      // An archived tab's: not yet. The notice can't be shown for it (`dispatch` only serves tabs
-      // in a pane), and marked announced it never would be — it is announced once restored.
-      if (p.archived || announced.has(p.followUp.id)) continue;
-      announced.add(p.followUp.id);
-      void notify('Allow a watch script?', p.tabName, 'info', { tabId: p.tabId }, {
-        key: approvalKey(p.followUp.id),
-        action: () => window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } })),
-      });
-    }
+    // An archived tab's: not yet. The notice can't be shown for it (`dispatch` only serves tabs in
+    // a pane), and marked announced it never would be — it is announced once restored.
+    const fresh = pendingApprovals().filter(p => !p.archived && !announced.has(p.followUp.id));
+    if (fresh.length === 0) return;
+    for (const p of fresh) announced.add(p.followUp.id);
+    // A new question rings again, worded for everything still waiting.
+    const { title, body } = approvalsNotice();
+    void notify(title, body, 'info', { tabId: fresh[fresh.length - 1].tabId }, {
+      key: APPROVALS_KEY,
+      action: () => window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } })),
+    });
   }
 
+  /** "Allow a watch script?" + the tab; for several, how many and where. */
+  function approvalsNotice(): { title: string; body: string } {
+    const shown = pendingApprovals().filter(p => announced.has(p.followUp.id));
+    if (shown.length <= 1) return { title: 'Allow a watch script?', body: shown[0]?.tabName ?? '' };
+    const tabs = [...new Set(shown.map(p => p.tabName))];
+    const where = tabs.length > 3 ? `${tabs.slice(0, 3).join(', ')} and ${tabs.length - 3} more` : tabs.join(', ');
+    return { title: `Allow ${shown.length} watch scripts?`, body: where };
+  }
+
+  /** Forget what was answered; the shared notice goes when nothing it announced still waits, and
+   *  is re-worded silently while some do. */
   function settleApprovalNotices() {
     const waiting = new Set(pendingApprovals().map(p => p.followUp.id));
-    for (const id of [...announced]) {
-      if (!waiting.has(id)) {
-        toastStore.removeByKey(approvalKey(id));
-        announced.delete(id);
-      }
-    }
+    for (const id of [...announced]) if (!waiting.has(id)) announced.delete(id);
+    if (announced.size === 0) toastStore.removeByKey(APPROVALS_KEY);
+    else if (toastStore.hasKey(APPROVALS_KEY)) toastStore.updateByKey(APPROVALS_KEY, approvalsNotice());
   }
 
   /** Remove one — atomically, and only if the tab still holds it. False: it wasn't there. */
@@ -674,7 +685,7 @@ function createFollowUpsStore() {
     async reject(tabId: string, id: string): Promise<boolean> {
       if (!(await take(tabId, id))) return false;
       wantedEarly.delete(id);
-      toastStore.removeByKey(approvalKey(id));
+      // Its notice is settled by `take`'s mirror.
       logInfo(`follow-ups: watch script ${id.slice(0, 8)} on tab ${tabId.slice(0, 8)} declined`);
       return true;
     },

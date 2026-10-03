@@ -74,6 +74,13 @@
   });
   const asking = $derived(rows.filter(r => r.v.awaiting_approval && r.v.status !== 'expired'));
   const listed = $derived(rows.filter(r => !(r.v.awaiting_approval && r.v.status !== 'expired')));
+  /** When the approval cards last changed, for their click guard (ScriptApprovalCard). */
+  let askingChangedAt = $state(0);
+  const askingIds = $derived(asking.map(r => r.f.id).join('|'));
+  $effect(() => {
+    void askingIds;
+    askingChangedAt = Date.now();
+  });
 
   $effect(() => {
     if (!open) return;
@@ -173,7 +180,7 @@
           <p class="status">This tab is gone — closed, or reloaded under a new id. Open Follow-ups from its tab again.</p>
         {:else}
           {#each asking as { f } (f.id)}
-            <ScriptApprovalCard tabId={tabId!} followUp={f} onnote={(t) => (approvalNote = t)} />
+            <ScriptApprovalCard tabId={tabId!} followUp={f} listChangedAt={askingChangedAt} onnote={(t) => (approvalNote = t)} />
           {/each}
           {#if approvalNote}<p class="outcome">{approvalNote}</p>{/if}
 
