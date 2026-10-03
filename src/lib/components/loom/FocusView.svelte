@@ -492,10 +492,18 @@
   let chatEl = $state<HTMLElement | null>(null);
   let pinned = true;
   const toBottom = () => { if (chatEl && pinned) chatEl.scrollTop = chatEl.scrollHeight; };
-  // Every new read, not `rows.length`: at the 40-turn window a new turn pushes an old one out
-  // and the count doesn't move.
+  // What's at the bottom, not `rows.length` (at the 40-turn window a new turn pushes an old one out
+  // and the count doesn't move) and not `rows` itself (a new array every poll, which yanked a fold
+  // the human had just opened at the bottom to its end within 3 s): the last row, how big a run it
+  // is, and what's drawn under it.
+  const tailKey = $derived.by(() => {
+    const r = rows.at(-1);
+    const key = !r ? '' : r.kind === 'tools' || r.kind === 'task' || r.kind === 'added' ? r.key : r.turn.msg_id;
+    const n = r?.kind === 'tools' ? r.turns.length : r?.kind === 'added' ? r.events.length : 0;
+    return `${rows.length}|${key}|${n}|${outgoingHere.length}|${liveState?.state === 'active'}`;
+  });
   $effect(() => {
-    void rows;
+    void tailKey;
     if (chatEl && pinned) requestAnimationFrame(toBottom);
   });
   // The chat's OWN height changes too: a prompt card opening (or resizing) in the dock below
