@@ -115,8 +115,11 @@ function createUpdaterStore() {
    *  broadcast, so it is known even in a window whose own check never ran. */
   let activeVersion = $state<string | null>(null);
   let lastProgressBroadcast = 0;
-  /** This window ran the download or the restart itself, rather than mirroring one. */
-  let ownsUpdate = false;
+  /** This window's OWN download / restart is running right now (not a mirror of another
+   *  window's). While either is, other windows' broadcasts are ignored: they can only be
+   *  stale copies of this window's state, and applying one would reset its progress. */
+  let ownDownload = false;
+  let ownRestart = false;
   let downloadedBytes = $state(0);
   /** Null when the server sent no Content-Length. */
   let totalBytes = $state<number | null>(null);
@@ -252,9 +255,12 @@ function createUpdaterStore() {
   /** Progress arrives every 250ms while downloading; the bundle swap after it is the long
    *  silent stretch, and it takes seconds, not minutes. */
   const MIRROR_STALE_MS = 120_000;
+  /** A mirrored restart whose window went away (closed or reloaded mid-flush, so it never
+   *  relaunched) falls back to installed — past the flush timeout plus room for relaunch. */
+  const MIRROR_RESTART_STALE_MS = RESTART_FLUSH_TIMEOUT_MS + 15_000;
 
   function applySync(s: UpdaterSync) {
-    if (s.origin === SYNC_ORIGIN) return;
+    if (s.origin === SYNC_ORIGIN || ownDownload || ownRestart) return;
     clearTimeout(mirrorWatchdog);
     if (s.version) activeVersion = s.version;
     downloading = s.phase === 'downloading' || s.phase === 'installing';
@@ -272,6 +278,11 @@ function createUpdaterStore() {
         downloading = false;
         installing = false;
       }, MIRROR_STALE_MS);
+    } else if (restarting) {
+      mirrorWatchdog = setTimeout(() => {
+        logInfo('Update: the restarting window never relaunched, offering Restart again');
+        restarting = false;
+      }, MIRROR_RESTART_STALE_MS);
     }
   }
 
@@ -283,10 +294,10 @@ function createUpdaterStore() {
       syncUnlisteners = await Promise.all([
         listen<UpdaterSync>(SYNC_EVENT, (e) => applySync(e.payload)),
         listen<string>(SYNC_REQUEST_EVENT, (e) => {
-          // A download in flight is answered only first-hand (a mirror's copy may be stale);
-          // an install is never undone, so any window holding one may answer for it.
+          // A download or restart in flight is answered only first-hand (a mirror's copy may
+          // be stale); an install is never undone, so any window holding one may answer for it.
           const phase = syncPhase();
-          if (e.payload !== SYNC_ORIGIN && phase !== 'idle' && (ownsUpdate || phase === 'installed')) broadcast();
+          if (e.payload !== SYNC_ORIGIN && phase !== 'idle' && (ownDownload || ownRestart || phase === 'installed')) broadcast();
         }),
       ]);
       emit(SYNC_REQUEST_EVENT, SYNC_ORIGIN).catch(() => {});
@@ -306,7 +317,8 @@ function createUpdaterStore() {
     installing = false;
     downloadedBytes = 0;
     totalBytes = null;
-    ownsUpdate = true;
+    ownDownload = true;
+    clearTimeout(mirrorWatchdog);
     const version = currentUpdate.version;
     activeVersion = version;
     broadcast();
@@ -339,6 +351,7 @@ function createUpdaterStore() {
     } finally {
       downloading = false;
       installing = false;
+      ownDownload = false;
       broadcast();
     }
   }
@@ -358,7 +371,8 @@ function createUpdaterStore() {
     // used to start another one racing the first.
     if (restarting) return;
     restarting = true;
-    ownsUpdate = true;
+    ownRestart = true;
+    clearTimeout(mirrorWatchdog);
     dismissed = false;
     broadcast();
     const flush = (async () => {
@@ -397,6 +411,7 @@ function createUpdaterStore() {
       // the right advice, not another Restart click.
       toastStore.addToast('Restart Failed', `${msg}. Quit and reopen maiTerm to finish the update.`, 'error');
       restarting = false;
+      ownRestart = false;
       broadcast();
     }
   }
