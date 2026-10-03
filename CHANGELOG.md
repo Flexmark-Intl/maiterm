@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.2.0
+
+Watch scripts are asked like every other question, and you can allow them from your phone.
+
+### Watch scripts
+
+- **A script waiting to be allowed is a Decision.** "Allow this watch script?" appears in the Loom's Decisions alongside the questions on your tasks, in the tab's task panel and at the top of its follow-ups list, with **Allow** and **Don't allow**. Inside maiTerm, its notification stays until you've answered it anywhere, and opens Decisions.
+- **Don't allow tells the agent.** It used to remove the script in silence, so the agent waited for something that would never come. Now it hears the script won't run.
+- **Allow them from your phone.** The same card reaches maiLink, and your answer applies only to exactly what the card showed — the script, its folder, its schedule, how long it may run and its message. Needs the matching maiLink update.
+- **The follow-ups list reads more simply.** Each row starts with what it's waiting for, the script and the add-your-own form fold away, and the buttons say **Send now** and **Remove**. The clock badge on the tab opens it.
+
+### Updates with several windows open
+
+- **One window installs; the others follow.** A second window no longer downloads the update again, or offers Install after the first window has installed it.
+- **Install & Restart restarts once**, saying "Saving state and restarting…" while it does. If saving state hangs, it restarts anyway after 15 seconds, and a relaunch that fails tells you to quit and reopen.
+
+### Fixes
+
+- **Clicks on the controls inside a tab work** — the follow-ups badge, unpin and SSH reconnect were being taken for the start of a drag.
+- **The Loom's Focus chat stays at the bottom while a prompt card opens**, and a fold you've just opened at the bottom stays open.
+- **Your own messages are no longer mistaken for the Overlord's**, including after a tab reload.
+
 ## v3.1.0
 
 Two Claude Code annoyances switched off by default, a steadier Loom, and services that come back as you left them.
