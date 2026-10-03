@@ -462,7 +462,7 @@ function createFollowUpsStore() {
       const ago = Date.now() - typedAt;
       if (ago < RESUME_WAIT_MS) return 'maiTerm restarted the agent — it goes once the agent is up';
       // Typed once and watched; it never came up. Saying so beats typing it again every tick.
-      if (!byHand) return `maiTerm restarted the agent at ${clockText(typedAt, Date.now())} and it did not come up — start it, or Deliver now to try again`;
+      if (!byHand) return `maiTerm restarted the agent at ${clockText(typedAt, Date.now())} and it did not come up — start it, or Send now to try again`;
     }
     const loc = locate(tab.id);
     const ws = loc && workspacesStore.workspaces.find(w => w.id === loc.workspaceId);
