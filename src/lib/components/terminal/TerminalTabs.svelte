@@ -610,7 +610,9 @@
   function handlePointerDown(e: PointerEvent, tabId: string) {
     // Only primary button, skip if editing or clicking close button
     if (e.button !== 0 || editingId === tabId) return;
-    if ((e.target as HTMLElement).closest('.tab-actions')) return;
+    // Nor on a control inside the tab (the follow-ups badge, unpin, ssh reconnect): the pointer
+    // capture below retargets the click to the TAB, so the control's own click never fires.
+    if ((e.target as HTMLElement).closest('.tab-actions, button')) return;
     // Alt+click tab → shallow duplicate (name, cwd, history, variables only)
     if (e.altKey) {
       e.preventDefault();
