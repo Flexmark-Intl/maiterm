@@ -1248,9 +1248,11 @@ pub(crate) const DECLINED_OUTCOME: &str =
 /// with `DECLINED_OUTCOME` rather than removed, so ordinary delivery tells the agent — through
 /// the same draft guard and take-before-type as any other — instead of leaving it believing it
 /// is still watching. A met script never runs (`watch.rs` collects only unmet ones). Desktop
-/// and phone both decline through this. False: not there, not a script, or already met.
+/// and phone both decline through this. False: not there, not a script, already met, or
+/// already APPROVED — answered elsewhere (the phone) first, and maybe already run, so "it never
+/// ran" could be false. The frontend's `whenText` matches this text's start (`DECLINED_PREFIX`).
 pub(crate) fn decline_follow_up_script(list: &mut [crate::state::workspace::FollowUp], id: &str) -> bool {
-    if !list.iter().any(|f| f.id == id && f.due.kind == "script") {
+    if !list.iter().any(|f| f.id == id && f.due.kind == "script" && !f.due.approved) {
         return false;
     }
     meet_follow_up(list, id, iso_now(), DECLINED_OUTCOME.to_string(), None)
@@ -1264,6 +1266,11 @@ pub fn decline_tab_follow_up_script(
     tab_id: String,
     follow_up_id: String,
 ) -> Result<Option<Vec<crate::state::workspace::FollowUp>>, String> {
+    // With the waiver on nothing waits for approval and it may already have run, as the phone's
+    // `awaits_approval` also says.
+    if state.app_data.read().preferences.follow_ups_scripts_unattended {
+        return Ok(None);
+    }
     let (declined, list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
         decline_follow_up_script(list, &follow_up_id)
     })?;
@@ -1293,7 +1300,9 @@ pub fn approve_tab_follow_up_script(
         .chain(workspace.archived_tabs.iter_mut())
         .find(|t| t.id == tab_id)
         .ok_or("Tab not found")?;
-    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && f.due.kind == "script") else {
+    // Unmet only: one the phone just DECLINED is met, and is on its way to the agent as declined —
+    // approving it would remember an approval for a script the human also refused.
+    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && f.due.kind == "script" && f.due.met_at.is_none()) else {
         return Ok(None);
     };
     let (Some(script), Some(cwd)) = (f.due.script.clone(), f.due.cwd.clone()) else {
@@ -3720,6 +3729,13 @@ mod reload_carry_tests {
         assert!(!decline_follow_up_script(&mut list, "e"), "only a script is declined");
         assert!(list[1].due.met_at.is_none());
         assert!(!decline_follow_up_script(&mut list, "gone"));
+
+        let mut approved = list[0].clone();
+        approved.id = "a".to_string();
+        approved.due = FollowUpDue { kind: "script".to_string(), approved: true, ..Default::default() };
+        let mut list = vec![approved];
+        assert!(!decline_follow_up_script(&mut list, "a"), "allowed elsewhere first: it may have run");
+        assert!(list[0].due.met_at.is_none());
     }
 
     #[test]

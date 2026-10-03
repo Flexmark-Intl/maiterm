@@ -403,6 +403,11 @@ export function durationText(ms: number): string {
   return `${m}m`;
 }
 
+/** How Rust's outcomes for a met script that did NOT pass begin — `DECLINED_OUTCOME` in
+ *  commands/workspace.rs and the broken one in watch.rs. Change them together. */
+export const DECLINED_PREFIX = 'your human DECLINED';
+export const BROKE_PREFIX = 'it BROKE';
+
 /** Where a follow-up stands, for a human: "in 12m", "due 3m ago", "expired 2h ago", or — for a
  *  trigger kind this build can't time — "waiting". The UI's one phrasing, so the badge and the
  *  list can't disagree. */
@@ -411,6 +416,15 @@ export function whenText(f: FollowUp, now: number): string {
   if (isConditionKind(f.due.kind) && !f.due.met_at) return `waiting for ${conditionText(f, 'wait')}`;
   const t = dueAt(f);
   if (t == null) return 'waiting';
+  if (f.due.kind === 'script') {
+    // A met script didn't necessarily PASS: Rust also meets one that broke, or that the human
+    // declined, and the agent is told which (`watch.rs`, `DECLINED_OUTCOME`).
+    const name = `watch script “${f.due.label ?? '?'}”`;
+    const ago = `${durationText(now - t)} ago`;
+    const outcome = f.due.outcome ?? '';
+    if (outcome.startsWith(DECLINED_PREFIX)) return `due: you declined ${name} ${ago} — the agent will be told`;
+    if (outcome.startsWith(BROKE_PREFIX)) return `due: ${name} broke ${ago}`;
+  }
   if (isConditionKind(f.due.kind)) return `due: ${conditionText(f, 'past')} ${durationText(now - t)} ago`;
   return t > now ? `in ${durationText(t - now)}` : `due ${durationText(now - t)} ago`;
 }

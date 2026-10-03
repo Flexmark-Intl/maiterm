@@ -150,6 +150,15 @@ describe('whenText', () => {
     expect(whenText(exp, NOW + 150 * MIN)).toBe('expired 2h ago');
     expect(whenText(fu({ due: { kind: 'when_the_moon_is_full' } }), NOW)).toBe('waiting');
   });
+
+  it('says how a met watch script ended: passed, broke, or declined', () => {
+    const met = (outcome: string) =>
+      fu({ due: { kind: 'script', label: 'CI', met_at: new Date(NOW).toISOString(), outcome } });
+    expect(whenText(met('it passed'), NOW + 2 * MIN)).toBe('due: watch script “CI” passed 2m ago');
+    expect(whenText(met('it BROKE instead — exit 2, on 3 runs in a row'), NOW + 2 * MIN)).toBe('due: watch script “CI” broke 2m ago');
+    expect(whenText(met('your human DECLINED it instead — it never ran'), NOW + 2 * MIN))
+      .toBe('due: you declined watch script “CI” 2m ago — the agent will be told');
+  });
 });
 
 describe('badgeSummary', () => {

@@ -273,6 +273,7 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
                 r.status.detail = Some(why.clone());
                 r.status.broken_runs += 1;
                 (r.status.broken_runs >= BROKEN_AFTER).then(|| {
+                    // The frontend's `whenText` matches the start ("it BROKE", `BROKE_PREFIX`).
                     (format!("it BROKE instead — {why}, on {BROKEN_AFTER} runs in a row — so the condition was never checked"), None)
                 })
             }
