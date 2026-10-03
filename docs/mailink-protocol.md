@@ -747,9 +747,15 @@ interface ChatDetail extends Chat {
 // 0.15. A watch script waiting for the human's approval (maiTerm docs/follow-ups.md §5.1). The
 // agent asked maiTerm to run `script` every `everySecs` in `folder`, as the user, unattended and
 // OUTSIDE the agent's own permission checks, and to type `message` back to the agent once a run
-// exits 0. Nothing runs until a human approves. Desktop card copy, for parity: "The agent wants
-// maiTerm to run this script every 90s, as you, without asking again. It runs outside the agent's
-// own permission checks." Buttons: "Approve and run" / "Reject".
+// exits 0. Nothing runs until a human approves. It is a DECISION, asked like a task question
+// (the desktop shows it in the Loom's Decisions). Desktop card copy, for parity
+// (`ScriptApprovalCard.svelte`): "Allow this watch script?" / "The agent wants maiTerm to run this
+// check for it, and to be woken only when it passes. It runs as you, outside the agent's own
+// permission checks." Buttons: "Allow" / "Don't allow". Receipts: "Allowed. The agent will be
+// woken when it passes." / "Not allowed. The script will not run, and the agent will be told."
+// Don't allow (`/reject`) is DELIVERED to the agent as declined, so it stops believing it is
+// watching. The desktop also ignores a click in a card's first 1.5 s on screen, or 1.5 s after the
+// list above it moved, and the second click of a double-click (BlockerCard's rules).
 //
 // THE CARD MUST SHOW ALL OF THE SCRIPT, AS IT WILL RUN. The approval is for what runs:
 // - The whole script, wrapped (pre-wrap + break anywhere), monospace. NO height cap, NO
@@ -758,8 +764,9 @@ interface ChatDetail extends Chat {
 //   the buttons BELOW the script.
 // - Its line and character counts: "3 lines, 84 characters". Lines as the script has them (a
 //   trailing newline ends the last line, it doesn't add one); characters as JS `.length`.
-// - The folder, verbatim, and the schedule EXACTLY: "every 90s", never rounded to "every 2m".
-//   Seconds under 60 or not a whole minute → "Ns"; whole minutes → minutes. Plus "up to Ns a run".
+// - The folder, verbatim, and the schedule EXACTLY, never rounded: the desktop says "every 90
+//   seconds", "every minute", "every 5m" — seconds under 60 or not a whole minute in seconds,
+//   whole minutes in minutes. Plus "up to Ns a run".
 // - Render `script` as TEXT, never markdown or HTML. maiTerm refuses at creation any script holding
 //   characters a screen can't show as they run (controls other than tab/newline, bidi and
 //   zero-width format characters, non-U+0020 spaces, U+2800), so what arrives is drawable as is —
