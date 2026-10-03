@@ -1781,11 +1781,10 @@ export interface Turn {
     rule?: string;              //   the rule's name, when one sent it
   };                            // Absent = the human's own words (or unknown). Matched against this tab's
                                 // Overlord ledger entries by text AND time, or by maiTerm's own prefixes
-                                // ("[maiTerm]"). A long rule step's text counts outside the time window only
-                                // by claiming this tab's own unclaimed entry for it (a remote clock that
-                                // runs slow), or for a turn older than the ledger's oldest entry (it is a
-                                // ring). Inside it, the human typing a rule step's exact words is still the
-                                // human. A reload moves the tab's entries to its new id.
+                                // ("[maiTerm]"). A long rule step's text counts only for a turn older than the
+                                // ledger's oldest entry (it is a ring); inside it, the human typing a rule
+                                // step's exact words is still the human. A reload moves the tab's entries
+                                // to its new id.
                                 // Draw it apart from the human's bubbles; GET only, not on WS frames.
   goal?: {                      // present iff kind === 'goal_status'
     event: 'set' | 'blocked' | 'met' | 'failed' | 'cleared';

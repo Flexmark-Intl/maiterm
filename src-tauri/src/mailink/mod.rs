@@ -5214,14 +5214,6 @@ fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
                 .filter(|&ms| ms > 0)
                 .min()
         });
-    // The earliest turn served, less the match window: how far back an entry can belong to one
-    // of these turns.
-    let window_from = turns
-        .iter()
-        .filter_map(|t| t.get("ts").and_then(|v| v.as_i64()))
-        .filter(|&ts| ts > 0)
-        .min()
-        .map_or(i64::MAX, |ts| ts - BEFORE_MS);
     let mut used = vec![false; ledger.len()];
     for t in turns.iter_mut() {
         if t.get("role").and_then(|r| r.as_str()) != Some("user") {
@@ -5257,31 +5249,19 @@ fn tag_typed_turns(app: &AppState, tab_id: &str, turns: &mut [Value]) {
                 if text.chars().count() < 40 {
                     return None;
                 }
-                let rule = data
-                    .preferences
+                // Only older than the ledger reaches (it is a ring): inside it, no entry means the
+                // human typed it, even a rule step's exact words. Letting a step claim an unused
+                // entry outside the time window (for a remote clock that runs slow, never observed)
+                // was tried in b2bab2c: an earlier human turn took a later directive's entry, and a
+                // repeat took one whose turn had scrolled out — both tagged the human. Don't.
+                if !ledger_from.is_none_or(|from| ts > 0 && ts < from) {
+                    return None;
+                }
+                data.preferences
                     .overlord_rules
                     .iter()
-                    .find(|r| r.sequence.iter().any(|s| norm(&s.text) == text))?;
-                // A long rule step this tab's ledger holds an UNCLAIMED entry for, at any time: the
-                // turn missed the time window, as on an SSH host whose clock runs slow. Claimed
-                // nearest first, so a human repeating the words later finds it already used — and
-                // only an entry from the time these turns span: one whose own turn has scrolled
-                // out of the window would otherwise be claimed by that later human repeat.
-                let unclaimed = ledger
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, (l, at, _, _))| !used[*i] && *l == text && *at > 0 && *at >= window_from)
-                    .min_by_key(|(_, (_, at, _, _))| (ts - at).abs())
-                    .map(|(i, _)| i);
-                if let Some(i) = unclaimed {
-                    used[i] = true;
-                    return Some((ledger[i].2, ledger[i].3.clone()));
-                }
-                // Otherwise only older than the ledger reaches (it is a ring): inside it, no entry
-                // means the human typed it, even a rule step's exact words.
-                ledger_from
-                    .is_none_or(|from| ts > 0 && ts < from)
-                    .then(|| ("overlord", Some(rule.name.clone())))
+                    .find(|r| r.sequence.iter().any(|s| norm(&s.text) == text))
+                    .map(|r| ("overlord", Some(r.name.clone())))
             });
         if let Some((by, rule)) = tag {
             t["typedBy"] = match rule {
@@ -6792,7 +6772,7 @@ mod tests {
                 e("12:00:00", "tab", "human", None, "sent", "go ahead"),
                 e("12:00:00", "other", "rule", Some("r1"), "sent", "only elsewhere"),
                 e("12:00:00", "tab", "rule", Some("r1"), "blocked_busy", "never typed"),
-                // Typed into a tab whose transcript clock runs 5 minutes slow.
+                // An entry 5 minutes after its matching-text turn (as a slow remote clock would show).
                 e("13:00:00", "tab", "rule", Some("r1"), "sent", STEP),
             ];
             // The tab lives in this window, so this ledger is the one that speaks for it.
@@ -6837,8 +6817,9 @@ mod tests {
         assert!(turns[5].get("typedBy").is_none(), "an injection that was never typed");
         assert_eq!(turns[6]["typedBy"], json!({ "by": "maiterm" }));
         assert!(turns[7].get("typedBy").is_none(), "a short rule step the human can type themselves");
-        // Outside the time window, a long rule step still claims this tab's unclaimed entry.
-        assert_eq!(turns[8]["typedBy"], json!({ "by": "overlord", "rule": "Compaction" }), "a slow remote clock");
+        // Outside the time window and inside the ledger's reach, nothing claims an entry by text
+        // alone: an earlier or later human turn would take it (review of b2bab2c).
+        assert!(turns[8].get("typedBy").is_none(), "no text-only claim inside the ledger's reach");
         // Inside the time the ledger covers, no entry left means the human typed it — even a rule
         // step's exact words.
         assert!(turns[9].get("typedBy").is_none(), "the human sending a rule step's text by hand");
