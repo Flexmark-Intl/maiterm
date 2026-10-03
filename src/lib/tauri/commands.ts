@@ -1043,6 +1043,10 @@ export async function approveTabFollowUpScript(workspaceId: string, tabId: strin
   return invoke('approve_tab_follow_up_script', { workspaceId, tabId, followUpId });
 }
 
+export async function declineTabFollowUpScript(workspaceId: string, tabId: string, followUpId: string): Promise<FollowUp[] | null> {
+  return invoke('decline_tab_follow_up_script', { workspaceId, tabId, followUpId });
+}
+
 export async function followUpWatchStatus(): Promise<Record<string, WatchStatus>> {
   return invoke('follow_up_watch_status');
 }

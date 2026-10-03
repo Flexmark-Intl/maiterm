@@ -685,12 +685,18 @@ function createFollowUpsStore() {
       return pendingApprovals();
     },
 
-    /** The human declined a watch script: it is removed, and never runs. Nothing is sent to the
-     *  agent. False: it was no longer there. */
+    /** The human declined a watch script: it never runs, and the agent is TOLD — Rust meets it
+     *  as declined, and it is delivered like any met follow-up, so the agent doesn't go on
+     *  believing it is watching. False: it was no longer there. */
     async reject(tabId: string, id: string): Promise<boolean> {
-      if (!(await take(tabId, id))) return false;
+      const loc = locate(tabId);
+      if (!loc) return false;
+      const list = await commands.declineTabFollowUpScript(loc.workspaceId, tabId, id);
+      if (!list) return false;
+      // It is delivered as declined, never as "sent before it happened".
       wantedEarly.delete(id);
-      // Its notice is settled by `take`'s mirror.
+      // Its notice is settled by the mirror: a met script no longer needs approval.
+      mirror(tabId, list);
       logInfo(`follow-ups: watch script ${id.slice(0, 8)} on tab ${tabId.slice(0, 8)} declined`);
       return true;
     },

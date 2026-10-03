@@ -417,7 +417,11 @@ anything. So:
   - **Not a task.** A task's blocker is answered by typing text to the agent, and the agent can
     rewrite a task with `updateTasks`. An approval is acted on by maiTerm, and the card reads
     the follow-up itself (`followUpsStore.pendingApprovals`), which no agent can edit after
-    asking. *Don't allow* removes it (`followUpsStore.reject`); nothing is sent to the agent.
+    asking. *Don't allow* never runs it and **tells the agent**: Rust meets it as declined
+    (`decline_follow_up_script`, the phone's reject too), so it is delivered like any met
+    follow-up — "when your watch script … passes — your human DECLINED it instead …", which
+    also tells the agent not to re-arm the same script. Removing it silently left the agent
+    believing it was still watching.
   - **The notification waits, and there is one.** "Allow a watch script?" with the tab's name
     ("Allow 3 watch scripts?" and where, for several, re-worded in place as they are answered;
     a new one rings again) — a single request toast

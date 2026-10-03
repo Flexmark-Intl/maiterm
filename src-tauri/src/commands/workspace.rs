@@ -1238,6 +1238,38 @@ pub(crate) fn meet_follow_up(
     }
 }
 
+/// What the agent is told when its human declines a watch script: the outcome of a script that
+/// was met by being refused. Reads after "when your watch script … passes —", like "it BROKE
+/// instead", and steers the agent away from re-arming the same script in a loop.
+pub(crate) const DECLINED_OUTCOME: &str =
+    "your human DECLINED it instead — it never ran, so the condition was never checked. Don't schedule the same script again; ask your human if you still need to wait on this";
+
+/// Decline a watch script (docs/follow-ups.md §5.1): the human read it and said no. It is MET
+/// with `DECLINED_OUTCOME` rather than removed, so ordinary delivery tells the agent — through
+/// the same draft guard and take-before-type as any other — instead of leaving it believing it
+/// is still watching. A met script never runs (`watch.rs` collects only unmet ones). Desktop
+/// and phone both decline through this. False: not there, not a script, or already met.
+pub(crate) fn decline_follow_up_script(list: &mut [crate::state::workspace::FollowUp], id: &str) -> bool {
+    if !list.iter().any(|f| f.id == id && f.due.kind == "script") {
+        return false;
+    }
+    meet_follow_up(list, id, iso_now(), DECLINED_OUTCOME.to_string(), None)
+}
+
+#[tauri::command]
+pub fn decline_tab_follow_up_script(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    tab_id: String,
+    follow_up_id: String,
+) -> Result<Option<Vec<crate::state::workspace::FollowUp>>, String> {
+    let (declined, list) = with_tab_follow_ups(&window, &state, &workspace_id, &tab_id, |list| {
+        decline_follow_up_script(list, &follow_up_id)
+    })?;
+    Ok(declined.then_some(list))
+}
+
 /// Approve a watch script (docs/follow-ups.md §5.1): the human read it on the card and said yes.
 /// Marks this follow-up approved, and records the script's digest so an agent re-arming the SAME
 /// script, in the same folder, isn't asked about again. Returns the tab's list as it now stands;
@@ -3467,7 +3499,7 @@ mod active_tab_pick_tests {
 
 #[cfg(test)]
 mod reload_carry_tests {
-    use super::{carry_tab_record, meet_follow_up, release_moved_claims};
+    use super::{carry_tab_record, decline_follow_up_script, meet_follow_up, release_moved_claims, DECLINED_OUTCOME};
     use crate::state::workspace::{FollowUp, FollowUpDue, TabType};
     use crate::state::{CommsBinding, CommsMonitor, CommsMonitorChannel, Tab};
     use std::collections::HashMap;
@@ -3662,6 +3694,32 @@ mod reload_carry_tests {
         assert!(!meet_follow_up(&mut list, "t", "2026-09-30T10:00:00Z".into(), "x".into(), None), "a time follow-up has its own due");
         assert!(list[1].due.met_at.is_none());
         assert!(!meet_follow_up(&mut list, "gone", "2026-09-30T10:00:00Z".into(), "x".into(), None));
+    }
+
+    #[test]
+    fn a_declined_script_is_met_as_declined_so_the_agent_is_told() {
+        let mut script = FollowUp {
+            id: "s".to_string(),
+            text: "check CI".to_string(),
+            due: FollowUpDue { kind: "script".to_string(), script: Some("true".to_string()), cwd: Some("/r".to_string()), ..Default::default() },
+            author: "agent".to_string(),
+            created_at: "2026-09-30T09:00:00Z".to_string(),
+            expires_at: None,
+        };
+        let mut event = script.clone();
+        event.id = "e".to_string();
+        event.due = FollowUpDue { kind: "service_ready".to_string(), ..Default::default() };
+        script.due.approved = false;
+        let mut list = vec![script, event];
+
+        assert!(decline_follow_up_script(&mut list, "s"));
+        assert_eq!(list.len(), 2, "kept, so it is delivered, not removed");
+        assert!(list[0].due.met_at.is_some());
+        assert_eq!(list[0].due.outcome.as_deref(), Some(DECLINED_OUTCOME));
+        assert!(!decline_follow_up_script(&mut list, "s"), "once");
+        assert!(!decline_follow_up_script(&mut list, "e"), "only a script is declined");
+        assert!(list[1].due.met_at.is_none());
+        assert!(!decline_follow_up_script(&mut list, "gone"));
     }
 
     #[test]

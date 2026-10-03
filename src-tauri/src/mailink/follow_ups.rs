@@ -151,8 +151,8 @@ pub(crate) enum Refusal {
     Stale(&'static str),
 }
 
-/// The human approved or rejected a waiting watch script from the phone. Reject cancels it, as the
-/// desktop's Reject does.
+/// The human approved or rejected a waiting watch script from the phone. Reject declines it as
+/// the desktop's does: it never runs, and the agent is told (`decline_follow_up_script`).
 pub(crate) fn decide(
     app: &AppState,
     tab_id: &str,
@@ -188,7 +188,7 @@ pub(crate) fn decide(
             match decision {
                 Decision::Approve => tab.follow_ups[pos].due.approved = true,
                 Decision::Reject => {
-                    tab.follow_ups.remove(pos);
+                    crate::commands::workspace::decline_follow_up_script(&mut tab.follow_ups, follow_up_id);
                 }
             }
             found = Some((w.label.clone(), ws.id.clone(), script, cwd));

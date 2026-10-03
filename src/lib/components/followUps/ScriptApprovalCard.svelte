@@ -67,7 +67,7 @@
           ? 'It was already answered or removed.'
           : allow
             ? 'Allowed. The agent will be woken when it passes.'
-            : 'Not allowed. The script was removed and will not run.',
+            : 'Not allowed. The script will not run, and the agent will be told.',
       );
     } catch (err) {
       onnote?.(`Could not save that: ${err}`);

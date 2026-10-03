@@ -2348,8 +2348,8 @@ async fn post_script_approve(
     script_decision(&s, &tab_id, &follow_up_id, &body.script_hash, follow_ups::Decision::Approve)
 }
 
-/// `POST /chats/{tabId}/scripts/{id}/reject` (v0.15): cancel the watch script, as the desktop's
-/// Reject does. The agent is not told, there or here.
+/// `POST /chats/{tabId}/scripts/{id}/reject` (v0.15): decline the watch script, as the desktop's
+/// Don't allow does. It never runs, and the agent is told, there and here.
 async fn post_script_reject(
     State(s): State<ApiState>,
     headers: HeaderMap,
