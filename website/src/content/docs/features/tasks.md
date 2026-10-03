@@ -49,7 +49,7 @@ Now an agent that stops on something only you can settle puts the question **on 
 | **Needs you** | Only you can do it: a `sudo`, a login, a payment | The exact command, when there is one |
 | **Waiting outside** | Something outside maiTerm: a review, CI, another person | The question says what |
 
-The question appears on the row in the task panel, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them). Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
+The question appears on the row in the task panel, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them), where a new question rings the phone. Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
 
 Already dealt with it in the agent's own tab? **Dismiss** closes the question without sending the agent anything: the task goes back to Active, and the log says it was handled in the tab.
 

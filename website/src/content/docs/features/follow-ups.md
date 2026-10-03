@@ -82,5 +82,5 @@ A tab holding follow-ups shows a **clock badge** beside its name: dim while they
 Click the badge, or right-click the tab and choose **Follow-ups…**, to see the list. A script waiting for you sits at the top as its approval card. Every other row leads with what it waits for — "in 12m", "waiting for service `web` to be ready", "due 3m ago" — then the prompt, who added it, and, for one that's due but not delivered, what's holding it. A watch script's code is folded under a line giving its schedule and how its last check went. **Send now** sends one early, through the same checks as the schedule (and restarts an exited agent whatever the preference: the click is the consent); **Remove** takes one off the list, expired ones included. **Schedule one yourself** opens a form to add your own: a prompt, in so many minutes.
 
 :::note
-From your phone, [maiLink](/features/mailink/) shows a waiting watch script as a card you can **Allow** or **Don't allow**, under the same rules as the desktop's. It doesn't list the rest of a tab's follow-ups.
+From your phone, [maiLink](/features/mailink/) shows a waiting watch script as a card you can **Allow** or **Don't allow**, under the same rules as the desktop's, and a new one rings your phone. It doesn't list the rest of a tab's follow-ups.
 :::
