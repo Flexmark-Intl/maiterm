@@ -44,7 +44,7 @@ impl JsonRpcResponse {
     }
 }
 
-/// `tasks_enabled` gates the three task tools (docs/tasks.md §4). An agent that is never
+/// `tasks_enabled` gates the four task tools (docs/tasks.md §4). An agent that is never
 /// primed to use them shouldn't be carrying their schemas in context either, so the
 /// preference removes the surface rather than just the instruction. Same for the stack, and
 /// for follow-ups, whose flag is `Preferences::follow_ups_live()` — the Overlord AND its
@@ -631,9 +631,9 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
 
     if tasks_enabled {
     // ── maiTerm tasks (docs/tasks.md §5) ──
-    // Three batched tools, deliberately no delete: an agent may mark a task done, only a
-    // human removes one. All scoped to the CALLING TAB'S WORKSPACE via connection→tab
-    // affinity, so a tab cannot see or touch another project's list.
+    // Four batched tools. All scoped to the CALLING TAB'S WORKSPACE via connection→tab
+    // affinity, so a tab cannot see or touch another project's list. deleteTasks is guarded
+    // in its handler (another tab's in-flight work, live dependents), not withheld.
     //
     // `blocker` (docs/tasks.md §3.1) is shared by createTasks and updateTasks.
     let blocker_schema = serde_json::json!({
@@ -693,7 +693,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
         },
         {
             "name": "updateTasks",
-            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job, and `assign_to` to change who owns one — claim an unassigned task with \"me\", hand one to another tab by its id, or release yours with null. There is no delete, and the three ways a task leaves the board are NOT interchangeable: 'done' means you finished it, 'backlog' means you are deliberately deferring it, and 'dropped' means it should not have been on the list at all — you misread the work, it was superseded, or it was decided against. Use 'dropped' for those rather than closing them as done: a dropped task does not satisfy anything waiting on it, so nothing you were blocking gets falsely released. Only a human deletes a row outright.",
+            "description": "Update tasks on this project — keep statuses current as you work, so your human and this window's board see real progress. Batch related updates into ONE call. Pass `workstream` to move a task into a different job, and `assign_to` to change who owns one — claim an unassigned task with \"me\", hand one to another tab by its id, or release yours with null. The three ways a task leaves the flow are NOT interchangeable: 'done' means you finished it, 'backlog' means you are deliberately deferring it, and 'dropped' means it should not have been on the list at all — you misread the work, it was superseded, or it was decided against. Use 'dropped' for those rather than closing them as done: a dropped task does not satisfy anything waiting on it, so nothing you were blocking gets falsely released. To take rows (or a whole workstream) off the board entirely, use deleteTasks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -723,6 +723,19 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
                     }
                 },
                 "required": ["updates"]
+            }
+        },
+        {
+            "name": "deleteTasks",
+            "description": "Remove tasks from this project's board for good — by id, or a whole workstream by name (every row in it, then the workstream itself). Use it to clean up rows that should never have been filed: a job you created by mistake, duplicates, a list you are replacing. It is not undoable, so a retraction someone may still want to see stays 'dropped' via updateTasks. Two things are refused, and when either is, NOTHING in the call is deleted: unfinished work assigned to another tab (it would re-add the row and is not told), and a task that something unfinished still waits on (deleting it would release the dependent as if it had finished — remove the edge with unblock_from, or delete the dependent in the same call). Your own rows, unassigned rows, and finished or dropped rows on any tab can go.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "Task ids from listTasks" },
+                    "workstreams": { "type": "array", "items": { "type": "string" }, "description": "Workstream names (as listTasks shows them): deletes every task in each, and the workstream with them" }
+                },
+                "required": []
             }
         }
     ]).as_array().unwrap().clone());

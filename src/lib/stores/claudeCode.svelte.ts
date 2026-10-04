@@ -15,7 +15,7 @@ import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
-import { appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, hasUnmetDeps, isDelegation, isInFlight, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
+import { appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
 import { activityStore } from '$lib/stores/activity.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -209,6 +209,9 @@ function createClaudeCodeStore() {
           break;
         case 'updateTasks':
           result = handleUpdateTasks(args as { tabId?: string; updates?: TaskToolUpdate[] });
+          break;
+        case 'deleteTasks':
+          result = handleDeleteTasks(args as { tabId?: string; ids?: string[]; workstreams?: string[] });
           break;
         // Workspace stack (docs/stack.md §6.1) — all resolve "this project" from the calling tab.
         case 'listStack':
@@ -2135,6 +2138,120 @@ function createClaudeCodeStore() {
       ...(missing.length ? { missing } : {}),
       ...(refused.length ? { refused } : {}),
       ...(handoffs.length ? { handoffs } : {}),
+    };
+  }
+
+  /** `deleteTasks` — rows, or whole workstreams, off the board for good (docs/tasks.md §5).
+   *
+   *  Deletion used to be human-only, and that left an agent that had cleaned up a job it
+   *  filed by mistake telling its human to go delete the rows by hand. The risks that rule
+   *  insured against are guarded here instead, all-or-nothing so a refusal never leaves a
+   *  job half-deleted:
+   *  - **Another tab's in-flight work** is refused. That tab would re-add it on its next list
+   *    re-send, and nothing types into a tab on an agent's say-so to tell it not to.
+   *  - **A prerequisite something live still waits on** is refused. Deleting it strips the
+   *    edge, which frees the dependent — the back door `dropped` exists to close. */
+  function handleDeleteTasks(args: { tabId?: string; ids?: string[]; workstreams?: string[] }) {
+    const loc = resolveActiveTab(args.tabId);
+    if ('error' in loc) return loc;
+    const wsId = loc.workspace.id;
+    const ids = (args.ids ?? []).filter((id) => typeof id === 'string' && id);
+    const names = (args.workstreams ?? []).filter((n) => typeof n === 'string' && n.trim());
+    if (!ids.length && !names.length) return { error: 'Pass ids, workstreams, or both.' };
+
+    const all = tasksStore.forWorkspace(wsId);
+    const byId = new Map(all.map((t) => [t.id, t]));
+    const target = new Set<string>();
+    const missing: string[] = [];
+    for (const id of ids) {
+      if (byId.has(id)) target.add(id);
+      // Scoped to this workspace on purpose, as in updateTasks.
+      else missing.push(id);
+    }
+    const streams: { id: string; name: string }[] = [];
+    const unknownStreams: string[] = [];
+    for (const name of names) {
+      const w = findWorkstream(tasksStore.workstreams(wsId), name);
+      if (!w) {
+        unknownStreams.push(name);
+        continue;
+      }
+      streams.push({ id: w.id, name: w.name });
+      for (const t of all) if (t.workstream_id === w.id) target.add(t.id);
+    }
+
+    const parked = workspacesStore.parkedTasks;
+    const nameOfTab = (id: string) => {
+      const tab = loc.workspace.panes.flatMap((p) => p.tabs).find((t) => t.id === id);
+      return tab ? tabDisplayName(tab) : id;
+    };
+    const refused: { id: string; title: string; reason: string; detail: string }[] = [];
+    for (const id of target) {
+      const t = byId.get(id)!;
+      if (t.tab_id && t.tab_id !== loc.tab.id && isInFlight(t)) {
+        refused.push({
+          id,
+          title: t.title,
+          reason: 'another_tabs_work',
+          detail: `${nameOfTab(t.tab_id)} is carrying this and it is not finished. It would re-add the row on its next list re-send, and it will not be told. Set it to 'dropped' with updateTasks and ask your human, or release it (assign_to null) once that tab is done with it.`,
+        });
+        continue;
+      }
+      // Live dependents outside this delete — on the board, or parked on an archived tab
+      // (restoring it would bring back an edge to a row that no longer exists, read as met).
+      const waiters = [
+        ...blocking(t, all).filter((w) => !target.has(w.id) && !isRetired(w.status)).map((w) => w.title),
+        ...[...parked.values()]
+          .filter((p) => p.task.blocked_by?.includes(id) && !isRetired(p.task.status))
+          .map((p) => `${p.task.title} (parked on archived tab ${p.tabName})`),
+      ];
+      if (waiters.length) {
+        refused.push({
+          id,
+          title: t.title,
+          reason: 'has_dependents',
+          detail: `Still a prerequisite of: ${waiters.join('; ')}. Deleting it would release them as if it had finished. Remove the edge first (updateTasks unblock_from on each dependent), or delete them in the same call.`,
+        });
+      }
+    }
+    if (refused.length) {
+      return {
+        deleted: [],
+        refused,
+        detail: 'Nothing was deleted: a delete is applied whole or not at all, so a job is never left half on the board.',
+        ...(missing.length ? { missing } : {}),
+        ...(unknownStreams.length ? { unknown_workstreams: unknownStreams } : {}),
+      };
+    }
+
+    const deleted = [...target].map((id) => ({ id, title: byId.get(id)!.title }));
+    if (target.size) {
+      tasksStore.removeMany(wsId, target);
+      overlordStore.forgetTasks(target);
+    }
+    // Even with nothing deleted: a named workstream can already be empty in this copy (Rust
+    // pruned it at the last persist), and it should go rather than be reported as kept.
+    // One that rows on an archived tab still point at survives, exactly as Rust keeps it.
+    const referenced = new Set<string>();
+    for (const t of tasksStore.forWorkspace(wsId)) if (t.workstream_id) referenced.add(t.workstream_id);
+    for (const p of parked.values()) if (p.task.workstream_id) referenced.add(p.task.workstream_id);
+    tasksStore.pruneWorkstreams(wsId, referenced);
+    const remaining = new Set(tasksStore.workstreams(wsId).map((w) => w.id));
+    const kept = streams.filter((s) => remaining.has(s.id));
+    return {
+      deleted,
+      ...(streams.length ? { workstreams_removed: streams.filter((s) => !remaining.has(s.id)).map((s) => s.name) } : {}),
+      // Only when an archived tab still holds rows in it — say why it is still listed.
+      ...(kept.length
+        ? {
+            workstreams_kept: kept.map((s) => ({
+              name: s.name,
+              detail: 'Rows parked on an archived tab still belong to it, so the name stays until that tab is restored and its rows deleted, or the archived tab is deleted.',
+            })),
+          }
+        : {}),
+      ...(missing.length ? { missing } : {}),
+      ...(unknownStreams.length ? { unknown_workstreams: unknownStreams } : {}),
     };
   }
 

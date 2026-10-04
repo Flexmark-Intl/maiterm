@@ -271,9 +271,10 @@ Six lanes gave an agent that had filed work it misread exactly two exits, and bo
 `done` says it finished — and, worse, **satisfies every dependent**, so a task legitimately
 waiting on the retracted one silently became ready work. `backlog` says it was deliberately
 deferred, and parked rows are exempt from every staleness check, which makes it a quiet
-place to hide a mistake. Deletion is human-only and stays that way (§9): an agent tidying
+place to hide a mistake. Deletion was human-only at the time (§9): an agent tidying
 away work it didn't understand is unrecoverable. So the missing verb was never *delete*, it
-was **retract**.
+was **retract**. (Agents gained a guarded `deleteTasks` on 2026-10-04 — see §5 — but
+`dropped` is still the exit for a retraction someone may want to see.)
 
 Four properties, each of which is a place the six-lane code was wrong:
 
@@ -409,7 +410,7 @@ Imported and agent statuses map: `pending → todo`, `in_progress → active`,
 
 ## 5. MCP surface
 
-Three tools, batched to keep both token cost and round trips down. Registered for every
+Four tools, batched to keep both token cost and round trips down. Registered for every
 runtime; they ride the SSH bridge like every other maiterm tool.
 
 ```ts
@@ -426,6 +427,10 @@ updateTasks({ updates: [{ id, status?, title?, detail?, note?, workstream?,
                           blocked_by?, block_on?, unblock_from?,
                           assign_to? }] })                 // tab id | "me" | null
   → { updated: string[], missing: string[], refused?: [{ id, reason, detail }] }
+
+deleteTasks({ ids?: string[], workstreams?: string[] })     // names; all-or-nothing
+  → { deleted: [{ id, title }], workstreams_removed?, workstreams_kept?,
+      refused?: [{ id, title, reason, detail }], missing?, unknown_workstreams? }
 ```
 
 ### `detail` is the spec; `notes` is the log (2026-09-10)
@@ -640,8 +645,25 @@ says plainly when a retraction means this will not resolve itself. `listTasks` h
   by equality), never be swept, and read as permanently unfinished to the dependency check —
   wedging everything blocked on it. `coerceStatus` maps it at the handler and Rust clamps
   again before disk.
-- Deletion is deliberately **not** exposed. An agent may mark `done`; only the human
-  deletes. Cheap insurance against an agent tidying away work it didn't understand.
+- **`deleteTasks` is guarded, not withheld (2026-10-04).** Deletion used to be human-only,
+  as cheap insurance against an agent tidying away work it didn't understand. In practice
+  it left an agent that had retracted a job it filed by mistake telling its human to go
+  delete nine rows by hand — the tools could drop rows but never remove them, nor the
+  workstream. The tool takes `ids` and/or `workstreams` (names; every row in each, after
+  which the emptied workstream is pruned — the frontend copy via `pruneWorkstreams`, disk by
+  `set_workspace_tasks`' own prune). The two risks the rule insured against are refused
+  instead, and **a refusal deletes nothing** so a job is never left half on the board:
+  - **another tab's in-flight work** (`another_tabs_work`) — that tab re-adds it on its next
+    list re-send, and the agent's delete tells nobody (nothing types into a tab on an
+    agent's say-so). Retired or unassigned rows on any tab may go;
+  - **a prerequisite something unfinished still waits on** (`has_dependents`), including a
+    dependent parked on an archived tab. `removeMany` strips the edge, which would release
+    the dependent as met — the very back door `dropped` closes. Delete both together, or
+    `unblock_from` first.
+
+  A workstream that rows parked on an archived tab still point at survives the delete
+  (`workstreams_kept`), matching Rust's prune — dropping it from the frontend copy alone
+  would make the next whole-list persist delete it on disk.
 - But a human deletion has to REACH the agent. `findDuplicate` only sees rows that exist,
   so a task the human removed comes straight back on the agent's next list re-send
   (re-prime, resume, compaction). Both delete paths — the board card and the side panel —
@@ -888,5 +910,5 @@ and the pass cannot run twice. Two details that matter:
 | Keep mirroring each runtime's private store | Three formats, one undocumented and moving, one scrape-only, one absent. Read-only ceiling. Three silent failures in two days. |
 | JSON file the agent reads/writes directly | Wrong host for SSH tabs; needs write reconciliation over the tunnel; no validation or atomicity. Speed advantage is irrelevant next to a model turn. |
 | Tasks on `WindowData` (status quo) | A workspace is the project. Window-scoped tasks don't survive moves and don't travel with an exported workspace. |
-| Exposing task deletion over MCP | An agent tidying away work it didn't understand is unrecoverable. `done` is enough. |
+| Exposing task deletion over MCP | ~~An agent tidying away work it didn't understand is unrecoverable. `done` is enough.~~ Reversed 2026-10-04: it wasn't enough — an agent could retract a mistaken job but not remove it, and handed the cleanup to the human. Shipped as a guarded `deleteTasks` (§5). |
 | Per-tab task storage | Tabs are ephemeral (reload mints a new id); projects are not. Tabs are an *assignee*, not an owner. |

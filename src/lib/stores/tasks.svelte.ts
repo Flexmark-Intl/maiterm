@@ -232,21 +232,40 @@ function createTasksStore() {
       return this.update(workspaceId, id, { status });
     },
 
-    /** Delete. Deliberately human-only — no MCP tool reaches this (docs/tasks.md §5).
-     *  Dangling `blocked_by` edges are cleaned up so no task is left blocked forever by
-     *  a prerequisite that no longer exists. */
+    /** Delete one row. Dangling `blocked_by` edges are cleaned up so no task is left blocked
+     *  forever by a prerequisite that no longer exists. */
     remove(workspaceId: string, id: string): boolean {
+      return this.removeMany(workspaceId, new Set([id])) > 0;
+    },
+
+    /** Delete many rows as ONE commit — the human's delete and the agent's `deleteTasks`
+     *  (docs/tasks.md §5). The guards on what an agent may delete live in the MCP handler;
+     *  this only removes. Returns how many rows went. */
+    removeMany(workspaceId: string, ids: ReadonlySet<string>): number {
       const list = this.forWorkspace(workspaceId);
-      if (!list.some((t) => t.id === id)) return false;
+      const kept = list.filter((t) => !ids.has(t.id));
+      if (kept.length === list.length) return 0;
       commit(
         workspaceId,
-        list
-          .filter((t) => t.id !== id)
-          .map((t) =>
-            t.blocked_by?.includes(id) ? { ...t, blocked_by: t.blocked_by.filter((b) => b !== id) } : t,
-          ),
+        kept.map((t) =>
+          t.blocked_by?.some((b) => ids.has(b)) ? { ...t, blocked_by: t.blocked_by.filter((b) => !ids.has(b)) } : t,
+        ),
       );
-      return true;
+      return list.length - kept.length;
+    },
+
+    /** Forget workstreams nothing points at any more — the in-memory half of the prune Rust
+     *  already does on every persist (`set_workspace_tasks`). Without it a deleted job stays
+     *  in this copy until the next rehydrate, and `listTasks`' `all_workstreams` keeps
+     *  offering its name to agents. `referenced` must include rows parked on archived tabs,
+     *  as Rust's does: dropping a workstream they still point at here would make the next
+     *  whole-list persist delete it on disk too. No persist: Rust has already pruned it. */
+    pruneWorkstreams(workspaceId: string, referenced: ReadonlySet<string>) {
+      const list = this.workstreams(workspaceId);
+      const kept = list.filter((w) => referenced.has(w.id));
+      if (kept.length === list.length) return;
+      streamsByWorkspace.set(workspaceId, kept);
+      streamsByWorkspace = new Map(streamsByWorkspace);
     },
 
     /** Whole-list replace for reordering / drag-and-drop, where order IS the change. */

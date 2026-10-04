@@ -2332,7 +2332,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 33] = [
+const PEER_ADDRESSING_TOOLS: [&str; 34] = [
     // Files leave the machine for the human's phone and land in a named tab's chat. An
     // inferred identity would put one agent's files in a stranger's conversation, which is
     // the "speak as it" side of this line, not the "act on it" side.
@@ -2366,6 +2366,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 33] = [
     "listTasks",
     "createTasks",
     "updateTasks",
+    "deleteTasks",
     // Stack write verbs (docs/stack.md §6.1): a deduced identity must never stop another
     // project's database or type a start command into a stranger's shell. Reads keep the
     // reconnect convenience.
