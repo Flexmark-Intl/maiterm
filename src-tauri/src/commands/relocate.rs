@@ -172,7 +172,8 @@ pub async fn relocate_project(
 
     // 3. Agents. Failures here are reported, not fatal: the folder has already moved, and
     //    maiTerm's own paths must follow it regardless.
-    let agents = agents::apply(&old, &new);
+    let known = relocate::known_paths(&app.app_data.read(), &old);
+    let agents = agents::apply(&old, &new, &known);
 
     // 4. maiTerm state.
     let (report, patches) = {

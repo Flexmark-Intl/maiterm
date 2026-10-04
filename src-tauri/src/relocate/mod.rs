@@ -222,6 +222,27 @@ pub fn relocate_state(data: &mut AppData, old: &Path, new: &Path) -> StateReport
     report
 }
 
+/// Every local folder under `old` that saved state points at — the folders agents were started
+/// in, as far as maiTerm knows.
+pub fn known_paths(data: &AppData, old: &Path) -> Vec<String> {
+    let mut out = vec![];
+    for w in &data.windows {
+        for ws in &w.workspaces {
+            for t in ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()) {
+                if is_ssh_tab(t) {
+                    continue;
+                }
+                for c in [&t.restore_cwd, &t.auto_resume_cwd, &t.last_cwd].into_iter().flatten() {
+                    if rebase(c, old, old).is_some() && !out.contains(c) {
+                        out.push(c.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
