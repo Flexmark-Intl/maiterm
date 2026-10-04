@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
 import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
+// A tab that opened in home because its folder was missing saves the folder it WANTED, through
+// every command below that saves a tab's cwd (docs/relocate.md §4).
+import { savedCwd } from '$lib/stores/relocateFallback';
 import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -696,7 +699,7 @@ export async function setTabPtyId(workspaceId: string, paneId: string, tabId: st
 }
 
 export async function suspendTab(workspaceId: string, paneId: string, tabId: string, cwd: string | null, sshCommand: string | null, remoteCwd: string | null): Promise<void> {
-  return invoke('suspend_tab', { workspaceId, paneId, tabId, cwd, sshCommand, remoteCwd });
+  return invoke('suspend_tab', { workspaceId, paneId, tabId, cwd: savedCwd(tabId, cwd), sshCommand, remoteCwd });
 }
 
 export async function setTabPinned(workspaceId: string, paneId: string, tabId: string, pinned: boolean): Promise<void> {
@@ -814,7 +817,7 @@ export async function setTabRestoreContext(
   sshCommand: string | null,
   remoteCwd: string | null,
 ): Promise<void> {
-  return invoke('set_tab_restore_context', { workspaceId, paneId, tabId, cwd, sshCommand, remoteCwd });
+  return invoke('set_tab_restore_context', { workspaceId, paneId, tabId, cwd: savedCwd(tabId, cwd), sshCommand, remoteCwd });
 }
 
 export async function setTabTriggerVariables(
@@ -1286,7 +1289,7 @@ export async function archiveTab(
   sshCommand: string | null,
   remoteCwd: string | null,
 ): Promise<void> {
-  return invoke('archive_tab', { workspaceId, paneId, tabId, displayName, scrollback, cwd, sshCommand, remoteCwd });
+  return invoke('archive_tab', { workspaceId, paneId, tabId, displayName, scrollback, cwd: savedCwd(tabId, cwd), sshCommand, remoteCwd });
 }
 
 export async function restoreArchivedTab(

@@ -840,6 +840,8 @@ export interface RelocatePreview {
   tabs: number;
   services: number;
   agents: AgentPlan;
+  /** The volume folds case, so paths match case-insensitively. */
+  fold: boolean;
 }
 
 export interface RelocateOutcome {

@@ -126,11 +126,20 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
       // Move project (docs/relocate.md): Rust's relocate_project, not the phone, asks these —
       // this is the one channel that reaches a window's webview and waits for its answer.
       case 'relocate.suspend': {
-        const roots = (req.args ?? {}).roots;
-        if (!Array.isArray(roots) || !roots.every((r) => typeof r === 'string')) result = { error: 'roots is required' };
-        else {
+        const { roots, session, fold } = (req.args ?? {}) as { roots?: unknown; session?: unknown; fold?: unknown };
+        if (!Array.isArray(roots) || !roots.every((r) => typeof r === 'string') || typeof session !== 'string') {
+          result = { error: 'roots and session are required' };
+        } else {
           const { suspendUnder } = await import('$lib/stores/relocate.svelte');
-          result = await suspendUnder(roots as string[]);
+          result = await suspendUnder(roots as string[], session, fold !== false);
+        }
+        break;
+      }
+      case 'relocate.abort': {
+        if (typeof a.session !== 'string') result = { error: 'session is required' };
+        else {
+          const { abortSession } = await import('$lib/stores/relocate.svelte');
+          result = abortSession(a.session);
         }
         break;
       }

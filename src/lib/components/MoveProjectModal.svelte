@@ -35,9 +35,7 @@
     outcome = null;
     runError = null;
     running = false;
-    void liveTabsUnder([req.old]).then((t) => {
-      restarts = t.map((x) => ({ name: x.tab.name || 'Terminal', working: x.working }));
-    });
+    restarts = [];
     // Explicit focus: Svelte's autofocus doesn't move focus off a keyboard opener (CLAUDE.md).
     requestAnimationFrame(() => {
       input?.focus();
@@ -58,6 +56,8 @@
       try {
         const p = await commands.previewRelocation(r.old, t, r.mode === 'move');
         if (seq === previewSeq) { preview = p; previewError = null; }
+        const live = await liveTabsUnder([r.old], p.fold);
+        if (seq === previewSeq) restarts = live.map((x) => ({ name: x.tab.name || 'Terminal', working: x.working }));
       } catch (e) {
         if (seq === previewSeq) { preview = null; previewError = String(e); }
       }

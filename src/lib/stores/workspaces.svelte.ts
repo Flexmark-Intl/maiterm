@@ -3,6 +3,7 @@ import type { AgentRuntime } from '$lib/agents/types';
 import { launchCommand } from '$lib/agents/descriptor';
 import { getAdapter } from '$lib/agents/adapter';
 import * as commands from '$lib/tauri/commands';
+import { savedCwd } from '$lib/stores/relocateFallback';
 import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
 import { activityStore } from '$lib/stores/activity.svelte';
@@ -1415,7 +1416,7 @@ function createWorkspacesStore() {
 
       // Update local state
       tab.pty_id = null;
-      tab.restore_cwd = cwd;
+      tab.restore_cwd = savedCwd(tabId, cwd); // as the command saved it (relocateFallback.ts)
       tab.restore_ssh_command = sshCommand;
       tab.restore_remote_cwd = remoteCwd;
       tab.suspended_at = new Date().toISOString();
@@ -1516,7 +1517,7 @@ function createWorkspacesStore() {
         archived_name: displayName,
         pty_id: null,
         scrollback,
-        restore_cwd: cwd,
+        restore_cwd: savedCwd(tabId, cwd),
         restore_ssh_command: sshCommand,
         restore_remote_cwd: remoteCwd,
         archived_at: new Date().toISOString(),

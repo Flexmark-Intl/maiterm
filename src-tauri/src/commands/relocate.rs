@@ -11,7 +11,7 @@
 //!   5. each window patches its mirror and wakes the tabs it suspended, which spawn in the new
 //!      folder and run their auto-resume command.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -79,6 +79,8 @@ pub struct RelocatePreview {
     pub tabs: usize,
     pub services: usize,
     pub agents: agents::AgentPlan,
+    /// The volume folds case — the frontend matches live tabs' folders the same way.
+    pub fold: bool,
 }
 
 #[tauri::command]
@@ -97,6 +99,7 @@ pub fn preview_relocation(
         tabs: report.tabs.len(),
         services: report.services,
         agents: agents::plan(&old, &new),
+        fold: relocate::case_insensitive(&old),
     })
 }
 
@@ -157,13 +160,17 @@ fn window_labels(state: &AppState) -> Vec<String> {
     state.app_data.read().windows.iter().map(|w| w.label.clone()).collect()
 }
 
-/// Ask every window to resume the tabs it suspended — the undo for a move called off.
-async fn wake(app: &Arc<AppState>, handle: &tauri::AppHandle, suspended: &[(String, Vec<String>)]) {
-    for (label, ids) in suspended {
-        if ids.is_empty() {
-            continue;
-        }
-        let _ = rpc::request(app, Some(handle), label, "relocate.apply", json!({ "tabs": [], "stacks": [], "wake": ids })).await;
+/// How long a window gets to suspend its tabs: each one saves scrollback, kills a PTY and writes
+/// state, one after another, and a throttled background webview runs slowly.
+const SUSPEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Call the move off in EVERY window, not only those that answered: a window that timed out
+/// still has the suspend request queued, and its answer will go nowhere — so it is told the
+/// session is over, and wakes whatever it suspended for it, now or when its suspend finishes.
+async fn abort(app: &Arc<AppState>, handle: &tauri::AppHandle, session: &str) {
+    for label in window_labels(app) {
+        let _ = rpc::request_with_timeout(app, Some(handle), &label, "relocate.abort", json!({ "session": session }), ABORT_TIMEOUT).await;
     }
 }
 
@@ -178,15 +185,18 @@ pub async fn relocate_project(
     let app = state.inner().clone();
     let (old, new) = validate(&old, &new, move_folder)?;
     let (old_s, new_s) = (old.to_string_lossy().to_string(), new.to_string_lossy().to_string());
+    let fold = relocate::case_insensitive(&old);
+    let session = uuid::Uuid::new_v4().to_string();
     log::info!("relocate: {} {old_s} → {new_s}", if move_folder { "moving" } else { "repointing" });
 
     // 1. Suspend: tabs whose shell is in the folder, and tabs that spawned in home because it
-    //    was missing (the window remembers those — relocate.svelte.ts `noteFallback`). Not
-    //    tabs already in the new folder when repointing: one opened there since is keyed to
-    //    the new path already, and restarting it would interrupt its agent for nothing.
+    //    was missing (the window remembers those — relocateFallback.ts). Not tabs already in
+    //    the new folder when repointing: one opened there since is keyed to the new path
+    //    already, and restarting it would interrupt its agent for nothing.
     let mut suspended: Vec<(String, Vec<String>)> = vec![];
     for label in window_labels(&app) {
-        let out = rpc::request(&app, Some(&handle), &label, "relocate.suspend", json!({ "roots": [old_s] })).await;
+        let args = json!({ "roots": [old_s], "session": session, "fold": fold });
+        let out = rpc::request_with_timeout(&app, Some(&handle), &label, "relocate.suspend", args, SUSPEND_TIMEOUT).await;
         let ids = match out {
             rpc::Outcome::Answered(v) if v.get("error").is_none() => v["suspended"]
                 .as_array()
@@ -199,8 +209,8 @@ pub async fn relocate_project(
                     rpc::Outcome::Timeout => "it didn't answer — its screen may be asleep".into(),
                     _ => "it dropped the request".into(),
                 };
-                wake(&app, &handle, &suspended).await;
-                return Err(format!("Nothing was moved: a window couldn't stop its tabs in the folder ({why})."));
+                abort(&app, &handle, &session).await;
+                return Err(format!("Nothing was moved: a window couldn't stop its tabs in the folder ({why}). Any tab it stopped is being started again."));
             }
         };
         suspended.push((label, ids));
@@ -209,7 +219,7 @@ pub async fn relocate_project(
     // 2. Move.
     if move_folder {
         if let Err(e) = std::fs::rename(&old, &new) {
-            wake(&app, &handle, &suspended).await;
+            abort(&app, &handle, &session).await;
             let cross = e.raw_os_error() == Some(18); // EXDEV
             return Err(if cross {
                 "Nothing was moved: that's a different disk, and maiTerm only renames within one. Move it yourself, then point maiTerm at the new folder.".into()
@@ -222,22 +232,28 @@ pub async fn relocate_project(
     // 3. Agents. Failures here are reported, not fatal: the folder has already moved, and
     //    maiTerm's own paths must follow it regardless.
     let known = relocate::known_paths(&app.app_data.read(), &old);
-    let agents = agents::apply(&old, &new, &known);
+    let mut agents = agents::apply(&old, &new, &known);
 
-    // 4. maiTerm state.
+    // 4. maiTerm state. A failed save is reported, not returned: the folder has moved and the
+    //    rebased state is live in memory (the next save writes it), and returning here would
+    //    leave every suspended tab down and every mirror on the old paths.
     let (report, patches) = {
         let mut data = app.app_data.write();
         let report = relocate::relocate_state(&mut data, &old, &new);
         let patches = window_patches(&data, &report);
         let clone = data.clone();
         drop(data);
-        save_state(&clone)?;
+        if let Err(e) = save_state(&clone) {
+            log::error!("relocate: saving state failed: {e}");
+            agents.warnings.push(format!("maiTerm couldn't save its state ({e}) — it will retry on the next save; quit normally to be sure."));
+        }
         (report, patches)
     };
 
     // 5. Mirrors + wake.
     let mut unconfirmed = vec![];
-    for (label, patch) in patches_with_wake(patches, &suspended) {
+    for (label, mut patch) in patches_with_wake(patches, &suspended) {
+        patch["session"] = json!(session);
         match rpc::request(&app, Some(&handle), &label, "relocate.apply", patch).await {
             rpc::Outcome::Answered(v) if v.get("error").is_none() => {}
             rpc::Outcome::NoWindow => {}
@@ -287,6 +303,7 @@ fn patches_with_wake(patches: Vec<(String, Value)>, suspended: &[(String, Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn validation_refuses_the_dangerous_shapes() {

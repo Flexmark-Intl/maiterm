@@ -6,7 +6,9 @@
 //! moved, so one runtime failing must not stop the others, and is reported rather than raised.
 //! All of it assumes no agent in the folder is running (`commands/relocate.rs` suspends them
 //! first) — a live Claude appends to the transcript path it opened, and would recreate the old
-//! project directory behind us.
+//! project directory behind us. Agents in OTHER projects keep running, and keep writing to the
+//! shared files edited here (`.claude.json`, `history.jsonl`): `update_file` redoes an edit the
+//! file changed under.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -83,11 +85,11 @@ pub fn apply(old: &Path, new: &Path, known: &[String]) -> AgentReport {
 }
 
 pub fn plan_in(h: &Homes, old: &Path, new: &Path) -> AgentPlan {
-    let dirs = claude_dirs(&h.claude_projects, old, new);
+    let c = claude_plan(&h.claude_projects, old, new);
     AgentPlan {
-        claude_sessions: dirs.iter().map(|d| sessions_in(&d.dir).len()).sum(),
-        claude_memory: dirs.iter().any(|d| d.dir.join("memory").is_dir()),
-        claude_trust: h.claude_json.iter().any(|f| read_json(f).is_some_and(|v| has_key_under(&v["projects"], old, new))),
+        claude_sessions: c.sessions.len(),
+        claude_memory: c.dirs.iter().any(|(from, _)| from.join("memory").is_dir()),
+        claude_trust: h.claude_json.iter().any(|f| read_json(f).is_some_and(|v| keys_under(&v["projects"], old, new) > 0)),
         codex_sessions: codex_threads(&h.codex, old, new).len(),
         codex_trust: fs::read_to_string(h.codex.join("config.toml")).is_ok_and(|t| codex_trust_keys(&t, old, new) > 0),
         gemini_projects: read_json(&h.gemini.join("projects.json")).map_or(0, |v| keys_under(&v["projects"], old, new)),
@@ -108,25 +110,86 @@ fn read_json(p: &Path) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
 
-/// Write beside, then rename over: a crash mid-write must never leave a runtime's config
-/// truncated — a broken `.claude.json` loses every account setting, not just this project's.
-fn write_atomic(p: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = p.with_extension(format!("maiterm-relocate-{}", std::process::id()));
-    fs::write(&tmp, contents)?;
-    if let Ok(m) = fs::metadata(p) {
-        let _ = fs::set_permissions(&tmp, m.permissions());
+fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let m = fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok()?))
+}
+
+/// Read, edit, write beside, rename over. `edit` returns `None` for "nothing to change".
+///
+/// - Through a symlink to the file it names: a config kept in a dotfiles repo stays a link.
+/// - Write-then-rename: a crash mid-write must never leave a runtime's config truncated — a
+///   broken `.claude.json` loses every account setting, not just this project's.
+/// - Redone when the file changed while it was being edited: agents in other projects keep
+///   running and appending, and a rename over their write would drop it.
+fn update_file(p: &Path, mut edit: impl FnMut(&[u8]) -> Option<Vec<u8>>) -> std::io::Result<bool> {
+    let target = match fs::canonicalize(p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    for _ in 0..5 {
+        let before = stamp(&target);
+        let bytes = fs::read(&target)?;
+        let Some(out) = edit(&bytes) else { return Ok(false) };
+        let tmp = target.with_extension(format!("maiterm-relocate-{}", std::process::id()));
+        fs::write(&tmp, &out)?;
+        if let Ok(m) = fs::metadata(&target) {
+            let _ = fs::set_permissions(&tmp, m.permissions());
+        }
+        if stamp(&target) != before {
+            let _ = fs::remove_file(&tmp);
+            continue;
+        }
+        return fs::rename(&tmp, &target).map(|_| true).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        });
     }
-    fs::rename(&tmp, p).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
+    Err(std::io::Error::other("it kept changing while being updated"))
+}
+
+/// `update_file` for a JSON document; `edit` returns whether it changed anything.
+fn update_json(p: &Path, mut edit: impl FnMut(&mut Value) -> bool) -> std::io::Result<bool> {
+    update_file(p, |b| {
+        let mut v: Value = serde_json::from_slice(b).ok()?;
+        if !edit(&mut v) {
+            return None;
+        }
+        serde_json::to_vec_pretty(&v).ok()
     })
+}
+
+/// A JSONL file edited line by line. Only lines that mention `needle` are parsed; the rest are
+/// copied byte for byte. `edit` returns whether it changed the line.
+fn edit_jsonl(bytes: &[u8], needle: &str, edit: &mut impl FnMut(&mut Value) -> bool) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut changed = false;
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        let body_len = line.len() - line.iter().rev().take_while(|b| **b == b'\n' || **b == b'\r').count();
+        let body = &line[..body_len];
+        let hit = std::str::from_utf8(body).is_ok_and(|s| s.contains(needle));
+        if hit {
+            if let Ok(mut v) = serde_json::from_slice::<Value>(body) {
+                if edit(&mut v) {
+                    out.extend(serde_json::to_vec(&v).ok()?);
+                    out.extend(&line[body_len..]);
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        out.extend(line);
+    }
+    changed.then_some(out)
+}
+
+fn update_jsonl(p: &Path, old: &Path, mut edit: impl FnMut(&mut Value) -> bool) -> std::io::Result<bool> {
+    let needle = old.to_string_lossy().to_string();
+    update_file(p, |b| edit_jsonl(b, &needle, &mut edit))
 }
 
 fn keys_under(map: &Value, old: &Path, new: &Path) -> usize {
     map.as_object().map_or(0, |m| m.keys().filter(|k| rebase(k, old, new).is_some()).count())
-}
-
-fn has_key_under(map: &Value, old: &Path, new: &Path) -> bool {
-    keys_under(map, old, new) > 0
 }
 
 /// Re-key every entry of a path-keyed object. An entry already under the new key wins field by
@@ -201,51 +264,68 @@ fn first_cwd(jsonl: &Path) -> Option<String> {
 }
 
 fn sessions_in(dir: &Path) -> Vec<PathBuf> {
-    fs::read_dir(dir)
+    let mut v: Vec<PathBuf> = fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
-        .collect()
+        .collect();
+    v.sort();
+    v
 }
 
-struct ClaudeDir {
-    dir: PathBuf,
-    /// The folder it belongs to, after the move.
-    new_path: String,
+struct ClaudeSession {
+    jsonl: PathBuf,
+    /// The folder it belongs to, after the move — its new project directory is this's slug.
+    new_cwd: String,
 }
 
-/// Project directories that belong to `old` or a folder inside it. The slug is lossy (`a.b` and
-/// `a-b` collide, and `old-sibling` shares the prefix), so a name match is only a candidate: a
-/// session inside must have been started under `old`. A directory with no sessions (memory
-/// alone) is taken only when its name is exactly `old`'s.
-fn claude_dirs(projects: &Path, old: &Path, new: &Path) -> Vec<ClaudeDir> {
+#[derive(Default)]
+struct ClaudePlan {
+    /// Every session started under `old`, decided ONE BY ONE: the slug is lossy (`/u/p/web`, a
+    /// subfolder, and `/u/p-web`, a sibling project, share `-u-p-web`), so one directory can
+    /// hold sessions of two projects, and only the ones that are ours move.
+    sessions: Vec<ClaudeSession>,
+    /// Directories whose remaining entries (`memory/`, indexes) move too, and where to: only
+    /// one holding nothing of another project's — anything else can't be told apart.
+    dirs: Vec<(PathBuf, PathBuf)>,
+    /// Memory left behind because its directory is shared with another project.
+    stuck_memory: Vec<PathBuf>,
+}
+
+fn claude_plan(projects: &Path, old: &Path, new: &Path) -> ClaudePlan {
     let old_slug = claude_slug(&old.to_string_lossy());
-    let mut out = vec![];
+    let fold = super::case_insensitive(old);
+    let norm = |s: &str| if fold { s.to_lowercase() } else { s.to_string() };
+    let mut plan = ClaudePlan::default();
     for e in fs::read_dir(projects).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        let candidate = if cfg!(target_os = "macos") {
-            let (n, o) = (name.to_lowercase(), old_slug.to_lowercase());
-            n == o || n.starts_with(&format!("{o}-"))
-        } else {
-            name == old_slug || name.starts_with(&format!("{old_slug}-"))
-        };
-        if !candidate || !e.path().is_dir() {
+        let (n, o) = (norm(&name), norm(&old_slug));
+        if !(n == o || n.starts_with(&format!("{o}-"))) || !e.path().is_dir() {
             continue;
         }
-        let cwd = sessions_in(&e.path()).iter().find_map(|s| first_cwd(s));
-        let new_path = match cwd {
-            Some(c) => match rebase(&c, old, new) {
-                Some(n) => n,
-                None => continue,
-            },
-            None if name == old_slug => new.to_string_lossy().to_string(),
-            None => continue,
-        };
-        out.push(ClaudeDir { dir: e.path(), new_path });
+        let (mut ours, mut foreign) = (0, 0);
+        let mut first_new: Option<String> = None;
+        for s in sessions_in(&e.path()) {
+            match first_cwd(&s).and_then(|c| rebase(&c, old, new)) {
+                Some(new_cwd) => {
+                    ours += 1;
+                    first_new.get_or_insert_with(|| new_cwd.clone());
+                    plan.sessions.push(ClaudeSession { jsonl: s, new_cwd });
+                }
+                // Another project's, or one that records no folder: can't be ours to move.
+                None => foreign += 1,
+            }
+        }
+        let target = if n == o { Some(new.to_string_lossy().to_string()) } else { first_new };
+        match target {
+            Some(t) if foreign == 0 => plan.dirs.push((e.path(), projects.join(claude_slug(&t)))),
+            _ if e.path().join("memory").is_dir() && ours > 0 => plan.stuck_memory.push(e.path().join("memory")),
+            _ => {}
+        }
     }
-    out
+    plan
 }
 
 /// Move `src`'s entries into `dst` one by one; a name already in `dst` stays behind (memory
@@ -274,7 +354,13 @@ fn merge_dir(src: &Path, dst: &Path) -> std::io::Result<Vec<PathBuf>> {
 fn append_relocated(jsonl: &Path, new_cwd: &str) -> std::io::Result<()> {
     let sid = jsonl.file_stem().unwrap_or_default().to_string_lossy().to_string();
     // A transcript whose last line has no newline would glue ours onto it.
-    let needs_nl = fs::read(jsonl).map(|b| b.last().is_some_and(|c| *c != b'\n')).unwrap_or(false);
+    let needs_nl = {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = fs::File::open(jsonl)?;
+        let len = f.metadata()?.len();
+        let mut last = [0u8; 1];
+        len > 0 && f.seek(SeekFrom::End(-1)).is_ok() && f.read_exact(&mut last).is_ok() && last[0] != b'\n'
+    };
     let mut f = fs::OpenOptions::new().append(true).open(jsonl)?;
     let rec = serde_json::json!({ "type": "relocated", "sessionId": sid, "relocatedCwd": new_cwd });
     if needs_nl {
@@ -303,69 +389,95 @@ fn repoint_links(root: &Path, from: &Path, to: &Path) {
 }
 
 fn claude(h: &Homes, old: &Path, new: &Path, r: &mut AgentReport) {
-    let mut sessions = 0;
+    let plan = claude_plan(&h.claude_projects, old, new);
+    let mut moved = 0;
+    for s in &plan.sessions {
+        let from_dir = s.jsonl.parent().unwrap_or(Path::new("")).to_path_buf();
+        let to_dir = h.claude_projects.join(claude_slug(&s.new_cwd));
+        let name = s.jsonl.file_name().unwrap_or_default();
+        let to = to_dir.join(name);
+        if to.exists() {
+            r.warnings.push(format!("Claude: session {} is already in the new project — left in {}.", name.to_string_lossy(), from_dir.display()));
+            continue;
+        }
+        let res = fs::create_dir_all(&to_dir).and_then(|_| fs::rename(&s.jsonl, &to));
+        if let Err(e) = res {
+            r.warnings.push(format!("Claude: couldn't move session {}: {e}", s.jsonl.display()));
+            continue;
+        }
+        // Its own folder (subagents, tool results) goes with it.
+        let stem = s.jsonl.file_stem().unwrap_or_default();
+        let (sub_from, sub_to) = (from_dir.join(stem), to_dir.join(stem));
+        if sub_from.is_dir() && !sub_to.exists() {
+            if let Err(e) = fs::rename(&sub_from, &sub_to) {
+                r.warnings.push(format!("Claude: couldn't move {}: {e}", sub_from.display()));
+            } else {
+                repoint_links(&sub_to, &from_dir, &to_dir);
+            }
+        }
+        match append_relocated(&to, &s.new_cwd) {
+            Ok(()) => moved += 1,
+            Err(e) => r.warnings.push(format!("Claude: couldn't mark {} as moved: {e}", to.display())),
+        }
+    }
     let mut memory = false;
-    for d in claude_dirs(&h.claude_projects, old, new) {
-        let to = h.claude_projects.join(claude_slug(&d.new_path));
-        // Case-only rename on a case-insensitive disk: the "destination" is the source itself.
-        let same = to.exists() && fs::canonicalize(&to).ok() == fs::canonicalize(&d.dir).ok();
-        let moved: Vec<PathBuf> = sessions_in(&d.dir).iter().filter_map(|s| s.file_name().map(|n| to.join(n))).collect();
-        memory |= d.dir.join("memory").is_dir();
-        let result = if !to.exists() || same {
-            fs::rename(&d.dir, &to).map(|_| vec![])
-        } else {
-            merge_dir(&d.dir, &to)
-        };
-        match result {
+    for (from, to) in &plan.dirs {
+        if !from.exists() {
+            continue; // emptied by the session moves and nothing else in it
+        }
+        memory |= from.join("memory").is_dir();
+        match merge_dir(from, to) {
             Ok(left) => {
-                for p in &left {
+                for p in left {
                     r.warnings.push(format!(
                         "Claude: {} was already in the new project and was left in {} — merge it by hand.",
                         p.file_name().unwrap_or_default().to_string_lossy(),
-                        d.dir.display()
+                        from.display()
                     ));
                 }
-                repoint_links(&to, &d.dir, &to);
-                for s in moved.iter().filter(|s| s.exists()) {
-                    let cwd = first_cwd(s).and_then(|c| rebase(&c, old, new)).unwrap_or_else(|| d.new_path.clone());
-                    match append_relocated(s, &cwd) {
-                        Ok(()) => sessions += 1,
-                        Err(e) => r.warnings.push(format!("Claude: couldn't mark {} as moved: {e}", s.display())),
-                    }
-                }
             }
-            Err(e) => r.warnings.push(format!("Claude: couldn't move {}: {e}", d.dir.display())),
+            Err(e) => r.warnings.push(format!("Claude: couldn't move {}: {e}", from.display())),
         }
+        // Emptied of everything ours: don't leave a husk named after the old path.
+        let _ = fs::remove_dir(from);
     }
-    if sessions > 0 {
-        r.done.push(format!("Claude: {sessions} session(s){} moved", if memory { " and project memory" } else { "" }));
+    for m in &plan.stuck_memory {
+        r.warnings.push(format!(
+            "Claude: project memory in {} wasn't moved — that folder also holds another project's sessions. Move it by hand if it's this project's.",
+            m.display()
+        ));
+    }
+    if moved > 0 || memory {
+        r.done.push(format!("Claude: {moved} session(s){} moved", if memory { " and project memory" } else { "" }));
     }
 
     let mut trust_files = 0;
     for f in &h.claude_json {
-        let Some(mut v) = read_json(f) else { continue };
-        let mut n = v.get_mut("projects").and_then(Value::as_object_mut).map_or(0, |m| rekey(m, old, new));
-        if let Some(repos) = v.get_mut("githubRepoPaths").and_then(Value::as_object_mut) {
-            for list in repos.values_mut().filter_map(Value::as_array_mut) {
-                let mut seen = vec![];
-                for p in list.iter_mut() {
-                    if let Some(rb) = p.as_str().and_then(|s| rebase(s, old, new)) {
-                        *p = Value::String(rb);
-                        n += 1;
+        let res = update_json(f, |v| {
+            let mut n = v.get_mut("projects").and_then(Value::as_object_mut).map_or(0, |m| rekey(m, old, new));
+            if let Some(repos) = v.get_mut("githubRepoPaths").and_then(Value::as_object_mut) {
+                for list in repos.values_mut().filter_map(Value::as_array_mut) {
+                    for p in list.iter_mut() {
+                        if let Some(rb) = p.as_str().and_then(|s| rebase(s, old, new)) {
+                            if p.as_str() != Some(rb.as_str()) {
+                                *p = Value::String(rb);
+                                n += 1;
+                            }
+                        }
                     }
+                    let mut seen = vec![];
+                    list.retain(|p| {
+                        let keep = !seen.contains(p);
+                        seen.push(p.clone());
+                        keep
+                    });
                 }
-                list.retain(|p| {
-                    let keep = !seen.contains(p);
-                    seen.push(p.clone());
-                    keep
-                });
             }
-        }
-        if n == 0 {
-            continue;
-        }
-        match serde_json::to_vec_pretty(&v).map_err(std::io::Error::other).and_then(|b| write_atomic(f, &b)) {
-            Ok(()) => trust_files += 1,
+            n > 0
+        });
+        match res {
+            Ok(true) => trust_files += 1,
+            Ok(false) => {}
             Err(e) => r.warnings.push(format!("Claude: couldn't update {}: {e}", f.display())),
         }
     }
@@ -374,46 +486,14 @@ fn claude(h: &Homes, old: &Path, new: &Path, r: &mut AgentReport) {
     }
 
     for f in &h.claude_history {
-        if let Err(e) = rewrite_jsonl(f, old, |v| {
+        let res = update_jsonl(f, old, |v| {
             let p = v.get("project").and_then(Value::as_str).and_then(|s| rebase(s, old, new));
             p.map(|p| v["project"] = Value::String(p)).is_some()
-        }) {
+        });
+        if let Err(e) = res {
             r.warnings.push(format!("Claude: couldn't update prompt history {}: {e}", f.display()));
         }
     }
-}
-
-/// Rewrite a JSONL file line by line. Only lines that mention `old` are parsed; the rest are
-/// copied byte for byte. `edit` returns whether it changed the line. Untouched when nothing did.
-fn rewrite_jsonl(f: &Path, old: &Path, mut edit: impl FnMut(&mut Value) -> bool) -> std::io::Result<bool> {
-    let Ok(file) = fs::File::open(f) else { return Ok(false) };
-    let needle = old.to_string_lossy().to_string();
-    let mut out: Vec<u8> = Vec::new();
-    let mut changed = false;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    while reader.read_line(&mut line)? > 0 {
-        let body = line.trim_end_matches(['\n', '\r']);
-        let mut written = false;
-        if body.contains(&needle) {
-            if let Ok(mut v) = serde_json::from_str::<Value>(body) {
-                if edit(&mut v) {
-                    out.extend(serde_json::to_vec(&v)?);
-                    out.extend(&line.as_bytes()[body.len()..]);
-                    changed = true;
-                    written = true;
-                }
-            }
-        }
-        if !written {
-            out.extend(line.as_bytes());
-        }
-        line.clear();
-    }
-    if changed {
-        write_atomic(f, &out)?;
-    }
-    Ok(changed)
 }
 
 // ── Codex ───────────────────────────────────────────────────────────────────────────────────
@@ -446,39 +526,37 @@ fn codex_threads(codex: &Path, old: &Path, new: &Path) -> Vec<(PathBuf, String, 
 fn codex(h: &Homes, old: &Path, new: &Path, r: &mut AgentReport) {
     // Trust: `[projects."<path>"]`, edited in place so the rest of the file keeps its layout.
     let cfg = h.codex.join("config.toml");
-    if let Ok(text) = fs::read_to_string(&cfg) {
-        if let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() {
-            let mut n = 0;
-            if let Some(t) = doc.get_mut("projects").and_then(|p| p.as_table_like_mut()) {
-                let moving: Vec<(String, String)> = t
-                    .iter()
-                    .filter_map(|(k, _)| rebase(k, old, new).filter(|nk| nk != k).map(|nk| (k.to_string(), nk)))
-                    .collect();
-                for (from, to) in moving {
-                    if let Some(item) = t.remove(&from) {
-                        if t.get(&to).is_none() {
-                            t.insert(&to, item);
-                        }
-                        n += 1;
-                    }
-                }
-            }
-            if n > 0 {
-                match write_atomic(&cfg, doc.to_string().as_bytes()) {
-                    Ok(()) => r.done.push("Codex: project trust moved".into()),
-                    Err(e) => r.warnings.push(format!("Codex: couldn't update {}: {e}", cfg.display())),
+    let res = update_file(&cfg, |b| {
+        let mut doc = std::str::from_utf8(b).ok()?.parse::<toml_edit::DocumentMut>().ok()?;
+        let t = doc.get_mut("projects").and_then(|p| p.as_table_like_mut())?;
+        let moving: Vec<(String, String)> = t
+            .iter()
+            .filter_map(|(k, _)| rebase(k, old, new).filter(|nk| nk != k).map(|nk| (k.to_string(), nk)))
+            .collect();
+        if moving.is_empty() {
+            return None;
+        }
+        for (from, to) in moving {
+            if let Some(item) = t.remove(&from) {
+                if t.get(&to).is_none() {
+                    t.insert(&to, item);
                 }
             }
         }
+        Some(doc.to_string().into_bytes())
+    });
+    match res {
+        Ok(true) => r.done.push("Codex: project trust moved".into()),
+        Ok(false) => {}
+        Err(e) => r.warnings.push(format!("Codex: couldn't update {}: {e}", cfg.display())),
     }
 
     // Sessions: the thread index's cwd, and the cwd each rollout records — `codex resume` asks
     // which folder to use when the recorded one is gone, which would stall an auto-resume.
-    let threads = codex_threads(&h.codex, old, new);
     let mut moved = 0;
-    for (db_path, id, cwd, rollout) in &threads {
-        let Some(new_cwd) = rebase(cwd, old, new) else { continue };
-        let db = rusqlite::Connection::open(db_path).and_then(|db| {
+    for (db_path, id, cwd, rollout) in codex_threads(&h.codex, old, new) {
+        let Some(new_cwd) = rebase(&cwd, old, new) else { continue };
+        let db = rusqlite::Connection::open(&db_path).and_then(|db| {
             db.busy_timeout(std::time::Duration::from_secs(5))?;
             db.execute("UPDATE threads SET cwd = ?1 WHERE id = ?2", rusqlite::params![new_cwd, id])
         });
@@ -487,7 +565,7 @@ fn codex(h: &Homes, old: &Path, new: &Path, r: &mut AgentReport) {
             continue;
         }
         if !rollout.is_empty() {
-            let res = rewrite_jsonl(Path::new(rollout), old, |v| {
+            let res = update_jsonl(Path::new(&rollout), old, |v| {
                 let kind = v["type"].as_str().unwrap_or_default();
                 if kind != "session_meta" && kind != "turn_context" {
                     return false;
@@ -520,28 +598,29 @@ fn gemini(h: &Homes, old: &Path, new: &Path, known: &[String], r: &mut AgentRepo
     // `.project_root` naming the path back — both must agree, or Gemini claims a fresh slug and
     // the history looks lost.
     let reg = g.join("projects.json");
-    if let Some(mut v) = read_json(&reg) {
-        if let Some(m) = v.get_mut("projects").and_then(Value::as_object_mut) {
-            let slugs: Vec<String> = m
-                .iter()
-                .filter(|(k, _)| rebase(k, old, new).is_some())
-                .filter_map(|(_, s)| s.as_str().map(String::from))
-                .collect();
-            moved += rekey(m, old, new);
-            for slug in slugs {
-                for base in ["tmp", "history"] {
-                    let marker = g.join(base).join(&slug).join(".project_root");
-                    if let Some(n) = fs::read_to_string(&marker).ok().and_then(|t| rebase(t.trim(), old, new)) {
-                        if let Err(e) = write_atomic(&marker, n.as_bytes()) {
-                            r.warnings.push(format!("Gemini: couldn't update {}: {e}", marker.display()));
-                        }
-                    }
-                }
-            }
+    let mut slugs: Vec<String> = vec![];
+    let res = update_json(&reg, |v| {
+        let Some(m) = v.get_mut("projects").and_then(Value::as_object_mut) else { return false };
+        slugs = m.iter().filter(|(k, _)| rebase(k, old, new).is_some()).filter_map(|(_, s)| s.as_str().map(String::from)).collect();
+        rekey(m, old, new) > 0
+    });
+    match res {
+        Ok(true) => moved += slugs.len(),
+        Ok(false) => slugs.clear(),
+        Err(e) => {
+            slugs.clear();
+            r.warnings.push(format!("Gemini: couldn't update {}: {e}", reg.display()));
         }
-        if moved > 0 {
-            if let Err(e) = serde_json::to_vec_pretty(&v).map_err(std::io::Error::other).and_then(|b| write_atomic(&reg, &b)) {
-                r.warnings.push(format!("Gemini: couldn't update {}: {e}", reg.display()));
+    }
+    for slug in &slugs {
+        for base in ["tmp", "history"] {
+            let marker = g.join(base).join(slug).join(".project_root");
+            let res = update_file(&marker, |b| {
+                let n = rebase(std::str::from_utf8(b).ok()?.trim(), old, new)?;
+                Some(n.into_bytes())
+            });
+            if let Err(e) = res {
+                r.warnings.push(format!("Gemini: couldn't update {}: {e}", marker.display()));
             }
         }
     }
@@ -565,12 +644,8 @@ fn gemini(h: &Homes, old: &Path, new: &Path, known: &[String], r: &mut AgentRepo
         }
     }
     let trust = g.join("trustedFolders.json");
-    if let Some(mut v) = read_json(&trust) {
-        if v.as_object_mut().map_or(0, |m| rekey(m, old, new)) > 0 {
-            if let Err(e) = serde_json::to_vec_pretty(&v).map_err(std::io::Error::other).and_then(|b| write_atomic(&trust, &b)) {
-                r.warnings.push(format!("Gemini: couldn't update {}: {e}", trust.display()));
-            }
-        }
+    if let Err(e) = update_json(&trust, |v| v.as_object_mut().map_or(0, |m| rekey(m, old, new)) > 0) {
+        r.warnings.push(format!("Gemini: couldn't update {}: {e}", trust.display()));
     }
     if moved > 0 {
         r.done.push(format!("Gemini: {moved} project(s) moved"));
@@ -668,6 +743,24 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_slug_moves_only_our_sessions() {
+        // `/u/p/web` (ours, a subfolder) and `/u/p-web` (a sibling project) share `-u-p-web`.
+        let s = scratch();
+        let (old, new) = (Path::new("/u/p"), Path::new("/u/q"));
+        let d = s.h.claude_projects.join("-u-p-web");
+        fs::create_dir_all(d.join("memory")).unwrap();
+        fs::write(d.join("a.jsonl"), "{\"cwd\":\"/u/p-web\"}\n").unwrap();
+        fs::write(d.join("b.jsonl"), "{\"cwd\":\"/u/p/web\"}\n").unwrap();
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(d.join("a.jsonl").exists(), "the sibling project's session stays");
+        assert!(d.join("memory").is_dir(), "memory in a shared directory isn't ours to take");
+        let moved = fs::read_to_string(s.h.claude_projects.join("-u-q-web/b.jsonl")).unwrap();
+        assert!(moved.contains("\"relocatedCwd\":\"/u/q/web\""));
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(r.warnings[0].contains("memory"));
+    }
+
+    #[test]
     fn claude_merges_into_an_existing_project_and_reports_clashes() {
         let s = scratch();
         let (old, new) = (Path::new("/u/a"), Path::new("/u/b"));
@@ -684,6 +777,30 @@ mod tests {
         assert_eq!(fs::read_to_string(p.join("-u-b/memory/MEMORY.md")).unwrap(), "new");
         assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
         assert!(r.warnings[0].contains("MEMORY.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_stays_a_symlink() {
+        let s = scratch();
+        let (old, new) = (Path::new("/u/a"), Path::new("/u/b"));
+        let real = s.base.join("dotfiles-claude.json");
+        fs::write(&real, json!({ "projects": { "/u/a": { "t": true } } }).to_string()).unwrap();
+        std::os::unix::fs::symlink(&real, &s.h.claude_json[0]).unwrap();
+        apply_in(&s.h, old, new, &[]);
+        assert!(fs::symlink_metadata(&s.h.claude_json[0]).unwrap().file_type().is_symlink());
+        assert_eq!(read_json(&real).unwrap()["projects"]["/u/b"]["t"], true);
+    }
+
+    #[test]
+    fn jsonl_edits_keep_untouched_lines_byte_for_byte() {
+        let src = b"{\"b\":1,  \"a\":\"/u/a\"}\r\n{\"project\":\"/u/a/x\"}\nnot json /u/a\n{\"project\":\"/u/z\"}";
+        let mut edit = |v: &mut Value| {
+            let n = v.get("project").and_then(Value::as_str).and_then(|s| rebase(s, Path::new("/u/a"), Path::new("/u/b")));
+            n.map(|n| v["project"] = Value::String(n)).is_some()
+        };
+        let out = String::from_utf8(edit_jsonl(src, "/u/a", &mut edit).unwrap()).unwrap();
+        assert_eq!(out, "{\"b\":1,  \"a\":\"/u/a\"}\r\n{\"project\":\"/u/b/x\"}\nnot json /u/a\n{\"project\":\"/u/z\"}");
     }
 
     #[test]

@@ -21,6 +21,7 @@ import type { MissingRoot, Service, Tab } from '$lib/tauri/types';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
+import { setFallback, clearFallback, wantedFolder } from '$lib/stores/relocateFallback';
 
 let home: string | null = null;
 async function getHome(): Promise<string> {
@@ -34,35 +35,26 @@ function expand(p: string, h: string): string {
   return p;
 }
 
-/** `path` is `root` or inside it — on a component boundary, folding case on macOS like Rust. */
-export function isUnder(path: string, root: string, h: string): boolean {
-  const fold = navigator.userAgent.includes('Mac');
+/**
+ * `path` is `root` or inside it, on a component boundary. `fold` folds case — Rust decides it
+ * per volume (`relocate::case_insensitive`), since macOS can mount case-sensitive volumes too.
+ */
+export function isUnder(path: string, root: string, h: string, fold: boolean): boolean {
   let p = expand(path.trim(), h).replace(/\/+$/, '');
   let r = expand(root.trim(), h).replace(/\/+$/, '');
   if (fold) { p = p.toLowerCase(); r = r.toLowerCase(); }
   return p === r || p.startsWith(r + '/');
 }
 
-/**
- * Tabs that spawned in home because their saved folder was missing → the folder they wanted.
- * While a tab is here it neither runs its resume command (it would resume nothing, in the wrong
- * place) nor saves its cwd over the one it wanted (`TerminalPane`'s restore-context saver) —
- * so locating the folder can restart it where it belongs. In memory: a restart re-detects.
- */
-const fallback = new Map<string, string>();
-
+/** Opened in home because its folder was missing (relocateFallback.ts) — resume held. */
 export function noteFallback(tabId: string, wanted: string) {
-  fallback.set(tabId, wanted);
+  setFallback(tabId, wanted);
   logInfo(`relocate: tab ${tabId.slice(0, 8)} wanted ${wanted}, which is missing — opened in home`);
   void relocateStore.promptMissing();
 }
 
-export function isFallback(tabId: string): boolean {
-  return fallback.has(tabId);
-}
-
 /** The live tabs in this window with a shell in the folder — what a move would restart. */
-export async function liveTabsUnder(roots: string[]): Promise<{ workspaceId: string; paneId: string; tab: Tab; working: boolean }[]> {
+export async function liveTabsUnder(roots: string[], fold: boolean): Promise<{ workspaceId: string; paneId: string; tab: Tab; working: boolean }[]> {
   const h = await getHome();
   const out: { workspaceId: string; paneId: string; tab: Tab; working: boolean }[] = [];
   for (const ws of workspacesStore.workspaces) {
@@ -71,8 +63,8 @@ export async function liveTabsUnder(roots: string[]): Promise<{ workspaceId: str
         if (tab.service_id) continue;
         const inst = terminalsStore.get(tab.id);
         if (!inst) continue;
-        const wanted = fallback.get(tab.id);
-        if (wanted && roots.some((r) => isUnder(wanted, r, h))) {
+        const wanted = wantedFolder(tab.id);
+        if (wanted && roots.some((r) => isUnder(wanted, r, h, fold))) {
           out.push({ workspaceId: ws.id, paneId: pane.id, tab, working: false });
           continue;
         }
@@ -83,7 +75,7 @@ export async function liveTabsUnder(roots: string[]): Promise<{ workspaceId: str
           cwd = info.cwd;
         } catch { /* fall back to what the shell last reported */ }
         cwd ??= terminalsStore.getOsc(tab.id)?.cwd ?? tab.last_cwd ?? null;
-        if (!cwd || !roots.some((r) => isUnder(cwd!, r, h))) continue;
+        if (!cwd || !roots.some((r) => isUnder(cwd!, r, h, fold))) continue;
         out.push({ workspaceId: ws.id, paneId: pane.id, tab, working: agentStateStore.getState(tab.id)?.state === 'active' });
       }
     }
@@ -91,24 +83,68 @@ export async function liveTabsUnder(roots: string[]): Promise<{ workspaceId: str
   return out;
 }
 
-export async function suspendUnder(roots: string[]): Promise<{ suspended: string[] }> {
-  const suspended: string[] = [];
-  for (const t of await liveTabsUnder(roots)) {
-    await workspacesStore.suspendTab(t.workspaceId, t.paneId, t.tab.id);
-    // Suspending saves the shell's cwd as where to come back — for a tab that fell back,
-    // that's home. Put back the folder it wanted, which the relocation then rebases.
-    const wanted = fallback.get(t.tab.id);
-    if (wanted) {
-      await commands.setTabRestoreContext(t.workspaceId, t.paneId, t.tab.id, wanted, null, null);
-      t.tab.restore_cwd = wanted;
+/**
+ * One move's suspensions in this window. A move can be called off AFTER this window was asked —
+ * it answered too late, or another window refused — and the request it was answering is gone by
+ * then, so nothing would ever wake what it suspended. Rust sends `relocate.abort` to every window
+ * instead; whatever this window suspended for that move, before or after the abort, is woken.
+ */
+const sessions = new Map<string, { aborted: boolean; suspended: string[] }>();
+
+function session(id: string) {
+  let s = sessions.get(id);
+  if (!s) { s = { aborted: false, suspended: [] }; sessions.set(id, s); }
+  return s;
+}
+
+export async function suspendUnder(roots: string[], sessionId: string, fold: boolean): Promise<{ suspended: string[] } | { error: string }> {
+  const s = session(sessionId);
+  if (!s.aborted) {
+    for (const t of await liveTabsUnder(roots, fold)) {
+      if (s.aborted) break;
+      await workspacesStore.suspendTab(t.workspaceId, t.paneId, t.tab.id);
+      s.suspended.push(t.tab.id);
     }
-    suspended.push(t.tab.id);
   }
-  logInfo(`relocate: suspended ${suspended.length} tab(s) in ${roots[0]}`);
-  return { suspended };
+  if (s.aborted) {
+    wakeTabs(s.suspended.splice(0));
+    return { error: 'the move was called off' };
+  }
+  logInfo(`relocate: suspended ${s.suspended.length} tab(s) in ${roots[0]}`);
+  return { suspended: s.suspended.slice() };
+}
+
+export function abortSession(sessionId: string): { woken: number } {
+  const s = session(sessionId);
+  s.aborted = true;
+  const ids = s.suspended.splice(0);
+  wakeTabs(ids);
+  return { woken: ids.length };
+}
+
+/**
+ * Wake suspended tabs through the same serial driver a workspace resume uses (+page.svelte):
+ * no navigation, one mount at a time, each pane's active tab first.
+ */
+function wakeTabs(ids: string[]) {
+  const wake = new Set(ids);
+  if (wake.size === 0) return;
+  const items: { workspaceId: string; paneId: string; tabId: string; label: string }[] = [];
+  for (const ws of workspacesStore.workspaces) {
+    for (const pane of ws.panes) {
+      for (const tab of pane.tabs) {
+        if (!wake.has(tab.id)) continue;
+        const item = { workspaceId: ws.id, paneId: pane.id, tabId: tab.id, label: `${ws.name} › ${tab.name || 'Terminal'}` };
+        if (tab.id === pane.active_tab_id) items.unshift(item);
+        else items.push(item);
+      }
+    }
+  }
+  if (items.length > 0) window.dispatchEvent(new CustomEvent('workspace-resume-tabs', { detail: items }));
 }
 
 interface Patch {
+  session?: string;
   tabs?: { workspace_id: string; tab: Tab }[];
   stacks?: { workspace_id: string; stack: Service[] }[];
   wake?: string[];
@@ -130,32 +166,25 @@ export function applyPatch(patch: Patch): { applied: number; woken: number } {
     const m = mirror as unknown as Record<string, unknown>;
     const src = tab as unknown as Record<string, unknown>;
     for (const f of TAB_PATH_FIELDS) m[f] = src[f] ?? null;
-    fallback.delete(tab.id);
+    clearFallback(tab.id);
     applied++;
   }
   for (const { workspace_id, stack } of patch.stacks ?? []) {
     const ws = workspacesStore.workspaces.find((w) => w.id === workspace_id);
     if (ws) ws.stack = stack;
   }
-  // Wake through the same serial driver a workspace resume uses (+page.svelte): no navigation,
-  // one mount at a time, each pane's active tab first.
-  const wake = new Set(patch.wake ?? []);
-  const items: { workspaceId: string; paneId: string; tabId: string; label: string }[] = [];
-  for (const ws of workspacesStore.workspaces) {
-    for (const pane of ws.panes) {
-      for (const tab of pane.tabs) {
-        if (!wake.has(tab.id)) continue;
-        const item = { workspaceId: ws.id, paneId: pane.id, tabId: tab.id, label: `${ws.name} › ${tab.name || 'Terminal'}` };
-        if (tab.id === pane.active_tab_id) items.unshift(item);
-        else items.push(item);
-      }
-    }
+  // Wake what this window suspended for the move — its own record, not only the ids Rust
+  // echoes back, so a tab suspended after its answer was cut off still comes back.
+  const ids = new Set(patch.wake ?? []);
+  if (patch.session) {
+    for (const id of sessions.get(patch.session)?.suspended ?? []) ids.add(id);
+    sessions.delete(patch.session);
   }
-  if (items.length > 0) window.dispatchEvent(new CustomEvent('workspace-resume-tabs', { detail: items }));
+  wakeTabs([...ids]);
   // Every window asks about a missing folder on its own; once any of them located it, the
   // others' prompts are moot.
   void relocateStore.closeIfLocated();
-  return { applied, woken: items.length };
+  return { applied, woken: ids.size };
 }
 
 // ── UI state ────────────────────────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
   import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists } from '$lib/tauri/commands';
-  import { noteFallback, isFallback } from '$lib/stores/relocate.svelte';
+  import { noteFallback } from '$lib/stores/relocate.svelte';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
@@ -1634,10 +1634,8 @@
           // Terminal may have been killed or alternate screen active — ignore
         }
 
-        // Also save restore context (cwd/SSH) if enabled — but not for a tab that opened in home
-        // because its folder was missing: home would overwrite the folder it is waiting to be
-        // moved back to (relocate.svelte.ts `fallback`).
-        if (preferencesStore.restoreSession && !isFallback(tabId)) {
+        // Also save restore context (cwd/SSH) if enabled
+        if (preferencesStore.restoreSession) {
           try {
             const info = await getPtyInfo(ptyId);
             let cwd = info.cwd;

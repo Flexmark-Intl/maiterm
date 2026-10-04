@@ -29,15 +29,66 @@ pub fn expand_home(value: &str) -> PathBuf {
     }
 }
 
-/// Component-wise prefix match. macOS volumes are case-insensitive by default and a path typed
-/// at a prompt (OSC 7 reports `$PWD`) keeps the case it was typed in, so there the match folds
-/// case; elsewhere it is exact.
+/// Does the volume `p` lives on fold case? Asked of the disk, not the platform: macOS volumes
+/// are case-insensitive by default but can be formatted case-sensitive, and there `app` and `App`
+/// are two projects. Probed at the nearest existing ancestor whose name has a cased letter —
+/// its case-flipped twin resolving to the same file means the volume folds. Nothing testable
+/// (a path on no mounted volume): the platform default. Cached per path.
+pub fn case_insensitive(p: &Path) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().ok().and_then(|c| c.get(p).copied()) {
+        return v;
+    }
+    let v = probe_case_insensitive(p);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(p.to_path_buf(), v);
+    }
+    v
+}
+
+fn probe_case_insensitive(p: &Path) -> bool {
+    let mut cur = Some(p);
+    while let Some(c) = cur {
+        if let Some(name) = c.file_name().and_then(|n| n.to_str()) {
+            let flipped: String = name
+                .chars()
+                .map(|ch| if ch.is_lowercase() { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() })
+                .collect();
+            if flipped != name && c.exists() {
+                return same_file(c, &c.with_file_name(&flipped));
+            }
+        }
+        cur = c.parent();
+    }
+    cfg!(target_os = "macos") || cfg!(windows)
+}
+
+#[cfg(unix)]
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(a: &Path, b: &Path) -> bool {
+    b.exists() && std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+}
+
+/// Component-wise prefix match. A path typed at a prompt (OSC 7 reports `$PWD`) keeps the case
+/// it was typed in, so on a volume that folds case the match folds too; elsewhere it is exact.
 fn strip_root<'a>(path: &'a Path, root: &Path) -> Option<PathBuf> {
+    let fold = case_insensitive(root);
     let mut p = path.components();
     for rc in root.components() {
         let pc = p.next()?;
         let (a, b) = (pc.as_os_str().to_string_lossy(), rc.as_os_str().to_string_lossy());
-        let same = if cfg!(target_os = "macos") { a.to_lowercase() == b.to_lowercase() } else { a == b };
+        let same = if fold { a.to_lowercase() == b.to_lowercase() } else { a == b };
         if !same {
             return None;
         }
@@ -174,18 +225,6 @@ pub struct StateReport {
     pub backup_directory: bool,
 }
 
-impl StateReport {
-    pub fn windows(&self) -> Vec<String> {
-        let mut w: Vec<String> = self.tabs.iter().map(|(l, _)| l.clone()).collect();
-        w.sort();
-        w.dedup();
-        w
-    }
-    pub fn is_empty(&self) -> bool {
-        self.tabs.is_empty() && self.services == 0 && !self.backup_directory
-    }
-}
-
 /// Rebase every saved local path in `data` from `old` to `new`. Pure: touches no disk.
 ///
 /// A watch script's approval is keyed by script AND folder (`watch::script_hash`) on purpose —
@@ -261,6 +300,18 @@ mod tests {
         assert_eq!(rebase("/u/IDE", &o, &n), None);
         assert_eq!(rebase("relative/aiTerm", &o, &n), None);
         assert_eq!(rebase("", &o, &n), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_volume_decides_case_folding() {
+        // The temp dir sits on the default (case-insensitive) APFS volume; probed through an
+        // existing ancestor even when the path itself is gone.
+        let d = std::env::temp_dir().join(format!("maiterm-Case-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(case_insensitive(&d));
+        assert!(case_insensitive(&d.join("Gone/Deeper")));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[cfg(target_os = "macos")]

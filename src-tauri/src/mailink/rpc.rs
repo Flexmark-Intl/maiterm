@@ -45,6 +45,19 @@ pub(crate) async fn request(
     verb: &str,
     args: Value,
 ) -> Outcome {
+    request_with_timeout(app, handle, window_label, verb, args, TIMEOUT).await
+}
+
+/// `request` with its own deadline — for desktop-initiated work that legitimately takes longer
+/// than a phone tap should wait (Move project suspending a window's tabs one by one).
+pub(crate) async fn request_with_timeout(
+    app: &Arc<AppState>,
+    handle: Option<&AppHandle>,
+    window_label: &str,
+    verb: &str,
+    args: Value,
+    timeout: std::time::Duration,
+) -> Outcome {
     let Some(handle) = handle else { return Outcome::NoHandle };
     if !app.app_data.read().windows.iter().any(|w| w.label == window_label) {
         return Outcome::NoWindow;
@@ -57,7 +70,7 @@ pub(crate) async fn request(
         app.ide_pending.write().remove(&request_id);
         return Outcome::NoWindow;
     }
-    match tokio::time::timeout(TIMEOUT, rx).await {
+    match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(v)) => Outcome::Answered(v),
         Ok(Err(_)) => {
             app.ide_pending.write().remove(&request_id);
