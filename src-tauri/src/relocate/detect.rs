@@ -134,16 +134,30 @@ fn candidates(root: &Path, subpaths: &[String], data: &AppData) -> Vec<PathBuf> 
         .filter(|p| !used.iter().any(|u| u.starts_with(p)))
         .map(|p| {
             let git = p.join(".git").exists();
-            let changed = std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            (git, changed, p)
+            (git, renamed_at(&p), p)
         })
         .collect();
     // Without any subfolder to require, every sibling qualifies: keep only git repos then.
     if subpaths.iter().all(|s| s.is_empty()) {
         found.retain(|(git, _, _)| *git);
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    found.into_iter().take(5).map(|(_, _, p)| p).collect()
+    // Most recently renamed first — the moved folder, in the common case — then git repos.
+    found.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+    found.into_iter().take(3).map(|(_, _, p)| p).collect()
+}
+
+/// When the folder's own entry last changed. A rename stamps it (the inode's ctime); its
+/// modification time is about its CONTENTS and a rename leaves it alone, so sorting by that
+/// ranked the moved folder below any sibling someone had saved a file in (live test).
+fn renamed_at(p: &Path) -> SystemTime {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(p) {
+            return SystemTime::UNIX_EPOCH + std::time::Duration::new(m.ctime().max(0) as u64, m.ctime_nsec().max(0) as u32);
+        }
+    }
+    std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 /// Every existing local folder saved state already points at — a sibling one of them lives in

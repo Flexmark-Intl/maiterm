@@ -263,6 +263,29 @@ fn first_cwd(jsonl: &Path) -> Option<String> {
     None
 }
 
+/// The folder a session belongs to NOW: its last `relocated` record — a session moved before,
+/// by this or by Claude itself, keeps its original folder on line one — else the first `cwd`.
+/// The whole file is scanned for the record, but only lines that mention it are parsed.
+fn session_cwd(jsonl: &Path) -> Option<String> {
+    let mut last: Option<String> = None;
+    if let Ok(f) = fs::File::open(jsonl) {
+        let mut r = BufReader::new(f);
+        let mut line = Vec::new();
+        while r.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+            const NEEDLE: &[u8] = b"\"relocated\"";
+            if line.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
+                if let Some(c) = serde_json::from_slice::<Value>(&line).ok().and_then(|v| {
+                    (v["type"] == "relocated").then(|| v["relocatedCwd"].as_str().map(String::from)).flatten()
+                }) {
+                    last = Some(c);
+                }
+            }
+            line.clear();
+        }
+    }
+    last.or_else(|| first_cwd(jsonl))
+}
+
 fn sessions_in(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(dir)
         .into_iter()
@@ -308,7 +331,7 @@ fn claude_plan(projects: &Path, old: &Path, new: &Path) -> ClaudePlan {
         let (mut ours, mut foreign) = (0, 0);
         let mut first_new: Option<String> = None;
         for s in sessions_in(&e.path()) {
-            match first_cwd(&s).map(|c| rebase(&c, old, new)) {
+            match session_cwd(&s).map(|c| rebase(&c, old, new)) {
                 Some(Some(new_cwd)) => {
                     ours += 1;
                     first_new.get_or_insert_with(|| new_cwd.clone());
@@ -744,6 +767,30 @@ mod tests {
         assert_eq!(j2["projects"]["/u/IDE/maiterm/src"]["x"], 2, "the entry already at the new key wins");
         let hist = fs::read_to_string(&s.h.claude_history[0]).unwrap();
         assert!(hist.contains("\"project\":\"/u/IDE/maiterm\"") && hist.contains("/u/other"));
+    }
+
+    #[test]
+    fn a_session_moved_before_is_found_by_its_relocated_record() {
+        // Live-test bug: after a first move, line one still names the ORIGINAL folder, and
+        // the second move found nothing of "its" project and left memory behind.
+        let s = scratch();
+        let d = s.h.claude_projects.join("-u-b");
+        fs::create_dir_all(d.join("memory")).unwrap();
+        fs::write(d.join("memory/MEMORY.md"), "m").unwrap();
+        fs::write(
+            d.join("s.jsonl"),
+            "{\"cwd\":\"/u/a\"}\n{\"type\":\"relocated\",\"sessionId\":\"s\",\"relocatedCwd\":\"/u/b\"}\n{\"cwd\":\"/u/a\",\"x\":1}\n",
+        )
+        .unwrap();
+        // And a new slug dir Claude already made, with an empty memory folder.
+        fs::create_dir_all(s.h.claude_projects.join("-u-c/memory")).unwrap();
+        let r = apply_in(&s.h, Path::new("/u/b"), Path::new("/u/c"), &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let n = s.h.claude_projects.join("-u-c");
+        assert!(n.join("memory/MEMORY.md").exists());
+        let t = fs::read_to_string(n.join("s.jsonl")).unwrap();
+        assert!(t.trim_end().ends_with("\"relocatedCwd\":\"/u/c\",\"sessionId\":\"s\",\"type\":\"relocated\"}"), "{t}");
+        assert!(!d.exists());
     }
 
     #[test]
