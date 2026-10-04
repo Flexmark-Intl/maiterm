@@ -190,12 +190,14 @@ pub async fn relocate_project(
     log::info!("relocate: {} {old_s} → {new_s}", if move_folder { "moving" } else { "repointing" });
 
     // 1. Suspend: tabs whose shell is in the folder, and tabs that spawned in home because it
-    //    was missing (the window remembers those — relocateFallback.ts). Not tabs already in
-    //    the new folder when repointing: one opened there since is keyed to the new path
-    //    already, and restarting it would interrupt its agent for nothing.
+    //    was missing (the window remembers those — relocateFallback.ts). When repointing, also
+    //    tabs in the NEW folder that run an agent: one started there before the folder was
+    //    located resumed its session from the OLD project key and keeps writing there (live
+    //    test, 2026-10-04). A plain shell in the new folder is left alone.
+    let agent_roots: Vec<&str> = if move_folder { vec![] } else { vec![new_s.as_str()] };
     let mut suspended: Vec<(String, Vec<String>)> = vec![];
     for label in window_labels(&app) {
-        let args = json!({ "roots": [old_s], "session": session, "fold": fold });
+        let args = json!({ "roots": [old_s], "session": session, "fold": fold, "agent_roots": agent_roots });
         let out = rpc::request_with_timeout(&app, Some(&handle), &label, "relocate.suspend", args, SUSPEND_TIMEOUT).await;
         let ids = match out {
             rpc::Outcome::Answered(v) if v.get("error").is_none() => v["suspended"]

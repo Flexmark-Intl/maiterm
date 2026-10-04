@@ -53,8 +53,13 @@ export function noteFallback(tabId: string, wanted: string) {
   void relocateStore.promptMissing();
 }
 
-/** The live tabs in this window with a shell in the folder — what a move would restart. */
-export async function liveTabsUnder(roots: string[], fold: boolean): Promise<{ workspaceId: string; paneId: string; tab: Tab; working: boolean }[]> {
+/**
+ * The live tabs in this window with a shell in the folder — what a move would restart.
+ * `agentRoots`: folders where only tabs running an AGENT count. A repoint passes the new folder:
+ * an agent started there before the folder was located resumed its session from the OLD project
+ * key and keeps writing there (live test), while a plain shell there is fine as it is.
+ */
+export async function liveTabsUnder(roots: string[], fold: boolean, agentRoots: string[] = []): Promise<{ workspaceId: string; paneId: string; tab: Tab; working: boolean }[]> {
   const h = await getHome();
   const out: { workspaceId: string; paneId: string; tab: Tab; working: boolean }[] = [];
   for (const ws of workspacesStore.workspaces) {
@@ -75,8 +80,12 @@ export async function liveTabsUnder(roots: string[], fold: boolean): Promise<{ w
           cwd = info.cwd;
         } catch { /* fall back to what the shell last reported */ }
         cwd ??= terminalsStore.getOsc(tab.id)?.cwd ?? tab.last_cwd ?? null;
-        if (!cwd || !roots.some((r) => isUnder(cwd!, r, h, fold))) continue;
-        out.push({ workspaceId: ws.id, paneId: pane.id, tab, working: agentStateStore.getState(tab.id)?.state === 'active' });
+        if (!cwd) continue;
+        const agent = agentStateStore.getState(tab.id);
+        const hit = roots.some((r) => isUnder(cwd!, r, h, fold))
+          || (!!agent && agentRoots.some((r) => isUnder(cwd!, r, h, fold)));
+        if (!hit) continue;
+        out.push({ workspaceId: ws.id, paneId: pane.id, tab, working: agent?.state === 'active' });
       }
     }
   }
@@ -97,10 +106,10 @@ function session(id: string) {
   return s;
 }
 
-export async function suspendUnder(roots: string[], sessionId: string, fold: boolean): Promise<{ suspended: string[] } | { error: string }> {
+export async function suspendUnder(roots: string[], sessionId: string, fold: boolean, agentRoots: string[] = []): Promise<{ suspended: string[] } | { error: string }> {
   const s = session(sessionId);
   if (!s.aborted) {
-    for (const t of await liveTabsUnder(roots, fold)) {
+    for (const t of await liveTabsUnder(roots, fold, agentRoots)) {
       if (s.aborted) break;
       await workspacesStore.suspendTab(t.workspaceId, t.paneId, t.tab.id);
       s.suspended.push(t.tab.id);

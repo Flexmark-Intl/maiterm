@@ -56,7 +56,7 @@
       try {
         const p = await commands.previewRelocation(r.old, t, r.mode === 'move');
         if (seq === previewSeq) { preview = p; previewError = null; }
-        const live = await liveTabsUnder([r.old], p.fold);
+        const live = await liveTabsUnder([r.old], p.fold, r.mode === 'repoint' ? [p.new] : []);
         if (seq === previewSeq) restarts = live.map((x) => ({ name: x.tab.name || 'Terminal', working: x.working }));
       } catch (e) {
         if (seq === previewSeq) { preview = null; previewError = String(e); }

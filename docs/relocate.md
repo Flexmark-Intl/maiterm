@@ -71,7 +71,8 @@ gemini-cli 0.43.0).
 past 200 chars cut + base-36 Java hash; of the *resolved* path. Shared by every managed account
 (symlink), so one place. The slug is lossy (`a.b`/`a-b`; `/u/p/web` and the sibling `/u/p-web`
 share `-u-p-web`), so **each session is decided on its own** by the folder its transcript
-records, and moved (with its `<sid>/` folder) to its new slug. Subfolder sessions have their own
+records — its LAST `relocated` record if it has one (a session moved before still names its
+original folder on line one), else its first `cwd` — and moved (with its `<sid>/` folder) to its new slug. Subfolder sessions have their own
 slugs and are moved too. Memory lives under the git root's slug; a directory's other entries
 (`memory/`) follow only when nothing of another project's is left in it — otherwise they stay
 and the result says so.
