@@ -3151,6 +3151,14 @@ function createOverlordStore() {
       const hit = tasksStore.findAnywhere(id);
       if (hit) tasksStore.setStatus(hit.workspaceId, id, status);
     },
+    /** Drop the engine's in-memory marks for rows that were deleted — by the human (`deleteTask`),
+     *  or by an agent's `deleteTasks`, which tells nobody (its guards only let it delete
+     *  work no other tab is carrying). */
+    forgetTasks(ids: Iterable<string>) {
+      for (const id of ids) handedOff.delete(id);
+      bumpLive();
+    },
+
     /** Drop a task off the board AND tell whoever was carrying it.
      *
      *  Deleting used to be silent, which made the board lie to the agent: the row vanished
@@ -3178,14 +3186,6 @@ function createOverlordStore() {
      *  re-send. That is the exact hole this notice exists to close, left open for everyone
      *  who is not running a supervisor. Only the RELAY belongs to Overlord, and it is gated
      *  below, on the same three conditions `startTask` uses. */
-    /** Drop the engine's in-memory marks for rows that were deleted — by the human above,
-     *  or by an agent's `deleteTasks`, which tells nobody (its guards only let it delete
-     *  work no other tab is carrying). */
-    forgetTasks(ids: Iterable<string>) {
-      for (const id of ids) handedOff.delete(id);
-      bumpLive();
-    },
-
     async deleteTask(id: string): Promise<{ removed: boolean; told: 'tab' | 'agent' | 'nobody' }> {
       const hit = tasksStore.findAnywhere(id);
       if (!hit) return { removed: false, told: 'nobody' };

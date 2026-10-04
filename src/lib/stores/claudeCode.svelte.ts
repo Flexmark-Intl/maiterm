@@ -2199,7 +2199,8 @@ function createClaudeCodeStore() {
       }
       // Live dependents outside this delete — on the board, or parked on an archived tab
       // (restoring it would bring back an edge to a row that no longer exists, read as met).
-      const waiters = [
+      // A DONE prerequisite is already met, so removing it frees nothing; a dropped one is not.
+      const waiters = t.status === 'done' ? [] : [
         ...blocking(t, all).filter((w) => !target.has(w.id) && !isRetired(w.status)).map((w) => w.title),
         ...[...parked.values()]
           .filter((p) => p.task.blocked_by?.includes(id) && !isRetired(p.task.status))
@@ -2229,8 +2230,9 @@ function createClaudeCodeStore() {
       tasksStore.removeMany(wsId, target);
       overlordStore.forgetTasks(target);
     }
-    // Even with nothing deleted: a named workstream can already be empty in this copy (Rust
-    // pruned it at the last persist), and it should go rather than be reported as kept.
+    // Even with nothing deleted: a named workstream can already be empty — in this copy, or
+    // on disk after its archived tab was deleted — and it should go (the prune persists)
+    // rather than be reported as kept.
     // One that rows on an archived tab still point at survives, exactly as Rust keeps it.
     const referenced = new Set<string>();
     for (const t of tasksStore.forWorkspace(wsId)) if (t.workstream_id) referenced.add(t.workstream_id);

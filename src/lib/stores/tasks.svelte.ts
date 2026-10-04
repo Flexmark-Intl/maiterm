@@ -259,13 +259,17 @@ function createTasksStore() {
      *  in this copy until the next rehydrate, and `listTasks`' `all_workstreams` keeps
      *  offering its name to agents. `referenced` must include rows parked on archived tabs,
      *  as Rust's does: dropping a workstream they still point at here would make the next
-     *  whole-list persist delete it on disk too. No persist: Rust has already pruned it. */
+     *  whole-list persist delete it on disk too. Persists when it drops one: Rust prunes only
+     *  inside `set_workspace_tasks`, and a workstream emptied some other way (the human
+     *  deleting the archived tab that held its last rows) is still on disk with no task
+     *  write coming to clear it. */
     pruneWorkstreams(workspaceId: string, referenced: ReadonlySet<string>) {
       const list = this.workstreams(workspaceId);
       const kept = list.filter((w) => referenced.has(w.id));
       if (kept.length === list.length) return;
       streamsByWorkspace.set(workspaceId, kept);
       streamsByWorkspace = new Map(streamsByWorkspace);
+      persist(workspaceId);
     },
 
     /** Whole-list replace for reordering / drag-and-drop, where order IS the change. */
