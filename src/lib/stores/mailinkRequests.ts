@@ -123,6 +123,22 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         else result = await overlordStore.recoverTab(a.tabId);
         break;
       }
+      // Move project (docs/relocate.md): Rust's relocate_project, not the phone, asks these —
+      // this is the one channel that reaches a window's webview and waits for its answer.
+      case 'relocate.suspend': {
+        const roots = (req.args ?? {}).roots;
+        if (!Array.isArray(roots) || !roots.every((r) => typeof r === 'string')) result = { error: 'roots is required' };
+        else {
+          const { suspendUnder } = await import('$lib/stores/relocate.svelte');
+          result = await suspendUnder(roots as string[]);
+        }
+        break;
+      }
+      case 'relocate.apply': {
+        const { applyPatch } = await import('$lib/stores/relocate.svelte');
+        result = applyPatch(req.args as Parameters<typeof applyPatch>[0]);
+        break;
+      }
       default:
         result = { error: `Unknown maiLink request: ${verb}` };
     }

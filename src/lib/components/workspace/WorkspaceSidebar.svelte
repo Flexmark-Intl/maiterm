@@ -512,6 +512,14 @@
       { label: '', separator: true, action: () => {} },
       workspaceMoveItem(moveTargets, workspaceId),
       { label: 'Share workspace…', action: () => { shareExportFor = workspaceId; } },
+      { label: 'Move project…', action: async () => {
+        const { relocateStore } = await import('$lib/stores/relocate.svelte');
+        const why = await relocateStore.openForWorkspace(workspaceId);
+        if (why) {
+          const { dispatch } = await import('$lib/stores/notificationDispatch');
+          dispatch("Can't move this project", why, 'error');
+        }
+      } },
     ];
   }
 

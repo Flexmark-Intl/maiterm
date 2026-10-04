@@ -815,3 +815,36 @@ export interface ScpProgress {
   done: boolean;
   indeterminate: boolean;
 }
+
+// Move project (docs/relocate.md) — mirrors src-tauri/src/relocate + commands/relocate.rs
+export interface MissingRoot {
+  root: string;
+  subpaths: string[];
+  tab_ids: string[];
+  service_ids: string[];
+  candidates: string[];
+}
+
+export interface AgentPlan {
+  claude_sessions: number;
+  claude_memory: boolean;
+  claude_trust: boolean;
+  codex_sessions: number;
+  codex_trust: boolean;
+  gemini_projects: number;
+}
+
+export interface RelocatePreview {
+  old: string;
+  new: string;
+  tabs: number;
+  services: number;
+  agents: AgentPlan;
+}
+
+export interface RelocateOutcome {
+  moved: boolean;
+  state: { tabs: [string, string][]; services: number; approvals_carried: number; backup_directory: boolean };
+  agents: { done: string[]; warnings: string[] };
+  unconfirmed_windows: string[];
+}

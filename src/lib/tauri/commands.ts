@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentRuntime } from '$lib/agents/types';
+import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
@@ -2046,4 +2047,29 @@ export async function bindRemoteAccount(tabId: string): Promise<boolean> {
  *  Unlinks symlinks without following them; the root points at the user's real transcripts. */
 export async function discardAccountRoot(runtime: string, accountId: string): Promise<void> {
   return invoke('discard_account_root', { runtime, accountId });
+}
+
+// Move project (docs/relocate.md)
+export async function findMissingFolders(): Promise<MissingRoot[]> {
+  return invoke('find_missing_folders');
+}
+
+export async function previewRelocation(old: string, newPath: string, moveFolder: boolean): Promise<RelocatePreview> {
+  return invoke('preview_relocation', { old, new: newPath, moveFolder });
+}
+
+export async function relocateProject(old: string, newPath: string, moveFolder: boolean): Promise<RelocateOutcome> {
+  return invoke('relocate_project', { old, new: newPath, moveFolder });
+}
+
+export async function folderExists(path: string): Promise<boolean> {
+  return invoke('folder_exists', { path });
+}
+
+export async function projectRootOf(path: string): Promise<string> {
+  return invoke('project_root_of', { path });
+}
+
+export async function pickFolder(startIn?: string | null): Promise<string | null> {
+  return invoke('pick_folder', { startIn: startIn ?? null });
 }

@@ -27,6 +27,50 @@ pub fn find_missing_folders(state: State<'_, Arc<AppState>>) -> Vec<detect::Miss
     detect::find_missing(&state.app_data.read())
 }
 
+/// Does a saved folder still exist? Asked before a tab spawns: a missing one would silently
+/// fall back to home, and the tab's resume command must not run there.
+#[tauri::command]
+pub fn folder_exists(path: String) -> bool {
+    relocate::expand_home(&path).is_dir()
+}
+
+/// The project a folder belongs to: its git checkout's top level, else the folder itself. What
+/// "Move project…" offers to move when opened from a tab sitting somewhere inside it.
+#[tauri::command]
+pub async fn project_root_of(path: String) -> Result<String, String> {
+    let dir = relocate::expand_home(&path);
+    if !dir.is_dir() {
+        return Err(format!("{} is not a folder.", dir.display()));
+    }
+    let out = tokio::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&dir)
+        .output()
+        .await;
+    Ok(match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => crate::share::canon(&dir).to_string_lossy().to_string(),
+    })
+}
+
+/// The OS folder picker, opened in `start_in` (or the nearest folder above it that exists).
+#[tauri::command]
+pub async fn pick_folder(app: tauri::AppHandle, start_in: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = app.dialog().file();
+    if let Some(mut p) = start_in.map(|s| relocate::expand_home(&s)) {
+        while !p.is_dir() {
+            if !p.pop() {
+                break;
+            }
+        }
+        if p.is_dir() {
+            dialog = dialog.set_directory(p);
+        }
+    }
+    Ok(dialog.blocking_pick_folder().map(|p| p.to_string()))
+}
+
 /// What a relocation would touch — shown before the human confirms. Reads only.
 #[derive(Debug, Serialize)]
 pub struct RelocatePreview {
@@ -77,6 +121,9 @@ fn validate(old: &str, new: &str, move_folder: bool) -> Result<(PathBuf, PathBuf
     }
     if old_p.parent().is_none() || new_p.parent().is_none() {
         return Err("A filesystem root can't be moved.".into());
+    }
+    if dirs::home_dir().is_some_and(|h| h.starts_with(&old_p)) {
+        return Err("That's your home folder or above it — move a project inside it instead.".into());
     }
     if new_p.starts_with(&old_p) || old_p.starts_with(&new_p) {
         return Err("A folder can't be moved into itself or onto its own parent.".into());
@@ -133,11 +180,13 @@ pub async fn relocate_project(
     let (old_s, new_s) = (old.to_string_lossy().to_string(), new.to_string_lossy().to_string());
     log::info!("relocate: {} {old_s} → {new_s}", if move_folder { "moving" } else { "repointing" });
 
-    // 1. Suspend. Both roots: a folder moved under a running shell is still that shell's cwd,
-    //    now reported at the new path.
+    // 1. Suspend: tabs whose shell is in the folder, and tabs that spawned in home because it
+    //    was missing (the window remembers those — relocate.svelte.ts `noteFallback`). Not
+    //    tabs already in the new folder when repointing: one opened there since is keyed to
+    //    the new path already, and restarting it would interrupt its agent for nothing.
     let mut suspended: Vec<(String, Vec<String>)> = vec![];
     for label in window_labels(&app) {
-        let out = rpc::request(&app, Some(&handle), &label, "relocate.suspend", json!({ "roots": [old_s, new_s] })).await;
+        let out = rpc::request(&app, Some(&handle), &label, "relocate.suspend", json!({ "roots": [old_s] })).await;
         let ids = match out {
             rpc::Outcome::Answered(v) if v.get("error").is_none() => v["suspended"]
                 .as_array()

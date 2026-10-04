@@ -10,7 +10,8 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists } from '$lib/tauri/commands';
+  import { noteFallback, isFallback } from '$lib/stores/relocate.svelte';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
   import { uploadWithProgress, AGENT_UPLOAD_DIR } from '$lib/utils/scpUpload';
@@ -902,6 +903,12 @@
       : null;
     const ctx = splitCtx ?? autoResumeCtx ?? restoreCtx;
 
+    // A saved folder that no longer exists — the project was moved (docs/relocate.md §4). Rust
+    // would fall back to home without a word, and the resume command would then run there and
+    // find nothing. Spawn anyway, but hold the resume and ask where the folder went.
+    const missingFolder = !reattaching && !splitCtx && !!ctx?.cwd && !ctx.sshCommand
+      && !(await folderExists(ctx.cwd).catch(() => true));
+
     // Nothing above this point has spawned a process, and several of the steps that got
     // us here awaited — so the pane can have been destroyed meanwhile (its tab closed, or
     // its `{#if}` branch swapped out from under it). Spawning now would leak a shell with
@@ -918,6 +925,7 @@
         logError(`Failed to spawn PTY: ${e}`);
       }
       await workspacesStore.setTabPtyId(workspaceId, paneId, tabId, ptyId);
+      if (missingFolder) noteFallback(tabId, ctx!.cwd!);
     } else {
       // Reattaching: sync the new xterm instance to the live grid first so the
       // running TUI never sees an 80×24 transient, then refit once the new pane
@@ -1007,7 +1015,7 @@
         }
       } else if (splitCtx?.launchCommand) {
         setTimeout(() => { if (!destroyed) typeLaunch(splitCtx); }, 500);
-      } else if ((autoResumeEnabled ?? true) && autoResumeCommand && (!splitCtx || splitCtx.fireAutoResume)) {
+      } else if ((autoResumeEnabled ?? true) && autoResumeCommand && (!splitCtx || splitCtx.fireAutoResume) && !missingFolder) {
         // Local auto-resume: send command after shell starts (also fires on reload)
         setTimeout(async () => {
           try {
@@ -1626,8 +1634,10 @@
           // Terminal may have been killed or alternate screen active — ignore
         }
 
-        // Also save restore context (cwd/SSH) if enabled
-        if (preferencesStore.restoreSession) {
+        // Also save restore context (cwd/SSH) if enabled — but not for a tab that opened in home
+        // because its folder was missing: home would overwrite the folder it is waiting to be
+        // moved back to (relocate.svelte.ts `fallback`).
+        if (preferencesStore.restoreSession && !isFallback(tabId)) {
           try {
             const info = await getPtyInfo(ptyId);
             let cwd = info.cwd;

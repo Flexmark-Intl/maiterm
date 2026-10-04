@@ -10,6 +10,7 @@
   import { loomStore, type LoomMode } from '$lib/stores/loom.svelte';
   import { retryDownBridgesNow } from '$lib/stores/sshMcpBridge.svelte';
   import ImportPreviewModal from '$lib/components/ImportPreviewModal.svelte';
+  import MoveProjectModal from '$lib/components/MoveProjectModal.svelte';
   import ShareImportWizard from '$lib/components/share/ShareImportWizard.svelte';
   import { SHARE_EXTENSION } from '$lib/share/share';
   import Toast from '$lib/components/Toast.svelte';
@@ -1422,6 +1423,7 @@
   onclose={() => { showImportPreview = false; }}
   onimported={() => { showImportPreview = false; window.location.reload(); }}
 />
+<MoveProjectModal />
 {#if shareImportQueue.length > 0}
   {#key shareImportQueue[0].id}
     <ShareImportWizard path={shareImportQueue[0].path} onclose={() => { shareImportQueue = shareImportQueue.slice(1); }} />

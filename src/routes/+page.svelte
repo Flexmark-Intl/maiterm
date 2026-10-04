@@ -319,6 +319,10 @@
       const list = buildRestoreList();
       workspacesStore.pendingWakeTabIds.clear();
       await queueRestore(list);
+      // Saved folders that are gone — a project moved while maiTerm was closed. Asked after the
+      // restore so the dialog doesn't sit on top of its progress; tabs that spawned meanwhile
+      // held their resume (docs/relocate.md §4).
+      void import('$lib/stores/relocate.svelte').then((m) => m.relocateStore.promptMissing());
     } finally {
       // Restore is done (or there was nothing to do, or it was cancelled mid-drain).
       // Release the gate so deferred startup work — the mesh auto-recheck — runs now
