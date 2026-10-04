@@ -22,9 +22,16 @@ use crate::mailink::rpc;
 use crate::relocate::{self, agents, detect};
 use crate::state::{save_state, AppState};
 
+/// Off the main thread: a stat per saved folder, plus a sibling listing per missing one.
 #[tauri::command]
-pub fn find_missing_folders(state: State<'_, Arc<AppState>>) -> Vec<detect::MissingRoot> {
-    detect::find_missing(&state.app_data.read())
+pub async fn find_missing_folders(state: State<'_, Arc<AppState>>) -> Result<Vec<detect::MissingRoot>, String> {
+    let app = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let data = app.app_data.read().clone();
+        detect::find_missing(&data)
+    })
+    .await
+    .map_err(|e| format!("scan failed: {e}"))
 }
 
 /// Does a saved folder still exist? Asked before a tab spawns: a missing one would silently
@@ -83,24 +90,32 @@ pub struct RelocatePreview {
     pub fold: bool,
 }
 
+/// Async and off the main thread: it reads agent state from disk (every matching Claude
+/// transcript's head and tail, Codex's thread db), and the dialog asks again on every pause in
+/// typing — a sync command froze the window for each one (review of c96bec9).
 #[tauri::command]
-pub fn preview_relocation(
+pub async fn preview_relocation(
     state: State<'_, Arc<AppState>>,
     old: String,
     new: String,
     move_folder: bool,
 ) -> Result<RelocatePreview, String> {
-    let (old, new) = validate(&old, &new, move_folder)?;
-    let mut copy = state.app_data.read().clone();
-    let report = relocate::relocate_state(&mut copy, &old, &new);
-    Ok(RelocatePreview {
-        old: old.to_string_lossy().to_string(),
-        new: new.to_string_lossy().to_string(),
-        tabs: report.tabs.len(),
-        services: report.services,
-        agents: agents::plan(&old, &new),
-        fold: relocate::case_insensitive(&old),
+    let app = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let (old, new) = validate(&old, &new, move_folder)?;
+        let mut copy = app.app_data.read().clone();
+        let report = relocate::relocate_state(&mut copy, &old, &new);
+        Ok(RelocatePreview {
+            old: old.to_string_lossy().to_string(),
+            new: new.to_string_lossy().to_string(),
+            tabs: report.tabs.len(),
+            services: report.services,
+            agents: agents::plan(&old, &new),
+            fold: relocate::case_insensitive(&old),
+        })
     })
+    .await
+    .map_err(|e| format!("preview failed: {e}"))?
 }
 
 #[derive(Debug, Serialize)]

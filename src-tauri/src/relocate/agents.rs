@@ -263,27 +263,37 @@ fn first_cwd(jsonl: &Path) -> Option<String> {
     None
 }
 
-/// The folder a session belongs to NOW: its last `relocated` record — a session moved before,
-/// by this or by Claude itself, keeps its original folder on line one — else the first `cwd`.
-/// The whole file is scanned for the record, but only lines that mention it are parsed.
+/// How much of a transcript's end Claude reads for its session metadata (2.1.289: `ZS`, 64 KB,
+/// the buffer its head/tail reader `avt` fills). Claude re-appends that metadata — the
+/// `relocated` record included — at the end of every run, so the current one is always there.
+const CLAUDE_TAIL: u64 = 64 * 1024;
+
+/// The folder a session belongs to NOW, read the way Claude reads it (`ne`: the last
+/// `relocated` record in the 64 KB tail, else the first `cwd` in the head). A session moved
+/// before — by this or by Claude itself — keeps its original folder on line one. Only the tail:
+/// transcripts run to hundreds of MB, this runs for every session in the preview, and agreeing
+/// with Claude's own lookup is the point.
 fn session_cwd(jsonl: &Path) -> Option<String> {
-    let mut last: Option<String> = None;
-    if let Ok(f) = fs::File::open(jsonl) {
-        let mut r = BufReader::new(f);
-        let mut line = Vec::new();
-        while r.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
-            const NEEDLE: &[u8] = b"\"relocated\"";
-            if line.windows(NEEDLE.len()).any(|w| w == NEEDLE) {
-                if let Some(c) = serde_json::from_slice::<Value>(&line).ok().and_then(|v| {
-                    (v["type"] == "relocated").then(|| v["relocatedCwd"].as_str().map(String::from)).flatten()
-                }) {
-                    last = Some(c);
-                }
-            }
-            line.clear();
+    tail_relocated(jsonl).or_else(|| first_cwd(jsonl))
+}
+
+fn tail_relocated(jsonl: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = fs::File::open(jsonl).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(CLAUDE_TAIL))).ok()?;
+    let mut buf = Vec::new();
+    f.take(CLAUDE_TAIL).read_to_end(&mut buf).ok()?;
+    // From the end, like Claude's `q`: the first (= last) line that is a relocated record. A
+    // line cut by the window's start fails to parse and is skipped, as there.
+    buf.split(|b| *b == b'\n').rev().find_map(|line| {
+        let s = std::str::from_utf8(line).ok()?;
+        if !(s.contains("\"relocatedCwd\":") && s.contains("\"type\":\"relocated\"")) {
+            return None;
         }
-    }
-    last.or_else(|| first_cwd(jsonl))
+        let v: Value = serde_json::from_str(s).ok()?;
+        (v["type"] == "relocated").then(|| v["relocatedCwd"].as_str().map(String::from)).flatten()
+    })
 }
 
 fn sessions_in(dir: &Path) -> Vec<PathBuf> {
