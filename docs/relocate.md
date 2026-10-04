@@ -23,6 +23,9 @@ window's half), `src/lib/components/MoveProjectModal.svelte`.
    fell back to home because it was missing (§4). **A running agent must be stopped before the
    move**: Claude keeps appending to the transcript path it opened, and would recreate the old
    project directory behind us. Service tabs are left running; their saved `cwd` is rebased.
+   When repointing, tabs already in the NEW folder are restarted too if they run an agent: one
+   started there before the folder was located resumed its session by id from the OLD project
+   key and keeps writing there (found in the live test). A plain shell there is left alone.
 2. **Only if every window confirmed**, the folder is renamed (`fs::rename`, so one volume only —
    across disks the human moves it and repoints). A window that times out (90 s) or refuses
    calls the whole move off, and `relocate.abort` goes to **every** window — including the one
