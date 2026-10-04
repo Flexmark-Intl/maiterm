@@ -308,14 +308,18 @@ fn claude_plan(projects: &Path, old: &Path, new: &Path) -> ClaudePlan {
         let (mut ours, mut foreign) = (0, 0);
         let mut first_new: Option<String> = None;
         for s in sessions_in(&e.path()) {
-            match first_cwd(&s).and_then(|c| rebase(&c, old, new)) {
-                Some(new_cwd) => {
+            match first_cwd(&s).map(|c| rebase(&c, old, new)) {
+                Some(Some(new_cwd)) => {
                     ours += 1;
                     first_new.get_or_insert_with(|| new_cwd.clone());
                     plan.sessions.push(ClaudeSession { jsonl: s, new_cwd });
                 }
-                // Another project's, or one that records no folder: can't be ours to move.
-                None => foreign += 1,
+                // Started in a folder outside `old`: the only real evidence of another project.
+                Some(None) => foreign += 1,
+                // Records no folder at all — Claude leaves stubs holding only
+                // `file-history-snapshot` lines (17 in this repo's own directory). Not evidence
+                // of anything: it stays with its directory, and moves with it if that moves.
+                None => {}
             }
         }
         let target = if n == o { Some(new.to_string_lossy().to_string()) } else { first_new };
@@ -740,6 +744,23 @@ mod tests {
         assert_eq!(j2["projects"]["/u/IDE/maiterm/src"]["x"], 2, "the entry already at the new key wins");
         let hist = fs::read_to_string(&s.h.claude_history[0]).unwrap();
         assert!(hist.contains("\"project\":\"/u/IDE/maiterm\"") && hist.contains("/u/other"));
+    }
+
+    #[test]
+    fn stub_transcripts_without_a_folder_dont_hold_memory_back() {
+        let s = scratch();
+        let (old, new) = (Path::new("/u/a"), Path::new("/u/b"));
+        let d = s.h.claude_projects.join("-u-a");
+        fs::create_dir_all(d.join("memory")).unwrap();
+        fs::write(d.join("memory/MEMORY.md"), "m").unwrap();
+        fs::write(d.join("real.jsonl"), "{\"cwd\":\"/u/a\"}\n").unwrap();
+        fs::write(d.join("stub.jsonl"), "{\"type\":\"file-history-snapshot\"}\n").unwrap();
+        assert!(plan_in(&s.h, old, new).claude_memory);
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let n = s.h.claude_projects.join("-u-b");
+        assert!(n.join("memory/MEMORY.md").exists() && n.join("real.jsonl").exists() && n.join("stub.jsonl").exists());
+        assert!(!d.exists());
     }
 
     #[test]

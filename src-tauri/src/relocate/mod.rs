@@ -49,21 +49,46 @@ pub fn case_insensitive(p: &Path) -> bool {
     v
 }
 
+/// Probed INSIDE the nearest existing folder, on an entry of its own volume: flipping that
+/// folder's own name would ask its PARENT's volume — at a mount point (`/Volumes/Data`) that is
+/// the boot volume, which folds, and the answer would be wrong for a case-sensitive disk below.
 fn probe_case_insensitive(p: &Path) -> bool {
-    let mut cur = Some(p);
-    while let Some(c) = cur {
-        if let Some(name) = c.file_name().and_then(|n| n.to_str()) {
-            let flipped: String = name
-                .chars()
-                .map(|ch| if ch.is_lowercase() { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() })
-                .collect();
-            if flipped != name && c.exists() {
-                return same_file(c, &c.with_file_name(&flipped));
+    let fallback = cfg!(target_os = "macos") || cfg!(windows);
+    let flip = |name: &str| -> String {
+        name.chars().map(|ch| if ch.is_lowercase() { ch.to_ascii_uppercase() } else { ch.to_ascii_lowercase() }).collect()
+    };
+    // Up from the nearest existing folder, staying on its volume: an empty folder has nothing to
+    // flip, so its parent is asked — but never past the mount point.
+    let mut dirs = p.ancestors().skip_while(|a| !a.is_dir()).peekable();
+    while let Some(dir) = dirs.next() {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten().take(200) {
+            let Some(name) = e.file_name().to_str().map(String::from) else { continue };
+            let flipped = flip(&name);
+            if flipped == name || !same_device(dir, &e.path()) {
+                continue; // nothing to flip, or a mount point of another volume
             }
+            return same_file(&e.path(), &dir.join(&flipped));
         }
-        cur = c.parent();
+        match dirs.peek() {
+            Some(parent) if same_device(dir, parent) => {}
+            _ => break,
+        }
     }
-    cfg!(target_os = "macos") || cfg!(windows)
+    fallback
+}
+
+#[cfg(unix)]
+fn same_device(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_device(_: &Path, _: &Path) -> bool {
+    true
 }
 
 #[cfg(unix)]
@@ -312,6 +337,20 @@ mod tests {
         assert!(case_insensitive(&d));
         assert!(case_insensitive(&d.join("Gone/Deeper")));
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Needs a case-sensitive volume: `MAITERM_CS_MOUNT=<mount point> cargo test -- --ignored
+    /// case_sensitive_mount`. Probes a gone path under the mount, an empty folder on it, and the
+    /// mount's own child — the cases where flipping the MOUNT's name asked the boot volume.
+    #[test]
+    #[ignore]
+    fn case_sensitive_mount() {
+        let m = PathBuf::from(std::env::var("MAITERM_CS_MOUNT").expect("MAITERM_CS_MOUNT"));
+        std::fs::create_dir_all(m.join("2024/app")).unwrap();
+        std::fs::create_dir_all(m.join("empty")).unwrap();
+        assert!(!probe_case_insensitive(&m.join("2024/gone/proj")));
+        assert!(!probe_case_insensitive(&m.join("2024")));
+        assert!(!probe_case_insensitive(&m.join("empty")));
     }
 
     #[cfg(target_os = "macos")]
