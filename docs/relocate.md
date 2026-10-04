@@ -24,11 +24,15 @@ window's half), `src/lib/components/MoveProjectModal.svelte`.
    move**: Claude keeps appending to the transcript path it opened, and would recreate the old
    project directory behind us. Service tabs are left running; their saved `cwd` is rebased.
 2. **Only if every window confirmed**, the folder is renamed (`fs::rename`, so one volume only —
-   across disks the human moves it and repoints). A window that times out or refuses calls the
-   whole move off, and the windows that did suspend wake their tabs again.
+   across disks the human moves it and repoints). A window that times out (90 s) or refuses
+   calls the whole move off, and `relocate.abort` goes to **every** window — including the one
+   that timed out, whose suspend is still queued and whose answer will go nowhere. Each window
+   keeps what it suspended per move (a session id), and wakes it on abort, now or when its
+   late suspend finishes.
 3. **Agents** (§3). Best effort per runtime, reported, never fatal: the folder has moved, and
    maiTerm's own paths must follow it regardless.
-4. **maiTerm state** (§2), one write under the lock, saved.
+4. **maiTerm state** (§2), one write under the lock, saved. A failed save is reported, not
+   returned: the rebased state is live in memory, and returning would leave every tab down.
 5. **Patch + wake.** Each window (verb `relocate.apply`) takes the rebased path fields into its
    mirror — the frontend writes some of these back, and a stale copy would restore the old path
    — and wakes the tabs it suspended through the serial restore driver
@@ -42,7 +46,9 @@ itself or onto its parent, a destination that exists.
 ## 2. maiTerm's paths (`relocate_state`)
 
 A **prefix rebase at path-component boundaries** — `/a/aiTerm` rebases `/a/aiTerm/src`, never
-`/a/aiTermX`. Case folds on macOS (a `cd`-typed `$PWD` keeps its typed case). A `~/…` value stays
+`/a/aiTermX`. Case folds when the VOLUME does (`case_insensitive` probes a case-flipped twin of
+an existing ancestor) — a `cd`-typed `$PWD` keeps its typed case, but on a case-sensitive volume
+`app` and `App` are two projects. A `~/…` value stays
 `~/…` while the result is under home.
 
 | Field | Note |
@@ -63,12 +69,17 @@ gemini-cli 0.43.0).
 
 **Claude.** `~/.claude/projects/<slug>/`, slug = every UTF-16 unit outside `[A-Za-z0-9]` → `-`,
 past 200 chars cut + base-36 Java hash; of the *resolved* path. Shared by every managed account
-(symlink), so one place. The slug is lossy (`a.b`/`a-b`, and `aiTerm-backup` shares
-`aiTerm`'s prefix), so a name match is only a candidate: a session inside must have started under
-the old folder. Subfolder sessions have their own slugs and are moved too. Memory lives under
-the git root's slug and moves with it.
-- No destination: rename the directory. Destination exists: merge entry by entry, `memory/`
-  file by file; a clash stays behind and is reported, never overwritten.
+(symlink), so one place. The slug is lossy (`a.b`/`a-b`; `/u/p/web` and the sibling `/u/p-web`
+share `-u-p-web`), so **each session is decided on its own** by the folder its transcript
+records, and moved (with its `<sid>/` folder) to its new slug. Subfolder sessions have their own
+slugs and are moved too. Memory lives under the git root's slug; a directory's other entries
+(`memory/`) follow only when nothing of another project's is left in it — otherwise they stay
+and the result says so.
+- Merges into an existing destination entry by entry, `memory/` file by file; a clash stays
+  behind and is reported, never overwritten.
+- Shared files (`.claude.json`, `history.jsonl`, Codex/Gemini configs) are edited through
+  symlinks (a dotfiles-managed config stays a link) and the edit is redone if the file changed
+  meanwhile — agents in other projects keep running and writing.
 - Each moved transcript gets Claude's own `{"type":"relocated","sessionId","relocatedCwd"}`
   appended — the last one wins over every `cwd` before it, so history isn't rewritten. Without
   it `claude --resume` from the new folder doesn't find the session.
@@ -92,7 +103,7 @@ installs: `tmp|history/<sha256(path)>`, one-way, so only paths maiTerm's state k
 still open — but `TerminalPane` now asks `folder_exists` first, and for a missing folder:
 
 - **holds the auto-resume command** — it would run in home and resume nothing;
-- **stops saving its cwd** as the restore context — home would overwrite the folder it is
+- **saves the folder it wanted, not home**, through every command that saves a tab's cwd (`relocateFallback.ts`: suspend, archive, the periodic restore context) — home would overwrite the folder it is
   waiting to go back to (the auto-resume-erasure class of bug);
 - records the tab as a *fallback* (`relocate.svelte.ts`) and raises the locate prompt.
 
