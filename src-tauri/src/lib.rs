@@ -8,6 +8,7 @@ mod state;
 mod share;
 mod terminal;
 mod watch;
+mod relocate;
 
 pub const APP_DISPLAY_NAME: &str = if cfg!(debug_assertions) { "maiTermDev" } else { "maiTerm" };
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -871,6 +872,9 @@ pub fn run() {
             commands::workspace::delete_archived_tab,
             commands::workspace::export_state,
             commands::workspace::import_state,
+            commands::relocate::find_missing_folders,
+            commands::relocate::preview_relocation,
+            commands::relocate::relocate_project,
             commands::workspace::preview_import,
             commands::workspace::import_state_selective,
             commands::workspace::run_scheduled_backup,

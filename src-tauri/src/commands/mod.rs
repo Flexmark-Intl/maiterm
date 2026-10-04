@@ -5,6 +5,7 @@ pub mod deshittify;
 pub mod editor;
 pub mod mailink;
 pub mod overlord;
+pub mod relocate;
 pub mod scheduler;
 pub mod ssh_tunnel;
 pub mod stack;
