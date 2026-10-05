@@ -4,6 +4,12 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.17 changelog** (2026-10-04). Additive: **`POST /tasks/{id}/dismiss`** (§13.3) `{ askedAt }`
+> — the desktop BlockerCard's Dismiss ("Already handled in the tab"). A task question the human
+> dealt with in the conversation was a card nobody could clear from the phone. Clears the
+> blocker, moves the task to Active with a note, and tells the agent nothing. Same envelope and
+> refusals as `/answer`.
+>
 > **v0.16 changelog** (2026-10-03). Additive: **pushes for the waits that open no prompt.** A
 > task question (`Chat.asks`, 0.13) and a watch script to allow (`Chat.scriptsWaiting`, 0.15) now
 > ring the doorbell (§6) when one starts waiting and no phone holds the WS: kind `ask` ("Has a
@@ -2140,6 +2146,7 @@ interface OutstandingDirective {
 | `POST /tasks/{id}` | `{ status?, title?, detail?: string\|null, tabId?: string\|null, workstreamId?: string\|null }` | `{ tasks: [MaitermTask] }` |
 | `POST /tasks/{id}/start` | `{}` | `{ accepted, confirmed, result?: { started, told, task } }` — see below |
 | `POST /tasks/{id}/answer` | `{ askedAt: string, option?: number, text?: string }` (0.13) | `{ accepted, confirmed, reason?, result?: { answered: true, told, task } }` — see below |
+| `POST /tasks/{id}/dismiss` | `{ askedAt: string }` (0.17) | `{ accepted, confirmed, reason?, result?: { dismissed: true, task } }` — "Already handled in the tab": the blocker is cleared and the task goes back to Active with the note "Handled in the tab by the human". NOTHING is typed to the agent. Any blocker kind (`decision`, `action`, `external`), as on the desktop's card. Refusals as for `/answer` (stale `askedAt`, no longer blocked), `reason` verbatim |
 
 **Answering a blocker (0.13).** `POST /tasks/{id}/answer` is the phone's "prompt me": the human
 answers the question on a task's `blocker`. It is the same human-only verb as the desktop's answer
@@ -2278,6 +2285,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.14` | adds `Turn.typedBy` on user turns maiTerm typed (an Overlord directive, or a message sent for the human) |
 | `0.15` | adds `Chat.scriptsWaiting`, `ChatDetail.scriptApprovals` (`ScriptApproval[]`), and `POST /chats/{tabId}/scripts/{id}/approve` + `/reject` |
 | `0.16` | adds doorbell kinds `ask` (a new task question) and `script` (a new watch script to allow), also in `/push-prefs` `kinds` |
+| `0.17` | adds `POST /tasks/{id}/dismiss` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

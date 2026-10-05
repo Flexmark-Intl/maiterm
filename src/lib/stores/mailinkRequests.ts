@@ -84,6 +84,18 @@ export async function handleMailinkRequest(req: MailinkRequest): Promise<void> {
         }
         break;
       }
+      case 'tasks.dismiss': {
+        // v0.17: the phone's "Already handled in the tab" — the desktop BlockerCard's Dismiss.
+        // Nothing is typed to the agent; the task goes back to Active with a note saying the
+        // human handled it. askedAt is the stale guard, as for an answer.
+        if (typeof a.id !== 'string' || typeof a.askedAt !== 'string') {
+          result = { error: 'id and askedAt are required' };
+        } else {
+          const r = overlordStore.dismissBlocker(a.id, a.askedAt);
+          result = r.dismissed ? r : { error: r.detail ?? 'That was not dismissed.' };
+        }
+        break;
+      }
       case 'overlord.dismissEscalation': {
         if (typeof a.id !== 'string') result = { error: 'id is required' };
         else { overlordStore.dismissEscalation(a.id); result = { ok: true }; }

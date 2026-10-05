@@ -369,6 +369,7 @@ fn build_router(api: ApiState) -> Router {
         // START is a separate verb from "set the lane to active", deliberately — see the handler.
         .route("/mailink/v1/tasks/{task_id}/start", post(post_task_start))
         .route("/mailink/v1/tasks/{task_id}/answer", post(post_task_answer))
+        .route("/mailink/v1/tasks/{task_id}/dismiss", post(post_task_dismiss))
         // The Overlord engine mirror, every window (mailink/overlord.rs). Baseline on connect;
         // the WS `overlord` frame carries changes inline.
         .route("/mailink/v1/overlord", get(overlord_windows))
@@ -513,7 +514,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.16";
+const PROTOCOL_VERSION: &str = "0.17";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -807,15 +808,46 @@ async fn post_task_answer(
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "text": body.text });
     let mut out = overlord_act(&s, &window, "tasks.answer", args).await;
+    attach_confirmed_row(&s, &task_id, &mut out);
+    Ok(out)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskDismissBody {
+    /// The `blocker.askedAt` the human was looking at: a dismiss must not clear a question the
+    /// agent asked after the phone last refreshed.
+    asked_at: String,
+}
+
+/// `POST /tasks/{id}/dismiss` (v0.17) — "Already handled in the tab": clear a task's blocker
+/// WITHOUT telling the agent (the desktop BlockerCard's Dismiss, `overlordStore.dismissBlocker`).
+/// The task goes back to Active with a note that the human handled it. Same envelope as
+/// `/answer`; a stale or no-longer-blocked task is `accepted:false` with the sentence as `reason`.
+async fn post_task_dismiss(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(body): Json<TaskDismissBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
+    let args = json!({ "id": task_id, "askedAt": body.asked_at });
+    let mut out = overlord_act(&s, &window, "tasks.dismiss", args).await;
+    attach_confirmed_row(&s, &task_id, &mut out);
+    Ok(out)
+}
+
+/// A confirmed task write (answer, dismiss) answers with the row as it now stands.
+fn attach_confirmed_row(s: &ApiState, task_id: &str, out: &mut Json<Value>) {
     // Only a CONFIRMED answer gets the row. On a timeout (accepted, unconfirmed) the webview
     // hasn't acted, so the row would still show the open question with its askedAt, and a
     // `result` holding only `task` reads to a client like an answer that told nobody.
     if out.0["accepted"] == Value::Bool(true) && out.0["confirmed"] == Value::Bool(true) {
-        if let Some(row) = board::task_row(&s.app, &task_id) {
+        if let Some(row) = board::task_row(&s.app, task_id) {
             out.0["result"]["task"] = row;
         }
     }
-    Ok(out)
 }
 
 // ─── Overlord actions (rpc.rs) ─────────────────────────────────────────────────────────────
