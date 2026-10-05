@@ -620,6 +620,7 @@
 
   const scrollbackOptions = [
     { value: 1000, label: '1,000 lines' },
+    { value: 3000, label: '3,000 lines (default)' },
     { value: 5000, label: '5,000 lines' },
     { value: 10000, label: '10,000 lines' },
     { value: 0, label: 'Unlimited' },
