@@ -289,7 +289,7 @@ for k in sys.argv[1].split("."):
         v=v[int(k)]
     else:
         v=None
-sys.stdout.write(v if isinstance(v,str) else "")' "$1" 2>/dev/null
+sys.stdout.write((v if isinstance(v,str) else "")+"\n")' "$1" 2>/dev/null
   elif command -v jq >/dev/null 2>&1; then
     printf '%s' "$input" | jq -r --arg k "$1" 'getpath($k|split(".")|map(tonumber? // .)) | strings' 2>/dev/null
   fi
@@ -324,7 +324,13 @@ cfg=${{CLAUDE_CONFIG_DIR:-}}
 # is REFUSED at once, telling the agent to use Write or Edit, which are approved
 # below. Without this it waits for a human, for hours if nobody is looking. The
 # directory Claude Code asks to add is how the prompt says what it is about.
+# Deleting, moving, copying or linking is left to the human: Write and Edit can't
+# do it, so refusing would make it impossible, not redirect it.
 if [ "$(field tool_name)" = Bash ]; then
+  command -v grep >/dev/null 2>&1 || exit 0
+  if field tool_input.command | grep -Eq '(^|[^[:alnum:]_.-])(rm|rmdir|unlink|mv|cp|ln|install|rsync)([[:space:]]|$)'; then
+    exit 0
+  fi
   for i in 0 1 2 3; do
     for j in 0 1 2 3; do
       d=$(field "permission_suggestions.$i.directories.$j")
@@ -339,7 +345,14 @@ if [ "$(field tool_name)" = Bash ]; then
 fi
 
 case "$(field tool_name)" in Write|Edit) ;; *) exit 0 ;; esac
-path=$(field tool_input.file_path)
+# Exactly: every parser ends its value with one newline, and $(...) would strip
+# more than that, approving "a.md<newline>" as though it were "a.md".
+nl='
+'
+path=$(field tool_input.file_path; echo .)
+path=${{path%.}}
+path=${{path%"$nl"}}
+case "$path" in *"$nl"*) exit 0 ;; esac
 case "$path" in /*) ;; *) exit 0 ;; esac
 in_memory_dir "$path" "$cfg" "$HOME/.claude" || exit 0
 
@@ -479,12 +492,10 @@ fn memory_writes_status(settings: &serde_json::Value, settings_err: &Option<Stri
     if !memory_hook_registered(settings) {
         return status(false, false, None);
     }
-    // Registered, so the script and the entry are unambiguously ours to maintain:
-    // bring stale ones up to date, as the githooks do, or a fix would never reach
-    // the people who have the rule on.
     if !memory_hook_is_current(&path) || !memory_hook_entry_is_current(settings) {
-        match set_memory_writes(true) {
-            Ok(()) => log::info!("Deshittify: refreshed the memory-write hook"),
+        match refresh_memory_writes(&path) {
+            Ok(true) => log::info!("Deshittify: refreshed the memory-write hook"),
+            Ok(false) => {}
             Err(e) => log::warn!("Deshittify: could not refresh the memory-write hook: {e}"),
         }
     }
@@ -493,9 +504,38 @@ fn memory_writes_status(settings: &serde_json::Value, settings_err: &Option<Stri
         current,
         false,
         (!current).then(|| {
-            format!("settings.json names the hook but ~/{MEMORY_HOOK_REL} could not be written — toggle this on to retry.")
+            format!("settings.json names the hook but ~/{MEMORY_HOOK_REL} is missing or out of date — toggle this on to rewrite it.")
         }),
     )
+}
+
+/// Bring an installed rule's stale script or entry up to date, as the githooks do,
+/// or a fix would never reach the people who have the rule on.
+///
+/// Status reads call this from any thread, while a switch-off may be running on
+/// another, which writes settings and THEN deletes the script. So a MISSING script
+/// is never reinstalled here (it is what a switch-off in progress looks like; the
+/// row reads as off and the toggle reinstalls it), and settings are re-read right
+/// before acting rather than trusted from the caller's earlier read.
+fn refresh_memory_writes(path: &PathBuf) -> Result<bool, String> {
+    let mut settings = read_claude_settings()?;
+    if !memory_hook_registered(&settings) || !path.exists() {
+        return Ok(false);
+    }
+    let mut changed = false;
+    if !memory_hook_is_current(path) {
+        install_memory_hook(path)?;
+        changed = true;
+    }
+    if !memory_hook_entry_is_current(&settings) {
+        let obj = settings
+            .as_object_mut()
+            .ok_or("~/.claude/settings.json is not a JSON object")?;
+        edit_memory_hook_entry(obj, true)?;
+        write_claude_settings(&settings)?;
+        changed = true;
+    }
+    Ok(changed)
 }
 
 fn set_memory_writes(enabled: bool) -> Result<(), String> {
@@ -1644,6 +1684,23 @@ mod tests {
             Some("deny")
         );
         assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[&other])), None);
+        // Removing, renaming or copying a memory is something Write/Edit can't do:
+        // the human is asked, as before, rather than the agent refused outright.
+        for cmd in [
+            "rm \"$M/stale.md\"",
+            "cd \"$M\" && mv old.md new.md",
+            "rmdir \"$M/sub\"",
+            "cp a.md \"$M/b.md\"",
+            "/bin/rm -f x.md",
+        ] {
+            let mut req = bash_req(&[&memory]);
+            req["tool_input"]["command"] = cmd.into();
+            assert_eq!(memory_hook_decision(&home, Some(&account), &req), None, "refused {cmd}");
+        }
+        // ...but a write that merely mentions such a word in a filename is still refused.
+        let mut req = bash_req(&[&memory]);
+        req["tool_input"]["command"] = "cat > \"$M/firm-rules.md\" <<'EOF'\nx\nEOF".into();
+        assert_eq!(memory_hook_decision(&home, Some(&account), &req).as_deref(), Some("deny"));
         assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[])), None);
         let mut plain = bash_req(&[]);
         plain.as_object_mut().unwrap().remove("permission_suggestions");
@@ -1739,6 +1796,9 @@ mod tests {
             },
         });
         assert!(!memory_hook_allows(&home, Some(&account), &forged), "read file_path out of content");
+        // A trailing newline is a different file from the one the checks would see.
+        let newline = write_req(std::path::Path::new(&format!("{}\n", via_account.display())));
+        assert!(!memory_hook_allows(&home, Some(&account), &newline), "approved a path ending in a newline");
 
         let _ = fs::remove_dir_all(&home);
     }
