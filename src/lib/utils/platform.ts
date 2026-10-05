@@ -13,6 +13,11 @@ export function isMac(): boolean {
   return _isMac;
 }
 
+/** True when running on Windows. */
+export function isWindows(): boolean {
+  return typeof navigator !== 'undefined' && /Win/.test(navigator.platform);
+}
+
 /** Check the platform action-modifier on a keyboard event (Cmd on mac, Ctrl elsewhere). */
 export function isModKey(e: KeyboardEvent): boolean {
   return _isMac ? e.metaKey : e.ctrlKey;

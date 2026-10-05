@@ -1,4 +1,5 @@
-import { check, type Update } from '@tauri-apps/plugin-updater';
+import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
+import { isWindows } from '$lib/utils/platform';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
@@ -324,7 +325,7 @@ function createUpdaterStore() {
     broadcast();
     logInfo(`Update v${version}: download started`);
     try {
-      await currentUpdate.downloadAndInstall((event) => {
+      const onEvent = (event: DownloadEvent) => {
         if (event.event === 'Started') {
           totalBytes = event.data.contentLength ?? null;
           broadcast();
@@ -336,7 +337,18 @@ function createUpdaterStore() {
           broadcast();
           logInfo(`Update v${version}: downloaded ${downloadedBytes} bytes, installing`);
         }
-      });
+      };
+      if (isWindows()) {
+        // On Windows install() launches the installer and ends the process on the spot
+        // (std::process::exit) — no quit event, so no shutdown cleanup and no final state
+        // flush. Flush first, as restart() does, or a save still waiting in Rust's
+        // coalescing window and every unsaved scrollback buffer die with the process.
+        await currentUpdate.download(onEvent);
+        await flushBeforeExit();
+        await currentUpdate.install();
+      } else {
+        await currentUpdate.downloadAndInstall(onEvent);
+      }
       installed = true;
       // The finished state carries the Restart button; a banner dismissed mid-download
       // would otherwise hide it, leaving an installed update that only a quit reveals.
@@ -361,20 +373,12 @@ function createUpdaterStore() {
   }
 
   /**
-   * Flush state to disk, then relaunch. relaunch() hard-kills the process
-   * without firing onCloseRequested/quit-requested, so the normal shutdown
-   * save path never runs — we must mirror it here or recently-changed state
-   * (tab names, scrollback, geometry) is lost across the update.
+   * Mirror the shutdown save path before an update ends the process: relaunch() (and the
+   * Windows installer) exit without firing onCloseRequested/quit-requested, so without this
+   * recently-changed state (tab names, scrollback, geometry) is lost across the update.
+   * Bounded by RESTART_FLUSH_TIMEOUT_MS — a hung save must not strand the update.
    */
-  async function restart() {
-    // Re-entry guard: the flush below takes seconds with many tabs, and every extra click
-    // used to start another one racing the first.
-    if (restarting) return;
-    restarting = true;
-    ownRestart = true;
-    clearTimeout(mirrorWatchdog);
-    dismissed = false;
-    broadcast();
+  async function flushBeforeExit() {
     const flush = (async () => {
       try {
         // 0 is "no answer" (displays asleep, list unreadable) and saveWindowGeometry
@@ -400,7 +404,20 @@ function createUpdaterStore() {
       flush.then(() => false),
       new Promise<boolean>(resolve => setTimeout(() => resolve(true), RESTART_FLUSH_TIMEOUT_MS)),
     ]);
-    if (timedOut) logError(`Pre-relaunch state flush still running after ${RESTART_FLUSH_TIMEOUT_MS}ms, relaunching anyway`);
+    if (timedOut) logError(`Pre-relaunch state flush still running after ${RESTART_FLUSH_TIMEOUT_MS}ms, continuing anyway`);
+  }
+
+  /** Flush state to disk, then relaunch. */
+  async function restart() {
+    // Re-entry guard: the flush below takes seconds with many tabs, and every extra click
+    // used to start another one racing the first.
+    if (restarting) return;
+    restarting = true;
+    ownRestart = true;
+    clearTimeout(mirrorWatchdog);
+    dismissed = false;
+    broadcast();
+    await flushBeforeExit();
     logInfo('Update: relaunching');
     try {
       await relaunch();

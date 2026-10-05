@@ -107,7 +107,9 @@ pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
 pub fn sync_state(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     log::info!("Forcing state sync to disk");
     let data_clone = state.app_data.read().clone();
-    save_state(&data_clone)?;
+    // Callers use this right before the process ends (update relaunch/install), so it must
+    // not leave the write in save_state's coalescing window.
+    crate::state::persistence::flush_state(&data_clone)?;
     log::info!("State saved successfully");
     Ok(())
 }
