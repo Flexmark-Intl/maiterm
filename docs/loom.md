@@ -62,7 +62,11 @@ The Loom works with the engine off: it is the human's view, not supervision.
   vocabulary (`toolVerb`), and `focusSections` applies the phone's Focus rules. A chat with a
   watch script waiting to be allowed is pinned in Needs you like one with a task question (the
   phone's `scriptsWaiting`), previews "Allow a watch script?", and shows its cards in the dock
-  under the task question, answered in place.
+  under the task question, answered in place. An image the agent shows by its PATH
+  (`![shot](/Users/…/a.png)`) is drawn in place: the Markdown renderer leaves an inert
+  placeholder, and `loom/chatImages.ts` asks `get_chat_image`, which reads it through the phone's
+  0.18 reader (`mailink/inline_image.rs` `read_image`) — only a path the agent itself wrote, an
+  image, on the computer the agent ran on. A URL is never fetched and stays its alt text.
 
 ## The weave
 

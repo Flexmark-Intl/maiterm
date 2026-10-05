@@ -431,6 +431,12 @@ export async function listTabModels(tabId: string): Promise<ModelOption[]> {
   return invoke('list_tab_models', { tabId });
 }
 
+/** An image an agent showed by its path, for the Focus chat (the phone's 0.18 rules). */
+export type ChatImage = { ok: true; url: string } | { ok: false; reason: string };
+export async function getChatImage(tabId: string, path: string): Promise<ChatImage> {
+  return invoke('get_chat_image', { tabId, path });
+}
+
 /** Answer a tab's open prompt through the same hardened path the phone uses. Pass the
  *  `prompt_id` from `getTabPrompt` — it is the stale-guard against answering a prompt that
  *  opened while the decision was being made. */

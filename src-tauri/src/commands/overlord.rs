@@ -104,6 +104,30 @@ pub async fn get_tab_meta(
         .map_err(|e| format!("meta read failed to run: {}", e))
 }
 
+/// An image an agent showed by its path, for the Loom's Focus chat: `{ ok: true, url }` (a data
+/// URL) or `{ ok: false, reason }`. The same reader and rules as the phone's
+/// `POST /chats/{tabId}/image` (`mailink/inline_image.rs`) — only a path in the agent's own
+/// messages, images only, 25 MB, read on the computer the agent ran on — but not stored, and not
+/// limited to tabs shared with maiLink.
+#[tauri::command]
+pub async fn get_chat_image(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    path: String,
+) -> Result<Value, String> {
+    use base64::Engine as _;
+    let app = state.inner().clone();
+    Ok(match crate::mailink::inline_image::read_image(&app, &tab_id, &path).await {
+        Ok(img) => {
+            let mime = crate::mailink::assets::mime_for(&img.name);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&img.bytes);
+            serde_json::json!({ "ok": true, "url": format!("data:{mime};base64,{b64}") })
+        }
+        Err(crate::mailink::inline_image::Refusal::Refused(reason)) => serde_json::json!({ "ok": false, "reason": reason }),
+        Err(crate::mailink::inline_image::Refusal::NotFound) => serde_json::json!({ "ok": false, "reason": "No such tab." }),
+    })
+}
+
 /// The models this tab can be switched to with `/model` (the phone's `GET /models?tab=`).
 #[tauri::command]
 pub async fn list_tab_models(

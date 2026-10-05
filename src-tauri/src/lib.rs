@@ -789,6 +789,7 @@ pub fn run() {
             commands::overlord::get_tab_prompt,
             commands::overlord::get_tab_meta,
             commands::overlord::list_tab_models,
+            commands::overlord::get_chat_image,
             commands::overlord::answer_tab_prompt,
             commands::overlord::answer_tab_prompt_as_human,
             commands::overlord::send_tab_message,

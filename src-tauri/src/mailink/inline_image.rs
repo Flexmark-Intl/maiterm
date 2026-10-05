@@ -185,11 +185,40 @@ fn agent_cwd(app: &AppState, sid: &str) -> Option<String> {
     app.agent_sessions.read().get(sid).and_then(|s| s.cwd.clone())
 }
 
-/// Fetch `path` as the agent in `tab_id` meant it, and store it for the phone.
+/// Fetch `path` as the agent in `tab_id` meant it, and store it for the phone. The phone may
+/// only ask about a tab it can see.
 pub(crate) async fn fetch(app: &Arc<AppState>, tab_id: &str, path: &str) -> Result<super::assets::AssetRecord, Refusal> {
     if !super::is_designated(app, tab_id) {
         return Err(Refusal::NotFound);
     }
+    let image = read_image(app, tab_id, path).await?;
+    let key = {
+        let mut h = sha2::Sha256::new();
+        h.update(tab_id.as_bytes());
+        h.update([0u8]);
+        h.update(image.resolved.as_bytes());
+        h.update([0u8]);
+        h.update(&image.bytes);
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let tab = tab_id.to_string();
+    tokio::task::spawn_blocking(move || super::assets::store_inline(&tab, &image.name, image.bytes, &key))
+        .await
+        .map_err(|e| refuse(format!("store task failed: {e}")))?
+        .map_err(Refusal::Refused)
+}
+
+/// An image read for a message: its name, where it was read from, and the bytes.
+pub(crate) struct Image {
+    pub name: String,
+    pub resolved: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Read `path` as the agent in `tab_id` meant it, under every rule above — the ONE reader for the
+/// phone (`fetch`) and the desktop Loom's Focus chat (`get_chat_image`), so they can't disagree
+/// about what an agent's message may show. Designation is the phone's gate, not this.
+pub(crate) async fn read_image(app: &Arc<AppState>, tab_id: &str, path: &str) -> Result<Image, Refusal> {
     let path = path.trim();
     if image_ext(path).is_none() {
         return Err(refuse("Only png, jpeg, gif, webp and heic images can be shown here."));
@@ -247,20 +276,7 @@ pub(crate) async fn fetch(app: &Arc<AppState>, tab_id: &str, path: &str) -> Resu
     if !looks_like(&ext, &bytes) {
         return Err(refuse(format!("{name} isn't a {} image.", ext.to_ascii_uppercase())));
     }
-    let key = {
-        let mut h = sha2::Sha256::new();
-        h.update(tab_id.as_bytes());
-        h.update([0u8]);
-        h.update(resolved.as_bytes());
-        h.update([0u8]);
-        h.update(&bytes);
-        h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
-    };
-    let tab = tab_id.to_string();
-    tokio::task::spawn_blocking(move || super::assets::store_inline(&tab, &name, bytes, &key))
-        .await
-        .map_err(|e| refuse(format!("store task failed: {e}")))?
-        .map_err(Refusal::Refused)
+    Ok(Image { name, resolved, bytes })
 }
 
 /// A local path: `~/` from the home folder, a relative one from the agent's folder.

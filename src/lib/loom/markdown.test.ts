@@ -21,6 +21,12 @@ describe('transcript markdown is inert', () => {
     expect(out).toContain('diagram');
   });
 
+  it('turns an image into an inert placeholder carrying its escaped src', () => {
+    const out = renderTurnMarkdown('![shot](/Users/me/a.png "t") ![x](/a/"><img src=y>.png)');
+    expect(out).toContain('<span class="md-img" data-src="/Users/me/a.png">shot</span>');
+    expect(out).not.toMatch(/<img/);
+  });
+
   it('still renders the markdown agents actually write', () => {
     const out = renderTurnMarkdown('**bold** and `code`\n\n- a\n- b');
     expect(out).toContain('<strong>bold</strong>');

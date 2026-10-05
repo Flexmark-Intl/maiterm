@@ -19,6 +19,7 @@
   import { getTabMeta, getTabsLastActivity, getTabTranscript, listTabModels, sendTabMessage, type ChatTurn, type TabMeta } from '$lib/tauri/commands';
   import { chatRows, FOCUS_WINDOWS, focusSections, injectedTurn, taskEventsFor, type FocusChat } from '$lib/loom/model';
   import { renderTurnMarkdown } from '$lib/loom/markdown';
+  import { chatImages } from '$lib/loom/chatImages';
   import { BLOCKER_LABEL, isRetired } from '$lib/tasks/model';
   import { fireRefusal, fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
@@ -724,7 +725,7 @@
           {:else if r.turn.role === 'user'}
             <div class="you">{r.turn.text}</div>
           {:else if r.turn.role === 'agent'}
-            <div class="agent">{@html renderTurnMarkdown(r.turn.text)}</div>
+            <div class="agent" use:chatImages={open.tabId}>{@html renderTurnMarkdown(r.turn.text)}</div>
           {:else}
             <div class="sys">{r.turn.text}</div>
           {/if}
@@ -956,6 +957,10 @@
   .agent :global(code) { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.9em; background: var(--bg-medium); padding: 1px 4px; border-radius: 3px; }
   .agent :global(pre code) { background: none; padding: 0; }
   .agent :global(a) { color: var(--accent); }
+  /* An image the agent showed by its path (loom/chatImages.ts): the placeholder until it loads,
+     its alt text plus the reason when it can't be shown. */
+  .agent :global(.md-img) { color: var(--fg-dim); font-style: italic; }
+  .agent :global(img.md-img-loaded) { display: block; max-width: 100%; max-height: 480px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--bg-light); }
   .agent :global(strong) { color: var(--fg); font-weight: 600; }
   .agent :global(table) { display: block; overflow-x: auto; border-collapse: collapse; margin: 4px 0 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
   .agent :global(th) { text-align: left; font-weight: 600; color: var(--fg-dim); border-bottom: 1px solid var(--bg-light); }
