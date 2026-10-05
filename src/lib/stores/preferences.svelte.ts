@@ -13,7 +13,7 @@ function createPreferencesStore() {
   let cursorStyle = $state<CursorStyle>('block');
   let cursorBlink = $state(true);
   let autoSaveInterval = $state(10);
-  let scrollbackLimit = $state(10000);
+  let scrollbackLimit = $state(3000);
   let promptPatterns = $state<string[]>([]);
   let cloneCwd = $state(true);
   let cloneScrollback = $state(true);

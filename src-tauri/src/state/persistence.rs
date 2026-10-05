@@ -417,6 +417,21 @@ pub fn migrate_app_data(data: &mut AppData) {
         log::info!("Migration: enabled restore_session (Restore on Relaunch) by default");
     }
 
+    // One-time move off the old 10,000-line scrollback default (see
+    // `default_scrollback_limit`). Only a value still AT the old default moves; any other
+    // value was chosen. Runs once per profile.
+    if !data.preferences.scrollback_limit_default_migrated {
+        if data.preferences.scrollback_limit == super::workspace::OLD_DEFAULT_SCROLLBACK_LIMIT {
+            data.preferences.scrollback_limit = super::workspace::Preferences::default().scrollback_limit;
+            log::info!(
+                "Migration: scrollback_limit {} → {} (the old default)",
+                super::workspace::OLD_DEFAULT_SCROLLBACK_LIMIT,
+                data.preferences.scrollback_limit
+            );
+        }
+        data.preferences.scrollback_limit_default_migrated = true;
+    }
+
     // Migrate from old single-window format to multi-window format
     if data.windows.is_empty() {
         if let Some(old_workspaces) = data.workspaces.take() {
@@ -1041,6 +1056,35 @@ fn backfill_agent_runtimes(data: &mut AppData) {
 mod migration_tests {
     use super::*;
     use crate::state::workspace::Workspace;
+
+    /// A profile that predates the marker deserializes with it false.
+    fn pre_marker_data(limit: u32) -> AppData {
+        let mut data = AppData::default();
+        data.preferences.scrollback_limit = limit;
+        data.preferences.scrollback_limit_default_migrated = false;
+        data
+    }
+
+    #[test]
+    fn the_old_scrollback_default_moves_to_the_new_one_once() {
+        let mut data = pre_marker_data(super::super::workspace::OLD_DEFAULT_SCROLLBACK_LIMIT);
+        migrate_app_data(&mut data);
+        assert_eq!(data.preferences.scrollback_limit, 3000);
+        assert!(data.preferences.scrollback_limit_default_migrated);
+
+        // Choosing 10,000 deliberately afterwards survives the next launch.
+        data.preferences.scrollback_limit = 10000;
+        migrate_app_data(&mut data);
+        assert_eq!(data.preferences.scrollback_limit, 10000);
+    }
+
+    #[test]
+    fn a_chosen_scrollback_limit_is_left_alone() {
+        let mut data = pre_marker_data(50_000);
+        migrate_app_data(&mut data);
+        assert_eq!(data.preferences.scrollback_limit, 50_000);
+        assert!(data.preferences.scrollback_limit_default_migrated);
+    }
 
     #[test]
     fn a_tab_that_has_run_an_agent_is_tagged_as_one() {

@@ -1216,9 +1216,16 @@ fn default_auto_save_interval() -> u32 {
     10
 }
 
+/// Lines of history each terminal keeps in memory. Was 10,000: alacritty stores every row at
+/// full width (24 bytes per cell, blank ones included), so a full terminal cost ~40 MB and
+/// 167 of them held 6.7 GB. 3,000 is ~13 MB.
 fn default_scrollback_limit() -> u32 {
-    10000
+    3000
 }
+
+/// The default before `default_scrollback_limit` was lowered — a stored value equal to this
+/// was never chosen, so the one-time migration moves it to the new default.
+pub(crate) const OLD_DEFAULT_SCROLLBACK_LIMIT: u32 = 10000;
 
 fn default_prompt_patterns() -> Vec<String> {
     vec![
@@ -1619,6 +1626,10 @@ pub struct Preferences {
     pub auto_save_interval: u32,
     #[serde(default = "default_scrollback_limit")]
     pub scrollback_limit: u32,
+    /// One-time marker for the lowered scrollback default. Once set, the migration never
+    /// runs again, so a user who deliberately sets 10,000 afterwards keeps it.
+    #[serde(default)]
+    pub scrollback_limit_default_migrated: bool,
     #[serde(default = "default_prompt_patterns")]
     pub prompt_patterns: Vec<String>,
     #[serde(default = "default_true")]
@@ -2058,6 +2069,7 @@ impl Default for Preferences {
             cursor_blink: default_cursor_blink(),
             auto_save_interval: default_auto_save_interval(),
             scrollback_limit: default_scrollback_limit(),
+            scrollback_limit_default_migrated: true,
             prompt_patterns: default_prompt_patterns(),
             clone_cwd: true,
             clone_scrollback: true,
