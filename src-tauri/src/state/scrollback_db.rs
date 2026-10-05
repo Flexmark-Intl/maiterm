@@ -26,6 +26,10 @@ impl ScrollbackDb {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA busy_timeout=5000;
+             -- Without a limit the -wal file never shrinks: it stays at its high-water mark
+             -- (once 370 MB, the size of the whole DB after a VACUUM went through it). With
+             -- one, SQLite truncates it back to this size whenever a checkpoint resets it.
+             PRAGMA journal_size_limit=67108864;
              CREATE TABLE IF NOT EXISTS scrollback (
                  tab_id TEXT PRIMARY KEY,
                  data TEXT NOT NULL,
@@ -205,8 +209,13 @@ impl ScrollbackDb {
         Ok(())
     }
 
-    /// Delete any rows whose tab_id is not in `live_tab_ids`, then VACUUM
-    /// so freed pages are returned to the OS. Returns count removed.
+    /// Delete any rows whose tab_id is not in `live_tab_ids`. Returns count removed.
+    ///
+    /// No VACUUM: this runs on the startup path, nearly every launch finds at least one
+    /// orphan, and a VACUUM rewrites the WHOLE database through the WAL — at ~350 MB it
+    /// blocked launch for tens of seconds and dirtied 2 GB of disk (macOS filed a
+    /// disk-writes report for it). The freed pages are reused by the next scrollback saves,
+    /// which rewrite every live tab's row anyway.
     pub fn prune_orphans(&self, live_tab_ids: &HashSet<String>) -> Result<usize, String> {
         let orphans: Vec<String> = {
             let conn = self.conn.lock();
@@ -226,9 +235,6 @@ impl ScrollbackDb {
         }
 
         self.delete_many(&orphans)?;
-
-        let conn = self.conn.lock();
-        let _ = conn.execute("VACUUM", []);
         Ok(orphans.len())
     }
 }
