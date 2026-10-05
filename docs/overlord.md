@@ -661,7 +661,8 @@ export interface OverlordRule {
   workspaces: string[];        // [] = global (this window)
   cooldown: number;            // seconds, per-tab
   default_id?: string | null;  // seeded from DEFAULT_OVERLORD_RULES
-  user_modified?: boolean;     // freezes it against template updates
+  user_modified?: boolean;     // freezes it against template updates — unless its template
+                               // fields still equal a shipped version (PREVIOUS_DEFAULT_OVERLORD_RULES)
   origin?: 'default' | 'user' | 'proposed';
 
   // ── What replaces `pattern` / `actions` ──────────────────────────
@@ -1226,7 +1227,10 @@ on.** Widening them should require opening Preferences by hand.
 ### Housekeeping
 
 - Approved changes set `user_modified: true` so `seedDefaultRules` won't
-  overwrite them on the next app update.
+  overwrite them on the next app update. The flag alone doesn't freeze a rule: one
+  whose template fields still equal a version we shipped (current, or recorded in
+  `PREVIOUS_DEFAULT_OVERLORD_RULES`) holds none of the human's words, so it is
+  migrated and the flag cleared — rescoping sets the flag too, and is kept.
 - Every approval lands in the ledger.
 - Rejected proposals persist as `origin: 'proposed'` with a rejection stamp, so
   Overlord doesn't re-pitch the same rule every session — otherwise the thing

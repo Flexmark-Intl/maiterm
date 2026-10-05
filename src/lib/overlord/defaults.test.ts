@@ -87,6 +87,50 @@ describe('seedDefaultOverlordRules — retiring a default', () => {
   });
 });
 
+describe('seedDefaultOverlordRules — a flagged rule that is still ours', () => {
+  const ID = 'checkpoint_at_context_pressure';
+  const tmpl = DEFAULT_OVERLORD_RULES[ID];
+  /** Exactly what shipped before 2026-10-05 — a separate prep and "Prepare for compaction." */
+  const OLD_SEQUENCE = [
+    { kind: 'process', text: 'Before we continue — make sure any relevant docs, memory, code comments and tasks are updated if needed.', await: { until: 'turn_end' }, timeout_seconds: 900, on_timeout: 'abort' },
+    { kind: 'process', text: 'Prepare for compaction.', await: { until: 'turn_end' }, timeout_seconds: 600, on_timeout: 'abort' },
+    { kind: 'slash', text: '/compact', runtimes: ['claude'], await: { until: 'context_below', pct: 30 }, timeout_seconds: 300, on_timeout: 'notify_human' },
+  ] as OverlordRule['sequence'];
+
+  function shipped(over: Partial<OverlordRule> = {}): OverlordRule {
+    return rule({ ...structuredClone(tmpl), default_id: ID, ...over });
+  }
+
+  it('migrates a flagged copy of a previous version, keeping scope and enabled', () => {
+    const r = shipped({ sequence: OLD_SEQUENCE, user_modified: true, enabled: false, workspaces: ['ws-1'] });
+    const row = seedDefaultOverlordRules([r], [])!.find((x) => x.default_id === ID)!;
+    expect(row.sequence).toEqual(tmpl.sequence);
+    expect(row.user_modified).toBe(false);
+    expect(row.enabled).toBe(false);
+    expect(row.workspaces).toEqual(['ws-1']);
+  });
+
+  it('clears the flag on a copy identical to the current template', () => {
+    const seeded = seedDefaultOverlordRules([shipped({ user_modified: true })], []);
+    expect(seeded!.find((x) => x.default_id === ID)!.user_modified).toBe(false);
+  });
+
+  it('leaves a real edit frozen', () => {
+    const mine = [...OLD_SEQUENCE.slice(0, 1), { ...OLD_SEQUENCE[1], text: 'My own wording.' }, OLD_SEQUENCE[2]];
+    const seeded = seedDefaultOverlordRules([shipped({ sequence: mine, user_modified: true })], []);
+    const row = (seeded ?? []).find((x) => x.default_id === ID);
+    if (row) {
+      expect(row.sequence[1].text).toBe('My own wording.');
+      expect(row.user_modified).toBe(true);
+    }
+  });
+
+  it('reports no change for an untouched, current rule', () => {
+    const all = Object.entries(DEFAULT_OVERLORD_RULES).map(([id, t]) => rule({ ...structuredClone(t), default_id: id }));
+    expect(seedDefaultOverlordRules(all, [])).toBeNull();
+  });
+});
+
 describe('pruneHiddenDefaultOverlordRules', () => {
   it('forgets a deletion of a template that has since been retired', () => {
     expect(pruneHiddenDefaultOverlordRules([RETIRED])).toEqual([]);

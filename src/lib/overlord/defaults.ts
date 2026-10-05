@@ -3,7 +3,9 @@ import type { OverlordRule } from '$lib/tauri/types';
 /**
  * App-provided default Overlord rules (docs/overlord.md §5, §7). Keyed by stable
  * default_id, same lifecycle contract as DEFAULT_TRIGGERS: seeded on startup, hideable,
- * auto-updated while un-modified, frozen once the user edits (`user_modified`).
+ * auto-updated while un-modified, frozen once the user edits. "Edited" is judged by content,
+ * not the `user_modified` flag alone — see PREVIOUS_DEFAULT_OVERLORD_RULES, and record the old
+ * version there whenever you change a template here.
  *
  * Rules are seeded ENABLED — the engine only runs when `overlord_enabled` is on, and
  * propose-mode (default) additionally holds every directive for a human click, so an
@@ -113,6 +115,64 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
   },
 };
 
+type OverlordRuleTemplate = (typeof DEFAULT_OVERLORD_RULES)[string];
+
+/**
+ * Earlier versions of a default, by default_id. **When you change a template above, push its
+ * old fields here** (the template fields only — `matchesTemplate` compares nothing else).
+ *
+ * `user_modified` is not evidence of an edit: scoping a rule to a workspace sets it, and so
+ * does a field changed and changed back. A rule whose template fields still equal a version
+ * we shipped holds no words of the human's, so the seeder migrates it whatever the flag says.
+ * Without this list a flagged-but-untouched rule is frozen at whatever we shipped when the
+ * flag got set — which is how a checkpoint kept its redundant "Prepare for compaction." step.
+ */
+const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = {
+  checkpoint_at_context_pressure: [
+    // Until 2026-10-05: prep split across two turns that asked for the same work.
+    {
+      ...DEFAULT_OVERLORD_RULES.checkpoint_at_context_pressure,
+      sequence: [
+        {
+          kind: 'process',
+          text: 'Before we continue — make sure any relevant docs, memory, code comments and tasks are updated if needed.',
+          await: { until: 'turn_end' },
+          timeout_seconds: 900,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'process',
+          text: 'Prepare for compaction.',
+          await: { until: 'turn_end' },
+          timeout_seconds: 600,
+          on_timeout: 'abort',
+        },
+        {
+          kind: 'slash',
+          text: '/compact',
+          runtimes: ['claude'],
+          await: { until: 'context_below', pct: 30 },
+          timeout_seconds: 300,
+          on_timeout: 'notify_human',
+        },
+      ],
+    },
+  ],
+};
+
+/** The template-owned fields equal — `enabled` and `workspaces` are the human's either way. */
+function matchesTemplate(rule: OverlordRule, tmpl: OverlordRuleTemplate): boolean {
+  return (
+    rule.name === tmpl.name &&
+    (rule.description ?? null) === (tmpl.description ?? null) &&
+    rule.cooldown === tmpl.cooldown &&
+    stableStringify(rule.when) === stableStringify(tmpl.when) &&
+    stableStringify(rule.guards) === stableStringify(tmpl.guards) &&
+    stableStringify(rule.sequence) === stableStringify(tmpl.sequence) &&
+    stableStringify(rule.supersedes ?? null) === stableStringify(tmpl.supersedes ?? null)
+  );
+}
+
 /** Key-order-insensitive stringify — persisted rules round-trip through serde, whose
  *  field order need not match the template literals here. Order-sensitive comparison
  *  would re-report "changed" (and re-save preferences) on every launch. */
@@ -194,15 +254,17 @@ export function seedDefaultOverlordRules(
       // differs. An unconditional rewrite makes this function report "changed" on
       // every call, which turns every window start into a preferences save + full
       // state-file write + preferences-changed broadcast.
-      const same =
-        linked.name === tmpl.name &&
-        (linked.description ?? null) === (tmpl.description ?? null) &&
-        linked.cooldown === tmpl.cooldown &&
-        stableStringify(linked.when) === stableStringify(tmpl.when) &&
-        stableStringify(linked.guards) === stableStringify(tmpl.guards) &&
-        stableStringify(linked.sequence) === stableStringify(tmpl.sequence) &&
-        stableStringify(linked.supersedes ?? null) === stableStringify(tmpl.supersedes ?? null);
-      if (!linked.user_modified && !same) {
+      const same = matchesTemplate(linked, tmpl);
+      // A flagged rule still word-for-word one of ours is not an edit (see
+      // PREVIOUS_DEFAULT_OVERLORD_RULES): migrate it, and drop the flag so the "edited"
+      // chip and Reset button stop claiming otherwise.
+      const ours = !linked.user_modified || same
+        || (PREVIOUS_DEFAULT_OVERLORD_RULES[defaultId] ?? []).some((prev) => matchesTemplate(linked, prev));
+      if (ours && linked.user_modified) {
+        linked.user_modified = false;
+        changed = true;
+      }
+      if (ours && !same) {
         linked.name = tmpl.name;
         linked.description = tmpl.description ?? null;
         linked.cooldown = tmpl.cooldown;
