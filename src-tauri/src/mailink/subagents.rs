@@ -138,6 +138,18 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                 }
             }
         }
+        // A notification that lands while the parent is MID-TURN is never a user turn: the CLI
+        // queues it and records its delivery as an `attachment` line, `{type: "queued_command",
+        // commandMode: "task-notification", prompt: "<task-notification>…"}`, then removes the
+        // queue entry. Reading only user turns left every delegation finished that way showing as
+        // running (maiLink report, 2026-10-05: 15 of them in one session, none ever settled).
+        if let Some(prompt) = queued_notification(v) {
+            if let Some(note) = parse_task_notification(prompt) {
+                if let Some(&i) = index.get(&note.task_id) {
+                    apply_completion(&mut agents[i], note, ts);
+                }
+            }
+        }
 
         let Some(blocks) = content.and_then(|c| c.as_array()) else { continue };
         for b in blocks {
@@ -329,6 +341,19 @@ fn line_ts(v: &Value) -> u64 {
         .map(super::transcript::rfc3339_to_ms)
         .unwrap_or(0)
         .max(0) as u64
+}
+
+/// The prompt of a queued command the CLI delivered mid-turn — an `attachment` line of type
+/// `queued_command` — which is how a task-notification arrives while the parent is working.
+fn queued_notification(v: &Value) -> Option<&str> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("attachment") {
+        return None;
+    }
+    let a = v.get("attachment")?;
+    if a.get("type").and_then(|t| t.as_str()) != Some("queued_command") {
+        return None;
+    }
+    a.get("prompt").and_then(|p| p.as_str())
 }
 
 /// A message content that is a bare string, which is how the task-notification turn arrives.
@@ -589,6 +614,39 @@ mod tests {
     fn notify(agent_id: &str, status: &str, result: &str, ts: &str) -> Value {
         json!({ "type": "user", "timestamp": ts, "message": { "content": format!(
             "<task-notification>\n<task-id>{agent_id}</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<status>{status}</status>\n<summary>Agent \"Review the wiring\" finished</summary>\n<result>{result}</result>\n</task-notification>") } })
+    }
+
+    /// A notification delivered while the parent was mid-turn: the CLI's queue records, then the
+    /// delivery as a `queued_command` attachment (shape from a real session, 2026-10-05).
+    fn queued_notify(agent_id: &str, status: &str, result: &str, ts: &str) -> Vec<Value> {
+        let prompt = format!(
+            "<task-notification>\n<task-id>{agent_id}</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<output-file>/tmp/x/tasks/{agent_id}.output</output-file>\n<status>{status}</status>\n<summary>Agent \"Review it\" finished</summary>\n<result>{result}</result>\n</task-notification>");
+        vec![
+            json!({ "type": "queue-operation", "operation": "enqueue", "timestamp": ts, "content": prompt }),
+            json!({ "type": "user", "timestamp": ts, "message": { "role": "user", "content":
+                format!("Another Claude session sent a message: <agent-message from=\"{agent_id}\">[Subagent hand-back] …") } }),
+            json!({ "type": "queue-operation", "operation": "remove", "timestamp": ts }),
+            json!({ "type": "attachment", "timestamp": ts, "attachment": {
+                "type": "queued_command", "commandMode": "task-notification", "prompt": prompt,
+                "origin": { "kind": "task-notification", "producer": "session-task" } } }),
+        ]
+    }
+
+    #[test]
+    fn a_notification_delivered_mid_turn_completes_it() {
+        let mut lines = vec![
+            launch("u1", "Review commit 602f0af", "code-reviewer", "2026-10-05T21:05:00Z"),
+            ack("u1", "ab5ae54ec06a536b8", "2026-10-05T21:05:02Z"),
+        ];
+        lines.extend(queued_notify("ab5ae54ec06a536b8", "completed", "No defects found.", "2026-10-05T21:13:00Z"));
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].status == SubagentStatus::Done, "the queued delivery is the completion");
+        assert!(agents[0].ended_at.is_some());
+        assert_eq!(agents[0].last_line.as_deref(), Some("No defects found."));
+        // The queue's own enqueue record is not a delivery: it alone settles nothing.
+        let mut only_enqueued = lines[..2].to_vec();
+        only_enqueued.push(queued_notify("ab5ae54ec06a536b8", "completed", "x", "2026-10-05T21:13:00Z")[0].clone());
+        assert!(subagents_from_lines(&only_enqueued)[0].status == SubagentStatus::Running);
     }
 
     #[test]
