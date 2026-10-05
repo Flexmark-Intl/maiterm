@@ -237,7 +237,7 @@ const MEMORY_HOOK_REL: &str = ".maiterm/claude-hooks/approve-memory-writes";
 const MEMORY_HOOK_TAG: &str = "/.maiterm/claude-hooks/approve-memory-writes";
 /// Claude Code runs hook commands through a shell, so `$HOME` expands there.
 const MEMORY_HOOK_COMMAND: &str = "\"$HOME\"/.maiterm/claude-hooks/approve-memory-writes";
-const MEMORY_HOOK_MATCHER: &str = "Write|Edit";
+const MEMORY_HOOK_MATCHER: &str = "Write|Edit|Bash";
 
 fn memory_hook_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(MEMORY_HOOK_REL))
@@ -268,8 +268,9 @@ fn memory_hook_script() -> String {
 #
 # This is a PermissionRequest hook: it runs only when a prompt is about to be
 # shown. It answers "allow" for a Markdown file inside a memory directory, judged
-# on the path as written AND on where it really leads. Anything else gets no
-# answer, and the prompt appears exactly as before.
+# on the path as written AND on where it really leads, and refuses a Bash write
+# there (see below). Anything else gets no answer, and the prompt appears exactly
+# as before.
 input=$(cat)
 
 field() {{
@@ -282,10 +283,15 @@ field() {{
 import json,sys
 v=json.load(sys.stdin)
 for k in sys.argv[1].split("."):
-    v=v.get(k) if isinstance(v,dict) else None
+    if isinstance(v,dict):
+        v=v.get(k)
+    elif isinstance(v,list) and k.isdigit() and int(k)<len(v):
+        v=v[int(k)]
+    else:
+        v=None
 sys.stdout.write(v if isinstance(v,str) else "")' "$1" 2>/dev/null
   elif command -v jq >/dev/null 2>&1; then
-    printf '%s' "$input" | jq -r --arg k "$1" 'getpath($k|split(".")) | strings' 2>/dev/null
+    printf '%s' "$input" | jq -r --arg k "$1" 'getpath($k|split(".")|map(tonumber? // .)) | strings' 2>/dev/null
   fi
 }}
 
@@ -311,10 +317,30 @@ realroot() {{
   [ -n "$1" ] && [ -d "$1" ] && (cd -P "$1" 2>/dev/null && pwd -P)
 }}
 
+cfg=${{CLAUDE_CONFIG_DIR:-}}
+
+# A Bash write into a memory directory (cat > memory/x.md) raises the same prompt.
+# A shell command can't be judged safe from its text, so it is never approved; it
+# is REFUSED at once, telling the agent to use Write or Edit, which are approved
+# below. Without this it waits for a human, for hours if nobody is looking. The
+# directory Claude Code asks to add is how the prompt says what it is about.
+if [ "$(field tool_name)" = Bash ]; then
+  for i in 0 1 2 3; do
+    for j in 0 1 2 3; do
+      d=$(field "permission_suggestions.$i.directories.$j")
+      [ -n "$d" ] || break
+      if in_memory_dir "${{d%/}}/x.md" "$cfg" "$HOME/.claude"; then
+        printf '%s\n' '{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"deny","message":"Do not write memory files with Bash. Use the Write or Edit tool for files in the memory directory: those are approved automatically, a Bash write there waits for a human."}}}}}}'
+        exit 0
+      fi
+    done
+  done
+  exit 0
+fi
+
 case "$(field tool_name)" in Write|Edit) ;; *) exit 0 ;; esac
 path=$(field tool_input.file_path)
 case "$path" in /*) ;; *) exit 0 ;; esac
-cfg=${{CLAUDE_CONFIG_DIR:-}}
 in_memory_dir "$path" "$cfg" "$HOME/.claude" || exit 0
 
 # Where it really leads. The deepest directory that exists is resolved; what is
@@ -366,13 +392,33 @@ fn install_memory_hook(path: &PathBuf) -> Result<(), String> {
     write_hook_file(path, &memory_hook_script())
 }
 
-/// Add our entry to `hooks.PermissionRequest`, or take it out again. Removing
-/// touches only hooks carrying our tag, and drops a group or the event only when
-/// that left it empty — the event is shared with maiTerm's own HTTP hook.
+/// The entry exactly as this build writes it. An older build registered a narrower
+/// matcher (`Write|Edit`, before Bash writes were redirected), and a hook that is
+/// never called for a tool can't answer for it — so "registered" isn't "current".
+fn memory_hook_entry_is_current(settings: &serde_json::Value) -> bool {
+    settings
+        .get("hooks")
+        .and_then(|h| h.get("PermissionRequest"))
+        .and_then(|a| a.as_array())
+        .is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g.get("matcher").and_then(|m| m.as_str()) == Some(MEMORY_HOOK_MATCHER)
+                    && g.get("hooks")
+                        .and_then(|h| h.as_array())
+                        .is_some_and(|hs| hs.len() == 1 && hs.iter().any(is_memory_hook))
+            })
+        })
+}
+
+/// Put our entry into `hooks.PermissionRequest` as this build writes it (replacing
+/// any older one), or take it out. Removing touches only hooks carrying our tag,
+/// and drops a group or the event only when that left it empty — the event is
+/// shared with maiTerm's own HTTP hook.
 fn edit_memory_hook_entry(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     enabled: bool,
 ) -> Result<(), String> {
+    remove_memory_hook_entry(obj);
     if enabled {
         let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
         let hooks = hooks
@@ -388,10 +434,13 @@ fn edit_memory_hook_entry(
             "matcher": MEMORY_HOOK_MATCHER,
             "hooks": [{ "type": "command", "command": MEMORY_HOOK_COMMAND }],
         }));
-        return Ok(());
     }
+    Ok(())
+}
+
+fn remove_memory_hook_entry(obj: &mut serde_json::Map<String, serde_json::Value>) {
     let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut()) else {
-        return Ok(());
+        return;
     };
     if let Some(groups) = hooks.get_mut("PermissionRequest").and_then(|a| a.as_array_mut()) {
         groups.retain_mut(|g| {
@@ -409,7 +458,6 @@ fn edit_memory_hook_entry(
     if hooks.is_empty() {
         obj.remove("hooks");
     }
-    Ok(())
 }
 
 fn memory_writes_status(settings: &serde_json::Value, settings_err: &Option<String>) -> DeshittifyRuleStatus {
@@ -431,11 +479,11 @@ fn memory_writes_status(settings: &serde_json::Value, settings_err: &Option<Stri
     if !memory_hook_registered(settings) {
         return status(false, false, None);
     }
-    // Registered, so the script is unambiguously ours to maintain: bring a stale
-    // or missing one up to date, as the githooks do, or a fix to it would never
-    // reach the people who have the rule on.
-    if !memory_hook_is_current(&path) {
-        match install_memory_hook(&path) {
+    // Registered, so the script and the entry are unambiguously ours to maintain:
+    // bring stale ones up to date, as the githooks do, or a fix would never reach
+    // the people who have the rule on.
+    if !memory_hook_is_current(&path) || !memory_hook_entry_is_current(settings) {
+        match set_memory_writes(true) {
             Ok(()) => log::info!("Deshittify: refreshed the memory-write hook"),
             Err(e) => log::warn!("Deshittify: could not refresh the memory-write hook: {e}"),
         }
@@ -453,14 +501,14 @@ fn memory_writes_status(settings: &serde_json::Value, settings_err: &Option<Stri
 fn set_memory_writes(enabled: bool) -> Result<(), String> {
     let path = memory_hook_path().ok_or("Could not determine home directory")?;
     let mut settings = read_claude_settings()?;
-    let registered = memory_hook_registered(&settings);
+    let current = memory_hook_entry_is_current(&settings);
     let obj = settings
         .as_object_mut()
         .ok_or("~/.claude/settings.json is not a JSON object")?;
     if enabled {
         // Script first: settings must never name a hook that isn't there.
         install_memory_hook(&path)?;
-        if !registered {
+        if !current {
             edit_memory_hook_entry(obj, true)?;
             write_claude_settings(&settings)?;
         }
@@ -908,8 +956,18 @@ if d["memoryHook"]=="set":
     if isinstance(hk,dict) and pr is None:
         pr=hk["PermissionRequest"]=[]
     if isinstance(hk,dict) and isinstance(pr,list):
-        if not any(isinstance(g,dict) and isinstance(g.get("hooks"),list) and any(ours(x) for x in g["hooks"]) for g in pr):
-            pr.append({"matcher":d["memoryHookMatcher"],"hooks":[{"type":"command","command":d["memoryHookCommand"]}]})
+        want={"matcher":d["memoryHookMatcher"],"hooks":[{"type":"command","command":d["memoryHookCommand"]}]}
+        if want not in pr:
+            keep=[]
+            for g in pr:
+                if isinstance(g,dict) and isinstance(g.get("hooks"),list):
+                    n=len(g["hooks"])
+                    g["hooks"]=[x for x in g["hooks"] if not ours(x)]
+                    if n and not g["hooks"]:
+                        continue
+                keep.append(g)
+            keep.append(want)
+            hk["PermissionRequest"]=keep
 elif isinstance(pr,list):
     keep=[]
     for g in pr:
@@ -1061,7 +1119,12 @@ fn render_remote_setup_script_from(status: &DeshittifyStatus, settings_readable:
 /// that is blocked or fails to apply stays unsettled so the next launch tries again
 /// — an unreadable settings file is not the user saying no. A rule already on disk,
 /// or one the user has explicitly chosen the other way, is settled without a write.
+///
+/// Also brings an installed rule's maiTerm-written files up to date: reading the
+/// status self-heals them (`memory_writes_status`, `commit_hook_status`), and
+/// without a read at launch a fix would wait until someone opened the section.
 pub fn seed_default_rules() {
+    let _ = build_status();
     let Some(marker) = seeded_marker_path() else {
         return;
     };
@@ -1520,6 +1583,12 @@ mod tests {
     /// Feed the memory hook one PermissionRequest, as Claude Code would, and say
     /// whether it answered "allow".
     fn memory_hook_allows(home: &PathBuf, config_dir: Option<&PathBuf>, input: &serde_json::Value) -> bool {
+        memory_hook_decision(home, config_dir, input).as_deref() == Some("allow")
+    }
+
+    /// The hook's answer to one PermissionRequest: "allow", "deny", or None for no
+    /// answer at all (the prompt is shown as usual).
+    fn memory_hook_decision(home: &PathBuf, config_dir: Option<&PathBuf>, input: &serde_json::Value) -> Option<String> {
         use std::io::Write;
         let hook = home.join("hook.sh");
         if !hook.exists() {
@@ -1540,10 +1609,64 @@ mod tests {
         assert!(out.status.success());
         let stdout = String::from_utf8_lossy(&out.stdout);
         if stdout.trim().is_empty() {
-            return false;
+            return None;
         }
         let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
-        v["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+        v["hookSpecificOutput"]["decision"]["behavior"].as_str().map(String::from)
+    }
+
+    fn bash_req(suggested: &[&std::path::Path]) -> serde_json::Value {
+        let dirs: Vec<String> = suggested.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": { "command": "cat > x <<'EOF'\nhi\nEOF" },
+            "permission_suggestions": [
+                { "type": "addDirectories", "directories": dirs, "destination": "session" },
+            ],
+        })
+    }
+
+    /// A Bash write into memory is refused at once, pointing the agent at Write or
+    /// Edit — never approved, and nothing else about Bash is answered at all.
+    #[test]
+    fn memory_hook_turns_a_bash_memory_write_back_to_write() {
+        let home = scratch("memhook-bash");
+        let account = home.join("accounts/a1");
+        let memory = account.join("projects/-repo/memory");
+        fs::create_dir_all(&memory).unwrap();
+
+        assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[&memory])).as_deref(), Some("deny"));
+        // The memory directory need not be the first one suggested.
+        let other = home.join("work");
+        assert_eq!(
+            memory_hook_decision(&home, Some(&account), &bash_req(&[&other, &memory])).as_deref(),
+            Some("deny")
+        );
+        assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[&other])), None);
+        assert_eq!(memory_hook_decision(&home, Some(&account), &bash_req(&[])), None);
+        let mut plain = bash_req(&[]);
+        plain.as_object_mut().unwrap().remove("permission_suggestions");
+        assert_eq!(memory_hook_decision(&home, Some(&account), &plain), None);
+
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A settings file holding the entry an older build wrote (narrower matcher)
+    /// is brought up to date in place, not left beside a second copy.
+    #[test]
+    fn an_older_memory_hook_entry_is_replaced_not_duplicated() {
+        let mut s = serde_json::json!({ "hooks": { "PermissionRequest": [
+            { "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": MEMORY_HOOK_COMMAND }] },
+            { "matcher": "", "hooks": [{ "type": "http", "url": "http://127.0.0.1:1/hooks" }] },
+        ] } });
+        assert!(memory_hook_registered(&s));
+        assert!(!memory_hook_entry_is_current(&s));
+        edit_memory_hook_entry(s.as_object_mut().unwrap(), true).unwrap();
+        assert!(memory_hook_entry_is_current(&s));
+        let groups = s["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "{s}");
+        assert_eq!(groups.iter().filter(|g| g["hooks"].as_array().unwrap().iter().any(is_memory_hook)).count(), 1);
     }
 
     fn write_req(path: &std::path::Path) -> serde_json::Value {

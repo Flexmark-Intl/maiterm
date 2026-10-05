@@ -17,7 +17,7 @@ There's one group today, **Claude Code**. maiTerm edits the agent's *own* config
 | **Remove the `/feedback` command** | The command stops being offered |
 | **Suppress feedback surveys** | Stops the in-session survey prompts |
 | **Disable Remote Control** | Sets `disableRemoteControl: true` and `remoteControlAtStartup: false`, so your sessions aren't exposed to claude.ai/code or the mobile app and the bridge never auto-starts. **On by default** |
-| **Stop asking to write memory** | A permission hook approves Claude Code's writes to Markdown files in its own memory directory, which it otherwise asks about one by one, and refuses outright in auto mode, wherever its config directory runs through a symlink. Anything that doesn't really lead into a memory directory still prompts. **On by default** |
+| **Stop asking to write memory** | A permission hook approves Claude Code's writes to Markdown files in its own memory directory, which it otherwise asks about one by one, and refuses outright in auto mode, wherever its config directory runs through a symlink. Anything that doesn't really lead into a memory directory still prompts. An agent that tries to write a memory with a shell command instead is turned back at once and told to use its file tools, rather than left waiting for you. **On by default** |
 | **No `Co-Authored-By` in commits** | Claude Code stops writing the trailer in the first place |
 | **Strip agent credit at commit time** | A `commit-msg` hook deletes `Co-Authored-By: Claude` and `Generated with Claude Code` lines from your commit messages |
 

@@ -298,7 +298,7 @@
         {
           id: 'cc_allow_memory_writes',
           label: 'Stop asking to write memory',
-          hint: 'Adds a PermissionRequest hook (~/.maiterm/claude-hooks/approve-memory-writes) that approves writes to Markdown files in Claude Code\'s own memory directory. Claude Code means to allow these itself, but misses them wherever its config directory runs through a symlink — every maiTerm account does — so each memory asks, and auto mode refuses. Checks where the path really leads; anything else still prompts. On by default — maiTerm applies it once; switch it off and it stays off.',
+          hint: 'Adds a PermissionRequest hook (~/.maiterm/claude-hooks/approve-memory-writes) that approves writes to Markdown files in Claude Code\'s own memory directory. Claude Code means to allow these itself, but misses them wherever its config directory runs through a symlink — every maiTerm account does — so each memory asks, and auto mode refuses. Checks where the path really leads; anything else still prompts. A Bash write into memory (cat > memory/x.md) is refused on the spot with a note to use Write or Edit, instead of waiting for you. On by default — maiTerm applies it once; switch it off and it stays off.',
         },
         {
           id: 'cc_include_co_authored_by',
