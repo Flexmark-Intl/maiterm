@@ -324,6 +324,9 @@ function createUpdaterStore() {
     activeVersion = version;
     broadcast();
     logInfo(`Update v${version}: download started`);
+    // Set once the pre-install flush has run: from then on this window's terminals are in
+    // shutting-down mode (no autosave, no pty-close handling) for the rest of the session.
+    let flushed = false;
     try {
       const onEvent = (event: DownloadEvent) => {
         if (event.event === 'Started') {
@@ -345,6 +348,7 @@ function createUpdaterStore() {
         // coalescing window and every unsaved scrollback buffer die with the process.
         await currentUpdate.download(onEvent);
         await flushBeforeExit();
+        flushed = true;
         await currentUpdate.install();
       } else {
         await currentUpdate.downloadAndInstall(onEvent);
@@ -358,7 +362,13 @@ function createUpdaterStore() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logError(`Update install failed: ${msg}`);
-      toastStore.addToast('Update Failed', msg, 'error');
+      // After the flush, autosave is off for this session (as after a failed relaunch), so
+      // quitting is the right advice, not another Install click.
+      toastStore.addToast(
+        'Update Failed',
+        flushed ? `${msg}. Quit and reopen maiTerm before trying again.` : msg,
+        'error',
+      );
       return false;
     } finally {
       downloading = false;
