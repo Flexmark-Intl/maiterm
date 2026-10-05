@@ -223,6 +223,11 @@ async fn fetch_once(host_key: &str, ssh_args: &str, session_id: &str, transcript
         return false;
     };
 
+    // Which host this session lives on, beside its shadow: the transcript alone doesn't say, and
+    // a path in it means a file on THAT host — not whichever host the tab is ssh'd into later
+    // (`inline_image`). Written on a successful fetch, so it names the host the turns came from.
+    record_host(&dir, session_id, host_key);
+
     // Board shadow first — independent of the transcript delta (a subagent can rewrite board
     // files without the main transcript growing). Never fails the fetch.
     update_tasks_shadow(session_id, tasks_b64);
@@ -347,6 +352,19 @@ mod tests {
 /// Delete shadow files whose transcript hasn't grown in [`PRUNE_AFTER_SECS`] — and their
 /// sessions' task-board shadows on the same clock. Called once at startup; keeps the shadow
 /// dirs from accumulating one file per remote session forever.
+fn record_host(dir: &std::path::Path, session_id: &str, host_key: &str) {
+    let path = dir.join(format!("{session_id}.host"));
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(host_key) {
+        let _ = std::fs::write(&path, host_key);
+    }
+}
+
+/// The host (`user@host`) a mirrored session's transcript was fetched from, if known.
+pub fn session_host(session_id: &str) -> Option<String> {
+    let path = shadow_dir()?.join(format!("{session_id}.host"));
+    std::fs::read_to_string(path).ok().filter(|h| !h.is_empty())
+}
+
 pub fn prune_stale_shadows() {
     let Some(dir) = shadow_dir() else { return };
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
@@ -371,6 +389,7 @@ pub fn prune_stale_shadows() {
                 if let Some(tasks) = super::tasks::shadow_path(stem) {
                     let _ = std::fs::remove_file(tasks);
                 }
+                let _ = std::fs::remove_file(dir.join(format!("{stem}.host")));
             }
         }
     }
