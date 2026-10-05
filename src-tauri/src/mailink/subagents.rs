@@ -123,6 +123,8 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
     let mut pending: HashMap<String, (String, Option<String>, u64)> = HashMap::new();
     let mut agents: Vec<Subagent> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
+    // agentId -> when the parent last sent it a message (SendMessage), for the queued-notice guard.
+    let mut messaged_at: HashMap<String, u64> = HashMap::new();
 
     for v in lines {
         let ts = line_ts(v);
@@ -143,10 +145,16 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
         // commandMode: "task-notification", prompt: "<task-notification>…"}`, then removes the
         // queue entry. Reading only user turns left every delegation finished that way showing as
         // running (maiLink report, 2026-10-05: 15 of them in one session, none ever settled).
+        // Its line is stamped with the ENQUEUE time, up to a minute before it is written. So a
+        // notice queued for a run that stopped just before the parent sent it back to work
+        // (SendMessage) can land after that message, and must not close the resumed run: no
+        // notice for the new run can be older than the message that started it (review of 9ecb8f7).
         if let Some(prompt) = queued_notification(v) {
             if let Some(note) = parse_task_notification(prompt) {
                 if let Some(&i) = index.get(&note.task_id) {
-                    apply_completion(&mut agents[i], note, ts);
+                    if ts >= messaged_at.get(&note.task_id).copied().unwrap_or(0) {
+                        apply_completion(&mut agents[i], note, ts);
+                    }
                 }
             }
         }
@@ -165,6 +173,9 @@ pub fn subagents_from_lines(lines: &[Value]) -> Vec<Subagent> {
                     if b.get("name").and_then(|n| n.as_str()) == Some("SendMessage") =>
                 {
                     let to = b.get("input").and_then(|i| i.get("to")).and_then(|t| t.as_str());
+                    if let Some(t) = to.filter(|t| index.contains_key(*t)) {
+                        messaged_at.insert(t.to_string(), ts);
+                    }
                     if let Some(&i) = to.and_then(|t| index.get(t)) {
                         // Only a TERMINAL entry is being restarted. The ack advertises
                         // SendMessage as the way to "continue this agent" and does not restrict
@@ -647,6 +658,25 @@ mod tests {
         let mut only_enqueued = lines[..2].to_vec();
         only_enqueued.push(queued_notify("ab5ae54ec06a536b8", "completed", "x", "2026-10-05T21:13:00Z")[0].clone());
         assert!(subagents_from_lines(&only_enqueued)[0].status == SubagentStatus::Running);
+    }
+
+    #[test]
+    fn a_queued_notice_for_the_run_before_a_resume_does_not_close_it() {
+        // Run 1 stops at 21:06 and its notice is queued; the parent, not having seen it, sends the
+        // agent more work at 21:06:30; the queued notice is written after that, stamped 21:06.
+        let mut lines = vec![
+            launch("u1", "Review it", "code-reviewer", "2026-10-05T21:00:00Z"),
+            ack("u1", "a1", "2026-10-05T21:00:02Z"),
+            send_message("a1", "2026-10-05T21:06:30Z"),
+        ];
+        lines.push(queued_notify("a1", "completed", "Run one.", "2026-10-05T21:06:00Z")[3].clone());
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].status == SubagentStatus::Running, "the resumed run is still working");
+        // Its own notice, queued after the message, does close it.
+        lines.push(queued_notify("a1", "completed", "Run two.", "2026-10-05T21:09:00Z")[3].clone());
+        let agents = subagents_from_lines(&lines);
+        assert!(agents[0].status == SubagentStatus::Done);
+        assert_eq!(agents[0].last_line.as_deref(), Some("Run two."));
     }
 
     #[test]
