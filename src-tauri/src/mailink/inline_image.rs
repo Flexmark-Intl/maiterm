@@ -87,11 +87,40 @@ fn agent_paths(text: &str) -> Vec<String> {
         let target = if let Some(inner) = after.strip_prefix('<') {
             inner.find('>').map(|j| &inner[..j])
         } else {
-            let end = after.find(|c: char| c == ')' || c.is_whitespace()).unwrap_or(after.len());
+            // CommonMark: a bare destination may hold BALANCED parentheses (`image(1).png`), and
+            // ends at whitespace or the `)` that closes the link.
+            let mut depth = 0usize;
+            let mut end = after.len();
+            let mut escaped = false;
+            for (j, c) in after.char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match c {
+                    '\\' => escaped = true,
+                    '(' => depth += 1,
+                    ')' if depth == 0 => {
+                        end = j;
+                        break;
+                    }
+                    ')' => depth -= 1,
+                    c if c.is_whitespace() => {
+                        end = j;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
             Some(&after[..end])
         };
         if let Some(t) = target.filter(|t| !t.is_empty()) {
             out.push(t.to_string());
+            // Markdown's backslash escapes (`a\_b.png` is `a_b.png` to the renderer).
+            let unescaped = unescape_markdown(t);
+            if unescaped != t {
+                out.push(unescaped);
+            }
         }
         rest = after;
     }
@@ -113,6 +142,25 @@ fn agent_paths(text: &str) -> Vec<String> {
         if is_absolute(w) {
             out.push(w.to_string());
         }
+    }
+    out
+}
+
+/// CommonMark backslash escapes: `\` before ASCII punctuation stands for that character.
+fn unescape_markdown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&n) = chars.peek() {
+                if n.is_ascii_punctuation() {
+                    out.push(n);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
     }
     out
 }
@@ -438,6 +486,11 @@ mod tests {
             "/Users/me/My Project Files/img/a.png"
         ));
         assert!(referenced_by_agent(&[agent("![a](</Users/me/a b.png>)")], "/Users/me/a b.png"));
+        // Balanced parentheses and backslash escapes, as the renderer reads them.
+        assert!(referenced_by_agent(&[agent("![s](/Users/me/Downloads/image(1).png)")], "/Users/me/Downloads/image(1).png"));
+        assert!(referenced_by_agent(&[agent("![s](/x/a.png \"title\")")], "/x/a.png"));
+        assert!(referenced_by_agent(&[agent("![a](/x/a\\_b.png)")], "/x/a_b.png"));
+        assert!(!referenced_by_agent(&[agent("![s](/Users/me/image(1).png)")], "/Users/me/image(1"));
     }
 
     #[test]

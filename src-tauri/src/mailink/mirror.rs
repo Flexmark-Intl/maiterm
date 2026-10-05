@@ -349,9 +349,7 @@ mod tests {
     }
 }
 
-/// Delete shadow files whose transcript hasn't grown in [`PRUNE_AFTER_SECS`] — and their
-/// sessions' task-board shadows on the same clock. Called once at startup; keeps the shadow
-/// dirs from accumulating one file per remote session forever.
+/// Record which host a session's transcript is fetched from (`<sid>.host` beside its shadow).
 fn record_host(dir: &std::path::Path, session_id: &str, host_key: &str) {
     let path = dir.join(format!("{session_id}.host"));
     if std::fs::read_to_string(&path).ok().as_deref() != Some(host_key) {
@@ -365,6 +363,9 @@ pub fn session_host(session_id: &str) -> Option<String> {
     std::fs::read_to_string(path).ok().filter(|h| !h.is_empty())
 }
 
+/// Delete shadow files whose transcript hasn't grown in [`PRUNE_AFTER_SECS`] — and their
+/// sessions' task-board and host records on the same clock. Called once at startup; keeps the
+/// shadow dirs from accumulating one file per remote session forever.
 pub fn prune_stale_shadows() {
     let Some(dir) = shadow_dir() else { return };
     let Ok(entries) = std::fs::read_dir(&dir) else { return };

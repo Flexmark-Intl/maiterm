@@ -14,10 +14,25 @@ import { getChatImage, type ChatImage } from '$lib/tauri/commands';
 
 const OK_TTL_MS = 5 * 60_000;
 const REFUSED_TTL_MS = 60_000;
-/** Data URLs can be large; keep only the most recent few. */
+/** Data URLs can be large (a 25 MB image is ~33 MB of base64): bounded by count AND total size,
+ *  and expired entries are dropped rather than kept until overwritten. */
 const MAX_CACHED = 40;
+const MAX_CACHED_CHARS = 64 * 1024 * 1024;
 
-const cache = new Map<string, { expires: number; result: Promise<ChatImage> }>();
+const cache = new Map<string, { expires: number; size: number; result: Promise<ChatImage> }>();
+
+function prune() {
+  const now = Date.now();
+  for (const [k, e] of cache) if (now >= e.expires) cache.delete(k);
+  let total = 0;
+  for (const e of cache.values()) total += e.size;
+  // Oldest first: a Map iterates in insertion order and hits are re-inserted.
+  for (const [k, e] of cache) {
+    if (cache.size <= MAX_CACHED && total <= MAX_CACHED_CHARS) break;
+    cache.delete(k);
+    total -= e.size;
+  }
+}
 
 /** A file path the agent wrote — not a URL with any other scheme. */
 function isFilePath(src: string): boolean {
@@ -26,19 +41,22 @@ function isFilePath(src: string): boolean {
 
 function load(tabId: string, path: string): Promise<ChatImage> {
   const key = `${tabId}\u0000${path}`;
+  prune();
   const hit = cache.get(key);
-  if (hit && Date.now() < hit.expires) {
+  if (hit) {
     cache.delete(key);
     cache.set(key, hit); // most recently used last
     return hit.result;
   }
   const result = getChatImage(tabId, path).catch((e) => ({ ok: false as const, reason: String(e) }));
-  // Held while in flight; its lifetime is set by how it ended.
-  const entry = { expires: Number.POSITIVE_INFINITY, result };
-  void result.then((r) => (entry.expires = Date.now() + (r.ok ? OK_TTL_MS : REFUSED_TTL_MS)));
-  cache.delete(key);
+  // Held while in flight; its lifetime and size are set by how it ended.
+  const entry = { expires: Number.POSITIVE_INFINITY, size: 0, result };
+  void result.then((r) => {
+    entry.expires = Date.now() + (r.ok ? OK_TTL_MS : REFUSED_TTL_MS);
+    entry.size = r.ok ? r.url.length : 0;
+    prune();
+  });
   cache.set(key, entry);
-  while (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value!);
   return result;
 }
 
