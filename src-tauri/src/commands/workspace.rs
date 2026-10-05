@@ -74,8 +74,10 @@ pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
 
     // Final state flush. Periodic autosave covers most of it, but a native
     // quit skips the frontend's on-quit save, so persist current app_data now.
+    // `flush_state`, not `save_state`: a save can sit in the coalescing window, and nothing
+    // runs after this to write it.
     let data_clone = state.app_data.read().clone();
-    if let Err(e) = save_state(&data_clone) {
+    if let Err(e) = crate::state::persistence::flush_state(&data_clone) {
         log::warn!("Final state save on shutdown failed: {}", e);
     }
 

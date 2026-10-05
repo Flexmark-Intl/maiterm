@@ -613,10 +613,79 @@ pub fn migrate_app_data(data: &mut AppData) {
     }
 }
 
+/// Saves closer together than this are coalesced into one write at the end of the window.
+///
+/// Every mutation saves the WHOLE state file, and at heavy use that file is ~4 MB: one
+/// session wrote it 559 times in 18 minutes (plus a backup copy each time, ~4.7 GB of disk
+/// writes), and a single tab reload chains ~10 saving commands. A burst now costs one write.
+/// A crash can lose at most this window of changes; every graceful exit flushes through
+/// `flush_state`.
+const SAVE_COALESCE_MS: u64 = 750;
+/// The rolling backup is refreshed at most this often, not on every save. It exists to hold
+/// a known-good PREVIOUS state, which a minute-old copy does as well as a second-old one.
+const BACKUP_INTERVAL_MS: u64 = 60_000;
+
+/// Orders snapshots by when `save_state` was CALLED, so a deferred older snapshot can never
+/// land on top of a newer one that was written directly.
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+static LAST_WRITTEN_SEQ: AtomicU64 = AtomicU64::new(0);
+static LAST_WRITE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_BACKUP_MS: AtomicU64 = AtomicU64::new(0);
+/// The newest snapshot waiting for the end of the coalescing window.
+static PENDING_SAVE: Mutex<Option<(u64, AppData)>> = Mutex::new(None);
+static FLUSH_SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Persist `data`. Written at once if nothing was written in the last `SAVE_COALESCE_MS`,
+/// otherwise held and written (newest snapshot only) when the window closes. An error from a
+/// deferred write is logged, not returned.
 pub fn save_state(data: &AppData) -> Result<(), String> {
+    let seq = SAVE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let since_last = now_ms().saturating_sub(LAST_WRITE_MS.load(Ordering::Relaxed));
+    if cfg!(test) || since_last >= SAVE_COALESCE_MS {
+        return write_state(data, seq);
+    }
+
+    *PENDING_SAVE.lock().unwrap_or_else(|e| e.into_inner()) = Some((seq, data.clone()));
+    if !FLUSH_SCHEDULED.swap(true, Ordering::SeqCst) {
+        let wait = SAVE_COALESCE_MS - since_last;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            // Cleared BEFORE taking, so a save landing after the take schedules its own flush.
+            FLUSH_SCHEDULED.store(false, Ordering::SeqCst);
+            let pending = PENDING_SAVE.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some((seq, data)) = pending {
+                if let Err(e) = write_state(&data, seq) {
+                    log::warn!("Deferred state save failed: {}", e);
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Write `data` now, superseding any snapshot still waiting in the coalescing window. For
+/// shutdown, where nothing may be left pending.
+pub fn flush_state(data: &AppData) -> Result<(), String> {
+    let seq = SAVE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    write_state(data, seq)
+}
+
+fn write_state(data: &AppData, seq: u64) -> Result<(), String> {
     // Held for the whole sequence — see SAVE_LOCK. A poisoned lock still gives us the
     // guard (a panicking save is not a reason to stop saving), so recover it.
     let _saving = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // A newer snapshot already reached disk; writing this one would roll it back.
+    if seq <= LAST_WRITTEN_SEQ.load(Ordering::SeqCst) {
+        return Ok(());
+    }
 
     let save_start = std::time::Instant::now();
     let path = get_state_path().ok_or("Could not determine data directory")?;
@@ -642,8 +711,8 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
             // so take ownership instead.
             //
             // The file we are about to overwrite gets its own snapshot first. The
-            // rolling .bak.json is NOT enough: it is rewritten on every save, so it
-            // would hold the rescued content for about one second. Whoever wrote this
+            // rolling .bak.json is NOT enough: it is rewritten every BACKUP_INTERVAL_MS, so
+            // it would hold the rescued content for a minute at most. Whoever wrote this
             // — a departed instance, or the user restoring a backup by hand while the
             // app runs — deserves better than that.
             if disk_mtime > known_mtime && !another_instance_running() {
@@ -744,9 +813,14 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
     // Only back up the current file if we know it was loaded successfully.
     // This prevents a failed-parse → default-state → save cycle from
     // clobbering the last known-good backup.
-    if path.exists() && LOADED_SUCCESSFULLY.load(Ordering::Relaxed) {
-        if let Err(e) = fs::copy(&path, &backup_path) {
-            log::warn!("Failed to create backup: {}", e);
+    let now = now_ms();
+    if path.exists()
+        && LOADED_SUCCESSFULLY.load(Ordering::Relaxed)
+        && now.saturating_sub(LAST_BACKUP_MS.load(Ordering::Relaxed)) >= BACKUP_INTERVAL_MS
+    {
+        match fs::copy(&path, &backup_path) {
+            Ok(_) => LAST_BACKUP_MS.store(now, Ordering::Relaxed),
+            Err(e) => log::warn!("Failed to create backup: {}", e),
         }
     }
 
@@ -757,6 +831,8 @@ pub fn save_state(data: &AppData) -> Result<(), String> {
     // the conflict guard, while saves from any other (stale) process — which
     // still hold the older mtime — get blocked.
     record_disk_mtime(&path);
+    LAST_WRITTEN_SEQ.store(seq, Ordering::SeqCst);
+    LAST_WRITE_MS.store(now_ms(), Ordering::Relaxed);
 
     // Record save timing
     let elapsed_us = save_start.elapsed().as_micros() as u64;
