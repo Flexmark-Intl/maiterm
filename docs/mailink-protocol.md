@@ -4,6 +4,12 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.18 changelog** (2026-10-05). Additive: **`POST /chats/{tabId}/image`** `{path}` (§4.1) —
+> an image an agent showed by its path in Markdown is fetched for the phone, which drew a broken
+> image (the path is on the Mac, or on the SSH host). Answers a `FileAsset` with `inline: true`;
+> draw it through `GET /assets/{id}`. Only a path in the agent's own messages, images only (no
+> svg), 25 MB. Inline assets are not transcript turns and not in `GET /assets`.
+>
 > **v0.17 changelog** (2026-10-04). Additive: **`POST /tasks/{id}/dismiss`** (§13.3) `{ askedAt }`
 > — the desktop BlockerCard's Dismiss ("Already handled in the tab"). A task question the human
 > dealt with in the conversation was a card nobody could clear from the phone. Clears the
@@ -469,6 +475,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `POST /chats/{tabId}/rename` | Set the tab title | `{title}` → `{ok, title}` (normalized) |
 | `POST /chats/{tabId}/resume-workspace` | Wake the suspended workspace that owns this tab | `{}` → `{ok, resumed, workspaceId?}` |
 | `POST /chats/{tabId}/wake` | Per-tab Initialize — re-register or restart this tab's agent | `{}` → `{ok:true, woke:"init"\|"resume"}` \| `{ok:true, woke:null, reason, detail?}` |
+| `POST /chats/{tabId}/image` | An image the agent showed by its path (`![icon](/Users/…/icon.png)`), fetched for the phone to draw (v0.18). Then `GET /assets/{asset_id}` as for any file. Rules: the path must appear, as a whole path, in one of the AGENT's own messages in this chat's transcript (not tool output, not the human's turns); png, jpeg, gif, webp or heic only, checked by extension AND content (no svg); at most 25 MB; `~/` and relative paths resolve against the agent session's folder; an SSH chat's path is read from the remote host over its bridge. The same image asked for again answers the same `asset_id` | `{path}` (exactly as the agent wrote it) → `{ok:true, asset: FileAsset}` (`inline: true`) \| `{ok:false, reason}` (not in the agent's messages, not an image, missing, too big, the remote unreachable), shown verbatim. `404` not designated |
 | `POST /chats/{tabId}/scripts/{id}/approve` | Approve a watch script the human read on its card (v0.15, `ScriptApproval`). It starts running on maiTerm's next pass (≤5 s) — unless follow-ups are off, or the workspace is suspended or Overlord-exempt (or the tab is exempt), when it waits for that to change — and an agent re-arming the same script in the same folder isn't asked again | `{scriptHash}` → `{ok:true, scriptApprovals}` (the chat's waiting scripts now) \| `{ok:false, reason}` when the card is stale: no longer waiting (approved or rejected elsewhere, expired, delivered, cancelled), or `scriptHash` doesn't match the stored follow-up. Show `reason` verbatim and re-read the chat. `404` not designated |
 | `POST /chats/{tabId}/scripts/{id}/reject` | Reject it: the script will not run (again — one that ran under the desktop's unattended waiver can be declined once the waiver is off), and its agent is told — it leaves the waiting list and is delivered to the agent as declined, as the desktop's Don't allow does. Say "The agent will be told" on the receipt | `{scriptHash}` → same as approve |
 | `POST /chats/{tabId}/queue/cancel` | Pull back the ONE message waiting in the input queue (§5) | `{}` → `{ok:true, cancelled:true, text, composerCleared}` \| `{ok:true, cancelled:false, reason}` |
@@ -895,6 +902,10 @@ interface FileAsset {
                             //   ALWAYS present. Do not infer this from a failed fetch: a 404
                             //   cannot distinguish an eviction from a broken server from an
                             //   expired token, and a client forced to guess guesses wrong
+  inline?: true;            // 0.18: fetched by POST /chats/{tabId}/image for an image an agent
+                            //   showed by its path. Belongs to that message: never a transcript
+                            //   `asset` turn, never in GET /assets. Absent on a sent file
+  source_key?: string;      // 0.18, inline only: maiTerm's dedupe key. Ignore it
 }
 // NO width, height, duration, or thumbnail endpoint, and none is coming. maiTerm has no image or
 // video decoder and should not acquire one. The phone plays a downloaded file from its own
@@ -2286,6 +2297,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.15` | adds `Chat.scriptsWaiting`, `ChatDetail.scriptApprovals` (`ScriptApproval[]`), and `POST /chats/{tabId}/scripts/{id}/approve` + `/reject` |
 | `0.16` | adds doorbell kinds `ask` (a new task question) and `script` (a new watch script to allow), also in `/push-prefs` `kinds` |
 | `0.17` | adds `POST /tasks/{id}/dismiss` |
+| `0.18` | adds `POST /chats/{tabId}/image` and `FileAsset.inline` / `source_key` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

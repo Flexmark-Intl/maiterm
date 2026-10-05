@@ -51,6 +51,15 @@ pub struct AssetRecord {
     /// failed fetch: a 404 cannot distinguish an eviction from a broken server from an expired
     /// token, and a client forced to guess guesses wrong. `false` renders as a tombstone.
     pub available: bool,
+    /// An image the agent showed in a message by its path, fetched for the phone to draw in place
+    /// (`POST /chats/{tabId}/image`, protocol 0.18). It belongs to that message, so it is never a
+    /// transcript turn of its own and never in the Files list; only `GET /assets/{id}` serves it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inline: bool,
+    /// For an `inline` one: the digest of tab, path and content it was stored under, so the same
+    /// image asked for again (every re-render) reuses this record instead of copying it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
 }
 
 fn assets_dir() -> Option<PathBuf> {
@@ -231,6 +240,8 @@ pub fn store_batch(
             tab_id: tab_id.to_string(),
             caption: caption.clone(),
             available: true,
+            inline: false,
+            source_key: None,
         });
     }
 
@@ -270,10 +281,47 @@ pub fn list(limit: usize) -> Vec<AssetRecord> {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
-    let mut records = load_unlocked();
+    let mut records: Vec<AssetRecord> = load_unlocked().into_iter().filter(|r| !r.inline).collect();
     records.sort_by(|a, b| b.ts.cmp(&a.ts));
     records.truncate(limit);
     records
+}
+
+/// Store an image fetched for a message (`inline`), or hand back the one already stored under the
+/// same `source_key` while its bytes are still on disk. One manifest write, under the lock.
+pub fn store_inline(tab_id: &str, name: &str, bytes: Vec<u8>, source_key: &str) -> Result<AssetRecord, String> {
+    let _guard = LOCK.lock().map_err(|_| "asset index lock poisoned".to_string())?;
+    let mut records = load_unlocked();
+    if let Some(r) = records.iter().find(|r| r.inline && r.available && r.source_key.as_deref() == Some(source_key)) {
+        if blob_path(&r.asset_id).is_some_and(|p| p.is_file()) {
+            return Ok(r.clone());
+        }
+    }
+    let dir = assets_dir().ok_or("no data directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create assets dir: {e}"))?;
+    let asset_id = uuid::Uuid::new_v4().to_string();
+    let path = blob_path(&asset_id).ok_or("no data directory")?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("could not store it: {e}"))?;
+    let record = AssetRecord {
+        asset_id: asset_id.clone(),
+        batch_id: asset_id,
+        name: name.to_string(),
+        mime: mime_for(name).to_string(),
+        bytes: bytes.len() as u64,
+        ts: super::now_ms(),
+        tab_id: tab_id.to_string(),
+        caption: None,
+        available: true,
+        inline: true,
+        source_key: Some(source_key.to_string()),
+    };
+    records.push(record.clone());
+    evict(&mut records);
+    if let Err(e) = save_unlocked(&records) {
+        let _ = std::fs::remove_file(&path);
+        return Err(format!("could not record it: {e}"));
+    }
+    Ok(record)
 }
 
 /// Every asset sent to one tab, oldest first — the transcript renders these in place.
@@ -287,7 +335,7 @@ pub fn for_tab(tab_id: &str) -> Vec<AssetRecord> {
         Err(_) => return Vec::new(),
     };
     let mut records: Vec<AssetRecord> =
-        load_unlocked().into_iter().filter(|r| r.tab_id == tab_id).collect();
+        load_unlocked().into_iter().filter(|r| r.tab_id == tab_id && !r.inline).collect();
     records.sort_by_key(|r| r.ts);
     records
 }
@@ -299,7 +347,7 @@ pub fn by_tab() -> std::collections::HashMap<String, Vec<AssetRecord>> {
     let mut out: std::collections::HashMap<String, Vec<AssetRecord>> =
         std::collections::HashMap::new();
     let Ok(_guard) = LOCK.lock() else { return out };
-    let mut records = load_unlocked();
+    let mut records: Vec<AssetRecord> = load_unlocked().into_iter().filter(|r| !r.inline).collect();
     records.sort_by_key(|r| r.ts);
     for r in records {
         out.entry(r.tab_id.clone()).or_default().push(r);
@@ -332,6 +380,7 @@ pub fn mime_for(name: &str) -> &'static str {
         "gif" => "image/gif",
         "webp" => "image/webp",
         "heic" => "image/heic",
+        "heif" => "image/heif",
         "svg" => "image/svg+xml",
         "bmp" => "image/bmp",
         "mp4" | "m4v" => "video/mp4",
@@ -393,6 +442,8 @@ mod tests {
             tab_id: "tab".into(),
             caption: None,
             available,
+            inline: false,
+            source_key: None,
         }
     }
 

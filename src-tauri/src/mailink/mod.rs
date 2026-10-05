@@ -45,6 +45,7 @@ pub(crate) mod input_box;
 pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod follow_ups;
+pub(crate) mod inline_image;
 pub(crate) mod overlord;
 pub(crate) mod rpc;
 pub(crate) mod transcript;
@@ -407,6 +408,8 @@ fn build_router(api: ApiState) -> Router {
             post(post_shell_stop),
         )
         .route("/mailink/v1/chats/{tab_id}/wake", post(post_wake))
+        // v0.18: an image the agent showed by its path, fetched for the phone to draw.
+        .route("/mailink/v1/chats/{tab_id}/image", post(post_chat_image))
         // v0.15: a watch script's approval card (docs/follow-ups.md §5.1).
         .route(
             "/mailink/v1/chats/{tab_id}/scripts/{follow_up_id}/approve",
@@ -514,7 +517,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.17";
+const PROTOCOL_VERSION: &str = "0.18";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -2359,6 +2362,33 @@ async fn post_rename(
         let _ = h.emit("mailink-tab-renamed", json!({ "tabId": tab_id, "name": title }));
     }
     Ok(Json(json!({ "ok": true, "title": title })))
+}
+
+#[derive(serde::Deserialize)]
+struct ChatImageBody {
+    /// The path exactly as the agent wrote it.
+    path: String,
+}
+
+/// `POST /chats/{tabId}/image` (v0.18): an image an agent showed by its path (`![…](/Users/…png)`),
+/// copied into the asset store for the phone to draw — `{ ok: true, asset: FileAsset }`, then
+/// `GET /assets/{id}`. `{ ok: false, reason }` when refused (not in the agent's messages, not an
+/// image, missing, too big), shown verbatim. mailink/inline_image.rs has the rules.
+async fn post_chat_image(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(tab_id): Path<String>,
+    Json(body): Json<ChatImageBody>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    match inline_image::fetch(&s.app, &tab_id, &body.path).await {
+        Ok(asset) => Ok(Json(json!({ "ok": true, "asset": asset }))),
+        Err(inline_image::Refusal::NotFound) => Err(StatusCode::NOT_FOUND),
+        Err(inline_image::Refusal::Refused(reason)) => {
+            log::info!("[maiLink] image for tab {} refused: {reason}", &tab_id[..8.min(tab_id.len())]);
+            Ok(Json(json!({ "ok": false, "reason": reason })))
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
