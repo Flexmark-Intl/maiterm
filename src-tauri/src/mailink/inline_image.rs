@@ -92,6 +92,8 @@ fn agent_paths(text: &str) -> Vec<String> {
             let mut depth = 0usize;
             let mut end = after.len();
             let mut escaped = false;
+            let mut first_close: Option<usize> = None;
+            let mut closed = false;
             for (j, c) in after.char_indices() {
                 if escaped {
                     escaped = false;
@@ -102,14 +104,26 @@ fn agent_paths(text: &str) -> Vec<String> {
                     '(' => depth += 1,
                     ')' if depth == 0 => {
                         end = j;
+                        closed = true;
                         break;
                     }
-                    ')' => depth -= 1,
+                    ')' => {
+                        first_close.get_or_insert(j);
+                        depth -= 1;
+                    }
                     c if c.is_whitespace() => {
                         end = j;
                         break;
                     }
                     _ => {}
+                }
+            }
+            // Unbalanced (`x(.png)`): the scan never found the link's own `)` — the `(` took it —
+            // and the renderer then falls back to the first `)` as the link's end, so that
+            // reading is a candidate too.
+            if !closed {
+                if let Some(fc) = first_close.filter(|&fc| fc > 0) {
+                    out.push(after[..fc].to_string());
                 }
             }
             Some(&after[..end])
@@ -491,6 +505,9 @@ mod tests {
         assert!(referenced_by_agent(&[agent("![s](/x/a.png \"title\")")], "/x/a.png"));
         assert!(referenced_by_agent(&[agent("![a](/x/a\\_b.png)")], "/x/a_b.png"));
         assert!(!referenced_by_agent(&[agent("![s](/Users/me/image(1).png)")], "/Users/me/image(1"));
+        // An unbalanced `(`: the renderer ends the link at the first `)`.
+        assert!(referenced_by_agent(&[agent("![s](/a/x(.png) and more")], "/a/x(.png"));
+        assert!(referenced_by_agent(&[agent("![s](/a/x(.png)")], "/a/x(.png"));
     }
 
     #[test]
