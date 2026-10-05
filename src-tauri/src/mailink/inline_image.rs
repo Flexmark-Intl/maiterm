@@ -70,15 +70,63 @@ pub(crate) fn referenced_by_agent(turns: &[Value], path: &str) -> bool {
         None => true,
         Some(c) => c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '"' | '\'' | '`' | '[' | ']' | ','),
     };
+    let relative = !path.starts_with('/') && !path.starts_with('~');
+    // A relative path right after a space whose preceding word is itself a path is the TAIL of a
+    // path with a space in it — `…/Application Support/x/icon.png` names no `Support/x/icon.png`
+    // (review of a9e5ab8). `Saved to out/plot.png` still counts: "to" is not a path.
+    let tail_of_spaced_path = |before: &str| {
+        relative
+            && before.ends_with(char::is_whitespace)
+            && before.trim_end().rsplit(char::is_whitespace).next().is_some_and(|w| w.contains('/'))
+    };
+    let shows = |text: &str| {
+        text.match_indices(path).any(|(i, _)| {
+            edge(text[..i].chars().next_back())
+                && edge(text[i + path.len()..].chars().next())
+                && !tail_of_spaced_path(&text[..i])
+        })
+    };
     turns
         .iter()
         .filter(|t| t.get("role").and_then(|r| r.as_str()) == Some("agent") && t.get("kind").is_none())
         .filter_map(|t| t.get("text").and_then(|x| x.as_str()))
-        .any(|text| {
-            text.match_indices(path).any(|(i, _)| {
-                edge(text[..i].chars().next_back()) && edge(text[i + path.len()..].chars().next())
-            })
-        })
+        // The phone percent-DECODES a Markdown src before asking (its renderer encodes it), and
+        // can't tell whether the agent typed `%20` or a space — so either form of the message
+        // may hold the path.
+        .any(|text| shows(text) || percent_decoded(text).is_some_and(|d| shows(&d)))
+}
+
+/// `text` with `%XX` escapes decoded; `None` when there are none, or the result isn't UTF-8.
+fn percent_decoded(text: &str) -> Option<String> {
+    if !text.contains('%') {
+        return None;
+    }
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).ok().filter(|s| s != text)
+}
+
+/// A `file://` URL's path (`file:///Users/…` → `/Users/…`). A URL naming a host is refused: that
+/// would be another machine's file, and the phone can only be shown this chat's.
+fn strip_file_url(path: &str) -> Result<&str, Refusal> {
+    match path.strip_prefix("file://") {
+        None => Ok(path),
+        Some(rest) if rest.starts_with('/') => Ok(rest),
+        Some(_) => Err(refuse("A file:// link that names another computer can't be shown here.")),
+    }
 }
 
 /// The folder a relative path in the agent's words is relative to: its current session's.
@@ -96,20 +144,40 @@ pub(crate) async fn fetch(app: &Arc<AppState>, tab_id: &str, path: &str) -> Resu
     let Some(ext) = image_ext(path) else {
         return Err(refuse("Only png, jpeg, gif, webp and heic images can be shown here."));
     };
-    // The transcript read is file I/O on a large file: off the async workers.
-    let referenced = {
+    // The transcript read is file I/O on a large file: off the async workers. So is finding where
+    // the session's transcript lives, which is what says which computer the agent's paths are on.
+    let (referenced, session_local) = {
         let (app, tab, p) = (app.clone(), tab_id.to_string(), path.to_string());
-        tokio::task::spawn_blocking(move || referenced_by_agent(&super::tab_transcript(&app, &tab), &p))
-            .await
-            .unwrap_or(false)
+        tokio::task::spawn_blocking(move || {
+            let referenced = referenced_by_agent(&super::tab_transcript(&app, &tab), &p);
+            let local = super::resolved_session_for_tab(&app, &tab)
+                .map(|(rt, sid)| super::transcript::session_is_local(rt.as_key(), &sid));
+            (referenced, local)
+        })
+        .await
+        .unwrap_or((false, None))
     };
     if !referenced {
         return Err(refuse("That image isn't in any of the agent's recent messages in this chat."));
     }
+    // Matched as written (scheme and all); resolved as a path.
+    let path = strip_file_url(path)?;
     let name = path.rsplit('/').next().unwrap_or(path).to_string();
     let cwd = agent_cwd(app, tab_id);
 
-    let (resolved, bytes) = match crate::comms::staging_target_for_tab(app, tab_id) {
+    // WHERE the agent is decides where its paths are — never what the tab's terminal runs now. A
+    // remote agent's chat stays readable after its ssh exits (the transcript is mirrored), and
+    // the tab is then a local shell: going by the terminal read the Mac's same-named file
+    // (review of a9e5ab8). The reverse too: a local agent's path, after the human ssh'd out.
+    let target = match session_local {
+        None => return Err(refuse("maiTerm can't tell which computer this agent runs on.")),
+        Some(true) => crate::comms::StagingTarget::Local,
+        Some(false) => match crate::comms::staging_target_for_tab(app, tab_id) {
+            remote @ crate::comms::StagingTarget::Remote { .. } => remote,
+            _ => crate::comms::StagingTarget::Unavailable,
+        },
+    };
+    let (resolved, bytes) = match target {
         crate::comms::StagingTarget::Unavailable => {
             return Err(refuse("This chat runs on another computer, and maiTerm's connection to it is down."));
         }
@@ -180,7 +248,16 @@ fn read_local(full: &std::path::Path) -> Result<(String, Vec<u8>), String> {
     if meta.len() > MAX_IMAGE_BYTES {
         return Err(too_big(meta.len()));
     }
-    let bytes = std::fs::read(&real).map_err(|e| format!("Could not read it: {e}"))?;
+    // Capped at the read too: the file can grow between the size check and here (an agent
+    // regenerating it), and an uncapped read would load all of it.
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&real)
+        .and_then(|f| f.take(MAX_IMAGE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("Could not read it: {e}"))?;
+    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+        return Err(too_big(bytes.len() as u64));
+    }
     Ok((real.to_string_lossy().to_string(), bytes))
 }
 
@@ -217,14 +294,19 @@ fn remote_path_expr(path: &str, cwd: Option<&str>) -> Option<String> {
 async fn fetch_remote_capped(host_key: &str, ssh_args: &str, expr: &str) -> Result<Vec<u8>, String> {
     let mut args = crate::commands::ssh_tunnel::mux_client_args(host_key);
     args.extend(ssh_args.split_whitespace().map(str::to_string));
-    args.push(format!(
+    // Run under `sh`, not the login shell, which parses an ssh command line: fish and tcsh reject
+    // `f=…` and `if …; then` (review of a9e5ab8).
+    let script = format!(
         "f={expr}; if [ ! -e \"$f\" ]; then echo missing >&2; exit 3; fi; if [ ! -f \"$f\" ]; then echo notfile >&2; exit 4; fi; head -c {} < \"$f\"",
         MAX_IMAGE_BYTES + 1
-    ));
+    );
+    args.push(format!("sh -c {}", sh_quote(&script)));
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         tokio::process::Command::new("ssh")
             .args(&args)
+            // A timeout drops this future; without this the ssh (and the remote read) live on.
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -262,6 +344,25 @@ mod tests {
         assert!(!referenced_by_agent(&[json!({ "role": "tool", "text": format!("ls: {p}") })], p), "a tool's output");
         assert!(!referenced_by_agent(&[json!({ "role": "user", "text": p })], p), "the human's words");
         assert!(!referenced_by_agent(&[json!({ "role": "agent", "kind": "peer_message", "text": p })], p));
+        // A relative path the agent wrote counts; the tail of a path with a space does not.
+        assert!(referenced_by_agent(&[agent("Saved to out/plot.png")], "out/plot.png"));
+        let spaced = agent("Look at /Users/me/Library/Application Support/x/icon.png");
+        assert!(!referenced_by_agent(&[spaced.clone()], "Support/x/icon.png"));
+        assert!(referenced_by_agent(&[spaced], "/Users/me/Library/Application Support/x/icon.png"));
+        // The phone decodes a Markdown src; the agent may have written it encoded.
+        let encoded = agent("![x](file:///Users/me/a%20b.png)");
+        assert!(referenced_by_agent(&[encoded.clone()], "file:///Users/me/a b.png"));
+        assert!(referenced_by_agent(&[encoded], "file:///Users/me/a%20b.png"));
+    }
+
+    #[test]
+    fn file_urls_resolve_to_their_path_and_never_another_host() {
+        assert_eq!(strip_file_url("file:///Users/me/a.png").ok(), Some("/Users/me/a.png"));
+        assert_eq!(strip_file_url("/Users/me/a.png").ok(), Some("/Users/me/a.png"));
+        assert!(strip_file_url("file://server/share/a.png").is_err());
+        assert_eq!(percent_decoded("a%20b%E2%80%AFc").as_deref(), Some("a b\u{202F}c"));
+        assert_eq!(percent_decoded("100%"), None, "a lone % is text");
+        assert_eq!(percent_decoded("no escapes"), None);
     }
 
     #[test]
