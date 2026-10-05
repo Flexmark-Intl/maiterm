@@ -26,16 +26,11 @@ export const DEFAULT_OVERLORD_RULES: Record<string, Omit<OverlordRule, 'id' | 'e
     sequence: [
       {
         kind: 'process',
-        text: 'Before we continue — make sure any relevant docs, memory, code comments and tasks are updated if needed.',
+        // One prep turn, not two: a separate "Prepare for compaction." after this asked for
+        // the same work again and spent a whole turn on "already done".
+        text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.',
         await: { until: 'turn_end' },
         timeout_seconds: 900,
-        on_timeout: 'abort',
-      },
-      {
-        kind: 'process',
-        text: 'Prepare for compaction.',
-        await: { until: 'turn_end' },
-        timeout_seconds: 600,
         on_timeout: 'abort',
       },
       {

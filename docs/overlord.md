@@ -826,11 +826,8 @@ firing `/compact` early truncates the work just asked for.
   cooldown: 1800,
   sequence: [
     { kind: 'process',
-      text: 'Before we continue — make sure any relevant docs, memory, code comments and tasks are updated if needed.',
+      text: 'Prepare for compaction: make sure any relevant docs, memory, code comments and tasks are updated if needed.',
       await: { until: 'turn_end' }, timeout_seconds: 900, on_timeout: 'abort' },
-    { kind: 'process',
-      text: 'Prepare for compaction.',
-      await: { until: 'turn_end' }, timeout_seconds: 600, on_timeout: 'abort' },
     { kind: 'slash', text: '/compact', runtimes: ['claude'],
       await: { until: 'context_below', pct: 30 }, timeout_seconds: 300,
       on_timeout: 'notify_human' },
