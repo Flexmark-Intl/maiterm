@@ -117,12 +117,13 @@ describe('seedDefaultOverlordRules — a flagged rule that is still ours', () =>
 
   it('leaves a real edit frozen', () => {
     const mine = [...OLD_SEQUENCE.slice(0, 1), { ...OLD_SEQUENCE[1], text: 'My own wording.' }, OLD_SEQUENCE[2]];
-    const seeded = seedDefaultOverlordRules([shipped({ sequence: mine, user_modified: true })], []);
-    const row = (seeded ?? []).find((x) => x.default_id === ID);
-    if (row) {
-      expect(row.sequence[1].text).toBe('My own wording.');
-      expect(row.user_modified).toBe(true);
-    }
+    const r = shipped({ sequence: mine, user_modified: true });
+    const seeded = seedDefaultOverlordRules([r], []);
+    // null = nothing changed; otherwise the row must still be there, untouched.
+    const row = seeded ? seeded.find((x) => x.id === r.id) : r;
+    expect(row).toBeDefined();
+    expect(row!.sequence[1].text).toBe('My own wording.');
+    expect(row!.user_modified).toBe(true);
   });
 
   it('reports no change for an untouched, current rule', () => {

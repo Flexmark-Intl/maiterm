@@ -130,8 +130,21 @@ type OverlordRuleTemplate = (typeof DEFAULT_OVERLORD_RULES)[string];
 const PREVIOUS_DEFAULT_OVERLORD_RULES: Record<string, OverlordRuleTemplate[]> = {
   checkpoint_at_context_pressure: [
     // Until 2026-10-05: prep split across two turns that asked for the same work.
+    // Written out in full, never spread from the live template: a later change there would
+    // silently rewrite this "old" version and it would stop matching what really shipped.
     {
-      ...DEFAULT_OVERLORD_RULES.checkpoint_at_context_pressure,
+      name: 'Checkpoint before compaction',
+      description:
+        'At ~55% context, have the agent update docs/memory, prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought.',
+      cooldown: 1800,
+      when: { event: 'context_pct', at_or_above: 55 },
+      guards: {
+        agent_state: ['idle'],
+        min_quiet_ms: 3000,
+        require_live_repl: true,
+        max_per_hour: 1,
+        only_if_no_outstanding: true,
+      },
       sequence: [
         {
           kind: 'process',
