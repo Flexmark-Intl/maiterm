@@ -536,14 +536,34 @@
   // The chat's OWN height changes too: a prompt card opening (or resizing) in the dock below
   // shrinks it, which leaves the newest lines under the edge — and the next scroll event (scroll
   // anchoring as content changes) then read that as the human having scrolled up, unpinning it.
+  // And what's drawn grows without the tail changing: a bubble's "Sending…" becoming the longer
+  // "Queued · …" line, an image arriving, the working line's detail — so the content is watched too.
+  // Except growth the human just caused: opening a fold at the bottom must not scroll its top away.
   $effect(() => {
     const el = chatEl;
     if (!el) return;
-    const ro = new ResizeObserver(toBottom);
-    ro.observe(el);
-    return () => ro.disconnect();
+    const box = new ResizeObserver(toBottom);
+    box.observe(el);
+    const content = new ResizeObserver(() => { if (!dragging && performance.now() - intentAt > 800) toBottom(); });
+    for (const c of el.children) content.observe(c);
+    return () => { box.disconnect(); content.disconnect(); };
   });
-  const onChatScroll = () => { if (chatEl) pinned = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 40; };
+  // Only the HUMAN unpins it. Position alone can't tell them apart: content that grows between our
+  // scroll and its scroll event reads as "scrolled up" (the event fires before the ResizeObserver
+  // in a frame), which left a just-sent bubble under the edge for good. So unpinning needs a wheel,
+  // touch, key or scrollbar drag in the chat just before; reaching the bottom by any means re-pins.
+  let intentAt = 0;
+  let dragging = false;
+  const onChatIntent = () => { intentAt = performance.now(); };
+  const onChatPointerDown = () => {
+    dragging = true;
+    window.addEventListener('pointerup', () => { dragging = false; onChatIntent(); }, { once: true });
+  };
+  const onChatScroll = () => {
+    if (!chatEl) return;
+    if (chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 40) pinned = true;
+    else if (dragging || performance.now() - intentAt < 800) pinned = false;
+  };
 
   // ── Column widths: dragged, and remembered per viewer (a convenience, not a document). ────
   const WIDTH_KEY = 'maiterm.loom.focus.widths';
@@ -641,7 +661,8 @@
       </header>
 
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-      <div class="chat" bind:this={chatEl} onscroll={onChatScroll} onclick={onChatClick}>
+      <div class="chat" bind:this={chatEl} onscroll={onChatScroll} onclick={onChatClick}
+        onwheel={onChatIntent} ontouchmove={onChatIntent} onkeydown={onChatIntent} onpointerdown={onChatPointerDown}>
         {#if loadedFor !== openId}
           <p class="hint">Reading the chat…</p>
         {:else if !rows.length}
