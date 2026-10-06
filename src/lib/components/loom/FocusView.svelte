@@ -529,6 +529,9 @@
     const n = r?.kind === 'tools' ? r.turns.length : r?.kind === 'added' ? r.events.length : 0;
     return `${rows.length}|${key}|${n}|${outgoingHere.length}|${liveState?.state === 'active'}`;
   });
+  // Another chat opens at its newest turn, whatever was scrolled up in the last one (before the
+  // tail effect, which runs in the same flush).
+  $effect(() => { void openId; pinned = true; });
   $effect(() => {
     void tailKey;
     if (chatEl && pinned) requestAnimationFrame(toBottom);
