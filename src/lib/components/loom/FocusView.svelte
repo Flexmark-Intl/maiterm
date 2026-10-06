@@ -544,7 +544,9 @@
     if (!el) return;
     const box = new ResizeObserver(toBottom);
     box.observe(el);
-    const content = new ResizeObserver(() => { if (!dragging && performance.now() - intentAt > 800) toBottom(); });
+    // Only a CLICK holds it off (that's what opens a fold): a wheel's momentum at the bottom must
+    // still follow growth.
+    const content = new ResizeObserver(() => { if (!dragging && performance.now() - clickAt > 800) toBottom(); });
     for (const c of el.children) content.observe(c);
     return () => { box.disconnect(); content.disconnect(); };
   });
@@ -553,11 +555,33 @@
   // in a frame), which left a just-sent bubble under the edge for good. So unpinning needs a wheel,
   // touch, key or scrollbar drag in the chat just before; reaching the bottom by any means re-pins.
   let intentAt = 0;
+  let clickAt = 0;
   let dragging = false;
+  /** The last press was in the chat: WebKit keyboard-scrolls the last-clicked scroller, but the
+   *  key goes to body (the chat has no tabindex), so a scroll key is read window-wide. */
+  let pressedInChat = false;
   const onChatIntent = () => { intentAt = performance.now(); };
+  const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+  $effect(() => {
+    const press = (e: PointerEvent) => { pressedInChat = !!chatEl && chatEl.contains(e.target as Node); };
+    const key = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (pressedInChat && SCROLL_KEYS.has(e.key) && !t?.closest?.('input, textarea, [contenteditable]')) onChatIntent();
+    };
+    window.addEventListener('pointerdown', press, true);
+    window.addEventListener('keydown', key, true);
+    return () => { window.removeEventListener('pointerdown', press, true); window.removeEventListener('keydown', key, true); };
+  });
   const onChatPointerDown = () => {
     dragging = true;
-    window.addEventListener('pointerup', () => { dragging = false; onChatIntent(); }, { once: true });
+    // A native drag (a link, an image, a selection) ends without a pointerup.
+    const end = () => {
+      dragging = false;
+      clickAt = performance.now();
+      onChatIntent();
+      for (const t of ['pointerup', 'pointercancel', 'dragend'] as const) window.removeEventListener(t, end, true);
+    };
+    for (const t of ['pointerup', 'pointercancel', 'dragend'] as const) window.addEventListener(t, end, true);
   };
   const onChatScroll = () => {
     if (!chatEl) return;
@@ -662,7 +686,7 @@
 
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="chat" bind:this={chatEl} onscroll={onChatScroll} onclick={onChatClick}
-        onwheel={onChatIntent} ontouchmove={onChatIntent} onkeydown={onChatIntent} onpointerdown={onChatPointerDown}>
+        onwheel={onChatIntent} ontouchmove={onChatIntent} onpointerdown={onChatPointerDown}>
         {#if loadedFor !== openId}
           <p class="hint">Reading the chat…</p>
         {:else if !rows.length}
