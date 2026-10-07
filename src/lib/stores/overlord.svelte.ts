@@ -1394,6 +1394,11 @@ function createOverlordStore() {
     if (workspacesStore.getTabRuntime(tabId) !== 'claude') return Promise.resolve(false);
     return serializeNotice(tabId, async () => {
       if (!typeable()) return false;
+      // The hook state outlives an agent killed without a Stop (OOM, kill -9): CR at a shell
+      // runs the answer as a command. Ask the process, as noticeToTab does…
+      if (!(await hasLiveRepl(tabId)) || !typeable()) return false;
+      // …and the screen, last, since over ssh "ssh is in the foreground" counts as live: a dead
+      // remote agent leaves a shell prompt, not an empty Claude box, at the bottom.
       if ((await commands.agentInputBox(tabId).catch(() => 'unknown')) !== 'empty') return false;
       const r = await commands.sendTabMessage(tabId, text).catch(() => null);
       return r?.status === 'delivered';
