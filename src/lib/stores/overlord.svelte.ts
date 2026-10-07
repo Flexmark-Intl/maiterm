@@ -1388,8 +1388,13 @@ function createOverlordStore() {
     // yet) is still printing, which `noticeToTab`'s quiet check refuses.
     const typeable = () => mappedState(tabId) === 'active' || mappedState(tabId) === 'idle';
     if (!typeable()) return Promise.resolve(false);
+    // Claude only: it queues text typed mid-turn, and its input box can be READ off the screen
+    // (other runtimes differ on mid-turn input, docs/follow-ups.md §6.1). An empty box only —
+    // a human's half-typed draft at the desktop would be submitted along with this.
+    if (workspacesStore.getTabRuntime(tabId) !== 'claude') return Promise.resolve(false);
     return serializeNotice(tabId, async () => {
       if (!typeable()) return false;
+      if ((await commands.agentInputBox(tabId).catch(() => 'unknown')) !== 'empty') return false;
       const r = await commands.sendTabMessage(tabId, text).catch(() => null);
       return r?.status === 'delivered';
     });
