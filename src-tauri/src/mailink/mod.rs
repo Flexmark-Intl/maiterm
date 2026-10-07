@@ -2846,15 +2846,34 @@ async fn ws_handler(
     }
     // The WS is the connection a phone holds open for hours, so it's the best liveness evidence
     // there is — and it doesn't go through `authorize`.
-    touch_device(&s, if header_ok { bearer_token(&headers) } else { q.token.as_deref().unwrap_or("") });
-    ws.on_upgrade(move |socket| ws_event_loop(socket, s))
+    let token = if header_ok { bearer_token(&headers) } else { q.token.as_deref().unwrap_or("") };
+    touch_device(&s, token);
+    let device = device_label(&s, token);
+    ws.on_upgrade(move |socket| ws_event_loop(socket, s, device))
+}
+
+/// Which paired client a socket belongs to, for the liveness log lines: the device's name and
+/// the first 8 of its id (two phones can share a name). Never the token.
+fn device_label(s: &ApiState, token: &str) -> String {
+    if token == s.dev_token {
+        return "dev token".to_string();
+    }
+    let hash = sha256_hex(token.as_bytes());
+    let data = s.app.app_data.read();
+    data.preferences
+        .mailink_devices
+        .iter()
+        .find(|d| d.token_hash == hash)
+        .map(|d| format!("\"{}\" ({})", d.name, d.id.chars().take(8).collect::<String>()))
+        .unwrap_or_else(|| "an unknown device".to_string())
 }
 
 /// Live event loop. v1 is an internal poller (~1.5s): it diffs the chat snapshot and pushes
 /// `chat_state` on any state change, `attention` when a tab enters permission/idle, and
 /// `chats_changed` when the roster changes. (A push-based variant driven directly off the
 /// hook state machine is a later refinement — this gives the client the WS interface now.)
-async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
+async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
+    let opened = std::time::Instant::now();
     // Coverage: while this WS is alive, a phone is receiving events directly → suppress the
     // doorbell. The guard decrements on any exit path (return, error, close).
     s.app
@@ -2972,7 +2991,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                     // isn't receiving events either, so it must go back to being reachable by
                     // doorbell. Both cases below close — only the diagnosis differs.
                     if answered_a_ping {
-                        log::info!("[maiLink] ws: no pong within {}s — treating the phone as gone", WS_PING_INTERVAL.as_secs());
+                        log::info!("[maiLink] ws: no pong within {}s from {device} (socket lived {}s) — treating the phone as gone", WS_PING_INTERVAL.as_secs(), opened.elapsed().as_secs());
                     } else {
                         // Never answered even the connect-time ping. Most likely a client that
                         // went away immediately; possibly one that doesn't implement pong. It is
@@ -2983,7 +3002,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState) {
                         // resolved the ambiguity by switching the check off. A reconnect loop is
                         // loud and self-announcing; phantom coverage is silent and eats
                         // notifications. Prefer the loud failure.
-                        log::warn!("[maiLink] ws: client never answered a ping (not even at connect) — closing. If a client legitimately cannot pong, that is a client bug: RFC 6455 requires it and both maiLink transports answer at framework level.");
+                        log::warn!("[maiLink] ws: {device} never answered a ping (not even at connect; socket lived {}s) — closing. If a client legitimately cannot pong, that is a client bug: RFC 6455 requires it and both maiLink transports answer at framework level.", opened.elapsed().as_secs());
                     }
                     break;
                 }
