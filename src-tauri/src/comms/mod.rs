@@ -509,13 +509,15 @@ fn injection_blocked_by_prompt(app: &Arc<AppState>, tab_id: &str) -> Option<&'st
     if matches!(session.state, AgentSessionState::WaitingPermission) {
         return Some("a permission prompt is open in that tab");
     }
-    drop(sessions);
-    // The pickup's CR would submit the human's half-typed draft along with it. Clears itself
-    // when they send or clear it, like a prompt (mailink `draft_hold`).
-    if crate::mailink::draft_hold::draft_in_box(app, tab_id) {
-        return Some("the human has a draft in that agent's input box");
-    }
     None
+}
+
+/// The human has a half-typed draft in the agent's input box: an injection's CR would submit it
+/// along with the payload (mailink `draft_hold`). Asked at the hold decision AND again right
+/// before typing — attachment downloads and transcript fetches sit between the two.
+const DRAFT_HOLD: &str = "your draft in that agent's input box is waiting to be sent or cleared";
+fn draft_blocks(app: &AppState, tab_id: &str) -> bool {
+    crate::mailink::draft_hold::draft_in_box(app, tab_id)
 }
 
 /// Positive evidence that an AGENT — not a bare shell — owns this tab's terminal.
@@ -543,7 +545,7 @@ fn injection_blocked_by_prompt(app: &Arc<AppState>, tab_id: &str) -> Option<&'st
 /// Known false negative: an agent under a LOCAL tmux lives outside the tab shell's descendant
 /// tree, so it reads as gone and its summons hold. Visible (the operator is notified with a
 /// `no_agent` reason) and recoverable, unlike the failure this replaces.
-async fn agent_owns_terminal(app: &Arc<AppState>, pty_id: &str) -> bool {
+pub(crate) async fn agent_owns_terminal(app: &Arc<AppState>, pty_id: &str) -> bool {
     let app = app.clone();
     let pty = pty_id.to_string();
     // The sweep is blocking; every other async caller of get_agent_liveness hops to
@@ -887,7 +889,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 // Another thread on this tab already got this tick's injection.
                 (Some("another message is already being delivered to that tab"), true)
             } else {
-                (prompt_block, true)
+                (prompt_block.or_else(|| draft_blocks(&app, &tab_id).then_some(DRAFT_HOLD)), true)
             };
             let newest_addressed = addressed.iter().map(|p| p.create_at).max().unwrap_or(0);
             if let Some(reason) = hold_reason {
@@ -974,6 +976,10 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 }
             }
 
+            if draft_blocks(&app, &tab_id) {
+                // Started typing while the attachments downloaded. Cursor not advanced: next tick.
+                continue;
+            }
             match crate::mailink::inject_text(&app, &pty_id, &payload, true).await {
                 Ok(()) => {
                     // Scan cursor to the tick's newest post; delivered watermark only to
@@ -1143,6 +1149,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                         || !agent_present
                         || at_capacity
                         || prompt_block.is_some()
+                        || draft_blocks(&app, &tab_id)
                     {
                         // Can't take it now. Hold the cursor HERE so this summon is
                         // retried when the tab frees up / comes back. Say so once.
@@ -1179,8 +1186,14 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                                     "the tab is holding all {MAX_TAB_BINDINGS} thread slots — close one out to free a slot"
                                 ),
                             )
+                        } else if let Some(p) = prompt_block {
+                            ("prompt_open", p.to_string())
                         } else {
-                            ("prompt_open", prompt_block.unwrap_or("a prompt is open").to_string())
+                            // NOT the silent prompt branch: a draft can sit for hours, and
+                            // this channel's cursor holds here meanwhile. The operator toast
+                            // (once per summon) tells the person who can clear it — no
+                            // in-channel reply, which only `at_capacity` posts.
+                            ("draft", DRAFT_HOLD.to_string())
                         };
                         // A prompt-open hold clears itself in seconds — don't burn the
                         // once-per-thread in-channel notice or the operator toast on it.
@@ -1552,6 +1565,10 @@ async fn summon_pickup(
          {approvers}{instructions}{thread_section}]",
         ch.name
     );
+    // The draft check ran before the attachment downloads and the transcript fetch above.
+    if draft_blocks(app, tab_id) {
+        return Err(DRAFT_HOLD.into());
+    }
     crate::mailink::inject_text(app, pty_id, &payload, true).await?;
 
     let binding = CommsBinding {

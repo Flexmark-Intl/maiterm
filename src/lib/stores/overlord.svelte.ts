@@ -4856,7 +4856,16 @@ function createOverlordStore() {
       if (!inst) return { sent: false, reason: 'no_live_repl' };
       // The human's draft is in that box; the directive's Enter would send it. The board
       // notices hold for the same reason and hand off to this tool, so it must hold too.
-      if (!(await noDraft(tabId, true)) || mappedState(tabId) !== 'idle') {
+      const clear = await noDraft(tabId, true);
+      // The state moved during the read: say what it moved to, not "a draft" (a prompt that
+      // opened meanwhile is not cleared by retrying).
+      if (mappedState(tabId) !== 'idle') {
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
+        return mappedState(tabId) === 'permission'
+          ? { sent: false, reason: 'awaiting_permission', detail: 'A prompt opened in that tab just now — use getTabPrompt.' }
+          : { sent: false, reason: 'agent_busy' };
+      }
+      if (!clear) {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
         return {
           sent: false,

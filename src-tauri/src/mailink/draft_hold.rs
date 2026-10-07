@@ -92,8 +92,21 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
                 return;
             }
         }
-        // The same last looks every typed message gets: no draft, no dialog of any kind.
-        if draft_in_box(&app, &tab_id) || super::open_prompt(&app, &tab_id).is_some() {
+        // An agent still owns the terminal (the comms rule, `agent_owns_terminal`): an exited
+        // agent's last frame — an empty box — can stay on screen above the shell prompt. Over
+        // ssh a live connection stands in for the remote agent, the known residual gap. First,
+        // because it awaits: every check after it is synchronous up to the typing.
+        if !crate::comms::agent_owns_terminal(&app, &pty).await {
+            continue;
+        }
+        // A box that reads EMPTY, not merely "no draft seen": a shell prompt reads `Unknown`,
+        // and so does a screen covering the box (a draft taller than the screen, a full-screen
+        // view) — typing then would run the message as a command, or send the draft after all.
+        if !matches!(super::agent_input_box(&app, &tab_id), super::input_box::InputBox::Empty) {
+            continue;
+        }
+        // The same last looks every typed message gets: no dialog of any kind.
+        if super::open_prompt(&app, &tab_id).is_some() {
             continue;
         }
         if super::live_screen_text(&app, &tab_id).is_some_and(|s| super::permission::any_dialog_open(&s)) {
