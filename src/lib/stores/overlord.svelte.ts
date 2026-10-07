@@ -1360,6 +1360,41 @@ function createOverlordStore() {
     return ws.panes.some((p) => p.tabs.some((t) => !!t.runtime));
   }
 
+  /** An Overlord agent that can actually relay something: its tab is up AND its agent is
+   *  running. `hasOverlordAgentTab` is only "there's a tab for one" (right for the sweep, which
+   *  must not drop items a busy agent will pull) — an agent that exited a week ago still has its
+   *  tab, and a board action that escalated to it reported `told: "agent"` for a relay that
+   *  could never happen (a phone answer lost that way, 2026-10-07). */
+  async function overlordAgentCanRelay(): Promise<boolean> {
+    const ws = overlordWorkspace();
+    if (!ws) return false;
+    for (const p of ws.panes) {
+      for (const t of p.tabs) {
+        if (t.runtime && (await replState(t.id)) === 'ready') return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The HUMAN's words to a tab that is busy (an answer, a "Do it"): typed in now, the way
+   * the Loom composer sends, so the agent takes them when its turn ends. `noticeToTab` waits for
+   * idle, which is right for the supervisor's own notices but left a human answer sent while the
+   * tab was still busy with the previous one to the Overlord relay. `send_tab_message` refuses
+   * at any open dialog, so this never types into a prompt. Serialized with the notices.
+   */
+  function queueToBusyTab(tabId: string, text: string): Promise<boolean> {
+    // `idle` too: a turn that has just ended (or one whose start the hooks haven't reported
+    // yet) is still printing, which `noticeToTab`'s quiet check refuses.
+    const typeable = () => mappedState(tabId) === 'active' || mappedState(tabId) === 'idle';
+    if (!typeable()) return Promise.resolve(false);
+    return serializeNotice(tabId, async () => {
+      if (!typeable()) return false;
+      const r = await commands.sendTabMessage(tabId, text).catch(() => null);
+      return r?.status === 'delivered';
+    });
+  }
+
   /**
    * Drop agent-only escalations nobody can deliver.
    *
@@ -3222,7 +3257,7 @@ function createOverlordStore() {
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
       // The RELAY is the supervisor's, and only it. Same split `startTask` makes, and for
       // the same reason — see the comment on the direct notice above.
-      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
         return { removed: true, told: 'nobody' };
       }
       escalate(
@@ -3281,7 +3316,7 @@ function createOverlordStore() {
         `current as you go. If you are mid-way through something else, finish that first ` +
         `and come to this next rather than abandoning it.`;
       const step: OverlordStep = { kind: 'process', text };
-      if (await noticeToTab(tabId, text, 'start')) {
+      if ((await noticeToTab(tabId, text, 'start')) || (await queueToBusyTab(tabId, text))) {
         ledger(tabId, null, 'human', 0, step, 'sent');
         return { started: true, told: 'tab' };
       }
@@ -3296,7 +3331,7 @@ function createOverlordStore() {
       // escalating here would delete the card into an agent that is forbidden to use it, and
       // report a relay that cannot happen. It would also hand the exempt tab's name and the
       // task's detail to the supervisor, which is the exact thing exemption promises not to do.
-      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
         return { started: true, told: 'nobody' };
       }
       escalate(
@@ -3342,13 +3377,14 @@ function createOverlordStore() {
       if (!tabId) return { answered: true, told: 'nobody' };
 
       const step: OverlordStep = { kind: 'process', text: r.message };
-      if (await noticeToTab(tabId, r.message, 'answer')) {
+      // Mid-turn (often still on the answer before this one): queued like a composer message.
+      if ((await noticeToTab(tabId, r.message, 'answer')) || (await queueToBusyTab(tabId, r.message))) {
         ledger(tabId, null, 'human', 0, step, 'sent');
         return { answered: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
       // Same three conditions as startTask's fallback, for the same reasons.
-      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
         return { answered: true, told: 'nobody' };
       }
       escalate(
@@ -3403,7 +3439,7 @@ function createOverlordStore() {
         return { asked: true, told: 'tab' };
       }
       ledger(tabId, null, 'human', 0, step, 'blocked_no_repl');
-      if (!preferencesStore.overlordEnabled || !hasOverlordAgentTab() || isExemptTab(tabId)) {
+      if (!preferencesStore.overlordEnabled || isExemptTab(tabId) || !(await overlordAgentCanRelay())) {
         return { asked: true, told: 'nobody' };
       }
       escalate(

@@ -763,6 +763,7 @@ async fn post_task_start(
     authorize(&s, &headers)?;
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let mut out = overlord_act(&s, &window, "tasks.start", json!({ "id": task_id })).await;
+    log_task_write("start", &task_id, &out);
     // Answer with the row, like every other task write, so the client can patch its model.
     // Load-bearing for an UNASSIGNED row: the WS `tasks` event is keyed by tab, so a backlog
     // task's move to Active reaches the phone through no other channel and it would sit in its
@@ -811,6 +812,7 @@ async fn post_task_answer(
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "text": body.text });
     let mut out = overlord_act(&s, &window, "tasks.answer", args).await;
+    log_task_write("answer", &task_id, &out);
     attach_confirmed_row(&s, &task_id, &mut out);
     Ok(out)
 }
@@ -837,8 +839,23 @@ async fn post_task_dismiss(
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let args = json!({ "id": task_id, "askedAt": body.asked_at });
     let mut out = overlord_act(&s, &window, "tasks.dismiss", args).await;
+    log_task_write("dismiss", &task_id, &out);
     attach_confirmed_row(&s, &task_id, &mut out);
     Ok(out)
+}
+
+/// One line per phone task write that may type into a tab, so "the agent never got it" can be
+/// traced to what the desktop answered (`told`) rather than reconstructed from the ledger.
+fn log_task_write(verb: &str, task_id: &str, out: &Json<Value>) {
+    let o = &out.0;
+    log::info!(
+        "[maiLink] task {verb} {}: accepted={} confirmed={} told={} reason={}",
+        task_id.chars().take(8).collect::<String>(),
+        o["accepted"],
+        o["confirmed"],
+        o["result"]["told"],
+        o["reason"]
+    );
 }
 
 /// A confirmed task write (answer, dismiss) answers with the row as it now stands.
