@@ -1410,20 +1410,25 @@ function createOverlordStore() {
 
   /**
    * Nothing of the human's would be submitted along with what is typed next: the agent's input
-   * box READ off the screen is empty (Claude; other runtimes' boxes don't parse, so they are
-   * judged by keystrokes alone), and nobody has typed in the last 2 s — a keystroke that recent
-   * may not have echoed into the box yet (the follow-ups rule, docs/follow-ups.md §6.1).
-   * Re-checks the keystrokes after the read, which is an IPC round trip.
+   * box READ off the screen is not holding text, and nobody has typed in the last 2 s — a
+   * keystroke that recent may not have echoed into the box yet (the follow-ups rule,
+   * docs/follow-ups.md §6.1). Re-checks the keystrokes after the read, an IPC round trip.
    *
-   * `unknownOk`: a Claude box that doesn't parse (mid-redraw) falls back to the keystrokes, as
-   * follow-ups do — the idle notices' rule. Mid-turn typing demands a box that reads empty.
+   * `unknownOk`: a box that doesn't parse (another runtime, a layout maiTerm doesn't know) is
+   * judged by keystrokes since the agent went idle, as follow-ups do — the rule for typing at an
+   * idle agent. Typing mid-turn demands a box that reads empty.
    */
   async function noDraft(tabId: string, unknownOk: boolean): Promise<boolean> {
     const keys = terminalsStore.getLastTakeoverInputAt(tabId);
     if (keys !== undefined && Date.now() - keys < 2000) return false;
-    if (workspacesStore.getTabRuntime(tabId) === 'claude') {
-      const box = await commands.agentInputBox(tabId).catch(() => 'unknown' as const);
-      if (box === 'has_text' || (box === 'unknown' && !unknownOk)) return false;
+    const box = await commands.agentInputBox(tabId).catch(() => 'unknown' as const);
+    if (box === 'has_text') return false;
+    if (box === 'unknown') {
+      if (!unknownOk) return false;
+      // A box that can't be read (another runtime, an unfamiliar layout): anything typed since
+      // this stretch of idle began may be a draft — follow-ups' rule (`holdReason`).
+      const st = claudeStateStore.getState(tabId);
+      if (keys !== undefined && st && keys > (st.idleSince ?? st.updatedAt)) return false;
     }
     return terminalsStore.getLastTakeoverInputAt(tabId) === keys;
   }
@@ -4849,6 +4854,18 @@ function createOverlordStore() {
       }
       const inst = terminalsStore.get(tabId);
       if (!inst) return { sent: false, reason: 'no_live_repl' };
+      // The human's draft is in that box; the directive's Enter would send it. The board
+      // notices hold for the same reason and hand off to this tool, so it must hold too.
+      if (!(await noDraft(tabId, true)) || mappedState(tabId) !== 'idle') {
+        ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
+        return {
+          sent: false,
+          reason: 'human_draft',
+          detail:
+            'Your human is typing in that tab, or has a draft in its input box — a directive ' +
+            'would send it along. Retry in a minute or two; it clears when they send or clear it.',
+        };
+      }
       try {
         await bracketedPasteSubmit(inst.ptyId, text);
       } catch {
