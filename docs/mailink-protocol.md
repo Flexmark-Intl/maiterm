@@ -10,8 +10,10 @@
 > off the screen), and the message's Enter would send the draft with it. maiTerm types it, in
 > order, once the box is empty again (the draft was sent or cleared); a later message to the same
 > tab waits behind it. Dropped (logged) after 30 minutes or if the tab's terminal goes. Show it
-> as waiting ("until your draft on the computer is sent or cleared"), and treat its turn's echo
-> as delivery, as for a queued send. `submit:false` messages are never held.
+> as waiting ("until your draft on the computer is sent or cleared"). **`ChatDetail.held`** lists
+> what is still held and **`ChatDetail.heldOutcomes`** what became of each (typed / dropped, with
+> why), by `msg_id` — so the phone never infers a drop from a missing echo. `submit:false`
+> messages are never held.
 >
 > **v0.18 changelog** (2026-10-05). Additive: **`POST /chats/{tabId}/image`** `{path}` (§4.1) —
 > an image an agent showed by its path in Markdown is fetched for the phone, which drew a broken
@@ -713,6 +715,17 @@ interface ChatDetail extends Chat {
                             // 0.15: watch scripts waiting for approval, oldest first. ALWAYS
                             //   present, `[]` when none. Re-read the chat when `scriptsWaiting`
                             //   changes (the desktop may have approved or rejected one).
+  held?: { msg_id: string; heldAt: number; reason: "draft" }[];
+                            // 0.19: `POST /message` sends maiTerm is still holding for a draft in
+                            //   the agent's box, oldest first, by the msg_id /message answered.
+                            //   Absent when none.
+  heldOutcomes?: { msg_id: string; outcome: "typed" | "dropped"; at: number;
+                   why?: "expired" | "terminal_gone" | "type_failed" }[];
+                            // 0.19: what became of this tab's held sends in the last hour. "typed"
+                            //   = ordinary pending-until-echo from here; "dropped" = give the words
+                            //   back. A held msg_id in NEITHER list means maiTerm restarted (holds
+                            //   and outcomes are in memory) or over an hour passed: not delivered.
+                            //   Read the chat again to see these move; no WS event carries them.
   queued?: { text: string; queuedAt: number }[];
                             // messages typed while the agent was BUSY and not yet consumed, oldest
                             //   first. Render these as genuinely "queued" (the agent is busy),
@@ -2307,7 +2320,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.16` | adds doorbell kinds `ask` (a new task question) and `script` (a new watch script to allow), also in `/push-prefs` `kinds` |
 | `0.17` | adds `POST /tasks/{id}/dismiss` |
 | `0.18` | adds `POST /chats/{tabId}/image` and `FileAsset.inline` / `source_key` |
-| `0.19` | adds `status:"held"` (`reason:"draft"`) to `POST /chats/{tabId}/message` |
+| `0.19` | adds `status:"held"` (`reason:"draft"`) to `POST /chats/{tabId}/message`, and `ChatDetail.held` / `heldOutcomes` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

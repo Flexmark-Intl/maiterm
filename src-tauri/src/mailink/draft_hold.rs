@@ -8,7 +8,8 @@
 //! (`input_box.rs`); another runtime's screen doesn't parse, so nothing is held for it.
 //!
 //! The hold is in memory: a restart drops what was waiting (logged), as it drops the PTY the
-//! message was for.
+//! message was for — and forgets the outcomes, so after a restart a held msg_id is in neither
+//! `ChatDetail.held` nor `heldOutcomes` (the phone reads that absence as dropped).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock};
@@ -23,7 +24,12 @@ use crate::state::AppState;
 const HOLD_MAX_MS: u64 = 30 * 60 * 1000;
 const POLL_MS: u64 = 1000;
 
+/// How long a held message's outcome stays in `ChatDetail.heldOutcomes`.
+const OUTCOME_KEEP_MS: u64 = 60 * 60 * 1000;
+
 pub(crate) struct Held {
+    /// The id `POST /message` answered with — the phone's key for `held` / `heldOutcomes`.
+    pub msg_id: String,
     /// Already-staged file paths typed ahead of the text (the phone's images).
     pub paths: Vec<String>,
     pub text: String,
@@ -35,6 +41,64 @@ struct Queue {
 }
 
 static QUEUES: LazyLock<Mutex<HashMap<String, Queue>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What became of held messages, per tab: (msg_id, "typed" | "dropped", at, why). The phone
+/// can't tell typed from dropped by watching for an echo (merged turns, captions, a stale
+/// transcript after sleep all read as "never came"), and this side knows.
+type Outcome = (String, &'static str, u64, Option<&'static str>);
+static OUTCOMES: LazyLock<Mutex<HashMap<String, Vec<Outcome>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn record(tab_id: &str, msg_id: &str, outcome: &'static str, why: Option<&'static str>) {
+    let now = super::now_ms();
+    let mut all = OUTCOMES.lock();
+    all.retain(|_, v| {
+        v.retain(|o| now.saturating_sub(o.2) < OUTCOME_KEEP_MS);
+        !v.is_empty()
+    });
+    all.entry(tab_id.to_string()).or_default().push((msg_id.to_string(), outcome, now, why));
+}
+
+/// A fresh id for a held send, unique even for two inside one millisecond.
+pub(crate) fn new_msg_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("m_{}_h{n}", super::now_ms())
+}
+
+/// `ChatDetail.held` (v0.19): what is still waiting for this tab, oldest first.
+pub(crate) fn held_for_tab(tab_id: &str) -> Vec<serde_json::Value> {
+    QUEUES
+        .lock()
+        .get(tab_id)
+        .map(|q| {
+            q.items
+                .iter()
+                .map(|(h, at)| serde_json::json!({ "msg_id": h.msg_id, "heldAt": at, "reason": "draft" }))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `ChatDetail.heldOutcomes` (v0.19): what became of this tab's held sends in the last hour.
+pub(crate) fn outcomes_for_tab(tab_id: &str) -> Vec<serde_json::Value> {
+    let now = super::now_ms();
+    OUTCOMES
+        .lock()
+        .get(tab_id)
+        .map(|v| {
+            v.iter()
+                .filter(|o| now.saturating_sub(o.2) < OUTCOME_KEEP_MS)
+                .map(|(id, outcome, at, why)| {
+                    let mut o = serde_json::json!({ "msg_id": id, "outcome": outcome, "at": at });
+                    if let Some(w) = why {
+                        o["why"] = serde_json::json!(w);
+                    }
+                    o
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// The human has text in this tab's agent input box (Claude only — the one box that parses).
 pub(crate) fn draft_in_box(app: &AppState, tab_id: &str) -> bool {
@@ -75,7 +139,7 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
         let Some(pty) = super::pty_for_tab(&app, &tab_id) else {
-            drop_all(&tab_id, "its terminal is gone");
+            drop_all(&tab_id, "its terminal is gone", "terminal_gone");
             return;
         };
         // Expire from the front: everything behind waited no longer than it.
@@ -86,6 +150,7 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
             while q.items.front().is_some_and(|(_, at)| now.saturating_sub(*at) > HOLD_MAX_MS) {
                 let (h, _) = q.items.pop_front().unwrap();
                 log::warn!("[maiLink] held {} for tab {tab_id} dropped: the draft stayed for 30 min", h.what);
+                record(&tab_id, &h.msg_id, "dropped", Some("expired"));
             }
             if q.items.is_empty() {
                 queues.remove(&tab_id);
@@ -124,18 +189,69 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
             super::inject_paths_then_text(&app, &pty, &held.paths, &held.text, true).await
         };
         match typed {
-            Ok(()) => log::info!("[maiLink] held {} for tab {tab_id} delivered", held.what),
-            Err(e) => log::warn!("[maiLink] held {} for tab {tab_id} failed to type: {e}", held.what),
+            Ok(()) => {
+                log::info!("[maiLink] held {} for tab {tab_id} delivered", held.what);
+                record(&tab_id, &held.msg_id, "typed", None);
+            }
+            Err(e) => {
+                log::warn!("[maiLink] held {} for tab {tab_id} failed to type: {e}", held.what);
+                record(&tab_id, &held.msg_id, "dropped", Some("type_failed"));
+            }
         }
         // The next one waits for Claude to take this one: until then the box holds its text and
         // reads as a draft, which is the ordering this wants.
     }
 }
 
-fn drop_all(tab_id: &str, why: &str) {
-    if let Some(q) = QUEUES.lock().remove(tab_id) {
-        for (h, _) in q.items {
-            log::warn!("[maiLink] held {} for tab {tab_id} dropped: {why}", h.what);
+fn drop_all(tab_id: &str, why: &str, code: &'static str) {
+    let Some(q) = QUEUES.lock().remove(tab_id) else { return };
+    for (h, _) in q.items {
+        log::warn!("[maiLink] held {} for tab {tab_id} dropped: {why}", h.what);
+        record(tab_id, &h.msg_id, "dropped", Some(code));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcomes_are_reported_per_tab_with_their_reason() {
+        record("tab-outcomes-a", "m_1_h0", "typed", None);
+        record("tab-outcomes-a", "m_2_h1", "dropped", Some("expired"));
+        record("tab-outcomes-b", "m_3_h2", "dropped", Some("terminal_gone"));
+        let a = outcomes_for_tab("tab-outcomes-a");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0]["msg_id"], "m_1_h0");
+        assert_eq!(a[0]["outcome"], "typed");
+        assert!(a[0].get("why").is_none());
+        assert_eq!(a[1]["why"], "expired");
+        assert_eq!(outcomes_for_tab("tab-outcomes-b").len(), 1);
+        assert!(outcomes_for_tab("tab-outcomes-none").is_empty());
+    }
+
+    #[test]
+    fn held_lists_what_is_waiting_oldest_first() {
+        {
+            let mut queues = QUEUES.lock();
+            let q = queues.entry("tab-held-a".into()).or_insert_with(|| Queue { items: VecDeque::new() });
+            for (id, at) in [("m_1_h0", 10), ("m_2_h1", 20)] {
+                q.items.push_back((Held { msg_id: id.into(), paths: vec![], text: "x".into(), what: "phone message" }, at));
+            }
         }
+        let held = held_for_tab("tab-held-a");
+        assert_eq!(held.len(), 2);
+        assert_eq!(held[0]["msg_id"], "m_1_h0");
+        assert_eq!(held[0]["heldAt"], 10);
+        assert_eq!(held[0]["reason"], "draft");
+        assert!(has_held("tab-held-a"));
+        assert!(held_for_tab("tab-held-none").is_empty());
+    }
+
+    #[test]
+    fn msg_ids_are_unique_within_a_millisecond() {
+        let a = new_msg_id();
+        let b = new_msg_id();
+        assert_ne!(a, b);
     }
 }

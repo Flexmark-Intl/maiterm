@@ -1306,8 +1306,9 @@ async fn post_message(
             paths
         };
         if body.submit && draft_hold::must_hold(&s.app, &tab_id) {
-            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { paths, text: body.text.clone(), what: "phone message" });
-            return Ok(Json(held_reply(woke)));
+            let msg_id = draft_hold::new_msg_id();
+            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths, text: body.text.clone(), what: "phone message" });
+            return Ok(Json(held_reply(msg_id, woke)));
         }
         inject_image_paths_and_text(&s.app, &pty, &paths, &body)
             .await
@@ -1320,8 +1321,9 @@ async fn post_message(
     // v0.19: a submitted message never rides on top of a human's draft (it would send the draft
     // with it) — it waits, in order, for the box to empty (`draft_hold.rs`).
     if body.submit && draft_hold::must_hold(&s.app, &tab_id) {
-        draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { paths: Vec::new(), text: body.text.clone(), what: "phone message" });
-        return Ok(Json(held_reply(woke)));
+        let msg_id = draft_hold::new_msg_id();
+        draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths: Vec::new(), text: body.text.clone(), what: "phone message" });
+        return Ok(Json(held_reply(msg_id, woke)));
     }
     inject_text(&s.app, &pty, &body.text, body.submit)
         .await
@@ -1333,9 +1335,10 @@ async fn post_message(
 
 /// `POST /message` held for a draft (v0.19): accepted, NOT typed yet. It is typed when the
 /// agent's input box on the desktop next reads empty, and dropped (logged) after 30 minutes or
-/// when the tab's terminal goes. The phone tells "delivered" by the turn's echo, as for a queued send.
-fn held_reply(woke: Option<&'static str>) -> Value {
-    json!({ "status": "held", "reason": "draft", "msg_id": format!("m_{}", now_ms()), "woke": woke,
+/// when the tab's terminal goes. Which of those happened is `ChatDetail.held` / `heldOutcomes`,
+/// keyed by this `msg_id`.
+fn held_reply(msg_id: String, woke: Option<&'static str>) -> Value {
+    json!({ "status": "held", "reason": "draft", "msg_id": msg_id, "woke": woke,
         "detail": "Waiting until your draft on the computer is sent or cleared." })
 }
 
@@ -5999,6 +6002,17 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     let scripts = follow_ups::waiting_for_tab(app, tab_id);
     detail["scriptsWaiting"] = json!(scripts.len());
     detail["scriptApprovals"] = json!(scripts);
+
+    // v0.19: phone sends held for a draft in the agent's box, and what became of recent ones —
+    // the phone can't tell typed from dropped by watching for an echo. Only when non-empty.
+    let held = draft_hold::held_for_tab(tab_id);
+    if !held.is_empty() {
+        detail["held"] = json!(held);
+    }
+    let outcomes = draft_hold::outcomes_for_tab(tab_id);
+    if !outcomes.is_empty() {
+        detail["heldOutcomes"] = json!(outcomes);
+    }
 
     // Messages typed while the agent was busy and NOT yet consumed. The phone renders these as
     // genuinely "queued" rather than a spinner, and it's the precondition for offering to pull one
