@@ -57,7 +57,8 @@ export function hostLabel(host: string): string {
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     if (w === '--') { dest ??= words[i + 1]; break; }
-    if (!w.startsWith('-') || w.length === 1) { dest ??= w; continue; }
+    // The first plain word is the destination; one after it starts a remote command.
+    if (!w.startsWith('-') || w.length === 1) { if (dest) break; dest = w; continue; }
     const flags = w.slice(1);
     for (let j = 0; j < flags.length; j++) {
       const ch = flags[j];

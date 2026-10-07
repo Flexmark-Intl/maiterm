@@ -34,8 +34,15 @@ mod remote;
 
 /// The ssh destination args of a live bridge tunnel to `host` (a tunnel's `host_key`): a remote
 /// script runs only over one, so the connection is maiTerm's own and already authenticated.
-fn tunnel_args(state: &AppState, host: &str) -> Option<String> {
-    state.ssh_tunnels.read().values().find(|t| t.host_key == host).map(|t| t.ssh_args.clone())
+/// Returned: the tunnel's own key (its ControlMaster socket is named by it) and the args to
+/// connect with — `connect_args`, never the tunnel's whole command line.
+fn tunnel_args(state: &AppState, host: &str) -> Option<(String, String)> {
+    state
+        .ssh_tunnels
+        .read()
+        .values()
+        .find(|t| connect_args(&t.host_key) == host)
+        .map(|t| (t.host_key.clone(), connect_args(&t.ssh_args)))
 }
 
 pub const MIN_EVERY_SECS: u32 = 15;
@@ -118,48 +125,8 @@ pub fn is_script_kind(kind: &str) -> bool {
 /// destination (`ews@nova -J bastion`), and "the last word that isn't an option" then named the
 /// JUMP host on a card approving a script on nova (review of dcf3545).
 pub fn host_label(host: &str) -> String {
-    let words: Vec<&str> = host.split_whitespace().collect();
-    let (mut dest, mut port, mut user): (Option<&str>, Option<&str>, Option<&str>) = (None, None, None);
-    let mut i = 0;
-    while i < words.len() {
-        let w = words[i];
-        if w == "--" {
-            dest = dest.or(words.get(i + 1).copied());
-            break;
-        }
-        match w.strip_prefix('-').filter(|f| !f.is_empty()) {
-            Some(flags) => {
-                // A cluster (`-xCp2222`): flags until one that takes an argument, which is the
-                // rest of the word or, if none, the next word.
-                for (j, ch) in flags.char_indices() {
-                    if !SSH_ARG_FLAGS.contains(ch) {
-                        continue;
-                    }
-                    let rest = &flags[j + ch.len_utf8()..];
-                    let arg = if rest.is_empty() {
-                        i += 1;
-                        words.get(i).copied()
-                    } else {
-                        Some(rest)
-                    };
-                    match (ch, arg) {
-                        ('p', Some(a)) => port = Some(a),
-                        ('l', Some(a)) => user = Some(a),
-                        ('o', Some(a)) => match a.split_once('=') {
-                            Some((k, v)) if k.eq_ignore_ascii_case("port") => port = Some(v),
-                            Some((k, v)) if k.eq_ignore_ascii_case("user") => user = Some(v),
-                            _ => {}
-                        },
-                        _ => {}
-                    }
-                    break;
-                }
-            }
-            None => dest = dest.or(Some(w)),
-        }
-        i += 1;
-    }
-    let Some(dest) = dest else { return host.to_string() };
+    let p = parse_ssh(host);
+    let (Some(dest), port, user) = (p.dest, p.port, p.user) else { return connect_args(host) };
     let dest = match user {
         Some(u) if !dest.contains('@') && !dest.contains("://") => format!("{u}@{dest}"),
         _ => dest.to_string(),
@@ -172,6 +139,86 @@ pub fn host_label(host: &str) -> String {
 
 /// ssh's options that take an argument (OpenSSH's getopt string).
 const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
+
+/// An ssh command line, read as ssh's getopt reads it.
+struct SshParse<'a> {
+    /// The words that say WHERE to connect — options and destination — without any remote
+    /// command after them, and without `-t`.
+    connect: Vec<&'a str>,
+    dest: Option<&'a str>,
+    port: Option<&'a str>,
+    user: Option<&'a str>,
+}
+
+fn parse_ssh(cmd: &str) -> SshParse<'_> {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let mut p = SshParse { connect: Vec::new(), dest: None, port: None, user: None };
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if w == "--" {
+            if p.dest.is_none() {
+                p.dest = words.get(i + 1).copied();
+                p.connect.extend(p.dest);
+            }
+            break;
+        }
+        let Some(flags) = w.strip_prefix('-').filter(|f| !f.is_empty()) else {
+            // The first plain word is the destination; one after it starts the remote command.
+            if p.dest.is_some() {
+                break;
+            }
+            p.dest = Some(w);
+            p.connect.push(w);
+            i += 1;
+            continue;
+        };
+        // A terminal is never wanted here: a run is fed on stdin.
+        if flags.chars().all(|c| c == 't') {
+            i += 1;
+            continue;
+        }
+        p.connect.push(w);
+        // A cluster (`-xCp2222`): flags until one that takes an argument, which is the rest of
+        // the word or, if none, the next word.
+        for (j, ch) in flags.char_indices() {
+            if !SSH_ARG_FLAGS.contains(ch) {
+                continue;
+            }
+            let rest = &flags[j + ch.len_utf8()..];
+            let arg = if rest.is_empty() {
+                i += 1;
+                let a = words.get(i).copied();
+                p.connect.extend(a);
+                a
+            } else {
+                Some(rest)
+            };
+            match (ch, arg) {
+                ('p', Some(a)) => p.port = Some(a),
+                ('l', Some(a)) => p.user = Some(a),
+                ('o', Some(a)) => match a.split_once('=') {
+                    Some((k, v)) if k.eq_ignore_ascii_case("port") => p.port = Some(v),
+                    Some((k, v)) if k.eq_ignore_ascii_case("user") => p.user = Some(v),
+                    _ => {}
+                },
+                _ => {}
+            }
+            break;
+        }
+        i += 1;
+    }
+    p
+}
+
+/// Where to connect, and nothing else: a tunnel's `host_key` can be an ssh command line read
+/// back from the process table, which for a session maiTerm started ends in maiTerm's own remote
+/// command — `export … MAITERM_AUTH=…; cd … && exec $SHELL -l`. That must never be stored with a
+/// follow-up (it is a credential, and the state file is on disk) nor have a script's `sh -s`
+/// appended to it. What `due.host` holds, and what a remote run's ssh is given.
+pub fn connect_args(key: &str) -> String {
+    parse_ssh(key).connect.join(" ")
+}
 
 /// A place for a human: `place` with the host's label.
 pub fn place_label(f: &FollowUp) -> Option<String> {
@@ -405,7 +452,7 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
 async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidate) {
     let outcome = match (&c.host, scripts_dir()) {
         (Some(host), _) => match tunnel_args(&state, host) {
-            Some(ssh_args) => remote::execute(&c, host, &ssh_args).await,
+            Some((tunnel_key, ssh_args)) => remote::execute(&c, &tunnel_key, &ssh_args).await,
             None => Outcome::Unreachable(format!(
                 "maiTerm has no connection to {} — it runs once an ssh tab to it is open",
                 host_label(host)
@@ -814,6 +861,13 @@ mod tests {
         assert_eq!(host_label("-o Port=2223 localhost"), "localhost (port 2223)");
         assert_eq!(host_label("-l ews -o ProxyJump=b nova"), "ews@nova");
         assert_eq!(host_label("-J bastion ews@nova"), "ews@nova");
+        // A key read back from the process table ends in maiTerm's own remote command, token and
+        // all: none of it is where to connect, and none of it may be kept.
+        let ps = "-t -o ControlMaster=no ews@nova export MAITERM_TAB_ID=t MAITERM_AUTH=secret; cd /srv && exec $SHELL -l";
+        assert_eq!(connect_args(ps), "-o ControlMaster=no ews@nova");
+        assert_eq!(host_label(ps), "ews@nova");
+        assert_eq!(connect_args("ews@nova -J bastion uptime"), "ews@nova -J bastion");
+        assert_eq!(connect_args("-x -C ews@nova"), "-x -C ews@nova");
         assert_eq!(host_label("nova"), "nova");
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());

@@ -1345,7 +1345,15 @@ pub struct RemoteScriptHome {
 
 #[tauri::command]
 pub fn follow_up_remote_home(state: State<'_, Arc<AppState>>, tab_id: String) -> RemoteScriptHome {
-    let host = state.ssh_tunnels.read().values().find(|t| t.tab_ids.contains(&tab_id)).map(|t| t.host_key.clone());
+    // Where to connect, never the tunnel's whole key: read back from the process table it can end
+    // in maiTerm's remote command, MAITERM_AUTH and all (`watch::connect_args`).
+    let host = state
+        .ssh_tunnels
+        .read()
+        .values()
+        .find(|t| t.tab_ids.contains(&tab_id))
+        .map(|t| crate::watch::connect_args(&t.host_key))
+        .filter(|h| !h.is_empty());
     let cwd = host.as_ref().and_then(|_| {
         let sessions = state.agent_sessions.read();
         let cwds: std::collections::HashSet<String> = sessions

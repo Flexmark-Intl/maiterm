@@ -157,6 +157,8 @@ pub(super) fn parse(stdout: &[u8], marker: &str, c: &Candidate, host: &str) -> O
     })
 }
 
+/// `host`: the tunnel's own key, which names its ControlMaster socket. `ssh_args`: where to
+/// connect, without any remote command (`connect_args`).
 pub(super) async fn execute(c: &Candidate, host: &str, ssh_args: &str) -> Outcome {
     let marker = format!("__MAITERM_WATCH_{}__", uuid::Uuid::new_v4().simple());
     let Some(input) = wrapper(c, &marker) else {

@@ -379,10 +379,13 @@ occluded webview is throttled when the screens sleep. One loop, every 5 s:
 waits on conditions on THAT machine, so its script runs there:
 
 - **Where.** At creation (`scriptHome` → `follow_up_remote_home`), a tab riding one of maiTerm's
-  own bridge tunnels — with ssh seen running in it right now — gets `due.host` = the tunnel's
-  `host_key` and `due.cwd`. The key is the ssh destination WITH its options (`-x -C ews@nova`):
-  it finds the connection and keys the approval, while everything a person or agent reads names
-  the destination alone (`host_label`, `hostLabel`: "ews@nova"). And `due.cwd` = the folder its agent registered from there (the remote
+  own bridge tunnels — with ssh seen running in it right now — gets `due.host` =
+  `connect_args(host_key)`: the ssh options and destination, read as ssh's getopt reads them, and
+  nothing after (`-x -C ews@nova`). A tunnel's own key can be an ssh command line read back from
+  the process table, which for a session maiTerm started ends in maiTerm's remote command —
+  `export … MAITERM_AUTH=…` — so it is never stored, and never given `sh -s` to append to. The
+  connect args find the tunnel and key the approval; everything a person or agent reads names the
+  destination (`host_label`, `hostLabel`: "ews@nova", with a port when there is one). And `due.cwd` = the folder its agent registered from there (the remote
   session's own `cwd`, from its SessionStart hook). No such folder, or two sessions naming
   different ones: refused, as locally.
 - **Its own kind, `remote_script`** (`watch::REMOTE_KIND`, `REMOTE_SCRIPT_KIND`), never `script`

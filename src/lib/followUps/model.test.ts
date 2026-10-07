@@ -154,6 +154,7 @@ describe('remote scripts', () => {
     expect(hostLabel('-xCp 2200 nova')).toBe('nova (port 2200)');
     expect(hostLabel('-o Port=2223 localhost')).toBe('localhost (port 2223)');
     expect(hostLabel('-l ews -o ProxyJump=b nova')).toBe('ews@nova');
+    expect(hostLabel('-t ews@nova export MAITERM_AUTH=x; cd /srv && exec $SHELL -l')).toBe('ews@nova');
   });
 
   it('are watch scripts in every respect but where they run', () => {
