@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import type { FollowUp } from '$lib/tauri/types';
 import {
-  resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary,
+  resolveCreate, isDue, isExpired, statusOf, envelope, durationText, clockText, whenText, badgeSummary, hostLabel,
+  isConditionKind,
   serviceOutcome, taskOutcome, needsApproval, MAX_PENDING, MAX_CREATED_PER_HOUR, type CreateContext,
 } from './model';
 
@@ -139,6 +140,21 @@ describe('envelope', () => {
     const text = envelope(fu({ text: '/compact' }), NOW + 20 * MIN);
     expect(text.startsWith('/')).toBe(false);
     expect(text.split('\n')[1]).toBe('/compact');
+  });
+});
+
+describe('remote scripts', () => {
+  it('name the machine without the ssh options, but keep a port', () => {
+    expect(hostLabel('-x -C ews@nova')).toBe('ews@nova');
+    expect(hostLabel('-p 2222 ews@nova')).toBe('ews@nova (port 2222)');
+    expect(hostLabel('-p2223 -i ~/.ssh/k localhost')).toBe('localhost (port 2223)');
+  });
+
+  it('are watch scripts in every respect but where they run', () => {
+    const f = fu({ due: { kind: 'remote_script', host: 'ews@nova', cwd: '/srv', script: 'exit 1', label: 'x' } });
+    expect(isConditionKind(f.due.kind)).toBe(true);
+    expect(needsApproval(f, false)).toBe(true);
+    expect(needsApproval(f, true)).toBe(false);
   });
 });
 

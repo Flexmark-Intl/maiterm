@@ -633,8 +633,8 @@ fn follow_up_when(due: &crate::state::workspace::FollowUpDue, unattended: bool) 
         "service_ready" => format!("when service {label} is ready"),
         "service_stopped" => format!("when service {label} stops"),
         "task_done" => format!("when task \u{201C}{label}\u{201D} ends"),
-        "script" if !due.approved && !unattended => format!("when your watch script \u{201C}{label}\u{201D} passes (waiting for your human to approve it)"),
-        "script" => format!("when your watch script \u{201C}{label}\u{201D} passes"),
+        k if crate::watch::is_script_kind(k) && !due.approved && !unattended => format!("when your watch script \u{201C}{label}\u{201D} passes (waiting for your human to approve it)"),
+        k if crate::watch::is_script_kind(k) => format!("when your watch script \u{201C}{label}\u{201D} passes"),
         other => other.to_string(),
     }
 }

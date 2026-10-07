@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 /// `needsApproval` (src/lib/followUps/model.ts), plus "not expired": an expired one will never run
 /// and the desktop card offers no approve for it either.
 fn awaits_approval(f: &FollowUp, unattended: bool, now_ms: i64) -> bool {
-    f.due.kind == "script"
+    crate::watch::is_script_kind(&f.due.kind)
         && f.due.met_at.is_none()
         && !f.due.approved
         && !unattended

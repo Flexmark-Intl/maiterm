@@ -1,7 +1,7 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
-import { hostLabel, needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
+import { hostLabel, isScriptKind, needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -1161,7 +1161,7 @@ function createClaudeCodeStore() {
       if (!r.ok) return { error: r.detail, reason: r.reason };
       const trigger = triggerText(r.followUp);
       logInfo(`follow-ups: tab ${scope.tab.id.slice(0, 8)} scheduled ${r.followUp.id.slice(0, 8)} ${trigger ?? `for ${r.followUp.due.at}`}`);
-      const script = r.followUp.due.kind === 'script';
+      const script = isScriptKind(r.followUp.due.kind);
       const awaiting = needsApproval(r.followUp, preferencesStore.followUpsScriptsUnattended);
       return {
         scheduled: true,

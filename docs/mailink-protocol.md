@@ -2335,6 +2335,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.17` | adds `POST /tasks/{id}/dismiss` |
 | `0.18` | adds `POST /chats/{tabId}/image` and `FileAsset.inline` / `source_key` |
 | `0.19` | adds `status:"held"` (`reason:"draft"`) to `POST /chats/{tabId}/message`, and `ChatDetail.held` / `heldOutcomes` |
+| `0.20` | `ScriptApproval.folder` reads `user@host:folder` for a script that runs on an ssh host, and adds `ScriptApproval.host` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

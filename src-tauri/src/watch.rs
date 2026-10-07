@@ -98,16 +98,35 @@ pub fn place(host: Option<&str>, cwd: &str) -> String {
     }
 }
 
+/// The kind of a script that runs on an ssh host. Its own kind, not `script` plus a `host`
+/// field: v3.1–3.2 run every `script` they hold, ignore a field they don't know, and would run a
+/// remote script on THIS computer in a folder of the same name — approved, or under the waiver.
+/// An unknown kind is one they never run (the reason `kind` is a string, not an enum).
+pub const REMOTE_KIND: &str = "remote_script";
+
+/// A watch script of either kind (§5.1).
+pub fn is_script_kind(kind: &str) -> bool {
+    kind == "script" || kind == REMOTE_KIND
+}
+
 /// A host for a human: the ssh destination without its options. A tunnel's `host_key` is the
 /// destination WITH them ("-x -C ews@nova") — what finds the connection, and what an approval is
 /// keyed by — but a person reads "ews@nova". The frontend twin is `hostLabel` (model.ts).
-pub fn host_label(host: &str) -> &str {
-    host.split_whitespace().filter(|t| !t.starts_with('-')).last().unwrap_or(host)
+/// A port stays: `localhost` behind two forwards is two machines, and the human must see which.
+pub fn host_label(host: &str) -> String {
+    let words: Vec<&str> = host.split_whitespace().collect();
+    let dest = words.iter().rev().find(|t| !t.starts_with('-')).copied().unwrap_or(host);
+    let port = words.windows(2).find(|w| w[0] == "-p").map(|w| w[1])
+        .or_else(|| words.iter().find_map(|t| t.strip_prefix("-p").filter(|p| !p.is_empty())));
+    match port {
+        Some(p) => format!("{dest} (port {p})"),
+        None => dest.to_string(),
+    }
 }
 
 /// A place for a human: `place` with the host's label.
 pub fn place_label(f: &FollowUp) -> Option<String> {
-    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(host_label), cwd))
+    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(host_label).as_deref(), cwd))
 }
 
 /// A script follow-up's place (`place`); None without a folder.
@@ -175,7 +194,17 @@ fn now_ms() -> i64 {
 }
 
 fn is_waiting_script(f: &FollowUp) -> bool {
-    f.due.kind == "script" && f.due.met_at.is_none()
+    is_script_kind(&f.due.kind) && f.due.met_at.is_none()
+}
+
+/// Where it runs, if its kind and host agree: a `remote_script` needs a host, a `script` must
+/// have none. Anything else runs nowhere — never "here, by default".
+fn run_host(f: &FollowUp) -> Option<Option<String>> {
+    match (f.due.kind == REMOTE_KIND, &f.due.host) {
+        (true, Some(h)) => Some(Some(h.clone())),
+        (false, None) => Some(None),
+        _ => None,
+    }
 }
 
 /// The scripts that should be running, and every script follow-up id there is at all (archived,
@@ -189,14 +218,14 @@ fn collect(app_data: &AppData) -> (Vec<Candidate>, HashSet<String>) {
     let mut ids = HashSet::new();
     for ws in app_data.windows.iter().flat_map(|w| w.workspaces.iter()) {
         for t in ws.archived_tabs.iter() {
-            ids.extend(t.follow_ups.iter().filter(|f| f.due.kind == "script").map(|f| f.id.clone()));
+            ids.extend(t.follow_ups.iter().filter(|f| is_script_kind(&f.due.kind)).map(|f| f.id.clone()));
         }
         // A parked workspace's tabs wait, like their deliveries do (§6.2); an exempt one's are
         // invisible to everything under the Overlord. Archived tabs wait for their restore.
         let skip_ws = ws.suspended || ws.overlord_exempt;
         for tab in ws.panes.iter().flat_map(|p| p.tabs.iter()) {
             for f in &tab.follow_ups {
-                if f.due.kind != "script" {
+                if !is_script_kind(&f.due.kind) {
                     continue;
                 }
                 ids.insert(f.id.clone());
@@ -205,7 +234,7 @@ fn collect(app_data: &AppData) -> (Vec<Candidate>, HashSet<String>) {
                 }
                 let expired = f.expires_at.as_deref().map(crate::mailink::transcript::rfc3339_to_ms)
                     .is_some_and(|t| t > 0 && t < now);
-                let (Some(script), Some(cwd)) = (&f.due.script, &f.due.cwd) else { continue };
+                let (Some(script), Some(cwd), Some(host)) = (&f.due.script, &f.due.cwd, run_host(f)) else { continue };
                 if expired {
                     continue;
                 }
@@ -214,7 +243,7 @@ fn collect(app_data: &AppData) -> (Vec<Candidate>, HashSet<String>) {
                     tab_id: tab.id.clone(),
                     script: script.clone(),
                     cwd: cwd.clone(),
-                    host: f.due.host.clone(),
+                    host,
                     every: Duration::from_secs(f.due.every_secs.unwrap_or(60).clamp(MIN_EVERY_SECS, MAX_EVERY_SECS) as u64),
                     timeout: Duration::from_secs(f.due.timeout_secs.unwrap_or(10).clamp(1, MAX_TIMEOUT_SECS) as u64),
                 });
@@ -672,8 +701,25 @@ mod tests {
         remember_approval(&mut d, &place(Some("ews@nova"), "/a"), "y");
         assert!(!is_approved(&d, "/a", "y"), "nor the other way");
         assert!(!is_approved(&d, &place(Some("ews@nova2"), "/a"), "y"));
+        // A remote script has its own kind, and runs only where kind and host agree.
+        let mut f = FollowUp {
+            id: "f".into(),
+            text: "t".into(),
+            due: crate::state::workspace::FollowUpDue { kind: "script".into(), ..Default::default() },
+            author: "agent".into(),
+            created_at: "2026-10-07T00:00:00Z".into(),
+            expires_at: None,
+        };
+        assert_eq!(run_host(&f), Some(None), "a script with no host runs here");
+        f.due.host = Some("ews@nova".into());
+        assert_eq!(run_host(&f), None, "a script with a host runs nowhere — never here by default");
+        f.due.kind = REMOTE_KIND.into();
+        assert_eq!(run_host(&f), Some(Some("ews@nova".into())));
+        f.due.host = None;
+        assert_eq!(run_host(&f), None, "a remote script with no host runs nowhere");
         assert_eq!(host_label("-x -C ews@nova"), "ews@nova");
-        assert_eq!(host_label("-p 2222 ews@nova"), "ews@nova");
+        assert_eq!(host_label("-p 2222 ews@nova"), "ews@nova (port 2222)");
+        assert_eq!(host_label("-p2223 -i ~/.ssh/k localhost"), "localhost (port 2223)");
         assert_eq!(host_label("nova"), "nova");
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());

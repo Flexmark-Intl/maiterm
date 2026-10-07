@@ -47,7 +47,12 @@ export type ResolvedScriptHome = { ok: true; cwd: string; host?: string } | { ok
  *  options ("-x -C ews@nova"): that finds the connection, but a person reads "ews@nova". The
  *  Rust twin is `watch::host_label`. */
 export function hostLabel(host: string): string {
-  return host.split(/\s+/).filter(t => t && !t.startsWith('-')).pop() ?? host;
+  const words = host.split(/\s+/).filter(Boolean);
+  const dest = [...words].reverse().find(t => !t.startsWith('-')) ?? host;
+  // A port stays: `localhost` behind two forwards is two machines, and the human must see which.
+  const i = words.indexOf('-p');
+  const port = i >= 0 ? words[i + 1] : words.find(t => t.startsWith('-p') && t.length > 2)?.slice(2);
+  return port ? `${dest} (port ${port})` : dest;
 }
 
 export type EventKind = 'service_ready' | 'service_stopped' | 'task_done';
@@ -89,12 +94,21 @@ export function isEventKind(kind: string): kind is EventKind {
 /** A follow-up that waits on a condition — an event or a watch script — and is due once `met_at`
  *  is set. Scripts are met in Rust (`watch.rs`); events by this window's store. */
 export function isConditionKind(kind: string): boolean {
-  return isEventKind(kind) || kind === 'script';
+  return isEventKind(kind) || isScriptKind(kind);
+}
+
+/** A script that runs on an ssh host has its OWN kind, so an older build — which runs every
+ *  `script` it holds and ignores `host` — never runs it here. `watch::REMOTE_KIND` in Rust. */
+export const REMOTE_SCRIPT_KIND = 'remote_script';
+
+/** A watch script of either kind (§5.1). */
+export function isScriptKind(kind: string): boolean {
+  return kind === 'script' || kind === REMOTE_SCRIPT_KIND;
 }
 
 /** A watch script still waiting for the human to say it may run. */
 export function needsApproval(f: FollowUp, unattended: boolean): boolean {
-  return f.due.kind === 'script' && !f.due.met_at && !f.due.approved && !unattended;
+  return isScriptKind(f.due.kind) && !f.due.met_at && !f.due.approved && !unattended;
 }
 
 function refuse(reason: string, detail: string): Resolved {
@@ -298,7 +312,7 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
     followUp: {
       id: ctx.newId(),
       text,
-      due: { kind: 'script', script, cwd: home.cwd, ...(home.host ? { host: home.host } : {}), every_secs: every, timeout_secs: timeout, label },
+      due: { kind: home.host ? REMOTE_SCRIPT_KIND : 'script', script, cwd: home.cwd, ...(home.host ? { host: home.host } : {}), every_secs: every, timeout_secs: timeout, label },
       author: ctx.author,
       created_at: new Date(ctx.now).toISOString(),
       expires_at: new Date(ctx.now + expiresMs).toISOString(),
@@ -370,7 +384,7 @@ function conditionText(f: FollowUp, tense: 'wait' | 'past' | 'when'): string {
     f.due.kind === 'service_ready' ? [`service \`${label}\``, 'to be ready', 'was ready', 'is ready']
     : f.due.kind === 'service_stopped' ? [`service \`${label}\``, 'to stop', 'stopped', 'stops']
     : f.due.kind === 'task_done' ? [`task “${label}”`, 'to end', 'ended', 'ends']
-    : f.due.kind === 'script' ? [`watch script “${label}”`, 'to pass', 'passed', 'passes']
+    : isScriptKind(f.due.kind) ? [`watch script “${label}”`, 'to pass', 'passed', 'passes']
     : [f.due.kind, '', '', ''];
   return `${what} ${tense === 'wait' ? wait : tense === 'past' ? past : when}`.trim();
 }
@@ -424,7 +438,7 @@ export function whenText(f: FollowUp, now: number): string {
   if (isConditionKind(f.due.kind) && !f.due.met_at) return `waiting for ${conditionText(f, 'wait')}`;
   const t = dueAt(f);
   if (t == null) return 'waiting';
-  if (f.due.kind === 'script') {
+  if (isScriptKind(f.due.kind)) {
     // A met script didn't necessarily PASS: Rust also meets one that broke, or that the human
     // declined, and the agent is told which (`watch.rs`, `DECLINED_OUTCOME`).
     const name = `watch script “${f.due.label ?? '?'}”`;
@@ -490,7 +504,7 @@ export function envelope(f: FollowUp, now: number, early = false): string {
   const due = dueAt(f) ?? now;
   const late = now - due;
   const event = isConditionKind(f.due.kind);
-  const script = f.due.kind === 'script';
+  const script = isScriptKind(f.due.kind);
   const when = early
     ? event ? 'delivered before it happened, at your human’s request' : 'delivered early, at your human’s request'
     : late > LATE_AFTER_MS ? `delivered ${durationText(late)} late` : 'delivered on time';

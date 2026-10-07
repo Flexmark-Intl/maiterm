@@ -1164,7 +1164,12 @@ pub fn add_tab_follow_up(
     // from what the frontend sent (§5.1), and never from the waiver preference, which the runner
     // reads live. The same answer for a follow-up put back after a delivery that didn't happen:
     // if a human approved it, its digest is in the set.
-    if follow_up.due.kind == "script" {
+    if crate::watch::is_script_kind(&follow_up.due.kind) {
+        // A host only on the remote kind, and the remote kind only with one: either half alone
+        // would run it on the wrong machine, or on none.
+        if (follow_up.due.kind == crate::watch::REMOTE_KIND) != follow_up.due.host.is_some() {
+            return Err("A watch script's kind and host disagree.".into());
+        }
         if follow_up.due.script.as_ref().is_some_and(|s| s.len() > crate::watch::MAX_SCRIPT_BYTES) {
             return Err(format!("A watch script can be at most {} KB.", crate::watch::MAX_SCRIPT_BYTES / 1024));
         }
@@ -1259,7 +1264,7 @@ pub(crate) const DECLINED_OUTCOME: &str =
 /// already APPROVED — answered elsewhere (the phone) first, and maybe already run, so "it never
 /// ran" could be false. The frontend's `whenText` matches this text's start (`DECLINED_PREFIX`).
 pub(crate) fn decline_follow_up_script(list: &mut [crate::state::workspace::FollowUp], id: &str) -> bool {
-    if !list.iter().any(|f| f.id == id && f.due.kind == "script" && !f.due.approved) {
+    if !list.iter().any(|f| f.id == id && crate::watch::is_script_kind(&f.due.kind) && !f.due.approved) {
         return false;
     }
     meet_follow_up(list, id, iso_now(), DECLINED_OUTCOME.to_string(), None)
@@ -1309,7 +1314,7 @@ pub fn approve_tab_follow_up_script(
         .ok_or("Tab not found")?;
     // Unmet only: one the phone just DECLINED is met, and is on its way to the agent as declined —
     // approving it would remember an approval for a script the human also refused.
-    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && f.due.kind == "script" && f.due.met_at.is_none()) else {
+    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && crate::watch::is_script_kind(&f.due.kind) && f.due.met_at.is_none()) else {
         return Ok(None);
     };
     let (Some(script), Some(place)) = (f.due.script.clone(), crate::watch::place_of(f)) else {

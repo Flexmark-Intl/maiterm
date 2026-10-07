@@ -46,7 +46,8 @@ export interface FollowUpDue {
   /** kind "script" (§5.1): the watch script, inline; the folder it runs in; its schedule. */
   script?: string | null;
   cwd?: string | null;
-  /** kind "script", ssh tabs: the host it runs on (`user@host`), `cwd` being a folder there. */
+  /** kind "remote_script" only (an ssh tab's): the tunnel key of the host it runs on, `cwd` being
+   *  a folder there. Its own kind so an older build, which ignores this field, never runs it here. */
   host?: string | null;
   every_secs?: number | null;
   timeout_secs?: number | null;

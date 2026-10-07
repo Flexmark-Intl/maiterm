@@ -385,6 +385,12 @@ waits on conditions on THAT machine, so its script runs there:
   the destination alone (`host_label`, `hostLabel`: "ews@nova"). And `due.cwd` = the folder its agent registered from there (the remote
   session's own `cwd`, from its SessionStart hook). No such folder, or two sessions naming
   different ones: refused, as locally.
+- **Its own kind, `remote_script`** (`watch::REMOTE_KIND`, `REMOTE_SCRIPT_KIND`), never `script`
+  plus a host. v3.1–3.2 run every `script` they hold and drop a field they don't know: a
+  downgrade would have run an approved remote script on THIS computer in a folder of the same
+  name (review of 6889cb9). An unknown kind is one an older build never runs. Everything else
+  treats both kinds alike (`is_script_kind`, `isScriptKind`); the runner runs one only where
+  kind and host agree (`run_host`), and `add_tab_follow_up` refuses a pair that doesn't.
 - **Approval is keyed by the place, not the folder:** `watch::place` = `user@host:folder` (a local
   place stays the bare folder, so earlier approvals still hold). Allowing a script in `~/app` here
   never allows it in `~/app` on a server. Every card says "runs on **user@host**, in folder"; the
