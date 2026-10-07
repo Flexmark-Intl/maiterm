@@ -718,8 +718,10 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
     // undeliverable burst re-notifies). Prevents a toast every 5s for held posts.
     let mut pending_notified: HashMap<String, i64> = HashMap::new();
     // Summon roots we already posted a "busy, queued" reply on / notified about —
-    // in-memory, so a restart re-notifies at most once. Pruned when a root binds.
-    let mut busy_replied: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // in-memory, so a restart re-notifies at most once. Pruned when a root binds. Keyed by
+    // REASON too: a root held first for a draft, then for capacity, must still get the capacity
+    // reply — once per root alone let the first reason silence every later one.
+    let mut busy_replied: std::collections::HashSet<(String, &'static str)> = std::collections::HashSet::new();
     let mut summon_notified: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut tick_no: u64 = 0;
 
@@ -1209,7 +1211,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                             );
                             break;
                         }
-                        if busy_replied.insert(root.clone()) {
+                        if busy_replied.insert((root.clone(), reason)) {
                             if reason == "at_capacity" {
                                 let _ = client
                                     .create_post(&ch.id, &root, BUSY_REPLY_MSG, &[])
@@ -1243,7 +1245,7 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                     .await
                     {
                         Ok(()) => {
-                            busy_replied.remove(&root);
+                            busy_replied.retain(|(r, _)| r != &root);
                             injected_tabs.insert(tab_id.clone());
                             emit_bindings_changed(&app_handle, &app, &tab_id);
                             let _ = app_handle.emit(
