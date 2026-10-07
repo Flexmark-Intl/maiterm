@@ -4,6 +4,15 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.19 changelog** (2026-10-07). Additive: **`POST /chats/{tabId}/message`** can answer
+> `{status:"held", reason:"draft", msg_id, woke, detail}` — accepted but NOT typed yet, because
+> the human has a half-written draft in the agent's input box on the computer (Claude only, read
+> off the screen), and the message's Enter would send the draft with it. maiTerm types it, in
+> order, once the box is empty again (the draft was sent or cleared); a later message to the same
+> tab waits behind it. Dropped (logged) after 30 minutes or if the tab's terminal goes. Show it
+> as waiting ("until your draft on the computer is sent or cleared"), and treat its turn's echo
+> as delivery, as for a queued send. `submit:false` messages are never held.
+>
 > **v0.18 changelog** (2026-10-05). Additive: **`POST /chats/{tabId}/image`** `{path}` (§4.1) —
 > an image an agent showed by its path in Markdown is fetched for the phone, which drew a broken
 > image (the path is on the Mac, or on the SSH host). Answers a `FileAsset` with `inline: true`;
@@ -465,7 +474,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `GET  /assets/{assetId}` | The bytes | → the file. `Accept-Ranges: bytes`; honours `Range` with `206` + `Content-Range`, `416` for a start past the end. `Content-Type` from the name, `Content-Disposition: attachment` with both `filename=` and `filename*=`. `404` when unknown OR evicted — but the descriptor's `available` already said so, so never discover it here |
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
 | `GET  /chats/{tabId}/context?lines=N` | Distilled plain-text context | → `{text, truncated}` |
-| `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"unreachable", reason, detail}` |
+| `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"held", reason:"draft", msg_id, woke, detail}` (v0.19: typed once the human's draft in the agent's box is sent or cleared) \| `{status:"unreachable", reason, detail}` |
 | `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/keys` | Press named keys in the tab's terminal (v0.12): the escape hatch for a screen nobody has taught maiTerm to read. Real key sequences, never a paste; arrows follow the terminal's cursor-key mode; keys go in ~40 ms apart so a lone `esc` can't merge with the next key into an Alt chord. Works on an unregistered tab | `{keys: string[]}` from `up down left right enter esc tab space backspace` (1–16) → `{ok:true}`. `400` for an unknown name, an empty list or more than 16, with NOTHING sent; `404` not designated; `409` no terminal |
@@ -2298,6 +2307,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.16` | adds doorbell kinds `ask` (a new task question) and `script` (a new watch script to allow), also in `/push-prefs` `kinds` |
 | `0.17` | adds `POST /tasks/{id}/dismiss` |
 | `0.18` | adds `POST /chats/{tabId}/image` and `FileAsset.inline` / `source_key` |
+| `0.19` | adds `status:"held"` (`reason:"draft"`) to `POST /chats/{tabId}/message` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

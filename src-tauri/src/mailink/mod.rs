@@ -46,6 +46,7 @@ pub(crate) mod tasks;
 pub(crate) mod board;
 pub(crate) mod follow_ups;
 pub(crate) mod inline_image;
+pub(crate) mod draft_hold;
 pub(crate) mod overlord;
 pub(crate) mod rpc;
 pub(crate) mod transcript;
@@ -517,7 +518,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.18";
+const PROTOCOL_VERSION: &str = "0.19";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1304,6 +1305,10 @@ async fn post_message(
             }
             paths
         };
+        if body.submit && draft_hold::must_hold(&s.app, &tab_id) {
+            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { paths, text: body.text.clone(), what: "phone message" });
+            return Ok(Json(held_reply(woke)));
+        }
         inject_image_paths_and_text(&s.app, &pty, &paths, &body)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1312,12 +1317,26 @@ async fn post_message(
         ));
     }
 
+    // v0.19: a submitted message never rides on top of a human's draft (it would send the draft
+    // with it) — it waits, in order, for the box to empty (`draft_hold.rs`).
+    if body.submit && draft_hold::must_hold(&s.app, &tab_id) {
+        draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { paths: Vec::new(), text: body.text.clone(), what: "phone message" });
+        return Ok(Json(held_reply(woke)));
+    }
     inject_text(&s.app, &pty, &body.text, body.submit)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(
         json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }),
     ))
+}
+
+/// `POST /message` held for a draft (v0.19): accepted, NOT typed yet. It is typed when the
+/// agent's input box on the desktop next reads empty, and dropped (logged) after 30 minutes or
+/// when the tab's terminal goes. The phone tells "delivered" by the turn's echo, as for a queued send.
+fn held_reply(woke: Option<&'static str>) -> Value {
+    json!({ "status": "held", "reason": "draft", "msg_id": format!("m_{}", now_ms()), "woke": woke,
+        "detail": "Waiting until your draft on the computer is sent or cleared." })
 }
 
 /// Bring a tab to where typing a message into it is safe, or say why it can't be. `Ok` carries

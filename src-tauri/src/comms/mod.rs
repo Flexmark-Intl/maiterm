@@ -509,6 +509,12 @@ fn injection_blocked_by_prompt(app: &Arc<AppState>, tab_id: &str) -> Option<&'st
     if matches!(session.state, AgentSessionState::WaitingPermission) {
         return Some("a permission prompt is open in that tab");
     }
+    drop(sessions);
+    // The pickup's CR would submit the human's half-typed draft along with it. Clears itself
+    // when they send or clear it, like a prompt (mailink `draft_hold`).
+    if crate::mailink::draft_hold::draft_in_box(app, tab_id) {
+        return Some("the human has a draft in that agent's input box");
+    }
     None
 }
 

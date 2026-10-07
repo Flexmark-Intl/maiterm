@@ -4,7 +4,7 @@ import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
 import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
-import { trustDialogOpen } from '$lib/tauri/commands';
+import { agentInputBox, trustDialogOpen } from '$lib/tauri/commands';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
 /**
@@ -54,7 +54,15 @@ export async function injectPrompt(tabId: string, text: string, beforePaste?: ()
 }
 
 export const agentDelivery = createDeliveryController({
-  inject: injectPrompt,
+  // A peer's message is held (queued; the drain retries) while the human has a draft in a
+  // Claude agent's input box: its CR would submit the draft along with it. Read off the screen,
+  // so only Claude's box counts — another runtime's doesn't parse ('unknown').
+  inject: async (tabId, text, beforePaste) => {
+    if (workspacesStore.getTabRuntime(tabId) === 'claude' && (await agentInputBox(tabId).catch(() => 'unknown')) === 'has_text') {
+      return false;
+    }
+    return injectPrompt(tabId, text, beforePaste);
+  },
   liveState: (tabId) => !!claudeStateStore.getState(tabId),
   awaitingHuman: (tabId) => {
     const st = claudeStateStore.getState(tabId);
