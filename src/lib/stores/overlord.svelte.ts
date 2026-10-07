@@ -1034,6 +1034,8 @@ function createOverlordStore() {
       // State can move during the liveness round trip.
       if (mappedState(tabId) !== 'idle') return false;
       if (Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) < 1500) return false;
+      // An idle agent is exactly where the human leaves a half-typed next message.
+      if (!(await noDraft(tabId, true))) return false;
       try {
         await bracketedPasteSubmit(inst.ptyId, text);
         return true;
@@ -1395,14 +1397,35 @@ function createOverlordStore() {
     return serializeNotice(tabId, async () => {
       if (!typeable()) return false;
       // The hook state outlives an agent killed without a Stop (OOM, kill -9): CR at a shell
-      // runs the answer as a command. Ask the process, as noticeToTab does…
+      // runs the answer as a command. Ask the process, as noticeToTab does. NOT closed over ssh:
+      // there "ssh is in the foreground" counts as live, and a remote agent's last frame (an
+      // empty box) can stay on screen above the shell prompt that replaced it — the same gap
+      // noticeToTab and follow-ups have (followUps `holdReason`).
       if (!(await hasLiveRepl(tabId)) || !typeable()) return false;
-      // …and the screen, last, since over ssh "ssh is in the foreground" counts as live: a dead
-      // remote agent leaves a shell prompt, not an empty Claude box, at the bottom.
-      if ((await commands.agentInputBox(tabId).catch(() => 'unknown')) !== 'empty') return false;
+      if (!(await noDraft(tabId, false))) return false;
       const r = await commands.sendTabMessage(tabId, text).catch(() => null);
       return r?.status === 'delivered';
     });
+  }
+
+  /**
+   * Nothing of the human's would be submitted along with what is typed next: the agent's input
+   * box READ off the screen is empty (Claude; other runtimes' boxes don't parse, so they are
+   * judged by keystrokes alone), and nobody has typed in the last 2 s — a keystroke that recent
+   * may not have echoed into the box yet (the follow-ups rule, docs/follow-ups.md §6.1).
+   * Re-checks the keystrokes after the read, which is an IPC round trip.
+   *
+   * `unknownOk`: a Claude box that doesn't parse (mid-redraw) falls back to the keystrokes, as
+   * follow-ups do — the idle notices' rule. Mid-turn typing demands a box that reads empty.
+   */
+  async function noDraft(tabId: string, unknownOk: boolean): Promise<boolean> {
+    const keys = terminalsStore.getLastTakeoverInputAt(tabId);
+    if (keys !== undefined && Date.now() - keys < 2000) return false;
+    if (workspacesStore.getTabRuntime(tabId) === 'claude') {
+      const box = await commands.agentInputBox(tabId).catch(() => 'unknown' as const);
+      if (box === 'has_text' || (box === 'unknown' && !unknownOk)) return false;
+    }
+    return terminalsStore.getLastTakeoverInputAt(tabId) === keys;
   }
 
   /**
