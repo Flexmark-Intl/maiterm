@@ -180,24 +180,38 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
         if super::trust_dialog_open(&app, &tab_id) {
             continue;
         }
-        let Some((held, _)) = QUEUES.lock().get_mut(&tab_id).and_then(|q| q.items.pop_front()) else {
+        // Typed from a COPY, and taken off the queue only when its outcome is recorded: a phone
+        // reading ChatDetail mid-typing (up to ~1 s, more with images) must still find it in
+        // `held`, not in neither list — which reads as "never delivered". Only this worker pops,
+        // and `hold` appends at the back, so the front is still this item afterwards.
+        let Some((msg_id, paths, text, what)) = QUEUES
+            .lock()
+            .get(&tab_id)
+            .and_then(|q| q.items.front())
+            .map(|(h, _)| (h.msg_id.clone(), h.paths.clone(), h.text.clone(), h.what))
+        else {
             continue;
         };
-        let typed = if held.paths.is_empty() {
-            super::inject_text(&app, &pty, &held.text, true).await
+        let typed = if paths.is_empty() {
+            super::inject_text(&app, &pty, &text, true).await
         } else {
-            super::inject_paths_then_text(&app, &pty, &held.paths, &held.text, true).await
+            super::inject_paths_then_text(&app, &pty, &paths, &text, true).await
         };
+        let mut queues = QUEUES.lock();
+        if let Some(q) = queues.get_mut(&tab_id) {
+            q.items.pop_front();
+        }
         match typed {
             Ok(()) => {
-                log::info!("[maiLink] held {} for tab {tab_id} delivered", held.what);
-                record(&tab_id, &held.msg_id, "typed", None);
+                log::info!("[maiLink] held {what} for tab {tab_id} delivered");
+                record(&tab_id, &msg_id, "typed", None);
             }
             Err(e) => {
-                log::warn!("[maiLink] held {} for tab {tab_id} failed to type: {e}", held.what);
-                record(&tab_id, &held.msg_id, "dropped", Some("type_failed"));
+                log::warn!("[maiLink] held {what} for tab {tab_id} failed to type: {e}");
+                record(&tab_id, &msg_id, "dropped", Some("type_failed"));
             }
         }
+        drop(queues);
         // The next one waits for Claude to take this one: until then the box holds its text and
         // reads as a draft, which is the ordering this wants.
     }

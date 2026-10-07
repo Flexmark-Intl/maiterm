@@ -724,7 +724,10 @@ interface ChatDetail extends Chat {
                             // 0.19: what became of this tab's held sends in the last hour. "typed"
                             //   = ordinary pending-until-echo from here; "dropped" = give the words
                             //   back. A held msg_id in NEITHER list means maiTerm restarted (holds
-                            //   and outcomes are in memory) or over an hour passed: not delivered.
+                            //   and outcomes are in memory), the tab was reloaded or closed (its
+                            //   outcome is under the old tab id), or over an hour passed: not
+                            //   delivered. A send being typed stays in `held` until its outcome
+                            //   is recorded, so it is never briefly in neither.
                             //   Read the chat again to see these move; no WS event carries them.
   queued?: { text: string; queuedAt: number }[];
                             // messages typed while the agent was BUSY and not yet consumed, oldest
