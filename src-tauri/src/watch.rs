@@ -98,6 +98,18 @@ pub fn place(host: Option<&str>, cwd: &str) -> String {
     }
 }
 
+/// A host for a human: the ssh destination without its options. A tunnel's `host_key` is the
+/// destination WITH them ("-x -C ews@nova") — what finds the connection, and what an approval is
+/// keyed by — but a person reads "ews@nova". The frontend twin is `hostLabel` (model.ts).
+pub fn host_label(host: &str) -> &str {
+    host.split_whitespace().filter(|t| !t.starts_with('-')).last().unwrap_or(host)
+}
+
+/// A place for a human: `place` with the host's label.
+pub fn place_label(f: &FollowUp) -> Option<String> {
+    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref().map(host_label), cwd))
+}
+
 /// A script follow-up's place (`place`); None without a folder.
 pub fn place_of(f: &FollowUp) -> Option<String> {
     f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref(), cwd))
@@ -279,7 +291,10 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
     let outcome = match (&c.host, scripts_dir()) {
         (Some(host), _) => match tunnel_args(&state, host) {
             Some(ssh_args) => remote::execute(&c, host, &ssh_args).await,
-            None => Outcome::Unreachable(format!("maiTerm has no connection to {host} — it runs once an ssh tab to it is open")),
+            None => Outcome::Unreachable(format!(
+                "maiTerm has no connection to {} — it runs once an ssh tab to it is open",
+                host_label(host)
+            )),
         },
         (None, Some(dir)) => execute(&c, &dir).await,
         (None, None) => Outcome::Broken("maiTerm has no data folder to run it from".into()),
@@ -657,6 +672,9 @@ mod tests {
         remember_approval(&mut d, &place(Some("ews@nova"), "/a"), "y");
         assert!(!is_approved(&d, "/a", "y"), "nor the other way");
         assert!(!is_approved(&d, &place(Some("ews@nova2"), "/a"), "y"));
+        assert_eq!(host_label("-x -C ews@nova"), "ews@nova");
+        assert_eq!(host_label("-p 2222 ews@nova"), "ews@nova");
+        assert_eq!(host_label("nova"), "nova");
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());
         }

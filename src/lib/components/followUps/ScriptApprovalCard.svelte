@@ -9,7 +9,7 @@
 -->
 <script lang="ts">
   import { followUpsStore } from '$lib/stores/followUps.svelte';
-  import { durationText } from '$lib/followUps/model';
+  import { durationText, hostLabel } from '$lib/followUps/model';
   import type { FollowUp } from '$lib/tauri/types';
 
   interface Props {
@@ -93,7 +93,7 @@
     <pre>{f.due.script}</pre>
     <!-- Everything the approval covers: the machine and folder, the run limit, and how much script
          there is (so a script padded past the screen can't pass for a short one). -->
-    <div class="where">{#if f.due.host}runs on <strong class="host">{f.due.host}</strong>, {/if}in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run · {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters</div>
+    <div class="where">{#if f.due.host}runs on <strong class="host">{hostLabel(f.due.host)}</strong>{', '}{/if}in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run · {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters</div>
   </figure>
 
   <details class="then">

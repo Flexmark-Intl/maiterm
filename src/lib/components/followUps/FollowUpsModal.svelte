@@ -9,7 +9,7 @@
    *  open by default, that form read as the next step after approving a script. */
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
-  import { whenText, durationText } from '$lib/followUps/model';
+  import { whenText, durationText, hostLabel } from '$lib/followUps/model';
   import * as commands from '$lib/tauri/commands';
   import type { WatchStatus } from '$lib/tauri/types';
   import ScriptApprovalCard from './ScriptApprovalCard.svelte';
@@ -202,7 +202,7 @@
                         {f.due.met_at ? 'Watch script' : `Watch script, every ${secsText(f.due.every_secs ?? 60)} · ${runText(v.id)}`}
                       </summary>
                       <pre>{f.due.script}</pre>
-                      <div class="where">{#if f.due.host}on {f.due.host}, {/if}in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run</div>
+                      <div class="where">{#if f.due.host}on {hostLabel(f.due.host)}{', '}{/if}in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run</div>
                     </details>
                   {/if}
                   <div class="meta">

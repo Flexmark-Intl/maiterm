@@ -115,8 +115,8 @@ fn to_json(f: &FollowUp) -> Value {
         "script": f.due.script.as_deref().unwrap_or(""),
         // Where it runs, whole: an ssh tab's is `user@host:folder`, so a phone that knows nothing
         // of `host` still shows the machine it would approve a script on.
-        "folder": crate::watch::place_of(f).unwrap_or_default(),
-        "host": f.due.host,
+        "folder": crate::watch::place_label(f).unwrap_or_default(),
+        "host": f.due.host.as_deref().map(crate::watch::host_label),
         "everySecs": every_secs(f),
         "timeoutSecs": timeout_secs(f),
         "message": f.text,

@@ -380,7 +380,9 @@ waits on conditions on THAT machine, so its script runs there:
 
 - **Where.** At creation (`scriptHome` → `follow_up_remote_home`), a tab riding one of maiTerm's
   own bridge tunnels — with ssh seen running in it right now — gets `due.host` = the tunnel's
-  `host_key` (`user@host`) and `due.cwd` = the folder its agent registered from there (the remote
+  `host_key` and `due.cwd`. The key is the ssh destination WITH its options (`-x -C ews@nova`):
+  it finds the connection and keys the approval, while everything a person or agent reads names
+  the destination alone (`host_label`, `hostLabel`: "ews@nova"). And `due.cwd` = the folder its agent registered from there (the remote
   session's own `cwd`, from its SessionStart hook). No such folder, or two sessions naming
   different ones: refused, as locally.
 - **Approval is keyed by the place, not the folder:** `watch::place` = `user@host:folder` (a local

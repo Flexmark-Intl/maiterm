@@ -182,6 +182,8 @@ pub(super) async fn execute(c: &Candidate, host: &str, ssh_args: &str) -> Outcom
         let _ = stdin.write_all(input.as_bytes()).await;
         // Dropped here: EOF ends `sh -s`'s input.
     }
+    // From here on `host` is only for people: the key found the connection above.
+    let host = super::host_label(host);
     let limit = c.timeout + Duration::from_secs(SSH_SLACK_SECS);
     let output = match tokio::time::timeout(limit, child.wait_with_output()).await {
         Ok(Ok(o)) => o,

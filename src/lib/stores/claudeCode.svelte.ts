@@ -1,7 +1,7 @@
 import type { ClaudeCodeToolRequest, DiffContext, Workspace, Pane, Tab, Task, TaskBlocker, TaskStatus, Service, ServiceRestart } from '$lib/tauri/types';
 import { stackStore, type ServiceRuntime } from '$lib/stores/stack.svelte';
 import { followUpsStore } from '$lib/stores/followUps.svelte';
-import { needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
+import { hostLabel, needsApproval, triggerText, type CreateArgs } from '$lib/followUps/model';
 import * as commands from '$lib/tauri/commands';
 import { workspacesStore, navigateToTab } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -1167,7 +1167,7 @@ function createClaudeCodeStore() {
         scheduled: true,
         id: r.followUp.id,
         ...(trigger ? { trigger } : { due_at: r.followUp.due.at }),
-        ...(script ? { approval: awaiting ? 'waiting_for_human' : 'approved', runs_in: r.followUp.due.cwd, ...(r.followUp.due.host ? { runs_on: r.followUp.due.host } : {}) } : {}),
+        ...(script ? { approval: awaiting ? 'waiting_for_human' : 'approved', runs_in: r.followUp.due.cwd, ...(r.followUp.due.host ? { runs_on: hostLabel(r.followUp.due.host) } : {}) } : {}),
         expires_at: r.followUp.expires_at ?? null,
         note: awaiting
           ? 'Your human has been asked to approve the script; it does not run until they do. Carry on with other work, or end your turn — you are not woken until it passes. Cancel with cancelFollowUp if it stops mattering.'

@@ -43,10 +43,11 @@ const SCRIPT_LABEL_CHARS = 80;
 /** `host`: an ssh tab's bridged host, `cwd` then a folder there; absent for this computer. */
 export type ResolvedScriptHome = { ok: true; cwd: string; host?: string } | { ok: false; reason: string; detail: string };
 
-/** Where a script runs, for a human: "~/repo", or "ews@nova:/srv/app" — `watch::place` in Rust. */
-export function scriptPlace(f: FollowUp): string {
-  const cwd = f.due.cwd ?? '';
-  return f.due.host ? `${f.due.host}:${cwd}` : cwd;
+/** A host for a human. `due.host` is the tunnel's key, which is the ssh destination WITH its
+ *  options ("-x -C ews@nova"): that finds the connection, but a person reads "ews@nova". The
+ *  Rust twin is `watch::host_label`. */
+export function hostLabel(host: string): string {
+  return host.split(/\s+/).filter(t => t && !t.startsWith('-')).pop() ?? host;
 }
 
 export type EventKind = 'service_ready' | 'service_stopped' | 'task_done';
