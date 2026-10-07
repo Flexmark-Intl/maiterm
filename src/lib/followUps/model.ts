@@ -47,13 +47,41 @@ export type ResolvedScriptHome = { ok: true; cwd: string; host?: string } | { ok
  *  options ("-x -C ews@nova"): that finds the connection, but a person reads "ews@nova". The
  *  Rust twin is `watch::host_label`. */
 export function hostLabel(host: string): string {
+  // Parsed as ssh's getopt reads it: options may follow the destination (`ews@nova -J bastion`),
+  // and guessing by position named the jump host (review of dcf3545). A port stays: `localhost`
+  // behind two forwards is two machines, and the human must see which.
   const words = host.split(/\s+/).filter(Boolean);
-  const dest = [...words].reverse().find(t => !t.startsWith('-')) ?? host;
-  // A port stays: `localhost` behind two forwards is two machines, and the human must see which.
-  const i = words.indexOf('-p');
-  const port = i >= 0 ? words[i + 1] : words.find(t => t.startsWith('-p') && t.length > 2)?.slice(2);
-  return port ? `${dest} (port ${port})` : dest;
+  let dest: string | undefined;
+  let port: string | undefined;
+  let user: string | undefined;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (w === '--') { dest ??= words[i + 1]; break; }
+    if (!w.startsWith('-') || w.length === 1) { dest ??= w; continue; }
+    const flags = w.slice(1);
+    for (let j = 0; j < flags.length; j++) {
+      const ch = flags[j];
+      if (!SSH_ARG_FLAGS.includes(ch)) continue;
+      const rest = flags.slice(j + 1);
+      const arg = rest || words[++i];
+      if (arg !== undefined) {
+        const eq = arg.indexOf('=');
+        const [k, v] = eq >= 0 ? [arg.slice(0, eq).toLowerCase(), arg.slice(eq + 1)] : ['', ''];
+        if (ch === 'p') port = arg;
+        else if (ch === 'l') user = arg;
+        else if (ch === 'o' && k === 'port') port = v;
+        else if (ch === 'o' && k === 'user') user = v;
+      }
+      break;
+    }
+  }
+  if (!dest) return host;
+  const shown = user && !dest.includes('@') && !dest.includes('://') ? `${user}@${dest}` : dest;
+  return port ? `${shown} (port ${port})` : shown;
 }
+
+/** ssh's options that take an argument (OpenSSH's getopt string) — `SSH_ARG_FLAGS` in Rust. */
+const SSH_ARG_FLAGS = 'bceilmopBDEFIJLOPQRSwW';
 
 export type EventKind = 'service_ready' | 'service_stopped' | 'task_done';
 
@@ -108,7 +136,14 @@ export function isScriptKind(kind: string): boolean {
 
 /** A watch script still waiting for the human to say it may run. */
 export function needsApproval(f: FollowUp, unattended: boolean): boolean {
-  return isScriptKind(f.due.kind) && !f.due.met_at && !f.due.approved && !unattended;
+  return isScriptKind(f.due.kind) && kindHostAgree(f) && !f.due.met_at && !f.due.approved && !unattended;
+}
+
+/** A remote script has a host and a local one none. One that disagrees (an older build saved it
+ *  and dropped the host) runs nowhere and is never asked about: its card would show a remote
+ *  folder as if it were here. Rust settles it (`watch::run_host`). */
+export function kindHostAgree(f: FollowUp): boolean {
+  return (f.due.kind === REMOTE_SCRIPT_KIND) === !!f.due.host;
 }
 
 function refuse(reason: string, detail: string): Resolved {

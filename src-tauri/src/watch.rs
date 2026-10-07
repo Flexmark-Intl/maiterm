@@ -113,16 +113,65 @@ pub fn is_script_kind(kind: &str) -> bool {
 /// destination WITH them ("-x -C ews@nova") — what finds the connection, and what an approval is
 /// keyed by — but a person reads "ews@nova". The frontend twin is `hostLabel` (model.ts).
 /// A port stays: `localhost` behind two forwards is two machines, and the human must see which.
+///
+/// Parsed the way ssh's own getopt reads it, never guessed by position: options may follow the
+/// destination (`ews@nova -J bastion`), and "the last word that isn't an option" then named the
+/// JUMP host on a card approving a script on nova (review of dcf3545).
 pub fn host_label(host: &str) -> String {
     let words: Vec<&str> = host.split_whitespace().collect();
-    let dest = words.iter().rev().find(|t| !t.starts_with('-')).copied().unwrap_or(host);
-    let port = words.windows(2).find(|w| w[0] == "-p").map(|w| w[1])
-        .or_else(|| words.iter().find_map(|t| t.strip_prefix("-p").filter(|p| !p.is_empty())));
+    let (mut dest, mut port, mut user): (Option<&str>, Option<&str>, Option<&str>) = (None, None, None);
+    let mut i = 0;
+    while i < words.len() {
+        let w = words[i];
+        if w == "--" {
+            dest = dest.or(words.get(i + 1).copied());
+            break;
+        }
+        match w.strip_prefix('-').filter(|f| !f.is_empty()) {
+            Some(flags) => {
+                // A cluster (`-xCp2222`): flags until one that takes an argument, which is the
+                // rest of the word or, if none, the next word.
+                for (j, ch) in flags.char_indices() {
+                    if !SSH_ARG_FLAGS.contains(ch) {
+                        continue;
+                    }
+                    let rest = &flags[j + ch.len_utf8()..];
+                    let arg = if rest.is_empty() {
+                        i += 1;
+                        words.get(i).copied()
+                    } else {
+                        Some(rest)
+                    };
+                    match (ch, arg) {
+                        ('p', Some(a)) => port = Some(a),
+                        ('l', Some(a)) => user = Some(a),
+                        ('o', Some(a)) => match a.split_once('=') {
+                            Some((k, v)) if k.eq_ignore_ascii_case("port") => port = Some(v),
+                            Some((k, v)) if k.eq_ignore_ascii_case("user") => user = Some(v),
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                    break;
+                }
+            }
+            None => dest = dest.or(Some(w)),
+        }
+        i += 1;
+    }
+    let Some(dest) = dest else { return host.to_string() };
+    let dest = match user {
+        Some(u) if !dest.contains('@') && !dest.contains("://") => format!("{u}@{dest}"),
+        _ => dest.to_string(),
+    };
     match port {
         Some(p) => format!("{dest} (port {p})"),
-        None => dest.to_string(),
+        None => dest,
     }
 }
+
+/// ssh's options that take an argument (OpenSSH's getopt string).
+const SSH_ARG_FLAGS: &str = "bceilmopBDEFIJLOPQRSwW";
 
 /// A place for a human: `place` with the host's label.
 pub fn place_label(f: &FollowUp) -> Option<String> {
@@ -196,6 +245,16 @@ fn now_ms() -> i64 {
 fn is_waiting_script(f: &FollowUp) -> bool {
     is_script_kind(&f.due.kind) && f.due.met_at.is_none()
 }
+
+/// A `remote_script` has a host and a `script` none. One that disagrees — an older build saved a
+/// remote script and dropped the field it didn't know — runs nowhere, is never asked about (its
+/// card would show a remote folder as if it were here), and is settled as broken by the loop.
+pub fn kind_host_agree(f: &FollowUp) -> bool {
+    (f.due.kind == REMOTE_KIND) == f.due.host.is_some()
+}
+
+/// What an agent is told of a script that lost its host.
+const LOST_HOST: &str = "it BROKE instead — an older maiTerm saved it and lost which machine it runs on, so it never ran. Schedule it again if you still need it";
 
 /// Where it runs, if its kind and host agree: a `remote_script` needs a host, a `script` must
 /// have none. Anything else runs nowhere — never "here, by default".
@@ -272,6 +331,20 @@ fn sweep(ids: &HashSet<String>) {
     }
 }
 
+/// Waiting scripts whose kind and host disagree (`kind_host_agree`), anywhere — archived tabs
+/// included, since nothing will ever run them.
+fn lost_host(app_data: &AppData) -> Vec<String> {
+    app_data
+        .windows
+        .iter()
+        .flat_map(|w| w.workspaces.iter())
+        .flat_map(|ws| ws.panes.iter().flat_map(|p| p.tabs.iter()).chain(ws.archived_tabs.iter()))
+        .flat_map(|t| t.follow_ups.iter())
+        .filter(|f| is_waiting_script(f) && !kind_host_agree(f))
+        .map(|f| f.id.clone())
+        .collect()
+}
+
 /// The loop. Spawned once at setup; idles cheaply when nothing is waiting.
 pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
     let mut ticker = tokio::time::interval(Duration::from_secs(LOOP_SECS));
@@ -279,11 +352,24 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
     let mut last_sweep: Option<Instant> = None;
     loop {
         ticker.tick().await;
-        let (live, candidates, ids) = {
+        let (live, candidates, ids, lost) = {
             let app_data = state.app_data.read();
             let (c, ids) = collect(&app_data);
-            (app_data.preferences.follow_ups_live(), c, ids)
+            (app_data.preferences.follow_ups_live(), c, ids, lost_host(&app_data))
         };
+        // Told once, as broken, rather than left to wait out its week for a run that can't come.
+        for id in lost {
+            let c = Candidate {
+                id,
+                tab_id: String::new(),
+                script: String::new(),
+                cwd: String::new(),
+                host: None,
+                every: Duration::ZERO,
+                timeout: Duration::ZERO,
+            };
+            meet(&state, &app, &c, LOST_HOST.to_string(), None);
+        }
         // A running entry stays until its run ends, so MAX_RUNNING still counts it.
         runs().lock().retain(|id, r| ids.contains(id) || r.status.running);
         // In line, before this pass starts anything: a sweep running beside the runs could take
@@ -720,6 +806,14 @@ mod tests {
         assert_eq!(host_label("-x -C ews@nova"), "ews@nova");
         assert_eq!(host_label("-p 2222 ews@nova"), "ews@nova (port 2222)");
         assert_eq!(host_label("-p2223 -i ~/.ssh/k localhost"), "localhost (port 2223)");
+        // Options after the destination: the jump host, a key or a port is never "the host".
+        assert_eq!(host_label("ews@nova -J bastion"), "ews@nova");
+        assert_eq!(host_label("ews@nova -p 2222"), "ews@nova (port 2222)");
+        assert_eq!(host_label("ews@nova -i ~/.ssh/k"), "ews@nova");
+        assert_eq!(host_label("-xCp 2200 nova"), "nova (port 2200)");
+        assert_eq!(host_label("-o Port=2223 localhost"), "localhost (port 2223)");
+        assert_eq!(host_label("-l ews -o ProxyJump=b nova"), "ews@nova");
+        assert_eq!(host_label("-J bastion ews@nova"), "ews@nova");
         assert_eq!(host_label("nova"), "nova");
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());

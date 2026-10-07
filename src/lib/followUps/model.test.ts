@@ -148,6 +148,12 @@ describe('remote scripts', () => {
     expect(hostLabel('-x -C ews@nova')).toBe('ews@nova');
     expect(hostLabel('-p 2222 ews@nova')).toBe('ews@nova (port 2222)');
     expect(hostLabel('-p2223 -i ~/.ssh/k localhost')).toBe('localhost (port 2223)');
+    expect(hostLabel('ews@nova -J bastion')).toBe('ews@nova');
+    expect(hostLabel('ews@nova -p 2222')).toBe('ews@nova (port 2222)');
+    expect(hostLabel('ews@nova -i ~/.ssh/k')).toBe('ews@nova');
+    expect(hostLabel('-xCp 2200 nova')).toBe('nova (port 2200)');
+    expect(hostLabel('-o Port=2223 localhost')).toBe('localhost (port 2223)');
+    expect(hostLabel('-l ews -o ProxyJump=b nova')).toBe('ews@nova');
   });
 
   it('are watch scripts in every respect but where they run', () => {
@@ -155,6 +161,9 @@ describe('remote scripts', () => {
     expect(isConditionKind(f.due.kind)).toBe(true);
     expect(needsApproval(f, false)).toBe(true);
     expect(needsApproval(f, true)).toBe(false);
+    // An older build dropped its host: never asked about, as if it were a local script.
+    const lost = fu({ due: { kind: 'remote_script', cwd: '/srv', script: 'exit 1', label: 'x' } });
+    expect(needsApproval(lost, false)).toBe(false);
   });
 });
 

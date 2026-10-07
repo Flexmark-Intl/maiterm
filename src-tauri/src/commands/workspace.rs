@@ -1314,7 +1314,7 @@ pub fn approve_tab_follow_up_script(
         .ok_or("Tab not found")?;
     // Unmet only: one the phone just DECLINED is met, and is on its way to the agent as declined —
     // approving it would remember an approval for a script the human also refused.
-    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && crate::watch::is_script_kind(&f.due.kind) && f.due.met_at.is_none()) else {
+    let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && crate::watch::is_script_kind(&f.due.kind) && crate::watch::kind_host_agree(f) && f.due.met_at.is_none()) else {
         return Ok(None);
     };
     let (Some(script), Some(place)) = (f.due.script.clone(), crate::watch::place_of(f)) else {

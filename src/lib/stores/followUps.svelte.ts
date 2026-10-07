@@ -41,6 +41,7 @@ import { sessionIdVar } from '$lib/agents/resume';
 import {
   resolveCreate, isDue, isExpired, dueAt, envelope, statusOf, serviceOutcome, taskOutcome, isWaitingOnEvent, triggerText, clockText,
   needsApproval,
+  hostLabel,
   type CreateArgs, type EventKind, type Resolved, type ResolvedEvent, type ResolvedScriptHome, type FollowUpStatus,
 } from '$lib/followUps/model';
 
@@ -425,12 +426,12 @@ function createFollowUpsStore() {
     } catch { /* no answer: treated as no tunnel, which the checks below refuse for an ssh tab */ }
     if (bridged.host && sshNow) {
       if (!bridged.cwd) {
-        return { ok: false, reason: 'no_folder', detail: `maiTerm can’t tell which folder on ${bridged.host} this tab’s agent is in, so it doesn’t know where to run the script.` };
+        return { ok: false, reason: 'no_folder', detail: `maiTerm can’t tell which folder on ${hostLabel(bridged.host)} this tab’s agent is in, so it doesn’t know where to run the script.` };
       }
       return { ok: true, cwd: bridged.cwd, host: bridged.host };
     }
     if (bridged.host) {
-      return { ok: false, reason: 'remote_tab', detail: `maiTerm couldn’t confirm this tab is still connected to ${bridged.host}, so it doesn’t know which machine to run the script on. Try again in a moment.` };
+      return { ok: false, reason: 'remote_tab', detail: `maiTerm couldn’t confirm this tab is still connected to ${hostLabel(bridged.host)}, so it doesn’t know which machine to run the script on. Try again in a moment.` };
     }
     // Ssh without a tunnel of maiTerm's: running it here would check the wrong machine.
     const remote = { ok: false as const, reason: 'remote_tab', detail: 'This tab runs over ssh, but maiTerm has no connection of its own to that host (its SSH bridge isn’t up), so it can’t run the script there. Use a time follow-up, or a service or task trigger.' };
