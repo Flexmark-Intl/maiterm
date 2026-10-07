@@ -375,10 +375,41 @@ occluded webview is throttled when the screens sleep. One loop, every 5 s:
 - **What the human sees of the runs:** `follow_up_watch_status` (in memory, since this launch):
   last run, last result, broken runs in a row. The list shows "checked 40s ago: not yet".
 
+**On an ssh tab's host** (2026-10-07, `src-tauri/src/watch/remote.rs`). An agent running over ssh
+waits on conditions on THAT machine, so its script runs there:
+
+- **Where.** At creation (`scriptHome` → `follow_up_remote_home`), a tab riding one of maiTerm's
+  own bridge tunnels — with ssh seen running in it right now — gets `due.host` = the tunnel's
+  `host_key` (`user@host`) and `due.cwd` = the folder its agent registered from there (the remote
+  session's own `cwd`, from its SessionStart hook). No such folder, or two sessions naming
+  different ones: refused, as locally.
+- **Approval is keyed by the place, not the folder:** `watch::place` = `user@host:folder` (a local
+  place stays the bare folder, so earlier approvals still hold). Allowing a script in `~/app` here
+  never allows it in `~/app` on a server. Every card says "runs on **user@host**, in folder"; the
+  phone's `ScriptApproval.folder` carries the whole place (protocol 0.20).
+- **How.** One `ssh … sh -s` per run, muxed over the tunnel's maiTerm-owned ControlMaster socket
+  (as `mailink/mirror.rs` does): no re-authentication. The wrapper rides STDIN, never the command
+  line, carrying the script in a heredoc; it writes the script and its state file under
+  `~/.maiterm/watch-scripts/` there, runs it in its folder with a minimal environment and the
+  remote login PATH (cached an hour), and reports back between random markers so a login
+  profile's chatter is never read as the answer.
+- **Nothing outlives a run, on the far side too.** ssh without a terminal sends the host no hangup
+  when the connection drops, so killing the local ssh would leave the script running there: the
+  WRAPPER enforces the limit and kills the script's whole process group, made with `setsid`, or
+  job control where there is none (macOS) — proven on a probe `sleep` first, and a host where
+  neither gives it a group of its own runs nothing and says so (a broken run, with why).
+- **No connection is a wait, not a break.** No live tunnel to the host, ssh failing to connect
+  (exit 255), or nothing back within the limit + 20 s is `Unreachable`: not a broken run, so it
+  never "BROKE" a follow-up three times over a laptop lid. The list says "waiting for the
+  connection (…)". It runs again once an ssh tab to that host is open.
+- **Cleanup there** is the wrapper's: files untouched for 8 days are removed on every run (a
+  follow-up waits at most 7, and every run touches its own two).
+- **A local project move** (`relocate`) leaves a remote script's folder alone.
+
 **Where it is refused at creation** (`scriptHome` in the store):
 
-- **SSH tabs.** A local script would check the wrong machine. Running it over the tab's
-  ControlMaster socket, as the transcript mirror does (`mailink/mirror.rs`), is a later step.
+- **SSH without maiTerm's own connection** (the bridge isn't up for that host, or ssh is a
+  session maiTerm didn't see start): a local script would check the wrong machine.
 - **Exempt tabs,** and when maiTerm can't tell the tab's folder.
 - **When follow-ups are off,** as for every follow-up.
 

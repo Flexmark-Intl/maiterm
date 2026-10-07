@@ -752,6 +752,7 @@ pub fn run() {
             commands::workspace::meet_tab_follow_up,
             commands::workspace::approve_tab_follow_up_script,
             commands::workspace::decline_tab_follow_up_script,
+            commands::workspace::follow_up_remote_home,
             commands::workspace::follow_up_watch_status,
             commands::workspace::publish_stack_runtime,
             commands::stack::suggest_stack,

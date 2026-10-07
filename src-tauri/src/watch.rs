@@ -30,6 +30,14 @@ use tauri::Emitter;
 use crate::state::workspace::FollowUp;
 use crate::state::{AppData, AppState};
 
+mod remote;
+
+/// The ssh destination args of a live bridge tunnel to `host` (a tunnel's `host_key`): a remote
+/// script runs only over one, so the connection is maiTerm's own and already authenticated.
+fn tunnel_args(state: &AppState, host: &str) -> Option<String> {
+    state.ssh_tunnels.read().values().find(|t| t.host_key == host).map(|t| t.ssh_args.clone())
+}
+
 pub const MIN_EVERY_SECS: u32 = 15;
 pub const MAX_EVERY_SECS: u32 = 24 * 60 * 60;
 pub const MAX_TIMEOUT_SECS: u32 = 60;
@@ -80,26 +88,42 @@ pub fn status() -> HashMap<String, WatchStatus> {
     runs().lock().iter().map(|(id, r)| (id.clone(), r.status.clone())).collect()
 }
 
-/// The approval key: the script and the folder it runs in. The same script somewhere else is a
-/// different thing to approve — `rm -rf build` means what the folder makes it mean.
-pub fn script_hash(cwd: &str, script: &str) -> String {
+/// Where a script runs, as one string: its folder on this computer ("/repo", "~/repo"), or
+/// `user@host:folder` for an ssh tab's. What the approval is keyed by and what a card shows. The
+/// two can't collide: a local folder starts with `/` or `~`, a remote place with the user name.
+pub fn place(host: Option<&str>, cwd: &str) -> String {
+    match host {
+        Some(h) => format!("{h}:{cwd}"),
+        None => cwd.to_string(),
+    }
+}
+
+/// A script follow-up's place (`place`); None without a folder.
+pub fn place_of(f: &FollowUp) -> Option<String> {
+    f.due.cwd.as_deref().map(|cwd| place(f.due.host.as_deref(), cwd))
+}
+
+/// The approval key: the script and the place it runs. The same script somewhere else is a
+/// different thing to approve — `rm -rf build` means what the folder (and the machine) make it
+/// mean. A local place is the bare folder, so approvals kept before remote scripts still hold.
+pub fn script_hash(place: &str, script: &str) -> String {
     let mut h = sha2::Sha256::new();
-    h.update(cwd.as_bytes());
+    h.update(place.as_bytes());
     h.update([0u8]);
     h.update(script.as_bytes());
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Has a HUMAN approved this script, in this folder? The preference that waives approval is NOT
+/// Has a HUMAN approved this script, in this place? The preference that waives approval is NOT
 /// part of the answer: it is read live, where scripts are picked to run (`collect`), so turning it
 /// off withdraws what it let through. Stored as `approved`, it would have approved for good a
 /// script no human ever saw (review of afaafbc).
-pub fn is_approved(app_data: &AppData, cwd: &str, script: &str) -> bool {
-    app_data.approved_watch_scripts.contains(&script_hash(cwd, script))
+pub fn is_approved(app_data: &AppData, place: &str, script: &str) -> bool {
+    app_data.approved_watch_scripts.contains(&script_hash(place, script))
 }
 
-pub fn remember_approval(app_data: &mut AppData, cwd: &str, script: &str) {
-    let hash = script_hash(cwd, script);
+pub fn remember_approval(app_data: &mut AppData, place: &str, script: &str) {
+    let hash = script_hash(place, script);
     let list = &mut app_data.approved_watch_scripts;
     list.retain(|h| *h != hash);
     list.push(hash);
@@ -116,6 +140,8 @@ struct Candidate {
     tab_id: String,
     script: String,
     cwd: String,
+    /// The ssh host it runs on; None: this computer.
+    host: Option<String>,
     every: Duration,
     timeout: Duration,
 }
@@ -124,6 +150,9 @@ enum Outcome {
     Met(String),
     NotYet,
     Broken(String),
+    /// A remote script's host can't be reached right now (no tunnel, ssh failed to connect). Not
+    /// the script's fault, so not a broken run: it waits, and three of these never "break" it.
+    Unreachable(String),
 }
 
 fn now_ms() -> i64 {
@@ -173,6 +202,7 @@ fn collect(app_data: &AppData) -> (Vec<Candidate>, HashSet<String>) {
                     tab_id: tab.id.clone(),
                     script: script.clone(),
                     cwd: cwd.clone(),
+                    host: f.due.host.clone(),
                     every: Duration::from_secs(f.due.every_secs.unwrap_or(60).clamp(MIN_EVERY_SECS, MAX_EVERY_SECS) as u64),
                     timeout: Duration::from_secs(f.due.timeout_secs.unwrap_or(10).clamp(1, MAX_TIMEOUT_SECS) as u64),
                 });
@@ -246,9 +276,13 @@ pub async fn watch_loop(state: Arc<AppState>, app: tauri::AppHandle) {
 }
 
 async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidate) {
-    let outcome = match scripts_dir() {
-        Some(dir) => execute(&c, &dir).await,
-        None => Outcome::Broken("maiTerm has no data folder to run it from".into()),
+    let outcome = match (&c.host, scripts_dir()) {
+        (Some(host), _) => match tunnel_args(&state, host) {
+            Some(ssh_args) => remote::execute(&c, host, &ssh_args).await,
+            None => Outcome::Unreachable(format!("maiTerm has no connection to {host} — it runs once an ssh tab to it is open")),
+        },
+        (None, Some(dir)) => execute(&c, &dir).await,
+        (None, None) => Outcome::Broken("maiTerm has no data folder to run it from".into()),
     };
     let met = {
         let mut map = runs().lock();
@@ -266,6 +300,12 @@ async fn run_and_record(state: Arc<AppState>, app: tauri::AppHandle, c: Candidat
                 r.status.last_result = Some("not_yet".into());
                 r.status.detail = None;
                 r.status.broken_runs = 0;
+                None
+            }
+            Outcome::Unreachable(why) => {
+                // `broken_runs` untouched: a host that comes and goes neither breaks nor clears it.
+                r.status.last_result = Some("unreachable".into());
+                r.status.detail = Some(why.clone());
                 None
             }
             Outcome::Broken(why) => {
@@ -502,6 +542,7 @@ mod tests {
             tab_id: "tab".into(),
             script: script.into(),
             cwd: cwd.display().to_string(),
+            host: None,
             every: Duration::from_secs(60),
             timeout: Duration::from_secs(timeout),
         }
@@ -610,6 +651,12 @@ mod tests {
         assert!(is_approved(&d, "/a", "x"));
         assert!(!is_approved(&d, "/b", "x"), "another folder is another approval");
         assert!(!is_approved(&d, "/a", "x "), "one byte changed is another script");
+        // The same folder on another machine is another place.
+        assert_eq!(place(None, "/a"), "/a", "a local place is the bare folder, so old approvals hold");
+        assert!(!is_approved(&d, &place(Some("ews@nova"), "/a"), "x"), "allowed here is not allowed on a server");
+        remember_approval(&mut d, &place(Some("ews@nova"), "/a"), "y");
+        assert!(!is_approved(&d, "/a", "y"), "nor the other way");
+        assert!(!is_approved(&d, &place(Some("ews@nova2"), "/a"), "y"));
         for i in 0..MAX_APPROVALS + 5 {
             remember_approval(&mut d, "/a", &i.to_string());
         }

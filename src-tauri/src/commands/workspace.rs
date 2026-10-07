@@ -1169,8 +1169,8 @@ pub fn add_tab_follow_up(
             return Err(format!("A watch script can be at most {} KB.", crate::watch::MAX_SCRIPT_BYTES / 1024));
         }
         let app_data = state.app_data.read();
-        follow_up.due.approved = match (&follow_up.due.cwd, &follow_up.due.script) {
-            (Some(cwd), Some(script)) => crate::watch::is_approved(&app_data, cwd, script),
+        follow_up.due.approved = match (crate::watch::place_of(&follow_up), &follow_up.due.script) {
+            (Some(place), Some(script)) => crate::watch::is_approved(&app_data, &place, script),
             _ => false,
         };
     }
@@ -1312,18 +1312,46 @@ pub fn approve_tab_follow_up_script(
     let Some(f) = tab.follow_ups.iter_mut().find(|f| f.id == follow_up_id && f.due.kind == "script" && f.due.met_at.is_none()) else {
         return Ok(None);
     };
-    let (Some(script), Some(cwd)) = (f.due.script.clone(), f.due.cwd.clone()) else {
+    let (Some(script), Some(place)) = (f.due.script.clone(), crate::watch::place_of(f)) else {
         return Ok(None);
     };
     f.due.approved = true;
     let list = tab.follow_ups.clone();
-    crate::watch::remember_approval(&mut app_data, &cwd, &script);
+    crate::watch::remember_approval(&mut app_data, &place, &script);
     log::info!("follow-ups: watch script {} on tab {} approved", &follow_up_id[..8.min(follow_up_id.len())], &tab_id[..8.min(tab_id.len())]);
 
     let data_clone = app_data.clone();
     drop(app_data);
     save_state(&data_clone)?;
     Ok(Some(list))
+}
+
+/// Where a watch script from an ssh tab would run (docs/follow-ups.md §5.1): the host of the
+/// bridge tunnel the tab rides, and the folder its agent registered from (the remote session's
+/// own `cwd`, from its SessionStart hook). `host` None: the tab rides no tunnel, so it is local —
+/// or ssh'd somewhere maiTerm has no connection of its own to, which the frontend tells apart.
+/// `cwd` None with a host: no agent session in the tab says where it is, or two say different
+/// places.
+#[derive(serde::Serialize)]
+pub struct RemoteScriptHome {
+    pub host: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[tauri::command]
+pub fn follow_up_remote_home(state: State<'_, Arc<AppState>>, tab_id: String) -> RemoteScriptHome {
+    let host = state.ssh_tunnels.read().values().find(|t| t.tab_ids.contains(&tab_id)).map(|t| t.host_key.clone());
+    let cwd = host.as_ref().and_then(|_| {
+        let sessions = state.agent_sessions.read();
+        let cwds: std::collections::HashSet<String> = sessions
+            .values()
+            .filter(|s| s.tab_id == tab_id)
+            .filter_map(|s| s.cwd.clone())
+            .filter(|c| c.starts_with('/') || c == "~" || c.starts_with("~/"))
+            .collect();
+        (cwds.len() == 1).then(|| cwds.into_iter().next().unwrap())
+    });
+    RemoteScriptHome { host, cwd }
 }
 
 /// What the watch-script runner knows about each script's runs (in memory, since this launch),

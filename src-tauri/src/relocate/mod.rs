@@ -228,7 +228,8 @@ fn relocate_tab(t: &mut Tab, old: &Path, new: &Path, scripts: &mut Vec<MovedScri
             dc.file_path = n;
         }
     }
-    for f in t.follow_ups.iter_mut() {
+    // A script that runs on an ssh host has its folder THERE: a local move is nothing to it.
+    for f in t.follow_ups.iter_mut().filter(|f| f.due.host.is_none()) {
         let before = f.due.cwd.clone();
         if rebase_field(&mut f.due.cwd, old, new) {
             changed = true;

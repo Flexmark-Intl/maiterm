@@ -46,6 +46,8 @@ export interface FollowUpDue {
   /** kind "script" (§5.1): the watch script, inline; the folder it runs in; its schedule. */
   script?: string | null;
   cwd?: string | null;
+  /** kind "script", ssh tabs: the host it runs on (`user@host`), `cwd` being a folder there. */
+  host?: string | null;
   every_secs?: number | null;
   timeout_secs?: number | null;
   /** kind "script": approved to run. Set only in Rust — whatever is sent here is ignored. */
@@ -57,7 +59,7 @@ export interface FollowUpDue {
 /** What the watch-script runner knows about one script's runs since this launch. */
 export interface WatchStatus {
   last_run_at: string | null;
-  /** "met" | "not_yet" | "broken" */
+  /** "met" | "not_yet" | "broken" | "unreachable" (a remote script's host couldn't be reached) */
   last_result: string | null;
   detail: string | null;
   broken_runs: number;

@@ -1057,6 +1057,11 @@ export async function declineTabFollowUpScript(workspaceId: string, tabId: strin
   return invoke('decline_tab_follow_up_script', { workspaceId, tabId, followUpId });
 }
 
+/** An ssh tab's watch-script home: the bridged host and its agent's folder there (§5.1). */
+export async function followUpRemoteHome(tabId: string): Promise<{ host: string | null; cwd: string | null }> {
+  return invoke('follow_up_remote_home', { tabId });
+}
+
 export async function followUpWatchStatus(): Promise<Record<string, WatchStatus>> {
   return invoke('follow_up_watch_status');
 }

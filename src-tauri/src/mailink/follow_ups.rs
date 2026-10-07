@@ -88,7 +88,7 @@ pub(crate) fn waiting_ids_by_tab(app: &AppState) -> HashMap<String, HashSet<Stri
 fn card_hash(f: &FollowUp) -> String {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
-    h.update(crate::watch::script_hash(f.due.cwd.as_deref().unwrap_or(""), f.due.script.as_deref().unwrap_or("")));
+    h.update(crate::watch::script_hash(&crate::watch::place_of(f).unwrap_or_default(), f.due.script.as_deref().unwrap_or("")));
     h.update([0u8]);
     h.update(every_secs(f).to_string());
     h.update([0u8]);
@@ -113,7 +113,10 @@ fn to_json(f: &FollowUp) -> Value {
         "id": f.id,
         "label": f.due.label,
         "script": f.due.script.as_deref().unwrap_or(""),
-        "folder": f.due.cwd.as_deref().unwrap_or(""),
+        // Where it runs, whole: an ssh tab's is `user@host:folder`, so a phone that knows nothing
+        // of `host` still shows the machine it would approve a script on.
+        "folder": crate::watch::place_of(f).unwrap_or_default(),
+        "host": f.due.host,
         "everySecs": every_secs(f),
         "timeoutSecs": timeout_secs(f),
         "message": f.text,
@@ -194,7 +197,7 @@ pub(crate) fn decide(
             if card_hash(f) != script_hash {
                 return Err(Refusal::Stale("The script changed since you read it. Refresh and read it again."));
             }
-            let (script, cwd) = (f.due.script.clone().unwrap_or_default(), f.due.cwd.clone().unwrap_or_default());
+            let (script, cwd) = (f.due.script.clone().unwrap_or_default(), crate::watch::place_of(f).unwrap_or_default());
             match decision {
                 Decision::Approve => tab.follow_ups[pos].due.approved = true,
                 Decision::Reject => {

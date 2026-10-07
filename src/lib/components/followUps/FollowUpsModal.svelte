@@ -56,6 +56,8 @@
     const s = watch[id];
     if (!s?.last_run_at) return s?.running ? 'first check running' : 'not checked yet';
     const ago = secsText((now - Date.parse(s.last_run_at)) / 1000);
+    // A host that can't be reached is waited on, not counted: say so, and why.
+    if (s.last_result === 'unreachable') return `waiting for the connection (${s.detail ?? 'host unreachable'})`;
     const result = s.last_result === 'not_yet' ? 'not yet' : s.last_result === 'broken' ? `broken (${s.detail ?? 'unknown'})` : 'passed';
     const streak = s.broken_runs > 1 ? `, ${s.broken_runs} runs in a row` : '';
     return `checked ${ago} ago: ${result}${streak}`;
@@ -200,7 +202,7 @@
                         {f.due.met_at ? 'Watch script' : `Watch script, every ${secsText(f.due.every_secs ?? 60)} · ${runText(v.id)}`}
                       </summary>
                       <pre>{f.due.script}</pre>
-                      <div class="where">in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run</div>
+                      <div class="where">{#if f.due.host}on {f.due.host}, {/if}in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run</div>
                     </details>
                   {/if}
                   <div class="meta">

@@ -40,7 +40,14 @@ const SCRIPT_LABEL_CHARS = 80;
 
 /** Where a watch script would run, or why this tab can't have one — the store decides, since only
  *  it can see the tab (its folder, ssh, exemption). */
-export type ResolvedScriptHome = { ok: true; cwd: string } | { ok: false; reason: string; detail: string };
+/** `host`: an ssh tab's bridged host, `cwd` then a folder there; absent for this computer. */
+export type ResolvedScriptHome = { ok: true; cwd: string; host?: string } | { ok: false; reason: string; detail: string };
+
+/** Where a script runs, for a human: "~/repo", or "ews@nova:/srv/app" — `watch::place` in Rust. */
+export function scriptPlace(f: FollowUp): string {
+  const cwd = f.due.cwd ?? '';
+  return f.due.host ? `${f.due.host}:${cwd}` : cwd;
+}
 
 export type EventKind = 'service_ready' | 'service_stopped' | 'task_done';
 
@@ -290,7 +297,7 @@ function resolveScriptCreate(text: string, args: CreateArgs, ctx: CreateContext)
     followUp: {
       id: ctx.newId(),
       text,
-      due: { kind: 'script', script, cwd: home.cwd, every_secs: every, timeout_secs: timeout, label },
+      due: { kind: 'script', script, cwd: home.cwd, ...(home.host ? { host: home.host } : {}), every_secs: every, timeout_secs: timeout, label },
       author: ctx.author,
       created_at: new Date(ctx.now).toISOString(),
       expires_at: new Date(ctx.now + expiresMs).toISOString(),

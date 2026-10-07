@@ -4,6 +4,12 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.20 changelog** (2026-10-07). **A watch script can run on an ssh tab's host** (maiTerm
+> docs/follow-ups.md §5.1). `ScriptApproval.folder` then reads `user@host:folder` — the machine
+> is half of what the human approves, so it rides in the field a 0.15 phone already shows — and
+> the additive **`ScriptApproval.host`** (`user@host` | null) names it on its own, for styling.
+> `scriptHash` covers it. Nothing else changes: approve, reject and the counts are as before.
+>
 > **v0.19 changelog** (2026-10-07). Additive: **`POST /chats/{tabId}/message`** can answer
 > `{status:"held", reason:"draft", msg_id, woke, detail}` — accepted but NOT typed yet, because
 > the human has a half-written draft in the agent's input box on the computer (Claude only, read
@@ -821,7 +827,12 @@ interface ScriptApproval {
   id: string;               // the follow-up's id; the route's `{id}`
   label: string | null;     // the agent's name for it, "CI on PR 12". Desktop shows "watch script" for null
   script: string;           // the WHOLE script, exactly as it will run
-  folder: string;           // where it runs (the tab's folder when it was asked for)
+  folder: string;           // where it runs (the tab's folder when it was asked for). 0.20: for
+                            //   an ssh tab, `user@host:folder` — the machine is part of what is
+                            //   approved, so it is in the one field every phone already shows
+  host: string | null;      // 0.20: the ssh host it runs on (`user@host`), null for the computer.
+                            //   Already inside `folder`; here to style it (e.g. bold), never to
+                            //   show `folder` without it
   everySecs: number;        // seconds between runs
   timeoutSecs: number;      // how long one run may take
   message: string;          // what is typed to the agent when a run passes

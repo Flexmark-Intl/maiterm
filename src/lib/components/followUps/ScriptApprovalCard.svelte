@@ -91,9 +91,9 @@
     </figcaption>
     <!-- Wrapped and never clipped: the approval is for every character of it. -->
     <pre>{f.due.script}</pre>
-    <!-- Everything the approval covers: the folder, the run limit, and how much script there is
-         (so a script padded past the screen can't pass for a short one). -->
-    <div class="where">in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run · {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters</div>
+    <!-- Everything the approval covers: the machine and folder, the run limit, and how much script
+         there is (so a script padded past the screen can't pass for a short one). -->
+    <div class="where">{#if f.due.host}runs on <strong class="host">{f.due.host}</strong>, {/if}in {f.due.cwd} · up to {f.due.timeout_secs ?? 10}s a run · {linesText(f.due.script ?? '')}, {(f.due.script ?? '').length} characters</div>
   </figure>
 
   <details class="then">
@@ -157,6 +157,8 @@
     overflow-wrap: anywhere;
     color: var(--fg);
   }
+  /* The machine is half of what is being approved: it must not read as a footnote. */
+  .where .host { color: var(--fg); font-weight: 600; }
   .where {
     padding: 4px 10px 6px;
     font-family: var(--font-mono, ui-monospace, monospace);

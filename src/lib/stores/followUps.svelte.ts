@@ -408,15 +408,33 @@ function createFollowUpsStore() {
     if (tab.overlord_exempt || ws?.overlord_exempt) {
       return { ok: false, reason: 'exempt', detail: 'This tab is exempt from the Overlord, so maiTerm runs no watch scripts for it.' };
     }
-    // A script runs on THIS machine; in an ssh tab the condition is on the other one.
-    const remote = { ok: false as const, reason: 'remote_tab', detail: 'This tab runs over ssh, and a watch script would run on this machine instead of the remote one. Use a time follow-up, or a service or task trigger.' };
-    if (tab.restore_ssh_command || tab.auto_resume_ssh_command) return remote;
+    // Is ssh running in the tab right now? null: no answer, which is no evidence either way.
     const inst = terminalsStore.get(tab.id);
+    let sshNow: boolean | null = null;
     if (inst) {
       try {
-        if ((await commands.getAgentLiveness(inst.ptyId)).ssh_foreground) return remote;
-      } catch { /* no answer is no evidence of ssh; the folder check still applies */ }
+        sshNow = (await commands.getAgentLiveness(inst.ptyId)).ssh_foreground;
+      } catch { /* stays null */ }
     }
+    // An ssh tab riding one of maiTerm's own bridge tunnels: the script runs on THAT host, over
+    // the tunnel's connection, in the folder its agent registered from there. Only while ssh is
+    // seen running: a tab back at its local prompt can still be listed on the tunnel briefly.
+    let bridged: { host: string | null; cwd: string | null } = { host: null, cwd: null };
+    try {
+      bridged = await commands.followUpRemoteHome(tab.id);
+    } catch { /* no answer: treated as no tunnel, which the checks below refuse for an ssh tab */ }
+    if (bridged.host && sshNow) {
+      if (!bridged.cwd) {
+        return { ok: false, reason: 'no_folder', detail: `maiTerm can’t tell which folder on ${bridged.host} this tab’s agent is in, so it doesn’t know where to run the script.` };
+      }
+      return { ok: true, cwd: bridged.cwd, host: bridged.host };
+    }
+    if (bridged.host) {
+      return { ok: false, reason: 'remote_tab', detail: `maiTerm couldn’t confirm this tab is still connected to ${bridged.host}, so it doesn’t know which machine to run the script on. Try again in a moment.` };
+    }
+    // Ssh without a tunnel of maiTerm's: running it here would check the wrong machine.
+    const remote = { ok: false as const, reason: 'remote_tab', detail: 'This tab runs over ssh, but maiTerm has no connection of its own to that host (its SSH bridge isn’t up), so it can’t run the script there. Use a time follow-up, or a service or task trigger.' };
+    if (sshNow || tab.restore_ssh_command || tab.auto_resume_ssh_command) return remote;
     // `last_cwd` is often home-relative ("~/repo"); Rust expands a leading `~` when it runs.
     const cwd = terminalsStore.getOsc(tab.id)?.cwd || tab.last_cwd || '';
     if (!(cwd.startsWith('/') || cwd === '~' || cwd.startsWith('~/'))) {

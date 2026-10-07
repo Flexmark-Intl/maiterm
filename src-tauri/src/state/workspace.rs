@@ -447,6 +447,10 @@ pub struct FollowUpDue {
     /// kind "script": the folder it runs in, the tab's as of creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// kind "script", ssh tabs only: the host it runs on (`user@host`, an ssh tunnel's
+    /// `host_key`), with `cwd` a folder THERE. None: this computer. Part of the approval key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     /// kind "script": seconds between runs, and how long one run may take.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_secs: Option<u32>,

@@ -1167,7 +1167,7 @@ function createClaudeCodeStore() {
         scheduled: true,
         id: r.followUp.id,
         ...(trigger ? { trigger } : { due_at: r.followUp.due.at }),
-        ...(script ? { approval: awaiting ? 'waiting_for_human' : 'approved', runs_in: r.followUp.due.cwd } : {}),
+        ...(script ? { approval: awaiting ? 'waiting_for_human' : 'approved', runs_in: r.followUp.due.cwd, ...(r.followUp.due.host ? { runs_on: r.followUp.due.host } : {}) } : {}),
         expires_at: r.followUp.expires_at ?? null,
         note: awaiting
           ? 'Your human has been asked to approve the script; it does not run until they do. Carry on with other work, or end your turn — you are not woken until it passes. Cancel with cancelFollowUp if it stops mattering.'
