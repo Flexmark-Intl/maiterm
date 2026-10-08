@@ -3497,7 +3497,7 @@ async fn mod_ask_handler(
 /// Handle GET /hooks/inbox?tab_id=<tab>&wait=<s> — one poll round of a maiterm-tab mod's loop
 /// collecting prompts for its tab (mod_inbox.rs): 200 `{id, text}` for a prompt to ack, 204 for
 /// none yet (poll again). With `ack=<id>`: 204 to go ahead and submit it, 410 when it was
-/// retracted (drop it).
+/// retracted (drop it). With `started=<id>`: that prompt's turn began (or its submit failed).
 async fn mod_inbox_handler(
     State(srv): State<ServerState>,
     headers: HeaderMap,
@@ -3515,6 +3515,10 @@ async fn mod_inbox_handler(
         } else {
             StatusCode::GONE.into_response()
         };
+    }
+    if let Some(id) = params.get("started") {
+        srv.state.mod_inbox.started(tab_id, id);
+        return StatusCode::NO_CONTENT.into_response();
     }
     let wait = params
         .get("wait")

@@ -1532,9 +1532,10 @@ function createOverlordStore() {
       // empty box) can stay on screen above the shell prompt that replaced it — the same gap
       // noticeToTab and follow-ups have (followUps `holdReason`).
       if (!(await hasLiveRepl(tabId)) || !typeable()) return false;
-      // `send_tab_message` hands it to the tab's mod when it takes it, around any draft (and
-      // then refuses rather than type over one).
-      if (!(await commands.agentTakesPrompt(tabId).catch(() => false)) && !(await noDraft(tabId, false))) return false;
+      // The tab's mod, when it takes it (between turns), submits it around any draft. Otherwise
+      // it is typed, and every typing guard applies.
+      if (await commands.submitPromptToAgent(tabId, text).catch(() => false)) return true;
+      if (!(await noDraft(tabId, false))) return false;
       const r = await commands.sendTabMessage(tabId, text).catch(() => null);
       return r?.status === 'delivered';
     });

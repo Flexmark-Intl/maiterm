@@ -528,12 +528,24 @@ acks each offer (`&ack=<id>`: 204 go, 410 retracted) and then calls `$.prompt.su
 asUser: true })`. Delivery is take-or-retract with that ack, so a prompt is submitted exactly when
 `deliver` reported it delivered.
 
-The one rule is `mod_inbox::takes_now`: a mod is polling, AND the agent is between turns OR the
-human has a draft in the box. A busy agent with an empty box still gets keystrokes, because Claude
-folds a prompt typed mid-turn into the running turn and phone steering relies on that. A submitted
-prompt waits for the turn to end (tested: `prompt.submit` mid-turn queues, and several queued ones
-run as ONE turn). `offerable` keeps slash commands (they'd reach the model as words) and empty text
-on the keyboard.
+The one rule is `mod_inbox::takes_now`: a mod is polling AND the agent is between turns. There a
+draft no longer holds anything: the mod submits around it.
+
+**Never mid-turn.** A first version also took prompts mid-turn when a draft was in the box. Review
+of 1e54a222 found two problems with that:
+- **Order.** A prompt the mod submitted mid-turn waits inside Claude for the turn to end, while a
+  later prompt typed into an emptied box folds into the running turn and overtakes it.
+- **Esc.** Pressing Esc runs queued submits at once (tested), right after the human stopped the
+  agent.
+
+So mid-turn the callers' old rules stand: typed into an empty box, held over a draft. A held
+prompt goes to the mod once the turn ends.
+
+`has_unstarted` covers the race of a turn starting just as a prompt was handed over. The mod
+reports `&started=<id>` once the prompt's turn begins, and until then every later prompt for that
+tab follows it through the mod.
+
+`offerable` keeps slash commands (they'd reach the model as words) and empty text on the keyboard.
 
 Callers go through one function per side:
 - Rust: `mailink::submit_prompt`. Used by the phone's text send, the draft-hold worker, the Loom
@@ -542,9 +554,9 @@ Callers go through one function per side:
   follow-ups), driveTab, ritual steps, board notices and the Overlord's own nudges.
 
 The draft gates (`draft_blocks_prompt`, follow-ups' `holdReason`, driveTab's `noDraft`) stand down
-when the mod takes the prompt. **In a tab whose mod is live, a draft is never typed over**: a
-prompt the mod didn't take (or a slash command) falls back to the caller's own draft check, and
-`submit_prompt` refuses rather than type. Recovery commands, `/maiterm init` nudges, resume
+when the mod takes the prompt. **A prompt the mod didn't take after all is typed under every guard
+the gate skipped**: follow-ups' `typeable` (no key since the gate, none in 2 s, still idle), the
+caller's draft check, and `submit_prompt`'s refusal to type over a draft in a tab whose mod is live. Recovery commands, `/maiterm init` nudges, resume
 commands and images (typed paths) stay keystrokes.
 
 Two traps:
@@ -557,7 +569,6 @@ Two traps:
 Verified on dev 2026-10-08 with a real `claude`:
 - idle → agent;
 - a draft in the box → agent, the draft kept;
-- busy with a draft → agent, run after the turn, the draft kept;
 - busy with an empty box → typed and folded in;
 - a slash command over a draft → refused.
 

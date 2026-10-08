@@ -2,11 +2,12 @@
 //! terminal.
 //!
 //! An interactive Claude session running the mod keeps one long-poll open on `GET
-//! /hooks/inbox?tab_id=` for its tab. A prompt maiTerm sends that tab (a phone message, a
-//! follow-up, an Overlord directive, a peer's message) is offered to that poll; the mod acks it
-//! and submits it with `$.prompt.submit`, which starts a turn once the session is idle and
-//! leaves whatever the human has in the input box where it is. So a message no longer waits for
-//! a desktop draft to be sent or cleared, and nothing is pasted into a box someone is typing in.
+//! /hooks/inbox?tab_id=` for its tab. A prompt maiTerm sends that tab between turns (a phone
+//! message, a follow-up, an Overlord directive, a peer's message) is offered to that poll; the
+//! mod acks it and submits it with `$.prompt.submit`, which starts a turn and leaves whatever the
+//! human has in the input box where it is. So a message no longer waits for a desktop draft to be
+//! sent or cleared, and nothing is pasted into a box someone is typing in. When it may be offered
+//! is `takes_now`.
 //!
 //! Delivery is take-or-retract, as for answers (mod_asks.rs), with one more step: the poll hands
 //! the offer out, and the mod must ack it before it submits. The ack is refused for an offer that
@@ -35,6 +36,8 @@ pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_WAIT: Duration = super::mod_asks::MAX_WAIT;
 /// A tab nobody has polled for this long is forgotten.
 const FORGET_AFTER: Duration = Duration::from_secs(600);
+/// How long an acked prompt counts as waiting in Claude without a `started` report.
+const UNSTARTED_FOR: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
@@ -57,12 +60,15 @@ struct Inbox {
     polling: usize,
     last_poll: Instant,
     offers: VecDeque<Offer>,
+    /// Acked offers whose turn hasn't started (the mod reports `started`): Claude holds them
+    /// until it is idle, so a prompt typed now would overtake them.
+    unstarted: Vec<(String, Instant)>,
     wake: Arc<Notify>,
 }
 
 impl Inbox {
     fn new(now: Instant) -> Self {
-        Inbox { polling: 0, last_poll: now, offers: VecDeque::new(), wake: Arc::new(Notify::new()) }
+        Inbox { polling: 0, last_poll: now, offers: VecDeque::new(), unstarted: Vec::new(), wake: Arc::new(Notify::new()) }
     }
 
     fn is_live(&self, now: Instant) -> bool {
@@ -141,7 +147,27 @@ impl ModInbox {
             return false;
         }
         o.stage = Stage::Acked;
+        let inbox = tabs.get_mut(tab_id).expect("found above");
+        inbox.unstarted.push((id.to_string(), Instant::now()));
         true
+    }
+
+    /// The turn of acked offer `id` has started (or its submit failed): it no longer waits in
+    /// Claude ahead of anything.
+    pub fn started(&self, tab_id: &str, id: &str) {
+        if let Some(inbox) = self.tabs.lock().get_mut(tab_id) {
+            inbox.unstarted.retain(|(i, _)| i != id);
+        }
+    }
+
+    /// A prompt the mod submitted for this tab is still waiting in Claude for its turn.
+    pub fn has_unstarted(&self, tab_id: &str) -> bool {
+        let now = Instant::now();
+        let mut tabs = self.tabs.lock();
+        let Some(inbox) = tabs.get_mut(tab_id) else { return false };
+        // A report lost on the way only keeps prompts on the mod a while longer.
+        inbox.unstarted.retain(|(_, at)| now.duration_since(*at) < UNSTARTED_FOR);
+        inbox.is_live(now) && !inbox.unstarted.is_empty()
     }
 
     /// Offers `text` to the tab's mod and waits for the ack. `true` once the mod has it and is
@@ -185,20 +211,23 @@ fn hand_out(inbox: &mut Inbox) -> Option<Polled> {
 }
 
 /// Whether a prompt for this tab should go to its mod now rather than be typed: a mod is polling,
-/// and either the agent is between turns (a typed prompt and a submitted one then do the same, and
-/// only the typed one can land in a box the human is typing in), or the human has a draft in the
-/// box (typing would send it; the mod leaves it alone, the prompt waiting for the turn to end).
+/// and the agent is between turns. There a typed prompt and a submitted one do the same, except
+/// that only the typed one can land in a box the human is typing in, and the submitted one leaves
+/// their draft alone — so a draft no longer holds anything at an idle agent.
 ///
-/// A busy agent with an empty box keeps the keystrokes: Claude folds a prompt typed mid-turn into
-/// the running turn, which a phone message steering the agent relies on, while a submitted one
-/// waits for the turn to end.
+/// Not mid-turn. Claude folds a prompt typed mid-turn into the running turn (phone steering relies
+/// on that), while a submitted one waits inside Claude for the turn to end: out of maiTerm's
+/// sight, already reported delivered, and run at once if the human presses Esc to stop the agent
+/// (tested), right after they stopped it. So mid-turn the callers' rules stand — typed into an
+/// empty box, held over a draft until the turn ends, when the mod takes it.
+///
+/// Except while a prompt the mod submitted is still waiting for its turn (`has_unstarted`, the
+/// race of a turn starting just as one was offered): then everything follows it through the mod,
+/// or a typed prompt would overtake it.
 ///
 /// Only for text that may be offered at all (`offerable`).
 pub fn takes_now(app: &AppState, tab_id: &str) -> bool {
-    if !app.mod_inbox.is_live(tab_id) {
-        return false;
-    }
-    agent_between_turns(app, tab_id) || crate::mailink::draft_hold::draft_in_box(app, tab_id)
+    app.mod_inbox.is_live(tab_id) && (agent_between_turns(app, tab_id) || app.mod_inbox.has_unstarted(tab_id))
 }
 
 /// Whether `text` can go to a mod at all. Not a slash command: a submitted prompt is the model's
@@ -244,6 +273,23 @@ mod tests {
         assert!(delivering.await.unwrap());
         // Gone once reported: a second ack is refused.
         assert!(!inbox.ack("tab", &id));
+    }
+
+    #[tokio::test]
+    async fn an_acked_prompt_counts_as_waiting_in_claude_until_its_turn_starts() {
+        let inbox = Arc::new(ModInbox::default());
+        let poll = parked_poll(&inbox, "tab").await;
+        let delivering = {
+            let inbox = inbox.clone();
+            tokio::spawn(async move { inbox.deliver("tab", "hello").await })
+        };
+        let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
+        assert!(!inbox.has_unstarted("tab"));
+        assert!(inbox.ack("tab", &id));
+        assert!(delivering.await.unwrap());
+        assert!(inbox.has_unstarted("tab"), "a later prompt must follow it through the mod");
+        inbox.started("tab", &id);
+        assert!(!inbox.has_unstarted("tab"));
     }
 
     #[tokio::test]

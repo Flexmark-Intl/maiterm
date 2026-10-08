@@ -566,24 +566,31 @@ function createFollowUpsStore() {
     // and then awaits more (the liveness sweep, the take, the trust check); someone who starts
     // typing inside that window would get the paste landed after their keys and submitted with
     // them. Checked again before the take and, last, just before the paste is written.
-    // Not where the tab's mod submits it: keys don't reach the box it goes around. Should the mod
-    // not take it after all, the typed fallback still reads the box first (agentDeliveryLive).
+    // Where the tab's mod submits it (`toAgent`, decided here at the gate), keys don't count: it
+    // goes around the box. But Rust decides again when it is handed over, and if the mod doesn't
+    // take it then, it is TYPED — so the typed fallback gets every guard the gate skipped on the
+    // mod's account (`typeable`): no keystroke since the gate, none in the last 2 s, and still
+    // between turns. The box itself is read again by the injector (agentDeliveryLive).
     const keysAtGate = terminalsStore.getLastTakeoverInputAt(tab.id);
     const toAgent = await commands.agentTakesPrompt(tab.id).catch(() => false);
-    const untouched = () => toAgent || terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
+    const untouched = () => terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
+    const typeable = () =>
+      untouched() &&
+      (keysAtGate === undefined || Date.now() - keysAtGate >= 2000) &&
+      agentStateStore.getState(tab.id)?.state === 'idle';
     try {
       const reason = await holdReason(tab, toAgent);
       // The agent has exited: restart it (§6.2), and the tick delivers once it is up.
       if (reason === NO_AGENT) return (await resumeAgent(tab, byHand, untouched)) ?? 'maiTerm restarted the agent — it goes once the agent is up';
       if (reason) return reason;
-      if (!untouched()) return 'someone is typing in the tab';
+      if (!toAgent && !untouched()) return 'someone is typing in the tab';
       // CLAIM it before typing anything: taken off the tab in Rust, atomically. If a reload has
       // moved it to a replacement tab (or a cancel beat us), the take finds nothing and this
       // tab does nothing — the replacement delivers it. Delivering and then removing is what
       // let one follow-up go out from both tabs.
       if (!(await take(tab.id, f.id))) return 'it is no longer on this tab';
       held = true;
-      const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now, early), untouched);
+      const r = await agentDelivery.tryDeliverNow(tab.id, envelope(f, now, early), typeable);
       if (r === 'delivered') {
         held = false;
         wantedEarly.delete(f.id);

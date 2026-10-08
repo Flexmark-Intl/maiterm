@@ -120,11 +120,11 @@ async function cancelAsk($: EngineInterface, to: Link, ask: string): Promise<voi
 
 // --- Prompts from maiTerm (claude_code/mod_inbox.rs) --------------------------------------
 //
-// What maiTerm sends this tab's agent (a phone message, a follow-up, an Overlord directive, a
-// peer's message) comes through here rather than typed: one loop long-polls GET /hooks/inbox,
-// acks each prompt (maiTerm refuses the ack for one it has meanwhile given up on and typed
-// instead) and submits it, which starts a turn once the session is idle and leaves the human's
-// draft in the box. Only in an interactive session: a `claude -p` an agent runs inherits this
+// What maiTerm sends this tab's agent between turns (a phone message, a follow-up, an Overlord
+// directive, a peer's message) comes through here rather than typed: one loop long-polls GET
+// /hooks/inbox, acks each prompt (maiTerm refuses the ack for one it has meanwhile given up on
+// and typed instead) and submits it, which starts a turn and leaves the human's draft in the
+// box. Only in an interactive session: a `claude -p` an agent runs inherits this
 // tab's environment, and must not take its prompts.
 
 // The interactive session's id, kept in the environment because module state isn't: a module
@@ -162,9 +162,18 @@ function startInbox($: EngineInterface, to: Link): void {
     }
     if (offer.id && typeof offer.text === 'string') {
       try {
-        const ack = await $.http.fetch(`${base}&ack=${encodeURIComponent(offer.id)}`, { headers })
+        const id = offer.id
+        const ack = await $.http.fetch(`${base}&ack=${encodeURIComponent(id)}`, { headers })
         // Not awaited: it resolves only as the turn starts, and the next prompt shouldn't wait.
-        if (ack.status === 204) void $.prompt.submit({ text: offer.text, asUser: true }).catch(() => {})
+        // maiTerm sends only between turns, but one can start first; until this one's turn has,
+        // it routes the tab's later prompts here too, so a typed one can't overtake it.
+        if (ack.status === 204) {
+          void $.prompt
+            .submit({ text: offer.text, asUser: true })
+            .catch(() => {})
+            .then(() => $.http.fetch(`${base}&started=${encodeURIComponent(id)}`, { headers }))
+            .catch(() => {})
+        }
       } catch {
         // Unacked, maiTerm takes it back.
       }

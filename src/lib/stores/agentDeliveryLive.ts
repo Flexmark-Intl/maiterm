@@ -50,8 +50,8 @@ export async function injectPrompt(
       return false;
     }
     // The caller's last word, with nothing async left between it and the write.
-    if (beforePaste && !beforePaste()) return false;
-    // The draft check reads the screen, so the caller's last word is asked again after it.
+    // Both guard the typing only: a prompt the tab's mod takes goes around the box. The draft
+    // check reads the screen, so the caller's last word comes after it.
     const via = await deliverPrompt(tabId, inst.ptyId, text, async () => (await clearToType()) && (!beforePaste || beforePaste()));
     return via !== false;
   } catch (e) {

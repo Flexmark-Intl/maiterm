@@ -3793,11 +3793,11 @@ pub(crate) async fn submit_prompt(
     inject_text(app, pty_id, text, true).await.map(|()| Delivered::Keys)
 }
 
-/// The human's draft in this tab's agent input box keeps a prompt out: there is one, and no mod
-/// is there to submit the prompt around it (`submit_prompt`). `offerable`: the prompt may go to
-/// a mod at all (`mod_inbox::offerable`).
+/// The human's draft in this tab's agent input box keeps a prompt out: there is one, and the
+/// tab's mod won't take the prompt now to submit it around the draft (`submit_prompt`; mid-turn
+/// it doesn't). `offerable`: the prompt may go to a mod at all (`mod_inbox::offerable`).
 pub(crate) fn draft_blocks_prompt(app: &AppState, tab_id: &str, offerable: bool) -> bool {
-    draft_hold::draft_in_box(app, tab_id) && !(offerable && app.mod_inbox.is_live(tab_id))
+    draft_hold::draft_in_box(app, tab_id) && !(offerable && crate::claude_code::mod_inbox::takes_now(app, tab_id))
 }
 
 /// Pause between image-path writes (and before the caption/submit) so the Claude Code TUI converts

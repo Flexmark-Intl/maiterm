@@ -530,7 +530,9 @@ card.
 > **Local Claude tabs with the maiterm-tab mod (2026-10-08):** the follow-up is handed to the mod,
 > which submits it with `prompt.submit`. That leaves the human's draft in the box, so `holdReason`
 > drops its draft check and its 2 s typing guard when `agentTakesPrompt` says the mod takes it.
-> The idle, quiet and liveness checks all stay. See `claude_code/CLAUDE.md` → "Prompts maiTerm
+> The idle, quiet and liveness checks all stay. If the mod doesn't take it after all, the typed
+> fallback still checks for keystrokes (none since the gate, none in the last 2 s) and that the
+> agent is still idle. See `claude_code/CLAUDE.md` → "Prompts maiTerm
 > sends go to the mod too". Everything below is still the path for every other tab, and the
 > fallback for this one.
 
