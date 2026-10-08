@@ -382,12 +382,13 @@ function createFollowUpsStore() {
     // type-ahead during boot slipped through. They still guard around the read — the 2 s check
     // above, `deliverOne`'s after-the-gate abort — and decide it where the screen isn't a layout
     // maiTerm recognises: anything typed since this stretch of idle began holds.
-    if (!toAgent) {
-      const box = await commands.agentInputBox(tab.id);
-      if (box === 'has_text') return "there's a draft in the agent's input box — send or clear it first";
-      if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {
-        return 'something was typed in the tab since the agent went idle, and its input box can’t be read';
-      }
+    // A draft the box shows doesn't hold one the tab's mod takes (it submits around it). One it
+    // can't read still does: should the mod not take it after all, the typed fallback can only
+    // refuse a box that reads `has_text`.
+    const box = await commands.agentInputBox(tab.id);
+    if (!toAgent && box === 'has_text') return "there's a draft in the agent's input box — send or clear it first";
+    if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {
+      return 'something was typed in the tab since the agent went idle, and its input box can’t be read';
     }
     if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
     // A session entry is not an agent: it is cleared by the SessionEnd hook, which never comes

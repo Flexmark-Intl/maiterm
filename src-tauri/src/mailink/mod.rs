@@ -1433,6 +1433,12 @@ pub(crate) async fn send_tab_message(
         if let Some(kind) = prompt_up() {
             return refuse(kind);
         }
+        // Typed, these would overtake a prompt the tab's mod submitted that still waits for its
+        // turn.
+        if app.mod_inbox.has_unstarted(tab_id) {
+            return json!({ "status": "failed",
+                "detail": "An earlier message is still waiting for the agent's turn. Send this once it has started." });
+        }
         inject_paths_then_text(app, &pty, &paths, text, true).await
     };
     match typed {

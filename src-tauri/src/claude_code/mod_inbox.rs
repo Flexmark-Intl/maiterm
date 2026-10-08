@@ -36,8 +36,10 @@ pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_WAIT: Duration = super::mod_asks::MAX_WAIT;
 /// A tab nobody has polled for this long is forgotten.
 const FORGET_AFTER: Duration = Duration::from_secs(600);
-/// How long an acked prompt counts as waiting in Claude without a `started` report.
-const UNSTARTED_FOR: Duration = Duration::from_secs(600);
+/// How long an acked prompt counts as waiting in Claude without a `started` report: longer than
+/// any turn it can be queued behind. Only a report lost on a live connection runs this out; a
+/// mod that stops polling takes its prompts with it (`poll`).
+const UNSTARTED_FOR: Duration = Duration::from_secs(6 * 3600);
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
@@ -120,6 +122,12 @@ impl ModInbox {
             let mut tabs = self.tabs.lock();
             tabs.retain(|_, i| i.polling > 0 || now.duration_since(i.last_poll) < FORGET_AFTER);
             let inbox = tabs.entry(tab_id.to_string()).or_insert_with(|| Inbox::new(now));
+            // A mod polling again after a lapse is a new one (the agent restarted, the module
+            // reloaded): prompts the old one submitted went with its process, or are no longer
+            // its to report.
+            if !inbox.is_live(now) {
+                inbox.unstarted.clear();
+            }
             inbox.last_poll = now;
             if let Some(o) = hand_out(inbox) {
                 return o;
@@ -289,6 +297,25 @@ mod tests {
         assert!(delivering.await.unwrap());
         assert!(inbox.has_unstarted("tab"), "a later prompt must follow it through the mod");
         inbox.started("tab", &id);
+        assert!(!inbox.has_unstarted("tab"));
+    }
+
+    #[tokio::test]
+    async fn a_mod_polling_again_after_a_lapse_starts_with_nothing_waiting() {
+        let inbox = Arc::new(ModInbox::default());
+        let poll = parked_poll(&inbox, "tab").await;
+        let delivering = {
+            let inbox = inbox.clone();
+            tokio::spawn(async move { inbox.deliver("tab", "hello").await })
+        };
+        let Polled::Offer { id, .. } = poll.await.unwrap() else { panic!("the poll should get the offer") };
+        assert!(inbox.ack("tab", &id));
+        assert!(delivering.await.unwrap());
+        // The agent exits with the prompt still queued; no `started` ever comes.
+        inbox.tabs.lock().get_mut("tab").unwrap().last_poll = Instant::now() - STALE_AFTER;
+        assert!(!inbox.has_unstarted("tab"));
+        // Its replacement polls: mid-turn prompts must not be routed to it on the old one's account.
+        let _ = inbox.poll("tab", Duration::from_millis(1)).await;
         assert!(!inbox.has_unstarted("tab"));
     }
 

@@ -543,7 +543,13 @@ prompt goes to the mod once the turn ends.
 
 `has_unstarted` covers the race of a turn starting just as a prompt was handed over. The mod
 reports `&started=<id>` once the prompt's turn begins, and until then every later prompt for that
-tab follows it through the mod.
+tab follows it through the mod. Image and file sends (typed paths) are held or refused instead.
+
+The record is cleared in two ways:
+- **A mod that polls again after a lapse.** Its prompts went with the old process, so a restarted
+  agent never inherits them.
+- **An expiry of 6 h.** Turns run long, so a 10-minute expiry let a later typed prompt overtake one
+  still queued (second review).
 
 `offerable` keeps slash commands (they'd reach the model as words) and empty text on the keyboard.
 

@@ -111,9 +111,10 @@ pub(crate) fn has_held(tab_id: &str) -> bool {
     QUEUES.lock().get(tab_id).is_some_and(|q| !q.items.is_empty())
 }
 
-/// Should a message to this tab be held rather than typed now?
+/// Should a message with images (typed paths) be held rather than typed now? Also while a prompt
+/// the tab's mod submitted waits for its turn: typed now, this would overtake it.
 pub(crate) fn must_hold(app: &AppState, tab_id: &str) -> bool {
-    has_held(tab_id) || draft_in_box(app, tab_id)
+    has_held(tab_id) || draft_in_box(app, tab_id) || app.mod_inbox.has_unstarted(tab_id)
 }
 
 /// Queue a message for this tab; starts the tab's worker if none is running.
@@ -198,6 +199,11 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
             }
             log::info!("[maiLink] held {what} for tab {tab_id} delivered → the agent");
             record(&tab_id, &msg_id, "typed", None);
+            continue;
+        }
+        // Typed paths wait out a prompt the mod submitted that is still waiting for its turn, or
+        // they would overtake it.
+        if !paths.is_empty() && app.mod_inbox.has_unstarted(&tab_id) {
             continue;
         }
         // A box that reads EMPTY, not merely "no draft seen": a shell prompt reads `Unknown`,
