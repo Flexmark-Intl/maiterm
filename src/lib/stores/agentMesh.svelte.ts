@@ -542,11 +542,13 @@ function createAgentMeshStore() {
 
   const onboarded = (tabId: string) => getVariables(tabId)?.get(MESH_ONBOARDED_VAR) === '1';
 
-  /** Tell each ONBOARDED member of `to` something (queued if busy). Members not yet onboarded
+  /** Tell each ONBOARDED member of `to` something (queued if busy) — and each one whose opener
+   *  is in flight (`primed`, the onboarded mark not yet written): that opener was built from
+   *  the roster before this change, and the notice queues behind it. Members not yet primed
    *  get the opener later, which already carries the current roster. */
   function notifyMembers(to: MeshMember[], text: string) {
     for (const m of to) {
-      if (!onboarded(m.tabId)) continue;
+      if (!onboarded(m.tabId) && !primed.has(m.tabId)) continue;
       ensureMember(m.tabId);
       void deliveryCtl.deliver(m.tabId, text);
     }

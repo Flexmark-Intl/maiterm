@@ -140,6 +140,7 @@ pub fn duplicate_window(
             let cloned = clone_workspace_with_new_ids(ws, &tab_contexts);
             new_win.workspaces.push(cloned);
         }
+        remint_mesh_groups(&mut new_win.workspaces);
 
         // Set active workspace to the cloned version of the source's active
         if let Some(ref active_id) = source.active_workspace_id {
@@ -699,6 +700,18 @@ fn build_window_sync(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// A duplicated window's linked meshes get FRESH group ids, one per source group, so the
+/// copies link to each other but never to their sources — moving a copy back into the source
+/// window would otherwise rejoin it and put every role on that mesh twice.
+fn remint_mesh_groups(workspaces: &mut [Workspace]) {
+    let mut fresh: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for ws in workspaces {
+        ws.mesh_group = ws.mesh_group.take().map(|g| {
+            fresh.entry(g).or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone()
+        });
+    }
+}
+
 fn clone_workspace_with_new_ids(ws: &Workspace, tab_contexts: &[TabContext]) -> Workspace {
     let (cloned, _) = clone_workspace_with_id_mapping(ws, tab_contexts);
     cloned
@@ -882,9 +895,9 @@ pub(crate) fn clone_workspace_with_id_mapping(
         bridge_all: ws.bridge_all,
         mailink_native: ws.mailink_native,
         mesh_topics: Vec::new(),
-        // A duplicated WINDOW's copies stay linked to each other (the group is per window);
-        // `duplicate_workspace` clears it, since a copy beside its source would join the same
-        // mesh with every role name doubled.
+        // Kept here; each caller decides. `duplicate_window` re-mints it per source group (its
+        // copies stay linked to each other, never to their sources); `duplicate_workspace`
+        // clears it, since a copy beside its source would put every role on the mesh twice.
         mesh_group: ws.mesh_group.clone(),
         tasks: new_tasks,
         workstreams: new_workstreams,
@@ -973,6 +986,20 @@ mod clone_ids_tests {
         assert_eq!(cloned.stack[0].name, "web");
         assert_ne!(cloned.workspace_notes[0].id, "note-1");
         assert_eq!(cloned.workspace_notes[0].content, "hi");
+    }
+
+    #[test]
+    fn a_duplicated_window_remints_mesh_groups_per_source_group() {
+        let mut ws: Vec<Workspace> = (0..4).map(|i| Workspace::new(format!("w{i}"))).collect();
+        ws[0].mesh_group = Some("g1".to_string());
+        ws[1].mesh_group = Some("g1".to_string());
+        ws[2].mesh_group = Some("g2".to_string());
+        super::remint_mesh_groups(&mut ws);
+        let g = |i: usize| ws[i].mesh_group.clone();
+        assert!(g(0).is_some() && g(0) != Some("g1".to_string()), "never the source's group");
+        assert_eq!(g(0), g(1), "copies of one group stay linked to each other");
+        assert!(g(2).is_some() && g(2) != Some("g2".to_string()) && g(2) != g(0));
+        assert_eq!(g(3), None, "an unlinked workspace stays unlinked");
     }
 
     #[test]

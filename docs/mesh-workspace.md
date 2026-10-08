@@ -581,8 +581,9 @@ workspace unlinks it first.
 **Same window only.** Each window is its own webview with its own stores, and delivery is a
 per-window controller, so a mesh never spans windows. A linked workspace moved to another
 window keeps its `mesh_group` and meshes there with whatever shares it (usually nothing),
-and rejoins if moved back. Duplicating a WINDOW keeps the ids (the copies link to each other
-in the new window); duplicating a WORKSPACE clears it — the copy beside its source would put
+and rejoins if moved back. Duplicating a WINDOW re-mints the ids, one per source group (the
+copies link to each other, never to their sources — so moving a copy back can't double every
+role on the source's mesh); duplicating a WORKSPACE clears it — the copy beside its source would put
 every role on the mesh twice. A share file never carries it (allowlist).
 
 **What spans the link** (`agentMesh.svelte.ts`, `meshWorkspacesOf`):
@@ -609,7 +610,8 @@ cap would reset on every link. `persistTopics` writes every workspace of the mes
 changed, and the mirror with it.
 
 **Telling the agents.** Already-onboarded members are told once, queued if busy: on link, who
-they can now reach (workspace-tagged); on unlink, who they lost. A member not yet onboarded
+they can now reach (workspace-tagged); on unlink, who they lost. A member whose opener is being typed at
+that moment (primed, not yet marked onboarded) is told too — its opener predates the change. A member not yet onboarded
 gets the opener, which already carries the whole linked roster.
 
 ## GSTACK REVIEW REPORT
