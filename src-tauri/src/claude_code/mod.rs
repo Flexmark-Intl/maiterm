@@ -3,6 +3,7 @@ pub mod codex;
 pub mod gate;
 pub mod lockfile;
 pub mod mod_asks;
+pub mod mod_inbox;
 pub mod protocol;
 pub mod registrar;
 pub mod server;

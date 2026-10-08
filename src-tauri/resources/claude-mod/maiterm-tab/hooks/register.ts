@@ -118,19 +118,95 @@ async function cancelAsk($: EngineInterface, to: Link, ask: string): Promise<voi
   }
 }
 
+// --- Prompts from maiTerm (claude_code/mod_inbox.rs) --------------------------------------
+//
+// What maiTerm sends this tab's agent (a phone message, a follow-up, an Overlord directive, a
+// peer's message) comes through here rather than typed: one loop long-polls GET /hooks/inbox,
+// acks each prompt (maiTerm refuses the ack for one it has meanwhile given up on and typed
+// instead) and submits it, which starts a turn once the session is idle and leaves the human's
+// draft in the box. Only in an interactive session: a `claude -p` an agent runs inherits this
+// tab's environment, and must not take its prompts.
+
+// The interactive session's id, kept in the environment because module state isn't: a module
+// reloaded mid-session (maiTerm rewrites these files on upgrade) gets no `session.start`, and
+// restarts its loop from the next event once this names the session it belongs to. A child
+// process inherits the variable but runs another session. (`$.env` takes the name spelled out
+// at each call: MAITERM_MOD_SESSION.)
+
+let inboxRunning = false
+
+function startInbox($: EngineInterface, to: Link): void {
+  if (inboxRunning) return
+  inboxRunning = true
+  const base = `http://127.0.0.1:${to.port}/hooks/inbox?tab_id=${encodeURIComponent(to.tab)}`
+  const headers = { 'x-claude-code-ide-authorization': to.auth }
+  const again = (ms: number) => {
+    $.clock.after(ms, () => {
+      void round()
+    })
+  }
+  const round = async (): Promise<void> => {
+    let r
+    try {
+      r = await $.http.fetch(`${base}&wait=10`, { headers })
+    } catch {
+      return again(5000)
+    }
+    if (r.status === 204) return again(1)
+    if (r.status !== 200) return again(5000)
+    let offer: { id?: string; text?: string }
+    try {
+      offer = JSON.parse(r.text)
+    } catch {
+      return again(1)
+    }
+    if (offer.id && typeof offer.text === 'string') {
+      try {
+        const ack = await $.http.fetch(`${base}&ack=${encodeURIComponent(offer.id)}`, { headers })
+        // Not awaited: it resolves only as the turn starts, and the next prompt shouldn't wait.
+        if (ack.status === 204) void $.prompt.submit({ text: offer.text, asUser: true }).catch(() => {})
+      } catch {
+        // Unacked, maiTerm takes it back.
+      }
+    }
+    again(1)
+  }
+  again(1)
+}
+
+async function ensureInbox($: EngineInterface, to: Link): Promise<void> {
+  if (inboxRunning) return
+  const [mine, session] = await Promise.all([$.env.get('MAITERM_MOD_SESSION'), $.session.id()])
+  if (mine && mine === session) startInbox($, to)
+}
+
 // The events maiTerm's server reads, forwarded as the settings hooks would have sent them.
 // Sent BEFORE `next(e)`: the settings hooks run beneath, so maiTerm hears this copy first
 // and knows to drop theirs.
 async function relay<E, R>($: EngineInterface, e: E, next: (e: E) => Promise<R>): Promise<R> {
   const to = await linkOf($)
-  if (to) await send($, to, e)
+  if (to) {
+    await send($, to, e)
+    await ensureInbox($, to)
+  }
   return next(e)
 }
 
 export const register: Register = on => {
+  on('session.start', async ($, e, next) => {
+    const result = await next(e)
+    const to = await linkOf($)
+    if (!to) return result
+    await $.env.set('MAITERM_MOD_SESSION', e.isInteractive ? await $.session.id() : '')
+    if (e.isInteractive) startInbox($, to)
+    return result
+  })
+
   on('classic.SessionStart', async ($, e, next) => {
     const to = await linkOf($)
     if (!to) return next(e)
+    // A /clear starts a new session in this process (and no `session.start`): the loop runs on.
+    if (inboxRunning) await $.env.set('MAITERM_MOD_SESSION', e.session_id)
     // The server's reply is the session's standing instructions: the tab and session ids and
     // whatever this tab's features need (the Overlord, tasks, the stack, follow-ups).
     const priming = await send($, to, e, '&prime=1')

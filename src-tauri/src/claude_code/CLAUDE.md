@@ -521,6 +521,46 @@ Verified live on dev 2026-10-08 through `answer_tab_prompt_as_human`:
 - don't-ask-again by key, saving the right rule;
 - a two-question form with multiSelect plus Other.
 
+**Prompts maiTerm sends go to the mod too** (`mod_inbox.rs`, 2026-10-08; no wire change). An
+interactive session's mod keeps one long-poll open on `GET /hooks/inbox?tab_id=`, started from
+`session.start` (only when `isInteractive`: a `claude -p` an agent runs inherits the tab's env). It
+acks each offer (`&ack=<id>`: 204 go, 410 retracted) and then calls `$.prompt.submit({ text,
+asUser: true })`. Delivery is take-or-retract with that ack, so a prompt is submitted exactly when
+`deliver` reported it delivered.
+
+The one rule is `mod_inbox::takes_now`: a mod is polling, AND the agent is between turns OR the
+human has a draft in the box. A busy agent with an empty box still gets keystrokes, because Claude
+folds a prompt typed mid-turn into the running turn and phone steering relies on that. A submitted
+prompt waits for the turn to end (tested: `prompt.submit` mid-turn queues, and several queued ones
+run as ONE turn). `offerable` keeps slash commands (they'd reach the model as words) and empty text
+on the keyboard.
+
+Callers go through one function per side:
+- Rust: `mailink::submit_prompt`. Used by the phone's text send, the draft-hold worker, the Loom
+  composer and both comms paths.
+- Frontend: `agentPrompt.ts::deliverPrompt`. Used by `injectPrompt` (mesh, bridge and
+  follow-ups), driveTab, ritual steps, board notices and the Overlord's own nudges.
+
+The draft gates (`draft_blocks_prompt`, follow-ups' `holdReason`, driveTab's `noDraft`) stand down
+when the mod takes the prompt. **In a tab whose mod is live, a draft is never typed over**: a
+prompt the mod didn't take (or a slash command) falls back to the caller's own draft check, and
+`submit_prompt` refuses rather than type. Recovery commands, `/maiterm init` nudges, resume
+commands and images (typed paths) stay keystrokes.
+
+Two traps:
+- `$.env.get`/`set` refuse anything but a literal name, at module load. `tsc` doesn't catch it, and
+  the whole mod fails to load.
+- A deploy rewrites the mod's files, which may reload the module and drop its timers without a new
+  `session.start`. `MAITERM_MOD_SESSION`, the interactive session's id, lets any relayed event
+  restart the loop in that session only. It is in `AGENT_ENV_MARKERS`.
+
+Verified on dev 2026-10-08 with a real `claude`:
+- idle → agent;
+- a draft in the box → agent, the draft kept;
+- busy with a draft → agent, run after the turn, the draft kept;
+- busy with an empty box → typed and folded in;
+- a slash command over a draft → refused.
+
 **Hooks registered:**
 - `SessionStart` (command): the only hook that runs **inside the tab's shell**, so the only one that can see `$MAITERM_TAB_ID`. It captures stdin once, POSTs the event to `/hooks?tab_id=$MAITERM_TAB_ID&prime=1`, and echoes the tab id, the session id, and the server's reply. Gated on `$MAITERM_PORT` matching server port (prevents dev/prod cross-talk). Output appears collapsed in TUI ("Ran 1 start hook") but injected into model context as system-reminder.
 - `SessionStart` (HTTP): POST to `/hooks` with `{session_id, cwd, source, model}` — no tab id (settings.json hook URLs are static), which is why the command hook exists.

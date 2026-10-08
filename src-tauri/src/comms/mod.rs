@@ -514,10 +514,12 @@ fn injection_blocked_by_prompt(app: &Arc<AppState>, tab_id: &str) -> Option<&'st
 
 /// The human has a half-typed draft in the agent's input box: an injection's CR would submit it
 /// along with the payload (mailink `draft_hold`). Asked at the hold decision AND again right
-/// before typing — attachment downloads and transcript fetches sit between the two.
+/// before typing — attachment downloads and transcript fetches sit between the two. Not when the
+/// tab's mod submits the payload instead, around the draft (`mailink::submit_prompt`).
 const DRAFT_HOLD: &str = "your draft in that agent's input box is waiting to be sent or cleared";
 fn draft_blocks(app: &AppState, tab_id: &str) -> bool {
-    crate::mailink::draft_hold::draft_in_box(app, tab_id)
+    // Asked before the payload is built; a comms payload is always prose a mod can take.
+    crate::mailink::draft_blocks_prompt(app, tab_id, true)
 }
 
 /// Positive evidence that an AGENT — not a bare shell — owns this tab's terminal.
@@ -982,8 +984,8 @@ pub async fn watcher_loop(app: Arc<AppState>, app_handle: tauri::AppHandle) {
                 // Started typing while the attachments downloaded. Cursor not advanced: next tick.
                 continue;
             }
-            match crate::mailink::inject_text(&app, &pty_id, &payload, true).await {
-                Ok(()) => {
+            match crate::mailink::submit_prompt(&app, &tab_id, &pty_id, &payload).await {
+                Ok(_) => {
                     // Scan cursor to the tick's newest post; delivered watermark only to
                     // the newest post actually in the payload.
                     let delivered = addressed.iter().map(|p| p.create_at).max();
@@ -1571,7 +1573,7 @@ async fn summon_pickup(
     if draft_blocks(app, tab_id) {
         return Err(DRAFT_HOLD.into());
     }
-    crate::mailink::inject_text(app, pty_id, &payload, true).await?;
+    crate::mailink::submit_prompt(app, tab_id, pty_id, &payload).await?;
 
     let binding = CommsBinding {
         provider: "mattermost".to_string(),

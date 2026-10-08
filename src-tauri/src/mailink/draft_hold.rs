@@ -164,12 +164,6 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
         if !crate::comms::agent_owns_terminal(&app, &pty).await {
             continue;
         }
-        // A box that reads EMPTY, not merely "no draft seen": a shell prompt reads `Unknown`,
-        // and so does a screen covering the box (a draft taller than the screen, a full-screen
-        // view) — typing then would run the message as a command, or send the draft after all.
-        if !matches!(super::agent_input_box(&app, &tab_id), super::input_box::InputBox::Empty) {
-            continue;
-        }
         // The same last looks every typed message gets: no dialog of any kind.
         if super::open_prompt(&app, &tab_id).is_some() {
             continue;
@@ -192,6 +186,26 @@ async fn worker(app: Arc<AppState>, tab_id: String) {
         else {
             continue;
         };
+        // A mod in the tab submits text around the draft: no need to wait for the box to empty.
+        // Images are typed paths, and a slash command must be typed, so those still wait.
+        if paths.is_empty()
+            && crate::claude_code::mod_inbox::offerable(&text)
+            && crate::claude_code::mod_inbox::takes_now(&app, &tab_id)
+            && app.mod_inbox.deliver(&tab_id, &text).await
+        {
+            if let Some(q) = QUEUES.lock().get_mut(&tab_id) {
+                q.items.pop_front();
+            }
+            log::info!("[maiLink] held {what} for tab {tab_id} delivered → the agent");
+            record(&tab_id, &msg_id, "typed", None);
+            continue;
+        }
+        // A box that reads EMPTY, not merely "no draft seen": a shell prompt reads `Unknown`,
+        // and so does a screen covering the box (a draft taller than the screen, a full-screen
+        // view) — typing then would run the message as a command, or send the draft after all.
+        if !matches!(super::agent_input_box(&app, &tab_id), super::input_box::InputBox::Empty) {
+            continue;
+        }
         let typed = if paths.is_empty() {
             super::inject_text(&app, &pty, &text, true).await
         } else {

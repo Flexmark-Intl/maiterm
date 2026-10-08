@@ -18,7 +18,7 @@ import { resumePane } from '$lib/stores/resumeGate.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
 import { preferencesStore } from '$lib/stores/preferences.svelte';
-import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
+import { bracketedPasteSubmit, deliverPrompt } from '$lib/utils/agentPrompt';
 import { dispatch } from '$lib/stores/notificationDispatch';
 import { pruneHiddenDefaultOverlordRules, seedDefaultOverlordRules } from '$lib/overlord/defaults';
 import { guardsForCondition } from '$lib/overlord/format';
@@ -1141,11 +1141,10 @@ function createOverlordStore() {
       // State can move during the liveness round trip.
       if (mappedState(tabId) !== 'idle') return false;
       if (Date.now() - (terminalsStore.getLastOutputAt(tabId) ?? 0) < 1500) return false;
-      // An idle agent is exactly where the human leaves a half-typed next message.
-      if (!(await noDraft(tabId, true))) return false;
       try {
-        await bracketedPasteSubmit(inst.ptyId, text);
-        return true;
+        // An idle agent is exactly where the human leaves a half-typed next message: typed, the
+        // notice would send it. The tab's mod submits around it instead.
+        return (await deliverPrompt(tabId, inst.ptyId, text, () => noDraft(tabId, true))) !== false;
       } catch (e) {
         logError(`overlord: ${what} notice failed for ${tabId.slice(0, 8)}: ${e}`);
         return false;
@@ -1533,7 +1532,9 @@ function createOverlordStore() {
       // empty box) can stay on screen above the shell prompt that replaced it — the same gap
       // noticeToTab and follow-ups have (followUps `holdReason`).
       if (!(await hasLiveRepl(tabId)) || !typeable()) return false;
-      if (!(await noDraft(tabId, false))) return false;
+      // `send_tab_message` hands it to the tab's mod when it takes it, around any draft (and
+      // then refuses rather than type over one).
+      if (!(await commands.agentTakesPrompt(tabId).catch(() => false)) && !(await noDraft(tabId, false))) return false;
       const r = await commands.sendTabMessage(tabId, text).catch(() => null);
       return r?.status === 'delivered';
     });
@@ -1802,7 +1803,7 @@ function createOverlordStore() {
             ? `${n} repl${n === 1 ? 'y' : 'ies'} from tabs you drove`
             : `${n} Overlord item${n === 1 ? '' : 's'} pending`;
           try {
-            await bracketedPasteSubmit(inst.ptyId, `${what} — call listEscalations.`);
+            await deliverPrompt(tab.id, inst.ptyId, `${what} — call listEscalations.`);
             unNudged.clear();
           } catch (e) {
             logError(`overlord: wake nudge failed: ${e}`);
@@ -1934,7 +1935,7 @@ function createOverlordStore() {
         const inst = terminalsStore.get(tab.id);
         if (!inst) { primedAgents.delete(primeId); continue; }
         try {
-          await bracketedPasteSubmit(inst.ptyId, buildDoctrine());
+          await deliverPrompt(tab.id, inst.ptyId, buildDoctrine());
           await setVariable(tab.id, OVERLORD_PRIMED_VAR, key);
           logInfo(`overlord: primed agent tab ${tab.id.slice(0, 8)} with doctrine ${key}`);
         } catch (e) {
@@ -2093,13 +2094,13 @@ function createOverlordStore() {
         // (waitInjectable waits one out; this catches one typed since). Only a box that READS as
         // holding text: an unreadable one (Codex) is left to `humanTypedSince`, as before — the
         // keystrokes-since-idle fallback aborted Codex rituals on a recalled-then-cleared line.
-        if (await boxHasText(tabId)) {
-          logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft is in the agent's input box`);
-          ledger(tabId, rule.id, origin, i, step, 'aborted');
-          return;
-        }
         try {
-          await bracketedPasteSubmit(inst.ptyId, step.text);
+          const via = await deliverPrompt(tabId, inst.ptyId, step.text, async () => !(await boxHasText(tabId)));
+          if (via === false) {
+            logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft is in the agent's input box`);
+            ledger(tabId, rule.id, origin, i, step, 'aborted');
+            return;
+          }
         } catch (e) {
           logError(`overlord: injection failed for tab ${tabId.slice(0, 8)}: ${e}`);
           ledger(tabId, rule.id, origin, i, step, 'blocked_guard');
@@ -3889,7 +3890,7 @@ function createOverlordStore() {
         const lastOut = terminalsStore.getLastOutputAt(tabId) ?? 0;
         if (Date.now() - lastOut < 3000) { skipped++; continue; }
         try {
-          await bracketedPasteSubmit(inst.ptyId, TRACK_REQUEST_TEXT);
+          await deliverPrompt(tabId, inst.ptyId, TRACK_REQUEST_TEXT);
         } catch (e) {
           logError(`overlord: track-request inject failed for ${tabId.slice(0, 8)}: ${e}`);
           skipped++; continue;
@@ -5080,8 +5081,10 @@ function createOverlordStore() {
       const inst = terminalsStore.get(tabId);
       if (!inst) return { sent: false, reason: 'no_live_repl' };
       // The human's draft is in that box; the directive's Enter would send it. The board
-      // notices hold for the same reason and hand off to this tool, so it must hold too.
-      const clear = await noDraft(tabId, true);
+      // notices hold for the same reason and hand off to this tool, so it must hold too —
+      // unless the tab's mod takes it, which submits around the draft.
+      const toAgent = await commands.agentTakesPrompt(tabId).catch(() => false);
+      const clear = toAgent || (await noDraft(tabId, true));
       // The state moved during the read: say what it moved to, not "a draft" (a prompt that
       // opened meanwhile is not cleared by retrying).
       if (mappedState(tabId) !== 'idle') {
@@ -5090,7 +5093,7 @@ function createOverlordStore() {
           ? { sent: false, reason: 'awaiting_permission', detail: 'A prompt opened in that tab just now — use getTabPrompt.' }
           : { sent: false, reason: 'agent_busy' };
       }
-      if (!clear) {
+      const draftHeld = () => {
         ledger(tabId, null, 'overlord_judgment', 0, step, 'blocked_guard');
         return {
           sent: false,
@@ -5099,9 +5102,13 @@ function createOverlordStore() {
             'Your human is typing in that tab, or has a draft in its input box — a directive ' +
             'would send it along. Retry in a minute or two; it clears when they send or clear it.',
         };
-      }
+      };
+      if (!clear) return draftHeld();
       try {
-        await bracketedPasteSubmit(inst.ptyId, text);
+        // Typed only if the mod didn't take it (a slash command, or it had gone): then the draft
+        // check skipped on its account is made after all.
+        const via = await deliverPrompt(tabId, inst.ptyId, text, () => !toAgent || noDraft(tabId, true));
+        if (via === false) return draftHeld();
       } catch {
         return { sent: false, reason: 'no_live_repl' };
       }

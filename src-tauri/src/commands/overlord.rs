@@ -175,6 +175,28 @@ pub fn agent_input_box(state: State<'_, Arc<AppState>>, tab_id: String) -> &'sta
     }
 }
 
+/// Whether a prompt for this tab goes to its maiterm-tab mod now rather than typed
+/// (`claude_code::mod_inbox::takes_now`). Then a draft in the box doesn't hold it.
+#[tauri::command]
+pub fn agent_takes_prompt(state: State<'_, Arc<AppState>>, tab_id: String) -> bool {
+    crate::claude_code::mod_inbox::takes_now(state.inner(), &tab_id)
+}
+
+/// Hands a prompt to this tab's maiterm-tab mod to submit, when it takes one now. `false` means
+/// nothing was sent, and the caller types it under its own checks (draft included).
+#[tauri::command]
+pub async fn submit_prompt_to_agent(state: State<'_, Arc<AppState>>, tab_id: String, text: String) -> Result<bool, String> {
+    let app = state.inner().clone();
+    if !crate::claude_code::mod_inbox::offerable(&text) || !crate::claude_code::mod_inbox::takes_now(&app, &tab_id) {
+        return Ok(false);
+    }
+    let taken = app.mod_inbox.deliver(&tab_id, &text).await;
+    if taken {
+        log::info!("[overlord] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
+    }
+    Ok(taken)
+}
+
 /// Is this agent session's transcript on THIS machine — i.e. could a resume typed into a local
 /// shell find it? False for a session recorded over ssh (docs/follow-ups.md §6.2).
 #[tauri::command]

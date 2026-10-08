@@ -800,6 +800,8 @@ pub fn run() {
             commands::overlord::send_tab_message,
             commands::overlord::trust_dialog_open,
             commands::overlord::agent_input_box,
+            commands::overlord::agent_takes_prompt,
+            commands::overlord::submit_prompt_to_agent,
             commands::overlord::agent_session_is_local,
             commands::overlord::get_tab_transcript,
             commands::overlord::append_overlord_ledger,

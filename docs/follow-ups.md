@@ -527,6 +527,13 @@ card.
 
 ### 6.1 The path
 
+> **Local Claude tabs with the maiterm-tab mod (2026-10-08):** the follow-up is handed to the mod,
+> which submits it with `prompt.submit`. That leaves the human's draft in the box, so `holdReason`
+> drops its draft check and its 2 s typing guard when `agentTakesPrompt` says the mod takes it.
+> The idle, quiet and liveness checks all stay. See `claude_code/CLAUDE.md` → "Prompts maiTerm
+> sends go to the mod too". Everything below is still the path for every other tab, and the
+> fallback for this one.
+
 Delivery goes through **`agentDelivery`** (core in `src/lib/stores/agentDelivery.ts`, the
 live instance in `agentDeliveryLive.ts`), the mailbox the bridge and the mesh already share.
 Follow-ups take no slot and no owner tag: `tryDeliverNow` works for a tab with no slot at all,

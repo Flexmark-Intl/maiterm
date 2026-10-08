@@ -1319,11 +1319,23 @@ async fn post_message(
     }
 
     // v0.19: a submitted message never rides on top of a human's draft (it would send the draft
-    // with it) — it waits, in order, for the box to empty (`draft_hold.rs`).
-    if body.submit && draft_hold::must_hold(&s.app, &tab_id) {
-        let msg_id = draft_hold::new_msg_id();
-        draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths: Vec::new(), text: body.text.clone(), what: "phone message" });
-        return Ok(Json(held_reply(msg_id, woke)));
+    // with it) — it waits, in order, for the box to empty (`draft_hold.rs`). Unless the tab's
+    // mod submits it, which leaves the draft where it is.
+    if body.submit {
+        let hold = |s: &ApiState| {
+            let msg_id = draft_hold::new_msg_id();
+            draft_hold::hold(s.app.clone(), &tab_id, draft_hold::Held { msg_id: msg_id.clone(), paths: Vec::new(), text: body.text.clone(), what: "phone message" });
+            Ok(Json(held_reply(msg_id, woke)))
+        };
+        if draft_hold::has_held(&tab_id) || draft_blocks_prompt(&s.app, &tab_id, crate::claude_code::mod_inbox::offerable(&body.text)) {
+            return hold(&s);
+        }
+        return match submit_prompt(&s.app, &tab_id, &pty, &body.text).await {
+            Ok(_) => Ok(Json(json!({ "status": "delivered", "msg_id": format!("m_{}", now_ms()), "woke": woke }))),
+            // The mod was asked and didn't take it, and the box holds a draft.
+            Err(_) if draft_hold::draft_in_box(&s.app, &tab_id) => hold(&s),
+            Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
     }
     inject_text(&s.app, &pty, &body.text, body.submit)
         .await
@@ -1411,7 +1423,7 @@ pub(crate) async fn send_tab_message(
         return refuse(kind);
     }
     let typed = if files.is_empty() {
-        inject_text(app, &pty, text, true).await
+        submit_prompt(app, tab_id, &pty, text).await.map(|_| ())
     } else {
         let paths = match stage_files_for_tab(app, tab_id, &pty, files).await {
             Ok(p) => p,
@@ -3748,6 +3760,44 @@ pub(crate) async fn inject_text(
         crate::pty::write_pty(app, pty_id, b"\r")?;
     }
     Ok(())
+}
+
+/// How a prompt reached the agent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Delivered {
+    /// Handed to the tab's maiterm-tab mod, which submits it (claude_code/mod_inbox.rs).
+    Agent,
+    /// Typed into the terminal and submitted with a CR.
+    Keys,
+}
+
+/// Hand a text prompt to this tab's agent: to its maiterm-tab mod when it takes it now
+/// (`mod_inbox::takes_now`), else typed. Callers make their usual checks for typing first, and
+/// may skip only the draft check when `draft_blocks_prompt` says the mod covers it — which is why
+/// a tab with a mod is never typed into over a draft: not when the mod didn't take the prompt,
+/// and not for a slash command, which must be typed.
+pub(crate) async fn submit_prompt(
+    app: &Arc<AppState>,
+    tab_id: &str,
+    pty_id: &str,
+    text: &str,
+) -> Result<Delivered, String> {
+    use crate::claude_code::mod_inbox;
+    if mod_inbox::offerable(text) && mod_inbox::takes_now(app, tab_id) && app.mod_inbox.deliver(tab_id, text).await {
+        log::info!("[maiLink] prompt for tab {tab_id} → the agent ({} chars)", text.chars().count());
+        return Ok(Delivered::Agent);
+    }
+    if app.mod_inbox.is_live(tab_id) && draft_hold::draft_in_box(app, tab_id) {
+        return Err("the human has a draft in the agent's input box, and the prompt can't go around it".into());
+    }
+    inject_text(app, pty_id, text, true).await.map(|()| Delivered::Keys)
+}
+
+/// The human's draft in this tab's agent input box keeps a prompt out: there is one, and no mod
+/// is there to submit the prompt around it (`submit_prompt`). `offerable`: the prompt may go to
+/// a mod at all (`mod_inbox::offerable`).
+pub(crate) fn draft_blocks_prompt(app: &AppState, tab_id: &str, offerable: bool) -> bool {
+    draft_hold::draft_in_box(app, tab_id) && !(offerable && app.mod_inbox.is_live(tab_id))
 }
 
 /// Pause between image-path writes (and before the caption/submit) so the Claude Code TUI converts

@@ -370,6 +370,18 @@ export async function agentInputBox(tabId: string): Promise<'empty' | 'has_text'
   return invoke('agent_input_box', { tabId });
 }
 
+/** Whether a prompt for this tab goes to its maiterm-tab mod now rather than typed: then a
+ *  draft in the agent's box doesn't hold it (claude_code/mod_inbox.rs `takes_now`). */
+export async function agentTakesPrompt(tabId: string): Promise<boolean> {
+  return invoke('agent_takes_prompt', { tabId });
+}
+
+/** Hands a prompt to this tab's maiterm-tab mod to submit, when it takes one now. False means
+ *  nothing was sent: type it, under the caller's own checks. Use `deliverPrompt`. */
+export async function submitPromptToAgent(tabId: string, text: string): Promise<boolean> {
+  return invoke('submit_prompt_to_agent', { tabId, text });
+}
+
 /** Whether Claude's workspace-trust dialog is open on this tab. Every automated path that types
  *  into a tab must ask first: an Enter there confirms "No, exit" and Claude quits. */
 export async function trustDialogOpen(tabId: string): Promise<boolean> {

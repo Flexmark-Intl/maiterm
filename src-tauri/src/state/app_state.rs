@@ -270,6 +270,9 @@ pub struct AppState {
     // Permission dialogs and questions a maiterm-tab mod hook is waiting to be answered on
     // (claude_code/mod_asks.rs): the delivery path that replaces keystrokes for those tabs.
     pub mod_asks: crate::claude_code::mod_asks::ModAsks,
+    // Prompts offered to a tab's maiterm-tab mod to submit rather than typed
+    // (claude_code/mod_inbox.rs).
+    pub mod_inbox: crate::claude_code::mod_inbox::ModInbox,
     // maiLink: outstanding one-time pairing codes → expiry instant (docs/mailink-protocol.md §3.2)
     pub mailink_pairing_codes: RwLock<HashMap<String, Instant>>,
     // maiLink: the live listener's (fingerprint, port), set when the bridge starts so the
@@ -345,6 +348,7 @@ impl AppState {
             contested_agent_sessions: RwLock::new(HashMap::new()),
             mod_agent_sessions: RwLock::new(HashMap::new()),
             mod_asks: Default::default(),
+            mod_inbox: Default::default(),
             mailink_pairing_codes: RwLock::new(HashMap::new()),
             mailink_info: RwLock::new(None),
             mailink_shutdown: RwLock::new(None),

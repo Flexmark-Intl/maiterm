@@ -2,7 +2,7 @@ import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { claudeStateStore } from '$lib/stores/agentState.svelte';
 import { getAdapter } from '$lib/agents/adapter';
-import { bracketedPasteSubmit } from '$lib/utils/agentPrompt';
+import { deliverPrompt } from '$lib/utils/agentPrompt';
 import { createDeliveryController } from '$lib/stores/agentDelivery';
 import { agentInputBox, trustDialogOpen } from '$lib/tauri/commands';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
@@ -27,8 +27,14 @@ export const DELIVERY_OWNER_MESH = 'mesh';
  *  submit timing can't drift apart — a too-short gap here was dropping the CR on long replies
  *  (a 20-line message stages as `[Pasted text]` but never sends). Also used directly for
  *  one-off writes that intentionally bypass the queue (fork re-init directive, disconnect
- *  notice). */
-export async function injectPrompt(tabId: string, text: string, beforePaste?: () => boolean): Promise<boolean> {
+ *  notice). A tab whose maiterm-tab mod takes prompts gets it submitted instead (`deliverPrompt`),
+ *  and only a typed one is subject to `clearToType`, the caller's draft check. */
+export async function injectPrompt(
+  tabId: string,
+  text: string,
+  beforePaste?: () => boolean,
+  clearToType: () => Promise<boolean> = async () => true,
+): Promise<boolean> {
   const inst = terminalsStore.get(tabId);
   if (!inst) {
     logError(`agentDelivery: cannot inject — no terminal instance for tab ${tabId.slice(0, 8)}`);
@@ -45,8 +51,9 @@ export async function injectPrompt(tabId: string, text: string, beforePaste?: ()
     }
     // The caller's last word, with nothing async left between it and the write.
     if (beforePaste && !beforePaste()) return false;
-    await bracketedPasteSubmit(inst.ptyId, text);
-    return true;
+    // The draft check reads the screen, so the caller's last word is asked again after it.
+    const via = await deliverPrompt(tabId, inst.ptyId, text, async () => (await clearToType()) && (!beforePaste || beforePaste()));
+    return via !== false;
   } catch (e) {
     logError(`agentDelivery: inject failed for tab ${tabId.slice(0, 8)}: ${e}`);
     return false;
@@ -56,13 +63,12 @@ export async function injectPrompt(tabId: string, text: string, beforePaste?: ()
 export const agentDelivery = createDeliveryController({
   // A peer's message is held (queued; the drain retries) while the human has a draft in a
   // Claude agent's input box: its CR would submit the draft along with it. Read off the screen,
-  // so only Claude's box counts — another runtime's doesn't parse ('unknown').
-  inject: async (tabId, text, beforePaste) => {
-    if (workspacesStore.getTabRuntime(tabId) === 'claude' && (await agentInputBox(tabId).catch(() => 'unknown')) === 'has_text') {
-      return false;
-    }
-    return injectPrompt(tabId, text, beforePaste);
-  },
+  // so only Claude's box counts — another runtime's doesn't parse ('unknown'). Not held where the
+  // tab's mod submits it around the draft.
+  inject: (tabId, text, beforePaste) =>
+    injectPrompt(tabId, text, beforePaste, async () =>
+      !(workspacesStore.getTabRuntime(tabId) === 'claude' && (await agentInputBox(tabId).catch(() => 'unknown')) === 'has_text'),
+    ),
   liveState: (tabId) => !!claudeStateStore.getState(tabId),
   awaitingHuman: (tabId) => {
     const st = claudeStateStore.getState(tabId);

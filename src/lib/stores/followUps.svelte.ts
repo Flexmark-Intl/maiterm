@@ -364,13 +364,15 @@ function createFollowUpsStore() {
     return null;
   }
 
-  async function holdReason(tab: Tab): Promise<string | null> {
+  /** `toAgent`: the tab's maiterm-tab mod takes the prompt (`agentTakesPrompt`), submitting it
+   *  around whatever is in the input box — so neither the box nor keystrokes hold it. */
+  async function holdReason(tab: Tab, toAgent: boolean): Promise<string | null> {
     const quick = tabHold(tab);
     if (quick) return quick;
     const st = agentStateStore.getState(tab.id)!;
     // Typing right now: a keystroke this recent may not have reached the screen yet.
     const typed = terminalsStore.getLastTakeoverInputAt(tab.id);
-    if (typed !== undefined && Date.now() - typed < 2000) return 'someone is typing in the tab';
+    if (!toAgent && typed !== undefined && Date.now() - typed < 2000) return 'someone is typing in the tab';
     // And the screen has settled — the same 1.5 s the Overlord's own notices wait for.
     if (Date.now() - (terminalsStore.getLastOutputAt(tab.id) ?? 0) < 1500) return 'output still arriving';
     // No draft in the input box. Typing into an agent's input fires no hook, so nothing reports
@@ -380,10 +382,12 @@ function createFollowUpsStore() {
     // type-ahead during boot slipped through. They still guard around the read — the 2 s check
     // above, `deliverOne`'s after-the-gate abort — and decide it where the screen isn't a layout
     // maiTerm recognises: anything typed since this stretch of idle began holds.
-    const box = await commands.agentInputBox(tab.id);
-    if (box === 'has_text') return "there's a draft in the agent's input box — send or clear it first";
-    if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {
-      return 'something was typed in the tab since the agent went idle, and its input box can’t be read';
+    if (!toAgent) {
+      const box = await commands.agentInputBox(tab.id);
+      if (box === 'has_text') return "there's a draft in the agent's input box — send or clear it first";
+      if (box === 'unknown' && typed !== undefined && typed > (st.idleSince ?? st.updatedAt)) {
+        return 'something was typed in the tab since the agent went idle, and its input box can’t be read';
+      }
     }
     if (!agentDelivery.canDeliverNow(tab.id)) return 'another message is being delivered';
     // A session entry is not an agent: it is cleared by the SessionEnd hook, which never comes
@@ -562,10 +566,13 @@ function createFollowUpsStore() {
     // and then awaits more (the liveness sweep, the take, the trust check); someone who starts
     // typing inside that window would get the paste landed after their keys and submitted with
     // them. Checked again before the take and, last, just before the paste is written.
+    // Not where the tab's mod submits it: keys don't reach the box it goes around. Should the mod
+    // not take it after all, the typed fallback still reads the box first (agentDeliveryLive).
     const keysAtGate = terminalsStore.getLastTakeoverInputAt(tab.id);
-    const untouched = () => terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
+    const toAgent = await commands.agentTakesPrompt(tab.id).catch(() => false);
+    const untouched = () => toAgent || terminalsStore.getLastTakeoverInputAt(tab.id) === keysAtGate;
     try {
-      const reason = await holdReason(tab);
+      const reason = await holdReason(tab, toAgent);
       // The agent has exited: restart it (§6.2), and the tick delivers once it is up.
       if (reason === NO_AGENT) return (await resumeAgent(tab, byHand, untouched)) ?? 'maiTerm restarted the agent — it goes once the agent is up';
       if (reason) return reason;

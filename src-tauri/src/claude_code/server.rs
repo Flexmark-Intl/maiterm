@@ -459,6 +459,8 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         .route("/hooks", post(hooks_handler))
         // The maiterm-tab mod's hooks waiting on an answer (mod_asks.rs)
         .route("/hooks/ask", get(mod_ask_handler))
+        // The maiterm-tab mod's loop collecting prompts to submit (mod_inbox.rs)
+        .route("/hooks/inbox", get(mod_inbox_handler))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -3489,6 +3491,39 @@ async fn mod_ask_handler(
         super::mod_asks::Polled::Answer(v) => axum::Json(v).into_response(),
         super::mod_asks::Polled::Pending => StatusCode::NO_CONTENT.into_response(),
         super::mod_asks::Polled::Unknown => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Handle GET /hooks/inbox?tab_id=<tab>&wait=<s> — one poll round of a maiterm-tab mod's loop
+/// collecting prompts for its tab (mod_inbox.rs): 200 `{id, text}` for a prompt to ack, 204 for
+/// none yet (poll again). With `ack=<id>`: 204 to go ahead and submit it, 410 when it was
+/// retracted (drop it).
+async fn mod_inbox_handler(
+    State(srv): State<ServerState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(tab_id) = params.get("tab_id").filter(|s| !s.is_empty()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if let Some(id) = params.get("ack") {
+        return if srv.state.mod_inbox.ack(tab_id, id) {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            StatusCode::GONE.into_response()
+        };
+    }
+    let wait = params
+        .get("wait")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(super::mod_inbox::MAX_WAIT);
+    match srv.state.mod_inbox.poll(tab_id, wait).await {
+        super::mod_inbox::Polled::Offer { id, text } => axum::Json(serde_json::json!({ "id": id, "text": text })).into_response(),
+        super::mod_inbox::Polled::Empty => StatusCode::NO_CONTENT.into_response(),
     }
 }
 

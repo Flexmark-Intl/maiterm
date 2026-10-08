@@ -1,4 +1,4 @@
-import { writeTerminal } from '$lib/tauri/commands';
+import { submitPromptToAgent, writeTerminal } from '$lib/tauri/commands';
 
 const enc = (s: string) => Array.from(new TextEncoder().encode(s));
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -41,4 +41,24 @@ export async function bracketedPasteSubmit(
   await writeTerminal(ptyId, enc(`\x1b[200~${text}\x1b[201~`));
   await sleep(pasteSettleMs(text.length, attachmentCount));
   await writeTerminal(ptyId, enc('\r'));
+}
+
+/**
+ * Hand `text` to a tab's agent as a prompt: to its maiterm-tab mod when it takes one now (Rust
+ * decides — claude_code/mod_inbox.rs `takes_now`), which submits it around whatever the human
+ * has in the input box; otherwise typed with {@link bracketedPasteSubmit}, once `clearToType`
+ * (the caller's draft check) passes. Every check other than the draft one comes before this.
+ *
+ * Resolves how it went in, or false when `clearToType` held it.
+ */
+export async function deliverPrompt(
+  tabId: string,
+  ptyId: string,
+  text: string,
+  clearToType: () => Promise<boolean> | boolean = () => true,
+): Promise<'agent' | 'keys' | false> {
+  if (await submitPromptToAgent(tabId, text).catch(() => false)) return 'agent';
+  if (!(await clearToType())) return false;
+  await bracketedPasteSubmit(ptyId, text);
+  return 'keys';
 }

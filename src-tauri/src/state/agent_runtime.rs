@@ -200,9 +200,11 @@ pub fn mcp_server_name(_rt: AgentRuntime) -> &'static str {
 /// MAITERM_VIA_MOD is the maiterm-tab mod's word that it speaks for its tab, set inside one
 /// Claude process (claude_code/claude_mod.rs). Inherited by a tab, it would stand down that
 /// tab's SessionStart/SessionEnd command hooks for a `claude` too old to load the mod — the
-/// one case those hooks are left to cover.
+/// one case those hooks are left to cover. MAITERM_MOD_SESSION, the mod's record of which
+/// session runs its prompt loop (claude_code/mod_inbox.rs), is that process's own the same way.
 pub const AGENT_ENV_MARKERS: &[&str] = &[
     "MAITERM_VIA_MOD",
+    "MAITERM_MOD_SESSION",
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
