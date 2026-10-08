@@ -1,0 +1,5 @@
+# Dev builds get a stable code signature so keychain "Always Allow" survives rebuilds.
+# See scripts/dev-sign-run.sh. Only `cargo run` (which `tauri dev` uses) goes through a runner;
+# `tauri build` signs on its own.
+[target.'cfg(target_os = "macos")']
+runner = "../scripts/dev-sign-run.sh"
