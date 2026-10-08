@@ -46,6 +46,9 @@ const TICK_MS = 5_000;
 const INJECTABLE_WAIT_CAP_MS = 5 * 60_000;
 /** How long the main turn must have stayed closed before a human-fired step types (`waitInjectable`). */
 const TURN_SETTLE_MS = 1500;
+/** After a human-fired step waited out a draft: how long since the last keystroke before it
+ *  types, so a draft just SENT has its turn reported first (the prompt hook's latency). */
+const DRAFT_SEND_SETTLE_MS = 3000;
 /** A commit older than this at first observation never fires the commit event. */
 const COMMIT_FRESH_MS = 15 * 60_000;
 /** Quiet a terminal must have been before the agent may put it away. `stopped` means no AGENT
@@ -1027,7 +1030,10 @@ function createOverlordStore() {
       const st = ritualState(run);
       const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
       const stateOk = run.targetsUnready ? st === undefined : !!st && allowed.includes(st);
-      if (stateOk && Date.now() - lastOut >= quiet && settled()) {
+      // After a draft-wait, an empty box may be the draft just SENT, its turn not yet reported
+      // (the prompt hook lands well after the Enter — later still over ssh). Give it time to.
+      const keyed = draftWait && Date.now() - (terminalsStore.getLastTakeoverInputAt(run.tabId) ?? 0) < DRAFT_SEND_SETTLE_MS;
+      if (stateOk && !keyed && Date.now() - lastOut >= quiet && settled()) {
         if (!(await boxHasText(run.tabId))) return true;
         // A draft in the box. An automatic run gives the tab back (§7: the human is using
         // it); one the human fired waits for them to send or clear it (the cap still applies).
