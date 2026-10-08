@@ -160,10 +160,12 @@ export const register: Register = on => {
     const answer = (await awaitAnswer($, to, ask, () => false)) as { decision?: PermissionRequestDecision } | undefined
     const decision = answer?.decision
     if (!decision) return result
-    if (decision.behavior === 'deny' && decision.interrupt) {
+    if (decision.behavior === 'deny' && decision.interrupt && !e.agent_id) {
       // A deny fires no hook, and an interrupted turn sends no Stop, so maiTerm would leave the
       // tab waiting on a dialog that is gone. The turn has stopped and the agent waits on its
-      // human, which is what idle_prompt tells maiTerm; sent once the dialog has closed.
+      // human, which is what idle_prompt tells maiTerm; sent once the dialog has closed. Only
+      // for the main thread's own dialog: a subagent's deny says nothing about whether the
+      // main thread is still working, and idle_prompt would release its calls too.
       const session_id = e.session_id
       const cwd = e.cwd
       $.clock.after(300, () => {

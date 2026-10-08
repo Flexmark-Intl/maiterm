@@ -35,8 +35,9 @@ pub const MAX_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AskKind {
-    /// A permission dialog for a call to `tool`.
-    Permission { tool: String },
+    /// A permission dialog for a call to `tool`; `fingerprint` is its input as the permission
+    /// ledger keys it (server.rs `tool_input_fingerprint`), so the call's own end settles it.
+    Permission { tool: String, fingerprint: String },
     /// An AskUserQuestion selector, with the tool's `questions` as the model sent them.
     Question { questions: Value },
 }
@@ -44,17 +45,44 @@ pub enum AskKind {
 struct Ask {
     tab_id: String,
     session_id: String,
+    /// `gate::agent_key`: "" for the main thread, else the subagent's id.
+    agent: String,
     kind: AskKind,
-    /// Set while a poll is parked on this ask; otherwise when the last poll ended.
+    /// Polls parked on this ask now (decremented by `PollGuard`, so a poll whose client went
+    /// away still counts down); otherwise when the last poll ended.
     polling: usize,
     last_poll: Instant,
     answer: Option<Value>,
+    /// The hook took `answer`: `deliver` reports success and removes the ask.
+    taken: bool,
     wake: Arc<Notify>,
 }
 
 impl Ask {
     fn is_live(&self, now: Instant) -> bool {
-        self.polling > 0 || now.duration_since(self.last_poll) < STALE_AFTER
+        !self.taken && (self.polling > 0 || now.duration_since(self.last_poll) < STALE_AFTER)
+    }
+
+    /// Kept in the map: live, or taken and still waiting for its `deliver` to report it — not
+    /// forever, in case that request was dropped (`last_poll` is when it was taken).
+    fn is_kept(&self, now: Instant) -> bool {
+        self.is_live(now) || (self.taken && now.duration_since(self.last_poll) < Duration::from_secs(30))
+    }
+}
+
+/// Ends one parked poll, whether it finished or its future was dropped (the hook's fetch was cut
+/// when Claude abandoned the hook): without it an abandoned ask counted as polled forever.
+struct PollGuard<'a> {
+    asks: &'a Mutex<HashMap<String, Ask>>,
+    id: &'a str,
+}
+
+impl Drop for PollGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(ask) = self.asks.lock().get_mut(self.id) {
+            ask.polling = ask.polling.saturating_sub(1);
+            ask.last_poll = Instant::now();
+        }
     }
 }
 
@@ -81,18 +109,20 @@ pub struct LiveAsk {
 
 impl ModAsks {
     /// Records an ask a mod hook is about to wait on. Registering an id again replaces it.
-    pub fn register(&self, id: &str, tab_id: &str, session_id: &str, kind: AskKind) {
+    pub fn register(&self, id: &str, tab_id: &str, session_id: &str, agent: &str, kind: AskKind) {
         let now = Instant::now();
         let mut asks = self.asks.lock();
-        asks.retain(|_, a| a.is_live(now));
+        asks.retain(|_, a| a.is_kept(now));
         asks.insert(id.to_string(), Ask {
             tab_id: tab_id.to_string(),
             session_id: session_id.to_string(),
+            agent: agent.to_string(),
             kind,
             polling: 0,
             // Counts as a poll: the hook polls straight after registering.
             last_poll: now,
             answer: None,
+            taken: false,
             wake: Arc::new(Notify::new()),
         });
     }
@@ -102,22 +132,26 @@ impl ModAsks {
     pub async fn poll(&self, id: &str, wait: Duration) -> Polled {
         let wake = {
             let mut asks = self.asks.lock();
-            let Some(ask) = asks.get_mut(id) else { return Polled::Unknown };
+            let Some(ask) = asks.get_mut(id).filter(|a| !a.taken) else { return Polled::Unknown };
             if let Some(answer) = ask.answer.take() {
-                asks.remove(id);
+                ask.taken = true;
+                ask.last_poll = Instant::now();
                 return Polled::Answer(answer);
             }
             ask.polling += 1;
             ask.wake.clone()
         };
+        let guard = PollGuard { asks: &self.asks, id };
+        // `notify_one` leaves a permit when nothing waits yet, so an answer delivered between
+        // the lock above and this wait is not missed.
         let _ = tokio::time::timeout(wait.min(MAX_WAIT), wake.notified()).await;
+        drop(guard);
         let mut asks = self.asks.lock();
-        let Some(ask) = asks.get_mut(id) else { return Polled::Unknown };
-        ask.polling = ask.polling.saturating_sub(1);
-        ask.last_poll = Instant::now();
+        let Some(ask) = asks.get_mut(id).filter(|a| !a.taken) else { return Polled::Unknown };
         match ask.answer.take() {
             Some(answer) => {
-                asks.remove(id);
+                ask.taken = true;
+                ask.last_poll = Instant::now();
                 Polled::Answer(answer)
             }
             None => Polled::Pending,
@@ -128,17 +162,53 @@ impl ModAsks {
     /// answer can be delivered to it and reported as taken.
     pub fn cancel(&self, id: &str) {
         if let Some(ask) = self.asks.lock().remove(id) {
-            ask.wake.notify_waiters();
+            ask.wake.notify_one();
         }
+    }
+
+    /// Drops the asks the end of one call settles: its permission dialog (matched by agent, tool
+    /// and input, as the permission ledger matches it), or, for AskUserQuestion, the agent's
+    /// question. The prompt can't be open once its call has ended.
+    pub fn settle_call(&self, session_id: &str, agent: &str, tool: &str, fingerprint: &str) {
+        self.drop_where(|a| {
+            a.session_id == session_id && a.agent == agent && match &a.kind {
+                AskKind::Permission { tool: t, fingerprint: f } => t == tool && f == fingerprint,
+                AskKind::Question { .. } => tool == "AskUserQuestion",
+            }
+        });
+    }
+
+    /// Drops every ask of one agent in a session (`agent` "" = the main thread): its turn ended
+    /// (Stop, an idle prompt) or the subagent did (SubagentStop). A subagent's ask outlives the
+    /// parent's turn, as its dialog does, so this never sweeps across agents.
+    pub fn settle_agent(&self, session_id: &str, agent: &str) {
+        self.drop_where(|a| a.session_id == session_id && a.agent == agent);
+    }
+
+    /// Drops every ask of a session that ended.
+    pub fn settle_session(&self, session_id: &str) {
+        self.drop_where(|a| a.session_id == session_id);
+    }
+
+    /// Only untaken asks: a taken one is `deliver`'s to report and remove.
+    fn drop_where(&self, mut settled: impl FnMut(&Ask) -> bool) {
+        let mut asks = self.asks.lock();
+        asks.retain(|_, a| {
+            let drop = !a.taken && settled(a);
+            if drop {
+                a.wake.notify_one();
+            }
+            !drop
+        });
     }
 
     /// The live asks of a tab's session. Callers decide by count and kind.
     pub fn live_for(&self, tab_id: &str, session_id: &str) -> Vec<LiveAsk> {
         let now = Instant::now();
         let mut asks = self.asks.lock();
-        asks.retain(|_, a| a.is_live(now));
+        asks.retain(|_, a| a.is_kept(now));
         asks.iter()
-            .filter(|(_, a)| a.tab_id == tab_id && a.session_id == session_id && a.answer.is_none())
+            .filter(|(_, a)| a.is_live(now) && a.tab_id == tab_id && a.session_id == session_id && a.answer.is_none())
             .map(|(id, a)| LiveAsk { id: id.clone(), kind: a.kind.clone() })
             .collect()
     }
@@ -150,19 +220,23 @@ impl ModAsks {
         {
             let mut asks = self.asks.lock();
             let Some(ask) = asks.get_mut(id) else { return false };
-            if ask.answer.is_some() {
+            if ask.answer.is_some() || ask.taken {
                 return false;
             }
             ask.answer = Some(answer);
-            ask.wake.notify_waiters();
+            ask.wake.notify_one();
         }
         let deadline = Instant::now() + DELIVERY_TIMEOUT;
         loop {
             {
                 let mut asks = self.asks.lock();
                 match asks.get(id) {
-                    // Taken: `poll` removes the ask as it takes the answer.
-                    None => return true,
+                    Some(a) if a.taken => {
+                        asks.remove(id);
+                        return true;
+                    }
+                    // Cancelled or settled while the answer waited: it was never taken.
+                    None => return false,
                     Some(_) if Instant::now() >= deadline => {
                         asks.remove(id);
                         return false;
@@ -237,13 +311,93 @@ mod tests {
     use serde_json::json;
 
     fn permission() -> AskKind {
-        AskKind::Permission { tool: "Bash".into() }
+        AskKind::Permission { tool: "Bash".into(), fingerprint: "fp".into() }
+    }
+
+    fn polling(asks: &ModAsks, id: &str) -> Option<usize> {
+        asks.asks.lock().get(id).map(|a| a.polling)
+    }
+
+    #[tokio::test]
+    async fn a_poll_whose_client_went_away_stops_counting_as_polled() {
+        let asks = Arc::new(ModAsks::default());
+        asks.register("a1", "tab", "sess", "", permission());
+        let poller = {
+            let asks = asks.clone();
+            tokio::spawn(async move { asks.poll("a1", Duration::from_secs(5)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(polling(&asks, "a1"), Some(1));
+        // What hyper does when the mod's fetch is cut: the handler future is dropped mid-wait.
+        poller.abort();
+        let _ = poller.await;
+        assert_eq!(polling(&asks, "a1"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn an_answer_delivered_before_the_poll_parks_is_not_missed() {
+        let asks = Arc::new(ModAsks::default());
+        asks.register("a1", "tab", "sess", "", permission());
+        let delivering = {
+            let asks = asks.clone();
+            tokio::spawn(async move { asks.deliver("a1", json!({"behavior": "allow"})).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The answer is already there: the poll takes it at once rather than parking 5 s.
+        let started = Instant::now();
+        assert!(matches!(asks.poll("a1", Duration::from_secs(5)).await, Polled::Answer(_)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(delivering.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_permit_left_by_an_early_notify_wakes_the_next_wait() {
+        let notify = Notify::new();
+        notify.notify_one();
+        tokio::time::timeout(Duration::from_millis(100), notify.notified()).await
+            .expect("notify_one stores a permit for a wait that starts later");
+    }
+
+    #[tokio::test]
+    async fn an_ask_settled_while_its_answer_waits_reports_not_taken() {
+        let asks = Arc::new(ModAsks::default());
+        asks.register("a1", "tab", "sess", "", permission());
+        let delivering = {
+            let asks = asks.clone();
+            tokio::spawn(async move { asks.deliver("a1", json!({"behavior": "allow"})).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        asks.settle_call("sess", "", "Bash", "fp");
+        assert!(!delivering.await.unwrap());
+    }
+
+    #[test]
+    fn settling_matches_the_call_or_the_agent_and_never_crosses_agents() {
+        let asks = ModAsks::default();
+        asks.register("main", "tab", "sess", "", permission());
+        asks.register("sub", "tab", "sess", "agent-1", permission());
+        asks.register("other", "tab", "sess", "", AskKind::Permission { tool: "Bash".into(), fingerprint: "fp2".into() });
+        asks.register("q", "tab", "sess", "", AskKind::Question { questions: json!([]) });
+        asks.settle_call("sess", "", "Bash", "fp");
+        let ids = |asks: &ModAsks| {
+            let mut v: Vec<String> = asks.live_for("tab", "sess").into_iter().map(|a| a.id).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids(&asks), vec!["other", "q", "sub"]);
+        asks.settle_call("sess", "", "AskUserQuestion", "whatever");
+        assert_eq!(ids(&asks), vec!["other", "sub"]);
+        // The main thread's turn ending leaves the subagent's dialog alone.
+        asks.settle_agent("sess", "");
+        assert_eq!(ids(&asks), vec!["sub"]);
+        asks.settle_session("sess");
+        assert!(ids(&asks).is_empty());
     }
 
     #[tokio::test]
     async fn an_answer_reaches_a_parked_poll() {
         let asks = Arc::new(ModAsks::default());
-        asks.register("a1", "tab", "sess", permission());
+        asks.register("a1", "tab", "sess", "", permission());
         let poller = {
             let asks = asks.clone();
             tokio::spawn(async move { asks.poll("a1", Duration::from_secs(5)).await })
@@ -260,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn an_untaken_answer_is_retracted_and_never_taken_later() {
         let asks = ModAsks::default();
-        asks.register("a1", "tab", "sess", permission());
+        asks.register("a1", "tab", "sess", "", permission());
         assert!(!asks.deliver("a1", json!({"behavior": "allow"})).await);
         assert!(matches!(asks.poll("a1", Duration::from_millis(1)).await, Polled::Unknown));
     }
@@ -268,9 +422,9 @@ mod tests {
     #[tokio::test]
     async fn live_for_names_only_this_sessions_unanswered_asks() {
         let asks = ModAsks::default();
-        asks.register("a1", "tab", "sess", permission());
-        asks.register("a2", "tab", "old", permission());
-        asks.register("a3", "other", "sess", permission());
+        asks.register("a1", "tab", "sess", "", permission());
+        asks.register("a2", "tab", "old", "", permission());
+        asks.register("a3", "other", "sess", "", permission());
         let live = asks.live_for("tab", "sess");
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].id, "a1");

@@ -3593,7 +3593,10 @@ async fn hooks_handler(
             use super::mod_asks::AskKind;
             let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
             let kind = match hook_event_name {
-                "PermissionRequest" => Some(AskKind::Permission { tool: tool.to_string() }),
+                "PermissionRequest" => Some(AskKind::Permission {
+                    tool: tool.to_string(),
+                    fingerprint: tool_input_fingerprint(event.get("tool_input")),
+                }),
                 "PreToolUse" if tool == "AskUserQuestion" => event
                     .get("tool_input")
                     .and_then(|i| i.get("questions"))
@@ -3602,8 +3605,36 @@ async fn hooks_handler(
             };
             if let Some(kind) = kind {
                 log::info!("Claude hook: mod ask {} for tab {} ({} {})", ask, tab, hook_event_name, tool);
-                srv.state.mod_asks.register(ask, tab, &session_id, kind);
+                let agent = crate::claude_code::gate::agent_key(&event);
+                srv.state.mod_asks.register(ask, tab, &session_id, &agent, kind);
             }
+        }
+    }
+
+    // A mod ask ends with its prompt. The hook stops polling when Claude abandons it (a key at
+    // the desktop), but the ask must not be offered to an answer before that is noticed, and a
+    // hook that is NOT abandoned has nothing else to end its wait: so the events that close a
+    // prompt settle it, as they release the permission ledger (gate.rs). For a mod session the
+    // anonymous copy was dropped above, and the mod's carries the same fields.
+    if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
+        let asks = &srv.state.mod_asks;
+        let agent = crate::claude_code::gate::agent_key(&event);
+        match hook_event_name {
+            "PostToolUse" | "PostToolUseFailure" => asks.settle_call(
+                &session_id,
+                &agent,
+                event.get("tool_name").and_then(|v| v.as_str()).unwrap_or(""),
+                &tool_input_fingerprint(event.get("tool_input")),
+            ),
+            "Stop" | "UserPromptSubmit" => asks.settle_agent(&session_id, ""),
+            "SubagentStop" => asks.settle_agent(&session_id, &agent),
+            "Notification"
+                if event.get("notification_type").and_then(|v| v.as_str()) == Some("idle_prompt") =>
+            {
+                asks.settle_agent(&session_id, "")
+            }
+            "SessionEnd" => asks.settle_session(&session_id),
+            _ => {}
         }
     }
 
