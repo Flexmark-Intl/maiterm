@@ -437,8 +437,12 @@ pub fn roster(session_id: &str) -> Option<Vec<Subagent>> {
 /// which is sound for delegations and would not be for shells: a shell exiting appends nothing,
 /// but a subagent's launch AND its completion notification are both written to the parent.
 pub fn roster_from_transcript(session_id: &str) -> Option<Vec<Subagent>> {
-    let lines = super::transcript::claude_lines(session_id, SUBAGENT_TAIL_BYTES)?;
-    Some(subagents_from_lines(&lines))
+    // Re-derived only when the transcript changed (the REST path re-polls every 2 s).
+    static MEMO: super::transcript::FileMemo<Vec<Subagent>> = std::sync::LazyLock::new(Default::default);
+    super::transcript::memo_by_transcript(&MEMO, session_id, || {
+        let lines = super::transcript::claude_lines(session_id, SUBAGENT_TAIL_BYTES)?;
+        Some(subagents_from_lines(&lines))
+    })
 }
 
 /// The CHEAP half — a 64 KB tail per RUNNING entry, so it costs nothing on the overwhelmingly

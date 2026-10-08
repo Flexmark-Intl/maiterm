@@ -435,26 +435,108 @@ pub(crate) fn claude_lines(session_id: &str, max_bytes: u64) -> Option<Vec<Value
 
 fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
     let path = locate_jsonl(session_id)?;
-    // Only the tail can hold the last `limit` turns; bound the read regardless of file size (a 155 MB
-    // session would otherwise be read + UTF-8-validated + line-split in full). A truncated first line
-    // just fails to parse and is skipped, same as every other tail scan here. Claude msg_ids are the
-    // per-turn uuids from the JSON, so a tail window (vs the whole file) can't shift them.
-    let body = read_tail(&path, TRANSCRIPT_TAIL_BYTES)?;
-    // Walked from the newest line back only to find where to start: until `limit` turns that
-    // count are in hand (see `counts_toward_limit`), since a stretch of tool calls is a line or
-    // two once folded and must not use up the window. The old forward read took a fixed 12 lines
-    // per turn, which a tool-heavy stretch also outran. The lines are then distilled FORWARD into
-    // one list: `push_line_messages` reads the previous row (a message typed mid-turn takes its
-    // place after the work it waited on), so distilling each line alone mis-dated those.
+    turns_from_path(&path, limit, tools)
+}
+
+// ─── incremental turns cache ────────────────────────────────────────────────────────────
+//
+// Every thread open, every 2 s re-poll of an open thread, the Loom's 3 s poll and each WS tick a
+// transcript moved used to re-read and re-parse its last 8 MiB (100–400 ms each on real
+// sessions, logged as `slow chat_detail`). Transcripts only ever grow at the end, so a session's
+// distilled turns are kept here with the byte offset they were read up to, and a later call
+// distills only the complete lines appended since — through the same `push_line_messages`, fed
+// the same running list a single forward read would have built.
+
+/// Counted turns kept per cached session; callers ask for 40.
+const TURNS_KEEP: usize = 200;
+/// Sessions kept; the least recently read goes first.
+const TURNS_CACHE_SESSIONS: usize = 32;
+
+struct TurnsCache {
+    /// Bytes consumed: up to the end of the last complete line read.
+    consumed: u64,
+    /// The file the bytes came from (device, inode). Another file at the path starts over.
+    file_id: (u64, u64),
+    msgs: Vec<Value>,
+    used: std::time::Instant,
+}
+
+static TURNS: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, bool), TurnsCache>>> = std::sync::OnceLock::new();
+
+fn turns_from_path(path: &std::path::Path, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
+    use std::os::unix::fs::MetadataExt;
+    let md = std::fs::metadata(path).ok()?;
+    let (len, file_id) = (md.len(), (md.dev(), md.ino()));
+    let key = (path.to_path_buf(), tools == ToolRender::Marker);
+    let cache = TURNS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    // Taken out while it is read, so no file IO happens under the lock; a concurrent caller for
+    // the same session just builds its own.
+    let held = cache.lock().ok().and_then(|mut c| c.remove(&key));
+    let mut entry = match held {
+        // Grown by a bounded amount (a cache idle across a long run reads fresh, as the
+        // first read does), and still the same file, never shorter.
+        Some(e) if e.file_id == file_id && e.consumed <= len && len - e.consumed <= TRANSCRIPT_TAIL_BYTES => {
+            let mut e = e;
+            if len > e.consumed {
+                let (bytes, _) = read_range(path, e.consumed, len)?;
+                // Only complete lines: a row Claude is still writing is read next time, whole.
+                if let Some(end) = bytes.iter().rposition(|&b| b == b'\n') {
+                    for line in bytes[..end].split(|&b| b == b'\n') {
+                        if let Ok(v) = serde_json::from_slice::<Value>(line) {
+                            push_line_messages(&v, tools, &mut e.msgs);
+                        }
+                    }
+                    e.consumed += end as u64 + 1;
+                    e.msgs = keep_last_turns(std::mem::take(&mut e.msgs), TURNS_KEEP);
+                }
+            }
+            e
+        }
+        _ => fresh_turns(path, tools, file_id)?,
+    };
+    entry.used = std::time::Instant::now();
+    let mut out = keep_last_turns(entry.msgs.clone(), limit);
+    // A full window starts at its oldest message, as a read that walked back only `limit` turns
+    // did: the tool calls ahead of it belong to an older one, now cut off.
+    if out.iter().filter(|m| counts_toward_limit(m)).count() == limit {
+        let lead = out.iter().take_while(|m| !counts_toward_limit(m)).count();
+        out.drain(..lead);
+    }
+    if let Ok(mut c) = cache.lock() {
+        if c.len() >= TURNS_CACHE_SESSIONS {
+            if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) {
+                c.remove(&oldest);
+            }
+        }
+        c.insert(key, entry);
+    }
+    Some(out)
+}
+
+/// A session's turns read from scratch, from the tail only.
+fn fresh_turns(path: &std::path::Path, tools: ToolRender, file_id: (u64, u64)) -> Option<TurnsCache> {
+    // Only the tail can hold the last turns; bound the read regardless of file size (a 155 MB
+    // session would otherwise be read + UTF-8-validated + line-split in full). A truncated first
+    // line just fails to parse and is skipped, same as every other tail scan here. Claude msg_ids
+    // are the per-turn uuids from the JSON, so a tail window (vs the whole file) can't shift them.
+    let (bytes, base) = read_tail_bytes(path, TRANSCRIPT_TAIL_BYTES)?;
+    // Up to the last complete line: the incremental reads pick up from there.
+    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    // Walked from the newest line back only to find where to start: until `TURNS_KEEP` turns
+    // that count are in hand (see `counts_toward_limit`), since a stretch of tool calls is a line
+    // or two once folded and must not use up the window. The old forward read took a fixed 12
+    // lines per turn, which a tool-heavy stretch also outran. The lines are then distilled FORWARD
+    // into one list: `push_line_messages` reads the previous row (a message typed mid-turn takes
+    // its place after the work it waited on), so distilling each line alone mis-dated those.
     let mut kept: Vec<Value> = Vec::new();
     let mut counted = 0;
-    for line in body.lines().rev() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+    for line in bytes[..end].split(|&b| b == b'\n').rev() {
+        let Ok(v) = serde_json::from_slice::<Value>(line) else { continue };
         let mut probe = Vec::new();
         push_line_messages(&v, tools, &mut probe);
         counted += probe.iter().filter(|m| counts_toward_limit(m)).count();
         kept.push(v);
-        if counted >= limit {
+        if counted >= TURNS_KEEP {
             break;
         }
     }
@@ -462,7 +544,54 @@ fn turns_for_session(session_id: &str, limit: usize, tools: ToolRender) -> Optio
     for v in kept.iter().rev() {
         push_line_messages(v, tools, &mut msgs);
     }
-    Some(keep_last_turns(msgs, limit))
+    Some(TurnsCache {
+        consumed: base + end as u64,
+        file_id,
+        msgs: keep_last_turns(msgs, TURNS_KEEP),
+        used: std::time::Instant::now(),
+    })
+}
+
+/// What a consumer derived from a session's transcript, kept per file with the (length, mtime)
+/// it was derived at. The shell and subagent rosters each parse a 32 MiB tail; a thread re-polled
+/// every 2 s paid that each time for a file that hadn't changed.
+pub(crate) type FileMemo<T> = std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, T)>>>;
+
+/// `compute()` for this session's transcript, or the value kept from a call that saw the file as
+/// it is now. Transcripts are append-only, so (length, mtime) is a sound change key (as
+/// `tail_facts`). `None` (no transcript, or `compute` found nothing) is not kept.
+pub(crate) fn memo_by_transcript<T: Clone>(
+    memo: &FileMemo<T>,
+    session_id: &str,
+    compute: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let Some(path) = locate_jsonl(session_id) else { return compute() };
+    let Ok(md) = std::fs::metadata(&path) else { return compute() };
+    let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
+    let key = (md.len(), mtime);
+    if let Some((l, m, v)) = memo.lock().ok().and_then(|c| c.get(&path).cloned()) {
+        if (l, m) == key {
+            return Some(v);
+        }
+    }
+    let v = compute()?;
+    if let Ok(mut c) = memo.lock() {
+        if c.len() >= 64 {
+            c.clear();
+        }
+        c.insert(path, (key.0, key.1, v.clone()));
+    }
+    Some(v)
+}
+
+/// Bytes `[from, to)` of a file, and `from`.
+fn read_range(path: &std::path::Path, from: u64, to: u64) -> Option<(Vec<u8>, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(from)).ok()?;
+    let mut buf = Vec::new();
+    f.take(to.saturating_sub(from)).read_to_end(&mut buf).ok()?;
+    Some((buf, from))
 }
 
 /// Whether a turn uses up the transcript window. Tool calls don't: every client folds a run of
@@ -2091,6 +2220,175 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_jsonl(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("maiterm-turns-{tag}-{}-{}.jsonl", std::process::id(), uuid::Uuid::new_v4()));
+        p
+    }
+
+    fn append(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    /// The incremental read must give exactly what a fresh read of the whole file gives.
+    fn assert_incremental_matches_fresh(full: &[u8], chunks: &[usize], tag: &str) {
+        let inc = temp_jsonl(&format!("{tag}-inc"));
+        let mut at = 0;
+        for &n in chunks {
+            let to = (at + n).min(full.len());
+            append(&inc, &full[at..to]);
+            at = to;
+            let _ = turns_from_path(&inc, 40, ToolRender::Marker);
+        }
+        append(&inc, &full[at..]);
+        let got = turns_from_path(&inc, 40, ToolRender::Marker).unwrap();
+        let fresh = temp_jsonl(&format!("{tag}-fresh"));
+        append(&fresh, full);
+        let want = turns_from_path(&fresh, 40, ToolRender::Marker).unwrap();
+        let _ = std::fs::remove_file(&inc);
+        let _ = std::fs::remove_file(&fresh);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn turns_read_in_pieces_match_a_fresh_read() {
+        let mut full = Vec::new();
+        for i in 0..60 {
+            let ts = format!("2026-10-08T10:{:02}:{:02}.000Z", i / 60, i % 60);
+            full.extend(
+                json!({ "type": "user", "uuid": format!("u{i}"), "timestamp": ts,
+                    "message": { "role": "user", "content": format!("question {i}") } })
+                .to_string()
+                .bytes(),
+            );
+            full.push(b'\n');
+            full.extend(
+                json!({ "type": "assistant", "uuid": format!("a{i}"), "timestamp": ts,
+                    "message": { "role": "assistant", "content": [
+                        { "type": "text", "text": format!("answer {i} — ünïcode") },
+                        { "type": "tool_use", "id": format!("t{i}"), "name": "Bash", "input": { "command": "ls" } } ] } })
+                .to_string()
+                .bytes(),
+            );
+            full.push(b'\n');
+        }
+        // Uneven pieces, so rows (and a multi-byte character) are split mid-line between reads.
+        assert_incremental_matches_fresh(&full, &[1, 333, 70, 4096, 5, 2000, 17], "synthetic");
+    }
+
+    #[test]
+    fn a_shorter_or_replaced_file_is_read_fresh() {
+        let p = temp_jsonl("replaced");
+        let row = |id: &str, text: &str| {
+            format!("{}\n", json!({ "type": "user", "uuid": id, "timestamp": "2026-10-08T10:00:00.000Z",
+                "message": { "role": "user", "content": text } }))
+        };
+        append(&p, row("u1", "first").as_bytes());
+        append(&p, row("u2", "second").as_bytes());
+        assert_eq!(turns_from_path(&p, 40, ToolRender::Marker).unwrap().len(), 2);
+        std::fs::remove_file(&p).unwrap();
+        append(&p, row("u9", "other").as_bytes());
+        let turns = turns_from_path(&p, 40, ToolRender::Marker).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["msg_id"], "u9");
+    }
+
+    /// `MAITERM_TURNS_FILE=<a .jsonl>` cargo test --release --lib turns_timing -- --ignored
+    /// --nocapture: what a read costs fresh, unchanged, and after a small append.
+    #[test]
+    #[ignore]
+    fn turns_timing() {
+        let src = std::env::var("MAITERM_TURNS_FILE").expect("MAITERM_TURNS_FILE");
+        let all = std::fs::read(src).unwrap();
+        let cut = all[..all.len() - 20_000].iter().rposition(|&b| b == b'\n').unwrap() + 1;
+        let p = temp_jsonl("timing");
+        append(&p, &all[..cut]);
+        let t = std::time::Instant::now();
+        pre_cache_turns(&all[all.len().saturating_sub(TRANSCRIPT_TAIL_BYTES as usize)..cut], 40);
+        eprintln!("before the cache, every read: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        turns_from_path(&p, 40, ToolRender::Marker);
+        eprintln!("fresh: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        turns_from_path(&p, 40, ToolRender::Marker);
+        eprintln!("unchanged: {:?}", t.elapsed());
+        append(&p, &all[cut..]);
+        let t = std::time::Instant::now();
+        turns_from_path(&p, 40, ToolRender::Marker);
+        eprintln!("after a {} byte append: {:?}", all.len() - cut, t.elapsed());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The distiller as it read before the turns cache (one pass, walking back `limit` turns).
+    fn pre_cache_turns(body: &[u8], limit: usize) -> Vec<Value> {
+        let body = String::from_utf8_lossy(body);
+        let mut kept: Vec<Value> = Vec::new();
+        let mut counted = 0;
+        for line in body.lines().rev() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            let mut probe = Vec::new();
+            push_line_messages(&v, ToolRender::Marker, &mut probe);
+            counted += probe.iter().filter(|m| counts_toward_limit(m)).count();
+            kept.push(v);
+            if counted >= limit {
+                break;
+            }
+        }
+        let mut msgs: Vec<Value> = Vec::new();
+        for v in kept.iter().rev() {
+            push_line_messages(v, ToolRender::Marker, &mut msgs);
+        }
+        keep_last_turns(msgs, limit)
+    }
+
+    /// Against real transcripts: `MAITERM_TURNS_CORPUS=<dir of .jsonl>` cargo test --lib
+    /// real_transcripts_read_in_pieces -- --ignored. Each file's last 4 MiB is replayed in
+    /// growing pieces and must come out as a fresh read does.
+    #[test]
+    #[ignore]
+    fn real_transcripts_read_in_pieces_match_a_fresh_read() {
+        let dir = std::env::var("MAITERM_TURNS_CORPUS").expect("MAITERM_TURNS_CORPUS");
+        let mut n = 0;
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let all = std::fs::read(&p).unwrap();
+            let tail = &all[all.len().saturating_sub(4 * 1024 * 1024)..];
+            let start = tail.iter().position(|&b| b == b'\n').map_or(0, |i| i + 1);
+            let tail = &tail[start..];
+            if tail.is_empty() {
+                continue;
+            }
+            // The first half at once, then the rest in pieces of a few KB.
+            let half = tail.len() / 2;
+            let mut chunks = vec![half];
+            chunks.extend(std::iter::repeat(3001).take((tail.len() - half) / 3001));
+            assert_incremental_matches_fresh(tail, &chunks, &format!("real{n}"));
+            // And the same 40 turns the read before the cache gave (it walked back 40, not 200).
+            let f = temp_jsonl(&format!("real{n}-old"));
+            append(&f, tail);
+            let mut now = turns_from_path(&f, 40, ToolRender::Marker).unwrap();
+            let _ = std::fs::remove_file(&f);
+            let mut old = pre_cache_turns(tail, 40);
+            // A message queued mid-turn takes the ts after the work it waited for. The old read
+            // stopped at the window's first turn and couldn't see that work, so its first turn fell
+            // back to the queue time; reading further back, the cache dates it properly.
+            for turns in [&mut now, &mut old] {
+                if let Some(q) = turns.first_mut().and_then(|t| t.get("queuedAt").cloned()) {
+                    turns[0]["ts"] = q;
+                }
+            }
+            assert_eq!(now, old, "{}", p.display());
+            n += 1;
+        }
+        assert!(n > 0, "no transcripts in the corpus dir");
+        eprintln!("{n} transcripts matched");
+    }
 
     #[test]
     fn tool_calls_do_not_use_up_the_window() {
