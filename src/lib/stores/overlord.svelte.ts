@@ -44,6 +44,8 @@ import { error as logError, info as logInfo, warn as logWarn } from '@tauri-apps
 const TICK_MS = 5_000;
 /** Max wait for a step's pre-injection window (state + quiet) before aborting the ritual. */
 const INJECTABLE_WAIT_CAP_MS = 5 * 60_000;
+/** How long the main turn must have stayed closed before a human-fired step types (`waitInjectable`). */
+const TURN_SETTLE_MS = 1500;
 /** A commit older than this at first observation never fires the commit event. */
 const COMMIT_FRESH_MS = 15 * 60_000;
 /** Quiet a terminal must have been before the agent may put it away. `stopped` means no AGENT
@@ -981,6 +983,11 @@ function createOverlordStore() {
 
   // ── Ritual executor (§7) — a gated sequence state machine ──────────────────
 
+  /** The agent's input box reads as holding the human's text (Claude; other boxes don't parse). */
+  async function boxHasText(tabId: string): Promise<boolean> {
+    return (await commands.agentInputBox(tabId).catch(() => 'unknown')) === 'has_text';
+  }
+
   /** The state a ritual waits on. For a human-fired run, a tab that reads 'active' only because
    *  a background subagent is working (its review, say) is between turns: the main agent's turn
    *  ended, and a /compact there is what the human asked for (Darryl, 2026-10-08). */
@@ -992,9 +999,16 @@ function createOverlordStore() {
   async function waitInjectable(run: RitualRun, guards: OverlordGuards): Promise<boolean> {
     // Every step waits for the main agent's turn to end (Darryl: "wait for turn to end, so long
     // as a subagent is not seen as still in turn" — `ritualState`). A human-fired run doesn't
-    // also wait for the screen to go quiet: a background subagent keeps it repainting.
+    // also wait for the screen to go quiet — a background subagent keeps it repainting — but for
+    // the TURN to have stayed closed a moment: a turn queued behind it (a task-notification, a
+    // message) starts milliseconds after the Stop, and its prompt hook reaches us later still.
     const allowed = guards.agent_state ?? ['idle'];
     const quiet = run.humanFired ? 0 : (guards.min_quiet_ms ?? 3000);
+    const settled = () => {
+      if (!run.humanFired) return true;
+      const closed = claudeStateStore.mainTurnClosedAt(run.tabId);
+      return closed === undefined || Date.now() - closed >= TURN_SETTLE_MS;
+    };
     const t0 = Date.now();
     while (Date.now() - t0 < INJECTABLE_WAIT_CAP_MS) {
       if (run.aborted) return false;
@@ -1005,7 +1019,8 @@ function createOverlordStore() {
       const st = ritualState(run);
       const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
       const stateOk = run.targetsUnready ? st === undefined : !!st && allowed.includes(st);
-      if (stateOk && Date.now() - lastOut >= quiet) return true;
+      // A draft in the box: wait for the human to send or clear it (the cap still applies).
+      if (stateOk && Date.now() - lastOut >= quiet && settled() && !(await boxHasText(run.tabId))) return true;
       await sleep(500);
     }
     return false;
@@ -2055,9 +2070,11 @@ function createOverlordStore() {
           return;
         }
         // The human's draft in the box would be sent along with the step. `humanTypedSince`
-        // only sees keys since the run began; a draft left from before it is read off the screen.
-        // Mid-turn the box must read empty outright (noDraft's busy rule).
-        if (!(await noDraft(tabId, ritualState(run) !== 'active'))) {
+        // only sees keys since the run began; a draft left from before it is read off the screen
+        // (waitInjectable waits one out; this catches one typed since). Only a box that READS as
+        // holding text: an unreadable one (Codex) is left to `humanTypedSince`, as before — the
+        // keystrokes-since-idle fallback aborted Codex rituals on a recalled-then-cleared line.
+        if (await boxHasText(tabId)) {
           logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft is in the agent's input box`);
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;

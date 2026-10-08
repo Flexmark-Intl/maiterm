@@ -124,6 +124,16 @@ function createAgentStateStore() {
   // say — a background subagent's tool calls (a review it launched) set the tab 'active' after
   // the parent's turn has ended. Absent: never seen a prompt or a Stop this run.
   const mainTurnOpen = new Map<string, boolean>();
+  // When the main turn last closed (Stop, or a manual compaction finishing): a turn queued behind
+  // it starts a few ms later, and its UserPromptSubmit reaches us later still.
+  const mainTurnClosedAt = new Map<string, number>();
+  // A compaction holds the turn open; this is whether one was open before it. Auto-compaction
+  // runs mid-turn (still open after), a manual /compact at idle sends no Stop (closed after).
+  const openBeforeCompact = new Map<string, boolean>();
+  function closeMainTurn(tabId: string) {
+    mainTurnOpen.set(tabId, false);
+    mainTurnClosedAt.set(tabId, Date.now());
+  }
 
   function pendingAsks(tabId: string): number {
     return (asks.get(tabId)?.length ?? 0) - (answers.get(tabId) ?? 0);
@@ -243,6 +253,11 @@ function createAgentStateStore() {
       return sessions.get(tabId)?.state === 'active' && mainTurnOpen.get(tabId) === false;
     },
 
+    /** ms epoch the main agent's turn last closed, if seen and still closed. */
+    mainTurnClosedAt(tabId: string): number | undefined {
+      return mainTurnOpen.get(tabId) === false ? mainTurnClosedAt.get(tabId) : undefined;
+    },
+
     /** Is this keystroke answering a permission dialog (rather than the human taking the
      *  conversation over)? Called for every human keystroke.
      *
@@ -359,7 +374,15 @@ function createAgentStateStore() {
         // at an empty prompt. Compaction is the exception — it fires DURING a turn, so the
         // agent really is working, and the next tool event would only have to undo it.
         const started: AgentState = source === 'compact' ? 'active' : 'idle';
-        mainTurnOpen.set(tab_id, started === 'active');
+        if (source === 'compact') {
+          // Back to what it was before the compaction (unknown: assume still open).
+          const was = openBeforeCompact.get(tab_id);
+          openBeforeCompact.delete(tab_id);
+          if (was === false) closeMainTurn(tab_id);
+          else mainTurnOpen.set(tab_id, true);
+        } else {
+          mainTurnOpen.set(tab_id, false);
+        }
         // Only a compaction is activity; a start or resume is not (see `updatedAt`).
         setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact', started === 'idle');
         // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
@@ -381,6 +404,8 @@ function createAgentStateStore() {
         if (!tab_id) return;
         removeSession(tab_id, session_id);
         mainTurnOpen.delete(tab_id);
+        mainTurnClosedAt.delete(tab_id);
+        openBeforeCompact.delete(tab_id);
         setVariable(tab_id, 'claudeAction', '');
         logInfo(`Claude state: session ended → tab ${tab_id.slice(0, 8)} removed`);
       });
@@ -389,7 +414,7 @@ function createAgentStateStore() {
       const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string; gate_held?: boolean }>('agent-hook-stop', (e) => {
         const { session_id, tab_id, gate_held } = e.payload;
         if (!tab_id) return;
-        mainTurnOpen.set(tab_id, false);
+        closeMainTurn(tab_id);
         // A background subagent's permission prompt outlives the parent's turn ending
         // (claude_code/gate.rs). Rust keeps the tab in permission; so does this mirror.
         if (!gate_held) {
@@ -569,6 +594,9 @@ function createAgentStateStore() {
         if (!tab_id) return;
         const runtime = runtimeOf(e.payload);
         if (event === 'PreCompact') {
+          // The compaction is the agent's turn as far as anything typed is concerned.
+          openBeforeCompact.set(tab_id, mainTurnOpen.get(tab_id) ?? false);
+          mainTurnOpen.set(tab_id, true);
           setState(tab_id, session_id, 'active', undefined, undefined, runtime);
           // A compaction that fails or is cancelled with Esc sends nothing after it — no
           // SessionStart(compact), and Claude has no Interrupt hook — so without an expiry the
@@ -579,6 +607,8 @@ function createAgentStateStore() {
             staleTimers.delete(tab_id);
             const s = sessions.get(tab_id);
             if (s?.sessionId === session_id && s.state === 'active' && !s.toolName) {
+              openBeforeCompact.delete(tab_id);
+              closeMainTurn(tab_id);
               setState(tab_id, session_id, 'idle', undefined, undefined, runtime);
               markReadInternal(tab_id);
             }
