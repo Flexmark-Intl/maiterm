@@ -49,6 +49,9 @@ interface MoveInPayload {
   /** A tab's lost-ssh badge lives only in webview memory. */
   disconnects: Record<string, DisconnectInfo>;
   stackRows: Array<[string, ServiceRuntime]>;
+  /** A moved tab is followed (target window focused, tab shown) only if the human was
+   *  looking at it when it moved. */
+  follow?: boolean;
 }
 
 interface Released {
@@ -130,7 +133,8 @@ export async function moveWorkspaceToWindow(workspaceId: string, targetLabel: st
 }
 
 /** Move a tab to a workspace of any window, this one included (then it is the ordinary
- *  same-window move, followed to where it landed). */
+ *  same-window move). It is followed to where it landed only if it was the tab being
+ *  viewed; moving a background tab leaves the human where they are. */
 export async function moveTabToWindow(
   sourceWsId: string,
   sourcePaneId: string,
@@ -142,10 +146,11 @@ export async function moveTabToWindow(
   const tab = sourcePane?.tabs.find((t) => t.id === tabId);
   if (!sourcePane || !tab) return;
 
+  const viewing = workspacesStore.activeWorkspaceId === sourceWsId && sourcePane.active_tab_id === tabId;
   const current = getCurrentWindow().label;
   if (targetLabel === current) {
     await workspacesStore.moveTabToWorkspace(sourceWsId, sourcePaneId, tabId, targetWsId);
-    await navigateToTab(tabId);
+    if (viewing) await navigateToTab(tabId);
     return;
   }
 
@@ -165,7 +170,7 @@ export async function moveTabToWindow(
   await workspacesStore.settleSourceAfterTabLeft(sourceWsId, sourcePaneId, movedTabWasActive, movedTabIndex);
   forgetTabs([tab]);
 
-  const payload: MoveInPayload = { kind: 'tab', workspaceId: targetWsId, tabIds: [tabId], ...released, stackRows: [] };
+  const payload: MoveInPayload = { kind: 'tab', workspaceId: targetWsId, tabIds: [tabId], ...released, stackRows: [], follow: viewing };
   await emitTo(targetLabel, MOVE_IN_EVENT, payload);
   logInfo(`windowMove: tab ${tabId} → ${targetLabel}/${targetWsId}`);
 }
@@ -200,6 +205,7 @@ async function receiveMove(payload: MoveInPayload) {
   agentBridgeStore.rehydrate();
   agentMeshStore.rehydrate();
 
+  if (payload.kind === 'tab' && !payload.follow) return;
   const win = getCurrentWindow();
   await win.unminimize().catch(() => {});
   await win.setFocus().catch(() => {});
