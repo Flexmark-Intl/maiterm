@@ -81,15 +81,23 @@ fn write_files(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The `CLAUDE_CODE_PLUGIN_DIRS` value for a tab: the mod's folder, ahead of any folders this
-/// process inherited, so a user's own setting is kept rather than replaced.
-pub fn plugin_dirs_env(dir: &Path, inherited: Option<&str>) -> String {
-    let ours = dir.to_string_lossy().into_owned();
-    match inherited.filter(|s| !s.is_empty()) {
-        Some(rest) if rest.split(':').any(|p| p == ours) => rest.to_string(),
-        Some(rest) => format!("{}:{}", ours, rest),
-        None => ours,
-    }
+/// The `CLAUDE_CODE_PLUGIN_DIRS` value for a tab: `ours` (when this tab gets the mod) ahead of
+/// the folders this process inherited, so a user's own setting is kept. Every inherited copy of
+/// this mod is dropped, whichever build installed it: a dev maiTerm started from a prod tab
+/// inherits prod's folder, and two plugins of one name load the first and warn about the
+/// second in every session; with the mod off here, prod's copy would still load and send.
+/// `None` when nothing is left, and then the variable is removed.
+pub fn plugin_dirs_env(ours: Option<&Path>, inherited: Option<&str>) -> Option<String> {
+    let suffix = format!("/claude-mod/{}", PLUGIN);
+    let mut dirs: Vec<String> = ours.map(|d| d.to_string_lossy().into_owned()).into_iter().collect();
+    dirs.extend(
+        inherited
+            .unwrap_or("")
+            .split(':')
+            .filter(|p| !p.is_empty() && !p.trim_end_matches('/').ends_with(&suffix))
+            .map(String::from),
+    );
+    (!dirs.is_empty()).then(|| dirs.join(":"))
 }
 
 #[cfg(test)]
@@ -113,14 +121,21 @@ mod tests {
     }
 
     #[test]
-    fn plugin_dirs_env_keeps_inherited_folders() {
-        let dir = Path::new("/data/claude-mod/maiterm-tab");
-        assert_eq!(plugin_dirs_env(dir, None), "/data/claude-mod/maiterm-tab");
-        assert_eq!(plugin_dirs_env(dir, Some("")), "/data/claude-mod/maiterm-tab");
-        assert_eq!(plugin_dirs_env(dir, Some("/mine")), "/data/claude-mod/maiterm-tab:/mine");
+    fn plugin_dirs_env_keeps_the_users_folders_and_no_other_copy_of_the_mod() {
+        let dev = Path::new("/data/com.aiterm.dev/claude-mod/maiterm-tab");
+        let prod = "/data/com.aiterm.app/claude-mod/maiterm-tab";
+        let dev_s = dev.to_str().unwrap();
+        assert_eq!(plugin_dirs_env(Some(dev), None).as_deref(), Some(dev_s));
+        assert_eq!(plugin_dirs_env(Some(dev), Some("")).as_deref(), Some(dev_s));
+        assert_eq!(plugin_dirs_env(Some(dev), Some("/mine")), Some(format!("{dev_s}:/mine")));
+        // Another build's copy (or our own, inherited) is dropped, the user's folder kept.
         assert_eq!(
-            plugin_dirs_env(dir, Some("/mine:/data/claude-mod/maiterm-tab")),
-            "/mine:/data/claude-mod/maiterm-tab"
+            plugin_dirs_env(Some(dev), Some(&format!("/mine:{prod}:{dev_s}/"))),
+            Some(format!("{dev_s}:/mine"))
         );
+        // Mod off for this tab: an inherited copy must not load either.
+        assert_eq!(plugin_dirs_env(None, Some(prod)), None);
+        assert_eq!(plugin_dirs_env(None, Some(&format!("{prod}:/mine"))).as_deref(), Some("/mine"));
+        assert_eq!(plugin_dirs_env(None, None), None);
     }
 }

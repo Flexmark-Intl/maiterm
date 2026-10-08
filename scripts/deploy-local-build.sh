@@ -114,7 +114,7 @@ log "=== maiTerm deploy: $SRC -> $DEST ==="
 # into the auto-resumed claude → it comes up as a "child session" and silently stops
 # writing its transcript to disk (chat-history loss). maiTerm also scrubs these at PTY
 # spawn (AGENT_ENV_MARKERS) as the real fix; keep the app process itself clean too.
-unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDECODE
+unset CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDECODE MAITERM_VIA_MOD
 # Belt-and-suspenders: scrub the legacy env-var sentinel too, so a shell inside an app
 # launched by a PRE-argv build of this script stops propagating MAITERM_DEPLOY_DETACHED=1.
 unset MAITERM_DEPLOY_DETACHED

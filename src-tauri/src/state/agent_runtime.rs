@@ -196,7 +196,13 @@ pub fn mcp_server_name(_rt: AgentRuntime) -> &'static str {
 /// disk — the tab's chat history never persists. It leaks in when maiTerm is launched
 /// from inside a Claude session (e.g. the local deploy script's `open`), so it MUST be
 /// stripped before the auto-resumed `claude` sees it.
+///
+/// MAITERM_VIA_MOD is the maiterm-tab mod's word that it speaks for its tab, set inside one
+/// Claude process (claude_code/claude_mod.rs). Inherited by a tab, it would stand down that
+/// tab's SessionStart/SessionEnd command hooks for a `claude` too old to load the mod — the
+/// one case those hooks are left to cover.
 pub const AGENT_ENV_MARKERS: &[&str] = &[
+    "MAITERM_VIA_MOD",
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",

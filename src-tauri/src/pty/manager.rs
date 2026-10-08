@@ -184,14 +184,15 @@ pub fn spawn_pty(
         }
         // The maiterm-tab mod, for any `claude` started in this shell: it sends the tab's hook
         // events itself (claude_code/claude_mod.rs). Only alongside the settings hooks it
-        // replaces — the same preference, and a running server to send to.
-        if state.mcp_port.read().is_some() && state.app_data.read().preferences.claude_hooks {
-            if let Some(dir) = crate::claude_code::claude_mod::installed() {
-                let inherited = std::env::var("CLAUDE_CODE_PLUGIN_DIRS").ok();
-                cmd.env(
-                    "CLAUDE_CODE_PLUGIN_DIRS",
-                    crate::claude_code::claude_mod::plugin_dirs_env(dir, inherited.as_deref()),
-                );
+        // replaces — the same preference, and a running server to send to. Set either way, so
+        // a copy inherited from another maiTerm is stripped even when this tab gets none.
+        {
+            let wanted = state.mcp_port.read().is_some() && state.app_data.read().preferences.claude_hooks;
+            let ours = crate::claude_code::claude_mod::installed().filter(|_| wanted);
+            let inherited = std::env::var("CLAUDE_CODE_PLUGIN_DIRS").ok();
+            match crate::claude_code::claude_mod::plugin_dirs_env(ours, inherited.as_deref()) {
+                Some(dirs) => { cmd.env("CLAUDE_CODE_PLUGIN_DIRS", dirs); }
+                None => { cmd.env_remove("CLAUDE_CODE_PLUGIN_DIRS"); }
             }
         }
 
