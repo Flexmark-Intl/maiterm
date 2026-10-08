@@ -635,6 +635,12 @@ export interface Preferences {
   overlord_enabled: boolean;
   /** Rules land as proposed directives the human clicks to send (docs/overlord.md §3). */
   overlord_propose_mode: boolean;
+  /** The Overlord AGENT answers tabs' escalations (docs/overlord.md §9.1.2). Off by default;
+   *  never settable over MCP. Read `preferencesStore.escalationsToOverlord`, not this alone. */
+  overlord_answers_escalations: boolean;
+  /** The human's standing answers for the Overlord agent, one entry each. Omitted by Rust
+   *  when empty. Written only by the human or an approved proposal. */
+  overlord_playbook?: string[];
   /** Follow-ups (docs/follow-ups.md §4) — a sub-feature of the Overlord. Never read alone:
    *  `preferencesStore.followUpsLive` is the combined answer. */
   follow_ups_enabled: boolean;

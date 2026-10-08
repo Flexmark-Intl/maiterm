@@ -48,8 +48,15 @@ impl JsonRpcResponse {
 /// primed to use them shouldn't be carrying their schemas in context either, so the
 /// preference removes the surface rather than just the instruction. Same for the stack, and
 /// for follow-ups, whose flag is `Preferences::follow_ups_live()` — the Overlord AND its
-/// follow-ups toggle.
-pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_live: bool) -> Value {
+/// follow-ups toggle. `escalations_to_overlord` (`Preferences::escalations_to_overlord()`)
+/// only changes what `replyToOverlord` tells an agent about escalating — the tool itself is
+/// always there, since `ready`/`ack`/`status` don't depend on it.
+pub fn tool_list_response(
+    tasks_enabled: bool,
+    stack_enabled: bool,
+    follow_ups_live: bool,
+    escalations_to_overlord: bool,
+) -> Value {
     // Tools are built in batches to stay under the serde_json::json! macro recursion limit (128).
     // Each batch is a small Vec<Value> that gets extended into the final tools array.
 
@@ -878,7 +885,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
     tools.extend(serde_json::json!([
         {
             "name": "replyToOverlord",
-            "description": "Report to this window's Overlord (the supervisor coordinating work across tabs). One shape, four uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked), 'escalate' when you need attention. Set needs_human ONLY for things a human must decide — it raises a real escalation. Keep summary under 280 chars.",
+            "description": reply_to_overlord_description(escalations_to_overlord),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -933,7 +940,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
         },
         {
             "name": "answerTabPrompt",
-            "description": "Overlord agent only: answer a tab's open prompt, with the human's authority. For kind 'permission' pass `choice`: one of getTabPrompt's `options`, verbatim (Claude's rows vary by request, and a label the dialog doesn't show is refused). For Codex, '1' approve / '2' approve for the session / '3' decline. For kind 'question' pass `answers` — one entry per question in order, each with `selected` (option labels verbatim) and/or `other` (free text). ALWAYS read getTabPrompt first and pass its prompt_id. ESCALATE INSTEAD OF ANSWERING when the decision is consequential — anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion. Routine approvals in service of work already underway are yours to make. Every answer is recorded in the ledger.",
+            "description": "Overlord agent only: answer a tab's open prompt, with the human's authority. For kind 'permission' pass `choice`: one of getTabPrompt's `options`, verbatim (Claude's rows vary by request, and a label the dialog doesn't show is refused). For Codex, '1' approve / '2' approve for the session / '3' decline. For kind 'question' pass `answers` — one entry per question in order, each with `selected` (option labels verbatim) and/or `other` (free text). ALWAYS read getTabPrompt first and pass its prompt_id. DO NOT ANSWER when the decision is consequential — anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Leave those to the human, and do not ask them about it yourself: an open prompt is already in front of them on their board and phone, and only an answer given at the prompt does anything. Routine approvals in service of work already underway are yours to make. Every answer is recorded in the ledger.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -958,7 +965,7 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
         },
         {
             "name": "proposeRuleChanges",
-            "description": "Overlord agent only: propose changes to the Overlord ruleset. Nothing applies without explicit human approval — the human approves or rejects each change individually in a native prompt. Batch related changes into ONE call. Guards (require_live_repl, only_if_no_outstanding, max_per_hour) are not proposable at all. Do not re-propose rejected changes.",
+            "description": "Overlord agent only: propose changes to the Overlord ruleset, or to your human's escalation playbook (ops 'playbook_add' / 'playbook_remove' with `text` — one short standalone standing answer per entry; remove names an existing entry verbatim). Nothing applies without explicit human approval — the human approves or rejects each change individually in a native prompt. Batch related changes into ONE call. Guards (require_live_repl, only_if_no_outstanding, max_per_hour) are not proposable at all. Do not re-propose rejected changes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -969,7 +976,8 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
                         "items": {
                             "type": "object",
                             "properties": {
-                                "op": { "type": "string", "enum": ["create", "update", "rescope", "enable", "disable", "delete"] },
+                                "op": { "type": "string", "enum": ["create", "update", "rescope", "enable", "disable", "delete", "playbook_add", "playbook_remove"] },
+                                "text": { "type": "string", "description": "playbook ops: the entry (≤400 chars) — new text to add, or an existing entry verbatim to remove" },
                                 "rule": overlord_rule_schema(),
                                 "rule_id": { "type": "string", "description": "ops other than create: target rule id or default_id" },
                                 "patch": { "type": "object", "description": "op update: partial rule fields (guards are ignored)" },
@@ -1081,6 +1089,18 @@ pub fn tool_list_response(tasks_enabled: bool, stack_enabled: bool, follow_ups_l
     ]).as_array().unwrap().clone());
 
     serde_json::json!({ "tools": tools })
+}
+
+/// `replyToOverlord`'s description, which is where a supervised agent learns who answers its
+/// decisions (docs/overlord.md §9.1.2). Exactly one asker per question: with the Overlord
+/// agent answering, the tab escalates and does NOT also ask its human; without, nobody answers
+/// an escalation, so the tab asks its human itself and `needs_human` is only a board note.
+fn reply_to_overlord_description(escalations_to_overlord: bool) -> &'static str {
+    if escalations_to_overlord {
+        "Report to this window's Overlord (the supervisor coordinating work across tabs). One shape, four uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked), 'escalate' with needs_human when you need a decision before you can go on. The Overlord agent answers an escalation — typed into your tab as a normal message — and asks your human itself only when it must, so do NOT also ask your human the same question; wait for the answer. Keep summary under 280 chars."
+    } else {
+        "Report to this window's Overlord (the supervisor coordinating work across tabs). Three uses: kind 'ready' when you come up, 'ack' when you finish something you were asked to do, 'status' for a state change worth recording (e.g. blocked). Nobody here answers escalations: when you need a decision, ask your human directly, as you normally would. Keep summary under 280 chars."
+    }
 }
 
 /// Schema for `proposeRuleChanges`' `rule` field (op `create`).

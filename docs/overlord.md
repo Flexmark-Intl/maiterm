@@ -895,8 +895,10 @@ replyToOverlord({
   blockers?: string[],
   next?: string,
   needs_human?: boolean,     // → an `agent_report` card on the human's board, never a
-                             //   status note. BOARD-ONLY: the supervisor is not rung for
-                             //   it and will not re-ask the question (§9.1.1)
+                             //   status note. Board-only by default (§9.1.1); delivered to
+                             //   the agent, which answers it, when the human turns on
+                             //   overlord_answers_escalations (§9.1.2). The tool's
+                             //   description says which, so a tab knows whether to wait.
 })
 → { received: true, outstanding_directive: string | null }
 ```
@@ -928,8 +930,9 @@ overlord: {
   present: true,
   standing_instruction:
     "This window has an Overlord coordinating work across tabs. Call replyToOverlord " +
-    "with kind:'ready' now. When you finish something you were asked to do, ack it. " +
-    "If you're blocked on a human decision, escalate with needs_human."
+    "with kind:'ready' now. When you finish something you were asked to do, ack it."
+    // + only when the Overlord agent answers escalations (§9.1.2): escalate with
+    //   needs_human and wait, and do not also ask your human.
 }
 ```
 
@@ -1020,6 +1023,52 @@ A board-only card is left unread for the same reason: a receipt for a delivery t
 happened is worse than no receipt. (The mirror publishes `read` to the phone unchanged; a
 permanently-unread card was already reachable there — any window with no Overlord agent tab
 produces them — so this is not a wire change.)
+
+### 9.1.2 One asker per question: who answers a tab's decision (2026-10-08)
+
+§9.1.1 made `agent_report` board-only, and the double prompt survived it — through every
+OTHER path. The doctrine still said consequential decisions "go to the human via
+AskUserQuestion", so a `permission_stuck`, a `blocked` or a `step_timeout` about a tab
+already sitting at its own prompt still had the agent put the same question to the human.
+The human answered at the tab (the only place an answer does anything), and nothing closed
+the agent's copy: it sat in the supervisor's transcript waiting on a decision already made.
+Meanwhile every supervised tab was still told, in its priming and in `replyToOverlord`'s
+description, to "escalate with needs_human" — to an escalation queue nobody answered.
+
+The rule now is **exactly one asker per question**, and the human picks which, with
+`Preferences.overlord_answers_escalations` (default **off**; `escalations_to_overlord()` =
+that AND `overlord_enabled`, mirrored as `preferencesStore.escalationsToOverlord`):
+
+| | off (default) | on |
+|---|---|---|
+| tab's priming / `replyToOverlord` text | ask your human directly; escalation not mentioned | escalate with `needs_human` and **wait**; do NOT also ask your human |
+| `agent_report` | board-only, as §9.1.1 | delivered to the agent too (`deliverableToAgent`) — only a card stamped `toAgent` at filing, and only while still on: a card filed before the flip came from a tab that already asked the human, and one the switch was turned off over is the human's again (the doorbell's prune re-checks the same predicate). `toAgent` never reaches the phone |
+| the agent with it | never sees it | answers it with `driveTab`; asks the human only when the playbook doesn't settle a consequential one — the one case where it may, because only there is nobody else asking |
+| the card | stays until dismissed (§3.1) | **withdrawn** once the agent drives or answers that tab (`withdrawAnsweredReports` — only cards it had PULLED, so a drive landing before it read a question never hides it) |
+
+In **both** modes the agent never answers a consequential prompt and never relays one: the
+prompt is already on the board, in the Loom and on the phone. `blocked`/`step_timeout`/
+`directive_unacked` stay deliverable — the agent may drive, recover or release — but "only
+the human can fix this" means *leave it on the board*. The trust-dialog refusals
+(`answerTabPrompt`, `recoverTab`, `getTabPrompt`'s note) used to tell the agent to escalate
+with `needs_human` — the agent filing an `agent_report` about someone else's tab, a card
+§9.1.1 then hid from it. They now say leave it.
+
+**The playbook** (`Preferences.overlord_playbook: Vec<String>`, window-wide) is the human's
+standing answers. Training is by proposal: when the agent had to ask, it proposes the answer
+as an entry through `proposeRuleChanges` (ops `playbook_add` / `playbook_remove`, `text`),
+approved per change in the same modal as rules — no new prompt surface. It reaches the agent
+on the `listEscalations` reply, not in the doctrine, so it is current at the moment of
+deciding and editing it never re-pastes the doctrine. Neither preference is in
+`preference_meta`: an agent that could set them could grant itself the job, or its own
+standing answers.
+
+**Re-priming.** The doctrine text differs by mode, so the primed marker is `doctrineKey()` —
+`DOCTRINE_VERSION` (now 10) plus `+answers` when on — and `primedAgents` is keyed by tab AND
+key. Flipping the switch re-primes; editing the playbook does not. Supervised tabs learn the
+mode at session start (priming) and on their next `tools/list`; a tab primed under the other
+mode keeps its old instruction until it restarts — the same staleness every priming change
+has.
 
 ### 9.2 The ruleset is also Overlord's own harness
 
@@ -1366,12 +1415,15 @@ neither kind correctly.
 **The line Overlord must not cross** — in the doctrine, the tool description, and the
 escalation text, so it reads the same wherever the agent meets it:
 
-> Escalate instead of answering when the decision is consequential: anything destructive
+> Do not answer when the decision is consequential: anything destructive
 > or irreversible (deleting data, force-push, dropping a database, `rm -rf`), anything
 > touching money, credentials, production, or an external party, or any question about
 > what the human **wants** rather than how to carry out what they already asked for.
 > Routine approvals in service of work already underway are Overlord's to make. If it is
-> genuinely unsure which side a decision falls on, it is the escalating side.
+> genuinely unsure which side a decision falls on, it is the consequential side.
+
+Until doctrine v10 that line ended "those go to the human via AskUserQuestion". It no
+longer does — a consequential prompt is **left**, not relayed; see §9.1.2.
 
 This is **doctrine, not a mechanical guard** — the engine cannot classify a decision's
 consequence, and §3's "guards must be mechanical" does not reach here. What *is* mechanical:

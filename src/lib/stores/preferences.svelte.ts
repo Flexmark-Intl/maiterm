@@ -64,6 +64,8 @@ function createPreferencesStore() {
   let tasksBacklogVocabularyMigrated = $state(false);
   let overlordEnabled = $state(false);
   let overlordProposeMode = $state(true);
+  let overlordAnswersEscalations = $state(false);
+  let overlordPlaybook = $state<string[]>([]);
   let followUpsEnabled = $state(true);
   let followUpsResumeAgent = $state(true);
   let followUpsScriptsUnattended = $state(false);
@@ -170,6 +172,13 @@ function createPreferencesStore() {
     },
     get overlordEnabled() { return overlordEnabled; },
     get overlordProposeMode() { return overlordProposeMode; },
+    /** The raw toggle — for the Preferences switch only. Everything else asks
+     *  `escalationsToOverlord`. */
+    get overlordAnswersEscalations() { return overlordAnswersEscalations; },
+    /** Whether the Overlord AGENT answers tabs' escalations (docs/overlord.md §9.1.2).
+     *  Mirrors Rust `Preferences::escalations_to_overlord`, which decides what tabs are told. */
+    get escalationsToOverlord() { return overlordEnabled && overlordAnswersEscalations; },
+    get overlordPlaybook() { return overlordPlaybook; },
     /** The raw toggle — for the Preferences switch only. Everything else asks `followUpsLive`. */
     get followUpsEnabled() { return followUpsEnabled; },
     /** Whether follow-ups are on at all: the Overlord AND its follow-ups toggle
@@ -284,6 +293,8 @@ function createPreferencesStore() {
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
+      overlordAnswersEscalations = prefs.overlord_answers_escalations ?? false;
+      overlordPlaybook = prefs.overlord_playbook ?? [];
       followUpsEnabled = prefs.follow_ups_enabled ?? true;
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
@@ -647,6 +658,16 @@ function createPreferencesStore() {
       await this.save();
     },
 
+    async setOverlordAnswersEscalations(value: boolean) {
+      overlordAnswersEscalations = value;
+      await this.save();
+    },
+
+    async setOverlordPlaybook(value: string[]) {
+      overlordPlaybook = value;
+      await this.save();
+    },
+
     async setOverlordRules(value: OverlordRule[]) {
       overlordRules = value;
       await this.save();
@@ -916,6 +937,8 @@ function createPreferencesStore() {
       tasksBacklogVocabularyMigrated = prefs.tasks_backlog_vocabulary_migrated ?? false;
       overlordEnabled = prefs.overlord_enabled ?? false;
       overlordProposeMode = prefs.overlord_propose_mode ?? true;
+      overlordAnswersEscalations = prefs.overlord_answers_escalations ?? false;
+      overlordPlaybook = prefs.overlord_playbook ?? [];
       followUpsEnabled = prefs.follow_ups_enabled ?? true;
       followUpsResumeAgent = prefs.follow_ups_resume_agent ?? true;
       followUpsScriptsUnattended = prefs.follow_ups_scripts_unattended ?? false;
@@ -1016,6 +1039,8 @@ function createPreferencesStore() {
         tasks_backlog_vocabulary_migrated: tasksBacklogVocabularyMigrated,
         overlord_enabled: overlordEnabled,
         overlord_propose_mode: overlordProposeMode,
+        overlord_answers_escalations: overlordAnswersEscalations,
+        overlord_playbook: overlordPlaybook,
         follow_ups_enabled: followUpsEnabled,
         follow_ups_resume_agent: followUpsResumeAgent,
         follow_ups_scripts_unattended: followUpsScriptsUnattended,

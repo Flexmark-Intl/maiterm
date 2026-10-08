@@ -16,7 +16,7 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 
 **Backend** (`src-tauri/src/claude_code/`):
 - `server.rs` — axum router with WebSocket (`/`) and SSE (`/sse` + `/message`) endpoints. Random port (10000–65535), 32-char auth token.
-- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled, follow_ups_live)` (the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`, the 3 follow-up tools on `Preferences::follow_ups_live()`), `initialize_response()`
+- `protocol.rs` — JSON-RPC request/response types, `tool_list_response(tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord)` (the 3 task tools are gated on the `tasks_enabled` preference, the 11 stack tools on `stack_enabled`, the 3 follow-up tools on `Preferences::follow_ups_live()`; `escalations_to_overlord` only picks `replyToOverlord`'s description — whether a tab escalates and waits, or asks its human, docs/overlord.md §9.1.2), `initialize_response()`
 - `lockfile.rs` — writes `~/.claude/ide/{port}.lock` for discovery, registers `mcpServers.maiterm` (or `maiterm-dev`) in `~/.claude.json` (stripping the legacy `aiterm`/`aiterm-dev` key on write — rebrand migration), registers hooks in `~/.claude/settings.json`
 
 **Frontend** (`src/lib/stores/claudeCode.svelte.ts`):

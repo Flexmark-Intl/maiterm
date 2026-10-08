@@ -1792,6 +1792,18 @@ pub struct Preferences {
     /// the human clicks to send, instead of firing autonomously. Default on for trust-building.
     #[serde(default = "default_true")]
     pub overlord_propose_mode: bool,
+    /// The Overlord AGENT answers tabs' escalations (docs/overlord.md §9.1.2). Off by default:
+    /// a tab then asks its human directly and is never told to escalate, and the agent never
+    /// relays a tab's decision to the human — the board and Loom already carry it. On: tabs
+    /// escalate and wait, and the agent answers them with `driveTab`, from the playbook.
+    /// Not in `preference_meta`: an agent must not be able to hand itself this job.
+    #[serde(default)]
+    pub overlord_answers_escalations: bool,
+    /// The human's standing answers for the Overlord agent (§9.1.2) — one entry per line of
+    /// guidance, window-wide. The agent PROPOSES additions through `proposeRuleChanges`; only
+    /// an approval writes here. Not in `preference_meta`, for the same reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlord_playbook: Vec<String>,
     /// Follow-ups (docs/follow-ups.md §4): an agent schedules a prompt back into its own tab.
     /// A sub-feature of the Overlord — the toggle sits under "Enable Overlord" and does
     /// nothing while it is off. Default on, so turning the Overlord on brings follow-ups with
@@ -2133,6 +2145,8 @@ impl Default for Preferences {
             active_account_ids: std::collections::BTreeMap::new(),
             overlord_enabled: false,
             overlord_propose_mode: true,
+            overlord_answers_escalations: false,
+            overlord_playbook: Vec::new(),
             follow_ups_enabled: true,
             follow_ups_resume_agent: true,
             follow_ups_scripts_unattended: false,
@@ -2185,6 +2199,13 @@ impl Preferences {
     /// it as `preferencesStore.followUpsLive`.
     pub fn follow_ups_live(&self) -> bool {
         self.overlord_enabled && self.follow_ups_enabled
+    }
+
+    /// Whether the Overlord agent answers escalations (docs/overlord.md §9.1.2). Decides what
+    /// supervised agents are TOLD — the priming line and `replyToOverlord`'s description — so
+    /// it is one predicate, mirrored as `preferencesStore.escalationsToOverlord`.
+    pub fn escalations_to_overlord(&self) -> bool {
+        self.overlord_enabled && self.overlord_answers_escalations
     }
 }
 

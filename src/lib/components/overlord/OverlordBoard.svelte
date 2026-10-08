@@ -682,9 +682,16 @@
                      (BOARD_ONLY_ESCALATIONS): the supervisor's only channel to the human is
                      AskUserQuestion, and a copy of the question raised there cannot act on
                      the answer — the tab would still be sitting at its own prompt. -->
+                <!-- Unless the human gave the agent this job (§9.1.2): then the tab was told
+                     to wait for the agent, which answers it and clears this card. -->
                 <p class="signal-note">
-                  This tab asked for you directly. Answer it there — Overlord deliberately does
-                  not repeat the question here, because its copy could not act on your answer.
+                  {#if s.e.toAgent && preferencesStore.escalationsToOverlord}
+                    The Overlord agent answers this one and clears the card when it has — it asks
+                    you only if its playbook doesn't settle it. Open the tab to answer it yourself.
+                  {:else}
+                    This tab asked for you directly. Answer it there — Overlord deliberately does
+                    not repeat the question here, because its copy could not act on your answer.
+                  {/if}
                 </p>
               {/if}
               <div class="signal-actions">

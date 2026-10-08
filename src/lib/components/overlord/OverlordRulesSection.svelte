@@ -27,6 +27,44 @@
    * injection safe. That's stated in the UI, not just in the docs.
    */
 
+  // The playbook is edited as text, one entry per line, and saved on blur — not per keystroke,
+  // which would re-split a half-typed line into entries. Re-seeded when the stored list
+  // changes underneath (an approved proposal from the agent), unless the field has focus.
+  //
+  // A save is a three-way merge against what was stored at FOCUS, not a write of the draft:
+  // an entry approved meanwhile (the phone, another window) is not in the draft, and writing
+  // the draft back would delete it with nothing to say so.
+  let playbookDraft = $state(preferencesStore.overlordPlaybook.join('\n'));
+  let playbookFocused = false;
+  let playbookAtFocus: string[] = [];
+  $effect(() => {
+    const stored = preferencesStore.overlordPlaybook.join('\n');
+    if (!playbookFocused) playbookDraft = stored;
+  });
+  function focusPlaybook() {
+    playbookFocused = true;
+    playbookAtFocus = [...preferencesStore.overlordPlaybook];
+  }
+  function savePlaybook() {
+    playbookFocused = false;
+    const mine = playbookDraft.split('\n').map((l) => l.trim()).filter(Boolean);
+    const base = playbookAtFocus;
+    const theirs = [...preferencesStore.overlordPlaybook];
+    if (mine.join('\n') === base.join('\n')) {
+      // Not edited: show whatever is stored now, write nothing.
+      playbookDraft = theirs.join('\n');
+      return;
+    }
+    // My edits, minus what was removed elsewhere since focus, plus what was added there.
+    const merged = [
+      ...mine.filter((l) => !(base.includes(l) && !theirs.includes(l))),
+      ...theirs.filter((l) => !base.includes(l)),
+    ];
+    const next = [...new Set(merged)];
+    playbookDraft = next.join('\n');
+    if (next.join('\n') !== theirs.join('\n')) void preferencesStore.setOverlordPlaybook(next);
+  }
+
   let expandedId = $state<string | null>(null);
   let confirmDeleteId = $state<string | null>(null);
 
@@ -292,6 +330,67 @@
         <span class="toggle-knob"></span>
       </button>
     </div>
+
+    <!-- Who answers a tab's decision (docs/overlord.md §9.1.2). Off: the tab asks you and the
+         agent leaves it alone. On: the tab escalates and waits, and the agent answers. Either
+         way there is one asker per question. Inert while the Overlord is off, like follow-ups. -->
+    <div class="setting" class:inert={!preferencesStore.overlordEnabled}>
+      <div class="setting-copy">
+        <label for="overlord-answers">Overlord agent answers escalations</label>
+        <p class="setting-hint">
+          {#if preferencesStore.overlordEnabled}
+            Tabs bring their decisions to the Overlord agent instead of asking you, and it
+            answers them from the playbook below — asking you only when the playbook doesn't
+            cover a consequential call. While this is off, tabs ask you directly and the agent
+            never repeats their questions.
+          {:else}
+            Lets the Overlord agent answer tabs' decisions for you. Turn on the Overlord first.
+          {/if}
+        </p>
+      </div>
+      <button
+        id="overlord-answers"
+        class="toggle"
+        class:active={preferencesStore.escalationsToOverlord}
+        disabled={!preferencesStore.overlordEnabled}
+        onclick={() => {
+          // Same WebKit guard as follow-ups: a click on a disabled button still lands.
+          if (!preferencesStore.overlordEnabled) return;
+          preferencesStore.setOverlordAnswersEscalations(!preferencesStore.overlordAnswersEscalations);
+        }}
+        aria-pressed={preferencesStore.escalationsToOverlord}
+        aria-label="Toggle Overlord agent answering escalations"
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
+
+    <!-- Shown whenever the Overlord is on: the agent follows it for routine prompts in both
+         modes, and an approved entry must be reviewable without switching answering on. -->
+    {#if preferencesStore.overlordEnabled}
+      <div class="setting playbook" transition:slide={{ duration: 160 }}>
+        <div class="setting-copy">
+          <label for="overlord-playbook">Overlord playbook</label>
+          <p class="setting-hint">
+            Your standing answers, one per line — what the agent may decide for you and how.
+            It follows them when it answers a prompt{#if preferencesStore.escalationsToOverlord}
+            or an escalation; when it has to ask you, it can propose adding your answer here{/if}.
+            Nothing is added without your approval.
+          </p>
+          <textarea
+            id="overlord-playbook"
+            class="ov-textarea playbook-text"
+            rows="5"
+            spellcheck="false"
+            placeholder={'Dependency installs and lockfile updates: approve.\nNever push to main without asking me.'}
+            value={playbookDraft}
+            onfocus={focusPlaybook}
+            oninput={(e) => (playbookDraft = e.currentTarget.value)}
+            onblur={savePlaybook}
+          ></textarea>
+        </div>
+      </div>
+    {/if}
 
     <!-- A sub-feature of the Overlord (docs/follow-ups.md §4): shown always, so it can be
          found, but inert until the Overlord is on — its own value is kept, not overwritten. -->
@@ -737,6 +836,9 @@
   /* A setting that depends on another one being on. Dimmed rather than hidden, so it can be
      found; the switch shows the effective state (off) while it can't take effect. */
   .setting.inert { opacity: 0.5; }
+
+  .setting.playbook .setting-copy { flex: 1; min-width: 0; }
+  .playbook-text { width: 100%; margin-top: 8px; box-sizing: border-box; resize: vertical; }
 
   /* Live status line — a readout, and clearly only a readout. */
   .status {

@@ -110,6 +110,11 @@
       });
     } else if (c.op === 'delete') {
       lines.push({ kind: 'danger', label: 'removes', value: 'this rule stops supervising anything, permanently' });
+    } else if (c.op === 'playbook_add') {
+      // Verbatim: this sentence is what the agent will answer tabs' decisions with, unasked.
+      lines.push({ kind: 'text', label: 'standing answer', value: (c.text ?? '').trim() });
+    } else if (c.op === 'playbook_remove') {
+      lines.push({ kind: 'text', label: 'removes', value: (c.text ?? '').trim() });
     }
     return lines;
   }
@@ -122,6 +127,8 @@
       case 'enable': return { verb: 'Enable', subject: ruleName(c.rule_id), danger: false };
       case 'disable': return { verb: 'Disable', subject: ruleName(c.rule_id), danger: true };
       case 'delete': return { verb: 'Delete', subject: ruleName(c.rule_id), danger: true };
+      case 'playbook_add': return { verb: 'Teach', subject: 'escalation playbook', danger: false };
+      case 'playbook_remove': return { verb: 'Unlearn', subject: 'escalation playbook entry', danger: false };
     }
   }
 
@@ -154,7 +161,7 @@
         <div class="seal">♔</div>
         <div class="slip-title">
           <p class="ov-label">Authorization required</p>
-          <p class="ov-label-lead">Overlord proposes {batch.changes.length} rule change{batch.changes.length === 1 ? '' : 's'}</p>
+          <p class="ov-label-lead">Overlord proposes {batch.changes.length} change{batch.changes.length === 1 ? '' : 's'}</p>
         </div>
         <span class="ov-mono slip-count">{approvedCount}<span class="of">/{batch.changes.length}</span></span>
       </header>

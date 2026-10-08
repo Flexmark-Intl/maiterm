@@ -495,22 +495,42 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
 
     // Overlord standing instruction (docs/overlord.md §8): only when the feature is on AND
     // this tab's window actually has an Overlord workspace.
-    let overlord_present = {
+    let (overlord_present, escalations_to_overlord) = {
         let app_data = state.app_data.read();
-        app_data.preferences.overlord_enabled
+        let present = app_data.preferences.overlord_enabled
             && app_data.windows.iter().any(|w| {
                 w.workspaces.iter().any(|ws| ws.overlord)
                     && w.workspaces.iter().any(|ws| {
                         ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id))
                     })
+            });
+        // The Overlord agent's own tab is the answerer, not an asker: "escalate and wait, do
+        // not ask your human" would contradict its doctrine, which has it ask the human when
+        // its playbook does not settle a decision — and an escalation it filed would come
+        // back to itself.
+        let is_overlord_agent = app_data.windows.iter().any(|w| {
+            w.workspaces.iter().any(|ws| {
+                ws.overlord && ws.panes.iter().any(|p| p.tabs.iter().any(|t| t.id == tab_id))
             })
+        });
+        (present, app_data.preferences.escalations_to_overlord() && !is_overlord_agent)
     };
     if overlord_present {
         out.push_str(
             "\n\nThis window has an Overlord coordinating work across tabs. Call replyToOverlord \
-             with kind:'ready' now. When you finish something you were asked to do, ack it. \
-             If you're blocked on a human decision, escalate with needs_human.",
+             with kind:'ready' now. When you finish something you were asked to do, ack it.",
         );
+        // Who answers a tab's decision (docs/overlord.md §9.1.2). Exactly one asker: told to
+        // escalate AND left to ask the human itself, a tab and the Overlord agent both put
+        // the same question to the human. Off, nobody answers an escalation, so the tab is
+        // not told to raise one. No apostrophes (see the SessionStart hook).
+        if escalations_to_overlord {
+            out.push_str(
+                " When you need a decision before you can go on, escalate it with needs_human \
+                 and wait: the Overlord answers it, asking your human itself only when it has \
+                 to. Do not also ask your human the same question.",
+            );
+        }
     }
 
     // maiTerm task priming (docs/tasks.md §5) — on EVERY agent tab, not just supervised ones,
@@ -2577,11 +2597,11 @@ async fn process_message(
         }
         "notifications/initialized" => None,
         "tools/list" => {
-            let (tasks_enabled, stack_enabled, follow_ups_live) = {
+            let (tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord) = {
                 let prefs = &state.app_data.read().preferences;
-                (prefs.tasks_enabled, prefs.stack_enabled, prefs.follow_ups_live())
+                (prefs.tasks_enabled, prefs.stack_enabled, prefs.follow_ups_live(), prefs.escalations_to_overlord())
             };
-            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled, follow_ups_live));
+            let resp = JsonRpcResponse::success(id, tool_list_response(tasks_enabled, stack_enabled, follow_ups_live, escalations_to_overlord));
             Some(serde_json::to_string(&resp).unwrap())
         }
         "tools/call" => {

@@ -202,7 +202,7 @@ pub async fn answer_tab_prompt(
     // Overlord agent may not, whatever its doctrine says about unblocking the fleet.
     if crate::mailink::trust_dialog_open(&app, &tab_id) {
         return Ok(serde_json::json!({ "ok": false, "reason": "human_decision",
-            "detail": "That tab is at Claude's workspace-trust dialog. Trusting a folder is the human's decision: escalate it (needs_human) rather than answer it." }));
+            "detail": "That tab is at Claude's workspace-trust dialog. Trusting a folder is the human's decision, and the dialog is already in front of them as a permission on their board: leave it, and do not ask them about it yourself." }));
     }
     Ok(crate::mailink::respond_to_prompt(
         &app,

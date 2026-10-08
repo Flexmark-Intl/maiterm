@@ -1663,7 +1663,8 @@ pub(crate) fn tab_prompt_view(app: &AppState, tab_id: &str) -> Option<Value> {
         }
         v["note"] = json!("Claude is asking whether to trust this folder before it starts. \
             Trusting a folder lets the agent read, edit and run everything in it: the human's \
-            decision. answerTabPrompt refuses it; escalate with needs_human.");
+            decision. answerTabPrompt refuses it, and the human already sees it on their board: \
+            leave it, and do not ask them about it yourself.");
     } else if kind == "question" {
         if let Some(t) = pending_question_for_tab(app, tab_id) {
             if let Some(q) = t.get("questions") {

@@ -172,6 +172,10 @@ export interface OverlordEscalation {
    *  a BOARD_ONLY_ESCALATIONS kind, which is never handed to the agent at all. Read it as
    *  "the supervisor has this", never as "the human has seen it". */
   read: boolean;
+  /** `agent_report` only: filed while the Overlord agent answered escalations, so its tab
+   *  was told to wait for the agent rather than ask its human (§9.1.2). Decided at filing,
+   *  because that is when the tab was told — see `deliverableToAgent`. */
+  toAgent?: boolean;
 }
 
 interface RitualRun {
@@ -194,13 +198,25 @@ interface RitualRun {
   lastInjectionAt: number;
 }
 
-/** One change in a proposeRuleChanges batch (docs/overlord.md §10). */
+/** One change in a proposeRuleChanges batch (docs/overlord.md §10). The `playbook_*` ops
+ *  are how the agent is trained to answer escalations (§9.1.2): they edit the human's
+ *  playbook rather than the ruleset, under the same per-change approval. */
 export interface OverlordRuleChange {
-  op: 'create' | 'update' | 'rescope' | 'enable' | 'disable' | 'delete';
+  op: 'create' | 'update' | 'rescope' | 'enable' | 'disable' | 'delete' | 'playbook_add' | 'playbook_remove';
   rule?: Partial<OverlordRule>;
   rule_id?: string;
   patch?: Partial<OverlordRule>;
   workspaces?: string[];
+  /** playbook ops: the entry — new text to add, or an existing entry verbatim to remove. */
+  text?: string;
+}
+
+/** Longest playbook entry an agent may propose. An entry is one standing answer; a long one
+ *  is several, and should be pitched as several so each can be approved on its own. */
+export const PLAYBOOK_ENTRY_MAX = 400;
+
+export function isPlaybookChange(c: OverlordRuleChange): boolean {
+  return c.op === 'playbook_add' || c.op === 'playbook_remove';
 }
 
 export interface PendingRuleChangeBatch {
@@ -323,8 +339,13 @@ const OVERLORD_PRIMED_VAR = 'overlordPrimed';
  *
  *  So: when maiTerm SHIPS a change to the default ruleset, bump. A user editing their own
  *  rules leaves primed agents equally stale and nothing re-primes them — a real gap, but a
- *  pre-existing one, and not one this constant can close. */
-const DOCTRINE_VERSION = '9';
+ *  pre-existing one, and not one this constant can close.
+ *
+ *  v10 is who answers a tab's decision (§9.1.2). An agent on v9 holds "ESCALATE … to the
+ *  human via AskUserQuestion" for consequential prompts — the line that made it ask the human
+ *  a second time about a question the tab was already putting to them. The escalation switch
+ *  itself is not versioned here: `doctrineKey` appends it, so flipping it re-primes too. */
+const DOCTRINE_VERSION = '10';
 
 /** Escalation kinds addressed to the Overlord AGENT rather than the human. The deck hides
  *  these, so nobody will ever dismiss one — `consumeEscalations` therefore DELETES them on
@@ -371,6 +392,11 @@ const HUMAN_BOARD_ESCALATIONS = new Set<OverlordEscalation['kind']>(['task_hando
  * before the human ever opens the board, which is most of the reason to run a supervisor.
  * The test for this set is not "is it about a human" but "is re-asking the human the only
  * thing the agent could do with it".
+ *
+ * **Unless the human made answering them the agent's job** (`escalationsToOverlord`,
+ * docs/overlord.md §9.1.2). Then the tab was told to escalate and NOT ask its human, so the
+ * agent is the one asker, and the card goes to both: the agent answers it with `driveTab`, and
+ * the deck shows the human what it is handling.
  */
 const BOARD_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>(['agent_report']);
 
@@ -380,8 +406,13 @@ const BOARD_ONLY_ESCALATIONS = new Set<OverlordEscalation['kind']>(['agent_repor
  *  the moment they are spelled separately: a card `consumeEscalations` refuses would still
  *  be counted in "N Overlord items pending", ringing the agent for a queue that then comes
  *  back short — or empty. */
-function deliverableToAgent(kind: OverlordEscalation['kind']): boolean {
-  return !BOARD_ONLY_ESCALATIONS.has(kind);
+function deliverableToAgent(e: Pick<OverlordEscalation, 'kind' | 'toAgent'>): boolean {
+  // An `agent_report` reaches the agent only if it was filed while the agent answered them
+  // AND it still does. Filed earlier, its tab was primed to ask the human itself and already
+  // has — delivering it on a later flip would make the agent the second asker. Switched off
+  // since, the human has taken the job back and the card is theirs (it stays on the board).
+  if (e.kind === 'agent_report') return !!e.toAgent && preferencesStore.escalationsToOverlord;
+  return !BOARD_ONLY_ESCALATIONS.has(e.kind);
 }
 
 /**
@@ -431,11 +462,14 @@ export const AGENT_RULE_GUARDS = {
 
 /** Stable identity for a proposed change, for the don't-re-pitch-rejections set. */
 function changeKey(c: OverlordRuleChange): string {
+  if (isPlaybookChange(c)) return JSON.stringify([c.op, (c.text ?? '').trim()]);
   return JSON.stringify([c.op, c.rule_id ?? c.rule?.name ?? '', c.patch ?? c.workspaces ?? c.rule?.when ?? null]);
 }
 
 function describeChange(c: OverlordRuleChange): string {
   switch (c.op) {
+    case 'playbook_add': return `add to playbook: "${(c.text ?? '').trim().slice(0, 80)}"`;
+    case 'playbook_remove': return `remove from playbook: "${(c.text ?? '').trim().slice(0, 80)}"`;
     case 'create': return `create "${c.rule?.name ?? 'unnamed'}"`;
     case 'update': return `update ${c.rule_id}`;
     case 'rescope': return `rescope ${c.rule_id} → ${c.workspaces?.length ? `${c.workspaces.length} workspace(s)` : 'global'}`;
@@ -459,7 +493,18 @@ function matchRule(rules: OverlordRule[], key: string | undefined): OverlordRule
  * Checked at PROPOSE time as well as apply time, so an agent gets a correctable error
  * instead of a false success, and the human is never asked to approve something unbuildable.
  */
-function changeProblem(c: OverlordRuleChange, rules: OverlordRule[]): string | null {
+function changeProblem(c: OverlordRuleChange, rules: OverlordRule[], playbook: string[]): string | null {
+  if (isPlaybookChange(c)) {
+    const text = (c.text ?? '').trim();
+    if (!text) return `op "${c.op}" needs a non-empty \`text\`.`;
+    if (c.op === 'playbook_remove') {
+      return playbook.includes(text) ? null : `op "playbook_remove": no playbook entry is exactly ${JSON.stringify(text)}.`;
+    }
+    if (text.length > PLAYBOOK_ENTRY_MAX) {
+      return `op "playbook_add": an entry is at most ${PLAYBOOK_ENTRY_MAX} characters — split it into separate entries.`;
+    }
+    return playbook.includes(text) ? 'op "playbook_add": the playbook already has that entry.' : null;
+  }
   if (c.op === 'create') {
     if (!c.rule) return 'op "create" needs a `rule` object.';
     const missing: string[] = [];
@@ -536,7 +581,19 @@ function applyRuleChange(rules: OverlordRule[], c: OverlordRuleChange): Overlord
       if (!target) return null;
       return rules.filter((r) => r.id !== target.id);
     }
+    // Playbook ops edit the playbook, not the ruleset — `resolveRuleChanges` applies them.
+    default:
+      return null;
   }
+}
+
+/** Apply one approved playbook change, or null if it no longer applies. */
+function applyPlaybookChange(playbook: string[], c: OverlordRuleChange): string[] | null {
+  const text = (c.text ?? '').trim();
+  if (!text) return null;
+  if (c.op === 'playbook_add') return playbook.includes(text) ? null : [...playbook, text];
+  if (c.op === 'playbook_remove') return playbook.includes(text) ? playbook.filter((l) => l !== text) : null;
+  return null;
 }
 
 function createOverlordStore() {
@@ -1148,7 +1205,9 @@ function createOverlordStore() {
       // `running` means the engine is ON for this window: rehydrate() starts the ticker in every
       // window regardless (tick() no-ops when disabled), so the preference is the truth here.
       running: running && preferencesStore.overlordEnabled,
-      escalations: s.humanEscalations,
+      // `toAgent` is desktop routing (§9.1.2), not part of the phone's `Escalation` — kept off
+      // the wire, where any new field is a protocol change (docs/mailink-protocol.md §13.5).
+      escalations: s.humanEscalations.map(({ toAgent: _toAgent, ...e }) => e),
       proposals: s.proposals,
       agentReports: [...agentReports.values()],
       outstandingDirectives: s.outstandingDirectives,
@@ -1235,25 +1294,24 @@ function createOverlordStore() {
       return open.id;
     }
     const id = crypto.randomUUID();
-    escalations = [
-      ...escalations,
-      {
-        id,
-        ts: Date.now(),
-        tabId,
-        workspaceId: workspaceForTab(tabId)?.id ?? '',
-        ruleId,
-        kind,
-        detail,
-        taskId,
-        read: false,
-      },
-    ];
+    const entry: OverlordEscalation = {
+      id,
+      ts: Date.now(),
+      tabId,
+      workspaceId: workspaceForTab(tabId)?.id ?? '',
+      ruleId,
+      kind,
+      detail,
+      taskId,
+      read: false,
+      ...(kind === 'agent_report' && preferencesStore.escalationsToOverlord ? { toAgent: true } : {}),
+    };
+    escalations = [...escalations, entry];
     scheduleMirror();
     // A board-only kind never enters the agent's queue, so it must not ring the agent's
     // doorbell either: the nudge names a count the pull cannot produce, and an agent rung
     // for nothing is exactly the noise the doorbell exists to ration.
-    if (deliverableToAgent(kind)) {
+    if (deliverableToAgent(entry)) {
       unNudged.add(id);
       void wakeOverlordAgent();
     }
@@ -1353,6 +1411,25 @@ function createOverlordStore() {
     logInfo(
       `overlord: withdrew ${ids.size} blocked card(s) for ${tabDisplayName(tabId)} — it reported a non-blocked state`,
     );
+  }
+
+  /**
+   * The agent answered a tab's asks: drop that tab's `agent_report` cards the agent had
+   * PULLED (§9.1.2). Called when it drives that tab.
+   *
+   * Only delivered ones (`read`). That is the line between "the agent read the question and
+   * then spoke to the tab" and a drive that merely happened to land after a question it has
+   * not seen yet — clearing that one would hide a question nobody has read. Unlike §3.1's
+   * bare-blocked withdrawal this keys off the ANSWERER acting, not the asker's own later
+   * activity, which is the reason §3.1 refuses to withdraw `agent_report` there.
+   */
+  function withdrawAnsweredReports(tabId: string) {
+    const gone = escalations.filter((e) => e.kind === 'agent_report' && e.tabId === tabId && e.read);
+    if (!gone.length) return;
+    const ids = new Set(gone.map((e) => e.id));
+    escalations = escalations.filter((e) => !ids.has(e.id));
+    scheduleMirror();
+    logInfo(`overlord: ${tabDisplayName(tabId)} answered — cleared ${ids.size} escalation card(s)`);
   }
 
   /** Does this window still have an Overlord agent tab that could ever pull the queue? */
@@ -1566,7 +1643,8 @@ function createOverlordStore() {
       // useless: the human closed it. Drop it without the escalation.
       driveWatch.delete(id);
       noticeChain.delete(id);
-      primedAgents.delete(id);
+      // Keyed `${tabId}:${doctrineKey}` — one per doctrine this tab was primed with.
+      for (const k of primedAgents) if (k.startsWith(`${id}:`)) primedAgents.delete(k);
       if (agentReports.has(id)) {
         agentReports.delete(id);
         agentReports = new Map(agentReports);
@@ -1643,8 +1721,10 @@ function createOverlordStore() {
     if (unNudged.size === 0) return;
     // The human may have cleared the queue while the agent was busy — an escalation
     // dismissed from the board must not still ring "0 escalations pending" later.
+    // Deliverability is re-checked too: an `agent_report` stops being the agent's when the
+    // human turns answering off, and ringing for it would promise a pull that comes back empty.
     for (const id of [...unNudged]) {
-      if (!escalations.some((e) => e.id === id && !e.read)) unNudged.delete(id);
+      if (!escalations.some((e) => e.id === id && !e.read && deliverableToAgent(e))) unNudged.delete(id);
     }
     if (unNudged.size === 0) return;
     const ws = overlordWorkspace();
@@ -1660,7 +1740,7 @@ function createOverlordStore() {
           if (!inst) return;
           // What the PULL will actually hand over — board-only kinds are not in it. Counting
           // the raw unread list promised the agent items `listEscalations` then withheld.
-          const unread = escalations.filter((e) => !e.read && deliverableToAgent(e.kind));
+          const unread = escalations.filter((e) => !e.read && deliverableToAgent(e));
           const n = unread.length;
           // Word it for what's actually queued: calling a tab's answer an "escalation" makes
           // the agent open it braced for a problem.
@@ -1697,6 +1777,36 @@ function createOverlordStore() {
     }
   }
 
+  /**
+   * Who answers a tab's decision (§9.1.2) — the part of the doctrine the human's
+   * `overlord_answers_escalations` switch decides. Exactly one asker per question, whichever
+   * way it is set: off, the tab asks its human itself and the agent leaves it alone; on, the
+   * tab was told to escalate and NOT ask, so the agent is the one asker and may go to the human
+   * — the only case where it does, because only there is nobody else asking.
+   */
+  function escalationDoctrine(): string {
+    if (!preferencesStore.escalationsToOverlord) {
+      return (
+        `  - Tabs here ask their human directly when they need a decision; answering escalations is not your job in this window. An agent_report card is the tab's note to the human's board, and it never reaches you.\n` +
+        `  - listEscalations also hands you your human's playbook when they have written one — their standing answers. Follow it when you answer a routine prompt.\n`
+      );
+    }
+    return (
+      `  - Answering tabs' decisions IS your job in this window. An agent_report escalation is a tab that stopped to ask and was told to wait for YOU, not to ask its human — so nobody else is asking. Answer it with driveTab into that tab, written as the human would write it, and the card clears.\n` +
+      `  - listEscalations hands you your human's playbook with them: their standing answers. Follow it. Routine decisions in service of work already underway are yours.\n` +
+      `  - When the playbook does not settle it and the decision is consequential, ask your human with AskUserQuestion — here you ARE the one asker — then driveTab their answer to the tab. If their answer is something you could apply yourself next time, propose it as a playbook entry (proposeRuleChanges, op 'playbook_add', one short standalone sentence) so you do not ask again. Never re-propose one they rejected.\n`
+    );
+  }
+
+  /** What the agent was primed with, as the persisted marker. The doctrine is pasted only
+   *  when this changes, so anything that changes the doctrine's TEXT must change it — the
+   *  version for maiTerm's own edits, and the escalation switch, which the human flips. The
+   *  playbook is deliberately NOT here: it rides on `listEscalations`, always current, so
+   *  editing it never re-pastes the whole doctrine into the agent's tab. */
+  function doctrineKey(): string {
+    return `${DOCTRINE_VERSION}${preferencesStore.escalationsToOverlord ? '+answers' : ''}`;
+  }
+
   /** The ruleset rendered as the agent's standing doctrine — one document driving both
    *  the engine and the agent's judgment, so they can't drift apart (§9.2). */
   function buildDoctrine(): string {
@@ -1717,7 +1827,9 @@ function createOverlordStore() {
       `  - To direct another tab, use driveTab — your text is typed into that tab with the human's full authority (the agent there cannot tell it from the human, so write exactly as the human would). Guard refusals (busy, no live REPL, outstanding directive) come back structured; wait and retry or escalate.\n` +
       `  - You WILL get the answer back: when a tab you drove finishes its turn, its reply is queued for you and you are rung the same way as an escalation. So it is fine to ask a tab a question and wait — you do not need to ask it to report back, and you should not poll it.\n` +
       `  - If that tab stops at a prompt instead, you are told. Call getTabPrompt to see it, then ANSWER IT with answerTabPrompt — unblocking your own fleet is your job, and a tab left sitting at a prompt is the failure you exist to prevent. Pass back the prompt_id you were given.\n` +
-      `  - ESCALATE INSTEAD OF ANSWERING when the decision is consequential: anything destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), anything touching money, credentials, production, or an external party, or any question about what the human actually WANTS rather than how to carry out what they already asked for. Those go to the human via AskUserQuestion, and you answer the tab once they tell you. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, it is the escalating side.\n` +
+      `  - A decision is CONSEQUENTIAL when it is destructive or irreversible (deleting data, force-push, dropping a database, rm -rf), touches money, credentials, production, or an external party, or is about what the human actually WANTS rather than how to carry out what they already asked for. Routine approvals in service of work already underway are yours to make. If you are genuinely unsure which side a decision falls on, treat it as consequential.\n` +
+      `  - Never answer a consequential prompt, and never relay one to your human either: a tab sitting at a prompt is already in front of them — on their board, in the Loom and on their phone — and only an answer given where the tab is waiting does anything. A copy of the question from you is a second prompt for one decision, and yours cannot act on the reply. The same goes for blocked, step_timeout and directive_unacked escalations: act on them when driving, recovering or releasing the tab fixes it; when only your human can, leave it on their board.\n` +
+      escalationDoctrine() +
       `  - Your human can also hand you a board task directly ("Send" on a card): it arrives as a task_handoff escalation naming the task and the tab that owns it. Carry it — drive that tab, drive a better one, or do it yourself — and keep its status current with updateTasks so the board follows along. A task_dropped escalation is the reverse: the human deleted a task and the tab carrying it could not be told, so tell it yourself when it is reachable.\n` +
       `  - Use listWorkspaces to see the tabs; every injection you make is recorded verbatim in the ledger. Each agent tab reports THREE independent facts: \`pty\` ('live' | 'suspended' | 'none' — the terminal underneath), \`state\` (what the agent is doing, meaningful only over a live pty), and \`loaded\` (whether anything can reach it at all). Read all three. An 'idle' agent with loaded:false is healthy and undrivable; a suspended tab is not a dead one.\n` +
       `  - Every state has one action, and you have all of them: 'idle'/'active' → driveTab · 'permission' → getTabPrompt + answerTabPrompt · 'unbound' or 'stopped' → recoverTab (re-binds or restarts, chosen from the process state) · pty 'suspended' → resumeTab · a tab in a suspended WORKSPACE → resumeWorkspace · a tab in that workspace's archivedTabs[] → restoreArchivedTab. Nothing in this window has to stay stuck.\n` +
@@ -1726,7 +1838,7 @@ function createOverlordStore() {
       `  - Judging a tab's age: listWorkspaces gives \`lastTurnAt\` (its last real turn) and \`contextPct\` for agent tabs whose session could be resolved, plus \`suspendedAt\` for suspended ones. Both are absent — not zero — when there is no readable transcript for that tab (no live session and no remembered session id), which is itself worth knowing: nothing can be read back from that tab. Archived tabs carry \`archivedAt\`, and getTabNotes reads an archived tab's notes without restoring it — read those before deciding what a session was for.\n` +
       `  - Finished sessions: archiveTab when there is any chance of coming back to it — a bug in what it built, or follow-up work — which keeps the scrollback, cwd and ssh context and restores. closeTab ONLY when the session is definitively over or a fresh one would do just as well; it is irreversible and keeps nothing. Prefer archiving whenever you are unsure. Both refuse a tab that is still working, and both are ledgered. deleteArchivedTab prunes the archive itself when an archived session is no longer worth keeping.\n` +
       `  - When you find yourself hand-issuing the same directive repeatedly, propose a rule with proposeRuleChanges (batched; the human approves each change). Never re-propose a rejected change.\n` +
-      `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes.\n\n` +
+      `  - Reaching your human: AskUserQuestion ONLY — never print questions to the terminal or write status notes. Never use it to repeat a question a tab is already putting to them.\n\n` +
       // This heading used to read "improvise with these same thresholds and phrasings when
       // asked to check on tabs by hand", which handed the agent a list of sequences with no
       // hint that anything else runs them. It read as a playbook, so the agent executed one
@@ -1752,19 +1864,27 @@ function createOverlordStore() {
     for (const pane of ws.panes) {
       for (const tab of pane.tabs) {
         if ((tab.tab_type ?? 'terminal') !== 'terminal' || !tab.runtime) continue;
-        if (primedAgents.has(tab.id)) continue;
+        // Keyed by the doctrine too, so flipping the escalation switch re-primes a tab this
+        // session already primed under the other doctrine.
+        const key = doctrineKey();
+        const primeId = `${tab.id}:${key}`;
+        // Forget this tab's marks for any OTHER doctrine: a tab primed off → on → off would
+        // otherwise still hold the "off" mark from the first pass and be skipped, keeping the
+        // "on" doctrine while tabs are told the opposite. The persisted variable then decides.
+        for (const k of primedAgents) if (k.startsWith(`${tab.id}:`) && k !== primeId) primedAgents.delete(k);
+        if (primedAgents.has(primeId)) continue;
         if (mappedState(tab.id) !== 'idle') continue;
-        primedAgents.add(tab.id); // mark before await so a racing tick can't double-prime
-        if (getVariables(tab.id)?.get(OVERLORD_PRIMED_VAR) === DOCTRINE_VERSION) continue;
-        if (!(await hasLiveRepl(tab.id))) { primedAgents.delete(tab.id); continue; }
+        primedAgents.add(primeId); // mark before await so a racing tick can't double-prime
+        if (getVariables(tab.id)?.get(OVERLORD_PRIMED_VAR) === key) continue;
+        if (!(await hasLiveRepl(tab.id))) { primedAgents.delete(primeId); continue; }
         const inst = terminalsStore.get(tab.id);
-        if (!inst) { primedAgents.delete(tab.id); continue; }
+        if (!inst) { primedAgents.delete(primeId); continue; }
         try {
           await bracketedPasteSubmit(inst.ptyId, buildDoctrine());
-          await setVariable(tab.id, OVERLORD_PRIMED_VAR, DOCTRINE_VERSION);
-          logInfo(`overlord: primed agent tab ${tab.id.slice(0, 8)} with doctrine`);
+          await setVariable(tab.id, OVERLORD_PRIMED_VAR, key);
+          logInfo(`overlord: primed agent tab ${tab.id.slice(0, 8)} with doctrine ${key}`);
         } catch (e) {
-          primedAgents.delete(tab.id);
+          primedAgents.delete(primeId);
           logError(`overlord: agent priming failed: ${e}`);
         }
         return;
@@ -3147,7 +3267,7 @@ function createOverlordStore() {
       // day-old timeouts. Read ones stay on the board until the human dismisses them.
       // Board-only kinds are never handed over at all (see BOARD_ONLY_ESCALATIONS).
       const out = ($state.snapshot(escalations) as OverlordEscalation[]).filter(
-        (e) => !e.read && deliverableToAgent(e.kind),
+        (e) => !e.read && deliverableToAgent(e),
       );
       // Drop delivered replies rather than marking them read. Read escalations linger on
       // purpose — they stay on the human's board until dismissed — but a `drive_reply` is
@@ -3160,7 +3280,7 @@ function createOverlordStore() {
       // one thing telling them the deck has something on it.
       escalations = escalations
         .filter((e) => !(AGENT_ONLY_ESCALATIONS.has(e.kind) && !e.read))
-        .map((e) => (e.read || !deliverableToAgent(e.kind) ? e : { ...e, read: true }));
+        .map((e) => (e.read || !deliverableToAgent(e) ? e : { ...e, read: true }));
       unNudged.clear(); // delivered by the pull itself; no doorbell owed
       return out;
     },
@@ -3878,7 +3998,7 @@ function createOverlordStore() {
       // Enter that would confirm its "No, exit". It is the human's decision, not a recovery.
       if (await commands.trustDialogOpen(tabId)) {
         return { sent: false, kind, reason: 'trust_dialog',
-          detail: "That tab is at Claude's workspace-trust dialog, asking whether to trust its folder. Trusting a folder is the human's decision: escalate it (needs_human). Nothing was typed." };
+          detail: "That tab is at Claude's workspace-trust dialog, asking whether to trust its folder. Trusting a folder is the human's decision, and the dialog is already in front of them as a permission on their board: leave it, and do not ask them about it yourself. Nothing was typed." };
       }
 
       let text: string;
@@ -4537,7 +4657,9 @@ function createOverlordStore() {
 
     /** listEscalations (§9.1) — Overlord-agent-only pull; content stays out of the
      *  wake nudge so the agent's transcript stays lean. */
-    listEscalationsFor(callerTabId: string): { error: string } | { escalations: unknown[] } {
+    listEscalationsFor(callerTabId: string):
+      | { error: string }
+      | { escalations: unknown[]; answers_escalations: boolean; playbook?: string[] } {
       if (!isOverlordAgentTab(callerTabId)) {
         return { error: 'listEscalations is available only to the Overlord agent tab.' };
       }
@@ -4550,7 +4672,14 @@ function createOverlordStore() {
         kind: e.kind,
         detail: e.detail,
       }));
-      return { escalations: items };
+      // The playbook rides on the pull rather than the doctrine (§9.1.2): always the current
+      // text, at the moment the agent is about to decide, and editing it costs no re-prime.
+      const playbook = preferencesStore.overlordPlaybook.filter((l) => l.trim());
+      return {
+        escalations: items,
+        answers_escalations: preferencesStore.escalationsToOverlord,
+        ...(playbook.length ? { playbook } : {}),
+      };
     },
 
     /** proposeRuleChanges (§10): queue the batch for explicit human approval (a modal
@@ -4573,9 +4702,15 @@ function createOverlordStore() {
       // object, so a create with no `when` or no `sequence` arrives well-formed, renders
       // fine in the approval prompt, and then applies to nothing. Refuse the batch with the
       // specific field named — the agent can fix that; it cannot fix a false "approved".
+      const rulesNow = $state.snapshot(preferencesStore.overlordRules) as OverlordRule[];
+      // Playbook changes are checked in ORDER against a running copy, as resolve applies them:
+      // checked each against the stored list, two identical adds both passed and the second
+      // then failed after approval, with an error toast for a change the human said yes to.
+      let playbookSim = $state.snapshot(preferencesStore.overlordPlaybook) as string[];
       const problems = changes
         .map((c, i) => {
-          const p = changeProblem(c, $state.snapshot(preferencesStore.overlordRules) as OverlordRule[]);
+          const p = changeProblem(c, rulesNow, playbookSim);
+          if (!p && isPlaybookChange(c)) playbookSim = applyPlaybookChange(playbookSim, c) ?? playbookSim;
           return p ? `changes[${i}]: ${p}` : null;
         })
         .filter((p): p is string => p !== null);
@@ -4637,11 +4772,29 @@ function createOverlordStore() {
       const rejected: string[] = [];
       const failed: string[] = [];
       let rules = ($state.snapshot(preferencesStore.overlordRules) as OverlordRule[]);
+      let playbook = ($state.snapshot(preferencesStore.overlordPlaybook) as string[]);
+      let rulesChanged = false;
+      let playbookChanged = false;
       batch.changes.forEach((change, i) => {
         const label = describeChange(change);
         if (!approvedIdx.includes(i)) {
           rejectedChangeKeys.add(changeKey(change));
           rejected.push(label);
+          return;
+        }
+        if (isPlaybookChange(change)) {
+          const nextPlaybook = applyPlaybookChange(playbook, change);
+          if (!nextPlaybook) {
+            const why = changeProblem(change, rules, playbook) ?? 'it no longer applies to the current playbook';
+            failed.push(`${label} — ${why}`);
+            ledger(batch.tabId, null, 'overlord_judgment', 0,
+              { kind: 'process', text: `playbook change approved but NOT applied: ${label} — ${why}` }, 'aborted');
+            return;
+          }
+          playbook = nextPlaybook;
+          playbookChanged = true;
+          approved.push(label);
+          ledger(batch.tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `playbook change approved: ${label}` }, 'sent');
           return;
         }
         // Look the target up BEFORE applying — a delete removes it from the list — but act
@@ -4654,13 +4807,14 @@ function createOverlordStore() {
           // approved to the agent, and never exist. Propose-time validation should stop this
           // reaching the modal at all; this is the backstop for a ruleset that moved in
           // between (the target rule deleted while the prompt was open).
-          const why = changeProblem(change, rules) ?? 'it no longer applies to the current ruleset';
+          const why = changeProblem(change, rules, playbook) ?? 'it no longer applies to the current ruleset';
           failed.push(`${label} — ${why}`);
           ledger(batch.tabId, null, 'overlord_judgment', 0,
             { kind: 'process', text: `rule change approved but NOT applied: ${label} — ${why}` }, 'aborted');
           return;
         }
         rules = next;
+        rulesChanged = true;
         // Deleting a seeded default must also hide its default_id, or the next
         // startup re-seeds it right back.
         if (target?.default_id && !preferencesStore.hiddenDefaultOverlordRules.includes(target.default_id)) {
@@ -4672,11 +4826,12 @@ function createOverlordStore() {
         approved.push(label);
         ledger(batch.tabId, null, 'overlord_judgment', 0, { kind: 'process', text: `rule change approved: ${label}` }, 'sent');
       });
-      if (approved.length) void preferencesStore.setOverlordRules(rules);
+      if (playbookChanged) void preferencesStore.setOverlordPlaybook(playbook);
+      if (rulesChanged) void preferencesStore.setOverlordRules(rules);
       if (failed.length) {
         dispatch(
           'Overlord',
-          `${failed.length} approved rule change${failed.length === 1 ? '' : 's'} could not be applied — see the ledger.`,
+          `${failed.length} approved change${failed.length === 1 ? '' : 's'} could not be applied — see the ledger.`,
           'error',
         );
       }
@@ -4727,7 +4882,11 @@ function createOverlordStore() {
       // of a prompt is somebody else's doing, which is what the stand-down may then assert.
       // Withdraw rather than forget: asks still queued would otherwise be delivered later,
       // about a gate this agent itself closed.
-      if (res.ok) withdrawPermissionHandoff(tabId);
+      if (res.ok) {
+        withdrawPermissionHandoff(tabId);
+        // An escalating tab may have asked at a prompt instead of waiting for a drive.
+        withdrawAnsweredReports(tabId);
+      }
       return res;
     },
 
@@ -4847,8 +5006,9 @@ function createOverlordStore() {
               detail:
                 'That tab is stopped at a prompt, so there is nothing to type a directive ' +
                 'into — retrying will not clear it. Use getTabPrompt to see what it is ' +
-                'asking and answerTabPrompt to answer it (escalate to the human first if ' +
-                'the decision is consequential). The tab resumes once it is answered.',
+                'asking and answerTabPrompt to answer it — unless the decision is ' +
+                'consequential, in which case leave it: the prompt is already in front of the ' +
+                'human, and do not ask them about it yourself. The tab resumes once it is answered.',
             }
           : { sent: false, reason: 'agent_busy' };
       }
@@ -4881,6 +5041,7 @@ function createOverlordStore() {
         return { sent: false, reason: 'no_live_repl' };
       }
       ledger(tabId, null, 'overlord_judgment', 0, step, 'sent');
+      withdrawAnsweredReports(tabId);
       // A slash command is a control, not a question: `/model`, `/effort`, `/compact` produce
       // no answer, so nothing would ever release the slot. Holding it anyway refused every
       // later driveTab at that tab until the 15-minute sweep, and then raised one "no reply"
