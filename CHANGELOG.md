@@ -1,5 +1,50 @@
 # Changelog
 
+## v3.3.0
+
+Move a project folder without breaking anything, link mesh workspaces, and the Overlord stops asking you the same question twice.
+
+### Move project
+
+- **Workspace menu → Move project…** moves a project's folder, and everything that points at it follows: tabs (open and archived), services, editors, follow-ups and their approvals, and each agent's own record of the project — Claude's sessions, memory and trust, Codex's trust and threads, Gemini's registry. Agents in the folder are paused before the move and woken after it, and nothing moves unless every window is ready.
+- **A tab whose folder has gone missing** opens in your home folder instead of resuming into nothing, and asks you where the folder went.
+
+### Overlord
+
+- **One question, one prompt.** The Overlord agent no longer asks you about something a tab is already asking you — that prompt is already on your board, in the Loom and on your phone.
+- **New: let the Overlord agent answer escalations** (Preferences → Overlord, off by default). Tabs then bring their decisions to it instead of you, and it answers from a playbook of your standing answers, asking you only when the playbook doesn't cover a consequential call. When it does ask, it can propose your answer as a new playbook entry for you to approve.
+- **The checkpoint before compaction is one step, not two.**
+
+### Your drafts are safe
+
+- **Nothing maiTerm types sends your half-typed message to Claude Code.** Phone messages, mesh and bridge messages, Mattermost pickups, task answers and board notices all wait until Claude's input box is empty, then go in order. On the phone, a held message shows as held.
+
+### Mesh workspaces
+
+- **Link mesh workspaces** in the same window from the workspace menu, and their agents work as one mesh: one roster, one set of topics, each peer tagged with its workspace. Unlinking splits them again.
+
+### Follow-ups and tasks
+
+- **Watch scripts from an ssh tab run on that host**, not on your Mac, and the approval card names the machine.
+- **Agents can delete tasks and whole workstreams** — never another tab's work in progress, or a task something unfinished still depends on.
+- **Dismiss a question already handled in the tab** — Dismiss on the card, or "Already handled" on the phone — and the task goes back to Active without interrupting the agent.
+
+### Loom and phone
+
+- **Images an agent shows by file path appear** in Loom Focus and on your phone, including from ssh tabs.
+- **Loom Focus stays on the newest message** unless you scroll up yourself.
+- **Subagents that finish while their parent is busy now show as finished** on the phone.
+
+### Lighter and faster
+
+- **Terminals keep 3,000 lines of scrollback by default instead of 10,000** — a full terminal took ~40 MB of memory, now ~13 MB. A profile still at 10,000 moves to 3,000 once; any other value you chose is kept, and you can pick 10,000 again in Preferences.
+- **Faster launch and far fewer disk writes**: state saves are batched, and the scrollback database is no longer rewritten at every startup.
+- **On Windows, installing an update no longer loses unsaved state.**
+
+### Fixes
+
+- An agent writing a memory file through the shell no longer sits at a permission prompt for hours; it's told to use its edit tools instead.
+
 ## v3.2.1
 
 - **Your phone rings when an agent asks a question on one of its tasks, or wants a watch script allowed.** Once per new question or script, and you can turn either off per phone like the other kinds of push.
