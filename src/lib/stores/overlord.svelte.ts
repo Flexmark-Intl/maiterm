@@ -1424,7 +1424,11 @@ function createOverlordStore() {
    * activity, which is the reason §3.1 refuses to withdraw `agent_report` there.
    */
   function withdrawAnsweredReports(tabId: string) {
-    const gone = escalations.filter((e) => e.kind === 'agent_report' && e.tabId === tabId && e.read);
+    // Still deliverable, too: a card the human took back by turning answering off is theirs,
+    // and the agent driving that tab later for some other reason must not clear it.
+    const gone = escalations.filter(
+      (e) => e.kind === 'agent_report' && e.tabId === tabId && e.read && deliverableToAgent(e),
+    );
     if (!gone.length) return;
     const ids = new Set(gone.map((e) => e.id));
     escalations = escalations.filter((e) => !ids.has(e.id));

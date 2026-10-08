@@ -45,14 +45,17 @@
     playbookFocused = true;
     playbookAtFocus = [...preferencesStore.overlordPlaybook];
   }
-  function savePlaybook() {
-    playbookFocused = false;
+  /** Merge the draft into the stored list. Also run while the field still has focus (the
+   *  window losing focus or closing), so the baseline moves to what was just written — a
+   *  stale baseline would read my own saved edits as "added elsewhere" and resurrect any I
+   *  then delete. */
+  function flushPlaybook() {
+    if (!playbookFocused) return;
     const mine = playbookDraft.split('\n').map((l) => l.trim()).filter(Boolean);
     const base = playbookAtFocus;
     const theirs = [...preferencesStore.overlordPlaybook];
     if (mine.join('\n') === base.join('\n')) {
-      // Not edited: show whatever is stored now, write nothing.
-      playbookDraft = theirs.join('\n');
+      playbookAtFocus = theirs;
       return;
     }
     // My edits, minus what was removed elsewhere since focus, plus what was added there.
@@ -61,9 +64,33 @@
       ...theirs.filter((l) => !base.includes(l)),
     ];
     const next = [...new Set(merged)];
-    playbookDraft = next.join('\n');
+    playbookAtFocus = next;
     if (next.join('\n') !== theirs.join('\n')) void preferencesStore.setOverlordPlaybook(next);
   }
+  function savePlaybook() {
+    flushPlaybook();
+    playbookFocused = false;
+    playbookDraft = preferencesStore.overlordPlaybook.join('\n');
+  }
+  // Escape and Cmd+W close the Preferences window outright, and a closing webview need not
+  // blur the field first — so an edit would die unsaved. Same last-ditch flush the comms
+  // fields use (routes/preferences/+page.svelte).
+  // The keys themselves are caught in the CAPTURE phase, which runs before the page's own
+  // window keydown handler closes the window.
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' || (e.key === 'w' && (e.metaKey || e.ctrlKey))) flushPlaybook();
+    };
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('pagehide', flushPlaybook);
+    window.addEventListener('blur', flushPlaybook);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('pagehide', flushPlaybook);
+      window.removeEventListener('blur', flushPlaybook);
+      flushPlaybook();
+    };
+  });
 
   let expandedId = $state<string | null>(null);
   let confirmDeleteId = $state<string | null>(null);
