@@ -1010,17 +1010,30 @@ function createOverlordStore() {
       return closed === undefined || Date.now() - closed >= TURN_SETTLE_MS;
     };
     const t0 = Date.now();
+    // A human-fired run found the human's draft in the box and is waiting for them to send or
+    // clear it — which takes keystrokes, so those don't count as taking the tab over.
+    let draftWait = false;
     while (Date.now() - t0 < INJECTABLE_WAIT_CAP_MS) {
       if (run.aborted) return false;
       // Human typed into the tab since our last injection (or ritual start) — their
       // tab now, even if their turn already finished (§7). Without this, a human turn
       // between steps gets waited out and the next step steamrolls their conversation.
-      if (humanTypedSince(run.tabId, run.lastInjectionAt)) return false;
+      if (humanTypedSince(run.tabId, run.lastInjectionAt)) {
+        if (!draftWait) return false;
+        // They asked for this run; finishing their draft first (and its turn, if they sent
+        // it — the state wait below) is not calling it off.
+        run.lastInjectionAt = Date.now();
+      }
       const st = ritualState(run);
       const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
       const stateOk = run.targetsUnready ? st === undefined : !!st && allowed.includes(st);
-      // A draft in the box: wait for the human to send or clear it (the cap still applies).
-      if (stateOk && Date.now() - lastOut >= quiet && settled() && !(await boxHasText(run.tabId))) return true;
+      if (stateOk && Date.now() - lastOut >= quiet && settled()) {
+        if (!(await boxHasText(run.tabId))) return true;
+        // A draft in the box. An automatic run gives the tab back (§7: the human is using
+        // it); one the human fired waits for them to send or clear it (the cap still applies).
+        if (!run.humanFired) return false;
+        draftWait = true;
+      }
       await sleep(500);
     }
     return false;
