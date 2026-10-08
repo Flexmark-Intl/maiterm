@@ -4,6 +4,15 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.21 changelog** (2026-10-08). **A Claude `permission` card can be `respondable:false`
+> with `options:[]`.** Claude sends the same "needs permission" signal for its own dialogs (the
+> Mods "Enable hot reloading for this session?" one, five rows) as for a tool's, and `/respond`
+> only ever answered a tool's (it refused the rest). The card is now answerable only while a
+> permission dialog is on the screen; otherwise it says so and offers no rows — show the
+> terminal and the key row (`POST /chats/{tabId}/keys`), never a Yes/No. Also: when such a dialog
+> came up after the turn ended, the chat no longer stays `permission` once it closes — maiTerm
+> sees it gone from the screen within ~2 s and the chat goes `idle`.
+>
 > **v0.20 changelog** (2026-10-07). **A watch script can run on an ssh tab's host** (maiTerm
 > docs/follow-ups.md §5.1). `ScriptApproval.folder` then reads `user@host:folder` — the machine
 > is half of what the human approves, so it rides in the field a 0.15 phone already shows — and
@@ -778,8 +787,10 @@ interface ChatDetail extends Chat {
     options?: string[];     // absent ⇒ free-text only. Claude: the dialog's rows as read off
                             // the screen, in screen order (["Yes","No"] on a Write to a project
                             // file; row 2 varies, e.g. "Yes, and always allow access to <dir>
-                            // from this project"), or ["Yes","No"] when the screen can't be
-                            // read. `/respond` matches `choice` against the rows on screen when
+                            // from this project"), or ["Yes","No"] when a permission dialog
+                            // is on screen but its rows can't be read. v0.21: [] (with
+                            // respondable:false) when no permission dialog is on screen at
+                            // all — one of Claude's own dialogs; offer the key row. `/respond` matches `choice` against the rows on screen when
                             // the tap arrives and refuses (`stale`) a label they don't show.
                             // Codex: always ["Yes","Yes, don't ask again","No"] (stable keys).
                             // Echo a label verbatim; never assume a fixed list.
@@ -2336,6 +2347,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.18` | adds `POST /chats/{tabId}/image` and `FileAsset.inline` / `source_key` |
 | `0.19` | adds `status:"held"` (`reason:"draft"`) to `POST /chats/{tabId}/message`, and `ChatDetail.held` / `heldOutcomes` |
 | `0.20` | `ScriptApproval.folder` reads `user@host:folder` for a script that runs on an ssh host, and adds `ScriptApproval.host` |
+| `0.21` | a Claude `permission` card is `respondable:false` with `options:[]` while no permission dialog is on screen (one of Claude's own dialogs); such a chat returns to `idle` once the dialog closes |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

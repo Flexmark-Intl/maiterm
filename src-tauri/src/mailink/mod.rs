@@ -518,7 +518,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.20";
+const PROTOCOL_VERSION: &str = "0.21";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -4300,6 +4300,15 @@ fn claude_dialog_on_screen(app: &AppState, tab_id: &str) -> bool {
     live_screen_text(app, tab_id).is_some_and(|s| permission::dialog_open(&s))
 }
 
+/// Whether a Claude tab's screen proves no dialog of any kind is open: none ends the screen and
+/// the agent's input box is drawn (a dialog replaces it). `false` whenever that can't be read,
+/// so a dialog of a shape maiTerm doesn't know is never read as closed.
+pub(crate) fn claude_screen_shows_no_dialog(app: &AppState, tab_id: &str) -> bool {
+    let Some(screen) = live_screen_text(app, tab_id) else { return false };
+    !permission::any_dialog_open(&screen)
+        && !matches!(agent_input_box(app, tab_id), input_box::InputBox::Unknown)
+}
+
 /// The prompt open on a tab, for everything that ANSWERS one or must not type over one (the
 /// responder, `getTabPrompt`, the Loom's composer): `current_prompt`, with a Claude permission
 /// corrected by the screen in both directions. The hook's state is late and long: it arrives
@@ -6130,11 +6139,15 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
         };
         // For Codex the state is NOT proof a human was asked, so the card is answerable only
         // while the overlay is really on screen; a request automatic review already settled
-        // renders as context, not as something to tap. Claude's permission Notification does
-        // mean the human is being asked, so its card is unchanged.
+        // renders as context, not as something to tap. Claude sends the same Notification for
+        // its own dialogs (the Mods "Enable hot reloading?" one), which `/respond` refuses
+        // (`open_prompt` wants a permission dialog on screen): that card is not answerable
+        // and offers no rows, so the phone shows the terminal and its key row, never a guessed
+        // Yes that would press row 1 of whatever is up.
+        let claude_dialog = approval.is_none() && claude_dialog_on_screen(app, tab_id);
         let respondable = match approval.as_ref() {
             Some(_) => codex_approval_overlay_open(app, tab_id),
-            None => true,
+            None => claude_dialog,
         };
         let mut pp = json!({
             "prompt_id": permission_prompt_id(app, tab_id),
@@ -6146,8 +6159,10 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             // rows vary by request and are read off the screen.
             "options": if runtime == AgentRuntime::Codex.as_key() {
                 json!(["Yes", "Yes, don't ask again", "No"])
-            } else {
+            } else if claude_dialog {
                 json!(claude_permission_options(app, tab_id))
+            } else {
+                json!([])
             },
         });
         // Display-only, like the question card's: how long this request has been sitting. No

@@ -97,6 +97,66 @@ fn emit_dual_to(app: &AppHandle, label: &str, agent_event: &str, legacy_event: &
     let _ = app.emit_to(label, legacy_event, payload);
 }
 
+/// Sessions with a [`watch_unattributed_prompt`] running, so a repeated Notification for the
+/// same dialog doesn't start a second one.
+static UNATTRIBUTED_WATCHES: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Release a permission state that one of Claude's own dialogs set after a turn ended (no tool
+/// in flight, so nothing in the gate ledger and no hook to come). Without it the tab read
+/// "Needs you" forever after the human answered the dialog: 2026-10-08, the Mods "Enable hot
+/// reloading?" dialog, answered from the phone's key row. The screen is the only evidence that
+/// the dialog closed, so it is read once a second, and two reads in a row showing the input box
+/// with no dialog release the state the way `idle_prompt` would (Rust and the frontend both).
+/// Anything else that moves the session on ends the watch.
+fn watch_unattributed_prompt(app: Arc<AppState>, handle: AppHandle, session_id: String, tab_id: String) {
+    if !UNATTRIBUTED_WATCHES.lock().insert(session_id.clone()) {
+        return;
+    }
+    tokio::spawn(async move {
+        use crate::state::app_state::AgentSessionState;
+        let still_unattributed = |app: &AppState| {
+            app.agent_sessions.read().get(&session_id).is_some_and(|s| {
+                s.state == AgentSessionState::WaitingPermission
+                    && !s.claude_gate.held()
+                    && s.pending_question.is_none()
+            })
+        };
+        let mut clear_reads = 0;
+        while still_unattributed(&app) {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            clear_reads = if crate::mailink::claude_screen_shows_no_dialog(&app, &tab_id) { clear_reads + 1 } else { 0 };
+            if clear_reads < 2 {
+                continue;
+            }
+            let released = {
+                let mut sessions = app.agent_sessions.write();
+                match sessions.get_mut(&session_id) {
+                    Some(s) if s.state == AgentSessionState::WaitingPermission && !s.claude_gate.held() && s.pending_question.is_none() => {
+                        s.state = AgentSessionState::WaitingInput;
+                        s.claude_gate.prompt_closed();
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if released {
+                log::info!("Claude prompt with no tool in flight closed on screen → tab {} back to idle", &tab_id[..tab_id.len().min(8)]);
+                emit_dual(&handle, "agent-hook-notification", "claude-hook-notification", serde_json::json!({
+                    "runtime": crate::state::AgentRuntime::Claude.as_key(),
+                    "session_id": session_id,
+                    "tab_id": tab_id,
+                    "notification_type": "idle_prompt",
+                    "title": null,
+                    "body": null,
+                }));
+            }
+            break;
+        }
+        UNATTRIBUTED_WATCHES.lock().remove(&session_id);
+    });
+}
+
 /// One dormancy-reaper poll. For every NON-Claude agent session, check whether the
 /// agent process is still alive in its tab's PTY descendant tree. After
 /// `DORMANCY_ABSENT_POLLS` consecutive "gone" observations, remove the session and
@@ -3752,10 +3812,12 @@ async fn hooks_handler(
             // human-waiting state via a distinct top-level event.
             // Update session state based on notification type. The `_` arm PRESERVES
             // the prior state for an unrecognized type (and the event still emits).
+            let mut watch_unattributed = false;
             if !session_id.is_empty() {
                 use crate::state::app_state::AgentSessionState;
                 let mut sessions = srv.state.agent_sessions.write();
                 if let Some(session) = sessions.get_mut(&session_id) {
+                    let was_active = session.state == AgentSessionState::Active;
                     session.state = match notification_type.as_str() {
                         "idle_prompt" => AgentSessionState::WaitingInput,
                         "permission_prompt" => AgentSessionState::WaitingPermission,
@@ -3790,7 +3852,14 @@ async fn hooks_handler(
                                 session.tool_name = None;
                                 session.tool_detail = None;
                             }
-                            Attribution::Unknown => {}
+                            // Nothing in flight, so no tool is asking: one of Claude's own
+                            // dialogs (the Mods "Enable hot reloading?" one sends this same
+                            // Notification). No hook follows its answer, and when it opened
+                            // after the turn ended no Stop is coming either, so only the
+                            // screen can say it closed.
+                            Attribution::Unknown => {
+                                watch_unattributed = !was_active && runtime == crate::state::AgentRuntime::Claude;
+                            }
                         }
                     }
                     // Any runtime whose permission Notification carries the gated tool inline
@@ -3821,6 +3890,9 @@ async fn hooks_handler(
                 "title": event.get("title"),
                 "body": event.get("body"),
             }));
+            if let (true, Some(tab)) = (watch_unattributed, tab_id) {
+                watch_unattributed_prompt(srv.state.clone(), srv.app_handle.clone(), session_id.clone(), tab);
+            }
         }
 
         HookPhase::Stop => {
