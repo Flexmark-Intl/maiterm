@@ -196,6 +196,11 @@ interface RitualRun {
    *  baseline. Any keystroke in the tab newer than this aborts the ritual (§7),
    *  including during the wait BETWEEN steps. */
   lastInjectionAt: number;
+  /** Fired by the HUMAN (the composer's rule bolt, the phone's fireRule), not by a condition.
+   *  They asked for it now: a busy agent doesn't hold it (a Claude agent takes a message typed
+   *  mid-turn), nor does output that never goes quiet — a background subagent's review keeps
+   *  the screen repainting while the agent itself waits (Darryl, 2026-10-08). */
+  humanFired: boolean;
 }
 
 /** One change in a proposeRuleChanges batch (docs/overlord.md §10). The `playbook_*` ops
@@ -976,9 +981,12 @@ function createOverlordStore() {
 
   // ── Ritual executor (§7) — a gated sequence state machine ──────────────────
 
-  async function waitInjectable(run: RitualRun, guards: OverlordGuards): Promise<boolean> {
-    const allowed = guards.agent_state ?? ['idle'];
-    const quiet = guards.min_quiet_ms ?? 3000;
+  async function waitInjectable(run: RitualRun, guards: OverlordGuards, step: OverlordStep): Promise<boolean> {
+    // A human-fired prose step goes into a mid-turn Claude agent (it reads it in that turn); a
+    // slash command still waits for the turn to end — it is a control, not something to queue.
+    const midTurnOk = run.humanFired && step.kind !== 'slash' && workspacesStore.getTabRuntime(run.tabId) === 'claude';
+    const allowed = midTurnOk ? [...(guards.agent_state ?? ['idle']), 'active'] : (guards.agent_state ?? ['idle']);
+    const quiet = run.humanFired ? 0 : (guards.min_quiet_ms ?? 3000);
     const t0 = Date.now();
     while (Date.now() - t0 < INJECTABLE_WAIT_CAP_MS) {
       if (run.aborted) return false;
@@ -1945,6 +1953,7 @@ function createOverlordStore() {
       startedAt: Date.now(),
       aborted: false,
       lastInjectionAt: Date.now(),
+      humanFired: origin === 'human',
     };
     rituals.set(tabId, run);
     bumpLive();
@@ -1974,7 +1983,7 @@ function createOverlordStore() {
           ledger(tabId, rule.id, origin, i, step, 'blocked_no_repl');
           return;
         }
-        if (!(await waitInjectable(run, rule.guards))) {
+        if (!(await waitInjectable(run, rule.guards, step))) {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
@@ -2035,6 +2044,14 @@ function createOverlordStore() {
         const inst = terminalsStore.get(tabId);
         if (!inst) {
           ledger(tabId, rule.id, origin, i, step, 'blocked_no_repl');
+          return;
+        }
+        // The human's draft in the box would be sent along with the step. `humanTypedSince`
+        // only sees keys since the run began; a draft left from before it is read off the screen.
+        // Mid-turn the box must read empty outright (noDraft's busy rule).
+        if (!(await noDraft(tabId, mappedState(tabId) !== 'active'))) {
+          logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft is in the agent's input box`);
+          ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
         try {
