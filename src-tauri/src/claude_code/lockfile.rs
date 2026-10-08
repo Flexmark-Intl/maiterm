@@ -450,9 +450,15 @@ fn build_our_hooks(port: u16, auth: &str) -> serde_json::Value {
     // Gate on $MAITERM_PORT matching our port to prevent dev/prod cross-talk. When
     // $MAITERM_TAB_ID is absent (tmux/su shells) the whole block is skipped and the http
     // hook's pending-pool path still runs, exactly as before.
+    //
+    // Both command hooks stand down under `$MAITERM_VIA_MOD`, which the maiterm-tab mod sets
+    // in the Claude process once it has taken the tab's events over (claude_code/claude_mod.rs):
+    // the mod then sends this event itself and adds the priming as SessionStart context, and a
+    // second copy here would prime the agent twice.
     let mcp_key = mcp_server_key();
     let session_start_cmd = format!(
-        "{{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
+        "[ -z \"$MAITERM_VIA_MOD\" ] && \
+         {{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
          [ -n \"$MAITERM_TAB_ID\" ] && {{ \
          MAITERM_IN=$(cat); \
          MAITERM_SID=$(printf '%s' \"$MAITERM_IN\" | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1); \
@@ -475,7 +481,8 @@ maiTerm already knows this tab and session; you do NOT need to initialize. Only 
     // one, so the server has to leave the mapping alone. This makes the common case decidable.
     // No echo: stdout at session end is not injected anywhere.
     let session_end_cmd = format!(
-        "{{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
+        "[ -z \"$MAITERM_VIA_MOD\" ] && \
+         {{ [ \"$MAITERM_PORT\" = \"{port}\" ] || [ -z \"$MAITERM_PORT\" ]; }} && \
          [ -n \"$MAITERM_TAB_ID\" ] && {{ \
          MAITERM_IN=$(cat); \
          curl -s -o /dev/null --connect-timeout 2 --max-time 4 \

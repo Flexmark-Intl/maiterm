@@ -442,6 +442,31 @@ can be in both — see "A bridge and a mesh coexist on one tab" above.
 
 Hooks registered in `~/.claude/settings.json` on MCP server startup, cleaned up on app exit and stale lockfile sweep.
 
+**Local Claude tabs send their events through the `maiterm-tab` mod instead** (2026-10-08,
+`claude_mod.rs`, source in `resources/claude-mod/maiterm-tab/`). A mod is a Claude Code plugin of
+function hooks (early-access API, 2.1.290+). maiTerm writes it to `<data dir>/claude-mod/` at
+startup, and `spawn_pty` names that folder in every tab's `CLAUDE_CODE_PLUGIN_DIRS`, behind the
+same `claude_hooks` preference as the settings hooks. The mod relays the same events to `/hooks`
+with `via=mod&tab_id=<tab>`, so **every** event names its tab, not only the two command hooks'.
+The settings hooks still fire beneath it, and three things keep the two paths from doubling up:
+- **The mod sends each event BEFORE `next(e)`.** The settings hooks run inside `next`, so its
+  copy always reaches the server first.
+- **The server drops the anonymous copy.** `hooks_handler` records the session in
+  `AppState.mod_agent_sessions` on any `via=mod` post, then drops later Claude events for that
+  session that carry no `tab_id`. Entries prune after an hour quiet; a live session's next mod
+  post re-records it before its copy arrives.
+- **The SessionStart/SessionEnd command hooks stand down under `$MAITERM_VIA_MOD`.** The mod
+  sets that variable with `$.env.set`, and the settings hooks inherit it (verified). Priming
+  comes back as the mod's `additionalContext`: with `via=mod`, the `prime=1` reply carries the
+  same identity sentence the command hook echoes ahead of it.
+
+PreToolUse comes from the mod's `tool.call` hook, not `classic.PreToolUse`, whose input lacks
+the session id and the subagent's `agent_id` (gate.rs keys on both). PreModelSwitch's `allow`
+is returned as the mod's own result. A Claude Code too old for mods ignores the variable, so
+its tabs run on the settings hooks exactly as before. That fallback is why both paths exist.
+SSH tabs don't get the mod yet. Verified end to end against a dev instance: one event per hook,
+each naming its tab, every anonymous copy dropped, and the priming delivered once.
+
 **Hooks registered:**
 - `SessionStart` (command): the only hook that runs **inside the tab's shell**, so the only one that can see `$MAITERM_TAB_ID`. It captures stdin once, POSTs the event to `/hooks?tab_id=$MAITERM_TAB_ID&prime=1`, and echoes the tab id, the session id, and the server's reply. Gated on `$MAITERM_PORT` matching server port (prevents dev/prod cross-talk). Output appears collapsed in TUI ("Ran 1 start hook") but injected into model context as system-reminder.
 - `SessionStart` (HTTP): POST to `/hooks` with `{session_id, cwd, source, model}` — no tab id (settings.json hook URLs are static), which is why the command hook exists.

@@ -3503,6 +3503,27 @@ async fn hooks_handler(
         .unwrap_or(crate::state::AgentRuntime::Claude);
     let runtime_key = runtime.as_key();
 
+    // The maiterm-tab mod (claude_mod.rs) sends a Claude session's events itself, each naming
+    // its tab, and sends each one BEFORE the settings.json hooks beneath it run. So once it has
+    // spoken for a session, an anonymous copy (no `tab_id`: Claude's own http hooks) is a
+    // duplicate. Entries quiet for an hour are pruned; any later event of a live session
+    // re-records it before its copy can arrive, because the mod's post comes first.
+    let via_mod = params.get("via").map(String::as_str) == Some("mod");
+    if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
+        if via_mod {
+            let now = std::time::Instant::now();
+            let mut sessions = srv.state.mod_agent_sessions.write();
+            sessions.retain(|_, seen| now.duration_since(*seen) < std::time::Duration::from_secs(3600));
+            sessions.insert(session_id.clone(), now);
+        } else if !params.contains_key("tab_id")
+            && srv.state.mod_agent_sessions.read().contains_key(&session_id)
+        {
+            log::debug!("Claude hook: '{}' session={} dropped, the maiterm-tab mod already sent it",
+                hook_event_name, &session_id[..session_id.len().min(8)]);
+            return StatusCode::OK.into_response();
+        }
+    }
+
     // tab_id comes from query param (set by the command hook script from $MAITERM_TAB_ID)
     // Validate it actually exists — it may be stale after HMR reload or tab recreation.
     let tab_id_from_param = params.get("tab_id").and_then(|raw_id| {
@@ -4429,6 +4450,19 @@ async fn hooks_handler(
     // initSession — including a resumed one, which takes no turn until its human types.
     if let Some(tab) = prime_tab.as_deref() {
         let text = session_priming_text(&srv.state, tab);
+        // The mod adds this reply to the session's context as it stands, so it carries the
+        // identity line the command hook would have echoed ahead of it (lockfile.rs) — the
+        // same words, so an agent reads the same thing whichever path primed it.
+        if via_mod {
+            let key = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+            return format!(
+                "Your maiTerm tab ID is {tab}. Your session ID is {session_id}. maiTerm already \
+                 knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool \
+                 answers that it does not know your tab, call the {key} initSession tool with this \
+                 tabId and sessionId to re-bind.{text}"
+            )
+            .into_response();
+        }
         // Codex parses a command hook's stdout as JSON and takes the model-visible text from
         // `hookSpecificOutput.additionalContext`. The server owns that encoding rather than the
         // shim: wrapping a multi-line string with quotes in it would mean JSON-escaping by hand

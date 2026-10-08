@@ -1,3 +1,4 @@
+pub mod claude_mod;
 pub mod codex;
 pub mod gate;
 pub mod lockfile;

@@ -1,0 +1,5 @@
+{
+  "name": "maiterm-tab",
+  "version": "0.1.0",
+  "description": "maiTerm's link to the Claude Code session in its tab: hook events reach maiTerm carrying the tab they came from."
+}

@@ -523,6 +523,9 @@ pub fn run() {
             // therefore no PTY can spawn or fire auto-resume) until we're
             // done here, which eliminates the race where `claude --resume`
             // read a stale MCP port from a prior maiTerm instance.
+            // The maiterm-tab mod each tab's shell is pointed at; written before any PTY spawns.
+            claude_code::claude_mod::install();
+
             if let Some(setup) = claude_code::server::prepare_server(&app_state) {
                 let server_state = app_state.clone();
                 let server_handle = app.handle().clone();
