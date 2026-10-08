@@ -493,9 +493,27 @@ again for: python3 *". The event's `permission_suggestions` are NOT what that ro
 verified on 2.1.295, they hold the exact command, while the row saves `Bash(python3 *)`. Only
 the dialog knows the rule.
 
-Delivery is take-or-retract under one lock. `ok` means the hook took the answer. An untaken
-answer is withdrawn after 2 s, so `inject_failed` with `delivery:"agent"` applied nothing and
-may be retried. That is why the mod path takes no `claim_question_inject` slot.
+Delivery is take-or-retract under one lock. `ok` means the hook took the answer (the ask's
+`taken` flag). An ask that is untaken after 2 s, or cancelled meanwhile, is withdrawn, so
+`inject_failed` with `delivery:"agent"` applied nothing and may be retried. That is why the mod
+path takes no `claim_question_inject` slot.
+
+**An ask must end when its prompt does** (review of 4211d2fd). When Claude abandons the hook, the
+mod's fetch is cut and axum drops the parked poll mid-await. `PollGuard` decrements `polling` on
+drop. Without it the abandoned ask counted as polled forever. The "exactly one permission ask" rule
+then failed, and every later permission in that session quietly went back to keystrokes.
+
+`hooks_handler` also settles asks from the events that close a prompt:
+
+| Event | Asks settled |
+|---|---|
+| `PostToolUse` / `PostToolUseFailure` | the call's own ask, matched by agent, tool and `tool_input_fingerprint`, as `gate.rs` matches |
+| `Stop`, `UserPromptSubmit`, `idle_prompt` | the main thread's asks only, because a subagent's dialog outlives the parent's turn |
+| `SubagentStop` | that agent's asks |
+| `SessionEnd` | all of the session's asks |
+
+Wakeups use `notify_one`, so an answer delivered before the poll parks leaves a permit. The mod's
+synthetic `idle_prompt` after a deny is sent only for a main-thread dialog (`!e.agent_id`).
 
 Verified live on dev 2026-10-08 through `answer_tab_prompt_as_human`:
 - allow;
