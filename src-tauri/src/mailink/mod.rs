@@ -518,7 +518,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.21";
+const PROTOCOL_VERSION: &str = "0.22";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -1778,6 +1778,8 @@ pub(crate) async fn respond_to_prompt(
                     "detail": "that approval is no longer open in the terminal" });
             }
             let choice = choice.unwrap_or("");
+            // The row the choice names, as the dialog on screen words it (Claude only).
+            let mut row_label: Option<String> = None;
             let key = if runtime == AgentRuntime::Codex {
                 codex_permission_key(choice).to_string()
             } else {
@@ -1787,7 +1789,12 @@ pub(crate) async fn respond_to_prompt(
                 let screen = live_screen_text(app, tab_id).unwrap_or_default();
                 match permission::parse(&screen) {
                     Some(d) => match d.key_for(choice) {
-                        Some(k) => k,
+                        Some(k) => {
+                            row_label = k.parse::<usize>().ok()
+                                .and_then(|n| d.options.get(n.wrapping_sub(1)))
+                                .cloned();
+                            k
+                        }
                         None => {
                             log::info!("[maiLink] refusing permission choice {choice:?} for tab {tab_id}: the dialog shows {:?}", d.options);
                             return json!({ "ok": false, "reason": "stale",
@@ -1812,6 +1819,27 @@ pub(crate) async fn respond_to_prompt(
                     },
                 }
             };
+            // The maiterm-tab mod, when its hook is behind this dialog, takes Yes and No by their
+            // MEANING (allow / deny, wherever the row sits) and closes the dialog itself, with no
+            // key pressed. Any other row (don't ask again, auto mode, the plan dialog's) goes in
+            // as the keystroke below: the dialog alone knows what it would save
+            // (mod_asks::permission_decision). The row was still matched against the
+            // screen above, so a stale or unknown choice is refused the same either way.
+            if let Some(label) = row_label.as_deref() {
+                if let Some(ask) = mod_ask_for_prompt(app, tab_id, "permission") {
+                    if matches!(ask.kind, crate::claude_code::mod_asks::AskKind::Permission { .. }) {
+                        if let Some(decision) = crate::claude_code::mod_asks::permission_decision(label) {
+                            if !app.mod_asks.deliver(&ask.id, json!({ "decision": decision })).await {
+                                log::info!("[maiLink] permission for tab {tab_id}: the agent didn't take {label:?}, withdrawn");
+                                return json!({ "ok": false, "reason": "inject_failed", "delivery": "agent",
+                                    "detail": "the agent didn't take the answer; nothing was applied" });
+                            }
+                            log::info!("[maiLink] permission answered for tab {tab_id}: {label:?} → the agent, as {}", decision["behavior"]);
+                            return json!({ "ok": true, "delivery": "agent" });
+                        }
+                    }
+                }
+            }
             if crate::pty::write_pty(app, &pty, key.as_bytes()).is_err() {
                 return json!({ "ok": false, "reason": "inject_failed" });
             }
@@ -1838,6 +1866,28 @@ pub(crate) async fn respond_to_prompt(
                 log::info!("[maiLink] refusing an answer for tab {tab_id}: no question selector on screen");
                 return json!({ "ok": false, "reason": "stale",
                     "detail": "that question is no longer open in the terminal" });
+            }
+            // The maiterm-tab mod, when its hook is behind this selector, takes the answers as
+            // data: no keys, so no selector position to lose, and a failed delivery is withdrawn
+            // whole (mod_asks::deliver) — which is why this path needs no one-attempt claim, and
+            // why it runs before the claim is taken.
+            if let Some(ask) = mod_ask_for_prompt(app, tab_id, "question") {
+                if let crate::claude_code::mod_asks::AskKind::Question { questions } = &ask.kind {
+                    let pairs: Vec<(Vec<String>, Option<String>)> =
+                        answers.iter().map(|a| (a.selected.clone(), a.other.clone())).collect();
+                    let Some(answered) = crate::claude_code::mod_asks::question_answers(questions, &pairs) else {
+                        log::info!("[maiLink] refusing an answer for tab {tab_id}: it doesn't fit the questions asked");
+                        return json!({ "ok": false, "reason": "bad_request",
+                            "detail": "the answers don't match the questions' options" });
+                    };
+                    if !app.mod_asks.deliver(&ask.id, json!({ "answers": answered })).await {
+                        log::info!("[maiLink] AskUserQuestion for tab {tab_id}: the agent didn't take the answers, withdrawn");
+                        return json!({ "ok": false, "reason": "inject_failed", "delivery": "agent",
+                            "detail": "the agent didn't take the answers; nothing was applied" });
+                    }
+                    log::info!("[maiLink] AskUserQuestion answered (tab {tab_id}, {} question(s)) → the agent", answers.len());
+                    return json!({ "ok": true, "delivery": "agent" });
+                }
             }
             // A SECOND attempt at the same ask is refused, and this is the important guard.
             // Navigation is relative and assumes the highlight starts at row 0, true only for
@@ -5081,6 +5131,31 @@ fn open_question(app: &AppState, tab_id: &str) -> Option<(Value, i64)> {
     s.pending_question.clone().map(|q| (q, s.pending_question_at.unwrap_or(0)))
 }
 
+/// The maiterm-tab mod's ask standing behind the tab's open `kind` prompt, from the tab's
+/// current session only (claude_code/mod_asks.rs). `None` sends an answer in as keystrokes.
+///
+/// A question's ask must carry the very questions the tab's open question holds. A permission
+/// needs exactly ONE permission ask live: dialogs stack (a subagent's behind the main thread's),
+/// the hook's event names no call, and only the front dialog is on screen, so with two asks
+/// there is no telling which one the human is looking at.
+pub(crate) fn mod_ask_for_prompt(app: &AppState, tab_id: &str, kind: &str) -> Option<crate::claude_code::mod_asks::LiveAsk> {
+    use crate::claude_code::mod_asks::AskKind;
+    let session = current_session_id(app, tab_id)?;
+    let live = app.mod_asks.live_for(tab_id, &session);
+    match kind {
+        "permission" => {
+            let mut asks: Vec<_> = live.into_iter().filter(|a| matches!(a.kind, AskKind::Permission { .. })).collect();
+            if asks.len() == 1 { asks.pop() } else { None }
+        }
+        "question" => {
+            let open = open_question(app, tab_id)?.0;
+            let open = open.get("questions")?;
+            live.into_iter().find(|a| matches!(&a.kind, AskKind::Question { questions } if questions == open))
+        }
+        _ => None,
+    }
+}
+
 /// The tab's current agent session: the one its agent last started as (the session id saved on
 /// the tab at SessionStart, which `--resume` uses), when that session has a record; else the
 /// highest-ranked record, ties broken by id so every poll agrees.
@@ -6089,6 +6164,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             "thread_id": tab_id,
             "kind": "permission",
             "respondable": true,
+            "delivery": "keys",
             "text": format!("Trust {}?", dialog.path),
             "options": dialog.options,
         });
@@ -6099,6 +6175,10 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             "thread_id": tab_id,
             "kind": "question",
             "respondable": true,
+            // How `/respond` will answer it (protocol 0.22): "agent" when the maiterm-tab mod's
+            // hook is behind it and takes the answers as data, so a failed attempt changes
+            // nothing and may be retried; "keys" when they are typed into the selector.
+            "delivery": if mod_ask_for_prompt(app, tab_id, "question").is_some() { "agent" } else { "keys" },
         });
         match pending_question_for_tab(app, tab_id).as_ref().and_then(map_ask_questions) {
             Some(qs) => { pp["questions"] = qs; }
@@ -6154,6 +6234,9 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
             "thread_id": tab_id,
             "kind": "permission",
             "respondable": respondable,
+            // "agent": the maiterm-tab mod answers Yes and No by their meaning, wherever the row
+            // sits; any other row (don't ask again, auto mode) still goes in as its key.
+            "delivery": if approval.is_none() && mod_ask_for_prompt(app, tab_id, "permission").is_some() { "agent" } else { "keys" },
             "text": text,
             // Codex answers by its stable letter keys, so its three are always right. Claude's
             // rows vary by request and are read off the screen.

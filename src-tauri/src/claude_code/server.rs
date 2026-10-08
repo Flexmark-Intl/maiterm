@@ -457,6 +457,8 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         .route("/message", post(sse_message_handler))
         // Claude Code hooks — lifecycle events from hook scripts
         .route("/hooks", post(hooks_handler))
+        // The maiterm-tab mod's hooks waiting on an answer (mod_asks.rs)
+        .route("/hooks/ask", get(mod_ask_handler))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -3459,6 +3461,37 @@ fn resolve_approval(
     false
 }
 
+/// Handle GET /hooks/ask?id=<ask>&wait=<s> — one poll round of a maiterm-tab mod hook waiting on
+/// the human's answer (mod_asks.rs). 200 with the answer, 204 for none yet (poll again), 404 for
+/// an ask maiTerm doesn't hold (stop polling). With `cancel=1`, drops the ask instead.
+async fn mod_ask_handler(
+    State(srv): State<ServerState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(id) = params.get("id").filter(|s| !s.is_empty()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    // `cancel=1`: the prompt was answered at the desktop; stop holding it.
+    if params.contains_key("cancel") {
+        srv.state.mod_asks.cancel(id);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let wait = params
+        .get("wait")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(super::mod_asks::MAX_WAIT);
+    match srv.state.mod_asks.poll(id, wait).await {
+        super::mod_asks::Polled::Answer(v) => axum::Json(v).into_response(),
+        super::mod_asks::Polled::Pending => StatusCode::NO_CONTENT.into_response(),
+        super::mod_asks::Polled::Unknown => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Handle POST /hooks — receives agent hook events (Claude today; other runtimes
 /// post here with a ?runtime= tag). SessionStart registers a session→tab mapping;
 /// other events use it to route Tauri events to the correct frontend tab.
@@ -3551,6 +3584,28 @@ async fn hooks_handler(
             None
         }
     });
+
+    // A maiterm-tab mod hook about to wait on the human: a permission dialog, or an
+    // AskUserQuestion selector (whose own PermissionRequest the mod sends without an ask). Only
+    // for a tab this instance knows, so an answer can only ever reach the tab it was given for.
+    if via_mod && runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
+        if let (Some(ask), Some(tab)) = (params.get("ask").filter(|s| !s.is_empty()), tab_id_from_param.as_deref()) {
+            use super::mod_asks::AskKind;
+            let tool = event.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            let kind = match hook_event_name {
+                "PermissionRequest" => Some(AskKind::Permission { tool: tool.to_string() }),
+                "PreToolUse" if tool == "AskUserQuestion" => event
+                    .get("tool_input")
+                    .and_then(|i| i.get("questions"))
+                    .map(|q| AskKind::Question { questions: q.clone() }),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                log::info!("Claude hook: mod ask {} for tab {} ({} {})", ask, tab, hook_event_name, tool);
+                srv.state.mod_asks.register(ask, tab, &session_id, kind);
+            }
+        }
+    }
 
     // Claude Code 2.1.283+ confirms a model switch ("Switch model?") whenever the current
     // model's prompt cache is probably warm, since switching throws it away. In a maiTerm tab the

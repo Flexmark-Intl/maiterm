@@ -4,6 +4,25 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.22 changelog** (2026-10-08). Additive: **`pendingPrompt.delivery: "agent" | "keys"`**.
+> It says how `/respond` will deliver the answer. **"agent"** means a Claude Code mod inside the
+> agent (maiterm-tab, local Claude 2.1.290+) takes it.
+> - **Permission:** "Yes" and "No" are answered by their meaning, not by their position. "Yes"
+>   allows, and "No" (or "No, …") is a real deny that stops the turn, wherever the row sits. Any
+>   other row ("Yes, and don't ask again…", "switch to auto mode", the plan dialog's) is pressed as
+>   its key, matched to the row on screen as before, because only the dialog knows what that row
+>   saves. Send the dialog's own row labels from `options`.
+> - **Question:** the answers go in as data, so multiSelect + Other works.
+> - **A failed attempt is withdrawn whole.** On "agent", `inject_failed` means nothing was applied,
+>   so the card may stay answerable and be retried; there is no `selector_dirty` on this path.
+> - **`ok` is sent only once the agent has taken the answer** (within about 2 s).
+> - **The `/respond` reply says which path ran.** It carries `"delivery":"agent"` (both `ok` and
+>   `inject_failed`) when the mod handled it. A reply without it came from keystrokes, including
+>   the keystroke fallback for a row the mod can't give (plan dialogs, "switch to auto mode").
+>
+> **"keys"** is unchanged: keystrokes into the terminal, as before. That covers ssh tabs, an older
+> Claude, the trust dialog and Codex. Treat an absent or unknown value as "keys".
+>
 > **v0.21 changelog** (2026-10-08). **A Claude `permission` card can be `respondable:false`
 > with `options:[]`.** Claude sends the same "needs permission" signal for its own dialogs (the
 > Mods "Enable hot reloading for this session?" one, five rows) as for a tool's, and `/respond`
@@ -778,6 +797,11 @@ interface ChatDetail extends Chat {
   pendingPrompt?: {         // present iff state==='permission' or a question is open
     prompt_id: string;      // opaque, minted when the agent opens this prompt; echoed in /respond
     kind: 'permission' | 'question';
+    delivery?: 'agent' | 'keys'; // v0.22: how /respond answers it. 'agent' = the maiterm-tab mod
+                            // takes Yes/No by meaning (a "No" row is a real deny wherever it
+                            // sits; other rows still go as their key) and a question's answers
+                            // as data; a failed attempt is withdrawn whole, so retrying is safe.
+                            // 'keys' (or absent/unknown) = keystrokes, as before.
     text: string;           // permission: "Tool(detail) — approve?" when maiTerm knows which call
                             // the Approve button answers. EXACTLY "Permission requested" when it
                             // doesn't: two agents asking at once (Claude's hooks can't say which
@@ -2348,6 +2372,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.19` | adds `status:"held"` (`reason:"draft"`) to `POST /chats/{tabId}/message`, and `ChatDetail.held` / `heldOutcomes` |
 | `0.20` | `ScriptApproval.folder` reads `user@host:folder` for a script that runs on an ssh host, and adds `ScriptApproval.host` |
 | `0.21` | a Claude `permission` card is `respondable:false` with `options:[]` while no permission dialog is on screen (one of Claude's own dialogs); such a chat returns to `idle` once the dialog closes |
+| `0.22` | adds `pendingPrompt.delivery` (`agent` / `keys`): on `agent` the maiterm-tab mod takes the answer by meaning, a failed attempt is withdrawn whole, and `ok` means the agent has it |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

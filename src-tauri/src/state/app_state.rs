@@ -267,6 +267,9 @@ pub struct AppState {
     // → when the mod last sent one. Their settings.json hooks still fire beneath the mod, and
     // their copies are dropped (claude_code/claude_mod.rs).
     pub mod_agent_sessions: RwLock<HashMap<String, Instant>>,
+    // Permission dialogs and questions a maiterm-tab mod hook is waiting to be answered on
+    // (claude_code/mod_asks.rs): the delivery path that replaces keystrokes for those tabs.
+    pub mod_asks: crate::claude_code::mod_asks::ModAsks,
     // maiLink: outstanding one-time pairing codes → expiry instant (docs/mailink-protocol.md §3.2)
     pub mailink_pairing_codes: RwLock<HashMap<String, Instant>>,
     // maiLink: the live listener's (fingerprint, port), set when the bridge starts so the
@@ -341,6 +344,7 @@ impl AppState {
             pending_agent_sessions: RwLock::new(Vec::new()),
             contested_agent_sessions: RwLock::new(HashMap::new()),
             mod_agent_sessions: RwLock::new(HashMap::new()),
+            mod_asks: Default::default(),
             mailink_pairing_codes: RwLock::new(HashMap::new()),
             mailink_info: RwLock::new(None),
             mailink_shutdown: RwLock::new(None),

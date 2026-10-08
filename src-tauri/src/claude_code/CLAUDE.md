@@ -467,6 +467,42 @@ its tabs run on the settings hooks exactly as before. That fallback is why both 
 SSH tabs don't get the mod yet. Verified end to end against a dev instance: one event per hook,
 each naming its tab, every anonymous copy dropped, and the priming delivered once.
 
+**Answers go to the mod, not the keyboard** (`mod_asks.rs`, maiLink protocol 0.22). The mod
+registers an **ask** in two places:
+- the `PermissionRequest` it sends (`&ask=<id>`);
+- an AskUserQuestion's `PreToolUse`, from its `tool.call` hook.
+
+Its hook then long-polls `GET /hooks/ask?id=` in rounds of 10 s or less, because one
+`$.http.fetch` dies at about 30 s. A key pressed at the desktop still wins: Claude abandons the
+permission hook, and the question hook cancels its ask (`&cancel=1`).
+
+`mailink::respond_to_prompt` (phone, Loom, Overlord) finds the ask behind the open prompt with
+`mod_ask_for_prompt`, which uses only the tab's current session. A permission additionally
+requires exactly one live ask. Every existing check still runs first: the prompt_id stale guard,
+and the chosen row matched against the dialog on screen.
+
+What goes through the mod:
+- **"Yes" → allow.**
+- **"No" / "No, …" → deny with `interrupt`**, the dialog's own No. A deny fires no hook, so the
+  mod then reports `idle_prompt` itself to release the tab.
+- **Question answers go in as data** (`question_answers`): a multi-select's labels and Other
+  text are joined with ", ".
+
+**Every other permission row is still pressed as its key.** That includes "Yes, and don't ask
+again for: python3 *". The event's `permission_suggestions` are NOT what that row saves:
+verified on 2.1.295, they hold the exact command, while the row saves `Bash(python3 *)`. Only
+the dialog knows the rule.
+
+Delivery is take-or-retract under one lock. `ok` means the hook took the answer. An untaken
+answer is withdrawn after 2 s, so `inject_failed` with `delivery:"agent"` applied nothing and
+may be retried. That is why the mod path takes no `claim_question_inject` slot.
+
+Verified live on dev 2026-10-08 through `answer_tab_prompt_as_human`:
+- allow;
+- deny with No as row 4 of 4;
+- don't-ask-again by key, saving the right rule;
+- a two-question form with multiSelect plus Other.
+
 **Hooks registered:**
 - `SessionStart` (command): the only hook that runs **inside the tab's shell**, so the only one that can see `$MAITERM_TAB_ID`. It captures stdin once, POSTs the event to `/hooks?tab_id=$MAITERM_TAB_ID&prime=1`, and echoes the tab id, the session id, and the server's reply. Gated on `$MAITERM_PORT` matching server port (prevents dev/prod cross-talk). Output appears collapsed in TUI ("Ran 1 start hook") but injected into model context as system-reminder.
 - `SessionStart` (HTTP): POST to `/hooks` with `{session_id, cwd, source, model}` — no tab id (settings.json hook URLs are static), which is why the command hook exists.

@@ -1,4 +1,4 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, PermissionRequestDecision, Register } from 'claude-code'
 
 // maiTerm's link to the Claude Code session running in one of its tabs.
 //
@@ -71,6 +71,53 @@ async function send($: EngineInterface, to: Link, event: unknown, query = ''): P
   }
 }
 
+// --- Answers from maiTerm (claude_code/mod_asks.rs) ---------------------------------------
+//
+// A permission dialog or an AskUserQuestion selector can be answered from maiTerm (the phone,
+// the Loom, the Overlord) as well as at the desktop. The hook behind it registers an ask with
+// the event it sends, then waits on GET /hooks/ask in short rounds: one fetch dies at about 30 s,
+// and a round this short also lets maiTerm tell a waiting hook from a gone one. A key pressed at
+// the desktop still wins; Claude then abandons the hook, which aborts its fetch.
+
+let askSeq = 0
+
+function newAskId(): string {
+  askSeq += 1
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${askSeq}`
+}
+
+// Resolves maiTerm's answer once it gives one, or undefined when maiTerm stops holding the ask
+// or can't be reached. `isDone` ends the wait between rounds once the prompt is settled.
+async function awaitAnswer($: EngineInterface, to: Link, ask: string, isDone: () => boolean): Promise<unknown> {
+  const url = `http://127.0.0.1:${to.port}/hooks/ask?id=${encodeURIComponent(ask)}&wait=10`
+  while (!isDone()) {
+    let r
+    try {
+      r = await $.http.fetch(url, { headers: { 'x-claude-code-ide-authorization': to.auth } })
+    } catch {
+      return undefined
+    }
+    if (r.status === 204) continue
+    if (r.status !== 200) return undefined
+    try {
+      return JSON.parse(r.text)
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
+async function cancelAsk($: EngineInterface, to: Link, ask: string): Promise<void> {
+  try {
+    await $.http.fetch(`http://127.0.0.1:${to.port}/hooks/ask?id=${encodeURIComponent(ask)}&cancel=1`, {
+      headers: { 'x-claude-code-ide-authorization': to.auth },
+    })
+  } catch {
+    // Unanswered, the ask is pruned once nothing polls it.
+  }
+}
+
 // The events maiTerm's server reads, forwarded as the settings hooks would have sent them.
 // Sent BEFORE `next(e)`: the settings hooks run beneath, so maiTerm hears this copy first
 // and knows to drop theirs.
@@ -98,7 +145,33 @@ export const register: Register = on => {
   on('classic.UserPromptSubmit', relay)
   on('classic.PostToolUse', relay)
   on('classic.PostToolUseFailure', relay)
-  on('classic.PermissionRequest', relay)
+  // Runs while the dialog is on screen (Claude draws it and raises this together). The decision
+  // maiTerm hands back closes the dialog as if its row had been pressed.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const to = await linkOf($)
+    if (!to) return next(e)
+    // AskUserQuestion's own permission is the selector itself, answered through tool.call below.
+    if (e.tool_name === 'AskUserQuestion') return relay($, e, next)
+    const ask = newAskId()
+    await send($, to, e, `&ask=${encodeURIComponent(ask)}`)
+    const result = await next(e)
+    // A settings hook of the user's own already decided: that stands.
+    if (result.decision) return result
+    const answer = (await awaitAnswer($, to, ask, () => false)) as { decision?: PermissionRequestDecision } | undefined
+    const decision = answer?.decision
+    if (!decision) return result
+    if (decision.behavior === 'deny' && decision.interrupt) {
+      // A deny fires no hook, and an interrupted turn sends no Stop, so maiTerm would leave the
+      // tab waiting on a dialog that is gone. The turn has stopped and the agent waits on its
+      // human, which is what idle_prompt tells maiTerm; sent once the dialog has closed.
+      const session_id = e.session_id
+      const cwd = e.cwd
+      $.clock.after(300, () => {
+        void send($, to, { hook_event_name: 'Notification', notification_type: 'idle_prompt', session_id, cwd })
+      })
+    }
+    return { ...result, decision }
+  })
   on('classic.SubagentStop', relay)
   on('classic.PreCompact', relay)
 
@@ -127,6 +200,8 @@ export const register: Register = on => {
     const to = await linkOf($)
     if (!to) return next(e)
     const { tool, tool_use_id, agentId, consent: _consent, ...tool_input } = e as Record<string, unknown>
+    const isQuestion = e.tool === 'AskUserQuestion'
+    const ask = isQuestion ? newAskId() : undefined
     await send($, to, {
       hook_event_name: 'PreToolUse',
       session_id: await $.session.id(),
@@ -135,7 +210,29 @@ export const register: Register = on => {
       tool_input,
       tool_use_id,
       ...(agentId ? { agent_id: agentId } : {}),
+    }, ask ? `&ask=${encodeURIComponent(ask)}` : '')
+    if (!ask || e.tool !== 'AskUserQuestion') return next(e)
+
+    // The selector (`next`) and maiTerm race; whichever answers first is the tool's result.
+    type First =
+      | { from: 'desktop'; r: Awaited<ReturnType<typeof next>> }
+      | { from: 'maiterm'; answers: Record<string, string> }
+    let settled = false
+    const local: Promise<First> = next(e).then(r => {
+      settled = true
+      return { from: 'desktop', r }
     })
-    return next(e)
+    const remote: Promise<First> = awaitAnswer($, to, ask, () => settled).then(a => {
+      const answers = (a as { answers?: Record<string, string> } | undefined)?.answers
+      // Nothing from maiTerm: the desktop's answer is the only one coming.
+      return answers ? { from: 'maiterm', answers } : local
+    })
+    const first = await Promise.race([local, remote])
+    if (first.from === 'desktop') {
+      void cancelAsk($, to, ask)
+      return first.r
+    }
+    settled = true
+    return { result: { questions: e.questions, answers: first.answers } }
   })
 }
