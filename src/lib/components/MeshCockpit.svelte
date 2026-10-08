@@ -42,6 +42,17 @@
     return ws ? agentMeshStore.pausedTopics(ws.id) : [];
   });
   const pausedIds = $derived(new Set(paused.map((p) => p.id)));
+  // A linked mesh (docs/mesh-workspace.md §17) spans several workspaces: the board, graph and
+  // topics are the whole mesh; the stage view stays this workspace's.
+  const linkedWith = $derived.by(() => {
+    void agentMeshStore.version;
+    return ws ? agentMeshStore.linkedWorkspaces(ws.id).filter((w) => w.id !== ws.id) : [];
+  });
+  async function unlink() {
+    if (!ws) return;
+    busy = true;
+    try { await agentMeshStore.unlinkMesh(ws.id); } finally { busy = false; }
+  }
   const roleOf = $derived((tabId: string) => board.find((b) => b.tabId === tabId)?.role ?? tabId.slice(0, 6));
 
   // ── Conversation graph geometry ─────────────────────────────────────────────
@@ -80,9 +91,11 @@
   // A hovered node can go away under a motionless pointer — clicking it closes the cockpit,
   // and the 1s re-derive drops an agent that left the mesh — and neither fires mouseleave.
   // Reading the label off the live graph hides the bubble the moment its node is gone.
-  const hoverText = $derived(
-    hoverTabId ? (graph.nodes.find((n) => n.tabId === hoverTabId)?.role ?? '') : ''
-  );
+  const hoverText = $derived.by(() => {
+    const role = hoverTabId ? (graph.nodes.find((n) => n.tabId === hoverTabId)?.role ?? '') : '';
+    const where = role ? board.find((b) => b.tabId === hoverTabId)?.workspace : null;
+    return where ? `${role} · ${where}` : role;
+  });
   // Closing unmounts the graph without a mouseleave, so the next open would otherwise
   // re-anchor to the detached <g> — a bubble pinned in the window's corner.
   $effect(() => {
@@ -175,8 +188,19 @@
         <div class="cockpit-actions">
           <button class="mini" onclick={toggleStage}>{stageActive ? 'Exit stage view' : 'Stage view'}</button>
           <button class="mini ghost" onclick={recheck}>Re-check</button>
+          {#if linkedWith.length > 0}
+            <Tooltip text="Take this workspace out of the linked mesh — it stays a mesh of its own">
+              <button class="mini ghost" disabled={busy} onclick={unlink}>Unlink</button>
+            </Tooltip>
+          {/if}
           <button class="mini ghost danger" disabled={busy} onclick={disableMesh}>Disable Mesh</button>
         </div>
+        {#if linkedWith.length > 0}
+          <p class="linked-note">
+            Linked with <strong>{linkedWith.map((w) => w.name).join(', ')}</strong> — one mesh across
+            {linkedWith.length + 1} workspaces. Stage view shows this workspace's agents only.
+          </p>
+        {/if}
 
         {#if paused.length > 0}
           <div class="paused-banner">
@@ -284,7 +308,10 @@
           {#if board.length === 0}
             <div class="empty small">Agents post their status here as they work.</div>
           {/if}
-          {#each board as a (a.tabId)}
+          {#each board as a, i (a.tabId)}
+            {#if a.workspace && a.workspace !== board[i - 1]?.workspace}
+              <div class="ws-group">{a.workspace}</div>
+            {/if}
             <div class="agent-card" class:needs={a.needsInput}>
               <div class="agent-head">
                 <StatusDot color={a.claudeState === 'active' ? 'accent' : a.live ? 'green' : 'dim'} pulse={a.claudeState === 'active'} />
@@ -324,6 +351,20 @@
 {/if}
 
 <style>
+  .linked-note {
+    margin: 8px 12px 0;
+    font-size: 11px;
+    color: var(--fg-dim);
+    overflow-wrap: anywhere;
+  }
+  .ws-group {
+    margin: 10px 0 4px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    overflow-wrap: anywhere;
+  }
   .mesh-backdrop {
     position: fixed;
     inset: 0;

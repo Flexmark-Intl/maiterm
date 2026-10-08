@@ -857,6 +857,13 @@ pub struct Workspace {
     /// workspace_notes (a persisted Vec).
     #[serde(default)]
     pub mesh_topics: Vec<MeshTopic>,
+    /// Linked meshes (docs/mesh-workspace.md §17): mesh workspaces IN ONE WINDOW that share
+    /// this id act as one mesh — one roster, one topic registry. None = this workspace's
+    /// mesh stands alone. Each topic stays persisted on its owner's workspace, so unlinking
+    /// splits the registry without a migration. A workspace that moves to another window
+    /// keeps the id and meshes only with linked workspaces there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh_group: Option<String>,
     /// This workspace's task list (docs/tasks.md). Ordering is the Vec order — there is
     /// no rank field; reordering rewrites the vector.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2360,6 +2367,7 @@ impl Workspace {
             bridge_all: false,
             mailink_native: false,
             mesh_topics: Vec::new(),
+            mesh_group: None,
             tasks: Vec::new(),
             workstreams: Vec::new(),
             stack: Vec::new(),

@@ -36,6 +36,9 @@ export interface MeshMember {
   purpose: string | null;
   /** Has a live agent session right now (vs dormant/booting). */
   live: boolean;
+  /** The workspace this member sits in — set only on a LINKED mesh (several workspaces,
+   *  docs/mesh-workspace.md §17), where it tells two same-named roles apart. */
+  workspace?: string;
 }
 
 /** A tab's addressable role: its display name with any legacy bridge glyph stripped. The one

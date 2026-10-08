@@ -744,6 +744,7 @@ pub fn run() {
             commands::workspace::update_workspace_note,
             commands::workspace::delete_workspace_note,
             commands::workspace::set_workspace_bridge_all,
+            commands::workspace::set_workspace_mesh_group,
             commands::workspace::set_workspace_mesh_topics,
             commands::workspace::set_workspace_stack,
             commands::workspace::set_tab_service_id,

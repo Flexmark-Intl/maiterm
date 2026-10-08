@@ -418,8 +418,11 @@ export interface Workspace {
   bridge_all?: boolean;
   /** maiLink flag — every agent tab in this workspace is exposed to maiLink as a chat. */
   mailink_native?: boolean;
-  /** Topic threads (empty for normal workspaces). */
+  /** Topic threads (empty for normal workspaces). On a linked mesh each topic lives on its
+   *  owner's workspace. */
   mesh_topics?: MeshTopic[];
+  /** Linked meshes: mesh workspaces in one window sharing this id act as one mesh. */
+  mesh_group?: string | null;
   /** This workspace's task list (docs/tasks.md). Order is the array order. */
   tasks?: Task[];
   /** Named task groups — one per distinct job in this workspace. */

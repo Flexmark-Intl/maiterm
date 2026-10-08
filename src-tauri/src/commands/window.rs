@@ -882,6 +882,10 @@ pub(crate) fn clone_workspace_with_id_mapping(
         bridge_all: ws.bridge_all,
         mailink_native: ws.mailink_native,
         mesh_topics: Vec::new(),
+        // A duplicated WINDOW's copies stay linked to each other (the group is per window);
+        // `duplicate_workspace` clears it, since a copy beside its source would join the same
+        // mesh with every role name doubled.
+        mesh_group: ws.mesh_group.clone(),
         tasks: new_tasks,
         workstreams: new_workstreams,
         // A copy of the project runs the same services; the definitions carry no tab ids.

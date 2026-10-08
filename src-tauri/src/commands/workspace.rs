@@ -1782,6 +1782,8 @@ pub fn duplicate_workspace(
             .clone();
 
         let (mut cloned, tab_id_map) = clone_workspace_with_id_mapping(&source, &tab_contexts);
+        // Same window as its source: staying linked would put every role on the mesh twice.
+        cloned.mesh_group = None;
 
         // Move scrollback from cloned tabs into SQLite
         for pane in &mut cloned.panes {
@@ -2180,6 +2182,32 @@ pub fn set_workspace_bridge_all(
             .find(|w| w.id == workspace_id)
             .ok_or("Workspace not found")?;
         workspace.bridge_all = enabled;
+        app_data.clone()
+    };
+    save_state(&data_clone)?;
+    Ok(())
+}
+
+/// Link (Some) or unlink (None) a workspace's mesh — workspaces in this window sharing a
+/// `mesh_group` id act as one mesh (docs/mesh-workspace.md §17). The frontend writes every
+/// member of a link/merge/unlink, one call each; topics are not touched here.
+#[tauri::command]
+pub fn set_workspace_mesh_group(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    group: Option<String>,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let data_clone = {
+        let mut app_data = state.app_data.write();
+        let win = app_data.window_mut(&label).ok_or("Window not found")?;
+        let workspace = win
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace_id)
+            .ok_or("Workspace not found")?;
+        workspace.mesh_group = group.filter(|g| !g.trim().is_empty());
         app_data.clone()
     };
     save_state(&data_clone)?;

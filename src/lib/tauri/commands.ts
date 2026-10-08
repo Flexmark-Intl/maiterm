@@ -892,6 +892,10 @@ export async function setWorkspaceBridgeAll(workspaceId: string, enabled: boolea
   return invoke('set_workspace_bridge_all', { workspaceId, enabled });
 }
 
+export async function setWorkspaceMeshGroup(workspaceId: string, group: string | null): Promise<void> {
+  return invoke('set_workspace_mesh_group', { workspaceId, group });
+}
+
 // maiLink companion commands (docs/mailink-protocol.md)
 export async function setTabMailinkNative(workspaceId: string, paneId: string, tabId: string, mailinkNative: boolean): Promise<void> {
   return invoke('set_tab_mailink_native', { workspaceId, paneId, tabId, mailinkNative });

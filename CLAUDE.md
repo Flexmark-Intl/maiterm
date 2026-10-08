@@ -188,6 +188,7 @@ Workspace
 ├── split_root: SplitNode (binary tree of pane layout)
 ├── overlord (bool — hosts the Overlord board + agent; one per window, own sidebar accessor row)
 ├── overlord_exempt (bool — every tab in it is invisible to the Overlord engine and refused by its tools)
+├── bridge_all (bool — Mesh Workspace) + mesh_topics; mesh_group (linked meshes: mesh workspaces IN ONE WINDOW sharing it are one mesh; topics persist on their owner's workspace — docs/mesh-workspace.md §17)
 ├── stack: Service[] (docs/stack.md — definitions only; which tab runs one is `Tab.service_id`, status is never persisted)
 └── notes: WorkspaceNote[] (workspace-level notes)
 

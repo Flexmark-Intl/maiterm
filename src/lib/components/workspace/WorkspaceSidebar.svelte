@@ -22,7 +22,7 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import '$lib/overlord/deck.css';
   import ChangelogModal from '$lib/components/ChangelogModal.svelte';
-  import ContextMenu from '$lib/components/ContextMenu.svelte';
+  import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import ShareExportModal from '$lib/components/share/ShareExportModal.svelte';
   import StackSection from '$lib/components/stack/StackSection.svelte';
   import { stackStore } from '$lib/stores/stack.svelte';
@@ -509,6 +509,7 @@
             if (workspaceId !== workspacesStore.activeWorkspaceId) await handleItemClick(workspaceId);
             window.dispatchEvent(new CustomEvent('open-mesh-setup', { detail: workspaceId }));
           } },
+      ...meshLinkItems(workspaceId),
       { label: '', separator: true, action: () => {} },
       workspaceMoveItem(moveTargets, workspaceId),
       { label: 'Share workspace…', action: () => { shareExportFor = workspaceId; } },
@@ -521,6 +522,40 @@
         }
       } },
     ];
+  }
+
+  /** Linked meshes (docs/mesh-workspace.md §17): "Link mesh with ›" any other workspace in
+   *  this window (a plain one becomes a mesh), and "Unlink mesh" while this one is linked. */
+  function meshLinkItems(workspaceId: string) {
+    const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
+    if (!ws || ws.overlord) return [];
+    const fail = async (what: string, why: string) => {
+      logError(`mesh: ${what}: ${why}`);
+      const { dispatch } = await import('$lib/stores/notificationDispatch');
+      dispatch(`Couldn't ${what}`, why, 'error');
+    };
+    const candidates = agentMeshStore.linkCandidates(workspaceId);
+    const items: MenuItem[] = [{
+      label: 'Link mesh with',
+      disabled: candidates.length === 0,
+      action: () => {},
+      submenu: candidates.map((c) => ({
+        label: c.mesh ? c.name : `${c.name} (becomes a mesh)`,
+        action: () => {
+          agentMeshStore.linkMeshes(workspaceId, c.id)
+            .then((r) => { if ('error' in r) void fail('link the meshes', r.error); })
+            .catch((e) => void fail('link the meshes', String(e)));
+        },
+      })),
+    }];
+    if (ws.bridge_all && ws.mesh_group) {
+      const others = agentMeshStore.linkedWorkspaces(workspaceId).filter((w) => w.id !== workspaceId);
+      items.push({
+        label: others.length ? `Unlink mesh from ${others.map((w) => w.name).join(', ')}` : 'Unlink mesh',
+        action: () => { agentMeshStore.unlinkMesh(workspaceId).catch((e) => void fail('unlink the mesh', String(e))); },
+      });
+    }
+    return items;
   }
 
   /** Windows the menu's "Move to Window" can send to, fetched as the menu opens. */
@@ -730,7 +765,7 @@
                 title="Mesh Workspace — open cockpit (⌘⇧M)"
                 aria-label="Open mesh cockpit"
                 onclick={(e) => { e.stopPropagation(); if (workspace.id !== workspacesStore.activeWorkspaceId) handleItemClick(workspace.id); window.dispatchEvent(new CustomEvent('open-mesh-cockpit')); }}
-              >MESH</button>
+              >{agentMeshStore.isLinkedMesh(workspace.id) ? 'MESH ⇄' : 'MESH'}</button>
             {/if}
             {#if preferencesStore.overlordEnabled && !workspace.overlord}
               <!-- Overlord exemption for the whole workspace (docs/overlord.md §11). Stays

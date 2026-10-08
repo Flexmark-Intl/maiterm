@@ -564,6 +564,54 @@ topic tools) → run after T1 and T2 land. C follows once the tool/contract shap
 are fixed. T7 (view) is a separate later phase after the spike. **Conflict flag:** T1 and T3
 both touch the delivery/store layer — keep them in the same lane (sequential), not parallel.
 
+## 17. Linked meshes (2026-10-08)
+
+Sometimes the human wants workspaces apart for **organization** (one per project, one per
+repo) while their agents still work as **one mesh**. Linking does that: the right-click menu
+on a workspace offers **Link mesh with ›** (any other non-Overlord workspace in this window; a
+plain workspace becomes a mesh by being picked) and, while linked, **Unlink mesh**. The
+sidebar badge reads `MESH ⇄` on a linked workspace.
+
+**Model.** `Workspace.mesh_group: Option<String>` — mesh workspaces *in one window* sharing the
+id are one mesh. Links compose: linking A↔B then B↔C makes one mesh of three; linking two
+groups merges them (the absorbed group's workspaces in THIS window take the surviving id).
+Unlink takes one workspace out; it stays a mesh of its own. Disabling Mesh on a linked
+workspace unlinks it first.
+
+**Same window only.** Each window is its own webview with its own stores, and delivery is a
+per-window controller, so a mesh never spans windows. A linked workspace moved to another
+window keeps its `mesh_group` and meshes there with whatever shares it (usually nothing),
+and rejoins if moved back. Duplicating a WINDOW keeps the ids (the copies link to each other
+in the new window); duplicating a WORKSPACE clears it — the copy beside its source would put
+every role on the mesh twice. A share file never carries it (allowlist).
+
+**What spans the link** (`agentMesh.svelte.ts`, `meshWorkspacesOf`):
+- the roster (`membersOf`) — every member is tagged with its workspace on a linked mesh, in
+  `listBridgedPeers` (plus `linkedWorkspaces`), the opener's roster, and the envelope's "from";
+- recipient resolution — roles must still be unique across the WHOLE mesh, or the router
+  answers "ambiguous, use the handle", as it always has; former-role shadowing likewise
+  counts every linked workspace's names;
+- the topic registry and loop control — one router per mesh (`meshKeyOf`: `group:<id>`, or
+  the workspace id when unlinked);
+- the cockpit — status board grouped by workspace, graph, topics, an Unlink button.
+
+**What stays per workspace:** the stage view and its filmstrip (`localMembersOf`), the
+readiness re-check / setup modal, maiLink's mesh-init, and the phone's `mesh` flag.
+
+**Topics.** Each topic is persisted on its **owner's** workspace (`topicHome`, set at first
+persist), so an unlink splits the registry with nothing to migrate: each side keeps the
+threads its own agents started. A reply on a thread that went to the other side is refused at
+the send boundary like any unknown topic. A router is cached with the workspace ids it was
+built from and rebuilt when that list changes (link, unlink, a workspace deleted, moved or
+toggled), seeded from the mirror — but a send's turn bump isn't persisted by itself, so the
+rebuild takes each topic's newest in-memory copy (`lastKnown`) over the mirror's, or the soft
+cap would reset on every link. `persistTopics` writes every workspace of the mesh whose list
+changed, and the mirror with it.
+
+**Telling the agents.** Already-onboarded members are told once, queued if busy: on link, who
+they can now reach (workspace-tagged); on unlink, who they lost. A member not yet onboarded
+gets the opener, which already carries the whole linked roster.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |

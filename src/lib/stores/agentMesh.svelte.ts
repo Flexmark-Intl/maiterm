@@ -33,6 +33,12 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
  * Roster is DERIVED, not persisted (eng review D2): a member is a named agent tab in a
  * `bridge_all` workspace. Closing the tab removes it; renaming it changes only the display
  * label, never the routing key (the tabId).
+ *
+ * LINKED meshes (§17): mesh workspaces in this window sharing `Workspace.mesh_group` are ONE
+ * mesh — the roster, the router and the topic registry span all of them (`meshWorkspacesOf`).
+ * The stage view stays per workspace. A router is cached with the workspaces it was built
+ * from and rebuilt when that set changes; each topic is persisted on its owner's workspace,
+ * so an unlink splits the registry with nothing to migrate.
  */
 
 const EDGE_RING_MAX = 300;
@@ -52,8 +58,18 @@ const TOPIC_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 const MESH_FORMER_ROLES_MAX = 5;
 
 function createAgentMeshStore() {
-  // One router per mesh workspace (each scopes its roster + owns its topic registry).
-  const routers = new Map<string, MeshRouter>();
+  // One router per MESH (each scopes its roster + owns its topic registry), keyed by
+  // `meshKeyOf` and remembering which workspaces it was built from — a link, an unlink, or a
+  // workspace deleted/moved away changes that set, and the next `routerFor` rebuilds.
+  interface RouterEntry { router: MeshRouter; wsIds: string[] }
+  const routers = new Map<string, RouterEntry>();
+  // Which workspace persists each topic (its owner's, at creation). Seeded on every rebuild
+  // from where the topic was loaded; a topic without one is homed on first persist.
+  const topicHome = new Map<string, string>();
+  // A rebuild's seed: the newest in-memory copy of every topic any router held. A send's turn
+  // bump isn't persisted on its own, so seeding from the mirror alone would roll turn counts
+  // (and the loop cap riding on them) back on every link/unlink.
+  const lastKnown = new Map<string, MeshTopic>();
   // Members already primed this session (opener injected) — keyed by tabId, idempotent.
   const primed = new Set<string>();
   // Stage-view UI state per mesh workspace (T7): which two members are on the stage, and
@@ -98,6 +114,30 @@ function createAgentMeshStore() {
     return workspacesStore.workspaces.find((w) => w.id === wsId) ?? null;
   }
 
+  function workspaceOfTab(tabId: string): Workspace | null {
+    return workspacesStore.workspaces.find((w) => w.panes.some((p) => p.tabs.some((t) => t.id === tabId))) ?? null;
+  }
+
+  /** The workspaces whose agents make up this workspace's mesh, in sidebar order: every mesh
+   *  workspace IN THIS WINDOW sharing its `mesh_group`, or just itself when it has none. A
+   *  workspace that isn't a mesh counts as its own (for code that inspects one before it's
+   *  enabled). Other windows are never part of it — a linked workspace moved to another
+   *  window meshes there with whatever shares its group, and rejoins if it moves back. */
+  function meshWorkspacesOf(ws: Workspace): Workspace[] {
+    if (!ws.bridge_all || !ws.mesh_group) return [ws];
+    const g = ws.mesh_group;
+    return workspacesStore.workspaces.filter((w) => w.bridge_all && w.mesh_group === g);
+  }
+
+  function meshKeyOf(ws: Workspace): string {
+    return ws.bridge_all && ws.mesh_group ? `group:${ws.mesh_group}` : ws.id;
+  }
+
+  /** Is this workspace's mesh linked with another workspace in this window? */
+  function isLinked(ws: Workspace): boolean {
+    return meshWorkspacesOf(ws).length > 1;
+  }
+
   function formerRolesOf(tabId: string): string[] {
     const raw = getVariables(tabId)?.get(MESH_FORMER_ROLES_VAR);
     if (!raw) return [];
@@ -129,9 +169,11 @@ function createAgentMeshStore() {
    *  the new holder's agent is up the name is simply unknown, as it was before renames. */
   function claimedRoles(ws: Workspace): string[] {
     const out: string[] = [];
-    for (const pane of ws.panes) {
-      for (const tab of pane.tabs) {
-        if ((tab.tab_type ?? 'terminal') === 'terminal' && !tab.service_id && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
+    for (const w of meshWorkspacesOf(ws)) {
+      for (const pane of w.panes) {
+        for (const tab of pane.tabs) {
+          if ((tab.tab_type ?? 'terminal') === 'terminal' && !tab.service_id && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
+        }
       }
     }
     return out;
@@ -164,25 +206,36 @@ function createAgentMeshStore() {
     return !!claudeStateStore.getState(tab.id) || !!tab.runtime;
   }
 
-  /** The roster of a mesh workspace (all addressable agent members). */
+  /** The roster of the MESH this workspace belongs to — every addressable agent member of
+   *  every workspace linked with it (§17). On a linked mesh each member names its workspace. */
   function membersOf(ws: Workspace): MeshMember[] {
     const out: MeshMember[] = [];
+    const mesh = meshWorkspacesOf(ws);
     const claimed = claimedRoles(ws);
-    for (const pane of ws.panes) {
-      for (const tab of pane.tabs) {
-        if (!isAgentMember(tab)) continue;
-        const former = formerRolesOf(tab.id).filter((f) => !claimed.includes(f.toLowerCase()));
-        out.push({
-          tabId: tab.id,
-          role: roleName(tab.name),
-          ...(former.length ? { formerRoles: former } : {}),
-          cwd: getCwd(tab.id),
-          purpose: tab.mesh_purpose ?? null,
-          live: !!claudeStateStore.getState(tab.id),
-        });
+    for (const w of mesh) {
+      for (const pane of w.panes) {
+        for (const tab of pane.tabs) {
+          if (!isAgentMember(tab)) continue;
+          const former = formerRolesOf(tab.id).filter((f) => !claimed.includes(f.toLowerCase()));
+          out.push({
+            tabId: tab.id,
+            role: roleName(tab.name),
+            ...(former.length ? { formerRoles: former } : {}),
+            cwd: getCwd(tab.id),
+            purpose: tab.mesh_purpose ?? null,
+            live: !!claudeStateStore.getState(tab.id),
+            ...(mesh.length > 1 ? { workspace: w.name } : {}),
+          });
+        }
       }
     }
     return out;
+  }
+
+  /** Just this workspace's own members — the stage view, readiness, and what leaves the mesh
+   *  when this one workspace is disabled or unlinked. */
+  function localMembersOf(ws: Workspace): MeshMember[] {
+    return membersOf(ws).filter((m) => ws.panes.some((p) => p.tabs.some((t) => t.id === m.tabId)));
   }
 
   /** Does this mesh workspace have an agent that ISN'T running right now? A tab with a
@@ -222,38 +275,94 @@ function createAgentMeshStore() {
     await bracketedPasteSubmit(ptyId, '/maiterm init');
   }
 
+  /** The router of this workspace's mesh. Safe inside a $derived read: a rebuild touches only
+   *  plain maps, never $state. */
   function routerFor(wsId: string): MeshRouter | null {
     const ws = getWorkspace(wsId);
     if (!ws || !ws.bridge_all) return null;
-    let router = routers.get(wsId);
-    if (!router) {
-      router = createMeshRouter({
-        members: () => {
-          const w = getWorkspace(wsId);
-          return w ? membersOf(w) : [];
-        },
-        now: () => new Date().toISOString(),
-        mintId: () => crypto.randomUUID(),
-      });
-      router.load(ws.mesh_topics ?? []);
-      routers.set(wsId, router);
+    const key = meshKeyOf(ws);
+    const mesh = meshWorkspacesOf(ws);
+    const wsIds = mesh.map((w) => w.id);
+    const cached = routers.get(key);
+    if (cached && cached.wsIds.length === wsIds.length && cached.wsIds.every((id, i) => id === wsIds[i])) return cached.router;
+    // New, or its workspaces changed. Keep every live topic's counters before any router goes.
+    for (const e of routers.values()) {
+      for (const t of e.router.all()) lastKnown.set(t.id, { ...t, participants: [...t.participants] });
     }
+    // A router built over any of these workspaces is superseded (e.g. a workspace's own
+    // router once it joins a group); its topics are in the mirror and `lastKnown`.
+    for (const [k, e] of routers) if (k !== key && e.wsIds.some((id) => wsIds.includes(id))) routers.delete(k);
+    const seed: MeshTopic[] = [];
+    for (const w of mesh) {
+      for (const t of w.mesh_topics ?? []) {
+        topicHome.set(t.id, w.id);
+        // The newer copy wins (every router mutation stamps updated_at): `lastKnown` can be
+        // older than the mirror — a router dropped by a disable was flushed, not harvested —
+        // and preferring it blindly would reopen a topic completed since.
+        const live = lastKnown.get(t.id);
+        seed.push(live && (live.updated_at > t.updated_at || (live.updated_at === t.updated_at && live.turn > t.turn)) ? live : t);
+      }
+    }
+    const router = createMeshRouter({
+      members: () => {
+        const w = getWorkspace(wsId);
+        return w ? membersOf(w) : [];
+      },
+      now: () => new Date().toISOString(),
+      mintId: () => crypto.randomUUID(),
+    });
+    router.load(seed);
+    routers.set(key, { router, wsIds });
     return router;
   }
 
+  /** Flush this workspace's mesh registry: each topic to its home workspace (its owner's,
+   *  once chosen), every workspace whose list changed. Updates the mirror too — a rebuild
+   *  seeds from it. Not for $derived reads (it writes the mirror). */
   function persistTopics(wsId: string) {
-    const router = routers.get(wsId);
-    if (!router) return;
-    commands.setWorkspaceMeshTopics(wsId, router.snapshot()).catch((e) =>
-      logError(`agentMesh: failed to persist topics for ws ${wsId.slice(0, 8)}: ${e}`),
-    );
+    const ws = getWorkspace(wsId);
+    const router = routerFor(wsId);
+    if (!ws || !router) return;
+    const mesh = meshWorkspacesOf(ws);
+    const byWs = new Map<string, MeshTopic[]>(mesh.map((w) => [w.id, []]));
+    for (const t of router.snapshot()) {
+      let home = topicHome.get(t.id);
+      if (!home || !byWs.has(home)) {
+        const owner = workspaceOfTab(t.owner_tab_id);
+        home = owner && byWs.has(owner.id) ? owner.id : ws.id;
+        topicHome.set(t.id, home);
+      }
+      byWs.get(home)!.push(t);
+    }
+    for (const w of mesh) {
+      const list = byWs.get(w.id)!;
+      if (JSON.stringify(list) === JSON.stringify(w.mesh_topics ?? [])) continue;
+      w.mesh_topics = list;
+      commands.setWorkspaceMeshTopics(w.id, list).catch((e) =>
+        logError(`agentMesh: failed to persist topics for ws ${w.id.slice(0, 8)}: ${e}`),
+      );
+    }
   }
 
-  /** Run the lifecycle sweep on one workspace's registry (see the TOPIC_* constants).
+  /** One workspace per mesh in this window — for passes that visit each registry once. */
+  function meshRepresentatives(): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const ws of workspacesStore.workspaces) {
+      if (!ws.bridge_all) continue;
+      const key = meshKeyOf(ws);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(ws.id);
+    }
+    return out;
+  }
+
+  /** Run the lifecycle sweep on one mesh's registry (see the TOPIC_* constants).
    *  NOT safe inside a $derived read (it bumps version) — call from rehydrate / the
    *  hourly interval, never from routerFor. */
   function sweepTopics(wsId: string) {
-    const router = routers.get(wsId);
+    const router = routerFor(wsId);
     if (!router) return;
     const { autoCompleted, expired } = router.sweep(Date.now(), {
       staleOpenMs: TOPIC_STALE_OPEN_MS,
@@ -273,8 +382,10 @@ function createAgentMeshStore() {
     const cwd = getCwd(senderTabId);
     const where = cwd ? `, working in ${cwd}` : '';
     const senderRole = roleForTab(senderTabId);
+    const senderWs = workspaceOfTab(senderTabId);
+    const inWs = senderWs && isLinked(senderWs) ? ` in workspace "${senderWs.name}"` : '';
     return (
-      `⟦MESH⟧ Message from "${senderRole}"${where} — a peer AI agent, NOT your human operator. [topic: ${topic.label}] [turn ${turn}]\n` +
+      `⟦MESH⟧ Message from "${senderRole}"${inWs}${where} — a peer AI agent, NOT your human operator. [topic: ${topic.label}] [turn ${turn}]\n` +
       `Reply with the sendToBridgedAgent tool, tagging topic "${topic.id}". If this fully answers it, just stop — don't reply only to acknowledge.\n\n` +
       message
     );
@@ -285,6 +396,27 @@ function createAgentMeshStore() {
       `⟦MESH⟧ Your human renamed your tab: on this mesh you are now "${newRole}" (formerly "${oldRole}"). ` +
       `Treat it as a clarification of your existing purpose, not a new assignment. Peers see your messages as from "${newRole}" ` +
       `and can still reach you by the old name. Don't announce this to anyone — just use the new name from here on and carry on.`
+    );
+  }
+
+  const rosterLines = (peers: MeshMember[]) =>
+    peers.map((p) => `  - "${p.role}"${p.workspace ? ` [${p.workspace}]` : ''}${p.purpose ? ` — ${p.purpose}` : p.cwd ? ` — ${p.cwd}` : ''}`).join('\n');
+
+  function buildLinkNotice(workspaces: string[], newPeers: MeshMember[]): string {
+    const names = workspaces.map((n) => `"${n}"`).join(', ');
+    return (
+      `⟦MESH⟧ Your human linked this mesh with workspace ${names}: its agents are now peers you can reach, like any other.\n` +
+      (newPeers.length ? `New peers:\n${rosterLines(newPeers)}\n` : `(no agents there yet — they appear as they join; call listBridgedPeers anytime)\n`) +
+      `Nothing to do now. Don't announce this to anyone — reach them only when your work needs to.`
+    );
+  }
+
+  function buildUnlinkNotice(workspaces: string[], gone: MeshMember[]): string {
+    const names = workspaces.map((n) => `"${n}"`).join(', ');
+    const who = gone.length ? `: ${gone.map((p) => `"${p.role}"`).join(', ')} can no longer be reached` : '';
+    return (
+      `⟦MESH⟧ Your human unlinked workspace ${names} from this mesh${who}. ` +
+      `Don't try to message them; threads you shared with them are closed to them. Don't announce this — just carry on.`
     );
   }
 
@@ -302,10 +434,13 @@ function createAgentMeshStore() {
     const where = member.cwd ? ` (working in ${member.cwd})` : '';
     const purpose = member.purpose?.trim();
     const roster = peers.length
-      ? peers.map((p) => `  - "${p.role}"${p.purpose ? ` — ${p.purpose}` : p.cwd ? ` — ${p.cwd}` : ''}`).join('\n')
+      ? rosterLines(peers)
       : '  (no other agents yet — peers appear as they join; call listBridgedPeers anytime)';
+    const spans = member.workspace
+      ? ` This mesh spans several workspaces (peers are tagged with theirs); you sit in "${member.workspace}".`
+      : '';
     return (
-      `⟦MESH⟧ You've joined a Mesh Workspace as "${member.role}"${where}. Every agent here is a peer AI agent (NOT your human operator); you can talk to any of them.\n\n` +
+      `⟦MESH⟧ You've joined a Mesh Workspace as "${member.role}"${where}. Every agent here is a peer AI agent (NOT your human operator); you can talk to any of them.${spans}\n\n` +
       `Your purpose: ${purpose || '(your human will tell you — ask if unclear)'}\n\n` +
       `Peers you can reach:\n${roster}\n\n` +
       `How the mesh works:\n` +
@@ -377,6 +512,111 @@ function createAgentMeshStore() {
       if (topic) return { ws, topic };
     }
     return null;
+  }
+
+  // ─── Enable / link / unlink ─────────────────────────────────────────────────
+
+  async function setMeshEnabled(wsId: string, enabled: boolean) {
+    const ws = getWorkspace(wsId);
+    if (!ws) return;
+    if (!enabled && ws.mesh_group) await unlinkMesh(wsId);
+    if (!enabled) persistTopics(wsId); // flush live turn counts before the registry goes dormant
+    await commands.setWorkspaceBridgeAll(wsId, enabled);
+    ws.bridge_all = enabled;
+    if (enabled) {
+      const router = routerFor(wsId);
+      if (router) for (const m of membersOf(ws)) { ensureMember(m.tabId); void tryPrime(m.tabId); }
+    } else {
+      // Leaving mesh mode: drop delivery entries for this ws's members (topics persist).
+      for (const m of localMembersOf(ws)) {
+        removeMember(m.tabId);
+        primed.delete(m.tabId);
+        void setVariable(m.tabId, MESH_ONBOARDED_VAR, null); // re-enabling should re-onboard
+        void setVariable(m.tabId, MESH_FORMER_ROLES_VAR, null); // …under its current name only
+      }
+      routers.delete(meshKeyOf(ws));
+    }
+    bump();
+    logInfo(`agentMesh: workspace ${wsId.slice(0, 8)} mesh ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  const onboarded = (tabId: string) => getVariables(tabId)?.get(MESH_ONBOARDED_VAR) === '1';
+
+  /** Tell each ONBOARDED member of `to` something (queued if busy). Members not yet onboarded
+   *  get the opener later, which already carries the current roster. */
+  function notifyMembers(to: MeshMember[], text: string) {
+    for (const m of to) {
+      if (!onboarded(m.tabId)) continue;
+      ensureMember(m.tabId);
+      void deliveryCtl.deliver(m.tabId, text);
+    }
+  }
+
+  /** Link the meshes of two workspaces in this window into one (§17). Either side may be a
+   *  mesh already — linked or not — or a plain workspace, which becomes a mesh. Two groups
+   *  merge into one (in this window; a workspace of the absorbed group sitting in another
+   *  window keeps the old id). Each side's onboarded agents are told who they can now reach. */
+  async function linkMeshes(aId: string, bId: string): Promise<{ ok: true } | { error: string }> {
+    const a = getWorkspace(aId);
+    const b = getWorkspace(bId);
+    if (!a || !b) return { error: 'Workspace not found.' };
+    if (a.id === b.id) return { error: 'A workspace cannot link with itself.' };
+    if (a.overlord || b.overlord) return { error: 'The Overlord workspace cannot join a mesh.' };
+    const sideA = meshWorkspacesOf(a);
+    const sideB = meshWorkspacesOf(b);
+    if (sideA.some((w) => w.id === b.id)) return { error: 'These workspaces are already one mesh.' };
+    const membersA = sideA.filter((w) => w.bridge_all).flatMap(localMembersOf);
+    const membersB = sideB.filter((w) => w.bridge_all).flatMap(localMembersOf);
+    for (const w of [...sideA, ...sideB]) if (w.bridge_all) persistTopics(w.id);
+    const group = (a.bridge_all && a.mesh_group) || (b.bridge_all && b.mesh_group) || crypto.randomUUID();
+    for (const w of [...sideA, ...sideB]) {
+      if (w.mesh_group === group) continue;
+      await commands.setWorkspaceMeshGroup(w.id, group);
+      w.mesh_group = group;
+    }
+    // Enable the plain sides only after the link, and EVERY one of them before priming any
+    // agent: an opener is built the moment it is primed, and a side primed while the other
+    // was still plain would be introduced to a roster of itself — and, being outside both
+    // notice lists below, never hear of the rest.
+    const plain = [...sideA, ...sideB].filter((w) => !w.bridge_all);
+    for (const w of plain) {
+      await commands.setWorkspaceBridgeAll(w.id, true);
+      w.bridge_all = true;
+    }
+    for (const w of plain) {
+      for (const m of localMembersOf(w)) { ensureMember(m.tabId); void tryPrime(m.tabId); }
+      logInfo(`agentMesh: workspace ${w.id.slice(0, 8)} mesh enabled (by link)`);
+    }
+    // The other side's members as the mesh now sees them (workspace-tagged).
+    const joined = membersOf(a);
+    const asJoined = (ms: MeshMember[]) => joined.filter((j) => ms.some((m) => m.tabId === j.tabId));
+    const bAll = joined.filter((j) => sideB.some((w) => w.panes.some((p) => p.tabs.some((t) => t.id === j.tabId))));
+    const aAll = joined.filter((j) => sideA.some((w) => w.panes.some((p) => p.tabs.some((t) => t.id === j.tabId))));
+    notifyMembers(asJoined(membersA), buildLinkNotice(sideB.map((w) => w.name), bAll));
+    notifyMembers(asJoined(membersB), buildLinkNotice(sideA.map((w) => w.name), aAll));
+    bump();
+    logInfo(`agentMesh: linked ${sideA.map((w) => w.name).join('+')} with ${sideB.map((w) => w.name).join('+')} (group ${group.slice(0, 8)})`);
+    return { ok: true };
+  }
+
+  /** Take one workspace out of its linked mesh; it stays a mesh of its own. Its topics stay
+   *  with it, the rest keep theirs (each topic lives on its owner's workspace). Both sides'
+   *  onboarded agents are told who they lost. */
+  async function unlinkMesh(wsId: string): Promise<void> {
+    const ws = getWorkspace(wsId);
+    if (!ws?.mesh_group) return;
+    const rest = meshWorkspacesOf(ws).filter((w) => w.id !== ws.id);
+    const mine = ws.bridge_all ? localMembersOf(ws) : [];
+    const theirs = rest.flatMap(localMembersOf);
+    if (ws.bridge_all) persistTopics(wsId);
+    await commands.setWorkspaceMeshGroup(wsId, null);
+    ws.mesh_group = null;
+    if (ws.bridge_all && rest.length) {
+      notifyMembers(mine, buildUnlinkNotice(rest.map((w) => w.name), theirs));
+      notifyMembers(theirs, buildUnlinkNotice([ws.name], mine));
+    }
+    bump();
+    logInfo(`agentMesh: unlinked ${ws.name} from ${rest.map((w) => w.name).join('+') || '(no workspace in this window)'}`);
   }
 
   // ─── Public API ─────────────────────────────────────────────────────────────
@@ -460,28 +700,38 @@ function createAgentMeshStore() {
       }
     },
 
-    /** Toggle a workspace into / out of mesh mode (persisted). */
-    async setMeshEnabled(wsId: string, enabled: boolean) {
+    /** Toggle a workspace into / out of mesh mode (persisted). Disabling a linked workspace
+     *  unlinks it first, so its peers are told they lost it. */
+    setMeshEnabled,
+
+    /** Is this workspace's mesh linked with another workspace in this window? */
+    isLinkedMesh(wsId: string): boolean {
+      void version;
       const ws = getWorkspace(wsId);
-      if (!ws) return;
-      await commands.setWorkspaceBridgeAll(wsId, enabled);
-      ws.bridge_all = enabled;
-      if (enabled) {
-        const router = routerFor(wsId);
-        if (router) for (const m of membersOf(ws)) { ensureMember(m.tabId); void tryPrime(m.tabId); }
-      } else {
-        // Leaving mesh mode: drop delivery entries for this ws's members (topics persist).
-        for (const m of membersOf(ws)) {
-          removeMember(m.tabId);
-          primed.delete(m.tabId);
-          void setVariable(m.tabId, MESH_ONBOARDED_VAR, null); // re-enabling should re-onboard
-          void setVariable(m.tabId, MESH_FORMER_ROLES_VAR, null); // …under its current name only
-        }
-        routers.delete(wsId);
-      }
-      bump();
-      logInfo(`agentMesh: workspace ${wsId.slice(0, 8)} mesh ${enabled ? 'enabled' : 'disabled'}`);
+      return !!ws?.bridge_all && isLinked(ws);
     },
+
+    /** The workspaces making up this workspace's mesh (itself first-class among them). */
+    linkedWorkspaces(wsId: string): { id: string; name: string }[] {
+      void version;
+      const ws = getWorkspace(wsId);
+      return ws?.bridge_all ? meshWorkspacesOf(ws).map((w) => ({ id: w.id, name: w.name })) : [];
+    },
+
+    /** Workspaces this one could link its mesh with: any other non-Overlord workspace in this
+     *  window not already on the same mesh. A non-mesh pick becomes a mesh by linking. */
+    linkCandidates(wsId: string): { id: string; name: string; mesh: boolean }[] {
+      void version;
+      const ws = getWorkspace(wsId);
+      if (!ws || ws.overlord) return [];
+      const same = new Set(ws.bridge_all ? meshWorkspacesOf(ws).map((w) => w.id) : [ws.id]);
+      return workspacesStore.workspaces
+        .filter((w) => !same.has(w.id) && !w.overlord)
+        .map((w) => ({ id: w.id, name: w.name, mesh: !!w.bridge_all }));
+    },
+
+    linkMeshes,
+    unlinkMesh,
 
     /** Set a member's one-line purpose (persisted on the tab so it survives restart). */
     setPurpose(tabId: string, purpose: string | null) {
@@ -509,10 +759,12 @@ function createAgentMeshStore() {
       return ws ? membersOf(ws) : [];
     },
 
+    /** This workspace's OWN members — the stage view's filmstrip. On a linked mesh the
+     *  whole roster is `rosterForTab` / `statusBoard`. */
     rosterForWorkspace(wsId: string): MeshMember[] {
       void version;
       const ws = getWorkspace(wsId);
-      return ws && ws.bridge_all ? membersOf(ws) : [];
+      return ws && ws.bridge_all ? localMembersOf(ws) : [];
     },
 
     /** Open + recently-completed topics of a mesh workspace (for the cockpit / listTopics). */
@@ -540,6 +792,7 @@ function createAgentMeshStore() {
         return {
           tabId: m.tabId,
           role: m.role,
+          workspace: m.workspace ?? null,
           cwd: m.cwd,
           purpose: m.purpose,
           live: m.live,
@@ -569,7 +822,7 @@ function createAgentMeshStore() {
       const s = stage.get(wsId);
       if (!s) return { left: null, right: null };
       const ws = getWorkspace(wsId);
-      const memberIds = new Set(ws ? membersOf(ws).map((m) => m.tabId) : []);
+      const memberIds = new Set(ws ? localMembersOf(ws).map((m) => m.tabId) : []);
       return { left: s.left && memberIds.has(s.left) ? s.left : null, right: s.right && memberIds.has(s.right) ? s.right : null };
     },
 
@@ -580,7 +833,7 @@ function createAgentMeshStore() {
       const s = stage.get(wsId) ?? { active: false, left: null, right: null };
       s.active = !s.active;
       if (s.active) {
-        const members = membersOf(ws).map((m) => m.tabId);
+        const members = localMembersOf(ws).map((m) => m.tabId);
         if (!s.left || !members.includes(s.left)) s.left = members[0] ?? null;
         if (!s.right || !members.includes(s.right) || s.right === s.left) s.right = members.find((m) => m !== s.left) ?? null;
       }
@@ -611,11 +864,12 @@ function createAgentMeshStore() {
     },
 
     /** Is this tab an addressable member of its mesh workspace? Drives `visible` in +page so
-     *  ALL members render live in stage view (stage at scale 1, filmstrip CSS-scaled). */
+     *  ALL members render live in stage view (stage at scale 1, filmstrip CSS-scaled). The
+     *  stage is per workspace even on a linked mesh, so this asks the tab's own workspace. */
     isMeshMemberTab(tabId: string): boolean {
       void version;
       const ws = meshWorkspaceForTab(tabId);
-      return !!ws && membersOf(ws).some((m) => m.tabId === tabId);
+      return !!ws && localMembersOf(ws).some((m) => m.tabId === tabId);
     },
 
     // ─── MCP tool: listBridgedPeers ───────────────────────────────────────────
@@ -626,8 +880,9 @@ function createAgentMeshStore() {
       }
       const peers = membersOf(ws)
         .filter((m) => m.tabId !== tabId)
-        .map((m) => ({ handle: m.tabId, role: m.role, cwd: m.cwd, purpose: m.purpose, live: m.live }));
-      return { workspace: ws.name, you: tabId, peers };
+        .map((m) => ({ handle: m.tabId, role: m.role, ...(m.workspace ? { workspace: m.workspace } : {}), cwd: m.cwd, purpose: m.purpose, live: m.live }));
+      const linked = meshWorkspacesOf(ws);
+      return { workspace: ws.name, ...(linked.length > 1 ? { linkedWorkspaces: linked.map((w) => w.name) } : {}), you: tabId, peers };
     },
 
     // ─── MCP tool: listTopics ─────────────────────────────────────────────────
@@ -870,7 +1125,7 @@ function createAgentMeshStore() {
 
       // Hourly topic-lifecycle sweep for long-running sessions (rehydrate covers app start).
       const sweepInterval = setInterval(() => {
-        for (const wsId of routers.keys()) sweepTopics(wsId);
+        for (const wsId of meshRepresentatives()) sweepTopics(wsId);
       }, TOPIC_SWEEP_INTERVAL_MS);
       unlisteners.push(() => clearInterval(sweepInterval));
     },
@@ -878,12 +1133,11 @@ function createAgentMeshStore() {
     /** Rebuild routers (and their topic registries) from persisted state after load. */
     rehydrate() {
       let count = 0;
-      for (const ws of workspacesStore.workspaces) {
-        if (!ws.bridge_all) continue;
-        const router = routerFor(ws.id);
-        if (!router) continue;
+      for (const wsId of meshRepresentatives()) {
+        const ws = getWorkspace(wsId);
+        if (!ws || !routerFor(wsId)) continue;
         for (const m of membersOf(ws)) ensureMember(m.tabId);
-        sweepTopics(ws.id);
+        sweepTopics(wsId);
         count++;
       }
       if (count) { bump(); logInfo(`agentMesh: rehydrated ${count} mesh workspace(s)`); }
@@ -895,6 +1149,8 @@ function createAgentMeshStore() {
       // The shared delivery controller is torn down once by +layout, not per store.
       loopCtl.reset();
       routers.clear();
+      topicHome.clear();
+      lastKnown.clear();
       primed.clear();
       stage.clear();
       autoRechecked.clear();
