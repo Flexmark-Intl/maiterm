@@ -148,8 +148,9 @@ See [Agent Bridge](/features/agent-bridge/) for the full feature.
 | `listTasks` | List the project's tasks, grouped by workstream — this tab's or the whole workspace, narrowed to what's *ready to start*, ranked and bounded |
 | `createTasks` | Create a batch of tasks, optionally into a named workstream |
 | `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, and an appended note |
+| `deleteTasks` | Remove rows or whole workstreams for good — never another tab's unfinished work, nor a task something unfinished still waits on |
 
-Three batched tools over one list you and your agent both edit. There is deliberately no delete tool — an agent may mark a task done or *retract* one it filed by mistake, only a human removes a row. See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
+Four batched tools over one list you and your agent both edit. Work an agent filed by mistake is normally *retracted* to Dropped, which you can reverse; deleting is for rows that should never have existed, and it is [guarded](/features/tasks/#deleting-is-guarded). See [Tasks](/features/tasks/) for the full feature; it can be switched off entirely in **Preferences → AI Agents → Task tracking**, which removes both the tools and the instruction that goes with them.
 
 ### Workspace stack
 

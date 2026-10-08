@@ -15,7 +15,7 @@ With a dozen agents running, what you lose isn't any single answer — it's trac
 
 ## Rules
 
-A rule is a **condition**, a set of **guards**, and a **sequence** of steps. The checkpoint rule that ships with it is the worked example: *when context reaches 55%, tell the agent to bring its docs, memory, code comments and tasks up to date; when that turn ends, tell it to prepare for compaction; when that turn ends, send `/compact`* — waiting for each step to genuinely land before sending the next, rather than firing three directives into a busy tab.
+A rule is a **condition**, a set of **guards**, and a **sequence** of steps. The checkpoint rule that ships with it is the worked example: *when context reaches 55%, tell the agent to prepare for compaction by bringing its docs, memory, code comments and tasks up to date; when that turn ends, send `/compact`* — waiting for each step to genuinely land before sending the next, rather than firing both into a busy tab.
 
 Conditions fire on **semantic state**, not on terminal output (that's what [triggers](/features/triggers/) are for):
 
@@ -48,7 +48,7 @@ Guards are **human-only**. The supervisor agent can propose changes to a rule's 
 
 | Rule | What it does |
 |------|--------------|
-| **Checkpoint before compaction** | At ~55% context, have the agent update its docs, memory, code comments and [task board](/features/tasks/), prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought |
+| **Checkpoint before compaction** | At ~55% context, have the agent update its docs, memory, code comments and [task board](/features/tasks/) to prepare for compaction, then compact — instead of hitting the auto-compact wall mid-thought. One prep step: an earlier version asked twice and cost a turn on "already done" |
 | **Review after commit** | After a commit lands, nudge the agent to have non-trivial work reviewed by a subagent before moving on |
 | **Keep a task list** | A tab doing sustained work with nothing on the [maiTerm board](/features/tasks/) gets nudged to record it |
 
@@ -73,7 +73,7 @@ With Overlord enabled, a **♔ Overlord** row appears above the workspace list i
 - **Board** — the [task board](/features/tasks/) for the whole window, indexed by workstream rather than by workspace. Drag a card between lanes, or onto a workstream in the index to move it to that job; `Escape` cancels a drag mid-flight.
 - **Ledger** — a verbatim record of every directive sent: which tab, which rule (or you, or the agent), the exact bytes, and what came of it. Because injections are by design indistinguishable from you typing, this is the only way to reconstruct who told a project to do something at 3am.
 
-**You're never asked the same question twice.** When a tab hits a decision only you can make, it asks you directly — on screen, where you can answer it — *and* files the fact with Overlord. The supervisor's only possible move on a card like that would be to put the same question to you a second time, in a transcript you'd then have to leave anyway to answer the original. So those cards stay on the deck and out of the agent's queue: the card carries **Open tab** and says why there's no second prompt. Everything the supervisor can actually *do* something about — a blocked tab, a timed-out step, an unanswered directive — still reaches it, because fixing one before you get to the board is most of the point of running a supervisor.
+**You're never asked the same question twice.** Every question has exactly one asker. By default that's the tab: when it hits a decision only you can make, it asks you directly — on screen, where you can answer it — and that prompt is already on your board, in the [Loom](/features/loom/) and on your phone. So the supervisor agent never repeats it or relays it: its copy would land in a transcript you'd then have to leave anyway to answer the original. A card about such a tab carries **Open tab** and says why there's no second prompt. Everything the supervisor can actually *do* something about — a blocked tab, a timed-out step, an unanswered directive — still reaches it, because fixing one before you get to the board is most of the point of running a supervisor. If you'd rather the supervisor be the asker, see [letting the agent answer escalations](#letting-the-agent-answer-escalations).
 
 **A directive nobody will answer can be let go.** A tab that owes an answer is out of reach — no rule fires at it and the supervisor can't drive it — until it replies or the 15 minutes run out. When you can see no reply is coming, **Release** stops the wait at once: it sits beside *awaiting reply* in the agent's chat header in the [Loom](/features/loom/), and on the unanswered-directive card in Triage. A reply that turns up afterwards is not collected, and the unanswered-directive card goes with the directive it described. A wait a rule is running as one of its own steps isn't yours to release — that sequence ends on its own timeout.
 
@@ -122,20 +122,30 @@ Clicking the Overlord row creates the Overlord workspace if it doesn't exist yet
 | `driveTab` | Inject a directive into another tab in this window, with your authority |
 | `releaseDirective` | Stop waiting on a tab's answer to an earlier directive, so it can be driven again — the same thing as **Release** on the deck |
 | `getTabPrompt` / `answerTabPrompt` | See what a tab is stopped at, and answer it |
-| `proposeRuleChanges` | Propose rule edits for you to approve or reject |
+| `proposeRuleChanges` | Propose rule edits, or entries for its [playbook](#letting-the-agent-answer-escalations), for you to approve or reject |
 | `archiveTab` / `closeTab` / `deleteArchivedTab` | Put a finished session away — one tab or a list of them in a single call |
 | `recoverTab` / `resumeTab` / `resumeWorkspace` | Get a tab responding again, whatever state it's in |
 
-Supervised agents — every other agent tab in the window — get one tool in return, `replyToOverlord`, to report ready, acknowledge a finished directive, or escalate something that needs a human.
+Supervised agents — every other agent tab in the window — get one tool in return, `replyToOverlord`, to report ready, acknowledge a finished directive, or escalate a problem. A decision only you can make is asked of you directly, unless you've [handed those to the supervisor](#letting-the-agent-answer-escalations).
 
 A few things worth knowing about how it behaves:
 
 - **It goes through the same door the rules do.** `driveTab` is one injection tool with identical guards for both callers; the agent gets no privileged path, cannot race a sequence a rule is already running, and everything it sends lands in the same ledger.
 - **Cleanup arrives as a list, so it's sent as one.** Pointing the supervisor at a window full of finished sessions used to cost a model turn per tab. Archiving, closing and deleting take a list of tabs in one call — but batching is transport, not permission: every tab still goes through its own quiet-window check and its own ledger entry, a refusal stops that tab rather than the batch, and the reply is clean only when *every* row succeeded.
 - **Refusals are structured and specific.** "The tab is at a permission prompt" and "a rule owns this tab right now" call for opposite responses, so the refusal names which and the agent is told not to retry the ones retrying can't fix.
-- **It answers routine prompts, and escalates the rest.** Approvals in service of work already underway are its to make; anything destructive or irreversible, anything touching money, credentials, production or an external party, and any question about what you actually *want* goes to you instead.
+- **It answers routine prompts, and leaves the rest to you.** Approvals in service of work already underway are its to make, guided by your playbook; anything destructive or irreversible, anything touching money, credentials, production or an external party, and any question about what you actually *want* is yours. It neither answers nor repeats one of those — the prompt is already waiting for you on the board, in the Loom and on your phone.
 - **It reaches tabs the engine can't type into** — suspended, archived, in a suspended workspace, or on the far end of an SSH connection.
-- **Rule changes always ask.** `driveTab` is pre-approved because its guards are mechanical; `proposeRuleChanges` always prompts you, and guards aren't proposable at all.
+- **Rule changes always ask.** `driveTab` is pre-approved because its guards are mechanical; `proposeRuleChanges` always prompts you — playbook entries included — and guards aren't proposable at all.
+
+### Letting the agent answer escalations
+
+**Preferences → Overlord → Overlord agent answers escalations** hands the supervisor the asking. It's **off by default**, and only counts while Overlord is on.
+
+Turned on, supervised tabs bring the decisions they'd have asked you about to the supervisor instead: they escalate and wait, rather than also prompting you. The supervisor answers each one with `driveTab`, and its card on the deck clears once it has. It asks you only when its playbook doesn't settle a consequential call — the one case where it may, because then nobody else is asking. A card stays answerable by you too: **Open tab** and answer it yourself.
+
+**The playbook** is your standing answers, one per line — *Dependency installs and lockfile updates: approve*, *Never push to main without asking me*. Edit it in **Preferences → Overlord → Overlord playbook**, shown whenever Overlord is on; the supervisor follows it when it answers routine prompts in either mode. When it does have to ask you, it can propose your answer as a new entry, which reaches you through the same approval dialog as a rule change. Nothing is added without your approval, and neither the switch nor the playbook can be changed by an agent.
+
+Flipping the switch re-primes the supervisor with the matching instructions. A supervised tab picks the change up when its session next starts.
 
 ## Scope
 

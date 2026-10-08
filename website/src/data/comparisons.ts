@@ -174,14 +174,14 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Agents talking to each other',
         maiterm:
-          'Mesh: every agent in a workspace addresses any other by role, across repositories, with topics and loop caps.',
+          'Mesh: every agent in a workspace — or in several linked workspaces — addresses any other by role, across repositories, with topics and loop caps.',
         theirs:
           'Agent spawning: a lead agent spawns others, even in a different harness, waits for them and collects the result.',
       },
       {
         dimension: 'Coming back later',
         maiterm:
-          'Follow-ups: the agent schedules its own next prompt into its own tab — at a time, when a service comes up or stops, when a task ends, or when a check script it wrote (and you approved) passes. Held by maiTerm, so it survives a restart, and an exited agent is relaunched to receive it.',
+          'Follow-ups: the agent schedules its own next prompt into its own tab — at a time, when a service comes up or stops, when a task ends, or when a check script it wrote (and you approved) passes — on the SSH host itself, for an agent working remotely. Held by maiTerm, so it survives a restart, and an exited agent is relaunched to receive it.',
         theirs:
           '“Set timer” gives a running agent a delayed prompt, set by you from the command palette.',
       },

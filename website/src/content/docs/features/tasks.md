@@ -23,7 +23,7 @@ BACKLOG   TO-DO   ACTIVE   BLOCKED   REVIEW   DONE      DROPPED
 
 **Backlog is a parking lot, not an inbox.** It's for next month, for future ideas, for the thing you don't want to lose but don't want to think about — and it's exempt from every "is this still in flight?" check, so a deliberately shelved item never ages into a nag. Work you actually intend to start goes in **To-do**, which is where everything new lands. The side panel labels the backlog lane **Parked** for exactly that reason.
 
-**Dropped is retraction, not completion.** An agent that filed work it had misread used to have exactly two exits, and both lie: *Done* claims it finished — and satisfies every dependent, so a task legitimately waiting on the retracted one silently became ready work — while *Backlog* claims it was deliberately deferred, and parked rows are exempt from every staleness check, which makes it a quiet place to hide a mistake. Deletion stays human-only, because an agent tidying away work it didn't understand is unrecoverable. The missing verb was never *delete*, it was **retract**.
+**Dropped is retraction, not completion.** An agent that filed work it had misread used to have exactly two exits, and both lie: *Done* claims it finished — and satisfies every dependent, so a task legitimately waiting on the retracted one silently became ready work — while *Backlog* claims it was deliberately deferred, and parked rows are exempt from every staleness check, which makes it a quiet place to hide a mistake. Deletion is no answer either: it is unrecoverable, and a row someone may still want to see is exactly the one an agent shouldn't tidy away. The missing verb was never *delete*, it was **retract**.
 
 So a dropped row **does not satisfy a dependent** — an agent cannot unblock its own task by dropping the one it was waiting on. The dependent stays blocked, and when an agent reads the board it is told which row it is waiting on and the lane that row is in, so a retraction surfaces as a real question rather than work quietly starting. It is counted separately from *Done*, because "12 done" must never include four tasks nobody did. And it is reversible: a lane, not a delete, so the card stays reachable and you can drag it back out. It sits off the flow for that reason — the steppers walk the six, and reaching *Dropped* is always a deliberate act rather than one click past *Done*.
 
@@ -51,7 +51,7 @@ Now an agent that stops on something only you can settle puts the question **on 
 
 The question appears on the row in the task panel, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them), where a new question rings the phone. Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
 
-Already dealt with it in the agent's own tab? **Dismiss** closes the question without sending the agent anything: the task goes back to Active, and the log says it was handled in the tab.
+Already dealt with it in the agent's own tab? **Dismiss** on the card — **Already handled** on the phone — closes the question without sending the agent anything: the task goes back to Active, and the log says it was handled in the tab.
 
 Moving the task out of Blocked by any other route — a drag on the board, the status chip, the agent itself — also clears the question, so nothing is left asking about work that has moved on.
 
@@ -91,13 +91,14 @@ The same list is editable from your phone: [maiLink](/features/mailink/#what-you
 
 ## What your agent gets
 
-Every agent tab — Claude Code, Codex, local or over SSH — gets three tools:
+Every agent tab — Claude Code, Codex, local or over SSH — gets four tools:
 
 | Tool | Description |
 |------|-------------|
 | `listTasks` | List this project's tasks, grouped by workstream. `scope: 'tab'` for just this tab's work, `'workspace'` (default) for the whole project |
 | `createTasks` | Create a batch of tasks, optionally into a named workstream |
 | `updateTasks` | Update a batch — status, title, detail, workstream, assignee, dependencies, an appended note, and a [question for you](#when-an-agent-stops-on-a-question) |
+| `deleteTasks` | Remove rows for good — by id, or a whole workstream by name — within [the limits below](#deleting-is-guarded) |
 
 They're batched to keep both round trips and token cost down, and every call is scoped to the **calling tab's workspace**, so an agent can never read or write another project's list.
 
@@ -119,7 +120,16 @@ What doesn't happen is one agent typing into another agent's terminal. A tab can
 
 The reply says which of those happened, in words. "Nobody was told" isn't a failure — the row is assigned, it's on the board, it's on the target's panel — but the caller is told so, because the alternative is an agent that believes it delegated the work and stops tracking it.
 
-**There is deliberately no delete tool.** An agent may mark a task done, or *retract* one to **Dropped** when it filed work it had misread; only a human removes a row. An agent tidying away work it didn't understand is unrecoverable, and between those two it has an honest exit either way — which is why the tool description tells it to drop such a task rather than close it as done. When you *do* delete a row, the owning agent is told — otherwise it would restate the task on its next list re-send and the deletion would quietly undo itself.
+### Deleting is guarded
+
+An agent that filed work it had misread has an honest exit: *retract* it to **Dropped**, which you can reverse — and the tool description tells it to do that rather than close the row as done. Some rows, though, should simply never have existed: a job created by mistake, duplicates, a list it is replacing. For those an agent can call `deleteTasks`, on single rows or on a whole workstream at once (every row in it, then the workstream itself). It isn't undoable, so a retraction someone may still want to see stays a retraction.
+
+Two things are refused, and when either is, **nothing in the call is deleted**:
+
+- **Another tab's unfinished work.** Its agent would restate the row on its next update, and wouldn't be told it had gone. An agent can delete its own rows, unassigned ones, and finished or dropped rows on any tab.
+- **A task something unfinished still waits on.** Deleting it would release the dependent as though the prerequisite had been done. The agent has to remove the dependency first, or delete the dependent in the same call. A prerequisite that is already done doesn't hold anything up, so it can go.
+
+When *you* delete a row, the owning agent is told — otherwise it would restate the task on its next list re-send and the deletion would quietly undo itself.
 
 ### Agents pick it up on their own
 

@@ -152,6 +152,8 @@ Because a released thread is no longer bound, it's also back to being mention-ga
 
 If a reply arrives while the agent is showing you something to decide — a multiple-choice question or a permission prompt — it isn't delivered yet. Those prompts are selection UIs, not text boxes, so a message typed into one would pick an option on your behalf and then vanish, taking both your answer and the message with it. maiTerm holds the message instead and delivers it the moment you've answered. These holds are silent: they clear in seconds, so they don't raise a notification or a reply on the thread the way a capacity or offline hold does.
 
+The same goes for anything you're halfway through typing. If a Claude Code agent's input box holds a draft of yours when a message arrives, the message waits until you've sent or cleared it, because the Enter that delivers it would submit your draft too. A draft can sit for hours, so this hold isn't silent: you get one notification for it, and nothing is posted to the thread.
+
 ### You're told when a reply can't be delivered
 
 If someone `@mentions` the bot on a bound thread while its agent session isn't running, maiTerm doesn't silently swallow the message. It raises a notification — a toast or OS notification per your [notification mode](/features/agents/), deep-linking to the tab — so you know there's something waiting. The message isn't lost: the backlog is delivered as soon as you resume the session.

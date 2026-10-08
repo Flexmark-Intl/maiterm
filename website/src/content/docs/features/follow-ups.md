@@ -47,7 +47,11 @@ The agent writes the condition as a short script. maiTerm runs it on a schedule,
 
 A script runs every 15 seconds to once a day (every 60 seconds by default), for up to a minute a run. Each run starts in the tab's folder with your login `PATH` but **not** your environment — no agent credentials, no account tokens — and everything it starts is killed when it ends, so a watch script can never leave a process running. It can keep state between runs in a file maiTerm gives it, which is how "changed since last time" is written.
 
-Watch scripts run on your computer, so they're refused in a tab running over SSH, where the condition would be on the other machine.
+### From an SSH tab, on the host
+
+An agent working over SSH is waiting on something on *that* machine, so its watch script runs **there**, not on your computer. Each run goes over the connection maiTerm's [SSH bridge](/features/agents/#ssh-mcp-bridge) already holds open to the host — no new login — and keeps the same rules on the far side: it starts in the tab's folder on the host, with that user's login `PATH` and a minimal environment, keeps its state file there, and everything it starts is killed when the run ends.
+
+The approval card names the machine — the folder reads as `user@host:folder` — and an approval is for that script in that folder on that host. If the host can't be reached for a run, that counts as waiting, not as the script breaking.
 
 ### You approve each script first
 
@@ -55,7 +59,7 @@ Every command an agent normally runs passes its own permission check at the mome
 
 A script waiting for you is a question, so it's asked where your other questions are: a card titled **Allow this watch script?** in the [Loom's Decisions](/features/loom/#decisions), in the tab's task panel, and at the top of the tab's follow-ups list. It's the same card everywhere, and answering it in one place answers it in all of them. A notification — **Allow a watch script?** and the tab's name — announces it, and inside maiTerm that notice stays up until the script is answered anywhere, your phone included; click it to open Decisions. Several scripts waiting share one notice.
 
-The card shows the script **exactly** as it will run — the whole thing, wrapped, never clipped — with its name and schedule above it, and below it the folder it runs in, how long a run may take, and its line and character count. **What the agent is told when it passes** opens to show the message it will be woken with. Then **Allow** or **Don't allow**. A card ignores clicks in its first moments on screen, and for a moment after anything above it moves it, so a card that slides under your pointer as you click can't be answered by accident.
+The card shows the script **exactly** as it will run — the whole thing, wrapped, never clipped — with its name and schedule above it, and below it the folder it runs in (and the host, for an SSH tab), how long a run may take, and its line and character count. **What the agent is told when it passes** opens to show the message it will be woken with. Then **Allow** or **Don't allow**. A card ignores clicks in its first moments on screen, and for a moment after anything above it moves it, so a card that slides under your pointer as you click can't be answered by accident.
 
 **Don't allow** means it will not run, and the agent is told so — the follow-up comes due saying you declined the script, rather than vanishing and leaving the agent waiting on a check nobody is running.
 

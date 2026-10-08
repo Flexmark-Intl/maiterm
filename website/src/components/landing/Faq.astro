@@ -41,7 +41,11 @@ const FAQS = [
   },
   {
     q: 'Do my agents get to change things without me?',
-    a: 'Only what you allow. Overlord ships in propose mode: every directive is held for your approval showing the exact words it would send, and your own keystrokes abort a sequence in progress. The rule guards are human-only and cannot be edited by an agent. Agents can mark a task done but there is deliberately no delete tool. A script an agent asks maiTerm to run for it later runs only once you have approved that exact script.',
+    a: 'Only what you allow. Overlord ships in propose mode: every directive is held for your approval showing the exact words it would send, and your own keystrokes abort a sequence in progress. The rule guards are human-only and cannot be edited by an agent. On the task board an agent retracts misread work to a lane you can reverse, and the rows it may delete outright never include another tab\'s work in progress or a task something unfinished still waits on. A script an agent asks maiTerm to run for it later runs only once you have approved that exact script. And nothing maiTerm types for you — a message from your phone or a peer agent, a chat pickup — is sent on top of something you have half-typed into a Claude Code agent\'s input box: it waits until you have sent or cleared it.',
+  },
+  {
+    q: 'What happens if I rename or move a project folder?',
+    a: 'Use Move project… on the workspace and nothing is left behind. maiTerm pauses the agents working in the folder, moves it, and points everything at the new location — tabs, services, follow-ups, and each agent\'s own record of the project: Claude Code\'s sessions, memory and folder trust, Codex\'s trust and threads, Gemini\'s registry — then resumes each agent in the same session. Moved it outside maiTerm? A tab whose folder has gone opens in your home folder without resuming its agent there, and asks you where the folder went.',
   },
   {
     q: 'Claude Code can already schedule things. Why follow-ups?',

@@ -84,7 +84,7 @@ const EVERYTHING = [
   },
   {
     title: 'Workspaces per project',
-    body: 'Group terminals by project, each with its own pane layout and context. Suspend the inactive ones to free resources; they resume with full state. Move a workspace or a single tab to another window and everything in it keeps running.',
+    body: 'Group terminals by project, each with its own pane layout and context. Suspend the inactive ones to free resources; they resume with full state. Move a workspace or a single tab to another window and everything in it keeps running — or move the project folder itself, and its tabs, services and agents’ sessions and memory follow it.',
   },
   {
     title: 'Hand a workspace to a teammate',
@@ -469,9 +469,10 @@ const EVERYTHING = [
         <p class="ln-lead">
           Open it with <code>Cmd+Shift+E</code>: add, retitle, annotate, park, reassign, or hand
           a row over with <strong>Do it</strong>. The agent sees every one of those edits
-          through the same tools it writes with — and none of the three lets it delete a row.
-          Work it misread gets <em>retracted</em> to Dropped, which you can reverse; removing
-          one for good stays yours.
+          through the same tools it writes with. Work it misread gets <em>retracted</em> to
+          Dropped, which you can reverse. It can delete rows that should never have existed —
+          but never another tab's work in progress, or a task something unfinished still
+          waits on.
         </p>
         <a class="ln-cta-link" href="/features/tasks/">How the board works</a>
       </div>
@@ -499,10 +500,16 @@ const EVERYTHING = [
       </p>
       <p class="ln-lead">
         A rule is a condition and a sequence: <em>when context reaches 55%, tell the agent to
-        update its docs, then to prepare for compaction, then <code>/compact</code></em> —
+        bring its docs and tasks up to date for compaction, then <code>/compact</code></em> —
         waiting for each step to genuinely land before sending the next.
         <strong>No model sits in that loop</strong>, so it is predictable and costs nothing to
         run.
+      </p>
+      <p class="ln-lead">
+        And it never asks you what a tab is already asking you. Each question has one asker:
+        the tab by default — or, if you switch it on, the optional supervisor agent, answering
+        tabs' decisions from a <strong>playbook of your standing answers</strong> and coming to
+        you only when the playbook doesn't cover a call that matters.
       </p>
 
       <div class="ln-cards">
@@ -552,6 +559,11 @@ const EVERYTHING = [
           enormous context and re-reads it turn after turn. A mesh keeps each agent's context
           small and sharply scoped, and they trade short addressed messages instead of
           duplicating each other's worlds.
+        </p>
+        <p class="ln-lead">
+          Keep each repository in a workspace of its own and <strong>link their meshes</strong>:
+          the agents work as one team — one roster, one set of topics — while the sidebar stays
+          sorted by project.
         </p>
         <a class="ln-cta-link" href="/features/mesh-workspace/">How mesh works</a>
       </div>
@@ -730,7 +742,8 @@ const EVERYTHING = [
       </div>
       <p class="ln-note band-note">
         Part of Overlord, so it is live while Overlord is on. Claude Code and Codex alike, and
-        it survives maiTerm restarting.
+        it survives maiTerm restarting. An agent working over SSH has its watch script run on
+        that host, where the thing it is waiting for is.
       </p>
       <a class="ln-cta-link" href="/features/follow-ups/">How follow-ups work</a>
     </div>

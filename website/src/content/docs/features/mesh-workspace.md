@@ -3,7 +3,7 @@ title: Mesh Workspace
 description: Turn a whole workspace into a mesh so every named agent in it can message any other by role — addressed, routed, and loop-controlled, with you in the cockpit.
 ---
 
-[Agent Bridge](/features/agent-bridge/) connects exactly two agents. A **Mesh Workspace** generalizes that to N:M: flip a whole workspace into a mesh and every named agent tab in it can message any other agent by role name. Your frontend agent can ask the backend agent a question, the backend can loop in the infra agent, and the infra agent can reply to both — all without you copy-pasting between panes, and all where you can watch it happen.
+[Agent Bridge](/features/agent-bridge/) connects exactly two agents. A **Mesh Workspace** generalizes that to N:M: flip a whole workspace into a mesh — or [link several](#linking-meshes-across-workspaces) — and every named agent tab in it can message any other agent by role name. Your frontend agent can ask the backend agent a question, the backend can loop in the infra agent, and the infra agent can reply to both — all without you copy-pasting between panes, and all where you can watch it happen.
 
 ## Why a mesh beats one giant agent
 
@@ -19,6 +19,8 @@ A mesh inverts that. Each agent is small and **purpose-trained on its own reposi
 ## Addressed, never broadcast
 
 There is no broadcast. Every message is **addressed** to a specific recipient and routed off a stable handle, so renaming an agent never misroutes a message. An unknown or ambiguous recipient is a hard error that lists the current roster, never a silent drop — an agent always knows whether its message landed.
+
+A message for a Claude Code agent whose input box holds something you're halfway through typing waits in its queue until you've sent or cleared it, so your draft is never submitted along with a peer's message.
 
 ### Renaming an agent mid-flight
 
@@ -76,6 +78,16 @@ After a restart, the mesh **auto-rechecks** readiness and offers to wake or re-i
 A mesh can be handed to a teammate with [Workspace Share](/features/workspace-share/#mesh-workspaces): the workspace arrives as a mesh, every tab keeps its role name and purpose, and their agents join each other as they start. The conversations yours had stay with you.
 
 You can also ready a whole mesh **from your phone**: mesh workspaces are badged in the [maiLink](/features/mailink/) inbox with a one-tap **Initialize all** that triages each member the same way — register the running-but-unregistered, resume the exited, leave the live ones alone.
+
+## Linking meshes across workspaces
+
+Sometimes you want projects apart in the sidebar — one workspace per repository — while their agents still work as one team. Right-click a workspace and choose **Link mesh with ›**, then another workspace in the same window; a plain workspace picked there becomes a mesh by being linked. Links add up: link A with B, then B with C, and all three are one mesh. A linked workspace's badge reads **MESH ⇄**.
+
+Linked, they share **one roster and one set of topics**, and loop control applies across the lot. Every peer is tagged with its workspace — in the roster an agent reads, in its opener and on every message — and role names must be unique across the whole mesh, or an address is reported as ambiguous rather than guessed. Agents already in the mesh are told once who they can now reach; the cockpit shows the combined mesh, grouped by workspace.
+
+**Unlink mesh** (or **Unlink** in the cockpit) takes one workspace back out; it stays a mesh of its own, and each side keeps the topics its own agents started. Its agents are told who they've lost. The stage view, the readiness check and the phone's **Initialize all** stay per workspace.
+
+A link only spans one window. Duplicating a workspace doesn't carry its link, since the copy beside its source would put every role on the mesh twice.
 
 :::note
 Mesh Workspace builds on the same [agent integration](/features/agents/) pipeline as [Agent Bridge](/features/agent-bridge/). It needs supported agents (Claude Code or Codex) running in the tabs you want to mesh, and works over SSH through the same reverse-tunnel MCP bridge.

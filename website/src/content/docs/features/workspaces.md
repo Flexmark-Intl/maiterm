@@ -19,6 +19,7 @@ Group your terminals by project. Each workspace has its own pane layout, tabs, a
 - **Recent workspaces** — collapsible section, toggleable in preferences
 - **Workspace notes** — markdown notes scoped to the whole workspace
 - **Workspace stack** — declare the services the project runs (dev server, API, database) and maiTerm runs them in tabs it owns, under a **Stack** section on the workspace row. See [Workspace Stack](/features/stack/)
+- **Move project** — right-click a workspace and choose **Move project…** to move its folder on disk; every tab, service and agent session that pointed at it follows. See [Moving a project folder](#moving-a-project-folder)
 - **Share a workspace** — right-click it and choose **Share workspace…** to save it as a file someone else can open: the same tabs in the same repositories, cloned for them where they don't have them, without your accounts or scrollback. See [Workspace Share](/features/workspace-share/)
 - **Overlord exemption** — when [Overlord](/features/overlord/#taking-a-tab-off-the-board) is on, an eye-off button on the workspace row takes every tab in it out of supervision; it stays visible while the exemption is set
 - **Suspend & resume** — suspend inactive workspaces to free resources (PTYs are killed, memory released). Resuming brings back exactly the tabs that had a live terminal when you suspended — maiTerm respawns and auto-resumes just those (with a progress modal for larger resumes), so a 20-tab workspace that had 3 agents running comes back with those 3 live, without waking tabs you never started. Auto-suspend after configurable timeout (15/30/60 min). A suspended workspace can also be woken from your phone with **Resume workspace** in [maiLink](/features/mailink/#managing-tabs-and-workspaces-from-the-phone)
@@ -43,6 +44,23 @@ Windows tend to be sorted by what you're paying attention to, and that changes. 
 The terminals keep running through the move: an agent mid-turn carries on, a dev server stays up, an SSH session stays connected and keeps its MCP bridge. A workspace takes its [stack](/features/stack/) services and its [tasks](/features/tasks/) with it.
 
 A few things stay put. Only terminal and editor tabs can cross to another window — diff and board tabs can't — and an editor with unsaved changes has to be saved first. The [Overlord](/features/overlord/) workspace belongs to its window. An [agent bridge](/features/agent-bridge/) whose partner stays behind in the other window is disconnected.
+
+### Moving a project folder
+
+Renaming or moving a project folder normally strands everything that knew it by path: tabs reopen in a folder that isn't there, and an agent resumed in the new location starts with none of its history, because Claude Code, Codex and Gemini all key their per-project state by the folder's path.
+
+Right-click a workspace and choose **Move project…**, then pick where the folder should go. Before anything happens, the dialog lists what will change: the folder renamed on disk, how many tabs and services will point at the new location, the agent state that will be carried, and which running tabs will be restarted — with any agent still mid-turn named, because it will be interrupted. Then:
+
+- **Agents in the folder are paused first, in every window.** A running agent keeps writing to the path it opened, and would recreate the old folder behind the move. Only once every window has confirmed is the folder moved; if any window doesn't answer, nothing moves and every paused tab is woken again.
+- **Everything that pointed at it follows** — tabs, open and archived, editor and diff tabs, [stack](/features/stack/) services, [follow-ups](/features/follow-ups/) and the watch-script approvals that go with them.
+- **So does each agent's own record of the project** — Claude Code's sessions, memory, folder trust and prompt history (for every [account](/features/accounts/)), Codex's trust and threads, Gemini's project registry and trust.
+- **The paused tabs come back in the new folder**, each resuming its agent in the same session.
+
+The folder stays on the same disk: to move one to another volume, move it yourself and let maiTerm find it (below). SSH tabs and remote folders aren't covered, and neither are agents running in another terminal app, which keep writing under the old path.
+
+#### When a folder has gone missing
+
+If a folder was moved outside maiTerm, a tab whose saved folder is gone opens in your home folder — a tab always opens — but its agent isn't resumed there, where it would find nothing, and the folder it wanted is kept rather than saved over with home. maiTerm asks **Locate moved project**: where the folder is now, suggesting likely matches nearby. Pick one, or browse to it, and **Use this folder** points everything at it and restarts those tabs in the right place. A suggestion is never applied on its own, since a wrong guess would run every agent in the wrong project.
 
 ## Panes
 
