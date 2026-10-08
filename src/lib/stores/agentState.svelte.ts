@@ -120,6 +120,10 @@ function createAgentStateStore() {
   const asks = new Map<string, string[]>();
   const answers = new Map<string, number>();
   const answered = new Set<string>();
+  // Whether the MAIN agent's turn is open: a prompt submitted and no Stop since. `state` can't
+  // say — a background subagent's tool calls (a review it launched) set the tab 'active' after
+  // the parent's turn has ended. Absent: never seen a prompt or a Stop this run.
+  const mainTurnOpen = new Map<string, boolean>();
 
   function pendingAsks(tabId: string): number {
     return (asks.get(tabId)?.length ?? 0) - (answers.get(tabId) ?? 0);
@@ -231,6 +235,12 @@ function createAgentStateStore() {
     /** Get Claude state for a tab, if a Claude session is active there. */
     getState(tabId: string): AgentTabSession | undefined {
       return sessions.get(tabId);
+    },
+
+    /** The tab reads 'active' only because of a background subagent: the main agent's own turn
+     *  has ended (Stop since its last prompt). False when unknown. */
+    onlySubagentsActive(tabId: string): boolean {
+      return sessions.get(tabId)?.state === 'active' && mainTurnOpen.get(tabId) === false;
     },
 
     /** Is this keystroke answering a permission dialog (rather than the human taking the
@@ -349,6 +359,7 @@ function createAgentStateStore() {
         // at an empty prompt. Compaction is the exception — it fires DURING a turn, so the
         // agent really is working, and the next tool event would only have to undo it.
         const started: AgentState = source === 'compact' ? 'active' : 'idle';
+        mainTurnOpen.set(tab_id, started === 'active');
         // Only a compaction is activity; a start or resume is not (see `updatedAt`).
         setState(tab_id, session_id, started, undefined, undefined, runtime, source === 'compact', started === 'idle');
         // ...and mark that idle READ: "idle + unread" is the finished-something-you-have-not-
@@ -369,6 +380,7 @@ function createAgentStateStore() {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
         removeSession(tab_id, session_id);
+        mainTurnOpen.delete(tab_id);
         setVariable(tab_id, 'claudeAction', '');
         logInfo(`Claude state: session ended → tab ${tab_id.slice(0, 8)} removed`);
       });
@@ -377,6 +389,7 @@ function createAgentStateStore() {
       const u3 = await listen<{ session_id: string; tab_id: string | null; runtime?: string; gate_held?: boolean }>('agent-hook-stop', (e) => {
         const { session_id, tab_id, gate_held } = e.payload;
         if (!tab_id) return;
+        mainTurnOpen.set(tab_id, false);
         // A background subagent's permission prompt outlives the parent's turn ending
         // (claude_code/gate.rs). Rust keeps the tab in permission; so does this mirror.
         if (!gate_held) {
@@ -390,6 +403,7 @@ function createAgentStateStore() {
       const u4 = await listen<{ session_id: string; tab_id: string | null; runtime?: string }>('agent-hook-user-prompt', (e) => {
         const { session_id, tab_id } = e.payload;
         if (!tab_id) return;
+        mainTurnOpen.set(tab_id, true);
         clearAsks(tab_id);
         // Clear tool state — new prompt means previous operation ended (possibly interrupted)
         setState(tab_id, session_id, 'active', undefined, undefined, runtimeOf(e.payload));

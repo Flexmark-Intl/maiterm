@@ -197,9 +197,9 @@ interface RitualRun {
    *  including during the wait BETWEEN steps. */
   lastInjectionAt: number;
   /** Fired by the HUMAN (the composer's rule bolt, the phone's fireRule), not by a condition.
-   *  They asked for it now: a busy agent doesn't hold it (a Claude agent takes a message typed
-   *  mid-turn), nor does output that never goes quiet — a background subagent's review keeps
-   *  the screen repainting while the agent itself waits (Darryl, 2026-10-08). */
+   *  It still waits for the main agent's turn to end, but a background subagent (a review it
+   *  launched) doesn't count as the turn, and output that never goes quiet — that subagent
+   *  repainting the screen — doesn't hold it either (Darryl, 2026-10-08). */
   humanFired: boolean;
 }
 
@@ -981,11 +981,19 @@ function createOverlordStore() {
 
   // ── Ritual executor (§7) — a gated sequence state machine ──────────────────
 
-  async function waitInjectable(run: RitualRun, guards: OverlordGuards, step: OverlordStep): Promise<boolean> {
-    // A human-fired prose step goes into a mid-turn Claude agent (it reads it in that turn); a
-    // slash command still waits for the turn to end — it is a control, not something to queue.
-    const midTurnOk = run.humanFired && step.kind !== 'slash' && workspacesStore.getTabRuntime(run.tabId) === 'claude';
-    const allowed = midTurnOk ? [...(guards.agent_state ?? ['idle']), 'active'] : (guards.agent_state ?? ['idle']);
+  /** The state a ritual waits on. For a human-fired run, a tab that reads 'active' only because
+   *  a background subagent is working (its review, say) is between turns: the main agent's turn
+   *  ended, and a /compact there is what the human asked for (Darryl, 2026-10-08). */
+  function ritualState(run: RitualRun): AgentState | undefined {
+    const st = mappedState(run.tabId);
+    return run.humanFired && st === 'active' && claudeStateStore.onlySubagentsActive(run.tabId) ? 'idle' : st;
+  }
+
+  async function waitInjectable(run: RitualRun, guards: OverlordGuards): Promise<boolean> {
+    // Every step waits for the main agent's turn to end (Darryl: "wait for turn to end, so long
+    // as a subagent is not seen as still in turn" — `ritualState`). A human-fired run doesn't
+    // also wait for the screen to go quiet: a background subagent keeps it repainting.
+    const allowed = guards.agent_state ?? ['idle'];
     const quiet = run.humanFired ? 0 : (guards.min_quiet_ms ?? 3000);
     const t0 = Date.now();
     while (Date.now() - t0 < INJECTABLE_WAIT_CAP_MS) {
@@ -994,7 +1002,7 @@ function createOverlordStore() {
       // tab now, even if their turn already finished (§7). Without this, a human turn
       // between steps gets waited out and the next step steamrolls their conversation.
       if (humanTypedSince(run.tabId, run.lastInjectionAt)) return false;
-      const st = mappedState(run.tabId);
+      const st = ritualState(run);
       const lastOut = terminalsStore.getLastOutputAt(run.tabId) ?? 0;
       const stateOk = run.targetsUnready ? st === undefined : !!st && allowed.includes(st);
       if (stateOk && Date.now() - lastOut >= quiet) return true;
@@ -1015,7 +1023,7 @@ function createOverlordStore() {
     while (Date.now() < deadline) {
       if (run.aborted) return 'aborted';
       if (humanTypedSince(run.tabId, directive.sentAt)) return 'aborted';
-      const st = mappedState(run.tabId);
+      const st = ritualState(run);
       switch (gate.until) {
         case 'turn_end': {
           // Wait for the directive's turn to start, then finish. 'permission' pauses the
@@ -1983,7 +1991,7 @@ function createOverlordStore() {
           ledger(tabId, rule.id, origin, i, step, 'blocked_no_repl');
           return;
         }
-        if (!(await waitInjectable(run, rule.guards, step))) {
+        if (!(await waitInjectable(run, rule.guards))) {
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
         }
@@ -2049,7 +2057,7 @@ function createOverlordStore() {
         // The human's draft in the box would be sent along with the step. `humanTypedSince`
         // only sees keys since the run began; a draft left from before it is read off the screen.
         // Mid-turn the box must read empty outright (noDraft's busy rule).
-        if (!(await noDraft(tabId, mappedState(tabId) !== 'active'))) {
+        if (!(await noDraft(tabId, ritualState(run) !== 'active'))) {
           logInfo(`overlord: "${rule.name}" on ${tabId.slice(0, 8)} stopped — a draft is in the agent's input box`);
           ledger(tabId, rule.id, origin, i, step, 'aborted');
           return;
