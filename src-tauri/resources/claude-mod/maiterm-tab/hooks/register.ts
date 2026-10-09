@@ -200,6 +200,10 @@ async function ensureInbox($: EngineInterface, to: Link): Promise<void> {
 // local tab's transcript is read in place: maiTerm answers 410 and no more are sent.
 
 let appendReports: 'idle' | 'pending' | 'off' = 'idle'
+// Only the first answer can turn the reports off. A local tab says 410 from the start; an ssh tab
+// can be told 410 for a few seconds while its tunnel reconnects (maiTerm re-lists the host's
+// tabs one at a time), and stopping then would end the reports for this whole process.
+let appendAnswered = false
 
 async function reportAppended($: EngineInterface, to: Link): Promise<void> {
   try {
@@ -208,7 +212,8 @@ async function reportAppended($: EngineInterface, to: Link): Promise<void> {
       `http://127.0.0.1:${to.port}/hooks/appended?tab_id=${encodeURIComponent(to.tab)}&session_id=${encodeURIComponent(session)}`,
       { headers: { 'x-claude-code-ide-authorization': to.auth } },
     )
-    appendReports = r.status === 410 ? 'off' : 'idle'
+    appendReports = r.status === 410 && !appendAnswered ? 'off' : 'idle'
+    appendAnswered = true
   } catch {
     appendReports = 'idle'
   }
