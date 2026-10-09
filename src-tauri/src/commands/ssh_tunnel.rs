@@ -933,6 +933,9 @@ pub struct MaitermSkillScripts {
     pub skill_md: String,
     pub setup_statusline: String,
     pub statusline_command: String,
+    /// The maiterm-tab mod's files, (path inside its folder, contents), for the remote copy
+    /// in `~/.maiterm/claude-mod/maiterm-tab` (claude_code/claude_mod.rs).
+    pub claude_mod: Vec<(String, String)>,
 }
 
 #[tauri::command]
@@ -941,6 +944,10 @@ pub fn get_maiterm_skill_scripts() -> MaitermSkillScripts {
         skill_md: crate::claude_code::lockfile::MAITERM_SKILL_MD.to_string(),
         setup_statusline: crate::claude_code::lockfile::STATUSLINE_SETUP_SCRIPT.to_string(),
         statusline_command: crate::claude_code::lockfile::STATUSLINE_PAYLOAD_SCRIPT.to_string(),
+        claude_mod: crate::claude_code::claude_mod::files()
+            .iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect(),
     }
 }
 

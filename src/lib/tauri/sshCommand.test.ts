@@ -36,7 +36,19 @@ describe('buildSshCommand', () => {
 
   it('carries which maiTerm to talk to, so the shared remote config need not name it', () => {
     const cmd = buildSshCommand('ews@nova', '/srv/app', TAB, { port: 28123, auth: 'tok-123' });
-    expect(cmd).toContain(`export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123;`);
+    expect(cmd).toContain(
+      `export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123 CLAUDE_CODE_PLUGIN_DIRS=$HOME/.maiterm/claude-mod/maiterm-tab;`,
+    );
+  });
+
+  it('points the remote claude at the mod only with a bridge to reach', () => {
+    expect(buildSshCommand('ews@nova', '/srv/app', TAB, { port: 28123, auth: 'tok-123' })).toContain('CLAUDE_CODE_PLUGIN_DIRS=');
+    expect(buildSshCommand('ews@nova', '/srv/app', TAB)).not.toContain('CLAUDE_CODE_PLUGIN_DIRS');
+  });
+
+  it('strips the mod variable with the rest of what it baked in', () => {
+    const cmd = buildSshCommand('ews@nova', '/srv/app', TAB, { port: 28123, auth: 'tok-123' });
+    expect(cleanSshCommand(cmd)).toBe('ews@nova');
   });
 
   it('drops a bridge it cannot safely paste into a remote shell', () => {

@@ -263,9 +263,9 @@ pub struct AppState {
     // session, or a stale $MAITERM_TAB_ID). For these, and only these, a SessionEnd that cannot
     // name its own tab must not clear the mapping — it may belong to the OTHER claimant.
     pub contested_agent_sessions: RwLock<HashMap<String, Instant>>, // session_id → last rebind
-    // Claude sessions whose hook events arrive from the maiterm-tab mod (`/hooks?via=mod`),
-    // → when the mod last sent one. Their settings.json hooks still fire beneath the mod, and
-    // their copies are dropped (claude_code/claude_mod.rs).
+    // "<session>\0<event>" → when the maiterm-tab mod last sent that event for that Claude
+    // session (`/hooks?via=mod`). The settings.json hooks still fire beneath the mod, and their
+    // copies of an event it sent moments ago are dropped (claude_code/server.rs hooks_handler).
     pub mod_agent_sessions: RwLock<HashMap<String, Instant>>,
     // Permission dialogs and questions a maiterm-tab mod hook is waiting to be answered on
     // (claude_code/mod_asks.rs): the delivery path that replaces keystrokes for those tabs.

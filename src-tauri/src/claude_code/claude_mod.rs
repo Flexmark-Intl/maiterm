@@ -5,8 +5,9 @@
 //! startup; every tab's shell gets that folder in `CLAUDE_CODE_PLUGIN_DIRS`, so any `claude`
 //! started there loads it. It forwards the hook events the settings.json hooks send
 //! (`lockfile::build_our_hooks`) to `/hooks` with `via=mod` and the tab's id. The server then
-//! drops the settings hooks' anonymous copy of each event for that session, and the
-//! SessionStart/SessionEnd command hooks stand down when the mod has set `MAITERM_VIA_MOD`.
+//! drops the settings hooks' copy of each event the mod just sent, and the SessionStart command
+//! hooks stand down when the mod has set `MAITERM_VIA_MOD`. An ssh host gets the same files
+//! (`files`, copied by the bridge setup) in `~/.maiterm/claude-mod/maiterm-tab`.
 //!
 //! A Claude Code too old for mods ignores the variable, and its settings hooks carry on
 //! exactly as before — that fallback is why both paths exist.
@@ -43,6 +44,12 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../resources/claude-mod/maiterm-tab/hooks/register.ts"),
     ),
 ];
+
+/// The mod's files, for the copy the ssh bridge puts on a remote host (`~/.maiterm/claude-mod/
+/// maiterm-tab`, written by sshMcpBridge.svelte.ts `buildSetupScript`).
+pub fn files() -> &'static [(&'static str, &'static str)] {
+    FILES
+}
 
 /// Where this build installs the mod. Per build flavor (`app_data_slug`), so a dev maiTerm and
 /// the installed one never overwrite each other's copy.

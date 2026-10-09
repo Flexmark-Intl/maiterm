@@ -352,6 +352,33 @@ export async function isRemoteShellForeground(ptyId: string): Promise<boolean> {
 }
 
 /**
+ * Setup-script lines that put the maiterm-tab mod (claude_code/claude_mod.rs) in
+ * `REMOTE_CLAUDE_MOD_DIR`, which an ssh tab's shell names in CLAUDE_CODE_PLUGIN_DIRS
+ * (`buildSshCommand`, the typed export). One folder per ACCOUNT, the same bytes from every
+ * maiTerm of a build, like the rest of this script's per-account files.
+ *
+ * Each file is replaced only when its contents changed: a running Claude reloads the mod on
+ * every write to that folder, and this script runs on every connect. Written beside the target
+ * first (`.new.$$`, so two tabs' setups can't collide) and moved over it whole.
+ */
+function claudeModFiles(files: [string, string][]): string[] {
+  const out = ['__mod="$HOME/.maiterm/claude-mod/maiterm-tab"'];
+  for (const [rel, contents] of files) {
+    // Our own constant paths; anything that could escape the quoting is not ours.
+    if (!/^[A-Za-z0-9._/-]+$/.test(rel) || rel.includes('..')) continue;
+    if (contents.includes('\nMAITERMMODEOF')) continue;
+    const body = contents.endsWith('\n') ? contents : contents + '\n';
+    const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+    out.push(
+      `mkdir -p "$__mod/${dir}"`,
+      `cat > "$__mod/${rel}.new.$$" << 'MAITERMMODEOF'\n${body}MAITERMMODEOF`,
+      `if cmp -s "$__mod/${rel}.new.$$" "$__mod/${rel}"; then rm -f "$__mod/${rel}.new.$$"; else mv -f "$__mod/${rel}.new.$$" "$__mod/${rel}"; fi`,
+    );
+  }
+  return out;
+}
+
+/**
  * Build a shell script for background SSH execution.
  * This runs as a non-interactive command, not through the user's PTY.
  * Sets up: lockfile, MCP entry in ~/.claude.json, hooks in ~/.claude/settings.json.
@@ -435,9 +462,16 @@ function buildSetupScript(
   // none (tmux/su), then fall through silently unless we know BOTH which maiTerm to reach and
   // which tab is asking. Without the port there is nowhere to send it; without the tab id the
   // event cannot be attributed, and a misattributed event is worse than a missing one.
-  const hookGate =
-    "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; " +
-    "[ -n \"$MAITERM_PORT\" ] && [ -n \"$MAITERM_TAB_ID\" ] && { ";
+  const recoverEnv = "{ [ -z \"$MAITERM_TAB_ID\" ] && [ -f ~/.aiterm ] && . ~/.aiterm; } 2>/dev/null; ";
+  const knowsWhere = "[ -n \"$MAITERM_PORT\" ] && [ -n \"$MAITERM_TAB_ID\" ] && { ";
+  const hookGate = recoverEnv + knowsWhere;
+  // Where the maiterm-tab mod runs (the bridge copies it here and the tab's shell points
+  // CLAUDE_CODE_PLUGIN_DIRS at it), it sends every one of these events itself, ahead of these
+  // hooks, and the server drops their copies (hooks_handler: the same event, from the mod,
+  // moments ago). So the others keep posting — should the mod stop, nothing goes missing —
+  // and only SessionStart stands down under it, as the local one does (lockfile.rs): its reply
+  // is the priming, which the mod already put in the session's context.
+  const sessionGate = recoverEnv + "[ -z \"$MAITERM_VIA_MOD\" ] && " + knowsWhere;
 
   // The generic event hook: forward stdin verbatim, ignore the reply.
   // `--data-binary @-` streams the payload straight through — nothing here needs to read it.
@@ -465,7 +499,7 @@ function buildSetupScript(
   // NOTE: no apostrophes inside the single-quoted echo string — one would close the quote.
   // Uses double-quoted JS strings so `${}` is not read as template interpolation.
   const sessionStartCmd =
-    hookGate +
+    sessionGate +
     "MAITERM_IN=$(cat); " +
     "MAITERM_SID=$(printf '%s' \"$MAITERM_IN\" | sed -n 's/.*\"session_id\" *: *\"\\([^\"]*\\)\".*/\\1/p' | head -1); " +
     "MAITERM_PRIME=$(curl -s --connect-timeout 2 --max-time 4 " +
@@ -647,6 +681,7 @@ function buildSetupScript(
     scripts.statusline_command,
     'MAITERMPAYLOADEOF',
     'chmod +x ~/.claude/skills/maiterm/bin/setup-statusline.sh ~/.claude/skills/maiterm/bin/statusline-command.sh',
+    ...claudeModFiles(scripts.claude_mod),
   ];
 
   return script.join('\n');
@@ -763,7 +798,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     setVariable(tabId, 'maitermTabId', tabId);
     setVariable(tabId, 'maitermPort', String(tunnelInfo.remote_port));
     setVariable(tabId, 'maitermExport',
-      `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port} MAITERM_AUTH=${authToken}`);
+      `export MAITERM_TAB_ID=${tabId} MAITERM_PORT=${tunnelInfo.remote_port} MAITERM_AUTH=${authToken} ${commands.REMOTE_CLAUDE_MOD_ENV}`);
 
     // Inject MAITERM_TAB_ID and MAITERM_PORT into the remote shell FIRST — before
     // building or kicking off the remote setup below. The injection only needs
@@ -851,7 +886,7 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
           // anything at all, and each of them hands the file back rather than leaving it.
           const acct = account ? await account.take() : null;
           let envCmd = " export MAITERM_TAB_ID=" + tabId + " MAITERM_PORT=" + tunnelInfo.remote_port
-            + " MAITERM_AUTH=" + authToken;
+            + " MAITERM_AUTH=" + authToken + " " + commands.REMOTE_CLAUDE_MOD_ENV;
           // Refused rather than escaped if it could break out — see buildSshCommand. Here it
           // would be worse: this string is typed straight at a live remote shell.
           if (acct && !acct.includes("'")) envCmd += "; " + acct;

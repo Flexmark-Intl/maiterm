@@ -2,12 +2,12 @@ import type { EngineInterface, PermissionRequestDecision, Register } from 'claud
 
 // maiTerm's link to the Claude Code session running in one of its tabs.
 //
-// maiTerm writes this folder into its data directory and names it in every tab's
-// CLAUDE_CODE_PLUGIN_DIRS (claude_code/claude_mod.rs). It forwards the same hook events
-// maiTerm's settings.json hooks send to POST /hooks, with two differences that are the point:
-// every event names its tab (`tab_id=`), so nothing has to be inferred from a session id, and
-// it says it came from here (`via=mod`), so the server drops the settings hooks' anonymous
-// copy of each one. A Claude Code too old for mods never loads this, and its settings hooks
+// maiTerm writes this folder into its data directory, and on an ssh host into
+// ~/.maiterm/claude-mod, and names it in every tab's CLAUDE_CODE_PLUGIN_DIRS
+// (claude_code/claude_mod.rs). It forwards the same hook events maiTerm's settings.json hooks
+// send to POST /hooks, with two differences that are the point: every event names its tab
+// (`tab_id=`), so nothing has to be inferred from a session id, and it says it came from here
+// (`via=mod`), so the server drops the settings hooks' copy of each one. A Claude Code too old for mods never loads this, and its settings hooks
 // run exactly as before.
 
 // Tested against 2.1.295; the API is early access and may move between releases.

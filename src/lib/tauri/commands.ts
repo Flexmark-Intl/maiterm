@@ -91,6 +91,17 @@ export function shellEscapePath(path: string): string {
 }
 
 /**
+ * Points a remote shell's `claude` at the maiterm-tab mod the ssh bridge copies to the host
+ * (sshMcpBridge.svelte.ts `claudeModFiles`), as a local tab's shell is pointed at its own copy
+ * (pty/manager.rs). Set beside MAITERM_PORT/AUTH, which the mod needs to reach maiTerm; `$HOME`
+ * expands on the remote. It replaces a remote CLAUDE_CODE_PLUGIN_DIRS of the user's own in that
+ * shell: prepending would add the folder again on every reconnect, and Claude loads a plugin
+ * named twice once, warning about the other in every session. A missing folder (a host the
+ * bridge hasn't set up yet) loads nothing, and a Claude too old for mods ignores the variable.
+ */
+export const REMOTE_CLAUDE_MOD_ENV = 'CLAUDE_CODE_PLUGIN_DIRS=$HOME/.maiterm/claude-mod/maiterm-tab';
+
+/**
  * Build the SSH command for split cloning / auto-resume.
  * Stored SSH values are bare "user@host" (possibly with flags).
  * Reconstructs full "ssh -t -o ControlMaster=no user@host" and
@@ -136,7 +147,7 @@ export function buildSshCommand(
   // Same rule for the token: it reaches a remote shell, so anything that isn't plainly
   // safe to paste into one is dropped rather than quoted around.
   if (bridge && bridge.port > 0 && /^[A-Za-z0-9._-]+$/.test(bridge.auth)) {
-    exports.push(`MAITERM_PORT=${bridge.port}`, `MAITERM_AUTH=${bridge.auth}`);
+    exports.push(`MAITERM_PORT=${bridge.port}`, `MAITERM_AUTH=${bridge.auth}`, REMOTE_CLAUDE_MOD_ENV);
   }
   let prelude = exports.length ? `export ${exports.join(' ')}; ` : '';
   // Refused rather than escaped if it could break out of the quoting below. Rust builds this
@@ -1585,6 +1596,8 @@ export interface MaitermSkillScripts {
   skill_md: string;
   setup_statusline: string;
   statusline_command: string;
+  /** The maiterm-tab mod's files: [path inside its folder, contents]. */
+  claude_mod: [string, string][];
 }
 
 export async function startSshTunnel(sshArgs: string, hostKey: string, tabId: string, localPort: number): Promise<SshTunnelInfo> {

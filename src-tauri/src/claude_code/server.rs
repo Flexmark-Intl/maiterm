@@ -3576,20 +3576,23 @@ async fn hooks_handler(
     let runtime_key = runtime.as_key();
 
     // The maiterm-tab mod (claude_mod.rs) sends a Claude session's events itself, each naming
-    // its tab, and sends each one BEFORE the settings.json hooks beneath it run. So once it has
-    // spoken for a session, an anonymous copy (no `tab_id`: Claude's own http hooks) is a
-    // duplicate. Entries quiet for an hour are pruned; any later event of a live session
-    // re-records it before its copy can arrive, because the mod's post comes first.
+    // its tab, and sends each one BEFORE the settings.json hooks beneath it run. So a hook's copy
+    // of an event the mod sent moments ago, for the same session, is a duplicate — whether it
+    // names its tab (an ssh host's command hooks) or not (local http hooks).
+    //
+    // Keyed by session AND event, within seconds: a mod that stops sending (a module reload that
+    // failed, an old Claude after a downgrade) leaves the hooks' copies to come through, instead
+    // of the session going deaf for as long as it was remembered (it was an hour, by session).
+    const MOD_COPY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
     let via_mod = params.get("via").map(String::as_str) == Some("mod");
     if runtime == crate::state::AgentRuntime::Claude && !session_id.is_empty() {
+        let key = format!("{session_id}\u{0}{hook_event_name}");
         if via_mod {
             let now = std::time::Instant::now();
-            let mut sessions = srv.state.mod_agent_sessions.write();
-            sessions.retain(|_, seen| now.duration_since(*seen) < std::time::Duration::from_secs(3600));
-            sessions.insert(session_id.clone(), now);
-        } else if !params.contains_key("tab_id")
-            && srv.state.mod_agent_sessions.read().contains_key(&session_id)
-        {
+            let mut sent = srv.state.mod_agent_sessions.write();
+            sent.retain(|_, at| now.duration_since(*at) < MOD_COPY_WINDOW * 6);
+            sent.insert(key, now);
+        } else if srv.state.mod_agent_sessions.read().get(&key).is_some_and(|at| at.elapsed() < MOD_COPY_WINDOW) {
             log::debug!("Claude hook: '{}' session={} dropped, the maiterm-tab mod already sent it",
                 hook_event_name, &session_id[..session_id.len().min(8)]);
             return StatusCode::OK.into_response();

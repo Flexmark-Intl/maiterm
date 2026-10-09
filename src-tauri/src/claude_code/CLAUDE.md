@@ -451,10 +451,14 @@ with `via=mod&tab_id=<tab>`, so **every** event names its tab, not only the two 
 The settings hooks still fire beneath it, and three things keep the two paths from doubling up:
 - **The mod sends each event BEFORE `next(e)`.** The settings hooks run inside `next`, so its
   copy always reaches the server first.
-- **The server drops the anonymous copy.** `hooks_handler` records the session in
-  `AppState.mod_agent_sessions` on any `via=mod` post, then drops later Claude events for that
-  session that carry no `tab_id`. Entries prune after an hour quiet; a live session's next mod
-  post re-records it before its copy arrives.
+- **The server drops the hooks' copy.** `hooks_handler` records `<session>\0<event>` in
+  `AppState.mod_agent_sessions` on every `via=mod` post. It drops a Claude event that didn't come
+  from the mod if the mod sent the same event for that session in the last 10 s, whether or not
+  the copy names its tab (an ssh host's hooks do).
+  - It used to drop every untagged event of a session the mod had spoken for in the last hour, so
+    a mod that stopped mid-session (a reload that failed to load) left maiTerm deaf to that
+    session for up to an hour.
+  - Keyed by event and seconds, a stopped mod just lets the hooks' copies through.
 - **The SessionStart/SessionEnd command hooks stand down under `$MAITERM_VIA_MOD`.** The mod
   sets that variable with `$.env.set`, and the settings hooks inherit it (verified). Priming
   comes back as the mod's `additionalContext`: with `via=mod`, the `prime=1` reply carries the
@@ -464,8 +468,32 @@ PreToolUse comes from the mod's `tool.call` hook, not `classic.PreToolUse`, whos
 the session id and the subagent's `agent_id` (gate.rs keys on both). PreModelSwitch's `allow`
 is returned as the mod's own result. A Claude Code too old for mods ignores the variable, so
 its tabs run on the settings hooks exactly as before. That fallback is why both paths exist.
-SSH tabs don't get the mod yet. Verified end to end against a dev instance: one event per hook,
-each naming its tab, every anonymous copy dropped, and the priming delivered once.
+Verified end to end against a dev instance: one event per hook, each naming its tab, every
+anonymous copy dropped, and the priming delivered once.
+
+**SSH tabs get the mod too** (2026-10-08). The bridge setup (sshMcpBridge.svelte.ts
+`buildSetupScript` → `claudeModFiles`) copies it to `~/.maiterm/claude-mod/maiterm-tab` on the host.
+The files come from `get_maiterm_skill_scripts().claude_mod`, which is `claude_mod::files()`. Each
+file is replaced only when its contents changed (`cmp`, then `mv`), because a running Claude
+reloads the mod on every write and the setup runs on every connect. The folder is per account,
+and its bytes are the same from every maiTerm of a build.
+- **The shell names it** with `REMOTE_CLAUDE_MOD_ENV` (`CLAUDE_CODE_PLUGIN_DIRS=$HOME/.maiterm/…`).
+  It rides beside `MAITERM_PORT`/`MAITERM_AUTH` in `buildSshCommand`, the typed export, the manual
+  "send env" action and `%maitermExport`. It replaces any value of the user's own in that shell,
+  because prepending would add the folder again on each reconnect.
+- **The mod reaches maiTerm through the same reverse tunnel** at `127.0.0.1:$MAITERM_PORT`, for
+  its events, asks and inbox long-polls.
+- **The remote command hooks keep posting**, and the server drops their copies (above). Only
+  their SessionStart stands down under `$MAITERM_VIA_MOD`, so the priming isn't sent twice.
+- **The first `claude` on a host that has never had the mod may start before the files land**:
+  auto-resume types it while the setup runs. It runs on the hooks; every later start loads the mod.
+
+Verified against nova (2.1.295):
+- the copy matched byte for byte;
+- the shell had the variable;
+- the inbox was live through the tunnel, and a prompt sent through it ran;
+- every hook copy of PreToolUse, PostToolUse and Stop was dropped as a duplicate;
+- the remote agent's MCP calls worked.
 
 **Answers go to the mod, not the keyboard** (`mod_asks.rs`, maiLink protocol 0.22). The mod
 registers an **ask** in two places:
