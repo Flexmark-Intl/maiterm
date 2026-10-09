@@ -439,7 +439,7 @@ pub fn roster(session_id: &str) -> Option<Vec<Subagent>> {
 pub fn roster_from_transcript(session_id: &str) -> Option<Vec<Subagent>> {
     // Re-derived only when the transcript changed (the REST path re-polls every 2 s).
     static MEMO: super::transcript::FileMemo<Vec<Subagent>> = std::sync::LazyLock::new(Default::default);
-    super::transcript::memo_by_transcript(&MEMO, session_id, || {
+    super::transcript::memo_by_transcript(&MEMO, session_id, false, || {
         let lines = super::transcript::claude_lines(session_id, SUBAGENT_TAIL_BYTES)?;
         Some(subagents_from_lines(&lines))
     })

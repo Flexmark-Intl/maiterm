@@ -2227,7 +2227,7 @@ async fn post_queue_cancel(
 /// processes, invisible to the local process table, so their liveness can't be confirmed and a
 /// Stop button couldn't signal them — a roster we can't stand behind is worse than none, so SSH
 /// tabs report nothing (the phone renders no strip).
-fn shell_roster(app: &AppState, tab_id: &str) -> Vec<shells::AgentShell> {
+fn shell_roster(app: &AppState, tab_id: &str, exact: bool) -> Vec<shells::AgentShell> {
     let Some((AgentRuntime::Claude, sid)) = resolved_session_for_tab(app, tab_id) else {
         return Vec::new();
     };
@@ -2235,7 +2235,7 @@ fn shell_roster(app: &AppState, tab_id: &str) -> Vec<shells::AgentShell> {
     if tab_is_ssh(app, tab_id) {
         return Vec::new();
     }
-    shells::roster(&sid, crate::pty::manager::pty_child_pid_of(app, &pty)).unwrap_or_default()
+    shells::roster(&sid, crate::pty::manager::pty_child_pid_of(app, &pty), exact).unwrap_or_default()
 }
 
 /// A tab's delegation roster (mailink/subagents.rs), or empty when it has none.
@@ -2339,7 +2339,8 @@ async fn post_shell_stop(
     if !is_designated(&s.app, &tab_id) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let target = shell_roster(&s.app, &tab_id)
+    // Exact: this one signals a pid (see `shells::roster`).
+    let target = shell_roster(&s.app, &tab_id, true)
         .into_iter()
         .find(|sh| sh.id == shell_id)
         .and_then(|sh| sh.pid);
@@ -3617,8 +3618,16 @@ async fn stream_subagents_if_changed(
     // quiet. The roster is then refreshed from the sidecars every tick, which is what keeps a
     // running delegation's progress line live while the parent transcript sits still.
     let roster = st.rosters.entry(tab_id.to_string()).or_default();
-    *roster = subagents::roster_from_transcript(session_id).unwrap_or_default();
+    let previous = std::mem::replace(roster, subagents::roster_from_transcript(session_id).unwrap_or_default());
     subagents::refresh_progress(roster, session_id);
+    // A sidecar read that finds no line (the tail is one huge tool_result, say) leaves the fresh
+    // copy's `last_line` empty; the line shown last tick for the same delegation still stands.
+    for a in roster.iter_mut().filter(|a| a.last_line.is_none()) {
+        if let Some(p) = previous.iter().find(|p| p.id == a.id && p.started_at == a.started_at) {
+            a.last_line = p.last_line.clone();
+            a.last_line_ts = p.last_line_ts;
+        }
+    }
     let roster = &*roster;
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -3662,7 +3671,7 @@ async fn stream_shells_if_changed(
     shell_keys: &mut HashMap<String, u64>,
 ) -> Result<(), ()> {
     use std::hash::{Hash, Hasher};
-    let roster = shell_roster(app, tab_id);
+    let roster = shell_roster(app, tab_id, false);
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for sh in &roster {
@@ -6207,7 +6216,7 @@ fn build_chat_detail(app: &AppState, tab_id: &str) -> Option<Value> {
     // Background shells (`Bash run_in_background` — the TUI's /bashes list), with liveness settled
     // against the process table so no Stop button is offered for a dead process. mailink/shells.rs.
     let ph = std::time::Instant::now();
-    let shells = shell_roster(app, tab_id);
+    let shells = shell_roster(app, tab_id, false);
     if !shells.is_empty() {
         detail["shells"] = json!(shells.iter().map(|s| s.to_json()).collect::<Vec<_>>());
     }

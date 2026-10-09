@@ -284,11 +284,14 @@ const SHELL_TAIL_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The roster for a Claude session id: transcript reconstruction settled against the live process
 /// tree under `shell_pid`. `None` for a session with no locatable transcript.
-pub fn roster(session_id: &str, shell_pid: Option<u32>) -> Option<Vec<AgentShell>> {
+/// `exact`: re-derive from the transcript as it is NOW (see `memo_by_transcript`) — required
+/// before signalling a pid, since a roster up to 5 s old can still list a shell the agent killed,
+/// which `settle_liveness` would then pair with a same-command successor's process.
+pub fn roster(session_id: &str, shell_pid: Option<u32>, exact: bool) -> Option<Vec<AgentShell>> {
     // The transcript half, re-derived only when the transcript changed; liveness is settled below
     // every call, since a shell exiting appends nothing.
     static FROM_TRANSCRIPT: super::transcript::FileMemo<Vec<AgentShell>> = std::sync::LazyLock::new(Default::default);
-    let mut shells = super::transcript::memo_by_transcript(&FROM_TRANSCRIPT, session_id, || {
+    let mut shells = super::transcript::memo_by_transcript(&FROM_TRANSCRIPT, session_id, exact, || {
         let lines = super::transcript::claude_lines(session_id, SHELL_TAIL_BYTES)?;
         Some(shells_from_lines(&lines))
     })?;

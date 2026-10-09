@@ -582,10 +582,13 @@ const MEMO_MAX_FILES: usize = 1024;
 /// it is now. Transcripts are append-only, so (length, mtime) is a sound change key (as
 /// `tail_facts`); a changed file is re-derived at most once per `MEMO_REPARSE_MIN`, and callers
 /// must keep asking (never cache "the file hasn't moved since") so the late re-derive reaches
-/// them. `None` (no transcript, or `compute` found nothing) is not kept.
+/// them. `exact` skips that allowance, for a caller that ACTS on the value rather than showing it
+/// (stopping a shell: a stale roster pairs a killed shell with the pid of its same-command
+/// successor). `None` (no transcript, or `compute` found nothing) is not kept.
 pub(crate) fn memo_by_transcript<T: Clone>(
     memo: &FileMemo<T>,
     session_id: &str,
+    exact: bool,
     compute: impl FnOnce() -> Option<T>,
 ) -> Option<T> {
     let Some(path) = locate_jsonl(session_id) else { return compute() };
@@ -593,7 +596,7 @@ pub(crate) fn memo_by_transcript<T: Clone>(
     let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
     let key = (md.len(), mtime);
     if let Some((l, m, at, v)) = memo.lock().ok().and_then(|c| c.get(&path).cloned()) {
-        if (l, m) == key || at.elapsed() < MEMO_REPARSE_MIN {
+        if (l, m) == key || (!exact && at.elapsed() < MEMO_REPARSE_MIN) {
             return Some(v);
         }
     }
@@ -601,9 +604,12 @@ pub(crate) fn memo_by_transcript<T: Clone>(
     if let Ok(mut c) = memo.lock() {
         // A bound, not a working-set size: there are hundreds of designated tabs, and a cap of
         // 64 (cleared wholesale) wiped the memo every pass over them, so most tabs re-parsed cold
-        // on every tick. An entry is a few rows, so a thousand is cheap.
-        if c.len() >= MEMO_MAX_FILES {
-            c.clear();
+        // on every tick. An entry is a few rows, so a thousand is cheap. At the bound the OLDEST
+        // goes, never the lot: a wholesale clear made every warm tab parse in the same tick.
+        if c.len() >= MEMO_MAX_FILES && !c.contains_key(&path) {
+            if let Some(oldest) = c.iter().min_by_key(|(_, e)| e.2).map(|(p, _)| p.clone()) {
+                c.remove(&oldest);
+            }
         }
         c.insert(path, (key.0, key.1, std::time::Instant::now(), v.clone()));
     }
