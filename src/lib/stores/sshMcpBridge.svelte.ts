@@ -358,11 +358,13 @@ export async function isRemoteShellForeground(ptyId: string): Promise<boolean> {
  * maiTerm of a build, like the rest of this script's per-account files.
  *
  * Each file is replaced only when its contents changed: a running Claude reloads the mod on
- * every write to that folder, and this script runs on every connect. Written beside the target
- * first (`.new.$$`, so two tabs' setups can't collide) and moved over it whole.
+ * every write to that folder, and this script runs on every connect. Each is written OUTSIDE
+ * the folder first (`.incoming.$$` in its parent, so two tabs' setups can't collide, and an
+ * unchanged file costs the watched folder nothing), compared, and moved in whole only if it
+ * differs.
  */
 function claudeModFiles(files: [string, string][]): string[] {
-  const out = ['__mod="$HOME/.maiterm/claude-mod/maiterm-tab"'];
+  const out = ['__mod="$HOME/.maiterm/claude-mod/maiterm-tab"', 'mkdir -p "$__mod"', '__in="$HOME/.maiterm/claude-mod/.incoming.$$"'];
   for (const [rel, contents] of files) {
     // Our own constant paths; anything that could escape the quoting is not ours.
     if (!/^[A-Za-z0-9._/-]+$/.test(rel) || rel.includes('..')) continue;
@@ -371,8 +373,8 @@ function claudeModFiles(files: [string, string][]): string[] {
     const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
     out.push(
       `mkdir -p "$__mod/${dir}"`,
-      `cat > "$__mod/${rel}.new.$$" << 'MAITERMMODEOF'\n${body}MAITERMMODEOF`,
-      `if cmp -s "$__mod/${rel}.new.$$" "$__mod/${rel}"; then rm -f "$__mod/${rel}.new.$$"; else mv -f "$__mod/${rel}.new.$$" "$__mod/${rel}"; fi`,
+      `cat > "$__in" << 'MAITERMMODEOF'\n${body}MAITERMMODEOF`,
+      `if cmp -s "$__in" "$__mod/${rel}"; then rm -f "$__in"; else mv -f "$__in" "$__mod/${rel}"; fi`,
     );
   }
   return out;

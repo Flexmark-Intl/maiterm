@@ -4582,7 +4582,14 @@ async fn hooks_handler(
         // identity line the command hook would have echoed ahead of it (lockfile.rs) — the
         // same words, so an agent reads the same thing whichever path primed it.
         if via_mod {
-            let key = crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude);
+            // An ssh host's MCP entry is always `maiterm` (the bridge writes one name for every
+            // build, sshMcpBridge.svelte.ts), whatever this build calls its local one.
+            let bridged = srv.state.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab));
+            let key = if bridged {
+                "maiterm"
+            } else {
+                crate::state::agent_runtime::mcp_server_name(crate::state::AgentRuntime::Claude)
+            };
             return format!(
                 "Your maiTerm tab ID is {tab}. Your session ID is {session_id}. maiTerm already \
                  knows this tab and session; you do NOT need to initialize. Only if a maiTerm tool \
