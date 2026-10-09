@@ -3057,6 +3057,10 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
     // A faster, mtime-gated ticker for per-turn message streaming: near-instant delivery without
     // paying the full chat rebuild (build_chats) at this cadence.
     let mut msg_ticker = tokio::time::interval(std::time::Duration::from_millis(400));
+    // Delay, not Burst: the select below is `biased`, and a pass slower than 400 ms (cold
+    // subagent parses right after a connect) left this ticker overdue every time round, so it
+    // won every iteration and the chat ticker's state frames waited until passes sped up.
+    msg_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // SSH transcript mirror keep-fresh: hook events drive most fetches, but a long assistant
     // turn appends JSONL with no hook until Stop — while a phone is actually watching, pull
     // the delta on a slow tick too. schedule_fetch coalesces, so ticks over an idle session
@@ -3132,10 +3136,13 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                     }
                     break;
                 }
+                // Stamped BEFORE the send, so it is never later than this tick: stamped after,
+                // the next on-time tick read a hair under the interval and waited another whole
+                // one, and a dead phone took 40 s to notice.
+                ping_sent = Some(std::time::Instant::now());
                 if socket.send(Message::Ping(Default::default())).await.is_err() {
                     return;
                 }
-                ping_sent = Some(std::time::Instant::now());
             }
             _ = msg_ticker.tick() => {
                 if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys, &mut subagent_stream).await.is_err() {
