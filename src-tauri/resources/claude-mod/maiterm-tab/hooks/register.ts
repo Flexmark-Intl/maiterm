@@ -189,6 +189,31 @@ async function ensureInbox($: EngineInterface, to: Link): Promise<void> {
   if (mine && mine === session) startInbox($, to)
 }
 
+// --- Transcript growth, for an ssh host (mailink/mirror.rs) --------------------------------
+//
+// On an ssh host maiTerm reads this session's transcript from a local copy it tops up over the
+// connection, on each hook event — and a long turn sends none until it ends. So the rows the
+// session stores are reported, and maiTerm fetches what was added. Not at once: a stored row
+// reaches the file a beat later (seen on nova, 2.1.295: rows stored at :41–:43, the file grew
+// at :44, so a report at :43 fetched nothing and the turn's text waited 15 s for the next hook).
+// A burst is reported ~1 s after its first row, and again 3 s after that for a slower write. A
+// local tab's transcript is read in place: maiTerm answers 410 and no more are sent.
+
+let appendReports: 'idle' | 'pending' | 'off' = 'idle'
+
+async function reportAppended($: EngineInterface, to: Link): Promise<void> {
+  try {
+    const session = await $.session.id()
+    const r = await $.http.fetch(
+      `http://127.0.0.1:${to.port}/hooks/appended?tab_id=${encodeURIComponent(to.tab)}&session_id=${encodeURIComponent(session)}`,
+      { headers: { 'x-claude-code-ide-authorization': to.auth } },
+    )
+    appendReports = r.status === 410 ? 'off' : 'idle'
+  } catch {
+    appendReports = 'idle'
+  }
+}
+
 // The events maiTerm's server reads, forwarded as the settings hooks would have sent them.
 // Sent BEFORE `next(e)`: the settings hooks run beneath, so maiTerm hears this copy first
 // and knows to drop theirs.
@@ -261,6 +286,27 @@ export const register: Register = on => {
   })
   on('classic.SubagentStop', relay)
   on('classic.PreCompact', relay)
+
+  // After the row is stored, never ahead of it: this hook sits in the store path. A subagent's
+  // rows go to its own file, which maiTerm doesn't copy.
+  on('session.append', async ($, e, next) => {
+    const stored = await next(e)
+    if (appendReports !== 'idle' || e.agentId) return stored
+    const to = await linkOf($)
+    if (to) {
+      appendReports = 'pending'
+      // Rows stored meanwhile ride along with this burst's reports.
+      $.clock.after(1000, () => {
+        void reportAppended($, to).then(() => {
+          if (appendReports === 'off') return
+          $.clock.after(3000, () => {
+            if (appendReports === 'idle') void reportAppended($, to)
+          })
+        })
+      })
+    }
+    return stored
+  })
 
   // The one event whose reply matters: maiTerm allows a model switch it asked for, which
   // skips Claude's "Switch model?" cache-miss confirm.

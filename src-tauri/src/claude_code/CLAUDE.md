@@ -485,6 +485,12 @@ and its bytes are the same from every maiTerm of a build.
   its events, asks and inbox long-polls.
 - **The remote command hooks keep posting**, and the server drops their copies (above). Only
   their SessionStart stands down under `$MAITERM_VIA_MOD`, so the priming isn't sent twice.
+- **The transcript copy follows the mod's word, not only hooks.** The mod's `session.append` hook
+  reports stored rows to `GET /hooks/appended` (mailink/mirror.rs `on_appended`), and the server
+  fetches the delta. A local tab gets 410 and the mod stops. A report is sent ~1 s after a burst
+  and again 3 s later, because a stored row reaches the file a beat after it is stored: on nova a
+  report sent at once fetched nothing. Before this, a turn's text before a slow tool call waited
+  for that call to end; now it arrives as the tool starts.
 - **The first `claude` on a host that has never had the mod may start before the files land**:
   auto-resume types it while the setup runs. It runs on the hooks; every later start loads the mod.
 

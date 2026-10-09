@@ -461,6 +461,8 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         .route("/hooks/ask", get(mod_ask_handler))
         // The maiterm-tab mod's loop collecting prompts to submit (mod_inbox.rs)
         .route("/hooks/inbox", get(mod_inbox_handler))
+        // The maiterm-tab mod on an ssh host: the session's transcript grew (mailink/mirror.rs)
+        .route("/hooks/appended", get(mod_appended_handler))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -3491,6 +3493,30 @@ async fn mod_ask_handler(
         super::mod_asks::Polled::Answer(v) => axum::Json(v).into_response(),
         super::mod_asks::Polled::Pending => StatusCode::NO_CONTENT.into_response(),
         super::mod_asks::Polled::Unknown => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Handle GET /hooks/appended?tab_id=<tab>&session_id=<sid> — the maiterm-tab mod stored a row in
+/// that session's transcript. 204 once the SSH mirror has been told; 410 for a tab no bridge
+/// tunnel carries (its transcript is local), so the mod stops sending these.
+async fn mod_appended_handler(
+    State(srv): State<ServerState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (Some(tab_id), Some(session_id)) = (
+        params.get("tab_id").filter(|s| !s.is_empty()),
+        params.get("session_id").filter(|s| !s.is_empty()),
+    ) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if crate::mailink::mirror::on_appended(&srv.state, tab_id, session_id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::GONE.into_response()
     }
 }
 

@@ -9,9 +9,11 @@
 //! How the pieces line up:
 //! * **What to fetch** — every Claude hook payload carries `transcript_path` verbatim;
 //!   `hooks_handler` captures it onto the session and calls [`schedule_fetch`] per event
-//!   (a hook event IS the "something appended" signal). While a phone WS is connected,
-//!   `ws_event_loop` also calls [`refresh_tabs`] on a slow tick to cover appends between
-//!   hook events (long assistant turns emit no hooks until Stop).
+//!   (a hook event IS the "something appended" signal). Where the maiterm-tab mod runs on the
+//!   host, it also reports the rows the session stores ([`on_appended`], `GET /hooks/appended`),
+//!   about a second after each burst, which covers what a long turn writes between hooks — its
+//!   prose before a slow tool call, the rows after Stop. While a phone WS is connected,
+//!   `ws_event_loop` also calls [`refresh_tabs`] on a slow tick, for hosts without the mod.
 //! * **How to fetch** — `tail -c +<offset+1>` over ssh, mux'd through the bridge tunnel's
 //!   maiTerm-owned ControlMaster socket (`cm_socket_path`): no re-auth, tens of ms. The
 //!   tunnel is alive exactly when remote hooks flow, so a working mirror and a working
@@ -129,6 +131,22 @@ pub fn schedule_fetch(app: &Arc<AppState>, tab_id: &str, session_id: &str, trans
             return;
         }
     });
+}
+
+/// The maiterm-tab mod on the host says this session's transcript just grew (it stored a row:
+/// `session.append`), which in a long turn is the only word between its hooks. Fetches the
+/// delta like a hook does. `false` when the tab rides no bridge tunnel (a local tab, whose file
+/// is read in place): the mod then stops saying so for that session.
+pub fn on_appended(app: &Arc<AppState>, tab_id: &str, session_id: &str) -> bool {
+    if !app.ssh_tunnels.read().values().any(|t| t.tab_ids.contains(tab_id)) {
+        return false;
+    }
+    let path = app.agent_sessions.read().get(session_id).and_then(|s| s.transcript_path.clone());
+    log::debug!("transcript mirror: the mod reports {} grew", &session_id[..session_id.len().min(8)]);
+    if let Some(path) = path {
+        schedule_fetch(app, tab_id, session_id, &path);
+    }
+    true
 }
 
 /// Schedule a fetch for every given tab that has a live Claude session with a known
