@@ -3554,13 +3554,13 @@ async fn stream_new_messages(
 
 /// Per-connection state for the `subagents` stream.
 ///
-/// Two maps because the two halves of the roster refresh on different clocks: `rosters` caches
-/// the transcript parse against the parent's mtime (the expensive half), while `keys` is the
-/// usual emitted-frame diff. Bundled so the message ticker's signature doesn't grow a sixth and
+/// Two maps: `rosters` holds the last roster per tab (its presence is what marks a tab warm for
+/// the cold-parse budget; the parse itself is memoized process-wide in `roster_from_transcript`),
+/// while `keys` is the usual emitted-frame diff. Bundled so the message ticker's signature doesn't grow a sixth and
 /// seventh loose `HashMap`.
 #[derive(Default)]
 struct SubagentStream {
-    rosters: HashMap<String, (u64, Vec<subagents::Subagent>)>,
+    rosters: HashMap<String, Vec<subagents::Subagent>>,
     keys: HashMap<String, u64>,
 }
 
@@ -3611,17 +3611,15 @@ async fn stream_subagents_if_changed(
         *cold_budget -= 1;
     }
     let subagent_keys = &mut st.keys;
-    // Re-parse the transcript only when it moved — see `roster_from_transcript`. The cached
-    // roster is then refreshed from the sidecars every tick, which is what keeps a running
-    // delegation's progress line live while the parent transcript sits still.
-    let mtime = transcript::mtime_for(AgentRuntime::Claude, session_id).unwrap_or(0);
-    let entry = st.rosters.entry(tab_id.to_string()).or_insert((0, Vec::new()));
-    if entry.0 != mtime {
-        entry.0 = mtime;
-        entry.1 = subagents::roster_from_transcript(session_id).unwrap_or_default();
-    }
-    subagents::refresh_progress(&mut entry.1, session_id);
-    let roster = &entry.1;
+    // Asked every tick: `roster_from_transcript` is memoized process-wide and re-parses a moving
+    // transcript at most every few seconds, so a value it served stale is replaced only if we ask
+    // again. Gating on the mtime here kept that stale roster for good once the transcript went
+    // quiet. The roster is then refreshed from the sidecars every tick, which is what keeps a
+    // running delegation's progress line live while the parent transcript sits still.
+    let roster = st.rosters.entry(tab_id.to_string()).or_default();
+    *roster = subagents::roster_from_transcript(session_id).unwrap_or_default();
+    subagents::refresh_progress(roster, session_id);
+    let roster = &*roster;
     let key = {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for a in roster {

@@ -567,11 +567,22 @@ fn fresh_turns(path: &std::path::Path, tools: ToolRender, file_id: (u64, u64)) -
 /// What a consumer derived from a session's transcript, kept per file with the (length, mtime)
 /// it was derived at. The shell and subagent rosters each parse a 32 MiB tail; a thread re-polled
 /// every 2 s paid that each time for a file that hadn't changed.
-pub(crate) type FileMemo<T> = std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, T)>>>;
+pub(crate) type FileMemo<T> = std::sync::LazyLock<std::sync::Mutex<HashMap<PathBuf, (u64, u64, std::time::Instant, T)>>>;
+
+/// How long a derived value is served after its transcript moved on. A working agent appends to
+/// its transcript several times a second, so a (length, mtime) key alone re-parsed a 32 MiB tail
+/// twice per busy tab on every 400 ms WS tick — 2026-10-08, the phone socket's loop sat in
+/// `claude_lines` for most of a sample and the whole runtime slowed with it (chat-list reads of
+/// 35–49 s). A shell or delegation starting shows up to this much later; the strips' live parts
+/// (shell liveness, subagent progress) are settled outside the memo on every call.
+const MEMO_REPARSE_MIN: std::time::Duration = std::time::Duration::from_secs(5);
+const MEMO_MAX_FILES: usize = 1024;
 
 /// `compute()` for this session's transcript, or the value kept from a call that saw the file as
 /// it is now. Transcripts are append-only, so (length, mtime) is a sound change key (as
-/// `tail_facts`). `None` (no transcript, or `compute` found nothing) is not kept.
+/// `tail_facts`); a changed file is re-derived at most once per `MEMO_REPARSE_MIN`, and callers
+/// must keep asking (never cache "the file hasn't moved since") so the late re-derive reaches
+/// them. `None` (no transcript, or `compute` found nothing) is not kept.
 pub(crate) fn memo_by_transcript<T: Clone>(
     memo: &FileMemo<T>,
     session_id: &str,
@@ -581,17 +592,20 @@ pub(crate) fn memo_by_transcript<T: Clone>(
     let Ok(md) = std::fs::metadata(&path) else { return compute() };
     let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
     let key = (md.len(), mtime);
-    if let Some((l, m, v)) = memo.lock().ok().and_then(|c| c.get(&path).cloned()) {
-        if (l, m) == key {
+    if let Some((l, m, at, v)) = memo.lock().ok().and_then(|c| c.get(&path).cloned()) {
+        if (l, m) == key || at.elapsed() < MEMO_REPARSE_MIN {
             return Some(v);
         }
     }
     let v = compute()?;
     if let Ok(mut c) = memo.lock() {
-        if c.len() >= 64 {
+        // A bound, not a working-set size: there are hundreds of designated tabs, and a cap of
+        // 64 (cleared wholesale) wiped the memo every pass over them, so most tabs re-parsed cold
+        // on every tick. An entry is a few rows, so a thousand is cheap.
+        if c.len() >= MEMO_MAX_FILES {
             c.clear();
         }
-        c.insert(path, (key.0, key.1, v.clone()));
+        c.insert(path, (key.0, key.1, std::time::Instant::now(), v.clone()));
     }
     Some(v)
 }
