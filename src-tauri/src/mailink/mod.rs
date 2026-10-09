@@ -334,7 +334,8 @@ pub fn prepare(app_state: &Arc<AppState>) -> Option<MailinkConfig> {
     // Publish (fp, port) so the pairing-code command can build the QR payload.
     *app_state.mailink_info.write() = Some((fingerprint.clone(), port));
     log::info!("[maiLink] bridge enabled — listening on 0.0.0.0:{port} (TLS). Pin fp = {fingerprint}");
-    log::info!("[maiLink] dev bearer token (Authorization: Bearer …): {dev_token}");
+    // Never the token itself: the log is read by agents and attached to reports.
+    log::info!("[maiLink] dev bearer token is in {:?}", mailink_dir().map(|d| d.join("dev-token.txt")));
     Some(MailinkConfig {
         port,
         cert_pem,
@@ -3071,13 +3072,47 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
     // pong is guaranteed to be answerable. Waiting an interval instead would mean the first ping
     // routinely lands in a suspended app — open maiLink, glance, pocket the phone — and "this
     // client has never ponged" would be a race with iOS rather than a fact about the client.
+    //
+    // The deadline is measured from the ping, never counted in ticks. tokio's default `Burst`
+    // fires every overdue tick back to back after a stall, so a loop held up 30 s sent its ping
+    // and then took the next tick a moment later as the deadline: a phone that answered at once
+    // was closed as "never answered a ping" every 30–60 s (2026-10-08, 75 times in two hours,
+    // reproduced with a client that pongs every ping).
     let mut ping_ticker = tokio::time::interval(WS_PING_INTERVAL);
-    let mut awaiting_pong = false;
+    ping_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ping_sent: Option<std::time::Instant> = None;
     let mut answered_a_ping = false;
+    let mut last_ping_tick = std::time::Instant::now();
     loop {
         tokio::select! {
+            // Frames first: a pong already waiting must be read before a tick can judge it missing.
+            biased;
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    // The phone is alive and its app is running. (A suspended app answers
+                    // nothing — which is the point; see WS_PING_INTERVAL.)
+                    Some(Ok(Message::Pong(_))) => {
+                        ping_sent = None;
+                        answered_a_ping = true;
+                    }
+                    // inbound client frames are ignored in v1 — the client uses REST for actions
+                    Some(Ok(_)) => {}
+                }
+            }
             _ = ping_ticker.tick() => {
-                if awaiting_pong {
+                // A tick this late means the loop itself was held up: every event this socket
+                // owes the phone was held up with it.
+                let gap = last_ping_tick.elapsed();
+                last_ping_tick = std::time::Instant::now();
+                if gap > WS_PING_INTERVAL + std::time::Duration::from_secs(5) {
+                    log::warn!("[maiLink] ws: event loop for {device} stalled — ping tick {}s late", (gap - WS_PING_INTERVAL).as_secs());
+                }
+                if ping_sent.is_some_and(|t| t.elapsed() < WS_PING_INTERVAL) {
+                    continue;
+                }
+                if ping_sent.is_some() {
                     // Closing is the SAFE direction either way: a phone that isn't answering
                     // isn't receiving events either, so it must go back to being reachable by
                     // doorbell. Both cases below close — only the diagnosis differs.
@@ -3100,7 +3135,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                 if socket.send(Message::Ping(Default::default())).await.is_err() {
                     return;
                 }
-                awaiting_pong = true;
+                ping_sent = Some(std::time::Instant::now());
             }
             _ = msg_ticker.tick() => {
                 if stream_new_messages(&mut socket, &s.app, &mut seen, &mut mtimes, &mut task_keys, &mut shell_keys, &mut subagent_stream).await.is_err() {
@@ -3249,20 +3284,6 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                 }
                 if roster_changed {
                     let _ = socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await;
-                }
-            }
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Err(_)) => break,
-                    // The phone is alive and its app is running. (A suspended app answers
-                    // nothing — which is the point; see WS_PING_INTERVAL.)
-                    Some(Ok(Message::Pong(_))) => {
-                        awaiting_pong = false;
-                        answered_a_ping = true;
-                    }
-                    // inbound client frames are ignored in v1 — the client uses REST for actions
-                    Some(Ok(_)) => {}
                 }
             }
         }
