@@ -180,7 +180,9 @@ suggests the most recent active topic as the likely default in tool descriptions
   — to constrain/correct scope upfront (e.g. "auth flow only, not the whole API") — persisted
   on `Tab.mesh_purpose`. The cockpit field is framed as optional, never shown as incomplete.
 - On join, maiTerm injects an opener directive (reusing `buildOpener`) containing: the
-  agent's role (+ purpose if set), the current roster, how topics work (set/propagate/complete,
+  agent's role (+ purpose if set), the current roster — only peers RUNNING now, the
+  suspended/not-started ones as a count pointing at `listBridgedPeers` (2026-10-09: a 54-tab
+  workspace introduced 32 names, most of them parked; they stay routable) —, how topics work (set/propagate/complete,
   tag every message), and the agent's own status-note id (see §8).
 - **Pre-flight setup modal (hardening).** Enabling mesh opens a readiness modal
   (`MeshSetupModal.svelte`) that inventories every terminal tab into Ready / Not-registered /

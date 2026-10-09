@@ -402,11 +402,25 @@ function createAgentMeshStore() {
   const rosterLines = (peers: MeshMember[]) =>
     peers.map((p) => `  - "${p.role}"${p.workspace ? ` [${p.workspace}]` : ''}${p.purpose ? ` — ${p.purpose}` : p.cwd ? ` — ${p.cwd}` : ''}`).join('\n');
 
+  /** The peers an agent is TOLD about: only those running now. A suspended or not-yet-started
+   *  member is still a member — routable, its messages wait for it — but listing every tab
+   *  that ever ran an agent buried the live roster (a 54-tab workspace introduced 32 names).
+   *  The rest are a count, with listBridgedPeers as the way to see them. */
+  function rosterBlock(peers: MeshMember[], empty: string): string {
+    const live = peers.filter((p) => p.live);
+    const rest = peers.length - live.length;
+    if (!live.length && !rest) return empty;
+    const more = rest
+      ? `  (+${rest} more not running right now — suspended or not started. listBridgedPeers lists everyone; a message to one waits until it's back)`
+      : '';
+    return [live.length ? rosterLines(live) : '', more].filter(Boolean).join('\n');
+  }
+
   function buildLinkNotice(workspaces: string[], newPeers: MeshMember[]): string {
     const names = workspaces.map((n) => `"${n}"`).join(', ');
     return (
       `⟦MESH⟧ Your human linked this mesh with workspace ${names}: its agents are now peers you can reach, like any other.\n` +
-      (newPeers.length ? `New peers:\n${rosterLines(newPeers)}\n` : `(no agents there yet — they appear as they join; call listBridgedPeers anytime)\n`) +
+      (newPeers.length ? `New peers:\n${rosterBlock(newPeers, '')}\n` : `(no agents there yet — they appear as they join; call listBridgedPeers anytime)\n`) +
       `Nothing to do now. Don't announce this to anyone — reach them only when your work needs to.`
     );
   }
@@ -433,9 +447,7 @@ function createAgentMeshStore() {
   function buildMeshOpener(member: MeshMember, peers: MeshMember[]): string {
     const where = member.cwd ? ` (working in ${member.cwd})` : '';
     const purpose = member.purpose?.trim();
-    const roster = peers.length
-      ? rosterLines(peers)
-      : '  (no other agents yet — peers appear as they join; call listBridgedPeers anytime)';
+    const roster = rosterBlock(peers, '  (no other agents yet — peers appear as they join; call listBridgedPeers anytime)');
     const spans = member.workspace
       ? ` This mesh spans several workspaces (peers are tagged with theirs); you sit in "${member.workspace}".`
       : '';
