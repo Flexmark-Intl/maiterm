@@ -464,9 +464,8 @@ struct TurnsCache {
 static TURNS: std::sync::OnceLock<std::sync::Mutex<HashMap<(PathBuf, bool), TurnsCache>>> = std::sync::OnceLock::new();
 
 fn turns_from_path(path: &std::path::Path, limit: usize, tools: ToolRender) -> Option<Vec<Value>> {
-    use std::os::unix::fs::MetadataExt;
     let md = std::fs::metadata(path).ok()?;
-    let (len, file_id) = (md.len(), (md.dev(), md.ino()));
+    let (len, file_id) = (md.len(), file_id(&md));
     let key = (path.to_path_buf(), tools == ToolRender::Marker);
     let cache = TURNS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     // Taken out while it is read, so no file IO happens under the lock; a concurrent caller for
@@ -511,6 +510,19 @@ fn turns_from_path(path: &std::path::Path, limit: usize, tools: ToolRender) -> O
         c.insert(key, entry);
     }
     Some(out)
+}
+
+/// Which file a path names (device, inode), so one replaced at the path is read afresh. Elsewhere
+/// only a shorter file is caught (as `relocate::same_file` falls back).
+#[cfg(unix)]
+fn file_id(md: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (md.dev(), md.ino())
+}
+
+#[cfg(not(unix))]
+fn file_id(_: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
 }
 
 /// A session's turns read from scratch, from the tail only.
