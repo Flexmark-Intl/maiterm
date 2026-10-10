@@ -84,9 +84,14 @@ an inferred identity. The ones that file requests, and `getRequestStatus`, are a
    busy Claude tab's empty box, never over a draft.
    - A restart is not reported this way: the agent is restarted instead.
 
-## 4. Not done yet
+## 4. The phone
 
-- **The phone (maiLink 0.23).** Pending requests on the phone, approve and deny endpoints, and a
-  doorbell kind. Until then a request can be answered only on the desktop.
+maiLink protocol 0.23, §4.4: `GET /requests`, `POST /requests/{id}/approve|deny` (`decide` with
+`by: "phone"`), the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell kind `request`,
+pushed into the doorbell's ring queue when a request is filed. An approval reply waits up to 15 s
+for the outcome, except for a restart.
+
+## 5. Not done yet
+
 - **Codex tabs** hear the outcome only when idle (the busy-tab path is Claude-only), and otherwise
   through `getRequestStatus`.

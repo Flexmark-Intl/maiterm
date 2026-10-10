@@ -57,7 +57,13 @@ pub struct AgentRequest {
     pub effects: Vec<String>,
     /// The agent's stated reason, shown as the agent's words.
     pub reason: Option<String>,
+    /// Who asked, as the tab read when it asked: a request can outlive the tab's name, or the
+    /// tab (maiLink 0.23 shows it to approve against).
+    pub asker_title: String,
+    pub asker_workspace: String,
     pub requested_at: u64,
+    /// When a pending request lapses.
+    pub expires_at: u64,
     /// pending → approved → done | failed; pending → denied | expired.
     pub status: String,
     pub decided_at: Option<u64>,
@@ -76,17 +82,25 @@ fn now_ms() -> u64 {
 
 /// Lapse what waited too long, forget what settled long ago.
 fn sweep(list: &mut Vec<AgentRequest>, now: u64) {
+    let mut moved = false;
     for r in list.iter_mut() {
         if r.status == "pending" && now.saturating_sub(r.requested_at) >= PENDING_TTL_MS {
             r.status = "expired".into();
             r.decided_at = Some(now);
+            moved = true;
         }
         // Approved but never reported back: the window that was to carry it out closed or
         // reloaded. Said so, rather than showing "approved" for good.
         if r.status == "approved" && now.saturating_sub(r.decided_at.unwrap_or(now)) >= APPROVED_TTL_MS {
             r.status = "failed".into();
             r.outcome = Some("approved, but the window that was to carry it out never reported back".into());
+            moved = true;
         }
+    }
+    // Lapsing is found here, on a read, so it moves the revision itself: the phone's socket sends
+    // the list only when that moves, and would otherwise keep showing a lapsed card.
+    if moved {
+        REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     list.retain(|r| {
         r.status == "pending"
@@ -95,20 +109,59 @@ fn sweep(list: &mut Vec<AgentRequest>, now: u64) {
     });
 }
 
+/// Moves on every change, so the phone's socket sends the list only when it moved.
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The current revision, after lapsing anything due: a poller's check is what finds a lapse.
+pub fn revision() -> u64 {
+    sweep(&mut REQUESTS.lock(), now_ms());
+    REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn changed(app: &AppHandle) {
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = app.emit("agent-requests-changed", ());
+}
+
+/// Pending requests per asking tab (`Chat.requestsWaiting`, maiLink 0.23).
+pub fn waiting_by_tab() -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    for r in list().iter().filter(|r| r.status == "pending") {
+        *out.entry(r.tab_id.clone()).or_insert(0) += 1;
+    }
+    out
+}
+
+/// A request as the phone draws it (maiLink protocol 0.23 `AgentRequest`). Every word on the card
+/// is maiTerm's except `reason`.
+pub fn wire(r: &AgentRequest) -> Value {
+    serde_json::json!({
+        "id": r.id,
+        "tabId": r.tab_id,
+        "asker": { "tabId": r.tab_id, "title": r.asker_title, "workspace": r.asker_workspace },
+        "kind": r.kind,
+        "summary": r.summary,
+        "effects": r.effects,
+        "reason": r.reason,
+        "onDeny": "The agent is told you denied it.",
+        "status": r.status,
+        "requestedAt": r.requested_at,
+        "expiresAt": r.expires_at,
+    })
 }
 
 /// File a request (the tool side). An identical one already pending is returned instead of a
 /// second card. `Err` when the kind is unknown or the tab already has its fill of pending ones.
+#[allow(clippy::too_many_arguments)]
 pub fn file(
     app: &AppHandle,
+    state: &crate::state::AppState,
     tab_id: &str,
     window_label: &str,
     kind: &str,
     args: Value,
     summary: String,
-    effects: Vec<String>,
+    mut effects: Vec<String>,
     reason: Option<String>,
 ) -> Result<AgentRequest, String> {
     if !KINDS.contains(&kind) {
@@ -128,6 +181,28 @@ pub fn file(
             "this tab already has {MAX_PENDING_PER_TAB} requests waiting for the human; wait for those to be answered"
         ));
     }
+    drop(list);
+    let (asker_title, asker_workspace) = asker(state, tab_id);
+    if kind == "restart" {
+        // App-wide, so counted here rather than by the filing window, which sees only its own.
+        let working = {
+            let sessions = state.agent_sessions.read();
+            let mut tabs: Vec<&str> = sessions
+                .values()
+                .filter(|s| s.state == crate::state::app_state::AgentSessionState::Active)
+                .map(|s| s.tab_id.as_str())
+                .collect();
+            tabs.sort_unstable();
+            tabs.dedup();
+            tabs.len()
+        };
+        effects.insert(0, match working {
+            0 => "No agent is in the middle of a turn right now.".to_string(),
+            1 => "1 agent is in the middle of a turn right now and will be interrupted.".to_string(),
+            n => format!("{n} agents are in the middle of a turn right now and will be interrupted."),
+        });
+    }
+    let mut list = REQUESTS.lock();
     let r = AgentRequest {
         id: format!("r_{}", uuid::Uuid::new_v4().simple()),
         tab_id: tab_id.to_string(),
@@ -137,7 +212,10 @@ pub fn file(
         summary,
         effects,
         reason: reason.filter(|s| !s.trim().is_empty()),
+        asker_title,
+        asker_workspace,
         requested_at: now,
+        expires_at: now + PENDING_TTL_MS,
         status: "pending".into(),
         decided_at: None,
         decided_by: None,
@@ -146,8 +224,28 @@ pub fn file(
     list.push(r.clone());
     drop(list);
     log::info!("[requests] {} filed by tab {}: {}", r.kind, &r.tab_id[..r.tab_id.len().min(8)], r.summary);
+    // The phone's doorbell (kind `request`), drained by its loop; a tap opens the asking chat.
+    if state.mailink_info.read().is_some() {
+        let mut q = state.mailink_pending_rings.lock();
+        q.push((r.tab_id.clone(), r.asker_title.clone(), "request"));
+        if q.len() > crate::mailink::overlord::MAX_PENDING_RINGS {
+            let excess = q.len() - crate::mailink::overlord::MAX_PENDING_RINGS;
+            q.drain(..excess);
+        }
+    }
     changed(app);
     Ok(r)
+}
+
+/// The tab's name and its workspace's, as they read now.
+fn asker(state: &crate::state::AppState, tab_id: &str) -> (String, String) {
+    let data = state.app_data.read();
+    for ws in data.windows.iter().flat_map(|w| w.workspaces.iter()) {
+        if let Some(t) = ws.panes.iter().flat_map(|p| p.tabs.iter()).find(|t| t.id == tab_id) {
+            return (t.name.clone(), ws.name.clone());
+        }
+    }
+    ("an agent".to_string(), String::new())
 }
 
 /// Every pending request, then the settled ones still kept, oldest first.
@@ -210,6 +308,7 @@ pub fn settle(app: &AppHandle, id: &str, ok: bool, outcome: String) -> Option<Ag
 #[allow(clippy::too_many_arguments)]
 pub fn file_agent_request(
     app: AppHandle,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
     window: tauri::Window,
     tab_id: String,
     kind: String,
@@ -218,7 +317,7 @@ pub fn file_agent_request(
     effects: Vec<String>,
     reason: Option<String>,
 ) -> Result<AgentRequest, String> {
-    file(&app, &tab_id, window.label(), &kind, args, summary, effects, reason)
+    file(&app, &state, &tab_id, window.label(), &kind, args, summary, effects, reason)
 }
 
 #[tauri::command]
@@ -250,7 +349,10 @@ mod tests {
             summary: String::new(),
             effects: vec![],
             reason: None,
+            asker_title: String::new(),
+            asker_workspace: String::new(),
             requested_at,
+            expires_at: requested_at + PENDING_TTL_MS,
             status: status.into(),
             decided_at,
             decided_by: None,

@@ -4,6 +4,13 @@
 > maiTerm **desktop** side (this repo) and the **maiLink mobile app** (separate codebase,
 > built collaboratively with the maiLink agent). Date: 2026-06-30.
 >
+> **v0.23 changelog** (2026-10-10). Additive: **agent requests** (§4.4, desktop design in
+> docs/agent-requests.md). Agents may ask to change which agents can message each other (a mesh
+> on/off, a link, a move that changes a tab's mesh) or to restart maiTerm. These only happen
+> once the human approves. New: `GET /requests`, `POST /requests/{id}/approve` and
+> `POST /requests/{id}/deny`, the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell
+> kind `request`.
+>
 > **v0.22 changelog** (2026-10-08). Additive: **`pendingPrompt.delivery: "agent" | "keys"`**.
 > It says how `/respond` will deliver the answer. **"agent"** means a Claude Code mod inside the
 > agent (maiterm-tab, local Claude 2.1.290+) takes it.
@@ -1434,6 +1441,54 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
 
 ---
 
+### 4.4 Agent requests (v0.23)
+
+Some agent actions happen only once the human approves them: turning a mesh on or off, linking
+or unlinking meshes, a move that changes a tab's mesh, and restarting maiTerm (with or without
+installing an update). The agent's tool files a **request** and waits. The phone and the
+desktop's Loom card are the only ways to approve one. Requests live in memory: none survive a
+desktop restart. A pending request lapses 30 min after it was filed.
+
+```ts
+interface AgentRequest {
+  id: string;
+  tabId: string;                  // the asking agent's tab: its chat shows the card too
+  asker: { tabId: string; title: string; workspace: string };  // as it read when it asked
+  kind: string;                   // mesh_enable | mesh_disable | mesh_link | mesh_unlink | tab_move
+                                  // | workspace_move | restart. Draw ANY kind from the text fields.
+  summary: string;                // one line, maiTerm's words
+  effects: string[];              // the consequences, maiTerm's words: show verbatim
+  reason: string | null;          // the AGENT's words: show as a quote, never as maiTerm's
+  onDeny: string;                 // what Deny does ("The agent is told you denied it.")
+  status: 'pending';              // only pending ones are served
+  requestedAt: number;            // ms, desktop clock
+  expiresAt: number;              // ms, desktop clock
+}
+```
+
+- **`GET /requests`** returns `{ requests: AgentRequest[] }`, pending only, oldest first. It is
+  in memory and cheap, so re-read it on every inbox refresh.
+- **WS `requests`** carries the same body plus `type` and `ts`, as a full replace. It is sent on
+  connect and whenever the list moves (filed, answered or lapsed), always followed by
+  `chats_changed`.
+- **`Chat.requestsWaiting`** is the number of pending requests from that tab. Pin it in "Needs
+  you" like `scriptsWaiting`.
+- **`POST /requests/{id}/approve`** and **`POST /requests/{id}/deny`** take no body. Replies:
+
+  | Reply | When |
+  |---|---|
+  | `{ ok:false, reason:"not_pending", detail }` | already answered, lapsed, or unknown |
+  | `{ ok:true, status:"denied", detail }` | deny; the agent is told |
+  | `{ ok:true, status:"done" \| "failed", detail }` | approve, once the desktop finishes. The reply waits up to 15 s; show `detail` verbatim |
+  | `{ ok:true, status:"approved", detail }` | approve, still running after 15 s |
+  | `{ ok:true, status:"approved", detail:"maiTerm is restarting." }` | approve of a `restart`, sent at once; the desktop goes away within seconds, so expect the socket to drop |
+
+- **Doorbell kind `request`.** Its payload `tabId` is the asking tab, so a tap opens that chat.
+  It is not time-sensitive.
+- **Guards.** The card takes the same guards as the script card: nothing decided in its first
+  1.5 s after it appears or moves, the second tap of a double tap ignored, and its buttons
+  locked until the POST settles.
+
 ## 6. The doorbell (APNs/FCM) — the only internet egress
 
 When an attention event fires (`permission`, or `idle`/done via the Stop hook, or a
@@ -2373,6 +2428,7 @@ layer leaves no way back, so "the Overlord button does nothing and now its neigh
 | `0.20` | `ScriptApproval.folder` reads `user@host:folder` for a script that runs on an ssh host, and adds `ScriptApproval.host` |
 | `0.21` | a Claude `permission` card is `respondable:false` with `options:[]` while no permission dialog is on screen (one of Claude's own dialogs); such a chat returns to `idle` once the dialog closes |
 | `0.22` | adds `pendingPrompt.delivery` (`agent` / `keys`): on `agent` the maiterm-tab mod takes the answer by meaning, a failed attempt is withdrawn whole, and `ok` means the agent has it |
+| `0.23` | adds agent requests (§4.4): `GET /requests`, `POST /requests/{id}/approve` and `/deny`, the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell kind `request` |
 
 **0.9 is the one lane addition a client cannot treat as optional.** `dropped` is retracted work —
 filed by mistake, superseded, decided against — and it arrives on rows the phone already renders,

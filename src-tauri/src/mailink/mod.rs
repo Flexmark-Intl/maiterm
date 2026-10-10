@@ -421,6 +421,10 @@ fn build_router(api: ApiState) -> Router {
             "/mailink/v1/chats/{tab_id}/scripts/{follow_up_id}/reject",
             post(post_script_reject),
         )
+        // v0.23: agent requests only the human approves (docs/agent-requests.md).
+        .route("/mailink/v1/requests", get(get_requests))
+        .route("/mailink/v1/requests/{id}/approve", post(post_request_approve))
+        .route("/mailink/v1/requests/{id}/deny", post(post_request_deny))
         .route(
             "/mailink/v1/chats/{tab_id}/queue/cancel",
             post(post_queue_cancel),
@@ -519,7 +523,7 @@ async fn heartbeat(State(s): State<ApiState>) -> Json<Value> {
 /// stopped answering the only question it exists to answer. That is not hypothetical: `windowLabel`,
 /// `rules` and `agentTabIds` were added under an unchanged "0.5" and a phone that assumed them
 /// present crashed its Overlord screen against a desktop that predated them.
-const PROTOCOL_VERSION: &str = "0.22";
+const PROTOCOL_VERSION: &str = "0.23";
 
 /// GET /mailink/v1/chats — the maiLink-native tabs as chats, with live agent state.
 async fn chats_list(
@@ -2527,6 +2531,68 @@ struct ScriptDecisionBody {
     script_hash: String,
 }
 
+/// `GET /requests` (v0.23): agent requests waiting for the human (src-tauri/src/agent_requests.rs,
+/// docs/agent-requests.md), oldest first. In memory: the phone re-reads it on every inbox refresh.
+async fn get_requests(State(s): State<ApiState>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    Ok(Json(requests_json()))
+}
+
+fn requests_json() -> Value {
+    let pending: Vec<Value> = crate::agent_requests::list()
+        .iter()
+        .filter(|r| r.status == "pending")
+        .map(crate::agent_requests::wire)
+        .collect();
+    json!({ "requests": pending })
+}
+
+/// `POST /requests/{id}/approve` (v0.23): the human's approval, from the phone. Waits up to
+/// `REQUEST_SETTLE_WAIT` for the desktop to carry it out, so the card can say what happened:
+/// `{ok:true, status:"done"|"failed", detail}`, or `status:"approved"` if it is still running.
+/// A restart answers at once (`detail` says maiTerm is restarting): the desktop goes away next.
+async fn post_request_approve(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    request_decision(&s, &id, true).await
+}
+
+/// `POST /requests/{id}/deny` (v0.23). The agent is told.
+async fn post_request_deny(
+    State(s): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    authorize(&s, &headers)?;
+    request_decision(&s, &id, false).await
+}
+
+const REQUEST_SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn request_decision(s: &ApiState, id: &str, approve: bool) -> Result<Json<Value>, StatusCode> {
+    let Some(app) = s.app_handle.as_ref() else { return Err(StatusCode::SERVICE_UNAVAILABLE) };
+    let Some(r) = crate::agent_requests::decide(app, id, approve, "phone") else {
+        return Ok(Json(json!({ "ok": false, "reason": "not_pending", "detail": "It was already answered, or it lapsed." })));
+    };
+    if !approve {
+        return Ok(Json(json!({ "ok": true, "status": "denied", "detail": "Denied. The agent is told." })));
+    }
+    if r.kind == "restart" {
+        return Ok(Json(json!({ "ok": true, "status": "approved", "detail": "maiTerm is restarting." })));
+    }
+    let deadline = std::time::Instant::now() + REQUEST_SETTLE_WAIT;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        if let Some(now) = crate::agent_requests::get(id).filter(|r| r.status != "approved") {
+            return Ok(Json(json!({ "ok": true, "status": now.status, "detail": now.outcome })));
+        }
+    }
+    Ok(Json(json!({ "ok": true, "status": "approved", "detail": "Approved. The desktop is still carrying it out." })))
+}
+
 /// `POST /chats/{tabId}/scripts/{id}/approve` (v0.15): the human read a watch script on the
 /// phone's card and said yes. Synchronous, written in Rust like the desktop's approve.
 async fn post_script_approve(
@@ -2872,7 +2938,7 @@ const UNATTRIBUTED_PERMISSION_TEXT: &str = "Permission requested";
 
 /// Every `kind` the doorbell can ring (docs §6.2). The phone shows one switch per entry, so a
 /// kind belongs here only once something in this build actually rings it.
-const DOORBELL_KINDS: &[&str] = &["permission", "question", "idle_done", "escalation", "account", "ask", "script"];
+const DOORBELL_KINDS: &[&str] = &["permission", "question", "idle_done", "escalation", "account", "ask", "script", "request"];
 
 fn push_prefs_json(muted: &[String]) -> Value {
     json!({ "kinds": DOORBELL_KINDS, "muted": muted })
@@ -3009,6 +3075,9 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
     let mut asks: HashMap<String, u64> = HashMap::new();
     // v0.15 `scriptsWaiting`: watch scripts waiting for approval. Same treatment as `asks`.
     let mut scripts: HashMap<String, u64> = HashMap::new();
+    // v0.23: the agent-request revision this socket was last sent (0 = never, so the first tick
+    // sends the baseline).
+    let mut requests_rev: u64 = 0;
     // Per-tab last-seen registration flag. A tab registering (or losing its registration) changes
     // the re-initialize affordance without moving state/prompt, so it needs its own diff.
     let mut registered: HashMap<String, bool> = HashMap::new();
@@ -3177,6 +3246,22 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                 mirror::refresh_tabs(&s.app, &tabs);
             }
             _ = ticker.tick() => {
+                // v0.23 agent requests: the pending list, full replace, whenever it moved (a
+                // baseline on the first tick), and `chats_changed` so the per-tab
+                // `requestsWaiting` counts are re-read with it.
+                let rev = crate::agent_requests::revision();
+                if rev != requests_rev {
+                    requests_rev = rev;
+                    let mut frame = requests_json();
+                    frame["type"] = json!("requests");
+                    frame["ts"] = json!(now_ms());
+                    if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        return;
+                    }
+                    if socket.send(Message::Text(json!({ "type": "chats_changed" }).to_string().into())).await.is_err() {
+                        return;
+                    }
+                }
                 // Overlord mirror: any window whose published snapshot moved goes out inline,
                 // full replace (docs §13). In-memory diff on a version stamp; nothing else.
                 for frame in overlord::changed_frames(&s.app, &mut overlord_versions) {
@@ -5988,6 +6073,7 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
     let now = now_ms();
     let asks = board::asks_by_tab(app);
     let scripts = follow_ups::waiting_by_tab(app);
+    let requests = crate::agent_requests::waiting_by_tab();
     designated_tabs(app)
         .into_iter()
         .map(|t| {
@@ -5997,6 +6083,8 @@ fn build_chat_summaries(app: &AppState) -> Vec<Value> {
                 "asks": asks.get(&t.tab_id).copied().unwrap_or(0),
                 // v0.15, diffed the same way.
                 "scriptsWaiting": scripts.get(&t.tab_id).copied().unwrap_or(0),
+                // v0.23: agent requests from this tab waiting for the human (GET /requests).
+                "requestsWaiting": requests.get(&t.tab_id).copied().unwrap_or(0),
                 "tabId": t.tab_id,
                 "title": t.title,
                 "workspaceSuspended": t.workspace_suspended,
@@ -6034,6 +6122,7 @@ fn build_chats(app: &AppState) -> Vec<Value> {
     let tab_count = tabs.len();
     let asks = board::asks_by_tab(app);
     let scripts = follow_ups::waiting_by_tab(app);
+    let requests = crate::agent_requests::waiting_by_tab();
     let ph = std::time::Instant::now();
     let chats: Vec<Value> = tabs
         .into_iter()
@@ -6073,6 +6162,8 @@ fn build_chats(app: &AppState) -> Vec<Value> {
                 // (docs/follow-ups.md §5.1). Pinned in "Needs you" like `asks`: a script does
                 // nothing until approved, and the agent has moved on meanwhile.
                 "scriptsWaiting": scripts.get(&t.tab_id).copied().unwrap_or(0),
+                // v0.23: agent requests from this tab waiting for the human (GET /requests).
+                "requestsWaiting": requests.get(&t.tab_id).copied().unwrap_or(0),
                 // ask_open guards the case where a build leaves an open AskUserQuestion at
                 // state=="active" — it still needs to surface as unread in the inbox.
                 // NOT plain `state == "idle"`. Since a starting session registers as idle, that

@@ -207,6 +207,8 @@ const KIND_BODY = {
   // agent's tasks, and a watch script it wants maiTerm to run.
   ask: "Has a question for you",
   script: "Wants to run a watch script",
+  // maiLink 0.23: a mesh change or a restart only the human may approve (docs/agent-requests.md).
+  request: "Asks for your approval",
 };
 
 // `Object.hasOwn`, not `??`: `kind` arrives over the network, and a plain object literal answers

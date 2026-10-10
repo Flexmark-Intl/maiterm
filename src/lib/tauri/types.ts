@@ -752,7 +752,11 @@ export interface AgentRequest {
   effects: string[];
   /** The agent's own words. */
   reason: string | null;
+  /** The asking tab's name and workspace when it asked. */
+  asker_title: string;
+  asker_workspace: string;
   requested_at: number;
+  expires_at: number;
   status: 'pending' | 'approved' | 'done' | 'failed' | 'denied' | 'expired';
   decided_at: number | null;
   decided_by: 'desktop' | 'phone' | null;

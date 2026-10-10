@@ -43,7 +43,8 @@
         if (t) return `${tabDisplayName(t.id)} · ${ws.name}`;
       }
     }
-    return 'an agent in another window';
+    // Another window's tab, or one closed since: as it read when it asked.
+    return r.asker_workspace ? `${r.asker_title} · ${r.asker_workspace}` : r.asker_title;
   });
 
   const heading = $derived(r.kind === 'restart' ? 'Allow this restart?' : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?');
