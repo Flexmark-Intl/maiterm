@@ -20,8 +20,8 @@
 >   `inject_failed`) when the mod handled it. A reply without it came from keystrokes, including
 >   the keystroke fallback for a row the mod can't give (plan dialogs, "switch to auto mode").
 >
-> **"keys"** is unchanged: keystrokes into the terminal, as before. That covers ssh tabs, an older
-> Claude, the trust dialog and Codex. Treat an absent or unknown value as "keys".
+> **"keys"** is unchanged: keystrokes into the terminal, as before. That covers an older
+> Claude (and an ssh host's Claude before the mod reaches it), the trust dialog and Codex. Treat an absent or unknown value as "keys".
 >
 > **v0.21 changelog** (2026-10-08). **A Claude `permission` card can be `respondable:false`
 > with `options:[]`.** Claude sends the same "needs permission" signal for its own dialogs (the
