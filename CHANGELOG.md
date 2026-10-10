@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.4.0
+
+maiTerm now works with Claude Code from the inside, through a Claude Code mod, instead of pressing keys in its terminal.
+
+### Claude Code tabs, through a mod
+
+- **Every Claude tab, local or ssh, now loads a small maiTerm mod** (on Claude Code versions that support mods; older ones keep working the old way). It is how maiTerm knows which tab an event came from, how answers reach Claude, and how messages get delivered.
+- **Answers from your phone, the Loom or the Overlord are given by meaning, not keystrokes.** "Yes" and "No" are picked whichever row they sit on, a "No" releases the tab, and multi-select and "Other" answers to an agent's questions work. An answer that doesn't take is withdrawn whole instead of leaving half of it typed.
+- **Messages no longer wait for your draft.** Phone messages, follow-ups, Overlord directives, mesh messages and Mattermost replies go to Claude between turns around whatever you're typing, and never into it.
+- **Agents in maiTerm tabs can't message other Claude sessions on their own.** Claude Code lets sessions on the same machine talk directly; in maiTerm the mesh, which you set up, is the only way across.
+- **ssh tabs stream as the agent writes**: text before a slow tool call reaches the phone and the Loom as the tool starts, not when it finishes.
+
+### Overlord
+
+- **Rules you fire yourself — the composer's bolt, or from your phone — aren't held up by a background subagent.** A compaction no longer stalls while a subagent review runs, and every step waits out a draft in Claude's input box instead of typing into it or giving up.
+
+### Phone and Loom
+
+- **A Claude dialog that isn't a permission** (like Claude's own "Enable hot reloading?") no longer leaves a tab stuck asking for permission, and the phone no longer offers guessed Yes/No buttons for it.
+- **The phone stays connected**: a phone that was answering was sometimes dropped as unresponsive.
+- **Chats open and the chat list loads much faster with many tabs**: conversations are read as they grow instead of re-read from the end each time.
+
+### Smaller
+
+- **A mesh introduces only peers whose agent is running**; parked ones are a count, and still reachable.
+- **Moving a background tab to another workspace leaves you where you are**, and a move to another window no longer jumps to that window.
+
 ## v3.3.0
 
 Move a project folder without breaking anything, link mesh workspaces, and the Overlord stops asking you the same question twice.
