@@ -188,7 +188,12 @@ Under the chat, in this order:
   through `send_tab_message`, the phone's `POST /message` rules (an unregistered tab is woken
   first, the trust dialog is never typed at) plus one: **nothing is sent while a prompt is
   open**, because typed text goes into the dialog, a digit picks a row and the rest lands in
-  "tell Claude what to do differently".
+  "tell Claude what to do differently". **Nor over a human's draft** in a Claude tab's input box
+  (`status: "draft"`, 2026-10-10): its CR would send the draft too. Where the phone holds the
+  message until the box empties (`draft_hold.rs`), the Loom refuses with the reason and the
+  composer keeps the text — the human is at the desktop. A text the tab's mod takes now (between
+  turns) goes around the draft; attachments and slash commands are typed, so a draft stops them.
+  Before this the attachment path had no draft check, and a tab without the mod was typed over.
 
 **"A Claude permission is open" is read off the screen** (`open_prompt` in mailink/mod.rs,
 used by the composer, the prompt card, `getTabPrompt` and the responder). The hook's state is

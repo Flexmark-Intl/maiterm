@@ -1387,7 +1387,9 @@ async fn ready_to_type(
 /// Type a message into a tab's agent from the desktop (the Loom's composer), under the same
 /// rules as the phone's `POST /message`, plus one: a message is refused while a permission or
 /// question prompt is open. Typed there, its characters go to the dialog (a digit picks a row,
-/// the rest lands in "tell Claude what to do differently") instead of reaching the agent.
+/// the rest lands in "tell Claude what to do differently") instead of reaching the agent. A
+/// human's draft in the agent's input box refuses it too (`status: "draft"`), where the phone
+/// would hold it.
 pub(crate) async fn send_tab_message(
     app: &Arc<AppState>,
     handle: Option<&tauri::AppHandle>,
@@ -1423,9 +1425,21 @@ pub(crate) async fn send_tab_message(
     if let Some(kind) = prompt_up() {
         return refuse(kind);
     }
+    // Nothing typed may submit the human's draft: the CR would send it along with this. The
+    // phone holds its message until the box empties (draft_hold.rs); here the human is at the
+    // desktop and the composer keeps the text, so it is refused with the reason. A text the tab's
+    // mod takes now goes around the draft; attachments are always typed, so any draft stops them.
+    let draft = || json!({ "status": "draft", "reason": "draft",
+        "detail": "That tab has an unsent draft in the agent's input box. Send or clear it there first: typed now, this would be sent together with it." });
     let typed = if files.is_empty() {
+        if draft_blocks_prompt(app, tab_id, crate::claude_code::mod_inbox::offerable(text)) {
+            return draft();
+        }
         submit_prompt(app, tab_id, &pty, text).await.map(|_| ())
     } else {
+        if draft_hold::draft_in_box(app, tab_id) {
+            return draft();
+        }
         let paths = match stage_files_for_tab(app, tab_id, &pty, files).await {
             Ok(p) => p,
             Err(refusal) => return refusal,
@@ -1433,6 +1447,9 @@ pub(crate) async fn send_tab_message(
         // Staging a large file can take a while: once more, the last look before typing.
         if let Some(kind) = prompt_up() {
             return refuse(kind);
+        }
+        if draft_hold::draft_in_box(app, tab_id) {
+            return draft();
         }
         // Typed, these would overtake a prompt the tab's mod submitted that still waits for its
         // turn.
@@ -1444,6 +1461,8 @@ pub(crate) async fn send_tab_message(
     };
     match typed {
         Ok(()) => json!({ "status": "delivered", "woke": woke }),
+        // The mod was asked and didn't take it after all, and the box holds a draft.
+        Err(_) if draft_hold::draft_in_box(app, tab_id) => draft(),
         Err(e) => {
             log::warn!("[loom] message to tab {tab_id} failed: {e}");
             json!({ "status": "failed", "detail": "The message couldn't be typed into that tab." })

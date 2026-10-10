@@ -496,7 +496,7 @@ export async function answerTabPromptAsHuman(
 
 /** What happened to a message typed from the Loom's composer. */
 export interface SendResult {
-  status: 'delivered' | 'unreachable' | 'prompt_open' | 'failed' | 'empty';
+  status: 'delivered' | 'unreachable' | 'prompt_open' | 'draft' | 'failed' | 'empty';
   reason?: string;
   detail?: string;
   /** The wake it took ('init' | 'resume'), when the tab's agent had to be brought back first. */
