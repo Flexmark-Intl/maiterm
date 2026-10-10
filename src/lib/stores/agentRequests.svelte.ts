@@ -84,8 +84,14 @@ function snapshot(wss: Workspace[]): { workspaces: string[]; agents: string[] } 
   };
 }
 
+/** Field by field: the stored copy has been through Rust's `serde_json::Value`, whose objects
+ *  come back with their keys sorted, so the two objects never stringify alike (review of
+ *  02a18021). The arrays themselves were sorted when taken. */
 function sameSnapshot(stored: unknown, wss: Workspace[]): boolean {
-  return JSON.stringify(stored) === JSON.stringify(snapshot(wss));
+  const s = stored as { workspaces?: unknown; agents?: unknown } | null;
+  const now = snapshot(wss);
+  const same = (a: unknown, b: string[]) => Array.isArray(a) && a.length === b.length && a.every((x, i) => x === b[i]);
+  return !!s && same(s.workspaces, now.workspaces) && same(s.agents, now.agents);
 }
 
 const CHANGED = 'the meshes changed after it was asked (workspaces or agents moved); nothing was done, ask again';
@@ -348,9 +354,10 @@ async function onApproved(r: AgentRequest) {
 async function onSettled(r: AgentRequest) {
   toastStore.removeByKey(`agent-request:${r.id}`);
   if (!terminalsStore.get(r.tab_id)) {
-    // A tab that just moved here (an approved move of the asking tab itself) is in this window's
-    // list before its terminal registers, and the settle can arrive in between.
-    if (!locateTab(r.tab_id)) return;
+    // A tab moving here (an approved cross-window move of the asking tab itself) can be in
+    // neither window when the settle arrives: gone from the old one, not yet in this one's list.
+    // So every window without its terminal waits a little, and whichever registers it says it;
+    // the rest time out (bounded, one timer each).
     await terminalsStore.waitForRegister(r.tab_id, 10_000);
     if (!terminalsStore.get(r.tab_id)) return;
   }
@@ -364,7 +371,9 @@ async function onSettled(r: AgentRequest) {
         ? `[maiTerm] The human approved your request${by} — ${r.summary} — but it could not be done: ${r.outcome ?? 'unknown error'}.`
         : r.status === 'denied'
           ? `[maiTerm] The human denied your request${by}: ${r.summary}. Do not ask again unless they bring it up.`
-          : null;
+          : r.status === 'expired'
+            ? `[maiTerm] Your request lapsed after 30 minutes without an answer from the human: ${r.summary}. Nothing was done.`
+            : null;
   if (text && !(await overlordStore.tellTab(r.tab_id, text, 'agent-request'))) {
     logInfo(`agentRequests: could not tell ${r.tab_id.slice(0, 8)} about ${r.id} (${r.status}); getRequestStatus has it`);
   }
