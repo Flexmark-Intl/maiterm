@@ -1088,9 +1088,9 @@ pub fn tool_list_response(
         }
     ]).as_array().unwrap().clone());
 
-    // Organisation, meshes and restart (docs/agent-requests.md). Reads and moves act at once;
-    // anything that changes which agents can message each other, and restarting maiTerm, files
-    // a request the HUMAN approves on a card — the tool never acts on it, and nothing an agent
+    // Organisation, meshes, new agents and restart (docs/agent-requests.md). Reads and moves act
+    // at once; anything that changes which agents can message each other, starting a new agent
+    // tab, and restarting maiTerm, files a request the HUMAN approves on a card — the tool never acts on it, and nothing an agent
     // can call can approve it.
     const AWAITS: &str = " It does NOT act: it files a request the human approves or denies on a card in maiTerm (and their phone), and returns {status:'awaiting_approval', request_id}. maiTerm tells you the outcome in this tab when they answer; getRequestStatus reads it meanwhile. Do not ask the human to approve it in chat — the card is the only approval that counts. Give a one-line `reason`: it is shown to them as your words.";
     tools.extend(serde_json::json!([
@@ -1169,6 +1169,22 @@ pub fn tool_list_response(
             }
         },
         {
+            "name": "createTab",
+            "description": format!("Open a new agent tab in a workspace (in this window or another), in a folder on this machine, and start a fresh agent session there (Claude by default). Give it a `name` to make it a named agent: in a Mesh Workspace a named tab joins the mesh. When it is done you are told the new tab's id, and its agent comes up on its own (allow it a few seconds). Local folders only, not ssh hosts.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "workspace_id": { "type": "string", "description": "The workspace to open it in (from getMeshLayout / listWorkspaces)" },
+                    "cwd": { "type": "string", "description": "Absolute path of an existing folder on this machine" },
+                    "runtime": { "type": "string", "enum": ["claude", "codex", "gemini"], "description": "The agent to start (default claude)" },
+                    "name": { "type": "string", "description": "The tab's name, e.g. its role. Optional; required to be a mesh member" },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["workspace_id", "cwd", "reason"]
+            }
+        },
+        {
             "name": "restartMaiterm",
             "description": format!("Restart maiTerm: install the available update first (`update: true`, refused when there is none) or just relaunch. Every window restarts; agents come back through their auto-resume, and this request does not survive it — you are not told the outcome, you are restarted.{AWAITS}"),
             "inputSchema": {
@@ -1183,7 +1199,7 @@ pub fn tool_list_response(
         },
         {
             "name": "getRequestStatus",
-            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, restartMaiterm, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
+            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, restartMaiterm, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

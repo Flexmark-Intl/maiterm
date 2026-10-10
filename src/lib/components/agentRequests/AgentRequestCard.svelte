@@ -47,7 +47,11 @@
     return r.asker_workspace ? `${r.asker_title} · ${r.asker_workspace}` : r.asker_title;
   });
 
-  const heading = $derived(r.kind === 'restart' ? 'Allow this restart?' : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?');
+  const heading = $derived(
+    r.kind === 'restart' ? 'Allow this restart?'
+      : r.kind === 'tab_create' ? 'Allow this new agent?'
+        : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
+  );
 
   async function decide(approve: boolean, e: MouseEvent) {
     if (busy || secondClick(e)) return;

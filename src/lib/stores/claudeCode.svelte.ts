@@ -398,6 +398,9 @@ function createClaudeCodeStore() {
         case 'unlinkMesh':
           result = await agentRequestsStore.unlinkMesh(args as Parameters<typeof agentRequestsStore.unlinkMesh>[0]);
           break;
+        case 'createTab':
+          result = await agentRequestsStore.createTab(args as Parameters<typeof agentRequestsStore.createTab>[0]);
+          break;
         case 'restartMaiterm':
           result = await agentRequestsStore.restartMaiterm(args as Parameters<typeof agentRequestsStore.restartMaiterm>[0]);
           break;

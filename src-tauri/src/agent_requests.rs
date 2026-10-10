@@ -1,7 +1,7 @@
 //! Agent requests that only the human can approve (docs/agent-requests.md).
 //!
 //! Some MCP tools change things an agent must not change on its own say-so: which tabs share a
-//! mesh (who can message whom), and restarting or updating maiTerm itself. Those tools do not act.
+//! mesh (who can message whom), starting a new agent tab, and restarting or updating maiTerm. Those tools do not act.
 //! They file a request here and answer "awaiting approval"; the human approves or denies it on a
 //! card (the Loom's Decisions, a toast, the phone), and only then does the window that owns the
 //! target carry it out, from the arguments stored HERE — never from anything the agent sends
@@ -32,13 +32,14 @@ const MAX_PENDING_PER_TAB: usize = 5;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 7] = [
+pub const KINDS: [&str; 8] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
     "mesh_unlink",
     "tab_move",
     "workspace_move",
+    "tab_create",
     "restart",
 ];
 

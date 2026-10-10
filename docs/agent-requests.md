@@ -14,6 +14,7 @@ and "for organization and read operations it doesn't require the prompt".
 | `setMesh` | never: a request |
 | `linkMeshes` | never: a request |
 | `unlinkMesh` | never: a request |
+| `createTab` (a new agent tab in a workspace and local folder) | never: a request |
 | `restartMaiterm` (`update: true` installs the update first) | never: a request |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
 
@@ -27,6 +28,20 @@ messages for the same reason). Any move that changes a tab's mesh is a mesh chan
 - **A workspace moved:** it needs approval when it is a mesh with a `mesh_group`. The move breaks
   the link in this window, and the workspace rejoins any workspace holding that group in the
   target window.
+
+**A new agent is always asked** (`createTab`, added 2026-10-10 on Darryl's ask; any agent may
+call it, not only the Overlord). The card is needed in a plain workspace too, not just a mesh.
+The new tab is another agent session that can itself ask for more, so the card is where the
+human sees agents being started. How it works:
+- It opens in the workspace's active pane, in the background, and starts the agent through the
+  same launch as the phone's "new conversation" (`workspacesStore.openAgentTab`). The launch
+  rides the auto-resume replay.
+- Only local folders are supported. The folder must exist when the agent files the request and
+  again when the request is carried out.
+- A `name` makes it a custom-named tab, which is what makes an agent tab a mesh member. So a
+  named tab in a mesh workspace has the joining mesh's snapshot on its card, checked like a
+  move's.
+- The asking agent is told the new tab's id.
 
 ## 2. Where the approval lives
 

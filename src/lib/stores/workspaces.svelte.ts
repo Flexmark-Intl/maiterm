@@ -1,6 +1,6 @@
 import type { SplitDirection, SplitNode, Tab, Pane, Task, Workspace, WorkspaceNote, EditorFileInfo, DiffContext, CommsMonitorChannel, CommsBinding, Service } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
-import { launchCommand } from '$lib/agents/descriptor';
+import { getDescriptor, launchCommand } from '$lib/agents/descriptor';
 import { getAdapter } from '$lib/agents/adapter';
 import * as commands from '$lib/tauri/commands';
 import { savedCwd } from '$lib/stores/relocateFallback';
@@ -2534,6 +2534,35 @@ function createWorkspacesStore() {
       // action doesn't yank the desktop's view out from under whoever is using it — so nothing
       // would ever mount it: the record would sit there with no terminal attached, forever.
       // Activate it explicitly (mounts + spawns, stays invisible) rather than stealing focus.
+      window.dispatchEvent(new CustomEvent('activate-tab', { detail: newTab.id }));
+      return newTab.id;
+    },
+
+    /**
+     * A new agent tab in a LOCAL folder, in a workspace's active pane: an approved `createTab`
+     * request (docs/agent-requests.md). The same launch as `newConversationFrom` (the agent rides
+     * the auto-resume replay, the runtime is claimed now, the tab mounts in the background), with
+     * the folder given rather than inherited. A `name` is a custom name, which is what makes an
+     * agent tab a mesh member (agentMesh `isAgentMember`).
+     *
+     * Returns the new tab id, or null when the workspace is gone.
+     */
+    async openAgentTab(workspaceId: string, cwd: string, runtime: AgentRuntime, name: string | null): Promise<string | null> {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      const paneId = ws?.active_pane_id ?? ws?.panes[0]?.id;
+      if (!ws || !paneId) return null;
+      const newTab = await commands.createTab(workspaceId, paneId, name ?? getDescriptor(runtime).displayName);
+      if (name) await commands.renameTab(workspaceId, paneId, newTab.id, name, true);
+      terminalsStore.markSpawning(newTab.id);
+      terminalsStore.setSplitContext(newTab.id, { cwd, sshCommand: null, remoteCwd: null, fireAutoResume: true });
+      await this.setTabAutoResumeContext(workspaceId, paneId, newTab.id, cwd, null, null, launchCommand(runtime), false);
+      await commands.setTabRuntime(workspaceId, paneId, newTab.id, runtime);
+      const data = await commands.getWindowData();
+      const updatedWs = data.workspaces.find(w => w.id === workspaceId);
+      if (updatedWs) {
+        const idx = workspaces.findIndex(w => w.id === workspaceId);
+        if (idx >= 0) workspaces[idx] = updatedWs;
+      }
       window.dispatchEvent(new CustomEvent('activate-tab', { detail: newTab.id }));
       return newTab.id;
     },

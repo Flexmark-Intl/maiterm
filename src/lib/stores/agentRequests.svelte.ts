@@ -2,10 +2,11 @@
  * Agent requests only the human approves (src-tauri/src/agent_requests.rs, docs/agent-requests.md).
  *
  * Three jobs, all in the window that owns the thing an agent wants changed:
- * - the TOOL handlers (moveTab, moveWorkspace, setMesh, linkMeshes, unlinkMesh, restartMaiterm):
- *   organisation happens at once; anything that changes which agents can message each other, and
- *   any restart, is filed as a request instead, with the card's wording built HERE from maiTerm's
- *   own state — the agent contributes only its `reason`, shown as its words;
+ * - the TOOL handlers (moveTab, moveWorkspace, setMesh, linkMeshes, unlinkMesh, createTab,
+ *   restartMaiterm): organisation happens at once; anything that changes which agents can message
+ *   each other, starting a new agent, and any restart, is filed as a request instead, with the
+ *   card's wording built HERE from maiTerm's own state — the agent contributes only its `reason`,
+ *   shown as its words;
  * - the EXECUTOR: Rust hands an approved request to the window that filed it, which re-checks
  *   that the world still matches the card and carries it out from the stored arguments;
  * - the OUTCOME: the requesting tab's agent is told what became of it.
@@ -26,6 +27,8 @@ import { updaterStore } from '$lib/stores/updater.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
 import { dispatch as notify } from '$lib/stores/notificationDispatch';
 import { moveTabToWindow, moveWorkspaceToWindow } from '$lib/stores/windowMove';
+import { getDescriptor } from '$lib/agents/descriptor';
+import type { AgentRuntime } from '$lib/agents/types';
 
 type ToolResult = Record<string, unknown>;
 
@@ -251,6 +254,40 @@ async function unlinkMesh(a: { tabId?: string; workspace_id?: string; reason?: s
   ], a.reason);
 }
 
+const RUNTIMES: AgentRuntime[] = ['claude', 'codex', 'gemini'];
+const MAX_TAB_NAME = 60;
+
+/** A new agent tab is ALWAYS asked, in a plain workspace too: it is a new agent session, which
+ *  could open more of its own, so the card is where the human sees agents being started. */
+async function createTab(a: { tabId?: string; workspace_id?: string; cwd?: string; runtime?: string; name?: string; reason?: string }): Promise<ToolResult> {
+  if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
+  if (!a.workspace_id || !a.cwd) return { error: 'workspace_id and cwd are required.' };
+  const ws = wsById(a.workspace_id);
+  if (!ws) return { error: 'Workspace not found in this window (getMeshLayout lists them).' };
+  if (ws.overlord) return { error: 'The Overlord workspace takes no new tabs.' };
+  const runtime = (a.runtime ?? 'claude') as AgentRuntime;
+  if (!RUNTIMES.includes(runtime)) return { error: `runtime must be one of ${RUNTIMES.join(', ')}.` };
+  const cwd = a.cwd.trim();
+  if (!cwd.startsWith('/')) return { error: 'cwd must be an absolute path on this machine.' };
+  if (!(await commands.isDirectory(cwd).catch(() => false))) return { error: `${cwd} is not a folder on this machine.` };
+  const name = a.name?.trim().slice(0, MAX_TAB_NAME) || null;
+  const agent = getDescriptor(runtime).displayName;
+  // Only a NAMED agent tab is a mesh member (agentMesh `isAgentMember`).
+  const joins = !!name && !!meshKey(ws);
+  const effects = [`A new ${agent} session starts in ${cwd}, with its own context and the same access to this machine as any tab you open.`];
+  if (joins) {
+    effects.push(`It joins the mesh of ${names(meshOf(ws))}: ${count(meshOf(ws).flatMap(agentTabs).length, 'agent')} there can message it, and it them.`);
+  }
+  return file(
+    a.tabId,
+    'tab_create',
+    { workspace_id: ws.id, cwd, runtime, name, mesh: joins ? snapshot(meshOf(ws)) : null },
+    `Open a new ${agent} tab${name ? ` “${name}”` : ''} in “${ws.name}”`,
+    effects,
+    a.reason,
+  );
+}
+
 async function restartMaiterm(a: { tabId?: string; update?: boolean; reason?: string }): Promise<ToolResult> {
   if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
   if (typeof a.update !== 'boolean') return { error: 'update must be true or false.' };
@@ -318,6 +355,18 @@ async function execute(r: AgentRequest): Promise<string> {
       const err = await moveWorkspaceToWindow(ws.id, s('to_window'), true);
       if (err) throw new Error(err);
       return 'moved';
+    }
+    case 'tab_create': {
+      const ws = wsById(s('workspace_id'));
+      if (!ws) throw new Error('the workspace is gone');
+      const name = (r.args.name as string | null) ?? null;
+      // The card said whether it joins a mesh, and whose; either having changed is a different question.
+      const joins = !!name && !!meshKey(ws);
+      if (joins !== !!r.args.mesh || (joins && !sameSnapshot(r.args.mesh, meshOf(ws)))) throw new Error(CHANGED);
+      if (!(await commands.isDirectory(s('cwd')).catch(() => false))) throw new Error(`${s('cwd')} is no longer a folder`);
+      const id = await workspacesStore.openAgentTab(ws.id, s('cwd'), s('runtime') as AgentRuntime, name);
+      if (!id) throw new Error('the workspace is gone');
+      return `opened tab ${id}${name ? ` (“${name}”)` : ''} in “${ws.name}”; its agent is starting`;
     }
     case 'restart': {
       if (r.args.update) {
@@ -409,6 +458,7 @@ function createAgentRequestsStore() {
     setMesh,
     linkMeshes,
     unlinkMesh,
+    createTab,
     restartMaiterm,
     async init() {
       const me = getCurrentWindow().label;
