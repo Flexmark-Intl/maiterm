@@ -2535,13 +2535,16 @@ struct ScriptDecisionBody {
 /// docs/agent-requests.md), oldest first. In memory: the phone re-reads it on every inbox refresh.
 async fn get_requests(State(s): State<ApiState>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
     authorize(&s, &headers)?;
-    Ok(Json(requests_json()))
+    Ok(Json(requests_json(&s.app)))
 }
 
-fn requests_json() -> Value {
+/// Pending requests from tabs exposed to maiLink only (`is_designated`, the gate for the chat
+/// list, the WS and the doorbell): an excluded tab's name and words never reach the phone. Its
+/// requests are answered on the desktop.
+fn requests_json(app: &AppState) -> Value {
     let pending: Vec<Value> = crate::agent_requests::list()
         .iter()
-        .filter(|r| r.status == "pending")
+        .filter(|r| r.status == "pending" && is_designated(app, &r.tab_id))
         .map(crate::agent_requests::wire)
         .collect();
     json!({ "requests": pending })
@@ -2556,7 +2559,7 @@ async fn post_request_approve(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    authorize_human(&s, &headers)?;
     request_decision(&s, &id, true).await
 }
 
@@ -2566,7 +2569,7 @@ async fn post_request_deny(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    authorize_human(&s, &headers)?;
     request_decision(&s, &id, false).await
 }
 
@@ -2574,6 +2577,11 @@ const REQUEST_SETTLE_WAIT: std::time::Duration = std::time::Duration::from_secs(
 
 async fn request_decision(s: &ApiState, id: &str, approve: bool) -> Result<Json<Value>, StatusCode> {
     let Some(app) = s.app_handle.as_ref() else { return Err(StatusCode::SERVICE_UNAVAILABLE) };
+    // An excluded tab's request is never served, so the phone can't have its id; refuse it all
+    // the same rather than lean on that.
+    if crate::agent_requests::get(id).is_some_and(|r| !is_designated(&s.app, &r.tab_id)) {
+        return Ok(Json(json!({ "ok": false, "reason": "not_pending", "detail": "It was already answered, or it lapsed." })));
+    }
     let Some(r) = crate::agent_requests::decide(app, id, approve, "phone") else {
         return Ok(Json(json!({ "ok": false, "reason": "not_pending", "detail": "It was already answered, or it lapsed." })));
     };
@@ -2601,7 +2609,8 @@ async fn post_script_approve(
     Path((tab_id, follow_up_id)): Path<(String, String)>,
     Json(body): Json<ScriptDecisionBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    // A paired phone only: the dev token is readable by any local agent (`authorize_human`).
+    authorize_human(&s, &headers)?;
     script_decision(&s, &tab_id, &follow_up_id, &body.script_hash, follow_ups::Decision::Approve)
 }
 
@@ -2613,7 +2622,7 @@ async fn post_script_reject(
     Path((tab_id, follow_up_id)): Path<(String, String)>,
     Json(body): Json<ScriptDecisionBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    authorize_human(&s, &headers)?;
     script_decision(&s, &tab_id, &follow_up_id, &body.script_hash, follow_ups::Decision::Reject)
 }
 
@@ -3252,7 +3261,7 @@ async fn ws_event_loop(mut socket: WebSocket, s: ApiState, device: String) {
                 let rev = crate::agent_requests::revision();
                 if rev != requests_rev {
                     requests_rev = rev;
-                    let mut frame = requests_json();
+                    let mut frame = requests_json(&s.app);
                     frame["type"] = json!("requests");
                     frame["ts"] = json!(now_ms());
                     if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
@@ -4785,6 +4794,21 @@ fn authorize(s: &ApiState, headers: &HeaderMap) -> Result<(), StatusCode> {
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// The gate for endpoints that stand for the HUMAN's approval (an agent request, a watch script):
+/// a paired device's token only. The dev token is refused because it sits in plain text in the
+/// maiLink data dir and the API listens on every interface, so any agent on this machine could
+/// read it and approve its own request with `curl`, which is the bypass these approvals exist to
+/// prevent (review of c11db1f3). A paired token is stored only as a hash here; the phone holds it.
+fn authorize_human(s: &ApiState, headers: &HeaderMap) -> Result<(), StatusCode> {
+    authorize(s, headers)?;
+    let token = bearer_token(headers);
+    if !s.dev_token.is_empty() && token == s.dev_token {
+        log::warn!("[maiLink] an approval endpoint was called with the dev token — refused (only a paired phone approves)");
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
 }
 
 /// How often a device's `last_seen_at` is allowed to cost a state write. The phone polls every

@@ -73,6 +73,23 @@ async function moveTargets(): Promise<MoveTargetWindow[]> {
   return commands.listMoveTargets();
 }
 
+/** What a card's mesh wording was built from: the workspaces of a mesh and the agent tabs in
+ *  them, sorted. Stored with the request and compared before it is carried out, so an approval
+ *  covers exactly the agents the card named — an agent could otherwise move more tabs into a
+ *  workspace (an ungated move) between the card and the click (review of ffb76a7f). */
+function snapshot(wss: Workspace[]): { workspaces: string[]; agents: string[] } {
+  return {
+    workspaces: wss.map((w) => w.id).sort(),
+    agents: wss.flatMap(agentTabs).map((t) => t.id).sort(),
+  };
+}
+
+function sameSnapshot(stored: unknown, wss: Workspace[]): boolean {
+  return JSON.stringify(stored) === JSON.stringify(snapshot(wss));
+}
+
+const CHANGED = 'the meshes changed after it was asked (workspaces or agents moved); nothing was done, ask again';
+
 // ── Filing ──────────────────────────────────────────────────────────────────────────────────
 
 async function file(
@@ -118,7 +135,15 @@ async function moveTab(a: { tabId?: string; tab_id?: string; to_workspace_id?: s
   const after = meshKey(dest.ws);
   // A mesh is per window: across windows, being in a mesh on either side is a change.
   const changes = dest.w.label === here ? before !== after : before !== null || after !== null;
-  const args = { tab_id: a.tab_id, from_workspace_id: at.ws.id, to_window: dest.w.label, to_workspace_id: dest.ws.id };
+  const destHere = dest.w.label === here ? wsById(dest.ws.id) : undefined;
+  const args = {
+    tab_id: a.tab_id,
+    from_workspace_id: at.ws.id,
+    to_window: dest.w.label,
+    to_workspace_id: dest.ws.id,
+    from_mesh: snapshot(meshOf(at.ws)),
+    to_mesh: destHere ? snapshot(meshOf(destHere)) : null,
+  };
   if (!changes) {
     const err = await moveTabToWindow(at.ws.id, at.paneId, a.tab_id, dest.w.label, dest.ws.id, true);
     return err ? { error: err } : { moved: true, tab_id: a.tab_id, workspace: dest.ws.name };
@@ -159,7 +184,7 @@ async function moveWorkspace(a: { tabId?: string; workspace_id?: string; to_wind
       : 'It carries a mesh link with it, and rejoins any workspace sharing that link in the other window.',
   ];
   const where = target.name ? `“${target.name}”` : 'another window';
-  return file(a.tabId, 'workspace_move', { workspace_id: ws.id, to_window: target.label }, `Move workspace “${ws.name}” to ${where}`, effects, a.reason);
+  return file(a.tabId, 'workspace_move', { workspace_id: ws.id, to_window: target.label, mesh: snapshot(meshOf(ws)) }, `Move workspace “${ws.name}” to ${where}`, effects, a.reason);
 }
 
 async function setMesh(a: { tabId?: string; workspace_id?: string; enabled?: boolean; reason?: string }): Promise<ToolResult> {
@@ -171,6 +196,7 @@ async function setMesh(a: { tabId?: string; workspace_id?: string; enabled?: boo
   if (ws.bridge_all === a.enabled) return { unchanged: true, mesh: a.enabled };
   const agents = agentTabs(ws);
   if (a.enabled) {
+    // No snapshot here: the card says agents added later join too, which is what a mesh is.
     return file(a.tabId, 'mesh_enable', { workspace_id: ws.id }, `Make “${ws.name}” a mesh workspace`, [
       agents.length
         ? `Its ${count(agents.length, 'agent')} (${names(agents)}) can message each other, and every agent tab added later joins them.`
@@ -178,7 +204,7 @@ async function setMesh(a: { tabId?: string; workspace_id?: string; enabled?: boo
     ], a.reason);
   }
   const linked = meshOf(ws).filter((w) => w.id !== ws.id);
-  return file(a.tabId, 'mesh_disable', { workspace_id: ws.id }, `Stop “${ws.name}” being a mesh workspace`, [
+  return file(a.tabId, 'mesh_disable', { workspace_id: ws.id, mesh: snapshot(meshOf(ws)) }, `Stop “${ws.name}” being a mesh workspace`, [
     `Its ${count(agents.length, 'agent')} can no longer message each other through the mesh.`,
     ...(linked.length ? [`It is unlinked from ${names(linked)}.`] : []),
   ], a.reason);
@@ -198,7 +224,14 @@ async function linkMeshes(a: { tabId?: string; workspace_id?: string; with_works
     `The ${count(sideX.flatMap(agentTabs).length, 'agent')} in ${names(sideX)} and the ${count(sideY.flatMap(agentTabs).length, 'agent')} in ${names(sideY)} can message each other.`,
     ...[...sideX, ...sideY].filter((w) => !w.bridge_all).map((w) => `“${w.name}” becomes a mesh workspace.`),
   ];
-  return file(a.tabId, 'mesh_link', { workspace_id: x.id, with_workspace_id: y.id }, `Link ${names(sideX)} with ${names(sideY)} into one mesh`, effects, a.reason);
+  return file(
+    a.tabId,
+    'mesh_link',
+    { workspace_id: x.id, with_workspace_id: y.id, side: snapshot(sideX), with_side: snapshot(sideY) },
+    `Link ${names(sideX)} with ${names(sideY)} into one mesh`,
+    effects,
+    a.reason,
+  );
 }
 
 async function unlinkMesh(a: { tabId?: string; workspace_id?: string; reason?: string }): Promise<ToolResult> {
@@ -207,7 +240,7 @@ async function unlinkMesh(a: { tabId?: string; workspace_id?: string; reason?: s
   if (!ws) return { error: 'Workspace not found.' };
   const rest = meshOf(ws).filter((w) => w.id !== ws.id);
   if (!ws.mesh_group || rest.length === 0) return { unchanged: true, note: 'It is not linked with any mesh in this window.' };
-  return file(a.tabId, 'mesh_unlink', { workspace_id: ws.id }, `Unlink “${ws.name}” from ${names(rest)}`, [
+  return file(a.tabId, 'mesh_unlink', { workspace_id: ws.id, mesh: snapshot(meshOf(ws)) }, `Unlink “${ws.name}” from ${names(rest)}`, [
     `Its ${count(agentTabs(ws).length, 'agent')} and the ${count(rest.flatMap(agentTabs).length, 'agent')} in ${names(rest)} can no longer message each other. It stays a mesh on its own.`,
   ], a.reason);
 }
@@ -240,29 +273,43 @@ async function execute(r: AgentRequest): Promise<string> {
       const ws = wsById(s('workspace_id'));
       if (!ws) throw new Error('the workspace is gone');
       const on = r.kind === 'mesh_enable';
+      if (!on && ws.bridge_all && !sameSnapshot(r.args.mesh, meshOf(ws))) throw new Error(CHANGED);
       if (ws.bridge_all !== on) await agentMeshStore.setMeshEnabled(ws.id, on);
       return on ? `“${ws.name}” is a mesh workspace` : `“${ws.name}” is no longer a mesh`;
     }
     case 'mesh_link': {
-      const res = await agentMeshStore.linkMeshes(s('workspace_id'), s('with_workspace_id'));
+      const x = wsById(s('workspace_id'));
+      const y = wsById(s('with_workspace_id'));
+      if (!x || !y) throw new Error('a workspace is gone');
+      if (!sameSnapshot(r.args.side, meshOf(x)) || !sameSnapshot(r.args.with_side, meshOf(y))) throw new Error(CHANGED);
+      const res = await agentMeshStore.linkMeshes(x.id, y.id);
       if ('error' in res) throw new Error(res.error);
       return 'linked';
     }
     case 'mesh_unlink': {
       const ws = wsById(s('workspace_id'));
       if (!ws) throw new Error('the workspace is gone');
+      if (!sameSnapshot(r.args.mesh, meshOf(ws))) throw new Error(CHANGED);
       await agentMeshStore.unlinkMesh(ws.id);
       return `“${ws.name}” is unlinked`;
     }
     case 'tab_move': {
       const at = locateTab(s('tab_id'));
       if (!at || at.ws.id !== s('from_workspace_id')) throw new Error('the tab is no longer where it was when you approved');
+      // The card named the agents on both sides; either mesh having changed is a different question.
+      const dest = r.args.to_mesh ? wsById(s('to_workspace_id')) : undefined;
+      if (!sameSnapshot(r.args.from_mesh, meshOf(at.ws)) || (r.args.to_mesh && (!dest || !sameSnapshot(r.args.to_mesh, meshOf(dest))))) {
+        throw new Error(CHANGED);
+      }
       const err = await moveTabToWindow(at.ws.id, at.paneId, at.tab.id, s('to_window'), s('to_workspace_id'), true);
       if (err) throw new Error(err);
       return 'moved';
     }
     case 'workspace_move': {
-      const err = await moveWorkspaceToWindow(s('workspace_id'), s('to_window'), true);
+      const ws = wsById(s('workspace_id'));
+      if (!ws) throw new Error('the workspace is gone');
+      if (!sameSnapshot(r.args.mesh, meshOf(ws))) throw new Error(CHANGED);
+      const err = await moveWorkspaceToWindow(ws.id, s('to_window'), true);
       if (err) throw new Error(err);
       return 'moved';
     }
@@ -300,7 +347,13 @@ async function onApproved(r: AgentRequest) {
 /** Tell the agent that asked. Only the window holding its terminal can. */
 async function onSettled(r: AgentRequest) {
   toastStore.removeByKey(`agent-request:${r.id}`);
-  if (!terminalsStore.get(r.tab_id)) return;
+  if (!terminalsStore.get(r.tab_id)) {
+    // A tab that just moved here (an approved move of the asking tab itself) is in this window's
+    // list before its terminal registers, and the settle can arrive in between.
+    if (!locateTab(r.tab_id)) return;
+    await terminalsStore.waitForRegister(r.tab_id, 10_000);
+    if (!terminalsStore.get(r.tab_id)) return;
+  }
   // The restart is its own outcome; a notice typed now would race the shutdown.
   if (r.kind === 'restart' && r.status === 'done') return;
   const by = r.decided_by === 'phone' ? ' (from their phone)' : '';

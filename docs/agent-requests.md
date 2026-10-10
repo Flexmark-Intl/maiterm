@@ -59,6 +59,19 @@ that the world still matches the card:
 - a tab that has moved since, fails;
 - for an update, a different version on offer than the one approved, fails.
 
+**A mesh request stores what its card named.** It records the workspaces of each mesh involved
+and the agent tabs in them. The executor refuses ("the meshes changed… ask again") if those
+differ at approval. Moves that don't touch a mesh are ungated, so without this check an agent
+could fill a plain workspace with agents between the card and the click. The approval would then
+link agents the card never mentioned (review of ffb76a7f). `mesh_enable` is the one exception:
+its card says agents added later join too.
+
+**The phone approves with a paired device's token only** (`authorize_human`). The dev bearer
+token is in plain text in the maiLink data dir, and the API listens on every interface, so any
+local agent could otherwise `curl` its own approval (review of c11db1f3). The watch-script
+approve and reject routes got the same gate. **Still open:** the dev token is also accepted on
+`/respond` (permission and question answers) and on task answers.
+
 **Identity.** Every tool that changes something is on `PEER_ADDRESSING_TOOLS`, so it is refused on
 an inferred identity. The ones that file requests, and `getRequestStatus`, are also on
 `OWN_TAB_ONLY_TOOLS`, because the card names the caller as the agent asking.

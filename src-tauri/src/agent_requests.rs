@@ -80,23 +80,49 @@ fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
+/// For the events a lapse owes: set by the first filing, which is the only way a request (and so
+/// a lapse) comes to exist.
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+/// Requests a sweep lapsed, waiting to be announced once the lock that found them is released.
+static LAPSED: LazyLock<parking_lot::Mutex<Vec<AgentRequest>>> = LazyLock::new(Default::default);
+
+/// Announce what a sweep lapsed, like any other settle: the card's toast goes, and the asking
+/// agent is told (`agent-request-settled`). Call with the REQUESTS lock released.
+fn flush_lapsed() {
+    let lapsed = std::mem::take(&mut *LAPSED.lock());
+    if lapsed.is_empty() {
+        return;
+    }
+    if let Some(app) = APP.get() {
+        for r in &lapsed {
+            log::info!("[requests] {} {} ({})", r.kind, r.status, r.id);
+            let _ = app.emit("agent-request-settled", r);
+        }
+        let _ = app.emit("agent-requests-changed", ());
+    }
+}
+
 /// Lapse what waited too long, forget what settled long ago.
 fn sweep(list: &mut Vec<AgentRequest>, now: u64) {
-    let mut moved = false;
+    let mut moved = Vec::new();
     for r in list.iter_mut() {
         if r.status == "pending" && now.saturating_sub(r.requested_at) >= PENDING_TTL_MS {
             r.status = "expired".into();
             r.decided_at = Some(now);
-            moved = true;
+            moved.push(r.clone());
         }
         // Approved but never reported back: the window that was to carry it out closed or
         // reloaded. Said so, rather than showing "approved" for good.
         if r.status == "approved" && now.saturating_sub(r.decided_at.unwrap_or(now)) >= APPROVED_TTL_MS {
             r.status = "failed".into();
             r.outcome = Some("approved, but the window that was to carry it out never reported back".into());
-            moved = true;
+            moved.push(r.clone());
         }
     }
+    let moved = !moved.is_empty() && {
+        LAPSED.lock().extend(moved);
+        true
+    };
     // Lapsing is found here, on a read, so it moves the revision itself: the phone's socket sends
     // the list only when that moves, and would otherwise keep showing a lapsed card.
     if moved {
@@ -115,6 +141,7 @@ static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 /// The current revision, after lapsing anything due: a poller's check is what finds a lapse.
 pub fn revision() -> u64 {
     sweep(&mut REQUESTS.lock(), now_ms());
+    flush_lapsed();
     REVISION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -167,6 +194,8 @@ pub fn file(
     if !KINDS.contains(&kind) {
         return Err(format!("unknown request kind {kind}"));
     }
+    let _ = APP.set(app.clone());
+    flush_lapsed();
     let now = now_ms();
     let mut list = REQUESTS.lock();
     sweep(&mut list, now);
@@ -189,7 +218,8 @@ pub fn file(
             let sessions = state.agent_sessions.read();
             let mut tabs: Vec<&str> = sessions
                 .values()
-                .filter(|s| s.state == crate::state::app_state::AgentSessionState::Active)
+                // Not the asker: it is mid-turn filing this, and restarting it is the point.
+                .filter(|s| s.state == crate::state::app_state::AgentSessionState::Active && s.tab_id != tab_id)
                 .map(|s| s.tab_id.as_str())
                 .collect();
             tabs.sort_unstable();
@@ -197,9 +227,9 @@ pub fn file(
             tabs.len()
         };
         effects.insert(0, match working {
-            0 => "No agent is in the middle of a turn right now.".to_string(),
-            1 => "1 agent is in the middle of a turn right now and will be interrupted.".to_string(),
-            n => format!("{n} agents are in the middle of a turn right now and will be interrupted."),
+            0 => "No other agent is in the middle of a turn right now.".to_string(),
+            1 => "1 other agent is in the middle of a turn right now and will be interrupted.".to_string(),
+            n => format!("{n} other agents are in the middle of a turn right now and will be interrupted."),
         });
     }
     let mut list = REQUESTS.lock();
@@ -225,7 +255,8 @@ pub fn file(
     drop(list);
     log::info!("[requests] {} filed by tab {}: {}", r.kind, &r.tab_id[..r.tab_id.len().min(8)], r.summary);
     // The phone's doorbell (kind `request`), drained by its loop; a tap opens the asking chat.
-    if state.mailink_info.read().is_some() {
+    // Only for a tab exposed to maiLink: an excluded tab's title must not reach the relay.
+    if state.mailink_info.read().is_some() && crate::mailink::is_designated(state, tab_id) {
         let mut q = state.mailink_pending_rings.lock();
         q.push((r.tab_id.clone(), r.asker_title.clone(), "request"));
         if q.len() > crate::mailink::overlord::MAX_PENDING_RINGS {
@@ -250,15 +281,23 @@ fn asker(state: &crate::state::AppState, tab_id: &str) -> (String, String) {
 
 /// Every pending request, then the settled ones still kept, oldest first.
 pub fn list() -> Vec<AgentRequest> {
-    let mut list = REQUESTS.lock();
-    sweep(&mut list, now_ms());
-    list.clone()
+    let out = {
+        let mut list = REQUESTS.lock();
+        sweep(&mut list, now_ms());
+        list.clone()
+    };
+    flush_lapsed();
+    out
 }
 
 pub fn get(id: &str) -> Option<AgentRequest> {
-    let mut list = REQUESTS.lock();
-    sweep(&mut list, now_ms());
-    list.iter().find(|r| r.id == id).cloned()
+    let out = {
+        let mut list = REQUESTS.lock();
+        sweep(&mut list, now_ms());
+        list.iter().find(|r| r.id == id).cloned()
+    };
+    flush_lapsed();
+    out
 }
 
 /// The HUMAN's answer (a click, or the phone). Only a pending request moves; anything else
@@ -269,12 +308,15 @@ pub fn decide(app: &AppHandle, id: &str, approve: bool, by: &str) -> Option<Agen
     let r = {
         let mut list = REQUESTS.lock();
         sweep(&mut list, now);
-        let r = list.iter_mut().find(|r| r.id == id && r.status == "pending")?;
-        r.status = if approve { "approved" } else { "denied" }.into();
-        r.decided_at = Some(now);
-        r.decided_by = Some(by.to_string());
-        r.clone()
+        list.iter_mut().find(|r| r.id == id && r.status == "pending").map(|r| {
+            r.status = if approve { "approved" } else { "denied" }.into();
+            r.decided_at = Some(now);
+            r.decided_by = Some(by.to_string());
+            r.clone()
+        })
     };
+    flush_lapsed();
+    let r = r?;
     log::info!("[requests] {} {} ({}) by {by}", r.kind, r.status, &r.id);
     if approve {
         let _ = app.emit_to(r.window_label.as_str(), "agent-request-approved", &r);
@@ -358,6 +400,15 @@ mod tests {
             decided_by: None,
             outcome: None,
         }
+    }
+
+    #[test]
+    fn a_lapse_is_queued_once_to_be_announced() {
+        // Its own id: tests run in parallel, and every sweep feeds the one shared queue.
+        let mut l = vec![AgentRequest { id: "lapse-once".into(), ..req("pending", 0, None) }];
+        sweep(&mut l, PENDING_TTL_MS);
+        sweep(&mut l, PENDING_TTL_MS + 1);
+        assert_eq!(LAPSED.lock().iter().filter(|r| r.id == "lapse-once").count(), 1);
     }
 
     #[test]
