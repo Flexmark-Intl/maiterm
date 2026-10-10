@@ -791,6 +791,26 @@ fn claim_pending_index(
 
 /// Resolve the best window label to emit a tool event to.
 /// Checks windowId, then tabId in the tool arguments, then falls back to the first window.
+/// The window that must run a tool acting on ANOTHER tab or a workspace: only the window owning
+/// it holds it in its stores (a move releases bridge/mesh/terminal state there, and the mesh
+/// store is per window). `None` for every other tool, or when the target is unknown, which then
+/// routes as usual and is refused there as not found.
+fn target_owner_window(state: &Arc<AppState>, tool_name: &str, arguments: &Value) -> Option<String> {
+    match tool_name {
+        "moveTab" => find_window_for_tab(state, arguments.get("tab_id")?.as_str()?),
+        "moveWorkspace" | "setMesh" | "linkMeshes" | "unlinkMesh" => {
+            let ws = arguments.get("workspace_id")?.as_str()?;
+            let app_data = state.app_data.read();
+            app_data
+                .windows
+                .iter()
+                .find(|w| w.workspaces.iter().any(|x| x.id == ws))
+                .map(|w| w.label.clone())
+        }
+        _ => None,
+    }
+}
+
 fn resolve_target_window(state: &Arc<AppState>, arguments: &Value) -> Option<String> {
     let app_data = state.app_data.read();
 
@@ -899,11 +919,85 @@ fn preference_meta() -> Vec<(&'static str, PrefMeta)> {
 /// Handle tools that can be resolved entirely on the backend without frontend involvement.
 /// Returns Some(result) if handled, None if the tool should be forwarded to the frontend.
 /// Async for the comms tools (outbound HTTP); lock guards must never be held across an await.
+/// `getMeshLayout`: every window's workspaces as meshes see them — which are meshes, which are
+/// linked (one `mesh_group` within a window is one mesh, docs/mesh-workspace.md §17), and the agent
+/// tabs in each. Read-only; the ids are what moveTab / moveWorkspace / setMesh / linkMeshes take.
+fn mesh_layout(state: &Arc<AppState>) -> Value {
+    let app_data = state.app_data.read();
+    let windows: Vec<Value> = app_data
+        .windows
+        .iter()
+        .filter(|w| w.label != "preferences" && w.label != "help")
+        .map(|w| {
+            let workspaces: Vec<Value> = w
+                .workspaces
+                .iter()
+                .map(|ws| {
+                    let agents: Vec<Value> = ws
+                        .panes
+                        .iter()
+                        .flat_map(|p| p.tabs.iter())
+                        .filter(|t| t.runtime.is_some() && t.service_id.is_none())
+                        .map(|t| serde_json::json!({ "tab_id": t.id, "name": t.name }))
+                        .collect();
+                    // The other workspaces in this window that share its group.
+                    let linked: Vec<&str> = ws
+                        .mesh_group
+                        .as_deref()
+                        .map(|g| {
+                            w.workspaces
+                                .iter()
+                                .filter(|o| o.id != ws.id && o.bridge_all && o.mesh_group.as_deref() == Some(g))
+                                .map(|o| o.id.as_str())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "workspace_id": ws.id,
+                        "name": ws.name,
+                        "mesh": ws.bridge_all,
+                        "linked_with": linked,
+                        "overlord": ws.overlord,
+                        "agent_tabs": agents,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "window_id": w.id, "window_name": w.name, "workspaces": workspaces })
+        })
+        .collect();
+    serde_json::json!({
+        "windows": windows,
+        "note": "Agents in a mesh workspace (and in workspaces linked with it) can message each other. Changing that needs the human's approval: setMesh, linkMeshes, unlinkMesh, and a moveTab that changes a tab's mesh file a request instead of acting.",
+    })
+}
+
+/// `getRequestStatus`: what became of a request this tab filed (agent_requests.rs). Another tab's
+/// request reads as unknown — its existence is not this caller's business.
+fn request_status(arguments: &Value) -> Value {
+    let id = arguments.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
+    let me = arguments.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::agent_requests::get(id).filter(|r| r.tab_id == me) {
+        Some(r) => serde_json::json!({
+            "request_id": r.id,
+            "kind": r.kind,
+            "summary": r.summary,
+            "status": r.status,
+            "decided_by": r.decided_by,
+            "outcome": r.outcome,
+        }),
+        None => serde_json::json!({
+            "error": "No such request from this tab. Requests are kept 30 minutes while waiting and an hour after, and none survive a maiTerm restart.",
+        }),
+    }
+}
+
 async fn handle_backend_tool(tool_name: &str, arguments: &Value, state: &Arc<AppState>, app_handle: &AppHandle) -> Option<Value> {
     match tool_name {
         "bindCommsThread" => Some(handle_bind_comms_thread(arguments, state, app_handle).await),
         "readCommsThread" => Some(handle_read_comms_thread(arguments, state).await),
         "sendFilesToPhone" => Some(handle_send_files_to_phone(arguments, state).await),
+        "getMeshLayout" => Some(mesh_layout(state)),
+        "getRequestStatus" => Some(request_status(arguments)),
         "postCommsReply" => Some(handle_post_comms_reply(arguments, state, app_handle).await),
         "startCommsThread" => Some(handle_start_comms_thread(arguments, state, app_handle).await),
         "unbindCommsThread" => {
@@ -2418,7 +2512,17 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 34] = [
+const PEER_ADDRESSING_TOOLS: [&str; 41] = [
+    // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
+    // filed in the caller's name and a move rearranges the human's windows; neither may run on a
+    // guessed identity. getMeshLayout is a read and keeps the reconnect convenience.
+    "moveTab",
+    "moveWorkspace",
+    "setMesh",
+    "linkMeshes",
+    "unlinkMesh",
+    "restartMaiterm",
+    "getRequestStatus",
     // Files leave the machine for the human's phone and land in a named tab's chat. An
     // inferred identity would put one agent's files in a stranger's conversation, which is
     // the "speak as it" side of this line, not the "act on it" side.
@@ -2476,7 +2580,22 @@ const PEER_ADDRESSING_TOOLS: [&str; 34] = [
 /// explicit `tabId` overrides the connection's own tab — for these it must not, or scheduling
 /// "a prompt to yourself" becomes typing into any agent in the instance, which is `driveTab`
 /// without any of its guards.
-const OWN_TAB_ONLY_TOOLS: [&str; 3] = ["createFollowUp", "listFollowUps", "cancelFollowUp"];
+///
+/// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
+/// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
+/// caller, and a request's status is only its own tab's to read.
+const OWN_TAB_ONLY_TOOLS: [&str; 10] = [
+    "createFollowUp",
+    "listFollowUps",
+    "cancelFollowUp",
+    "moveTab",
+    "moveWorkspace",
+    "setMesh",
+    "linkMeshes",
+    "unlinkMesh",
+    "restartMaiterm",
+    "getRequestStatus",
+];
 
 /// Tools gated on the caller BEING the Overlord agent (docs/overlord.md). The gate is judged on
 /// `tabId`, so the caller is always the connection's own STATED tab (`pin_overlord_caller`).
@@ -2525,7 +2644,7 @@ fn own_tab_only_refusal(tool_name: &str, explicit_tab: Option<&str>, affinity: O
     match (explicit_tab, affinity) {
         (Some(given), Some((own, true))) if given == own => None,
         (Some(given), Some((own, true))) if given != own => Some(format!(
-            "{tool_name} only works on your own tab — a follow-up is a prompt to yourself. Leave tabId out."
+            "{tool_name} only works as your own tab. Leave tabId out."
         )),
         // No binding, or only a guessed one: nothing to check a named tab against, so it can't
         // be shown to be the caller's.
@@ -3218,7 +3337,9 @@ async fn process_message(
 
                     // Emit to the specific window that owns the tab (avoids race
                     // when preferences/help windows also listen for the event)
-                    if let Some(label) = resolve_target_window(state, &arguments) {
+                    if let Some(label) = target_owner_window(state, &tool_name, &arguments)
+                        .or_else(|| resolve_target_window(state, &arguments))
+                    {
                         emit_dual_to(app_handle, &label, "agent-ide-tool", "claude-code-tool", payload);
                     } else {
                         emit_dual(app_handle, "agent-ide-tool", "claude-code-tool", payload);

@@ -226,6 +226,8 @@ pub fn close_window(window: tauri::Window, state: State<'_, Arc<AppState>>) -> R
 /// A window a workspace or tab can be moved to, as the "Move to Window" menus list it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MoveTargetWindow {
+    /// The window's persistent id — what `listWindows` gives agents (`moveWorkspace`).
+    pub id: String,
     pub label: String,
     pub name: Option<String>,
     /// What an unnamed window is called in its own titlebar: its active workspace's name.
@@ -239,6 +241,10 @@ pub struct MoveTargetWindow {
 pub struct MoveTargetWorkspace {
     pub id: String,
     pub name: String,
+    /// Its mesh, for deciding whether moving a tab in changes who can message it
+    /// (agent_requests.rs): a window cannot see another window's workspaces otherwise.
+    pub bridge_all: bool,
+    pub mesh_group: Option<String>,
 }
 
 /// Every app window (not Preferences/Help) with its workspaces, in window order.
@@ -249,6 +255,7 @@ pub fn list_move_targets(window: tauri::Window, state: State<'_, Arc<AppState>>)
     app_data.windows.iter()
         .filter(|w| w.label != "preferences" && w.label != "help")
         .map(|w| MoveTargetWindow {
+            id: w.id.clone(),
             label: w.label.clone(),
             name: w.name.clone(),
             active_workspace_name: w.active_workspace_id.as_ref()
@@ -257,7 +264,12 @@ pub fn list_move_targets(window: tauri::Window, state: State<'_, Arc<AppState>>)
             is_current: w.label == current,
             workspaces: w.workspaces.iter()
                 .filter(|ws| !ws.overlord)
-                .map(|ws| MoveTargetWorkspace { id: ws.id.clone(), name: ws.name.clone() })
+                .map(|ws| MoveTargetWorkspace {
+                    id: ws.id.clone(),
+                    name: ws.name.clone(),
+                    bridge_all: ws.bridge_all,
+                    mesh_group: ws.mesh_group.clone(),
+                })
                 .collect(),
         })
         .collect()

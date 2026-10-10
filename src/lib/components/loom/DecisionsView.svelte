@@ -13,8 +13,10 @@
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
+  import AgentRequestCard from '$lib/components/agentRequests/AgentRequestCard.svelte';
+  import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import type { PendingApproval } from '$lib/stores/followUps.svelte';
-  import type { Task, Workspace } from '$lib/tauri/types';
+  import type { AgentRequest, Task, Workspace } from '$lib/tauri/types';
 
   interface Props {
     workspaces: Workspace[];
@@ -25,18 +27,25 @@
   }
   let { workspaces, tasks, approvals }: Props = $props();
 
-  type Item = { kind: 'task'; at: number; task: Task } | { kind: 'script'; at: number; approval: PendingApproval };
-  /** Blockers and scripts, oldest first: the order they should be answered in. */
+  type Item =
+    | { kind: 'task'; at: number; task: Task }
+    | { kind: 'script'; at: number; approval: PendingApproval }
+    | { kind: 'request'; at: number; request: AgentRequest };
+  const itemKey = (i: Item) => (i.kind === 'task' ? i.task.id : i.kind === 'script' ? i.approval.followUp.id : i.request.id);
+  /** Blockers, scripts and agent requests, oldest first: the order they should be answered in.
+   *  Requests are not scoped by the workspace filter: a restart or a mesh change is app-wide,
+   *  and a filter must never hide something only the human can approve. */
   const queue = $derived.by((): Item[] =>
     [
       ...decisionsQueue(tasks).map((task): Item => ({ kind: 'task', at: Date.parse(task.blocker!.asked_at), task })),
       ...approvals.map((approval): Item => ({ kind: 'script', at: Date.parse(approval.followUp.created_at), approval })),
+      ...agentRequestsStore.pending.map((request): Item => ({ kind: 'request', at: request.requested_at, request })),
     ].sort((a, b) => a.at - b.at),
   );
   /** When the queue last changed — an item in, out or reordered — for the script cards' click
    *  guard: any change can move a card under the pointer. Written, never read, here. */
   let listChangedAt = $state(0);
-  const signature = $derived(queue.map((i) => (i.kind === 'task' ? i.task.id : i.approval.followUp.id)).join('|'));
+  const signature = $derived(queue.map(itemKey).join('|'));
   $effect(() => {
     void signature;
     listChangedAt = Date.now();
@@ -88,7 +97,7 @@
       {/each}
     </div>
   {/if}
-  {#each queue as item (item.kind === 'task' ? item.task.id : item.approval.followUp.id)}
+  {#each queue as item (itemKey(item))}
     {#if item.kind === 'task'}
       {@const t = item.task}
       <article class="card">
@@ -110,6 +119,19 @@
             <button onclick={() => void navigateToTab(t.tab_id!)}>Open the tab</button>
           {/if}
         </div>
+      </article>
+    {:else if item.kind === 'request'}
+      {@const r = item.request}
+      <article class="card">
+        <div class="who">
+          <span>agent request</span>
+          <span>waiting {fmtAge(new Date(r.requested_at).toISOString())}</span>
+        </div>
+        <AgentRequestCard
+          request={r}
+          {listChangedAt}
+          onnote={(text) => (answered = [{ id: r.id, title: r.summary, text }, ...answered.filter((x) => x.id !== r.id)].slice(0, 5))}
+        />
       </article>
     {:else}
       {@const a = item.approval}

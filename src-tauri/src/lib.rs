@@ -1,4 +1,5 @@
 mod accounts;
+mod agent_requests;
 mod claude_code;
 mod commands;
 mod comms;
@@ -824,6 +825,10 @@ pub fn run() {
             commands::window::close_window,
             commands::window::list_move_targets,
             commands::window::move_workspace_to_window,
+            agent_requests::file_agent_request,
+            agent_requests::list_agent_requests,
+            agent_requests::decide_agent_request,
+            agent_requests::settle_agent_request,
             commands::window::move_tab_to_window,
             commands::window::set_window_name,
             commands::window::save_window_geometry,

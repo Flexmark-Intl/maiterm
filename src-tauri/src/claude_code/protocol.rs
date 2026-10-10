@@ -1088,6 +1088,113 @@ pub fn tool_list_response(
         }
     ]).as_array().unwrap().clone());
 
+    // Organisation, meshes and restart (docs/agent-requests.md). Reads and moves act at once;
+    // anything that changes which agents can message each other, and restarting maiTerm, files
+    // a request the HUMAN approves on a card — the tool never acts on it, and nothing an agent
+    // can call can approve it.
+    const AWAITS: &str = " It does NOT act: it files a request the human approves or denies on a card in maiTerm (and their phone), and returns {status:'awaiting_approval', request_id}. maiTerm tells you the outcome in this tab when they answer; getRequestStatus reads it meanwhile. Do not ask the human to approve it in chat — the card is the only approval that counts. Give a one-line `reason`: it is shown to them as your words.";
+    tools.extend(serde_json::json!([
+        {
+            "name": "getMeshLayout",
+            "description": "Every window's workspaces as meshes see them: which are Mesh Workspaces, which are linked with each other (agents in linked meshes can message across them), and the agent tabs in each, with the ids moveTab / moveWorkspace / setMesh / linkMeshes take. Read-only.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "moveTab",
+            "description": "Move a tab into another workspace, in this window or another. Organisation only, so it happens at once — unless it changes the tab's mesh (into, out of, or between meshes that aren't linked), which changes which agents can message it: then it files a request for the human instead." ,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected). Not the tab to move." },
+                    "tab_id": { "type": "string", "description": "The tab to move (from getMeshLayout / listWorkspaces)" },
+                    "to_workspace_id": { "type": "string", "description": "The workspace to move it into" },
+                    "reason": { "type": "string", "description": "One line, shown to the human if this needs their approval" }
+                },
+                "required": ["tab_id", "to_workspace_id"]
+            }
+        },
+        {
+            "name": "moveWorkspace",
+            "description": "Move a whole workspace to another window (listWindows gives their ids). Organisation only, so it happens at once — unless the workspace is linked with a mesh in its window, which the move would break: then it files a request for the human instead. The Overlord workspace never moves.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "workspace_id": { "type": "string", "description": "The workspace to move" },
+                    "to_window_id": { "type": "string", "description": "The window to move it to (an id from listWindows)" },
+                    "reason": { "type": "string", "description": "One line, shown to the human if this needs their approval" }
+                },
+                "required": ["workspace_id", "to_window_id"]
+            }
+        },
+        {
+            "name": "setMesh",
+            "description": format!("Turn a workspace into a Mesh Workspace (every agent in it can message every other) or turn that off.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "workspace_id": { "type": "string", "description": "The workspace" },
+                    "enabled": { "type": "boolean", "description": "true to make it a mesh, false to stop" },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["workspace_id", "enabled", "reason"]
+            }
+        },
+        {
+            "name": "linkMeshes",
+            "description": format!("Link two Mesh Workspaces in the same window into one mesh, so their agents can message each other.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "workspace_id": { "type": "string", "description": "A mesh workspace" },
+                    "with_workspace_id": { "type": "string", "description": "The mesh workspace to link it with (same window)" },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["workspace_id", "with_workspace_id", "reason"]
+            }
+        },
+        {
+            "name": "unlinkMesh",
+            "description": format!("Take a mesh workspace out of the meshes it is linked with; it stays a mesh on its own.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "workspace_id": { "type": "string", "description": "The linked mesh workspace" },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["workspace_id", "reason"]
+            }
+        },
+        {
+            "name": "restartMaiterm",
+            "description": format!("Restart maiTerm: install the available update first (`update: true`, refused when there is none) or just relaunch. Every window restarts; agents come back through their auto-resume, and this request does not survive it — you are not told the outcome, you are restarted.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "update": { "type": "boolean", "description": "true: install the available update, then relaunch. false: relaunch only." },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["update", "reason"]
+            }
+        },
+        {
+            "name": "getRequestStatus",
+            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, restartMaiterm, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "request_id": { "type": "string", "description": "The request_id the tool returned" }
+                },
+                "required": ["request_id"]
+            }
+        }
+    ]).as_array().unwrap().clone());
+
     serde_json::json!({ "tools": tools })
 }
 

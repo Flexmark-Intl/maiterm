@@ -14,6 +14,7 @@
   import { claudeStateStore } from '$lib/stores/agentState.svelte';
   import { decisionsQueue, summarize } from '$lib/loom/model';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
+  import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { workspaceIsLive } from '$lib/workspace/liveness';
   import LoomView from './LoomView.svelte';
   import DecisionsView from './DecisionsView.svelte';
@@ -57,7 +58,8 @@
     followUpsStore.pendingApprovals.filter((a) => !loomStore.workspaceFilter || a.workspaceId === loomStore.workspaceFilter),
   );
   const scripts = $derived(approvals.length);
-  const decisions = $derived(decisionsQueue(tasks).length + scripts);
+  // Agent requests are app-wide (a restart, a mesh change), so no filter hides them.
+  const decisions = $derived(decisionsQueue(tasks).length + scripts + agentRequestsStore.pending.length);
   /** Agents stopped at a permission prompt, in scope. */
   const permissions = $derived(
     scoped.reduce(

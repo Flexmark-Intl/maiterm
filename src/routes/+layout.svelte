@@ -29,6 +29,7 @@
   import { followUpsStore } from '$lib/stores/followUps.svelte';
   import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
   import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
+  import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
   import { agentDelivery } from '$lib/stores/agentDeliveryLive';
   import { toastStore } from '$lib/stores/toasts.svelte';
   import { navHistoryStore } from '$lib/stores/navHistory.svelte';
@@ -739,6 +740,9 @@
     agentBridgeStore.init();
     // Mesh Workspace (N:M agent bridging — docs/mesh-workspace.md)
     agentMeshStore.init();
+    // Agent requests the human approves (docs/agent-requests.md): the waiting list, and this
+    // window's share of carrying out approved ones and telling the agent.
+    void agentRequestsStore.init();
 
     // OS notification click → deep-link to workspace+tab.
     // NOTE: onAction only fires on mobile (iOS/Android). On desktop (macOS/Linux/Windows),
@@ -1395,6 +1399,7 @@
       followUpsStore.destroy();
       agentBridgeStore.destroy();
       agentMeshStore.destroy();
+      agentRequestsStore.destroy();
       agentDelivery.destroy(); // the mailbox both of them share
       unlistenNotificationAction?.unregister();
       unlistenFocus?.();

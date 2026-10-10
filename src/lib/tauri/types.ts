@@ -726,13 +726,37 @@ export interface MailinkDevice {
 
 /** A window a workspace or tab can be moved to (`list_move_targets`). */
 export interface MoveTargetWindow {
+  /** The persistent window id (what `listWindows` gives agents). */
+  id: string;
   label: string;
   name: string | null;
   /** What an unnamed window's titlebar shows. */
   active_workspace_name: string | null;
   is_current: boolean;
   /** Never the Overlord workspace. */
-  workspaces: { id: string; name: string }[];
+  workspaces: { id: string; name: string; bridge_all: boolean; mesh_group: string | null }[];
+}
+
+/** An agent's request only the human can approve (src-tauri/src/agent_requests.rs). */
+export interface AgentRequest {
+  id: string;
+  /** The tab whose agent asked. */
+  tab_id: string;
+  /** The window that filed it and carries it out. */
+  window_label: string;
+  kind: 'mesh_enable' | 'mesh_disable' | 'mesh_link' | 'mesh_unlink' | 'tab_move' | 'workspace_move' | 'restart';
+  /** Exactly what runs on approval, built by maiTerm. */
+  args: Record<string, unknown>;
+  /** What the card says will happen, written by maiTerm. */
+  summary: string;
+  effects: string[];
+  /** The agent's own words. */
+  reason: string | null;
+  requested_at: number;
+  status: 'pending' | 'approved' | 'done' | 'failed' | 'denied' | 'expired';
+  decided_at: number | null;
+  decided_by: 'desktop' | 'phone' | null;
+  outcome: string | null;
 }
 
 export interface WindowData {

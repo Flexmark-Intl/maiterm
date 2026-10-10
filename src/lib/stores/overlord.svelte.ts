@@ -3587,6 +3587,14 @@ function createOverlordStore() {
      * losing it because a paste couldn't land would be worse. `told` says what reached the
      * agent, with the same Overlord relay fallback as "Do it".
      */
+    /** Tell a tab's agent something with the human's authority, by the same rules as a board
+     *  notice: idle, or typed into a busy Claude tab's empty box, never over a draft
+     *  (noticeToTab / queueToBusyTab). Used for the outcome of an agent request
+     *  (agentRequests.svelte.ts). Resolves whether it landed. */
+    async tellTab(tabId: string, text: string, what: string): Promise<boolean> {
+      return (await noticeToTab(tabId, text, what)) || (await queueToBusyTab(tabId, text));
+    },
+
     async answerBlocker(
       id: string,
       answer: BlockerAnswer,

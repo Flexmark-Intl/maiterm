@@ -13,6 +13,7 @@ import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelt
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
 import { overlordStore } from '$lib/stores/overlord.svelte';
+import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
 import { tasksStore } from '$lib/stores/tasks.svelte';
 import { appendNote, blockerNote, blocking, coerceStatus, effectiveStatus, findWorkstream, hasUnmetDeps, isDelegation, isInFlight, isRetired, normalizeTitle, parseBlocker, resolveBlockers, resolveEdges, TASK_NOTE_CAP, type BlockerInput } from '$lib/tasks/model';
@@ -380,6 +381,26 @@ function createClaudeCodeStore() {
             : { error: 'No tab identity — call initSession first.' };
           break;
         }
+        // Organisation, meshes and restart (agentRequests.svelte.ts): a move acts at once; a
+        // change to who can message whom, or a restart, files a request the human approves.
+        case 'moveTab':
+          result = await agentRequestsStore.moveTab(args as Parameters<typeof agentRequestsStore.moveTab>[0]);
+          break;
+        case 'moveWorkspace':
+          result = await agentRequestsStore.moveWorkspace(args as Parameters<typeof agentRequestsStore.moveWorkspace>[0]);
+          break;
+        case 'setMesh':
+          result = await agentRequestsStore.setMesh(args as Parameters<typeof agentRequestsStore.setMesh>[0]);
+          break;
+        case 'linkMeshes':
+          result = await agentRequestsStore.linkMeshes(args as Parameters<typeof agentRequestsStore.linkMeshes>[0]);
+          break;
+        case 'unlinkMesh':
+          result = await agentRequestsStore.unlinkMesh(args as Parameters<typeof agentRequestsStore.unlinkMesh>[0]);
+          break;
+        case 'restartMaiterm':
+          result = await agentRequestsStore.restartMaiterm(args as Parameters<typeof agentRequestsStore.restartMaiterm>[0]);
+          break;
         default:
           result = { error: `Unknown tool: ${tool}` };
       }

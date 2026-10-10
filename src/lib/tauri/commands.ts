@@ -4,7 +4,7 @@ import type { MissingRoot, RelocateOutcome, RelocatePreview } from './types';
 // A tab that opened in home because its folder was missing saves the folder it WANTED, through
 // every command below that saves a tab's cwd (docs/relocate.md §4).
 import { savedCwd } from '$lib/stores/relocateFallback';
-import type { AgentBridge, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
+import type { AgentBridge, AgentRequest, AppData, BotChannel, OverlordLedgerEntry, CommsMonitorChannel, DiffContext, DuplicateWorkspaceResult, EditorFileInfo, FollowUp, MailinkDevice, MailinkPairingPayload, MeshTopic, MoveTargetWindow, Pane, Preferences, ScrollInfo, SearchResult, Service, ShellInfo, SplitDirection, Tab, Task, Workstream, FrameMeta, WatchStatus, WindowData, Workspace, WorkspaceNote } from './types';
 
 // Terminal commands
 export async function spawnTerminal(ptyId: string, tabId: string, cols: number, rows: number, cwd?: string | null): Promise<void> {
@@ -1137,6 +1137,33 @@ export async function listMoveTargets(): Promise<MoveTargetWindow[]> {
 
 export async function moveWorkspaceToWindow(workspaceId: string, targetLabel: string): Promise<void> {
   return invoke('move_workspace_to_window', { workspaceId, targetLabel });
+}
+
+// ── Agent requests only the human approves (src-tauri/src/agent_requests.rs) ──
+// `decideAgentRequest` is the human's click and nothing else may call it: no tool handler, no
+// rule, no agent-facing path. That is the whole security of the feature.
+
+export async function fileAgentRequest(
+  tabId: string,
+  kind: AgentRequest['kind'],
+  args: Record<string, unknown>,
+  summary: string,
+  effects: string[],
+  reason: string | null,
+): Promise<AgentRequest> {
+  return invoke('file_agent_request', { tabId, kind, args, summary, effects, reason });
+}
+
+export async function listAgentRequests(): Promise<AgentRequest[]> {
+  return invoke('list_agent_requests');
+}
+
+export async function decideAgentRequest(id: string, approve: boolean): Promise<AgentRequest | null> {
+  return invoke('decide_agent_request', { id, approve });
+}
+
+export async function settleAgentRequest(id: string, ok: boolean, outcome: string): Promise<AgentRequest | null> {
+  return invoke('settle_agent_request', { id, ok, outcome });
 }
 
 export async function moveTabToWindow(

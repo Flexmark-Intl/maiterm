@@ -67,8 +67,11 @@ export function canMoveTabAcrossWindows(tab: Tab): boolean {
   return isTerminal(tab) || tab.tab_type === 'editor';
 }
 
-function refuse(body: string) {
-  toastStore.addToast('Can’t move', body, 'error');
+/** Says why a move didn't happen, and returns it: a menu click shows the toast, an agent's
+ *  `moveTab`/`moveWorkspace` (`quiet`) gets the reason as its answer instead. */
+function refuse(body: string, quiet = false): string {
+  if (!quiet) toastStore.addToast('Can’t move', body, 'error');
+  return body;
 }
 
 /** Everything the source webview must let go of for these tabs, taken BEFORE they leave
@@ -105,18 +108,20 @@ function dirtyEditor(tabs: Tab[]): Tab | undefined {
   return tabs.find((t) => t.tab_type === 'editor' && isEditorDirty(t.id));
 }
 
-export async function moveWorkspaceToWindow(workspaceId: string, targetLabel: string): Promise<void> {
+/** Resolves null once moved, or why it didn't. */
+export async function moveWorkspaceToWindow(workspaceId: string, targetLabel: string, quiet = false): Promise<string | null> {
   const ws = workspacesStore.workspaces.find((w) => w.id === workspaceId);
-  if (!ws || ws.overlord) return;
+  if (!ws) return 'Workspace not found in this window.';
+  if (ws.overlord) return 'The Overlord workspace stays in its window.';
   const tabs = ws.panes.flatMap((p) => p.tabs);
   const dirty = dirtyEditor(tabs);
-  if (dirty) return refuse(`“${dirty.name}” has unsaved changes. Save it first.`);
+  if (dirty) return refuse(`“${dirty.name}” has unsaved changes. Save it first.`, quiet);
 
   try {
     await commands.moveWorkspaceToWindow(workspaceId, targetLabel);
   } catch (e) {
     logError(`windowMove: workspace ${workspaceId} → ${targetLabel}: ${e}`);
-    return refuse(String(e));
+    return refuse(String(e), quiet);
   }
 
   const movingIds = new Set(tabs.map((t) => t.id));
@@ -130,6 +135,7 @@ export async function moveWorkspaceToWindow(workspaceId: string, targetLabel: st
   const payload: MoveInPayload = { kind: 'workspace', workspaceId, tabIds: [...movingIds], ...released, stackRows };
   await emitTo(targetLabel, MOVE_IN_EVENT, payload);
   logInfo(`windowMove: workspace ${workspaceId} (${tabs.length} tabs) → ${targetLabel}`);
+  return null;
 }
 
 /** Move a tab to a workspace of any window, this one included (then it is the ordinary
@@ -141,21 +147,25 @@ export async function moveTabToWindow(
   tabId: string,
   targetLabel: string,
   targetWsId: string,
-): Promise<void> {
+  quiet = false,
+): Promise<string | null> {
   const sourcePane = workspacesStore.workspaces.find((w) => w.id === sourceWsId)?.panes.find((p) => p.id === sourcePaneId);
   const tab = sourcePane?.tabs.find((t) => t.id === tabId);
-  if (!sourcePane || !tab) return;
+  if (!sourcePane || !tab) return 'Tab not found in this window.';
 
   const viewing = workspacesStore.activeWorkspaceId === sourceWsId && sourcePane.active_tab_id === tabId;
   const current = getCurrentWindow().label;
   if (targetLabel === current) {
     await workspacesStore.moveTabToWorkspace(sourceWsId, sourcePaneId, tabId, targetWsId);
+    // The same-window move reports nothing; whether the tab arrived is the answer.
+    const landed = workspacesStore.workspaces.find((w) => w.id === targetWsId)?.panes.some((p) => p.tabs.some((t) => t.id === tabId));
+    if (!landed) return 'The tab did not move (see the log).';
     if (viewing) await navigateToTab(tabId);
-    return;
+    return null;
   }
 
-  if (!canMoveTabAcrossWindows(tab)) return refuse('Only terminal and editor tabs can move to another window.');
-  if (dirtyEditor([tab])) return refuse(`“${tab.name}” has unsaved changes. Save it first.`);
+  if (!canMoveTabAcrossWindows(tab)) return refuse('Only terminal and editor tabs can move to another window.', quiet);
+  if (dirtyEditor([tab])) return refuse(`“${tab.name}” has unsaved changes. Save it first.`, quiet);
 
   const movedTabWasActive = sourcePane.active_tab_id === tabId;
   const movedTabIndex = sourcePane.tabs.findIndex((t) => t.id === tabId);
@@ -163,7 +173,7 @@ export async function moveTabToWindow(
     await commands.moveTabToWindow(sourceWsId, sourcePaneId, tabId, targetLabel, targetWsId);
   } catch (e) {
     logError(`windowMove: tab ${tabId} → ${targetLabel}/${targetWsId}: ${e}`);
-    return refuse(String(e));
+    return refuse(String(e), quiet);
   }
 
   const released = releaseTabs([tab], new Set([tabId]));
@@ -173,6 +183,7 @@ export async function moveTabToWindow(
   const payload: MoveInPayload = { kind: 'tab', workspaceId: targetWsId, tabIds: [tabId], ...released, stackRows: [], follow: viewing };
   await emitTo(targetLabel, MOVE_IN_EVENT, payload);
   logInfo(`windowMove: tab ${tabId} → ${targetLabel}/${targetWsId}`);
+  return null;
 }
 
 /** The receiving window. Order matters: reattach marks and bridge state before the tabs
