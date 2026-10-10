@@ -9,7 +9,10 @@
 > on/off, a link, a move that changes a tab's mesh) or to restart maiTerm. These only happen
 > once the human approves. New: `GET /requests`, `POST /requests/{id}/approve` and
 > `POST /requests/{id}/deny`, the WS `requests` frame, `Chat.requestsWaiting`, and the doorbell
-> kind `request`.
+> kind `request`. **The routes that stand for the human's answer take a paired device's token
+> only, and answer `403` to the dev token:** request approve/deny, script approve/reject,
+> `/chats/{tabId}/respond`, `/tasks/{id}/answer` and `/tasks/{id}/dismiss`. Any local agent can
+> read the dev token, so with it an agent could answer its own request or another tab's prompt.
 >
 > **v0.22 changelog** (2026-10-08). Additive: **`pendingPrompt.delivery: "agent" | "keys"`**.
 > It says how `/respond` will deliver the answer. **"agent"** means a Claude Code mod inside the
@@ -518,7 +521,7 @@ everything except `/pair`. JSON bodies. All times are unix ms.
 | `GET  /chats/{tabId}?before={msg_id}&limit=N` | One chat + transcript (paging params reserved) | → `ChatDetail` |
 | `GET  /chats/{tabId}/context?lines=N` | Distilled plain-text context | → `{text, truncated}` |
 | `POST /chats/{tabId}/message` | Send a message / proactive command (auto-wakes an unregistered tab first — §5) | `{text, submit?:true}` → `{status:"delivered", msg_id, woke:null\|"init"\|"resume"}` \| `{status:"held", reason:"draft", msg_id, woke, detail}` (v0.19: typed once the human's draft in the agent's box is sent or cleared) \| `{status:"unreachable", reason, detail}` |
-| `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}` |
+| `POST /chats/{tabId}/respond` | Answer a pending permission/question | `{choice, prompt_id}` (see §5) → `{ok}` \| `{ok:false, reason:"stale"}`; `403` for the dev token (v0.23) |
 | `POST /chats/{tabId}/activate` | Activate/focus/resume a designated tab | `{}` → `{state}` |
 | `POST /chats/{tabId}/keys` | Press named keys in the tab's terminal (v0.12): the escape hatch for a screen nobody has taught maiTerm to read. Real key sequences, never a paste; arrows follow the terminal's cursor-key mode; keys go in ~40 ms apart so a lone `esc` can't merge with the next key into an Alt chord. Works on an unregistered tab | `{keys: string[]}` from `up down left right enter esc tab space backspace` (1–16) → `{ok:true}`. `400` for an unknown name, an empty list or more than 16, with NOTHING sent; `404` not designated; `409` no terminal |
 | `POST /chats/{tabId}/interrupt` | Send Esc (stop the agent); settles chat state to idle, clears the restored prompt | `{}` → `{ok, settled, composerCleared}` (may hold up to 3 s — §5) |

@@ -814,7 +814,7 @@ async fn post_task_answer(
     Path(task_id): Path<String>,
     Json(body): Json<TaskAnswerBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    authorize_human(&s, &headers)?;
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let args = json!({ "id": task_id, "askedAt": body.asked_at, "option": body.option, "text": body.text });
     let mut out = overlord_act(&s, &window, "tasks.answer", args).await;
@@ -841,7 +841,7 @@ async fn post_task_dismiss(
     Path(task_id): Path<String>,
     Json(body): Json<TaskDismissBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    authorize_human(&s, &headers)?;
     let window = board::window_for_task(&s.app, &task_id).ok_or(StatusCode::NOT_FOUND)?;
     let args = json!({ "id": task_id, "askedAt": body.asked_at });
     let mut out = overlord_act(&s, &window, "tasks.dismiss", args).await;
@@ -1988,7 +1988,8 @@ async fn post_respond(
     Path(tab_id): Path<String>,
     Json(body): Json<RespondBody>,
 ) -> Result<Json<Value>, StatusCode> {
-    authorize(&s, &headers)?;
+    // A paired phone only: answering a permission prompt is the human's approval of a tool call.
+    authorize_human(&s, &headers)?;
     if !is_designated(&s.app, &tab_id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -4796,11 +4797,14 @@ fn authorize(s: &ApiState, headers: &HeaderMap) -> Result<(), StatusCode> {
     }
 }
 
-/// The gate for endpoints that stand for the HUMAN's approval (an agent request, a watch script):
-/// a paired device's token only. The dev token is refused because it sits in plain text in the
-/// maiLink data dir and the API listens on every interface, so any agent on this machine could
-/// read it and approve its own request with `curl`, which is the bypass these approvals exist to
-/// prevent (review of c11db1f3). A paired token is stored only as a hash here; the phone holds it.
+/// The gate for endpoints that stand for the HUMAN's answer (an agent request, a watch script, a
+/// permission or question prompt via `/respond`, a task blocker's answer or dismiss): a paired
+/// device's token only. The dev token is refused because it sits in plain text in the maiLink
+/// data dir and the API listens on every interface, so any agent on this machine could read it
+/// and approve its own request, or answer another tab's permission prompt, with `curl` — the
+/// bypass these answers exist to prevent (review of c11db1f3; Darryl locked `/respond` and task
+/// answers the same way, 2026-10-10). A paired token is stored only as a hash here; the phone
+/// holds it.
 fn authorize_human(s: &ApiState, headers: &HeaderMap) -> Result<(), StatusCode> {
     authorize(s, headers)?;
     let token = bearer_token(headers);
@@ -6907,6 +6911,37 @@ mod tests {
             .unwrap();
         let status = build_router(api).oneshot(req).await.unwrap().status();
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Any local agent can read the dev token, so the routes that stand for the human's answer
+    /// refuse it: an agent must not answer another tab's permission prompt or a task's blocker.
+    #[tokio::test]
+    async fn the_dev_token_cannot_answer_for_the_human() {
+        use tower::ServiceExt as _;
+
+        let api = ApiState {
+            app: Arc::new(AppState::new()),
+            app_handle: None,
+            server_name: "maiTerm".to_string(),
+            fingerprint: "sha256/test".to_string(),
+            dev_token: "dev-token".to_string(),
+        };
+        for (uri, body) in [
+            ("/mailink/v1/chats/some-tab/respond", r#"{"choice":"1"}"#),
+            ("/mailink/v1/tasks/some-task/answer", r#"{"askedAt":"x","option":0}"#),
+            ("/mailink/v1/tasks/some-task/dismiss", r#"{"askedAt":"x"}"#),
+            ("/mailink/v1/requests/some-request/approve", ""),
+        ] {
+            let req = axum::http::Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer dev-token")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let status = build_router(api.clone()).oneshot(req).await.unwrap().status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
     }
 
     #[test]

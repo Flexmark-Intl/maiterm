@@ -69,8 +69,9 @@ its card says agents added later join too.
 **The phone approves with a paired device's token only** (`authorize_human`). The dev bearer
 token is in plain text in the maiLink data dir, and the API listens on every interface, so any
 local agent could otherwise `curl` its own approval (review of c11db1f3). The watch-script
-approve and reject routes got the same gate. **Still open:** the dev token is also accepted on
-`/respond` (permission and question answers) and on task answers.
+approve and reject routes got the same gate, and so did `/respond` (permission and question
+answers) and task answers and dismissals: Darryl's call, 2026-10-10, since with the dev token a
+local agent could answer another tab's permission prompt.
 
 **Identity.** Every tool that changes something is on `PEER_ADDRESSING_TOOLS`, so it is refused on
 an inferred identity. The ones that file requests, and `getRequestStatus`, are also on
