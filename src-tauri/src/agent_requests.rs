@@ -430,10 +430,19 @@ mod tests {
 
     #[test]
     fn an_approved_request_nobody_carries_out_is_reported_failed() {
-        let mut l = vec![req("approved", 0, Some(0))];
+        let mut l = vec![AgentRequest { id: "move".into(), kind: "tab_move".into(), ..req("approved", 0, Some(0)) }];
         sweep(&mut l, APPROVED_TTL_MS - 1);
         assert_eq!(l[0].status, "approved");
         sweep(&mut l, APPROVED_TTL_MS);
+        assert_eq!(l[0].status, "failed");
+    }
+
+    #[test]
+    fn an_approved_restart_has_time_to_download_its_update() {
+        let mut l = vec![AgentRequest { id: "restart-ttl".into(), ..req("approved", 0, Some(0)) }];
+        sweep(&mut l, APPROVED_TTL_MS);
+        assert_eq!(l[0].status, "approved");
+        sweep(&mut l, RESTART_APPROVED_TTL_MS);
         assert_eq!(l[0].status, "failed");
     }
 }
