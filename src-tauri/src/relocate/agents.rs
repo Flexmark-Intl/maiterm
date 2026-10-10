@@ -167,7 +167,8 @@ fn edit_jsonl(bytes: &[u8], needle: &str, edit: &mut impl FnMut(&mut Value) -> b
     for line in bytes.split_inclusive(|b| *b == b'\n') {
         let body_len = line.len() - line.iter().rev().take_while(|b| **b == b'\n' || **b == b'\r').count();
         let body = &line[..body_len];
-        let hit = std::str::from_utf8(body).is_ok_and(|s| s.contains(needle));
+        let n = needle.as_bytes();
+        let hit = std::str::from_utf8(body).is_ok() && (n.is_empty() || body.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n)));
         if hit {
             if let Ok(mut v) = serde_json::from_slice::<Value>(body) {
                 if edit(&mut v) {
@@ -183,8 +184,11 @@ fn edit_jsonl(bytes: &[u8], needle: &str, edit: &mut impl FnMut(&mut Value) -> b
     changed.then_some(out)
 }
 
+/// The prefilter is the old folder's last NAME, matched ignoring ASCII case: the whole path is
+/// not what the raw line holds on Windows (JSON escapes `C:\x` as `C:\\x`, and either separator
+/// may be the one recorded), nor on a volume that folds case. `edit` decides with `rebase`.
 fn update_jsonl(p: &Path, old: &Path, mut edit: impl FnMut(&mut Value) -> bool) -> std::io::Result<bool> {
-    let needle = old.to_string_lossy().to_string();
+    let needle = old.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     update_file(p, |b| edit_jsonl(b, &needle, &mut edit))
 }
 
@@ -414,9 +418,7 @@ fn repoint_links(root: &Path, from: &Path, to: &Path) {
         if meta.file_type().is_symlink() {
             if let Ok(target) = fs::read_link(&p) {
                 if let Ok(rest) = target.strip_prefix(from) {
-                    let _ = fs::remove_file(&p);
-                    #[cfg(unix)]
-                    let _ = std::os::unix::fs::symlink(to.join(rest), &p);
+                    relink(&p, &to.join(rest));
                 }
             }
         } else if meta.is_dir() {
@@ -424,6 +426,33 @@ fn repoint_links(root: &Path, from: &Path, to: &Path) {
         }
     }
 }
+
+#[cfg(unix)]
+fn relink(link: &Path, target: &Path) {
+    let _ = fs::remove_file(link);
+    let _ = std::os::unix::fs::symlink(target, link);
+}
+
+/// Making a link on Windows can need a privilege the user lacks, so the new one is made beside
+/// the old and swapped in only once it exists — a failure leaves the old link, not none.
+#[cfg(windows)]
+fn relink(link: &Path, target: &Path) {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    let mut name = link.file_name().unwrap_or_default().to_os_string();
+    name.push(".maiterm-relink");
+    let tmp = link.with_file_name(name);
+    let made = if target.is_dir() { symlink_dir(target, &tmp) } else { symlink_file(target, &tmp) };
+    if made.is_ok() {
+        // A directory link is removed as a directory on Windows.
+        let _ = fs::remove_file(link).or_else(|_| fs::remove_dir(link));
+        if fs::rename(&tmp, link).is_err() {
+            let _ = fs::remove_file(&tmp).or_else(|_| fs::remove_dir(&tmp));
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn relink(_: &Path, _: &Path) {}
 
 fn claude(h: &Homes, old: &Path, new: &Path, r: &mut AgentReport) {
     let plan = claude_plan(&h.claude_projects, old, new);
@@ -730,6 +759,9 @@ mod tests {
         Scratch { base, h }
     }
 
+    // Fixtures written as Unix paths (`/u/…` isn't absolute on Windows) are `cfg(unix)`; the
+    // Windows forms have their own test below.
+    #[cfg(unix)]
     #[test]
     fn claude_sessions_memory_trust_and_history_follow_the_folder() {
         let s = scratch();
@@ -779,6 +811,34 @@ mod tests {
         assert!(hist.contains("\"project\":\"/u/IDE/maiterm\"") && hist.contains("/u/other"));
     }
 
+    /// A transcript and the prompt history hold `C:\\u\\a` (JSON-escaped), and Claude's config
+    /// keys the same folder as `C:/u/a`: all three follow, each in its own form.
+    #[cfg(windows)]
+    #[test]
+    fn windows_transcripts_history_and_trust_follow_the_folder() {
+        let s = scratch();
+        let (old, new) = (Path::new(r"C:\u\a"), Path::new(r"C:\u\b"));
+        let p = &s.h.claude_projects;
+        let d = p.join(claude_slug(r"C:\u\a"));
+        fs::create_dir_all(d.join("memory")).unwrap();
+        fs::write(d.join("memory/MEMORY.md"), "m").unwrap();
+        fs::write(d.join("s1.jsonl"), format!("{}\n", json!({ "type": "user", "cwd": r"C:\u\a" }))).unwrap();
+        fs::write(&s.h.claude_history[0], format!("{}\n", json!({ "display": "hi", "project": r"C:\u\a\src" }))).unwrap();
+        fs::write(&s.h.claude_json[0], json!({ "projects": { "C:/u/a": { "hasTrustDialogAccepted": true } } }).to_string()).unwrap();
+
+        let r = apply_in(&s.h, old, new, &[]);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        let n = p.join("C--u-b");
+        assert!(n.join("memory/MEMORY.md").exists() && !d.exists());
+        let t = fs::read_to_string(n.join("s1.jsonl")).unwrap();
+        let last: Value = serde_json::from_str(t.lines().last().unwrap()).unwrap();
+        assert_eq!(last["relocatedCwd"], r"C:\u\b");
+        let hist: Value = serde_json::from_str(fs::read_to_string(&s.h.claude_history[0]).unwrap().trim()).unwrap();
+        assert_eq!(hist["project"], r"C:\u\b\src");
+        assert_eq!(read_json(&s.h.claude_json[0]).unwrap()["projects"]["C:/u/b"]["hasTrustDialogAccepted"], true);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_session_moved_before_is_found_by_its_relocated_record() {
         // Live-test bug: after a first move, line one still names the ORIGINAL folder, and
@@ -803,6 +863,7 @@ mod tests {
         assert!(!d.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn stub_transcripts_without_a_folder_dont_hold_memory_back() {
         let s = scratch();
@@ -820,6 +881,7 @@ mod tests {
         assert!(!d.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shared_slug_moves_only_our_sessions() {
         // `/u/p/web` (ours, a subfolder) and `/u/p-web` (a sibling project) share `-u-p-web`.
@@ -838,6 +900,7 @@ mod tests {
         assert!(r.warnings[0].contains("memory"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn claude_merges_into_an_existing_project_and_reports_clashes() {
         let s = scratch();
@@ -870,6 +933,7 @@ mod tests {
         assert_eq!(read_json(&real).unwrap()["projects"]["/u/b"]["t"], true);
     }
 
+    #[cfg(unix)]
     #[test]
     fn jsonl_edits_keep_untouched_lines_byte_for_byte() {
         let src = b"{\"b\":1,  \"a\":\"/u/a\"}\r\n{\"project\":\"/u/a/x\"}\nnot json /u/a\n{\"project\":\"/u/z\"}";
@@ -881,6 +945,7 @@ mod tests {
         assert_eq!(out, "{\"b\":1,  \"a\":\"/u/a\"}\r\n{\"project\":\"/u/b/x\"}\nnot json /u/a\n{\"project\":\"/u/z\"}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_trust_threads_and_rollouts_follow_the_folder() {
         let s = scratch();
@@ -908,6 +973,7 @@ mod tests {
         assert_eq!(cwd, "/u/b");
     }
 
+    #[cfg(unix)]
     #[test]
     fn gemini_registry_markers_hash_dirs_and_trust_follow_the_folder() {
         let s = scratch();

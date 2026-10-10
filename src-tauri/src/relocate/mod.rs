@@ -123,6 +123,10 @@ fn strip_root<'a>(path: &'a Path, root: &Path) -> Option<PathBuf> {
 
 /// `value` rebased from `old` onto `new`, or `None` when it isn't under `old`. Both roots are
 /// absolute. A `~/…` value stays home-relative when the result is under home.
+///
+/// The result is written with the value's own separator: on Windows a path can be `C:\x` or
+/// `C:/x` (Claude keys its config one way, a transcript records the other), and `Path::join`
+/// would glue `C:/x` + `src` into a mixed `C:/x\src` that no longer matches its owner's key.
 pub fn rebase(value: &str, old: &Path, new: &Path) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -133,6 +137,7 @@ pub fn rebase(value: &str, old: &Path, new: &Path) -> Option<String> {
     if !abs.is_absolute() {
         return None;
     }
+    let sep = if cfg!(windows) && !value.contains('\\') { '/' } else { std::path::MAIN_SEPARATOR };
     let rest = strip_root(&abs, old)?;
     let out = if rest.as_os_str().is_empty() { new.to_path_buf() } else { new.join(rest) };
     if tilde {
@@ -141,12 +146,31 @@ pub fn rebase(value: &str, old: &Path, new: &Path) -> Option<String> {
                 return Some(if r.as_os_str().is_empty() {
                     "~".to_string()
                 } else {
-                    format!("~/{}", r.to_string_lossy())
+                    format!("~/{}", render(r, sep))
                 });
             }
         }
     }
-    Some(out.to_string_lossy().to_string())
+    Some(render(&out, sep))
+}
+
+/// `p` written out with `sep` between its components.
+fn render(p: &Path, sep: char) -> String {
+    use std::path::Component;
+    let mut s = String::new();
+    for c in p.components() {
+        match c {
+            Component::Prefix(x) => s.push_str(&x.as_os_str().to_string_lossy()),
+            Component::RootDir => s.push(sep),
+            other => {
+                if !s.is_empty() && !s.ends_with(sep) {
+                    s.push(sep);
+                }
+                s.push_str(&other.as_os_str().to_string_lossy());
+            }
+        }
+    }
+    s
 }
 
 /// `field` rebased in place. True when it changed.
@@ -174,7 +198,7 @@ fn rebase_text(text: &str, old: &Path, new: &Path) -> Option<String> {
     let mut changed = false;
     while let Some(i) = rest.find(old_s.as_ref()) {
         let after = &rest[i + old_s.len()..];
-        let boundary = after.chars().next().map_or(true, |c| c == '/' || c == '\'' || c == '"' || c.is_whitespace() || c == ';' || c == '&' || c == '|' || c == ')');
+        let boundary = after.chars().next().map_or(true, |c| c == '/' || (cfg!(windows) && c == '\\') || c == '\''|| c == '"' || c.is_whitespace() || c == ';' || c == '&' || c == '|' || c == ')');
         out.push_str(&rest[..i]);
         if boundary {
             out.push_str(&new_s);
@@ -316,6 +340,9 @@ mod tests {
         PathBuf::from(s)
     }
 
+    // Fixtures written as Unix paths (`/u/…` isn't absolute on Windows) are `cfg(unix)`; the
+    // Windows forms have their own tests below.
+    #[cfg(unix)]
     #[test]
     fn rebases_at_component_boundaries_only() {
         let (o, n) = (p("/u/IDE/aiTerm"), p("/u/IDE/maiterm"));
@@ -367,10 +394,22 @@ mod tests {
         let (o, n) = (h.join("DATA/IDE/aiTerm"), h.join("DATA/IDE/maiterm"));
         assert_eq!(rebase("~/DATA/IDE/aiTerm/docs", &o, &n).as_deref(), Some("~/DATA/IDE/maiterm/docs"));
         // Absolute stays absolute.
-        let abs = h.join("DATA/IDE/aiTerm").to_string_lossy().to_string();
-        assert_eq!(rebase(&abs, &o, &n), Some(h.join("DATA/IDE/maiterm").to_string_lossy().to_string()));
+        let abs = h.join("DATA").join("IDE").join("aiTerm").to_string_lossy().to_string();
+        assert_eq!(rebase(&abs, &o, &n), Some(h.join("DATA").join("IDE").join("maiterm").to_string_lossy().to_string()));
         // Moved out of home: the `~` form can't hold it any more.
         assert_eq!(rebase("~/DATA/IDE/aiTerm", &o, &p("/Volumes/x/maiterm")).as_deref(), Some("/Volumes/x/maiterm"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_keep_their_own_separator() {
+        let (o, n) = (p(r"C:\u\IDE\aiTerm"), p("C:/u/IDE/maiterm"));
+        assert_eq!(rebase(r"C:\u\IDE\aiTerm\src", &o, &n).as_deref(), Some(r"C:\u\IDE\maiterm\src"));
+        assert_eq!(rebase("C:/u/IDE/aiTerm/src", &o, &n).as_deref(), Some("C:/u/IDE/maiterm/src"));
+        assert_eq!(rebase(r"C:\u\IDE\aiTerm", &o, &n).as_deref(), Some(r"C:\u\IDE\maiterm"));
+        assert_eq!(rebase(r"C:\u\IDE\aiTermX", &o, &n), None);
+        assert_eq!(rebase(r"D:\u\IDE\aiTerm", &o, &n), None);
+        assert_eq!(rebase_text(r"cd C:\u\IDE\aiTerm\src && claude", &o, &n).as_deref(), Some(r"cd C:/u/IDE/maiterm\src && claude"));
     }
 
     #[test]
@@ -382,12 +421,14 @@ mod tests {
         assert_eq!(rebase_text("claude --resume abc", &o, &n), None);
     }
 
+    #[cfg(unix)]
     fn tab(id: &str) -> Tab {
         let mut t = Tab::new(id.into());
         t.id = id.into();
         t
     }
 
+    #[cfg(unix)]
     fn data_with(tabs: Vec<Tab>, archived: Vec<Tab>) -> AppData {
         let mut ws = crate::state::workspace::Workspace::new("ws".into());
         ws.panes[0].tabs = tabs;
@@ -399,6 +440,7 @@ mod tests {
         d
     }
 
+    #[cfg(unix)]
     #[test]
     fn relocates_local_tabs_and_leaves_ssh_tabs_alone() {
         let (o, n) = (p("/u/aiTerm"), p("/u/maiterm"));
@@ -428,6 +470,7 @@ mod tests {
         assert_eq!(ids, vec!["local", "arch"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn carries_a_held_scripts_approval_and_nothing_else() {
         let (o, n) = (p("/u/aiTerm"), p("/u/maiterm"));
