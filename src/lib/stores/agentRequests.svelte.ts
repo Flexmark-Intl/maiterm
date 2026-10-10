@@ -265,6 +265,8 @@ async function createTab(a: { tabId?: string; workspace_id?: string; cwd?: strin
   const ws = wsById(a.workspace_id);
   if (!ws) return { error: 'Workspace not found in this window (getMeshLayout lists them).' };
   if (ws.overlord) return { error: 'The Overlord workspace takes no new tabs.' };
+  // Nothing mounts in a suspended workspace, so its agent would not start until it is resumed.
+  if (ws.suspended) return { error: `“${ws.name}” is suspended; its tabs start only when the human resumes it.` };
   const runtime = (a.runtime ?? 'claude') as AgentRuntime;
   if (!RUNTIMES.includes(runtime)) return { error: `runtime must be one of ${RUNTIMES.join(', ')}.` };
   const cwd = a.cwd.trim();
@@ -359,6 +361,7 @@ async function execute(r: AgentRequest): Promise<string> {
     case 'tab_create': {
       const ws = wsById(s('workspace_id'));
       if (!ws) throw new Error('the workspace is gone');
+      if (ws.suspended) throw new Error(`“${ws.name}” was suspended after it was asked; nothing was opened`);
       const name = (r.args.name as string | null) ?? null;
       // The card said whether it joins a mesh, and whose; either having changed is a different question.
       const joins = !!name && !!meshKey(ws);

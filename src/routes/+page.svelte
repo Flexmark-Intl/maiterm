@@ -384,16 +384,22 @@
     window.addEventListener('deactivate-tabs', handleDeactivateTabs);
 
     // Mount a tab that isn't its pane's active tab, so its TerminalPane spawns a PTY and its
-    // auto-resume fires — without switching what the desktop is showing. Two callers: mesh setup's
-    // "Wake all", and a maiLink-created new conversation (which lands in the background by design).
-    // Also clears any pending-resume gate on its pane so it doesn't sit waiting.
+    // auto-resume fires — without switching what the desktop is showing. Callers: mesh setup's
+    // "Wake all", a maiLink-created new conversation and an approved `createTab` (both land in the
+    // background by design). Also clears any pending-resume gate on its pane so it doesn't sit
+    // waiting, and activates its WORKSPACE: terminals render only for activated workspaces, and
+    // `createTab` can target one not visited since launch, whose agent would otherwise wait for
+    // the human to open it (review of 869d6aed). Only this tab mounts, since every terminal is
+    // also gated on `activatedTabIds`. A suspended workspace is not activated here.
     function handleActivateTab(e: Event) {
       const tabId = (e as CustomEvent<string>).detail;
       if (!tabId) return;
       for (const ws of workspacesStore.workspaces) {
-        for (const pane of ws.panes) {
-          if (pane.tabs.some(t => t.id === tabId)) { pendingResumePanes.delete(pane.id); break; }
-        }
+        const pane = ws.panes.find(p => p.tabs.some(t => t.id === tabId));
+        if (!pane) continue;
+        pendingResumePanes.delete(pane.id);
+        if (!ws.suspended) activatedWorkspaceIds.add(ws.id);
+        break;
       }
       activatedTabIds.add(tabId);
     }
