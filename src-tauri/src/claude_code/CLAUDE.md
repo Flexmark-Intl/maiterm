@@ -612,6 +612,26 @@ Verified on dev 2026-10-08 with a real `claude`:
 - busy with an empty box → typed and folded in;
 - a slash command over a draft → refused.
 
+**Messages to other Claude sessions are refused in maiTerm tabs** (2026-10-10, the mod's
+`session.send` hook). Claude Code's own `SendMessage`/`ListAgents` reach every other Claude
+session on the machine (`uds:/tmp/cc-socks/<pid>.sock`, names like `maistarter-41`), which
+bypassed the mesh — the one place the human decides which agents may talk (linked workspaces,
+docs/mesh-workspace.md §17). Found live: maiMarketing's backend and maiSoft's maiStarter traded
+eight messages over it with no link between their workspaces, invisible to maiTerm. The hook lets
+a send through only to this session's own agents as `$.agent.list()` reports them (id, `name`,
+a teammate's `<name>@<team>` or bare name) or to `main`; anything else gets `{ isDelivered: false,
+reason }` — the model reads the reason as the tool's result, which points it at
+`sendToBridgedAgent`. Never decided from the shape of the address. Plugin-composed sends are held
+to the same rule. Tests: `resources/claude-mod/maiterm-tab/tests/session-send.test.ts`
+(`claude plugin test <mod folder>`; not shipped — `claude_mod::files()` embeds three files).
+Why not the documented switches: a `SendMessage` permission deny also kills messaging to the
+session's OWN subagents (same tool), and no specifier narrows it. INBOUND is the user setting
+`crossSessionInbound: refuse` (`~/.claude/settings.json`, which every managed account symlinks),
+set by hand on Darryl's machine — maiTerm does not write it: with every maiTerm tab refusing to
+send, only sessions outside maiTerm can still send, and the setting also stops those talking to
+each other. The mod could drop inbound per tab (`session.receive` → `{ consumed }`), but its
+`peer` origin may also cover the session's own agents; unverified, so not done.
+
 **Hooks registered:**
 - `SessionStart` (command): the only hook that runs **inside the tab's shell**, so the only one that can see `$MAITERM_TAB_ID`. It captures stdin once, POSTs the event to `/hooks?tab_id=$MAITERM_TAB_ID&prime=1`, and echoes the tab id, the session id, and the server's reply. Gated on `$MAITERM_PORT` matching server port (prevents dev/prod cross-talk). Output appears collapsed in TUI ("Ran 1 start hook") but injected into model context as system-reminder.
 - `SessionStart` (HTTP): POST to `/hooks` with `{session_id, cwd, source, model}` — no tab id (settings.json hook URLs are static), which is why the command hook exists.

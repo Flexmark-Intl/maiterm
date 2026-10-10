@@ -373,4 +373,36 @@ export const register: Register = on => {
     settled = true
     return { result: { questions: e.questions, answers: first.answers } }
   })
+
+  // An agent in a maiTerm tab talks to OTHER agents only where its human said it may: over the
+  // mesh (sendToBridgedAgent), whose roster is the workspaces the human linked. Claude's own
+  // SendMessage also reaches every other Claude session on the machine (ListAgents), which
+  // bypassed that entirely — maiMarketing and maiSoft agents traded messages with no link
+  // between their workspaces, unseen by maiTerm. So a send leaves only for this session's own
+  // agents, as the engine lists them, or for its parent ("main"); anything else is refused, and
+  // the model reads the reason as the tool's result. A plugin sending on the tab's behalf is held
+  // to the same rule: whoever composed it, it would still be this tab talking past its mesh.
+  on('session.send', async ($, e, next) => {
+    if (!(await linkOf($))) return next(e)
+    if (await isOwnAgent($, e.to)) return next(e)
+    return {
+      isDelivered: false,
+      reason:
+        `maiTerm: "${e.to}" is another Claude session, and messaging other sessions is off in maiTerm tabs — ` +
+        'your human decides which agents talk to each other. To reach another agent use sendToBridgedAgent ' +
+        '(listBridgedPeers shows who you can reach); if the one you need is not there, ask your human to link ' +
+        'its workspace to yours. SendMessage still works for your own subagents.',
+    }
+  })
+}
+
+// Is `to` this session's own subagent or teammate (or, from inside one, its parent)? Matched
+// against the engine's own list — id, the name SendMessage addresses it by, or a teammate's
+// `<name>@<team>` address and its bare name — never against the shape of the string.
+async function isOwnAgent($: EngineInterface, to: string): Promise<boolean> {
+  if (to === 'main') return true
+  const agents = await $.agent.list().catch(() => [])
+  return agents.some(a =>
+    a.id === to || a.name === to || a.teammateId === to || (!!a.teammateId && a.teammateId.split('@')[0] === to),
+  )
 }

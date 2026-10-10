@@ -598,6 +598,11 @@ every role on the mesh twice. A share file never carries it (allowlist).
   the workspace id when unlinked);
 - the cockpit — status board grouped by workspace, graph, topics, an Unlink button.
 
+**The mesh is the only way across.** Claude Code's own `SendMessage` reaches any Claude
+session on the machine, linked or not; maiTerm's mod refuses those sends in its tabs (own
+subagents excepted) and points the agent at `sendToBridgedAgent` — src-tauri/src/claude_code/
+CLAUDE.md, "Messages to other Claude sessions".
+
 **What stays per workspace:** the stage view and its filmstrip (`localMembersOf`), the
 readiness re-check / setup modal, maiLink's mesh-init, and the phone's `mesh` flag.
 
