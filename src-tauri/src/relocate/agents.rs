@@ -437,11 +437,13 @@ fn relink(link: &Path, target: &Path) {
 /// the old and swapped in only once it exists — a failure leaves the old link, not none.
 #[cfg(windows)]
 fn relink(link: &Path, target: &Path) {
-    use std::os::windows::fs::{symlink_dir, symlink_file};
+    use std::os::windows::fs::{symlink_dir, symlink_file, FileTypeExt};
     let mut name = link.file_name().unwrap_or_default().to_os_string();
     name.push(".maiterm-relink");
     let tmp = link.with_file_name(name);
-    let made = if target.is_dir() { symlink_dir(target, &tmp) } else { symlink_file(target, &tmp) };
+    // The old link's own kind, not its target's: the target may not have been moved in yet.
+    let dir = fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink_dir());
+    let made = if dir { symlink_dir(target, &tmp) } else { symlink_file(target, &tmp) };
     if made.is_ok() {
         // A directory link is removed as a directory on Windows.
         let _ = fs::remove_file(link).or_else(|_| fs::remove_dir(link));
