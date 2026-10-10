@@ -152,7 +152,7 @@ Because a released thread is no longer bound, it's also back to being mention-ga
 
 If a reply arrives while the agent is showing you something to decide — a multiple-choice question or a permission prompt — it isn't delivered yet. Those prompts are selection UIs, not text boxes, so a message typed into one would pick an option on your behalf and then vanish, taking both your answer and the message with it. maiTerm holds the message instead and delivers it the moment you've answered. These holds are silent: they clear in seconds, so they don't raise a notification or a reply on the thread the way a capacity or offline hold does.
 
-The same goes for anything you're halfway through typing. If a Claude Code agent's input box holds a draft of yours when a message arrives, the message waits until you've sent or cleared it, because the Enter that delivers it would submit your draft too. A draft can sit for hours, so this hold isn't silent: you get one notification for it, and nothing is posted to the thread.
+The same goes for anything you're halfway through typing: the Enter that types a reply in would submit your draft too. In a Claude tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), a reply that arrives while the agent is between turns isn't typed — the mod submits it beside your draft, which stays in the box. Otherwise, if a Claude Code agent's input box holds a draft of yours when a message arrives, the message waits — until the turn ends, with the mod, or until you've sent or cleared the draft without it. A draft can sit for hours, so this hold isn't silent: you get one notification for it, and nothing is posted to the thread.
 
 ### You're told when a reply can't be delivered
 

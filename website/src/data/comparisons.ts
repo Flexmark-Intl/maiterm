@@ -174,7 +174,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Agents talking to each other',
         maiterm:
-          'Mesh: every agent in a workspace — or in several linked workspaces — addresses any other by role, across repositories, with topics and loop caps.',
+          'Mesh: every agent in a workspace — or in several linked workspaces — addresses any other by role, across repositories, with topics and loop caps. Only along the links you set: a Claude Code agent in a maiTerm tab is refused Claude’s own messaging to other sessions, on versions that support mods.',
         theirs:
           'Agent spawning: a lead agent spawns others, even in a different harness, waits for them and collects the result.',
       },

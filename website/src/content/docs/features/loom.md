@@ -33,8 +33,8 @@ Focus is the work area: the chat list on the left, the chosen agent's conversati
 
 Whatever the agent is stopped at appears under the chat, answerable in place:
 
-- **A permission prompt**, with the rows Claude Code is actually showing — read off the screen, so the choice you click is the one that's pressed.
-- **A question** (`AskUserQuestion`), single- or multi-select, with its options and a field to answer in your own words. Your answer goes in only while that question's own selector is on screen; if something else has replaced it, the answer is refused rather than typed into whatever is there now.
+- **A permission prompt**, with the rows Claude Code is actually showing — read off the screen, so the choice you click is the one that's pressed. In a tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), *Yes* and *No* are handed to Claude by meaning instead — an allow, or a deny that stops the turn — whichever row they sit on.
+- **A question** (`AskUserQuestion`), single- or multi-select, with its options and a field to answer in your own words. Your answer goes in only while that question's own selector is on screen; if something else has replaced it, the answer is refused rather than typed into whatever is there now. With the mod, answers go in as data, multi-select and your own words included, and one that doesn't take is withdrawn whole so you can answer again.
 - **Claude's workspace-trust dialog** — *Trust this folder?* — which a resumed agent can stop at before it has a session at all.
 - **A question on one of its tasks** — see [blockers](/features/tasks/#when-an-agent-stops-on-a-question).
 - **A watch script it wants to run** — **Allow this watch script?**, with the whole script, **Allow** and **Don't allow**; see [watch scripts](/features/follow-ups/#you-approve-each-script-first).
@@ -45,7 +45,7 @@ A card ignores clicks in its first moments on screen, so a prompt that appears u
 
 Type to the agent at the bottom. `Enter` sends and `Shift+Enter` adds a line; drafts are kept per chat. Paste a screenshot or Finder files, or drop files on the composer, and they're attached the same way as in the terminal's [composer dock](/features/terminal/#composer-dock) — for an agent on an SSH host, each file is copied over to the host first. Attachments are for Claude Code chats.
 
-A sent message stays in the chat as a bubble marked **Sending…**, then **Queued** (Claude Code holds a message until its current turn ends) or **Delivered**, until the agent's transcript shows it. A queued message isn't in the transcript yet, so without the bubble it would look lost.
+A sent message stays in the chat as a bubble marked **Sending…**, then **Queued** (Claude Code holds a message until its current turn ends) or **Delivered**, until the agent's transcript shows it. A queued message isn't in the transcript yet, so without the bubble it would look lost. If you've left a draft in the terminal's own input box of a Claude tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), a message sent while the agent is between turns goes in beside it, leaving the draft alone; one sent mid-turn comes back to the composer as not sent, rather than being typed into the draft.
 
 Nothing is sent while a prompt is open on the agent: text typed into a permission dialog lands in the dialog, and a digit picks a row. Answer the prompt first. An agent that has exited or isn't connected is woken before the message goes, rather than having it typed at a shell.
 

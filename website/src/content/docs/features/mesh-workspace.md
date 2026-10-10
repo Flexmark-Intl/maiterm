@@ -20,7 +20,11 @@ A mesh inverts that. Each agent is small and **purpose-trained on its own reposi
 
 There is no broadcast. Every message is **addressed** to a specific recipient and routed off a stable handle, so renaming an agent never misroutes a message. An unknown or ambiguous recipient is a hard error that lists the current roster, never a silent drop — an agent always knows whether its message landed.
 
-A message for a Claude Code agent whose input box holds something you're halfway through typing waits in its queue until you've sent or cleared it, so your draft is never submitted along with a peer's message.
+A peer's message never submits something you're halfway through typing into a Claude Code agent's input box. In a tab running [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code), a message that arrives between turns is submitted beside your draft, which stays where it is; one that arrives mid-turn, or for an agent without the mod, waits in its queue while a draft is in the box.
+
+An agent's opener names the peers whose agent is running. Members that are suspended or not yet started are given as a count, with `listBridgedPeers` to look them up — they're still addressable, and a message to one waits until it's up — so a large workspace doesn't open every conversation with a roll call of parked tabs.
+
+The mesh is also the **only** way across. Claude Code can message other Claude sessions on the same machine directly; in a maiTerm tab, [maiTerm's mod](/features/agents/#the-maiterm-mod-claude-code) refuses those sends and points the agent at `sendToBridgedAgent` instead, so two agents talk only where you've meshed, linked or bridged them.
 
 ### Renaming an agent mid-flight
 

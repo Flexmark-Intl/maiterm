@@ -42,6 +42,14 @@ const description =
  */
 const KEY_FEATURES = [
   {
+    id: 'inside',
+    // v3.4.0. Backed by features/agents.md "The maiTerm mod (Claude Code)". Claude Code
+    // only, and only versions with mod support — the band says so; don't widen it to Codex.
+    title: 'Inside Claude Code',
+    blurb: 'Answers by meaning, never typed into your draft',
+    new: true,
+  },
+  {
     id: 'loom',
     // "Without opening their terminals" is the promise and it is literal: Focus reads each
     // agent's transcript the way the phone does (get_tab_transcript), answers the prompt it
@@ -50,7 +58,6 @@ const KEY_FEATURES = [
     title: 'Workstream Loom',
     blurb:
       'Talk to every agent in the window from one place — read it, answer it, send it work — without opening a single terminal.',
-    new: true,
   },
   {
     id: 'accounts',
@@ -183,14 +190,68 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* -------------------------------------------------------------- Inside */}
+  {/* The release slot (v3.4.0): the hero rail's top entry links here. --raised, right
+      after the --flush hero; inserting it flipped every band down to the --sunken
+      compat strip, which resets parity.
+
+      Every claim here is backed by features/agents.md "The maiTerm mod (Claude Code)"
+      and checked against src-tauri/src/claude_code/{mod_asks,mod_inbox}.rs:
+      - Yes/No by meaning: only those two rows; "don't ask again" rows are still keys,
+        so don't say "every answer".
+      - Prompts go around a draft only BETWEEN TURNS (mod_inbox::takes_now); mid-turn a
+        draft still holds them. "Reach an idle agent" is the honest wording.
+      - Cross-session refusal is outbound from maiTerm tabs only. */}
+  <section class="ln-band ln-band--raised" id="inside">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Inside Claude Code</p>
+      <h2 class="ln-h2 ln-h2--wide">It works with Claude Code from the inside, not through its keyboard.</h2>
+      <p class="ln-lead">
+        Answering an agent from your phone used to mean maiTerm pressing keys in its terminal
+        for you, and a message waiting until your half-typed draft was gone. Now every Claude
+        Code tab, local
+        or over SSH, loads a small maiTerm mod, and answers and messages are handed to Claude
+        itself.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Yes means yes</h3>
+          <p>
+            Approve from your phone, the Loom or Overlord and Claude gets an allow or a deny,
+            whichever row it sat on. Multi-select and "Other" answers go in as data, and one
+            that doesn't take is withdrawn whole, never left half-typed.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Your draft stays yours</h3>
+          <p>
+            Phone messages, follow-ups, peer messages and chat replies reach an idle agent
+            beside whatever you're halfway through typing. Not into it, and no longer waiting
+            for you to finish it.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Only the paths you drew</h3>
+          <p>
+            Claude Code lets sessions on one machine message each other. In maiTerm they
+            can't: one agent reaches another only through a mesh or a bridge you set up.
+          </p>
+        </div>
+      </div>
+      <p class="ln-note band-note">
+        On Claude Code versions that support mods. Older ones keep working the way they did.
+      </p>
+      <a class="ln-cta-link" href="/features/agents/#the-maiterm-mod-claude-code">How the mod works</a>
+    </div>
+  </section>
+
   {/* ---------------------------------------------------------------- Loom */}
-  {/* The release slot: the hero rail's top entry links here. --raised because it sits
-      in the one churn-free spot right after the --flush hero, and the Accounts band
-      below it stays a plain ln-band, so nothing further down flips.
+  {/* The release slot until v3.4.0.
 
       No screenshot yet: a real Focus view is a list of real tab names and transcripts.
       A staged one belongs here once the screenshot playbook has been run for it. */}
-  <section class="ln-band ln-band--raised" id="loom">
+  <section class="ln-band" id="loom">
     <div class="ln-inner">
       <p class="ln-eyebrow">Workstream Loom</p>
       <h2 class="ln-h2 ln-h2--wide">Every agent in the window. None of their terminals.</h2>
@@ -246,7 +307,7 @@ const EVERYTHING = [
       No screenshot on purpose: the Accounts pane is a list of real email
       addresses and organisation names. Every honest shot of it leaks an identity,
       and a staged one would be a fake account list. */}
-  <section class="ln-band" id="accounts">
+  <section class="ln-band ln-band--raised" id="accounts">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agent accounts</p>
       <h2 class="ln-h2 ln-h2--wide">Claude Code has one login slot. Your week does not.</h2>
@@ -310,7 +371,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------- Progression */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band">
     <div class="ln-inner">
       <p class="ln-eyebrow">Start with what you know</p>
       <h2 class="ln-h2 ln-h2--wide">It is a terminal first. The rest waits until you want it.</h2>
@@ -352,7 +413,7 @@ const EVERYTHING = [
   {/* --------------------------------------------------------------- Stack */}
   {/* .ln-cards sits OUTSIDE the text block on purpose: `.ln-stack > :first-child`
       caps at 46rem, which drops the three-card grid to two columns. */}
-  <section class="ln-band" id="stack">
+  <section class="ln-band ln-band--raised" id="stack">
     <div class="ln-inner ln-stack">
     <div>
       <p class="ln-eyebrow">Workspace stack</p>
@@ -427,7 +488,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------------- Tasks */}
-  <section class="ln-band ln-band--raised" id="board">
+  <section class="ln-band" id="board">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -489,7 +550,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band" id="overlord">
+  <section class="ln-band ln-band--raised" id="overlord">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -544,7 +605,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band ln-band--raised" id="mesh">
+  <section class="ln-band" id="mesh">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -580,7 +641,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band" id="mailink">
+  <section class="ln-band ln-band--raised" id="mailink">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -636,7 +697,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band ln-band--raised" id="comms">
+  <section class="ln-band" id="comms">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
@@ -692,11 +753,11 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------- Follow-ups */}
-  {/* Plain ln-band in the churn-free spot before the --sunken compat strip: Chat
-      threads above it is --raised, and the sunken strip resets parity below.
+  {/* --raised, the last band before the --sunken compat strip: Chat threads above
+      it is plain, and the sunken strip resets parity below.
       Follow-ups only run while the Overlord is on (Preferences.follow_ups_live()),
       so the note says so rather than letting the band read as always-on. */}
-  <section class="ln-band" id="follow-ups">
+  <section class="ln-band ln-band--raised" id="follow-ups">
     <div class="ln-inner">
       <p class="ln-eyebrow">Follow-ups</p>
       <h2 class="ln-h2 ln-h2--wide">An agent that comes back to it, without you remembering to ask.</h2>

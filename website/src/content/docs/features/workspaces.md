@@ -39,7 +39,7 @@ The name is the window's everywhere it's referred to: macOS uses it in Mission C
 Windows tend to be sorted by what you're paying attention to, and that changes. A workspace or a tab can move to another window without being closed and reopened:
 
 - **A workspace** — right-click it in the sidebar and choose **Move to Window**, then the window. It lands at the bottom of that window's list and becomes its active workspace.
-- **A tab** — right-click it and choose **Move to**, then a window (**This window** is listed first) and the workspace it should land in.
+- **A tab** — right-click it and choose **Move to**, then a window (**This window** is listed first) and the workspace it should land in. You follow the tab only if it's the one you were looking at; moving a background tab leaves you where you are, and a tab sent to another window doesn't bring that window to the front.
 
 The terminals keep running through the move: an agent mid-turn carries on, a dev server stays up, an SSH session stays connected and keeps its MCP bridge. A workspace takes its [stack](/features/stack/) services and its [tasks](/features/tasks/) with it.
 

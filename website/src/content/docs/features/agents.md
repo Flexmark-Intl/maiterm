@@ -9,7 +9,7 @@ maiTerm integrates deeply with coding agents — **Claude Code** and **OpenAI Co
 
 | Agent | On by default | Integration |
 |-------|---------------|-------------|
-| **Claude Code** | Yes | MCP/IDE tools, hooks, auto-resume, Agent Bridge (fork or connect), SSH bridge, `/maiterm` skill + status line |
+| **Claude Code** | Yes | MCP/IDE tools, hooks + the [maiTerm mod](#the-maiterm-mod-claude-code), auto-resume, Agent Bridge (fork or connect), SSH bridge, `/maiterm` skill + status line |
 | **Codex** | Yes | MCP/IDE tools, lifecycle hooks, auto-resume, Agent Bridge (connect, or fork — new), SSH bridge, `maiterm` prompt |
 
 Both agents get the same core treatment: live state in the sidebar and footer, tab activity indicators, auto-resume after a crash or relaunch, and notifications — all driven through the same hooks pipeline. Integration is on by default for each; it only takes effect once you actually run that agent.
@@ -22,7 +22,7 @@ Claude Code / Codex CLI ←→ Streamable HTTP ←→ axum server (Rust) ←→ 
 
 There's **one** MCP/IDE server, shared by every agent. It starts automatically when maiTerm launches and listens on a single port with a single auth token. What differs per agent is only the on-disk config a CLI reads to discover it:
 
-- **Claude Code** — a lock file in `~/.claude/ide/`, an `mcpServers` entry in `~/.claude.json`, and lifecycle hooks in `~/.claude/settings.json`.
+- **Claude Code** — a lock file in `~/.claude/ide/`, an `mcpServers` entry in `~/.claude.json`, lifecycle hooks in `~/.claude/settings.json`, and a small [Claude Code mod](#the-maiterm-mod-claude-code) each tab's shell points Claude at.
 - **Codex** — an MCP block in `~/.codex/config.toml`, lifecycle hooks in `~/.codex/hooks.json`, and a `maiterm` prompt in `~/.codex/prompts/`.
 
 When an agent connects, maiTerm identifies the runtime from the client's own handshake — so a Codex connection never binds to a Claude tab. And **no agent needs a manual registration step**: a tab names itself on the wire, and the session links itself the moment the agent process starts. See [Acting as the right tab](#acting-as-the-right-tab).
@@ -34,7 +34,7 @@ Agent settings live in one runtime-neutral **AI Agents** section in Preferences,
 **Claude Code**
 
 - **Enable IDE Integration** — the MCP/IDE server and tools
-- **Enable Hooks Integration** — lifecycle hooks for real-time state
+- **Enable Hooks Integration** — lifecycle hooks for real-time state, and the [maiTerm mod](#the-maiterm-mod-claude-code) in each tab
 - **Enable Auto-Resume via Hooks** — capture session IDs and reconnect on restore
 - **Enable IDE Integration over SSH** — expose IDE tools to remote Claude Code via reverse tunnel
 
@@ -219,6 +219,20 @@ maiTerm integrates with each agent's hook system for real-time session awareness
 - **Multi-agent awareness** — `getClaudeSessions` lets any session discover other active agent sessions across tabs for coordination, and [Agent Bridge](/features/agent-bridge/) lets two sessions talk to each other directly
 - **Compaction notifications** — alerts during and after context compaction
 - **Model switches without the extra confirm** — newer Claude Code builds stop a `/model` switch at a "Switch model?" confirmation when the current model's cache is warm, which a switch from your phone or the [Loom](/features/loom/) can't see. maiTerm answers it for sessions running in its own tabs, so the switch you asked for goes through; a Claude session in another terminal keeps its confirm, and a Claude Code too old to know the hook isn't given it
+
+### The maiTerm mod (Claude Code)
+
+Every Claude tab — local, or on a host you've reached over the [SSH bridge](#ssh-mcp-bridge) — also loads a small Claude Code **mod** called `maiterm-tab`. maiTerm points each tab's shell at it, so any `claude` you start there picks it up; over SSH the bridge copies it to the host (into `~/.maiterm/claude-mod/`) and the remote shell is pointed at that copy. It comes with **Enable Hooks Integration**, and only Claude Code versions that support mods load it. An older Claude ignores it and runs on the settings hooks exactly as before.
+
+The mod works from inside Claude Code rather than by pressing keys in its terminal, which changes a few things you'll notice:
+
+- **Every event names its tab.** The settings hooks are shared by every Claude on the machine and mostly can't say which tab they came from; the mod's copy can, and its duplicate from the settings hooks is dropped.
+- **Answers are given by meaning.** A permission answered from your [phone](/features/mailink/), the [Loom](/features/loom/) or the [Overlord](/features/overlord/) is handed to Claude as an allow or a deny, whichever row *Yes* and *No* sit on, and a *No* stops the turn as the dialog's own *No* does. Answers to an agent's `AskUserQuestion` go in as data, so multi-select and **Other** answers work. An answer that doesn't take is withdrawn whole rather than left half-typed. Other rows — *Yes, and don't ask again for…*, say — are still pressed as their key, because only the dialog knows the rule that row saves.
+- **Prompts go around your draft, not into it.** A message maiTerm sends the agent — from the phone or the Loom, a [follow-up](/features/follow-ups/), an Overlord directive, a [mesh](/features/mesh-workspace/) or [bridge](/features/agent-bridge/) peer, a [Mattermost](/features/comms/) reply — is handed to the mod while the agent is between turns, and submitted beside whatever you're typing in its input box, which stays where it is. While the agent is mid-turn, each kind of message keeps its old rules — a phone message, for one, is typed into an empty box and folds into the running turn, or waits while you have a draft there — and whatever waited goes to the mod once the turn ends. Slash commands and images are still typed, so they still wait for an empty box.
+- **Other Claude sessions are off limits.** Claude Code lets sessions on the same machine message each other directly with its `SendMessage` tool. An agent in a maiTerm tab is refused a send to another session, and told to use `sendToBridgedAgent` instead — so a [bridge](/features/agent-bridge/) or a [mesh](/features/mesh-workspace/), which you set up, is the only way one maiTerm agent reaches another. Its own subagents and teammates are unaffected.
+- **SSH transcripts stream.** For an agent over SSH, the mod tells maiTerm as each part of the conversation is written, so text the agent wrote before a slow tool call reaches the phone and the Loom as the tool starts, not when it finishes.
+
+Codex tabs, and Claude Code versions without mods, keep the keystroke paths described on each feature's page.
 
 ## Agent State Indicators
 

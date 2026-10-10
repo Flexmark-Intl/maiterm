@@ -40,7 +40,7 @@ Overlord types with **your** authority and no envelope wrapped around it — the
 - **A live agent must be there.** The real hazard isn't a misbehaving agent, it's an absent one — "spin up a review of that commit" typed at a bare shell prompt is a shell command.
 - **One directive at a time per tab**, so sequences stay coherent. A directive that asks something holds the tab until it's answered, or for 15 minutes; a slash command such as `/model`, `/effort` or `/compact` never answers, so it doesn't hold the tab at all. A tab that is mid-compaction counts as busy, so nothing is typed into it halfway through.
 - **A rate ceiling per tab per hour**, and a required quiet period before anything is sent.
-- **Your own keystrokes abort a running sequence.** If you start typing, the ritual stops. Keys you press to answer a permission prompt don't count — a step that needed your approval carries on once you've given it.
+- **Your own keystrokes abort a running sequence.** If you start typing, the ritual stops. Keys you press to answer a permission prompt don't count — a step that needed your approval carries on once you've given it. A draft you've left in the agent's input box counts as using the tab too: a sequence that fired on its own gives the tab back rather than typing over it.
 
 Guards are **human-only**. The supervisor agent can propose changes to a rule's wording, timing and scope, but not to the conditions under which it may fire at all.
 
@@ -94,6 +94,8 @@ A rule's condition decides when it fires *on its own*. It doesn't decide when **
 The **bolt** in an agent's composer in the [Loom](/features/loom/) lists every rule that could run at that tab — enabled ones first, disabled ones tagged `off` — and fires the one you pick, whatever its when-clause says. Scope still holds: a rule pinned to a workspace stays pinned, because its steps were written for that workspace. Only the *when* is set aside. A rule you've added but not yet written any steps for doesn't appear at all.
 
 The same menu is available from the tab you're already in. With Overlord on, the terminal's [composer dock](/features/terminal/#composer-dock) grows a **bolt** — beside the collapsed handle, and in the actions row when it's open — so you can fire a rule at the tab in front of you without going to the deck. A tab that has never hosted an agent doesn't get one, so a plain shell never sprouts a button that types into `bash`.
+
+A rule you fire yourself — here or [from your phone](#from-your-phone) — waits for the agent's own turn to end, but not for a background subagent it left running, and not for the screen to go quiet: a subagent's review repainting the terminal no longer holds up a checkpoint. If you have a draft in the agent's input box, each step waits for you to send or clear it, rather than typing into it or giving up; the keys you press to do that don't call the sequence off.
 
 A manual fire obeys the same guards as an automatic one, and when it can't happen it says why — under the Loom's composer, or as a toast from the terminal's — rather than failing silently. The common refusals: the tab has no live agent, another sequence already owns it, or it's sitting at a permission prompt — which looks ready but isn't, so the fire is declined up front instead of holding the tab's slot for the full wait typing nothing.
 
