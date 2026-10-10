@@ -384,6 +384,10 @@ async function onSettled(r: AgentRequest) {
 function createAgentRequestsStore() {
   let requests = $state<AgentRequest[]>([]);
   let unlisten: UnlistenFn[] = [];
+  /** Rust lapses a request only when the list is read. maiLink reads it every few seconds, but
+   *  maiLink is off by default, and then a lapsed card stayed up and its agent was never told
+   *  (review of 3973dc21). This read is the clock. */
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
 
   async function refresh() {
     requests = await commands.listAgentRequests().catch(() => requests);
@@ -417,10 +421,12 @@ function createAgentRequestsStore() {
         listen<AgentRequest>('agent-request-settled', (e) => void onSettled(e.payload)),
       ]);
       await refresh();
+      sweepTimer = setInterval(() => void refresh(), 30_000);
     },
     destroy() {
       unlisten.forEach((u) => u());
       unlisten = [];
+      clearInterval(sweepTimer);
     },
   };
 }

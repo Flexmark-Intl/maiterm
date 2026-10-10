@@ -26,6 +26,7 @@ const PENDING_TTL_MS: u64 = 30 * 60 * 1000;
 const SETTLED_TTL_MS: u64 = 60 * 60 * 1000;
 /// How long an approved request may take to be carried out before it is reported failed.
 const APPROVED_TTL_MS: u64 = 5 * 60 * 1000;
+const RESTART_APPROVED_TTL_MS: u64 = 30 * 60 * 1000;
 /// Pending requests one tab may hold: enough for a real reorganisation, not a flood of cards.
 const MAX_PENDING_PER_TAB: usize = 5;
 
@@ -113,7 +114,10 @@ fn sweep(list: &mut Vec<AgentRequest>, now: u64) {
         }
         // Approved but never reported back: the window that was to carry it out closed or
         // reloaded. Said so, rather than showing "approved" for good.
-        if r.status == "approved" && now.saturating_sub(r.decided_at.unwrap_or(now)) >= APPROVED_TTL_MS {
+        // A restart that installs an update first downloads it, which can take longer than any
+        // other kind runs; reporting it failed meanwhile told the agent so while it went ahead.
+        let ttl = if r.kind == "restart" { RESTART_APPROVED_TTL_MS } else { APPROVED_TTL_MS };
+        if r.status == "approved" && now.saturating_sub(r.decided_at.unwrap_or(now)) >= ttl {
             r.status = "failed".into();
             r.outcome = Some("approved, but the window that was to carry it out never reported back".into());
             moved.push(r.clone());
