@@ -617,12 +617,19 @@ Verified on dev 2026-10-08 with a real `claude`:
 session on the machine (`uds:/tmp/cc-socks/<pid>.sock`, names like `maistarter-41`), which
 bypassed the mesh — the one place the human decides which agents may talk (linked workspaces,
 docs/mesh-workspace.md §17). Found live: maiMarketing's backend and maiSoft's maiStarter traded
-eight messages over it with no link between their workspaces, invisible to maiTerm. The hook lets
-a send through only to this session's own agents as `$.agent.list()` reports them (id, `name`,
-a teammate's `<name>@<team>` or bare name) or to `main`; anything else gets `{ isDelivered: false,
-reason }` — the model reads the reason as the tool's result, which points it at
-`sendToBridgedAgent`. Never decided from the shape of the address. Plugin-composed sends are held
-to the same rule. Tests: `resources/claude-mod/maiterm-tab/tests/session-send.test.ts`
+eight messages over it with no link between their workspaces, invisible to maiTerm. The hook
+refuses a send only on POSITIVE evidence that the recipient is another session: a `uds:` or
+`bridge:` address (the forms the SendMessage schema documents for one), or a name the session's
+own `ListAgents` result filed under a session-type section (`kind: "sessions"` seen live; cloud /
+Remote Control kinds matched by keyword), with or without its ` [ref]`. The mod learns those
+names from its `tool.call` hook on ListAgents — the only way a model learns a session's name.
+Everything else is delivered, and an own agent (`$.agent.list()`, or `main`) always is. The first
+version did the opposite, delivering only to listed own agents, and review of 76421ae0 showed it
+refusing real own-session sends: a teammate answering its lead as `team-lead` (the lead is the
+main loop, never in the list) and a finished subagent SendMessage resumes after the engine has
+dropped it from the list. A session this misses still lands on `crossSessionInbound: refuse`.
+The refusal is `{ isDelivered: false, reason }`; the model reads the reason, which points it at
+`sendToBridgedAgent`. Plugin-composed sends are held to the same rule. Tests: `resources/claude-mod/maiterm-tab/tests/session-send.test.ts`
 (`claude plugin test <mod folder>`; not shipped — `claude_mod::files()` embeds three files).
 Why not the documented switches: a `SendMessage` permission deny also kills messaging to the
 session's OWN subagents (same tool), and no specifier narrows it. INBOUND is the user setting

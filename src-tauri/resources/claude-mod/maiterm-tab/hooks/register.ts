@@ -378,13 +378,22 @@ export const register: Register = on => {
   // mesh (sendToBridgedAgent), whose roster is the workspaces the human linked. Claude's own
   // SendMessage also reaches every other Claude session on the machine (ListAgents), which
   // bypassed that entirely — maiMarketing and maiSoft agents traded messages with no link
-  // between their workspaces, unseen by maiTerm. So a send leaves only for this session's own
-  // agents, as the engine lists them, or for its parent ("main"); anything else is refused, and
-  // the model reads the reason as the tool's result. A plugin sending on the tab's behalf is held
-  // to the same rule: whoever composed it, it would still be this tab talking past its mesh.
+  // between their workspaces, unseen by maiTerm. So a send to ANOTHER SESSION is refused, and the
+  // model reads the reason as the tool's result. A plugin sending on the tab's behalf is held to
+  // the same rule: whoever composed it, it would still be this tab talking past its mesh.
+  //
+  // Refused only on positive evidence that the recipient is a session (`isOtherSession`), never
+  // because it is missing from the session's own agents: that list forgets a finished subagent
+  // that SendMessage can still resume, and never holds the lead a teammate answers as
+  // `team-lead` (review of 76421ae0). A session this misses is still stopped where it lands —
+  // `crossSessionInbound: refuse` on the receiving end.
+  on('tool.call', { tool: 'ListAgents' }, async ($, e, next) => {
+    const r = await next(e)
+    if (await linkOf($)) recordSessions((r as { result?: unknown }).result)
+    return r
+  })
   on('session.send', async ($, e, next) => {
-    if (!(await linkOf($))) return next(e)
-    if (await isOwnAgent($, e.to)) return next(e)
+    if (!(await linkOf($)) || !isOtherSession(e.to) || (await isOwnAgent($, e.to))) return next(e)
     return {
       isDelivered: false,
       reason:
@@ -396,9 +405,34 @@ export const register: Register = on => {
   })
 }
 
-// Is `to` this session's own subagent or teammate (or, from inside one, its parent)? Matched
-// against the engine's own list — id, the name SendMessage addresses it by, or a teammate's
-// `<name>@<team>` address and its bare name — never against the shape of the string.
+// Names ListAgents filed under another session (its own machine's, a cloud one, a Remote Control
+// one) during this module's life. The listing is the only way a model learns a session's name, so
+// a name it can address is a name this saw. Lost on a reload (a deploy rewrites the mod), when the
+// model has to list again before it can name one — and the inbound setting covers the gap.
+const sessionNames = new Set<string>()
+const SESSION_KIND = /session|cloud|remote|peer/i
+
+function recordSessions(result: unknown) {
+  const sections = (result as { sections?: { kind?: unknown; rows?: { name?: unknown; ref?: unknown; id?: unknown }[] }[] } | undefined)?.sections
+  if (!Array.isArray(sections)) return
+  for (const s of sections) {
+    if (typeof s.kind !== 'string' || !SESSION_KIND.test(s.kind) || /agent|teammate/i.test(s.kind)) continue
+    for (const row of s.rows ?? []) {
+      for (const v of [row.name, row.id]) if (typeof v === 'string' && v) sessionNames.add(v)
+      if (typeof row.name === 'string' && typeof row.ref === 'string') sessionNames.add(`${row.name} [${row.ref}]`)
+    }
+  }
+}
+
+// An address SendMessage only gives a session — `uds:<socket>` and `bridge:<session id>`, the
+// forms its schema documents for one — or a name ListAgents listed as a session.
+function isOtherSession(to: string): boolean {
+  if (/^(uds|bridge):/.test(to)) return true
+  return sessionNames.has(to) || sessionNames.has(to.replace(/\s*\[[^\]]*\]$/, ''))
+}
+
+// Is `to` this session's own subagent or teammate (or, from inside one, its parent)? Checked
+// first so an own agent that happens to share a listed session's name is still reached.
 async function isOwnAgent($: EngineInterface, to: string): Promise<boolean> {
   if (to === 'main') return true
   const agents = await $.agent.list().catch(() => [])
