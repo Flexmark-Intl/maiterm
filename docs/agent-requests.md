@@ -56,7 +56,7 @@ restart. A request moves through these states:
 | `denied` | the human denies |
 | `expired` | 30 min with no answer |
 
-An approval nobody reports back on within 5 min becomes `failed`.
+An approval nobody reports back on within 5 min (30 min for a restart, which may install an update first — `RESTART_APPROVED_TTL_MS`) becomes `failed`.
 
 **Only `decide` moves a request out of pending.** Two things call it:
 - the Tauri command behind the card's button (`decide_agent_request`);
