@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.5.0
+
+Agents can organise your tabs, meshes and maiTerm itself, and ask you first wherever it matters.
+
+### Agents that organise, with your approval
+
+- **Agents can move tabs and workspaces, and see how your meshes are laid out.** Anything that changes which agents can talk to each other (making a workspace a mesh, linking or unlinking meshes, a move that changes a tab's mesh) and restarting maiTerm, optionally installing an update first, is only a request. It appears as a card in the Loom's Decisions and on your phone, worded by maiTerm, and nothing happens until you approve it. An agent asking you a question, or Claude's permission dialog, doesn't count as approval.
+- **Agents can ask for a new agent tab** (Claude Code, Codex or Gemini, in a workspace and folder of their choosing), always on an approval card.
+- **Your phone rings for these requests**, and you can approve or deny them there.
+
+### Mesh
+
+- **In linked meshes every agent is named Workspace/Tab**, so two "Backend" tabs in different workspaces can't be mixed up. A message to a name that no longer matches is refused with the current names instead of guessed.
+
+### Fixes
+
+- **Move project works on Windows**: Claude's prompt history and Codex conversations follow the folder, paths keep their own slashes, and links inside a moved session are recreated rather than lost.
+- **The Loom composer never types into your draft.** A message it can't deliver around a draft in the agent's input box comes back to the composer with the reason, your text kept.
+- **Only your paired phone can answer for you.** Permission and task answers and approvals over maiLink no longer accept the local developer token, which any program on your computer could read.
+
 ## v3.4.0
 
 maiTerm now works with Claude Code from the inside, through a Claude Code mod, instead of pressing keys in its terminal.
