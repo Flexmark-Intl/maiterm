@@ -168,12 +168,16 @@ function createAgentMeshStore() {
    *  tab has since claimed must not route to its previous holder (a silent misroute); until
    *  the new holder's agent is up the name is simply unknown, as it was before renames. */
   function claimedRoles(ws: Workspace): string[] {
+    return meshWorkspacesOf(ws).flatMap(claimedIn);
+  }
+
+  /** The same, for one workspace: on a linked mesh a former FULL name `W/old` is taken only when
+   *  a tab in W claims "old" — another workspace's "old" is a different name there. */
+  function claimedIn(w: Workspace): string[] {
     const out: string[] = [];
-    for (const w of meshWorkspacesOf(ws)) {
-      for (const pane of w.panes) {
-        for (const tab of pane.tabs) {
-          if ((tab.tab_type ?? 'terminal') === 'terminal' && !tab.service_id && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
-        }
+    for (const pane of w.panes) {
+      for (const tab of pane.tabs) {
+        if ((tab.tab_type ?? 'terminal') === 'terminal' && !tab.service_id && tab.custom_name) out.push(roleName(tab.name).toLowerCase());
       }
     }
     return out;
@@ -225,8 +229,15 @@ function createAgentMeshStore() {
           const bare = roleName(tab.name);
           const linked = mesh.length > 1;
           // Former names are kept bare; on a linked mesh each also routes as `Workspace/old`.
-          const kept = formerRolesOf(tab.id).filter((f) => !claimed.includes(f.toLowerCase()));
-          const former = linked ? kept.flatMap((f) => [f, `${w.name}/${f}`]) : kept;
+          // A bare former name is dropped once any tab on the mesh claims it; on a linked mesh its
+          // full form `W/old` only once a tab in W does (review of a68c53e4: W's renamed agent
+          // stayed reachable as "W/Backend" while X also has a "Backend").
+          const all = formerRolesOf(tab.id);
+          const bareFormer = all.filter((f) => !claimed.includes(f.toLowerCase()));
+          const inW = linked ? claimedIn(w) : [];
+          const former = linked
+            ? [...bareFormer, ...all.filter((f) => !inW.includes(f.toLowerCase())).map((f) => `${w.name}/${f}`)]
+            : bareFormer;
           out.push({
             tabId: tab.id,
             role: linked ? `${w.name}/${bare}` : bare,

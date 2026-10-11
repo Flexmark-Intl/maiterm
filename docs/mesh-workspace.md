@@ -595,10 +595,13 @@ every role on the mesh twice. A share file never carries it (allowlist).
   one it can type back. A mesh inside one workspace keeps bare tab names. Resolution
   (`meshRouting.ts`, in order): handle → full name → the BARE tab name while no other workspace
   has a tab by it (agents linked earlier carry bare names; ambiguity is an error naming both full
-  names) → a former name, bare or `Workspace/old` → a `Workspace/` prefix that is stale (a
-  renamed workspace) matched by the WHOLE tab name at the end, never by splitting at `/`, which
-  either name may hold; the send result teaches the current name. A workspace rename therefore
-  needs no saved state and no notice to its agents. Former names are stored bare; renames are
+  names; so is a full name that is also another peer's bare tab name, e.g. a tab literally named
+  `A/Backend`) → a former name, bare or `Workspace/old`. Nothing past that: a stale `Workspace/`
+  prefix is NOT matched by the tab name at the end — "W was renamed" and "W left the mesh" read
+  the same, and in the second case the only `…/Backend` left is a different agent (review of
+  a68c53e4). After a workspace rename the old full name gets an error listing the current names:
+  one turn spent, nothing misdelivered. A bare former name is dropped once any tab on the mesh
+  claims it; its full form `W/old` only once a tab in W does. Former names are stored bare; renames are
   compared bare. `meshKnowsName` is the same matcher for the 1:1 bridge's dispatch, so the two
   can't disagree about a name. The cockpit board, already grouped by workspace, shows bare names,
   its graph full ones;

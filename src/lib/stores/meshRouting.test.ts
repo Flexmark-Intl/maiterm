@@ -131,25 +131,34 @@ describe('resolveRecipient', () => {
       }
     });
 
-    it('routes a stale workspace prefix by the whole tab name and teaches the current name', () => {
+    it('refuses a stale workspace prefix rather than matching the tab name at the end', () => {
       const { router: r2 } = makeHarness(roster());
-      expect(r2.resolveRecipient('s-back', 'Old Backend WS/Migrations')).toEqual({
-        ok: true, tabId: 'b-db', role: 'EWS Backend/Migrations', viaFormerRole: 'Old Backend WS/Migrations',
-      });
+      const r = r2.resolveRecipient('s-back', 'Old Backend WS/Migrations');
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain('"EWS Backend/Migrations"'); // the roster shows the current name
     });
 
-    it('never splits at a slash: a tab name holding one resolves bare, in full, and under a stale prefix', () => {
+    it("never delivers a departed peer's full name to the same-named tab left behind (review of a68c53e4)", () => {
+      // W/Backend's workspace left the mesh (or was renamed — the two read the same).
+      const { router: r2 } = makeHarness([linked('x1', 'X', 'Backend'), linked('y1', 'Y', 'Lead')]);
+      expect(r2.resolveRecipient('y1', 'W/Backend').ok).toBe(false);
+    });
+
+    it('never splits at a slash: a tab name holding one resolves bare and in full', () => {
       const { router: r2 } = makeHarness(roster());
       expect(r2.resolveRecipient('b-db', 'api/v2')).toMatchObject({ ok: true, tabId: 's-api' });
       expect(r2.resolveRecipient('b-db', 'EWS Sites/api/v2')).toMatchObject({ ok: true, tabId: 's-api' });
-      expect(r2.resolveRecipient('b-db', 'Sites Renamed/api/v2')).toMatchObject({ ok: true, tabId: 's-api' });
     });
 
-    it('refuses a stale prefix whose tab name two workspaces share', () => {
-      const { router: r2 } = makeHarness(roster());
-      const r = r2.resolveRecipient('b-db', 'Gone/Backend');
+    it("refuses a full name that is also another peer's bare tab name", () => {
+      // Workspace A has "Backend"; workspace W has a tab literally named "A/Backend".
+      const { router: r2 } = makeHarness([linked('a1', 'A', 'Backend'), linked('w1', 'W', 'A/Backend'), linked('z1', 'Z', 'Lead')]);
+      const r = r2.resolveRecipient('z1', 'A/Backend');
       expect(r.ok).toBe(false);
-      if (!r.ok) expect(r.error).toContain('Address one by its full name');
+      if (!r.ok) {
+        expect(r.error).toContain('"A/Backend"');
+        expect(r.error).toContain('"W/A/Backend"');
+      }
     });
 
     it('resolves a former tab name bare and in full', () => {
@@ -160,10 +169,11 @@ describe('resolveRecipient', () => {
 
     it('meshKnowsName agrees with the router on every form', () => {
       const r = roster();
-      for (const name of ['s-back', 'EWS Sites/Backend', 'Backend', 'Migrations', 'Old/Migrations', 'api/v2']) {
+      for (const name of ['s-back', 'EWS Sites/Backend', 'Backend', 'Migrations', 'api/v2']) {
         expect(meshKnowsName(r, name)).toBe(true);
       }
       expect(meshKnowsName(r, 'Frontend')).toBe(false);
+      expect(meshKnowsName(r, 'Old/Migrations')).toBe(false); // no stale-prefix guess, here either
       expect(meshKnowsName(r, '')).toBe(false);
     });
   });

@@ -103,8 +103,8 @@ export function normalizeLabel(label: string): string {
     .join('-');
 }
 
-/** Would the mesh resolve `name` to a member — by handle, role, bare tab name, former name or a
- *  stale `Workspace/` prefix? The same rules as `resolveRecipient`, minus ambiguity: the 1:1
+/** Would the mesh resolve `name` to a member — by handle, role, bare tab name or former name?
+ *  The same rules as `resolveRecipient`, minus ambiguity: the 1:1
  *  bridge's dispatch asks it so a name the mesh knows is never sent over the bridge instead. */
 export function meshKnowsName(members: MeshMember[], name: string): boolean {
   const lc = name.trim().toLowerCase();
@@ -113,8 +113,7 @@ export function meshKnowsName(members: MeshMember[], name: string): boolean {
     m.tabId === name.trim() ||
     m.role.trim().toLowerCase() === lc ||
     m.shortRole?.trim().toLowerCase() === lc ||
-    (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === lc) ||
-    (!!m.shortRole && lc.endsWith(`/${m.shortRole.trim().toLowerCase()}`)),
+    (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === lc),
   );
 }
 
@@ -153,6 +152,16 @@ export function createMeshRouter(deps: MeshRouterDeps) {
     // 2. Unique case-insensitive role match. Ambiguity is an error, never a guess.
     const lc = arg.toLowerCase();
     const byRole = members.filter((m) => m.role.trim().toLowerCase() === lc);
+    const byShort = members.filter((m) => m.shortRole?.trim().toLowerCase() === lc);
+    // A full name that is ALSO another peer's bare tab name (a tab literally named "A/Backend"
+    // beside workspace A's "Backend"): both readings are offered to agents, so pick neither.
+    const clash = byRole.length === 1 ? byShort.filter((m) => m.tabId !== byRole[0].tabId) : [];
+    if (clash.length) {
+      return {
+        ok: false,
+        error: `"${arg}" could mean ${[byRole[0], ...clash].map((m) => `"${m.role}"`).join(' or ')}. Address one by its full name or tabId handle (see listBridgedPeers).`,
+      };
+    }
     if (byRole.length === 1) return self(byRole[0], senderTabId);
     if (byRole.length > 1) {
       return {
@@ -163,7 +172,6 @@ export function createMeshRouter(deps: MeshRouterDeps) {
 
     // 3. A bare tab name on a linked mesh, where roles are `Workspace/Tab`: unique → that peer;
     //    the same tab name in two workspaces → an error naming both full names, never a guess.
-    const byShort = members.filter((m) => m.shortRole?.trim().toLowerCase() === lc);
     if (byShort.length === 1) return self(byShort[0], senderTabId);
     if (byShort.length > 1) {
       return {
@@ -184,17 +192,10 @@ export function createMeshRouter(deps: MeshRouterDeps) {
       };
     }
 
-    // 5. `Workspace/Tab` whose workspace part is stale — the workspace was renamed, or the sender
-    //    misremembers it — matched by its whole tab name at the end, never by splitting at a `/`
-    //    (either name may hold one). Unique only; the result teaches the current name.
-    const bySuffix = members.filter((m) => m.shortRole && lc.endsWith(`/${m.shortRole.trim().toLowerCase()}`));
-    if (bySuffix.length === 1) return self(bySuffix[0], senderTabId, arg);
-    if (bySuffix.length > 1) {
-      return {
-        ok: false,
-        error: `No peer is named "${arg}"; its tab name matches ${bySuffix.map((m) => `"${m.role}"`).join(', ')}. Address one by its full name.`,
-      };
-    }
+    // No guess past this point. A `Workspace/Tab` whose workspace part is stale is NOT matched by
+    // its tab name at the end: "W was renamed" and "W left the mesh" read the same, and in the
+    // second case the only `…/Backend` left is a different agent (review of a68c53e4). The
+    // error lists the current names, so the sender spends one turn, never a misdelivery.
     return { ok: false, error: `No peer named "${arg}" in this mesh.${rosterHint()}` };
   }
 
