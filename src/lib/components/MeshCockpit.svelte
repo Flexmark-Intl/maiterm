@@ -91,11 +91,10 @@
   // A hovered node can go away under a motionless pointer — clicking it closes the cockpit,
   // and the 1s re-derive drops an agent that left the mesh — and neither fires mouseleave.
   // Reading the label off the live graph hides the bubble the moment its node is gone.
-  const hoverText = $derived.by(() => {
-    const role = hoverTabId ? (graph.nodes.find((n) => n.tabId === hoverTabId)?.role ?? '') : '';
-    const where = role ? board.find((b) => b.tabId === hoverTabId)?.workspace : null;
-    return where ? `${role} · ${where}` : role;
-  });
+  // On a linked mesh the role already reads `Workspace/Tab`.
+  const hoverText = $derived(
+    hoverTabId ? (graph.nodes.find((n) => n.tabId === hoverTabId)?.role ?? '') : ''
+  );
   // Closing unmounts the graph without a mouseleave, so the next open would otherwise
   // re-anchor to the detached <g> — a bubble pinned in the window's corner.
   $effect(() => {
@@ -316,7 +315,7 @@
               <div class="agent-head">
                 <StatusDot color={a.claudeState === 'active' ? 'accent' : a.live ? 'green' : 'dim'} pulse={a.claudeState === 'active'} />
                 <Tooltip text="Open this agent's tab">
-                  <button class="role-link" onclick={() => openTab(a.tabId)}>{a.role}</button>
+                  <button class="role-link" onclick={() => openTab(a.tabId)}>{a.shortRole}</button>
                 </Tooltip>
                 <span class="spacer"></span>
                 {#if a.needsInput}

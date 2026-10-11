@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { createMeshRouter, normalizeLabel, type MeshMember, type MeshRouter } from './meshRouting';
+import { createMeshRouter, meshKnowsName, normalizeLabel, type MeshMember, type MeshRouter } from './meshRouting';
 
 /** Deterministic deps: fixed clock, monotonic id minter, mutable roster. */
 function makeHarness(members: MeshMember[]) {
@@ -95,6 +95,76 @@ describe('resolveRecipient', () => {
     it('still rejects a self-send by a former name', () => {
       const { router: r2 } = makeHarness([renamed('a', 'Alice v2', ['Alice']), member('b', 'Bob')]);
       expect(r2.resolveRecipient('a', 'Alice').ok).toBe(false);
+    });
+  });
+
+  describe('linked mesh: roles are Workspace/Tab (docs/mesh-workspace.md §17)', () => {
+    const linked = (tabId: string, ws: string, tab: string, formerRoles?: string[]): MeshMember => ({
+      ...member(tabId, `${ws}/${tab}`),
+      shortRole: tab,
+      ...(formerRoles ? { formerRoles } : {}),
+    });
+    const roster = () => [
+      linked('s-back', 'EWS Sites', 'Backend'),
+      linked('b-back', 'EWS Backend', 'Backend'),
+      linked('b-db', 'EWS Backend', 'Migrations'),
+      linked('s-api', 'EWS Sites', 'api/v2'),
+    ];
+
+    it('resolves a full name, case-insensitively', () => {
+      const { router: r2 } = makeHarness(roster());
+      expect(r2.resolveRecipient('b-db', 'ews sites/backend')).toEqual({ ok: true, tabId: 's-back', role: 'EWS Sites/Backend' });
+    });
+
+    it('resolves a bare tab name no other workspace shares', () => {
+      const { router: r2 } = makeHarness(roster());
+      expect(r2.resolveRecipient('s-back', 'Migrations')).toEqual({ ok: true, tabId: 'b-db', role: 'EWS Backend/Migrations' });
+    });
+
+    it('refuses a bare tab name two workspaces share, naming both full names', () => {
+      const { router: r2 } = makeHarness(roster());
+      const r = r2.resolveRecipient('b-db', 'Backend');
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain('"EWS Sites/Backend"');
+        expect(r.error).toContain('"EWS Backend/Backend"');
+      }
+    });
+
+    it('routes a stale workspace prefix by the whole tab name and teaches the current name', () => {
+      const { router: r2 } = makeHarness(roster());
+      expect(r2.resolveRecipient('s-back', 'Old Backend WS/Migrations')).toEqual({
+        ok: true, tabId: 'b-db', role: 'EWS Backend/Migrations', viaFormerRole: 'Old Backend WS/Migrations',
+      });
+    });
+
+    it('never splits at a slash: a tab name holding one resolves bare, in full, and under a stale prefix', () => {
+      const { router: r2 } = makeHarness(roster());
+      expect(r2.resolveRecipient('b-db', 'api/v2')).toMatchObject({ ok: true, tabId: 's-api' });
+      expect(r2.resolveRecipient('b-db', 'EWS Sites/api/v2')).toMatchObject({ ok: true, tabId: 's-api' });
+      expect(r2.resolveRecipient('b-db', 'Sites Renamed/api/v2')).toMatchObject({ ok: true, tabId: 's-api' });
+    });
+
+    it('refuses a stale prefix whose tab name two workspaces share', () => {
+      const { router: r2 } = makeHarness(roster());
+      const r = r2.resolveRecipient('b-db', 'Gone/Backend');
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain('Address one by its full name');
+    });
+
+    it('resolves a former tab name bare and in full', () => {
+      const { router: r2 } = makeHarness([linked('a', 'W1', 'Alice'), linked('b', 'W2', 'Billing', ['Bob', 'W2/Bob'])]);
+      expect(r2.resolveRecipient('a', 'Bob')).toMatchObject({ ok: true, tabId: 'b', viaFormerRole: 'Bob' });
+      expect(r2.resolveRecipient('a', 'W2/Bob')).toMatchObject({ ok: true, tabId: 'b', viaFormerRole: 'W2/Bob' });
+    });
+
+    it('meshKnowsName agrees with the router on every form', () => {
+      const r = roster();
+      for (const name of ['s-back', 'EWS Sites/Backend', 'Backend', 'Migrations', 'Old/Migrations', 'api/v2']) {
+        expect(meshKnowsName(r, name)).toBe(true);
+      }
+      expect(meshKnowsName(r, 'Frontend')).toBe(false);
+      expect(meshKnowsName(r, '')).toBe(false);
     });
   });
 });

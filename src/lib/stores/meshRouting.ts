@@ -26,8 +26,14 @@ import type { MeshTopic } from '$lib/tauri/types';
 export interface MeshMember {
   /** Stable, maiTerm-minted routing handle. */
   tabId: string;
-  /** Human-given descriptive name — the addressable label, display only (never the key). */
+  /** Human-given descriptive name — the addressable label, display only (never the key). On a
+   *  LINKED mesh it is `Workspace/Tab`: tab names repeat across workspaces, and a name an agent
+   *  reads must be one it can type back (docs/mesh-workspace.md §17). */
   role: string;
+  /** The bare tab name, set only when `role` is qualified. Still addressable while no other
+   *  workspace on the mesh has a tab by that name — the common case, and what agents linked
+   *  before names were qualified have in their transcripts. */
+  shortRole?: string;
   /** Names this member was introduced to peers under BEFORE its current role (the human renamed
    *  the tab after it was onboarded). Peers whose transcripts still carry an old name keep
    *  routing without spending a turn on a "no such peer" error. Never a current role. */
@@ -97,6 +103,21 @@ export function normalizeLabel(label: string): string {
     .join('-');
 }
 
+/** Would the mesh resolve `name` to a member — by handle, role, bare tab name, former name or a
+ *  stale `Workspace/` prefix? The same rules as `resolveRecipient`, minus ambiguity: the 1:1
+ *  bridge's dispatch asks it so a name the mesh knows is never sent over the bridge instead. */
+export function meshKnowsName(members: MeshMember[], name: string): boolean {
+  const lc = name.trim().toLowerCase();
+  if (!lc) return false;
+  return members.some((m) =>
+    m.tabId === name.trim() ||
+    m.role.trim().toLowerCase() === lc ||
+    m.shortRole?.trim().toLowerCase() === lc ||
+    (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === lc) ||
+    (!!m.shortRole && lc.endsWith(`/${m.shortRole.trim().toLowerCase()}`)),
+  );
+}
+
 export function createMeshRouter(deps: MeshRouterDeps) {
   // In-memory authoritative registry (seeded from persisted state via load()).
   let topics: MeshTopic[] = [];
@@ -107,6 +128,11 @@ export function createMeshRouter(deps: MeshRouterDeps) {
   }
 
   // ─── Recipient resolution ───────────────────────────────────────────────────
+
+  function self(m: MeshMember, senderTabId: string, via?: string): RecipientResolution {
+    if (m.tabId === senderTabId) return { ok: false, error: 'Cannot send to yourself.' };
+    return { ok: true, tabId: m.tabId, role: m.role, ...(via ? { viaFormerRole: via } : {}) };
+  }
 
   function resolveRecipient(senderTabId: string, recipientArg: string | undefined): RecipientResolution {
     const arg = (recipientArg ?? '').trim();
@@ -122,18 +148,12 @@ export function createMeshRouter(deps: MeshRouterDeps) {
 
     // 1. Exact tabId handle (the canonical, always-unambiguous key).
     const byId = members.find((m) => m.tabId === arg);
-    if (byId) {
-      if (byId.tabId === senderTabId) return { ok: false, error: 'Cannot send to yourself.' };
-      return { ok: true, tabId: byId.tabId, role: byId.role };
-    }
+    if (byId) return self(byId, senderTabId);
 
     // 2. Unique case-insensitive role match. Ambiguity is an error, never a guess.
     const lc = arg.toLowerCase();
     const byRole = members.filter((m) => m.role.trim().toLowerCase() === lc);
-    if (byRole.length === 1) {
-      if (byRole[0].tabId === senderTabId) return { ok: false, error: 'Cannot send to yourself.' };
-      return { ok: true, tabId: byRole[0].tabId, role: byRole[0].role };
-    }
+    if (byRole.length === 1) return self(byRole[0], senderTabId);
     if (byRole.length > 1) {
       return {
         ok: false,
@@ -141,18 +161,38 @@ export function createMeshRouter(deps: MeshRouterDeps) {
       };
     }
 
-    // 3. Unique match on a FORMER role — the peer was renamed after this sender learned its
-    //    name. A current role always shadows a former one (step 2 ran first); ambiguity across
+    // 3. A bare tab name on a linked mesh, where roles are `Workspace/Tab`: unique → that peer;
+    //    the same tab name in two workspaces → an error naming both full names, never a guess.
+    const byShort = members.filter((m) => m.shortRole?.trim().toLowerCase() === lc);
+    if (byShort.length === 1) return self(byShort[0], senderTabId);
+    if (byShort.length > 1) {
+      return {
+        ok: false,
+        error: `"${arg}" is a tab in ${byShort.length} linked workspaces: ${byShort.map((m) => `"${m.role}"`).join(', ')}. Address one by its full name.`,
+      };
+    }
+
+    // 4. Unique match on a FORMER role — the peer was renamed after this sender learned its
+    //    name. A current role always shadows a former one (steps 2–3 ran first); ambiguity across
     //    former names is still an error, never a guess.
     const byFormer = members.filter((m) => (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === lc));
-    if (byFormer.length === 1) {
-      if (byFormer[0].tabId === senderTabId) return { ok: false, error: 'Cannot send to yourself.' };
-      return { ok: true, tabId: byFormer[0].tabId, role: byFormer[0].role, viaFormerRole: arg };
-    }
+    if (byFormer.length === 1) return self(byFormer[0], senderTabId, arg);
     if (byFormer.length > 1) {
       return {
         ok: false,
         error: `"${arg}" is a former name of ${byFormer.length} peers. Address by current role or tabId handle instead (see listBridgedPeers).`,
+      };
+    }
+
+    // 5. `Workspace/Tab` whose workspace part is stale — the workspace was renamed, or the sender
+    //    misremembers it — matched by its whole tab name at the end, never by splitting at a `/`
+    //    (either name may hold one). Unique only; the result teaches the current name.
+    const bySuffix = members.filter((m) => m.shortRole && lc.endsWith(`/${m.shortRole.trim().toLowerCase()}`));
+    if (bySuffix.length === 1) return self(bySuffix[0], senderTabId, arg);
+    if (bySuffix.length > 1) {
+      return {
+        ok: false,
+        error: `No peer is named "${arg}"; its tab name matches ${bySuffix.map((m) => `"${m.role}"`).join(', ')}. Address one by its full name.`,
       };
     }
     return { ok: false, error: `No peer named "${arg}" in this mesh.${rosterHint()}` };

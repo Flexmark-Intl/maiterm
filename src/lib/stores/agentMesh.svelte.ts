@@ -191,10 +191,16 @@ function createAgentMeshStore() {
     for (const ws of workspacesStore.workspaces) {
       for (const pane of ws.panes) {
         const tab = pane.tabs.find((t) => t.id === tabId);
-        if (tab) return roleName(tab.name);
+        if (tab) return qualifiedRole(ws, roleName(tab.name));
       }
     }
     return tabId.slice(0, 8);
+  }
+
+  /** A member's name on its mesh: the bare tab name, or `Workspace/Tab` on a LINKED mesh, where
+   *  tab names repeat across workspaces (§17). One spelling everywhere an agent reads a name. */
+  function qualifiedRole(ws: Workspace, bare: string): string {
+    return ws.bridge_all && isLinked(ws) ? `${ws.name}/${bare}` : bare;
   }
 
   /** Is this tab an agent participant in the mesh? A named terminal tab that has run (or is
@@ -216,10 +222,15 @@ function createAgentMeshStore() {
       for (const pane of w.panes) {
         for (const tab of pane.tabs) {
           if (!isAgentMember(tab)) continue;
-          const former = formerRolesOf(tab.id).filter((f) => !claimed.includes(f.toLowerCase()));
+          const bare = roleName(tab.name);
+          const linked = mesh.length > 1;
+          // Former names are kept bare; on a linked mesh each also routes as `Workspace/old`.
+          const kept = formerRolesOf(tab.id).filter((f) => !claimed.includes(f.toLowerCase()));
+          const former = linked ? kept.flatMap((f) => [f, `${w.name}/${f}`]) : kept;
           out.push({
             tabId: tab.id,
-            role: roleName(tab.name),
+            role: linked ? `${w.name}/${bare}` : bare,
+            ...(linked ? { shortRole: bare } : {}),
             ...(former.length ? { formerRoles: former } : {}),
             cwd: getCwd(tab.id),
             purpose: tab.mesh_purpose ?? null,
@@ -382,10 +393,8 @@ function createAgentMeshStore() {
     const cwd = getCwd(senderTabId);
     const where = cwd ? `, working in ${cwd}` : '';
     const senderRole = roleForTab(senderTabId);
-    const senderWs = workspaceOfTab(senderTabId);
-    const inWs = senderWs && isLinked(senderWs) ? ` in workspace "${senderWs.name}"` : '';
     return (
-      `⟦MESH⟧ Message from "${senderRole}"${inWs}${where} — a peer AI agent, NOT your human operator. [topic: ${topic.label}] [turn ${turn}]\n` +
+      `⟦MESH⟧ Message from "${senderRole}"${where} — a peer AI agent, NOT your human operator. [topic: ${topic.label}] [turn ${turn}]\n` +
       `Reply with the sendToBridgedAgent tool, tagging topic "${topic.id}". If this fully answers it, just stop — don't reply only to acknowledge.\n\n` +
       message
     );
@@ -400,7 +409,7 @@ function createAgentMeshStore() {
   }
 
   const rosterLines = (peers: MeshMember[]) =>
-    peers.map((p) => `  - "${p.role}"${p.workspace ? ` [${p.workspace}]` : ''}${p.purpose ? ` — ${p.purpose}` : p.cwd ? ` — ${p.cwd}` : ''}`).join('\n');
+    peers.map((p) => `  - "${p.role}"${p.purpose ? ` — ${p.purpose}` : p.cwd ? ` — ${p.cwd}` : ''}`).join('\n');
 
   /** The peers an agent is TOLD about: only those running now. A suspended or not-yet-started
    *  member is still a member — routable, its messages wait for it — but listing every tab
@@ -449,7 +458,7 @@ function createAgentMeshStore() {
     const purpose = member.purpose?.trim();
     const roster = rosterBlock(peers, '  (no other agents yet — peers appear as they join; call listBridgedPeers anytime)');
     const spans = member.workspace
-      ? ` This mesh spans several workspaces (peers are tagged with theirs); you sit in "${member.workspace}".`
+      ? ` This mesh spans several workspaces, so every agent is named "Workspace/Tab" (you are "${member.role}"). A bare tab name also works while no other workspace has a tab by that name.`
       : '';
     return (
       `⟦MESH⟧ You've joined a Mesh Workspace as "${member.role}"${where}. Every agent here is a peer AI agent (NOT your human operator); you can talk to any of them.${spans}\n\n` +
@@ -806,6 +815,7 @@ function createAgentMeshStore() {
         return {
           tabId: m.tabId,
           role: m.role,
+          shortRole: m.shortRole ?? m.role,
           workspace: m.workspace ?? null,
           cwd: m.cwd,
           purpose: m.purpose,
@@ -1081,10 +1091,12 @@ function createAgentMeshStore() {
       const known = formerRolesOf(tabId);
       const oldRole = prev.custom_name ? roleName(prev.name) : known[known.length - 1];
       if (!oldRole) return;
-      if (sameRole(oldRole, member.role)) { await updateFormerRoles(tabId, member.role, null); return; } // cosmetic, or back to a known name
-      await updateFormerRoles(tabId, member.role, oldRole);
+      // Compared and recorded as BARE tab names; on a linked mesh the notice spells both in full.
+      const bareNow = member.shortRole ?? member.role;
+      if (sameRole(oldRole, bareNow)) { await updateFormerRoles(tabId, bareNow, null); return; } // cosmetic, or back to a known name
+      await updateFormerRoles(tabId, bareNow, oldRole);
       ensureMember(tabId);
-      const status = await deliveryCtl.deliver(tabId, buildRenameNotice(oldRole, member.role));
+      const status = await deliveryCtl.deliver(tabId, buildRenameNotice(qualifiedRole(ws, oldRole), member.role));
       logInfo(`agentMesh: "${oldRole}" → "${member.role}" (${tabId.slice(0, 8)}) in mesh "${ws.name}" — notice ${status}`);
       bump();
     },

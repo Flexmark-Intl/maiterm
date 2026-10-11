@@ -589,11 +589,19 @@ role on the source's mesh); duplicating a WORKSPACE clears it — the copy besid
 every role on the mesh twice. A share file never carries it (allowlist).
 
 **What spans the link** (`agentMesh.svelte.ts`, `meshWorkspacesOf`):
-- the roster (`membersOf`) — every member is tagged with its workspace on a linked mesh, in
-  `listBridgedPeers` (plus `linkedWorkspaces`), the opener's roster, and the envelope's "from";
-- recipient resolution — roles must still be unique across the WHOLE mesh, or the router
-  answers "ambiguous, use the handle", as it always has; former-role shadowing likewise
-  counts every linked workspace's names;
+- the roster (`membersOf`). On a linked mesh every member is NAMED `Workspace/Tab`
+  (2026-10-11): tab names repeat across workspaces ("Backend" in two of them), and the name an
+  agent reads in `listBridgedPeers`, the opener, an envelope's "from" or a topic's owner must be
+  one it can type back. A mesh inside one workspace keeps bare tab names. Resolution
+  (`meshRouting.ts`, in order): handle → full name → the BARE tab name while no other workspace
+  has a tab by it (agents linked earlier carry bare names; ambiguity is an error naming both full
+  names) → a former name, bare or `Workspace/old` → a `Workspace/` prefix that is stale (a
+  renamed workspace) matched by the WHOLE tab name at the end, never by splitting at `/`, which
+  either name may hold; the send result teaches the current name. A workspace rename therefore
+  needs no saved state and no notice to its agents. Former names are stored bare; renames are
+  compared bare. `meshKnowsName` is the same matcher for the 1:1 bridge's dispatch, so the two
+  can't disagree about a name. The cockpit board, already grouped by workspace, shows bare names,
+  its graph full ones;
 - the topic registry and loop control — one router per mesh (`meshKeyOf`: `group:<id>`, or
   the workspace id when unlinked);
 - the cockpit — status board grouped by workspace, graph, topics, an Unlink button.

@@ -12,6 +12,7 @@ import { dispatch as dispatchNotification } from '$lib/stores/notificationDispat
 import { claudeStateStore, resumeCommandFor } from '$lib/stores/agentState.svelte';
 import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
+import { meshKnowsName } from '$lib/stores/meshRouting';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { agentRequestsStore } from '$lib/stores/agentRequests.svelte';
 import { normalizeTabBatch } from '$lib/stores/tabBatch';
@@ -1657,15 +1658,12 @@ function createClaudeCodeStore() {
 
   // --- Agent Bridge tools ---
 
-  /** Does `recipient` name one of this tab's mesh peers — by handle, current role, or a
-   *  former role (the same three the mesh router resolves)? Used to keep the mesh ahead
-   *  of the bridge when a name could mean either. */
+  /** Does `recipient` name one of this tab's mesh peers, by any name the mesh router resolves
+   *  (`meshKnowsName`: handle, role, a linked mesh's bare tab name, former name, stale
+   *  `Workspace/` prefix)? Used to keep the mesh ahead of the bridge when a name could mean
+   *  either — one matcher, so the two can't drift apart. */
   function namesMeshPeer(tabId: string, recipient: string): boolean {
-    const r = recipient.toLowerCase();
-    return agentMeshStore.rosterForTab(tabId).some((m) =>
-      m.tabId !== tabId &&
-      (m.tabId === recipient || m.role.trim().toLowerCase() === r || (m.formerRoles ?? []).some((f) => f.trim().toLowerCase() === r)),
-    );
+    return meshKnowsName(agentMeshStore.rosterForTab(tabId).filter((m) => m.tabId !== tabId), recipient);
   }
 
   /** A tab can hold a 1:1 bridge AND sit on a mesh, so the send is routed by what the
