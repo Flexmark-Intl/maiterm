@@ -446,9 +446,12 @@ function createAgentRequestsStore() {
   }
 
   return {
-    /** Waiting for the human, oldest first. */
+    /** Waiting for the human, oldest first — this window's only: windows are isolated, and the
+     *  window that filed a request is the one that carries it out. Rust's list is app-wide (the
+     *  phone sees them all). */
     get pending(): AgentRequest[] {
-      return requests.filter((r) => r.status === 'pending');
+      const me = getCurrentWindow().label;
+      return requests.filter((r) => r.status === 'pending' && r.window_label === me);
     },
     /** The human's click: the ONLY caller of decideAgentRequest. */
     async decide(id: string, approve: boolean): Promise<AgentRequest | null> {

@@ -102,7 +102,9 @@ an inferred identity. The ones that file requests, and `getRequestStatus`, are a
    `tab_id` or `workspace_id`). Only that window holds the target in its stores.
 2. That window's handler (`agentRequests.svelte.ts`) acts at once, or calls `file_agent_request`.
    Filing raises a request notice that opens the Loom's Decisions when clicked.
-3. The human answers on `AgentRequestCard` (the Decisions queue). The card has the same click
+3. The human answers on `AgentRequestCard` (the Decisions queue of the window that filed it —
+   windows are isolated, so another window's Decisions doesn't show it; the phone shows them
+   all). The card has the same click
    guards as `ScriptApprovalCard`:
    - nothing is decided in a card's first 1.5 s after it appears or its list moves;
    - the second click of a double-click is ignored.
