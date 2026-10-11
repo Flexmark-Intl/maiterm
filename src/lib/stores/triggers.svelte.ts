@@ -12,6 +12,7 @@ import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import { mergeAutoResumeContext } from '$lib/stores/autoResumeContext';
 import { parseCondition, evaluateCondition } from '$lib/triggers/variableCondition';
 import { isForkCommand, isResumeTemplate, sessionIdVar, toForkCommand } from '$lib/agents/resume';
+import { launchCommand } from '$lib/agents/descriptor';
 import type { Trigger, MatchMode } from '$lib/tauri/types';
 import type { AgentRuntime } from '$lib/agents/types';
 
@@ -388,9 +389,13 @@ export async function handleEnableAutoResume(tabId: string, commandTemplate: str
     // preference that changes the template must be able to refresh it — otherwise toggling
     // codex_hooks_bypass_trust never reaches a tab that already had auto-resume configured, in
     // either direction. A command the user actually edited is still preserved.
+    // The bare launch command (`claude`) is maiTerm's too: a tab it opened for a NEW conversation
+    // (`openAgentTab`, `newConversationFrom`) launches through the auto-resume replay, and kept
+    // as-is it starts a fresh session on every later wake (relocate, restart) instead of resuming.
     const arRuntime = workspacesStore.getTabRuntime(tabId);
     const supersede = isForkCommand(arRuntime, existingRaw)
-      || (!!commandTemplate && isResumeTemplate(arRuntime, existingRaw));
+      || (!!commandTemplate && isResumeTemplate(arRuntime, existingRaw))
+      || (!!commandTemplate && existingRaw?.trim() === launchCommand(arRuntime));
     const existing = supersede ? null : existingRaw;
     const cmd = existing || (commandTemplate || null);
 
