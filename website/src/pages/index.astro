@@ -42,12 +42,20 @@ const description =
  */
 const KEY_FEATURES = [
   {
+    id: 'requests',
+    // v3.5.0. Backed by features/agents.md "Organising tabs, meshes and maiTerm". "Who talks
+    // to whom" is the line the app draws (docs/agent-requests.md §1); moves that don't touch
+    // a mesh act at once, so don't promise that agents ask before every change.
+    title: 'Agents that ask first',
+    blurb: 'They tidy up; who talks to whom is yours',
+    new: true,
+  },
+  {
     id: 'inside',
     // v3.4.0. Backed by features/agents.md "The maiTerm mod (Claude Code)". Claude Code
     // only, and only versions with mod support — the band says so; don't widen it to Codex.
     title: 'Inside Claude Code',
     blurb: 'Answers by meaning, never typed into your draft',
-    new: true,
   },
   {
     id: 'loom',
@@ -190,10 +198,62 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ------------------------------------------------------------ Requests */}
+  {/* The release slot (v3.5.0): the hero rail's top entry links here. --raised, right
+      after the --flush hero (which has the plain background); inserting it flipped every
+      band down to the --sunken compat strip, which resets parity.
+
+      Every claim here is backed by features/agents.md "Organising tabs, meshes and maiTerm"
+      and checked against src/lib/stores/agentRequests.svelte.ts + src-tauri/src/agent_requests.rs:
+      - getMeshLayout / moveTab / moveWorkspace act at once, EXCEPT a move that changes a
+        tab's mesh (or breaks a link), which files a request — "around" is the honest verb.
+      - createTab is ALWAYS a request, mesh or not. It can start gemini too; this page names
+        no runtimes so it doesn't outrun "Claude Code and Codex" elsewhere.
+      - Approval is only the card (Loom Decisions) or a PAIRED phone (authorize_human refuses
+        the dev token). AskUserQuestion and Claude's permission dialog are not approval.
+      - Pending requests lapse after 30 min (PENDING_TTL_MS). */}
+  <section class="ln-band ln-band--raised" id="requests">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">Agents that ask first</p>
+      <h2 class="ln-h2 ln-h2--wide">Your agents can tidy up. Who talks to whom is still your call.</h2>
+      <p class="ln-lead">
+        Agents can see how your workspaces and meshes are laid out and move tabs and
+        workspaces around, without bothering you. Anything that changes which agents can
+        message each other, starts a new agent, or restarts maiTerm is
+        only a request: a card in the Loom and on your phone, and nothing happens until you
+        click Approve.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Housekeeping, at once</h3>
+          <p>
+            Reading the layout and moving a tab to another workspace or a workspace to another
+            window happen straight away, unless the move would change a tab's mesh.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Decisions, by you</h3>
+          <p>
+            Making or linking a mesh, a new agent tab, a restart: each waits in the Loom's
+            Decisions and on your paired phone, and lapses if nobody answers.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Only your click counts</h3>
+          <p>
+            The card is in maiTerm's words, with the agent's reason quoted. An agent asking in
+            chat, or a permission dialog it got past, is not approval, and you approve exactly
+            what the card showed.
+          </p>
+        </div>
+      </div>
+      <a class="ln-cta-link" href="/features/agents/#organising-tabs-meshes-and-maiterm">What agents can change, and what they ask</a>
+    </div>
+  </section>
+
   {/* -------------------------------------------------------------- Inside */}
-  {/* The release slot (v3.4.0): the hero rail's top entry links here. --raised, right
-      after the --flush hero; inserting it flipped every band down to the --sunken
-      compat strip, which resets parity.
+  {/* The release slot until v3.5.0 (v3.4.0). Plain since the Requests band went in above it.
 
       Every claim here is backed by features/agents.md "The maiTerm mod (Claude Code)"
       and checked against src-tauri/src/claude_code/{mod_asks,mod_inbox}.rs:
@@ -202,7 +262,7 @@ const EVERYTHING = [
       - Prompts go around a draft only BETWEEN TURNS (mod_inbox::takes_now); mid-turn a
         draft still holds them. "Reach an idle agent" is the honest wording.
       - Cross-session refusal is outbound from maiTerm tabs only. */}
-  <section class="ln-band ln-band--raised" id="inside">
+  <section class="ln-band" id="inside">
     <div class="ln-inner">
       <p class="ln-eyebrow">Inside Claude Code</p>
       <h2 class="ln-h2 ln-h2--wide">It works with Claude Code from the inside, not through its keyboard.</h2>
@@ -251,7 +311,7 @@ const EVERYTHING = [
 
       No screenshot yet: a real Focus view is a list of real tab names and transcripts.
       A staged one belongs here once the screenshot playbook has been run for it. */}
-  <section class="ln-band" id="loom">
+  <section class="ln-band ln-band--raised" id="loom">
     <div class="ln-inner">
       <p class="ln-eyebrow">Workstream Loom</p>
       <h2 class="ln-h2 ln-h2--wide">Every agent in the window. None of their terminals.</h2>
@@ -289,8 +349,8 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>Decisions</h3>
           <p>
-            Every question an agent has stopped on, and every watch script waiting for your
-            OK, oldest first. Pick an option or answer in your own words, and the answer goes
+            Every question an agent has stopped on, every watch script waiting for your OK,
+            and every change an agent has asked you to approve, oldest first. Pick an option or answer in your own words, and the answer goes
             back to the agent that asked.
           </p>
         </div>
@@ -307,7 +367,7 @@ const EVERYTHING = [
       No screenshot on purpose: the Accounts pane is a list of real email
       addresses and organisation names. Every honest shot of it leaks an identity,
       and a staged one would be a fake account list. */}
-  <section class="ln-band ln-band--raised" id="accounts">
+  <section class="ln-band" id="accounts">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agent accounts</p>
       <h2 class="ln-h2 ln-h2--wide">Claude Code has one login slot. Your week does not.</h2>
@@ -371,7 +431,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------- Progression */}
-  <section class="ln-band">
+  <section class="ln-band ln-band--raised">
     <div class="ln-inner">
       <p class="ln-eyebrow">Start with what you know</p>
       <h2 class="ln-h2 ln-h2--wide">It is a terminal first. The rest waits until you want it.</h2>
@@ -413,7 +473,7 @@ const EVERYTHING = [
   {/* --------------------------------------------------------------- Stack */}
   {/* .ln-cards sits OUTSIDE the text block on purpose: `.ln-stack > :first-child`
       caps at 46rem, which drops the three-card grid to two columns. */}
-  <section class="ln-band ln-band--raised" id="stack">
+  <section class="ln-band" id="stack">
     <div class="ln-inner ln-stack">
     <div>
       <p class="ln-eyebrow">Workspace stack</p>
@@ -488,7 +548,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------------- Tasks */}
-  <section class="ln-band" id="board">
+  <section class="ln-band ln-band--raised" id="board">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -550,7 +610,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band ln-band--raised" id="overlord">
+  <section class="ln-band" id="overlord">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -605,7 +665,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band" id="mesh">
+  <section class="ln-band ln-band--raised" id="mesh">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -641,7 +701,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band ln-band--raised" id="mailink">
+  <section class="ln-band" id="mailink">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -697,7 +757,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band" id="comms">
+  <section class="ln-band ln-band--raised" id="comms">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
@@ -753,11 +813,12 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------- Follow-ups */}
-  {/* --raised, the last band before the --sunken compat strip: Chat threads above
-      it is plain, and the sunken strip resets parity below.
+  {/* Plain, the last band before the --sunken compat strip: Chat threads above it is
+      --raised (since v3.5.0's Requests band flipped the page), and the sunken strip resets
+      parity below.
       Follow-ups only run while the Overlord is on (Preferences.follow_ups_live()),
       so the note says so rather than letting the band read as always-on. */}
-  <section class="ln-band ln-band--raised" id="follow-ups">
+  <section class="ln-band" id="follow-ups">
     <div class="ln-inner">
       <p class="ln-eyebrow">Follow-ups</p>
       <h2 class="ln-h2 ln-h2--wide">An agent that comes back to it, without you remembering to ask.</h2>

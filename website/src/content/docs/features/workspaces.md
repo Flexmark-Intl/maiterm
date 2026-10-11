@@ -41,6 +41,8 @@ Windows tend to be sorted by what you're paying attention to, and that changes. 
 - **A workspace** — right-click it in the sidebar and choose **Move to Window**, then the window. It lands at the bottom of that window's list and becomes its active workspace.
 - **A tab** — right-click it and choose **Move to**, then a window (**This window** is listed first) and the workspace it should land in. You follow the tab only if it's the one you were looking at; moving a background tab leaves you where you are, and a tab sent to another window doesn't bring that window to the front.
 
+Agents can do this too, with `moveTab` and `moveWorkspace`. A move that would change which agents can message each other — a tab going into, out of or between [meshes](/features/mesh-workspace/), or a linked mesh workspace leaving its window — waits for [your approval](/features/agents/#organising-tabs-meshes-and-maiterm) instead.
+
 The terminals keep running through the move: an agent mid-turn carries on, a dev server stays up, an SSH session stays connected and keeps its MCP bridge. A workspace takes its [stack](/features/stack/) services and its [tasks](/features/tasks/) with it.
 
 A few things stay put. Only terminal and editor tabs can cross to another window — diff and board tabs can't — and an editor with unsaved changes has to be saved first. The [Overlord](/features/overlord/) workspace belongs to its window. An [agent bridge](/features/agent-bridge/) whose partner stays behind in the other window is disconnected.
