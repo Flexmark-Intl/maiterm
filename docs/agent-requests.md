@@ -43,8 +43,16 @@ the card. The rules:
   live-bridged with a third agent is neither connected to nor forked. Only a runtime that can
   fork (`supportsFork`: Claude, Codex) is forked.
 - **The card names what closes.** A bridge the caller already has is closed by the new one, and
-  the card says so. A fork is "a new agent" too, so its card asks *Allow this new agent and
-  bridge?* and says the copy has the access of any tab.
+  the card says so — and that the other agent is told unless it is mid-turn, which is all the
+  bridge's disconnect does. A fork is "a new agent" too, so its card asks *Allow this new agent
+  and bridge?* and says WHERE the copy runs: forking an agent that is over ssh starts the copy on
+  that host, so the card names the ssh command, and approval refuses if the target has since
+  moved to another host or to local (review of c9d2419c).
+- **No agent-written opener text.** The picker's purpose box is the human's words, and the
+  bridge's opener presents it as theirs; an agent's would have been shown to it as the human's
+  and never on the card, so the tools take none. The agent's `reason` is on the card, quoted.
+- **A fork that fails after closing the caller's old bridge says so**, rather than "nothing was
+  done".
 - **Re-checked when carried out.** The caller's live partner must still be the one the card named
   (or none), and the other tab must still be free; otherwise "the bridges changed… ask again".
   A fork reads its target (`agentBridgeStore.forkTarget`, the picker's reading, ssh command and

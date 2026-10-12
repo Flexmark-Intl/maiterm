@@ -304,12 +304,16 @@ function livePartner(tabId: string): string | null {
 
 const tabName = (tabId: string) => locateTab(tabId)?.tab.name ?? 'a closed tab';
 
+/** What the bridge's disconnect actually does about the other side: it tells it only when it is
+ *  not mid-turn (agentBridge `disconnect`), so the card says no more than that. */
+const TOLD = (name: string) => `“${name}” is told, unless it is in the middle of a turn at that moment.`;
+
 const BRIDGE_CHANGED = 'the bridges changed after it was asked (one of the tabs was bridged or disconnected meanwhile); nothing was done, ask again';
 
 /** Bridge the CALLER with another tab in this window — the picker's two modes, under its rules:
  *  a tab live-bridged with a third agent is neither connected to nor forked, and only a runtime
  *  that can fork is forked. A bridge the caller already has is closed, and the card says so. */
-async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: boolean; purpose?: string; reason?: string }): Promise<ToolResult> {
+async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: boolean; reason?: string }): Promise<ToolResult> {
   if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
   if (!a.with_tab_id) return { error: 'with_tab_id is required (listWorkspaces gives tab ids).' };
   const me = locateTab(a.tabId);
@@ -326,13 +330,23 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
   if (fork && theirs) return { error: `“${them.tab.name}” is in a bridge already, so it is not forked (the human's picker has the same rule).` };
   if (!fork && theirs) return { error: `“${them.tab.name}” is bridged with “${tabName(theirs)}”; it would have to disconnect first.` };
   if (fork && !getAdapter(workspacesStore.getTabRuntime(them.tab.id)).supportsFork) return { error: `“${them.tab.name}” runs an agent that cannot be forked; bridge with it without fork.` };
-  const closes = mine ? [`“${me.tab.name}”’s bridge with “${tabName(mine)}” is closed; “${tabName(mine)}” is told.`] : [];
+  const closes = mine ? [`“${me.tab.name}”’s bridge with “${tabName(mine)}” is closed; ${TOLD(tabName(mine))}`] : [];
   const where = them.ws.id === me.ws.id ? '' : ` (in “${them.ws.name}”)`;
   const agent = getDescriptor(workspacesStore.getTabRuntime(them.tab.id)).displayName;
-  const args = { caller_tab_id: me.tab.id, target_tab_id: them.tab.id, caller_partner: mine, purpose: a.purpose?.trim() || null };
+  // No agent-written `purpose`: the bridge's opener presents it as the human operator's words,
+  // and the card would not show it (review of c9d2419c). The agent's `reason` is on the card.
+  const args = { caller_tab_id: me.tab.id, target_tab_id: them.tab.id, caller_partner: mine };
   if (fork) {
-    return file(a.tabId, 'bridge_fork', args, `Fork “${them.tab.name}”${where} into a new tab and bridge it with “${me.tab.name}”`, [
-      `A new ${agent} session starts in a new pane beside “${me.tab.name}”, with a copy of “${them.tab.name}”’s conversation so far (the original is untouched) and the same access to this machine as any tab you open.`,
+    // Where the copy RUNS is the card's to say: forking an agent that is over ssh starts the copy
+    // on that host (review of c9d2419c). Read now, compared again on approval.
+    const ft = await agentBridgeStore.forkTarget(them.tab.id);
+    if ('error' in ft) return { error: ft.error };
+    const ssh = ft.sshCommand ?? null;
+    const runs = ssh
+      ? `on the remote host “${them.tab.name}” runs on, through \`${ssh}\`, with the access that login has there`
+      : 'on this machine, with the same access as any tab you open';
+    return file(a.tabId, 'bridge_fork', { ...args, ssh_command: ssh }, `Fork “${them.tab.name}”${where} into a new tab and bridge it with “${me.tab.name}”`, [
+      `A new ${agent} session starts in a new pane beside “${me.tab.name}” with a copy of “${them.tab.name}”’s conversation so far (the original is untouched). It runs ${runs}.`,
       `“${me.tab.name}” and the copy can message each other directly over a 1:1 bridge.`,
       ...closes,
     ], a.reason);
@@ -356,7 +370,7 @@ async function disconnectBridge(a: { tabId?: string; reason?: string }): Promise
   const me = tabName(a.tabId);
   const them = tabName(partner);
   return file(a.tabId, 'bridge_disconnect', { caller_tab_id: a.tabId, partner_tab_id: partner }, `Close the bridge between “${me}” and “${them}”`, [
-    `They can no longer message each other directly; “${them}” is told. A mesh they share is not affected.`,
+    `They can no longer message each other directly; ${TOLD(them)} A mesh they share is not affected.`,
   ], a.reason);
 }
 
@@ -452,18 +466,25 @@ async function execute(r: AgentRequest): Promise<string> {
       if (livePartner(me) !== ((r.args.caller_partner as string | null) ?? null)) throw new Error(BRIDGE_CHANGED);
       const theirs = livePartner(them);
       if (theirs && theirs !== me) throw new Error(BRIDGE_CHANGED);
-      const purpose = (r.args.purpose as string | null) ?? undefined;
       if (r.kind === 'bridge_connect') {
-        const res = await agentBridgeStore.bridgeExistingTab(me, them, purpose);
+        const res = await agentBridgeStore.bridgeExistingTab(me, them);
         if (!res.ok) throw new Error(res.error);
         return `bridged with “${target.tab.name}”`;
       }
       if (theirs) throw new Error(BRIDGE_CHANGED);
       const ft = await agentBridgeStore.forkTarget(them);
       if ('error' in ft) throw new Error(ft.error);
-      if (r.args.caller_partner) agentBridgeStore.disconnect(me); // the card said so; establishBridge refuses a live one
-      const res = await agentBridgeStore.establishBridge(me, ft, purpose);
-      if (!res.ok) throw new Error(res.error);
+      // The card said where the copy runs: local, or through this exact ssh command.
+      if ((ft.sshCommand ?? null) !== ((r.args.ssh_command as string | null) ?? null)) {
+        throw new Error(`“${target.tab.name}” is no longer where the card said (${ft.sshCommand ? `now over \`${ft.sshCommand}\`` : 'now local'}); nothing was done, ask again`);
+      }
+      const old = (r.args.caller_partner as string | null) ?? null;
+      if (old) agentBridgeStore.disconnect(me); // the card said so; establishBridge refuses a live one
+      const res = await agentBridgeStore.establishBridge(me, ft);
+      if (!res.ok) {
+        // Not "nothing was done": the bridge the card named as closing is already gone.
+        throw new Error(old ? `your bridge with “${tabName(old)}” was closed, but the fork failed: ${res.error}` : res.error);
+      }
       return `forked “${target.tab.name}” into tab ${res.partnerTabId} and bridged it with you; the copy is starting`;
     }
     case 'bridge_disconnect': {

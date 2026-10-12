@@ -1193,7 +1193,6 @@ pub fn tool_list_response(
                     "tabId": { "type": "string", "description": "Your own tab (auto-injected). Not the agent to bridge with." },
                     "with_tab_id": { "type": "string", "description": "The other agent's tab (same window)" },
                     "fork": { "type": "boolean", "description": "true: bridge with a fresh copy of its conversation in a new tab, not the agent itself (default false)" },
-                    "purpose": { "type": "string", "description": "Optional: what you want from it, put in the bridge's opening message" },
                     "reason": { "type": "string", "description": "One line: why, shown to the human" }
                 },
                 "required": ["with_tab_id", "reason"]
