@@ -50,7 +50,9 @@
   const heading = $derived(
     r.kind === 'restart' ? 'Allow this restart?'
       : r.kind === 'tab_create' ? 'Allow this new agent?'
-        : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
+        : r.kind === 'bridge_fork' ? 'Allow this new agent and bridge?'
+          : r.kind.startsWith('bridge') ? 'Allow this bridge change?'
+            : r.kind.startsWith('mesh') ? 'Allow this mesh change?' : 'Allow this move?',
   );
 
   async function decide(approve: boolean, e: MouseEvent) {

@@ -15,6 +15,8 @@ and "for organization and read operations it doesn't require the prompt".
 | `linkMeshes` | never: a request |
 | `unlinkMesh` | never: a request |
 | `createTab` (a new agent tab in a workspace and local folder) | never: a request |
+| `bridgeWith` (a 1:1 Agent Bridge with another tab in the caller's window; `fork: true` bridges with a copy of its conversation in a new tab) | never: a request |
+| `disconnectBridge` | never: a request, unless the partner's tab is gone (then at once) |
 | `restartMaiterm` (`update: true` installs the update first) | never: a request |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
 
@@ -28,6 +30,30 @@ messages for the same reason). Any move that changes a tab's mesh is a mesh chan
 - **A workspace moved:** it needs approval when it is a mesh with a `mesh_group`. The move breaks
   the link in this window, and the workspace rejoins any workspace holding that group in the
   target window.
+
+**A 1:1 Agent Bridge is asked like a mesh change** (`bridgeWith` / `disconnectBridge`, added
+2026-10-12 on Darryl's ask). A bridge is the other way two agents come to message each other, and
+maiLink has no bridge picker: on the phone the human tells an agent to bridge itself and approves
+the card. The rules:
+- **The caller is always one end.** Its own tab, a STATED identity (both tools are on
+  `OWN_TAB_ONLY_TOOLS`), so the card's "asked by" is a side of the bridge.
+- **One window.** The bridge store resolves tabs in its own window, so the other tab must be in
+  the caller's; the tool says so rather than filing a card that cannot be carried out.
+- **The picker's rules, enforced when filed.** The other tab needs a running agent session. A tab
+  live-bridged with a third agent is neither connected to nor forked. Only a runtime that can
+  fork (`supportsFork`: Claude, Codex) is forked.
+- **The card names what closes.** A bridge the caller already has is closed by the new one, and
+  the card says so. A fork is "a new agent" too, so its card asks *Allow this new agent and
+  bridge?* and says the copy has the access of any tab.
+- **Re-checked when carried out.** The caller's live partner must still be the one the card named
+  (or none), and the other tab must still be free; otherwise "the bridges changed… ask again".
+  A fork reads its target (`agentBridgeStore.forkTarget`, the picker's reading, ssh command and
+  remote folder included) at that moment.
+- **A bridge to a closed tab carries no messages**, so `disconnectBridge` closes one at once.
+
+Verified on dev 2026-10-12 over the real MCP path (an HTTP client sending the tab's
+`x-maiterm-tab`): connect, disconnect and fork each filed, drew the right card, and on approval
+did what the card said; bridging with a tab that has no agent was refused at filing.
 
 **A new agent is always asked** (`createTab`, added 2026-10-10 on Darryl's ask; any agent may
 call it, not only the Overlord). The card is needed in a plain workspace too, not just a mesh.

@@ -3,7 +3,7 @@
  *
  * Three jobs, all in the window that owns the thing an agent wants changed:
  * - the TOOL handlers (moveTab, moveWorkspace, setMesh, linkMeshes, unlinkMesh, createTab,
- *   restartMaiterm): organisation happens at once; anything that changes which agents can message
+ *   bridgeWith, disconnectBridge, restartMaiterm): organisation happens at once; anything that changes which agents can message
  *   each other, starting a new agent, and any restart, is filed as a request instead, with the
  *   card's wording built HERE from maiTerm's own state — the agent contributes only its `reason`,
  *   shown as its words;
@@ -22,6 +22,9 @@ import type { AgentRequest, MoveTargetWindow, Tab, Workspace } from '$lib/tauri/
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { agentMeshStore } from '$lib/stores/agentMesh.svelte';
+import { agentBridgeStore } from '$lib/stores/agentBridge.svelte';
+import { claudeStateStore } from '$lib/stores/agentState.svelte';
+import { getAdapter } from '$lib/agents/adapter';
 import { overlordStore } from '$lib/stores/overlord.svelte';
 import { updaterStore } from '$lib/stores/updater.svelte';
 import { toastStore } from '$lib/stores/toasts.svelte';
@@ -290,6 +293,73 @@ async function createTab(a: { tabId?: string; workspace_id?: string; cwd?: strin
   );
 }
 
+// ── 1:1 Agent Bridges ───────────────────────────────────────────────────────────────────────
+// The other way two agents come to message each other, so asked like a mesh change. On the phone
+// there is no picker: the human tells an agent to bridge itself, and approves the card.
+
+/** A tab's LIVE bridge partner (a bridge to a closed tab is no bridge), or null. */
+function livePartner(tabId: string): string | null {
+  return agentBridgeStore.isBridgedToLivePartner(tabId) ? agentBridgeStore.getPartnerTabId(tabId) : null;
+}
+
+const tabName = (tabId: string) => locateTab(tabId)?.tab.name ?? 'a closed tab';
+
+const BRIDGE_CHANGED = 'the bridges changed after it was asked (one of the tabs was bridged or disconnected meanwhile); nothing was done, ask again';
+
+/** Bridge the CALLER with another tab in this window — the picker's two modes, under its rules:
+ *  a tab live-bridged with a third agent is neither connected to nor forked, and only a runtime
+ *  that can fork is forked. A bridge the caller already has is closed, and the card says so. */
+async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: boolean; purpose?: string; reason?: string }): Promise<ToolResult> {
+  if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
+  if (!a.with_tab_id) return { error: 'with_tab_id is required (listWorkspaces gives tab ids).' };
+  const me = locateTab(a.tabId);
+  if (!me) return { error: 'Your tab is not in this window.' };
+  const them = locateTab(a.with_tab_id);
+  if (!them) return { error: 'That tab is not in your window. A bridge joins two tabs in one window (getMeshLayout / listWorkspaces show where each is).' };
+  if (them.tab.id === me.tab.id) return { error: 'You cannot bridge with yourself.' };
+  if ((them.tab.tab_type ?? 'terminal') !== 'terminal' || them.tab.service_id) return { error: `“${them.tab.name}” is not an agent tab.` };
+  if (!claudeStateStore.getState(them.tab.id)) return { error: `“${them.tab.name}” has no running agent session right now.` };
+  const fork = a.fork === true;
+  const mine = livePartner(me.tab.id);
+  const theirs = livePartner(them.tab.id);
+  if (!fork && mine === them.tab.id) return { unchanged: true, note: `You are already bridged with “${them.tab.name}”.` };
+  if (fork && theirs) return { error: `“${them.tab.name}” is in a bridge already, so it is not forked (the human's picker has the same rule).` };
+  if (!fork && theirs) return { error: `“${them.tab.name}” is bridged with “${tabName(theirs)}”; it would have to disconnect first.` };
+  if (fork && !getAdapter(workspacesStore.getTabRuntime(them.tab.id)).supportsFork) return { error: `“${them.tab.name}” runs an agent that cannot be forked; bridge with it without fork.` };
+  const closes = mine ? [`“${me.tab.name}”’s bridge with “${tabName(mine)}” is closed; “${tabName(mine)}” is told.`] : [];
+  const where = them.ws.id === me.ws.id ? '' : ` (in “${them.ws.name}”)`;
+  const agent = getDescriptor(workspacesStore.getTabRuntime(them.tab.id)).displayName;
+  const args = { caller_tab_id: me.tab.id, target_tab_id: them.tab.id, caller_partner: mine, purpose: a.purpose?.trim() || null };
+  if (fork) {
+    return file(a.tabId, 'bridge_fork', args, `Fork “${them.tab.name}”${where} into a new tab and bridge it with “${me.tab.name}”`, [
+      `A new ${agent} session starts in a new pane beside “${me.tab.name}”, with a copy of “${them.tab.name}”’s conversation so far (the original is untouched) and the same access to this machine as any tab you open.`,
+      `“${me.tab.name}” and the copy can message each other directly over a 1:1 bridge.`,
+      ...closes,
+    ], a.reason);
+  }
+  return file(a.tabId, 'bridge_connect', args, `Bridge “${me.tab.name}” with “${them.tab.name}”${where}`, [
+    `The two agents can message each other directly over a 1:1 bridge, and each is told so.`,
+    ...closes,
+  ], a.reason);
+}
+
+/** Close the CALLER's bridge. A bridge to a closed tab carries no messages, so it goes at once. */
+async function disconnectBridge(a: { tabId?: string; reason?: string }): Promise<ToolResult> {
+  if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
+  if (!locateTab(a.tabId)) return { error: 'Your tab is not in this window.' };
+  if (!agentBridgeStore.isBridged(a.tabId)) return { unchanged: true, note: 'You are not bridged with any agent.' };
+  const partner = livePartner(a.tabId);
+  if (!partner) {
+    agentBridgeStore.disconnect(a.tabId);
+    return { disconnected: true, note: 'Your bridge was to a tab that is gone; it is closed.' };
+  }
+  const me = tabName(a.tabId);
+  const them = tabName(partner);
+  return file(a.tabId, 'bridge_disconnect', { caller_tab_id: a.tabId, partner_tab_id: partner }, `Close the bridge between “${me}” and “${them}”`, [
+    `They can no longer message each other directly; “${them}” is told. A mesh they share is not affected.`,
+  ], a.reason);
+}
+
 async function restartMaiterm(a: { tabId?: string; update?: boolean; reason?: string }): Promise<ToolResult> {
   if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
   if (typeof a.update !== 'boolean') return { error: 'update must be true or false.' };
@@ -370,6 +440,38 @@ async function execute(r: AgentRequest): Promise<string> {
       const id = await workspacesStore.openAgentTab(ws.id, s('cwd'), s('runtime') as AgentRuntime, name);
       if (!id) throw new Error('the workspace is gone');
       return `opened tab ${id}${name ? ` (“${name}”)` : ''} in “${ws.name}”; its agent is starting`;
+    }
+    case 'bridge_connect':
+    case 'bridge_fork': {
+      const me = s('caller_tab_id');
+      const them = s('target_tab_id');
+      if (!locateTab(me)) throw new Error('your tab is gone');
+      const target = locateTab(them);
+      if (!target) throw new Error('the other tab is gone');
+      // The card said which bridge of the caller's closes, and that the other side was free.
+      if (livePartner(me) !== ((r.args.caller_partner as string | null) ?? null)) throw new Error(BRIDGE_CHANGED);
+      const theirs = livePartner(them);
+      if (theirs && theirs !== me) throw new Error(BRIDGE_CHANGED);
+      const purpose = (r.args.purpose as string | null) ?? undefined;
+      if (r.kind === 'bridge_connect') {
+        const res = await agentBridgeStore.bridgeExistingTab(me, them, purpose);
+        if (!res.ok) throw new Error(res.error);
+        return `bridged with “${target.tab.name}”`;
+      }
+      if (theirs) throw new Error(BRIDGE_CHANGED);
+      const ft = await agentBridgeStore.forkTarget(them);
+      if ('error' in ft) throw new Error(ft.error);
+      if (r.args.caller_partner) agentBridgeStore.disconnect(me); // the card said so; establishBridge refuses a live one
+      const res = await agentBridgeStore.establishBridge(me, ft, purpose);
+      if (!res.ok) throw new Error(res.error);
+      return `forked “${target.tab.name}” into tab ${res.partnerTabId} and bridged it with you; the copy is starting`;
+    }
+    case 'bridge_disconnect': {
+      const me = s('caller_tab_id');
+      if (!locateTab(me)) throw new Error('your tab is gone');
+      if (livePartner(me) !== s('partner_tab_id')) throw new Error(BRIDGE_CHANGED);
+      agentBridgeStore.disconnect(me);
+      return 'the bridge is closed';
     }
     case 'restart': {
       if (r.args.update) {
@@ -465,6 +567,8 @@ function createAgentRequestsStore() {
     linkMeshes,
     unlinkMesh,
     createTab,
+    bridgeWith,
+    disconnectBridge,
     restartMaiterm,
     async init() {
       const me = getCurrentWindow().label;

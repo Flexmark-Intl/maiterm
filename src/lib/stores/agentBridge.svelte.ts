@@ -11,6 +11,17 @@ import { agentDelivery as deliveryCtl, injectPrompt, DELIVERY_OWNER_BRIDGE as OW
 import { roleName } from '$lib/stores/meshRouting';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 
+/** The agent session a fork copies, as `establishBridge` takes it. */
+export interface ForkTarget {
+  sessionId: string;
+  runtime: AgentRuntime;
+  tabName: string;
+  workspaceName: string;
+  cwd: string | null;
+  sshCommand?: string | null;
+  remoteCwd?: string | null;
+}
+
 /**
  * Agent Bridge — a bridge between two running Claude agents in different maiTerm panes.
  *
@@ -386,12 +397,43 @@ function createAgentBridgeStore() {
     },
 
     /**
+     * What `establishBridge` needs to fork the agent in `tabId`, read from the tab as it is now:
+     * its session, runtime and folder — and for an ssh tab the ssh command and the REMOTE folder,
+     * so the fork reconnects. One reading for the picker and an approved bridge request
+     * (agentRequests.svelte.ts), so both fork the same way.
+     */
+    async forkTarget(tabId: string): Promise<ForkTarget | { error: string }> {
+      const loc = resolveTab(tabId);
+      if (!loc) return { error: 'Tab not found.' };
+      const cs = claudeStateStore.getState(tabId);
+      if (!cs) return { error: `"${loc.tab.name}" has no running agent session to fork.` };
+      const runtime = workspacesStore.getTabRuntime(tabId);
+      if (!getAdapter(runtime).supportsFork) return { error: `"${loc.tab.name}" runs an agent that cannot be forked.` };
+      const osc = terminalsStore.getOsc(tabId);
+      let cwd: string | null = osc?.cwd ?? osc?.promptCwd ?? null;
+      let sshCommand: string | null = null;
+      let remoteCwd: string | null = null;
+      const inst = terminalsStore.get(tabId);
+      if (inst) {
+        try {
+          const info = await commands.getPtyInfo(inst.ptyId);
+          if (info.foreground_command) {
+            sshCommand = info.foreground_command; // already cleaned by getPtyInfo
+            remoteCwd = cwd; // OSC cwd is the remote cwd when SSH is active
+            cwd = info.cwd ?? null; // local cwd to launch ssh from
+          }
+        } catch { /* pty gone; fall through local */ }
+      }
+      return { sessionId: cs.sessionId, runtime, tabName: loc.tab.name, workspaceName: loc.ws.name, cwd, sshCommand, remoteCwd };
+    },
+
+    /**
      * Fork `target`'s session into a split beside `callerTabId` and bridge the two.
-     * `target` comes from the picker (getClaudeSessions / claudeState).
+     * `target` comes from `forkTarget`.
      */
     async establishBridge(
       callerTabId: string,
-      target: { sessionId: string; runtime: AgentRuntime; tabName: string; workspaceName: string; cwd: string | null; sshCommand?: string | null; remoteCwd?: string | null },
+      target: ForkTarget,
       purpose?: string,
     ): Promise<{ ok: true; partnerTabId: string; partnerLabel: string } | { ok: false; error: string }> {
       const loc = resolveTab(callerTabId);
@@ -514,7 +556,7 @@ function createAgentBridgeStore() {
     async sendFromTab(senderTabId: string, message: string) {
       const bridge = bridges.get(senderTabId);
       if (!bridge) {
-        return { ok: false, error: 'You are not bridged to any agent. Ask the human to bridge a session via the Agent Bridge picker.' };
+        return { ok: false, error: 'You are not bridged to any agent. bridgeWith asks the human to bridge you with one (or they use the Agent Bridge picker).' };
       }
       const recipient = bridge.partnerTabId;
       if (recipient === senderTabId) {

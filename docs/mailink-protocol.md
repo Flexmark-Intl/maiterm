@@ -1447,8 +1447,8 @@ shortcut; this guarantees it can't corrupt a TUI mid-prompt.
 ### 4.4 Agent requests (v0.23)
 
 Some agent actions happen only once the human approves them: turning a mesh on or off, linking
-or unlinking meshes, a move that changes a tab's mesh, opening a new agent tab, and restarting
-maiTerm (with or without installing an update). The agent's tool files a **request** and waits. The phone and the
+or unlinking meshes, a move that changes a tab's mesh, opening a new agent tab, making or closing
+a 1:1 Agent Bridge, and restarting maiTerm (with or without installing an update). The agent's tool files a **request** and waits. The phone and the
 desktop's Loom card are the only ways to approve one. Requests live in memory: none survive a
 desktop restart. A pending request lapses 30 min after it was filed.
 
@@ -1458,8 +1458,10 @@ interface AgentRequest {
   tabId: string;                  // the asking agent's tab: its chat shows the card too
   asker: { tabId: string; title: string; workspace: string };  // as it read when it asked
   kind: string;                   // mesh_enable | mesh_disable | mesh_link | mesh_unlink | tab_move
-                                  // | workspace_move | tab_create | restart. Draw ANY kind from the
-                                  // text fields: a kind added later is not a version bump.
+                                  // | workspace_move | tab_create | restart | bridge_connect
+                                  // | bridge_fork | bridge_disconnect (added 2026-10-12, no bump).
+                                  // Draw ANY kind from the text fields: a kind added later is not
+                                  // a version bump.
   summary: string;                // one line, maiTerm's words
   effects: string[];              // the consequences, maiTerm's words: show verbatim
   reason: string | null;          // the AGENT's words: show as a quote, never as maiTerm's

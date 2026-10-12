@@ -2512,7 +2512,7 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 42] = [
+const PEER_ADDRESSING_TOOLS: [&str; 44] = [
     // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
     // filed in the caller's name and a move rearranges the human's windows; neither may run on a
     // guessed identity. getMeshLayout is a read and keeps the reconnect convenience.
@@ -2522,6 +2522,8 @@ const PEER_ADDRESSING_TOOLS: [&str; 42] = [
     "linkMeshes",
     "unlinkMesh",
     "createTab",
+    "bridgeWith",
+    "disconnectBridge",
     "restartMaiterm",
     "getRequestStatus",
     // Files leave the machine for the human's phone and land in a named tab's chat. An
@@ -2585,7 +2587,7 @@ const PEER_ADDRESSING_TOOLS: [&str; 42] = [
 /// The agent-request tools (agent_requests.rs) are here for the same reason from the other side:
 /// a request is shown to the human as "the agent in <tab> asks…", so the tab named must be the
 /// caller, and a request's status is only its own tab's to read.
-const OWN_TAB_ONLY_TOOLS: [&str; 11] = [
+const OWN_TAB_ONLY_TOOLS: [&str; 13] = [
     "createFollowUp",
     "listFollowUps",
     "cancelFollowUp",
@@ -2595,6 +2597,8 @@ const OWN_TAB_ONLY_TOOLS: [&str; 11] = [
     "linkMeshes",
     "unlinkMesh",
     "createTab",
+    "bridgeWith",
+    "disconnectBridge",
     "restartMaiterm",
     "getRequestStatus",
 ];

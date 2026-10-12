@@ -6,7 +6,6 @@
   import { getAdapter } from '$lib/agents/adapter';
   import type { AgentRuntime } from '$lib/agents/types';
   import { getDescriptor } from '$lib/agents/descriptor';
-  import { getPtyInfo } from '$lib/tauri/commands';
   import { error as logError } from '@tauri-apps/plugin-log';
 
   interface Props {
@@ -152,31 +151,11 @@
         return;
       }
 
-      // Fork mode: SSH session? Capture its ssh command + remote cwd so the fork reconnects.
-      let sshCommand: string | null = null;
-      let remoteCwd: string | null = null;
-      let cwd = c.cwd;
-      const inst = terminalsStore.get(c.tabId);
-      if (inst) {
-        try {
-          const info = await getPtyInfo(inst.ptyId);
-          if (info.foreground_command) {
-            sshCommand = info.foreground_command; // already cleaned by getPtyInfo
-            remoteCwd = c.cwd; // OSC cwd is the remote cwd when SSH is active
-            cwd = info.cwd ?? null; // local cwd to launch ssh from
-          }
-        } catch { /* pty gone; fall through local */ }
-      }
-
-      const res = await agentBridgeStore.establishBridge(callerTabId, {
-        sessionId: c.sessionId,
-        runtime: c.runtime,
-        tabName: c.tabName,
-        workspaceName: c.workspaceName,
-        cwd,
-        sshCommand,
-        remoteCwd,
-      }, purpose);
+      // Fork mode: the tab as it reads now (an ssh tab's command and remote folder included,
+      // so the fork reconnects) — the same reading an approved bridgeWith request forks from.
+      const target = await agentBridgeStore.forkTarget(c.tabId);
+      if ('error' in target) { errorMsg = target.error; busy = false; return; }
+      const res = await agentBridgeStore.establishBridge(callerTabId, target, purpose);
       if (!res.ok) {
         errorMsg = res.error;
         busy = false;

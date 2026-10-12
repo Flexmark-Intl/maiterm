@@ -301,7 +301,9 @@ agent can pull a bug-report thread as a work item and post a resolution back. Mo
 
 Lets two running Claude agents in different panes talk to each other. The human bridges
 the active tab to another running Claude session via the **Agent Bridge picker**
-(`Cmd+Shift+L`, or terminal context menu → "Connect to Agent…"). The agents then converse
+(`Cmd+Shift+L`, or terminal context menu → "Connect to Agent…"), or an agent asks for one with
+`bridgeWith` / `disconnectBridge`, which only file a request the human approves on a card in the
+Loom or on the phone (docs/agent-requests.md — maiLink has no picker). The agents then converse
 asynchronously via the `sendToBridgedAgent` tool; each message is injected as a real
 terminal turn in the recipient's pane, so the human watches the whole exchange and can
 interrupt with Esc.

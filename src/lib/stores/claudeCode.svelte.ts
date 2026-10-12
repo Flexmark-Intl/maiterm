@@ -402,6 +402,12 @@ function createClaudeCodeStore() {
         case 'createTab':
           result = await agentRequestsStore.createTab(args as Parameters<typeof agentRequestsStore.createTab>[0]);
           break;
+        case 'bridgeWith':
+          result = await agentRequestsStore.bridgeWith(args as Parameters<typeof agentRequestsStore.bridgeWith>[0]);
+          break;
+        case 'disconnectBridge':
+          result = await agentRequestsStore.disconnectBridge(args as Parameters<typeof agentRequestsStore.disconnectBridge>[0]);
+          break;
         case 'restartMaiterm':
           result = await agentRequestsStore.restartMaiterm(args as Parameters<typeof agentRequestsStore.restartMaiterm>[0]);
           break;

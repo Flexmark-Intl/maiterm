@@ -1185,6 +1185,33 @@ pub fn tool_list_response(
             }
         },
         {
+            "name": "bridgeWith",
+            "description": format!("Bridge yourself 1:1 with another agent's tab in this window, so the two of you can message each other directly with sendToBridgedAgent (the same bridge the human makes with the Agent Bridge picker). By default it connects you to that agent as it is. With `fork: true` it instead copies that agent's conversation into a new tab beside you and bridges you with the copy, leaving the original untouched (Claude and Codex only). A tab already bridged with a third agent cannot be connected to or forked; if you are bridged with someone else, that bridge is closed. Use the tab id from listWorkspaces.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected). Not the agent to bridge with." },
+                    "with_tab_id": { "type": "string", "description": "The other agent's tab (same window)" },
+                    "fork": { "type": "boolean", "description": "true: bridge with a fresh copy of its conversation in a new tab, not the agent itself (default false)" },
+                    "purpose": { "type": "string", "description": "Optional: what you want from it, put in the bridge's opening message" },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["with_tab_id", "reason"]
+            }
+        },
+        {
+            "name": "disconnectBridge",
+            "description": format!("Close your 1:1 Agent Bridge; the agent you were bridged with is told. A mesh you share is not affected.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["reason"]
+            }
+        },
+        {
             "name": "restartMaiterm",
             "description": format!("Restart maiTerm: install the available update first (`update: true`, refused when there is none) or just relaunch. Every window restarts; agents come back through their auto-resume, and this request does not survive it — you are not told the outcome, you are restarted.{AWAITS}"),
             "inputSchema": {
@@ -1199,7 +1226,7 @@ pub fn tool_list_response(
         },
         {
             "name": "getRequestStatus",
-            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, restartMaiterm, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
+            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, bridgeWith, disconnectBridge, restartMaiterm, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
