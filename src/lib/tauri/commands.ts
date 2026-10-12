@@ -1706,7 +1706,8 @@ export async function getMcpAuth(): Promise<string | null> {
  * is still coming up, in which case the command is built without them, exactly as before.
  */
 export async function getRemoteBridgeEnv(hostKey: string): Promise<{ port: number; auth: string } | null> {
-  return invoke('get_remote_bridge_env', { hostKey });
+  // A stored command may keep the user's ssh program (cleanSshCommand); Rust keys on the host.
+  return invoke('get_remote_bridge_env', { hostKey: sshArgsOf(hostKey) });
 }
 
 export async function sshRunSetup(sshArgs: string, setupScript: string): Promise<void> {
@@ -2135,7 +2136,10 @@ export async function prepareRemoteAccountToken(
    *  maiTerm types a NEW ssh carrying the fragment in its argv — that one is recognised by it. */
   bindNow = false,
 ): Promise<RemoteTokenPrep> {
-  return invoke('prepare_remote_account_token', { tabId, sshArgs, bindNow });
+  // Without the user's ssh program: Rust finds the account by the host, and a program in front
+  // read as the host matches none — the tab would come up as the host's own login (docs/login.md
+  // §6.1), with nothing said.
+  return invoke('prepare_remote_account_token', { tabId, sshArgs: sshArgsOf(sshArgs), bindNow });
 }
 
 /** Take back a handoff file that is not going to be used.

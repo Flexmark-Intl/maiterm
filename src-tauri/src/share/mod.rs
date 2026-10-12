@@ -282,6 +282,13 @@ pub fn ssh_refusal(cmd: &str) -> Option<String> {
     if let Some(c) = cmd.chars().find(|&c| c != ' ' && !shell_plain(c)) {
         return Some(format!("it contains {c:?}, which the shell would act on"));
     }
+    // The receiver's maiTerm runs a leading ssh-by-another-name as the program (a stored command
+    // keeps the user's own: `buildSshCommand`), so `~/code/evil/ssh nova` would run a file the
+    // share just cloned — with this tab's MAITERM_AUTH on its command line. A sender's file never
+    // carries one (`safe_ssh` strips it), so any that does is refused.
+    if ssh_program_len(cmd.trim_start()).is_some_and(|n| cmd.trim_start()[..n] != *"ssh") {
+        return Some("it starts with a program to run rather than an ssh target".to_string());
+    }
     // Options that run, or load code from, something on this computer.
     // `smartcarddevice` is ssh's alias for PKCS11Provider; `xauthlocation` is run with -X/-Y.
     const RUNS_LOCALLY: [&str; 10] = [
@@ -536,11 +543,38 @@ fn session_var(rt: AgentRuntime) -> &'static str {
     crate::state::agent_runtime::descriptor(rt).session_id_var
 }
 
+/// Length of a leading ssh-by-another-name (`ssh`, `/opt/homebrew/bin/ssh`, `autossh`), the form
+/// the frontend's `cleanSshCommand` keeps in front of a stored command (`SSH_PROGRAM` there).
+fn ssh_program_len(cmd: &str) -> Option<usize> {
+    let word = cmd.split(' ').next()?;
+    let base = word.rsplit('/').next().unwrap_or(word);
+    matches!(base, "ssh" | "autossh").then_some(word.len())
+}
+
+/// The ssh arguments of a stored command, without the sender's ssh program — the receiver's may
+/// be elsewhere or absent — or autossh's own `-M`/`-f` (the frontend's `sshArgsOf`).
+fn without_ssh_program(cmd: &str) -> String {
+    let Some(n) = ssh_program_len(cmd) else { return cmd.to_string() };
+    let autossh = cmd[..n].rsplit('/').next() == Some("autossh");
+    let mut out: Vec<&str> = Vec::new();
+    let mut words = cmd[n..].split_whitespace();
+    while let Some(w) = words.next() {
+        if autossh && w == "-M" {
+            words.next();
+        } else if !(autossh && (w == "-f" || w.starts_with("-M"))) {
+            out.push(w);
+        }
+    }
+    out.join(" ")
+}
+
 /// An ssh command still carrying maiTerm's injected remote command would put the sender's
 /// tab id and MCP auth token in the file. The frontend cleans it; this refuses anything that
-/// slipped through rather than trusting that it always will.
+/// slipped through rather than trusting that it always will. A stored command that kept the
+/// sender's ssh program (the persisted fallback in `tab_place`) leaves without it.
 fn safe_ssh(cmd: Option<&str>) -> Option<String> {
-    let cmd = cmd?.trim();
+    let cmd = without_ssh_program(cmd?.trim());
+    let cmd = cmd.as_str();
     if cmd.is_empty() {
         return None;
     }
@@ -1515,6 +1549,15 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_ssh_command_leaves_without_the_senders_program() {
+        assert_eq!(safe_ssh(Some("/opt/homebrew/bin/ssh -p 2222 ews@nova")).as_deref(), Some("-p 2222 ews@nova"));
+        assert_eq!(safe_ssh(Some("autossh -M 0 -f -x ews@nova")).as_deref(), Some("-x ews@nova"));
+        assert_eq!(safe_ssh(Some("autossh -M20000 ews@nova")).as_deref(), Some("ews@nova"));
+        assert_eq!(safe_ssh(Some("-M -S /tmp/s ews@nova")).as_deref(), Some("-M -S /tmp/s ews@nova"));
+        assert_eq!(safe_ssh(Some("ssh.example.com")).as_deref(), Some("ssh.example.com"));
+    }
+
+    #[test]
     fn ssh_targets_that_would_run_something_locally_are_refused() {
         for ok in [
             "ews@nova",
@@ -1526,6 +1569,8 @@ mod tests {
             "-lFred nova",
             "-JEdge nova",
             "-vp22 nova",
+            "ssh nova",
+            "ssh.example.com",
         ] {
             assert_eq!(ssh_refusal(ok), None, "{ok}");
         }
@@ -1550,6 +1595,9 @@ mod tests {
             "-o =LocalCommand=x nova",
             "-oSmartcardDevice=/tmp/x.so nova",
             "-X -oXAuthLocation=x/evil nova",
+            "~/code/evil/ssh nova",
+            "/opt/homebrew/bin/ssh nova",
+            "autossh -M 0 nova",
             "",
         ] {
             assert!(ssh_refusal(bad).is_some(), "{bad:?} should be refused");

@@ -193,7 +193,10 @@ something presented as a host.
 - **ssh target:** `buildSshCommand` types it unquoted into the local shell. A tab is refused
   when its target has anything but plain word characters, or has an option that runs a local
   command (`ProxyCommand`, `LocalCommand`, `KnownHostsCommand`, `Match`, `Include`), or has
-  `-F`/`-E`. Remote editors share the same check.
+  `-F`/`-E`, or starts with an ssh program (`~/x/ssh nova`, `autossh …`): a stored command keeps
+  the user's own ssh program and `buildSshCommand` runs it, so that would run a file the share
+  may just have cloned. The sender's file never carries one (`safe_ssh` strips it). Remote
+  editors share the same check.
 - **Remote directory:** it goes inside the single-quoted remote command, and a quote there
   closes it locally. The same plain-character rule applies.
 - **Session id:** it's typed after `claude --resume`, so it must be `[A-Za-z0-9-]`. If it
