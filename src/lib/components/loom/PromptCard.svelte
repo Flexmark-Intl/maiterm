@@ -19,7 +19,12 @@
     /** Something changed that may have opened or closed a prompt (the agent's state). */
     pulse: unknown;
   }
-  let { tabId, active, pulse }: Props = $props();
+  let { tabId: tabIdProp, active, pulse }: Props = $props();
+  // Read through a derived, which passes on only a real change of tab. The prop is a getter on
+  // the parent's chat object (`open.tabId`), rebuilt on every poll and hook event, so reading it
+  // directly re-ran the new-chat reset below on each one: the card was dropped and redrawn and
+  // the answer box lost focus mid-typing.
+  const tabId = $derived(tabIdProp);
 
   interface Question {
     question: string;
