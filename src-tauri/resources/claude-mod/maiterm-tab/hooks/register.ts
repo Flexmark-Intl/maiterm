@@ -340,15 +340,15 @@ export const register: Register = on => {
     const { tool, tool_use_id, agentId, consent: _consent, ...tool_input } = e as Record<string, unknown>
     const isQuestion = e.tool === 'AskUserQuestion'
     const ask = isQuestion ? newAskId() : undefined
-    await send($, to, {
-      hook_event_name: 'PreToolUse',
+    const call = {
       session_id: await $.session.id(),
       cwd: await $.session.cwd(),
       tool_name: tool,
       tool_input,
       tool_use_id,
       ...(agentId ? { agent_id: agentId } : {}),
-    }, ask ? `&ask=${encodeURIComponent(ask)}` : '')
+    }
+    await send($, to, { hook_event_name: 'PreToolUse', ...call }, ask ? `&ask=${encodeURIComponent(ask)}` : '')
     if (!ask || e.tool !== 'AskUserQuestion') return next(e)
 
     // The selector (`next`) and maiTerm race; whichever answers first is the tool's result.
@@ -371,7 +371,13 @@ export const register: Register = on => {
       return first.r
     }
     settled = true
-    return { result: { questions: e.questions, answers: first.answers } }
+    const answered = { questions: e.questions, answers: first.answers }
+    // Answering with the selector still pending aborts what runs beneath, Claude's PostToolUse
+    // for this call with it, and that event is what tells maiTerm the question is over: without
+    // it the phone kept drawing an answered question until the turn ended. So its end is
+    // reported here.
+    await send($, to, { hook_event_name: 'PostToolUse', ...call, tool_response: answered })
+    return { result: answered }
   })
 
   // An agent in a maiTerm tab talks to OTHER agents only where its human said it may: over the
