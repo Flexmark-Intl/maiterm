@@ -47,7 +47,11 @@ the card. The rules:
   bridge's disconnect does. A fork is "a new agent" too, so its card asks *Allow this new agent
   and bridge?* and says WHERE the copy runs: forking an agent that is over ssh starts the copy on
   that host, so the card names the ssh command, and approval refuses if the target has since
-  moved to another host or to local (review of c9d2419c).
+  moved to another host or to local (review of c9d2419c). Two refusals keep that card true and
+  clean (review of 3302b9e9): a target tab not loaded in the window has no terminal to read where
+  it runs, so it is not forked by request; and `cleanSshCommand` recognises only a plain `ssh …`,
+  so under a full-path ssh or autossh the read still holds maiTerm's export with `MAITERM_AUTH` —
+  the fork is refused rather than that line shown on a card the phone also gets.
 - **No agent-written opener text.** The picker's purpose box is the human's words, and the
   bridge's opener presents it as theirs; an agent's would have been shown to it as the human's
   and never on the card, so the tools take none. The agent's `reason` is on the card, quoted.
@@ -157,6 +161,11 @@ pushed into the doorbell's ring queue when a request is filed. An approval reply
 for the outcome, except for a restart.
 
 ## 5. Not done yet
+
+- **The picker's fork (and clone/reconnect) under a full-path ssh or autossh** still carry the raw
+  `ps` line, `MAITERM_AUTH` included, because `cleanSshCommand` returns anything not starting with
+  `ssh ` unchanged. The request path refuses it; widening the cleaner would also change which ssh
+  program clones run (it strips the program name), so it is its own change.
 
 - **Codex tabs** hear the outcome only when idle (the busy-tab path is Claude-only), and otherwise
   through `getRequestStatus`.

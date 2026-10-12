@@ -339,11 +339,20 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
   if (fork) {
     // Where the copy RUNS is the card's to say: forking an agent that is over ssh starts the copy
     // on that host (review of c9d2419c). Read now, compared again on approval.
+    // Where it runs is read off its terminal; a tab not loaded in this window since maiTerm
+    // started has none yet, and "local" would be a guess (review of 3302b9e9).
+    if (!terminalsStore.get(them.tab.id)) return { error: `“${them.tab.name}” is not loaded in this window yet, so where its agent runs cannot be read. Ask the human to open its tab once, then ask again.` };
     const ft = await agentBridgeStore.forkTarget(them.tab.id);
     if ('error' in ft) return { error: ft.error };
     const ssh = ft.sshCommand ?? null;
+    // The cleaner recognises only a plain `ssh …` (getPtyInfo → cleanSshCommand); under a full
+    // path or autossh the raw line comes back with maiTerm's export, MAITERM_AUTH included —
+    // and this card goes to the phone. Refused rather than shown (review of 3302b9e9).
+    if (ssh && /MAITERM_|\bexec\s+\$?SHELL\b/.test(ssh)) {
+      return { error: `“${them.tab.name}”'s ssh command cannot be read safely (ssh runs under a custom path or as autossh), so it is not forked by request. The human can fork it with the Agent Bridge picker.` };
+    }
     const runs = ssh
-      ? `on the remote host “${them.tab.name}” runs on, through \`${ssh}\`, with the access that login has there`
+      ? `on the remote host “${them.tab.name}” runs on, through \`ssh ${ssh}\`, with the access that login has there`
       : 'on this machine, with the same access as any tab you open';
     return file(a.tabId, 'bridge_fork', { ...args, ssh_command: ssh }, `Fork “${them.tab.name}”${where} into a new tab and bridge it with “${me.tab.name}”`, [
       `A new ${agent} session starts in a new pane beside “${me.tab.name}” with a copy of “${them.tab.name}”’s conversation so far (the original is untouched). It runs ${runs}.`,
@@ -472,11 +481,13 @@ async function execute(r: AgentRequest): Promise<string> {
         return `bridged with “${target.tab.name}”`;
       }
       if (theirs) throw new Error(BRIDGE_CHANGED);
+      if (!terminalsStore.get(them)) throw new Error(`“${target.tab.name}” is no longer loaded in this window; nothing was done, ask again`);
       const ft = await agentBridgeStore.forkTarget(them);
       if ('error' in ft) throw new Error(ft.error);
       // The card said where the copy runs: local, or through this exact ssh command.
       if ((ft.sshCommand ?? null) !== ((r.args.ssh_command as string | null) ?? null)) {
-        throw new Error(`“${target.tab.name}” is no longer where the card said (${ft.sshCommand ? `now over \`${ft.sshCommand}\`` : 'now local'}); nothing was done, ask again`);
+        // Not echoing the new command: it is unchecked, and this outcome reaches the phone too.
+        throw new Error(`“${target.tab.name}” is no longer where the card said (${ft.sshCommand ? 'now over a different ssh connection' : 'now local'}); nothing was done, ask again`);
       }
       const old = (r.args.caller_partner as string | null) ?? null;
       if (old) agentBridgeStore.disconnect(me); // the card said so; establishBridge refuses a live one
