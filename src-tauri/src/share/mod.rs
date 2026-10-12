@@ -285,9 +285,13 @@ pub fn ssh_refusal(cmd: &str) -> Option<String> {
     // The receiver's maiTerm runs a leading ssh-by-another-name as the program (a stored command
     // keeps the user's own: `buildSshCommand`), so `~/code/evil/ssh nova` would run a file the
     // share just cloned — with this tab's MAITERM_AUTH on its command line. A sender's file never
-    // carries one (`safe_ssh` strips it), so any that does is refused.
-    if ssh_program_len(cmd.trim_start()).is_some_and(|n| cmd.trim_start()[..n] != *"ssh") {
-        return Some("it starts with a program to run rather than an ssh target".to_string());
+    // carries one (`safe_ssh` strips it), so any that does is refused. Checked on EVERY word, not
+    // just the first: the receiver re-cleans a stored command, which drops a leading `ssh` and
+    // `-t`, so `ssh -t ~/code/evil/ssh nova` comes out as that program (review of 1a60fc05). Only
+    // a plain `ssh` in first place is allowed; a host named `ssh` or `autossh` is refused with it.
+    let words: Vec<&str> = cmd.split(' ').filter(|w| !w.is_empty()).collect();
+    if words.iter().enumerate().any(|(i, w)| ssh_program_len(w).is_some() && !(i == 0 && *w == "ssh")) {
+        return Some("it names a program to run rather than only an ssh target".to_string());
     }
     // Options that run, or load code from, something on this computer.
     // `smartcarddevice` is ssh's alias for PKCS11Provider; `xauthlocation` is run with -X/-Y.
@@ -1598,6 +1602,10 @@ mod tests {
             "~/code/evil/ssh nova",
             "/opt/homebrew/bin/ssh nova",
             "autossh -M 0 nova",
+            "ssh ~/code/evil/ssh nova",
+            "ssh -t ~/code/evil/ssh nova",
+            "-t autossh nova",
+            "ssh ssh nova",
             "",
         ] {
             assert!(ssh_refusal(bad).is_some(), "{bad:?} should be refused");
