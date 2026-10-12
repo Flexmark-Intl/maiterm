@@ -27,7 +27,10 @@ function phoneAnswers(on: On, posted: Record<string, unknown>[]) {
   on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(() => {}))
 }
 
-test("an answer from maiTerm ends the call for maiTerm too: the selector's own PostToolUse never runs", async ($, on) => {
+// The abort of Claude's own PostToolUse is the API's documented behaviour (returning with `next`
+// pending aborts what runs beneath) and what nova showed; the harness raises no classic
+// PostToolUse for a mocked tool either way, so this checks only that the mod reports the end.
+test('an answer from maiTerm ends the call for maiTerm too: the mod posts its PostToolUse', async ($, on) => {
   const posted: Record<string, unknown>[] = []
   phoneAnswers(on, posted)
   const r = await $.tool.call({ tool: 'AskUserQuestion', questions: QUESTIONS })
