@@ -345,14 +345,14 @@ async function bridgeWith(a: { tabId?: string; with_tab_id?: string; fork?: bool
     const ft = await agentBridgeStore.forkTarget(them.tab.id);
     if ('error' in ft) return { error: ft.error };
     const ssh = ft.sshCommand ?? null;
-    // The cleaner recognises only a plain `ssh …` (getPtyInfo → cleanSshCommand); under a full
-    // path or autossh the raw line comes back with maiTerm's export, MAITERM_AUTH included —
-    // and this card goes to the phone. Refused rather than shown (review of 3302b9e9).
+    // This card goes to the phone. getPtyInfo cleans maiTerm's export (MAITERM_AUTH) off the
+    // line, a full-path ssh or autossh included; anything the cleaner still does not recognise
+    // would come back raw, so a line still carrying it is refused rather than shown.
     if (ssh && /MAITERM_|\bexec\s+\$?SHELL\b/.test(ssh)) {
-      return { error: `“${them.tab.name}”'s ssh command cannot be read safely (ssh runs under a custom path or as autossh), so it is not forked by request. The human can fork it with the Agent Bridge picker.` };
+      return { error: `“${them.tab.name}”'s ssh command cannot be read safely, so it is not forked by request. The human can fork it with the Agent Bridge picker.` };
     }
     const runs = ssh
-      ? `on the remote host “${them.tab.name}” runs on, through \`ssh ${ssh}\`, with the access that login has there`
+      ? `on the remote host “${them.tab.name}” runs on, through \`${commands.sshCommandLine(ssh)}\`, with the access that login has there`
       : 'on this machine, with the same access as any tab you open';
     return file(a.tabId, 'bridge_fork', { ...args, ssh_command: ssh }, `Fork “${them.tab.name}”${where} into a new tab and bridge it with “${me.tab.name}”`, [
       `A new ${agent} session starts in a new pane beside “${me.tab.name}” with a copy of “${them.tab.name}”’s conversation so far (the original is untouched). It runs ${runs}.`,

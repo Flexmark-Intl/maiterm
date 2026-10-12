@@ -196,6 +196,14 @@ leaves a dangling `'export MAITERM_TAB_ID=…;`, which is stored and baked into 
 accumulating on every clone/restore. `sshCommand.test.ts` covers the round-trip and its
 idempotence.
 
+**ssh by another name keeps its program.** maiTerm types `ssh …`, but an alias or wrapper can run
+it as `/opt/homebrew/bin/ssh` or `autossh`, which is what `ps` reports. `cleanSshCommand` cleans
+those too and keeps the program in front of the stored form (`autossh -M 0 ews@nova`), and
+`buildSshCommand` reuses it; plain `ssh` is still stored bare. Anything that reads a HOST out of a
+stored command, or hands it to maiTerm's own `ssh` (the MCP bridge tunnel, remote files, a share
+file), goes through `sshArgsOf`, which drops the program and autossh's `-M`/`-f` — ssh reads `-M`
+as master mode, so `-M 0` would make `0` the host.
+
 ### Remote CWD Detection
 
 Priority: OSC 7 (if not stale) → prompt pattern heuristic.

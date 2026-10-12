@@ -2,7 +2,7 @@ import type { EditorFileInfo } from '$lib/tauri/types';
 import { detectLanguageFromPath } from './languageDetect';
 import { terminalsStore } from '$lib/stores/terminals.svelte';
 import { workspacesStore } from '$lib/stores/workspaces.svelte';
-import { getPtyInfo } from '$lib/tauri/commands';
+import { getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
 import { error as logError } from '@tauri-apps/plugin-log';
 
 /**
@@ -65,7 +65,7 @@ export async function openFileFromTerminal(
     const fileInfo: EditorFileInfo = {
       file_path: resolvedPath,
       is_remote: isRemote,
-      remote_ssh_command: isRemote ? sshCommand! : null,
+      remote_ssh_command: isRemote ? sshArgsOf(sshCommand!) : null,
       remote_path: isRemote ? resolvedPath : null,
       language,
     };

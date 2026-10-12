@@ -308,7 +308,7 @@ const SSH_FLAGS_WITH_ARG = new Set([
  *   - trailing command contains `exec $SHELL` (maiTerm's split/restore reconnect pattern)
  */
 export function isInteractiveSshSession(cmd: string): boolean {
-  const tokens = cmd.replace(/^ssh\s+/, '').split(/\s+/).filter(Boolean);
+  const tokens = commands.sshArgsOf(cmd).split(/\s+/).filter(Boolean);
   let i = 0;
   let sawHost = false;
   while (i < tokens.length) {
@@ -737,8 +737,9 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
     return false;
   }
 
-  // Strip leading "ssh " prefix — callers may pass the full ps command or just the args
-  sshArgs = sshArgs.replace(/^ssh\s+/, '');
+  // Just the ssh arguments — callers may pass the full ps command, or a stored one that kept the
+  // user's ssh program (a full path, autossh); the tunnel runs maiTerm's own `ssh` with these.
+  sshArgs = commands.sshArgsOf(sshArgs);
 
   // Already bridged or in progress? A prior 'failed' attempt is NOT a dead end —
   // fall through and retry it (the remote may have been briefly down, e.g. a network

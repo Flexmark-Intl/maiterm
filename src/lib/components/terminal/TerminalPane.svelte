@@ -10,7 +10,7 @@
   import { CanvasAddon } from '@xterm/addon-canvas';
   import { Unicode11Addon } from '@xterm/addon-unicode11';
   import '@xterm/xterm/css/xterm.css';
-  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists, REMOTE_CLAUDE_MOD_ENV } from '$lib/tauri/commands';
+  import { spawnTerminal, writeTerminal, resizeTerminal, killTerminal, setTabScrollback, getPtyInfo, getPtyForeground, getPtyForegroundJob, setTabRestoreContext, cleanSshCommand, normalizeSshInput, buildSshCommand, getRemoteBridgeEnv, getMcpAuth, shellEscapePath, readClipboardFilePaths, serializeTerminal, restoreTerminalScrollback, scrollTerminal, scrollTerminalTo, saveTerminalScrollback, restoreTerminalFromSaved, hasSavedScrollback, getSavedTerminalSize, getTerminalScrollbackInfo, playBellSound, saveClipboardImage, startSelection, updateSelection, clearSelection, copySelection, selectAll, scrollSelection, setTerminalVisible, refreshTerminalFrame, getTerminalRecentText, bindRemoteAccount, folderExists, sshArgsOf, REMOTE_CLAUDE_MOD_ENV } from '$lib/tauri/commands';
   import { noteFallback } from '$lib/stores/relocate.svelte';
   import type { TerminalFrame, FrameMeta, OscCwdEvent, OscShellEvent } from '$lib/tauri/types';
   import { remoteAccountExport } from '$lib/utils/remoteAccountToken';
@@ -1706,7 +1706,7 @@
 
   /** Best-effort hostname from a cleaned ssh command, for display. */
   function parseSshHost(sshCmd: string): string | null {
-    const tokens = sshCmd.replace(/^ssh\s+/, '').split(/\s+/).filter(Boolean);
+    const tokens = sshArgsOf(sshCmd).split(/\s+/).filter(Boolean);
     const withUser = tokens.find(t => t.includes('@'));
     if (withUser) return withUser.split('@')[1] || null;
     const host = tokens.find(t => !t.startsWith('-'));

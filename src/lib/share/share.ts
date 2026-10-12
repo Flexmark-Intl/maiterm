@@ -4,7 +4,7 @@
 
 import type { Workspace } from '$lib/tauri/types';
 import type { ShareAgentLaunch, ShareTabContext } from '$lib/tauri/commands';
-import { cleanSshCommand, getPtyInfo } from '$lib/tauri/commands';
+import { cleanSshCommand, getPtyInfo, sshArgsOf } from '$lib/tauri/commands';
 import { terminalsStore, type SplitContext } from '$lib/stores/terminals.svelte';
 import { agentStateStore } from '$lib/stores/agentState.svelte';
 import { extractRemoteCwd } from '$lib/stores/workspaces.svelte';
@@ -42,7 +42,9 @@ export async function gatherShareContexts(ws: Workspace): Promise<ShareTabContex
       out.push({
         tab_id: tab.id,
         cwd: ssh ? null : cwd,
-        ssh_command: ssh,
+        // Without the sender's ssh program (a full path, autossh): the receiver's may be elsewhere
+        // or absent, and plain `ssh` is what every receiver has.
+        ssh_command: ssh ? sshArgsOf(ssh) : null,
         remote_cwd: remoteCwd,
         live_agent: live ? { runtime: live.runtime, session_id: live.sessionId || null } : null,
       });

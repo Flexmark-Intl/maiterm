@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildSshCommand, cleanSshCommand } from './commands';
+import { buildSshCommand, cleanSshCommand, normalizeSshInput, sshArgsOf, sshCommandLine } from './commands';
 
 const TAB = 'a1b2c3d4-5e6f-7788-99aa-bbccddeeff00';
 /** Verbatim what `accounts::remote::export_fragment` produces — keep the two in step. */
@@ -151,5 +151,49 @@ describe('cleanSshCommand round-trip', () => {
       stored = cleanSshCommand(buildSshCommand(stored, '/srv/app', TAB, { port: 1, auth: 'a' }, ACCT));
     }
     expect(stored).toBe('-x -C ews@nova');
+  });
+});
+
+// maiTerm types `ssh …`, but an alias or wrapper can run it as a full-path ssh or as autossh —
+// and that is the program `ps` shows. Recognising only `ssh …` returned such a line raw, with
+// MAITERM_AUTH in it, to be retyped into every clone and shown on a fork request's card.
+describe('ssh by another name', () => {
+  const bridge = { port: 28123, auth: 'tok-123' };
+
+  it('cleans a full-path ssh and autossh line, keeping the program', () => {
+    expect(cleanSshCommand(
+      `/opt/homebrew/bin/ssh -t -o ControlMaster=no ews@nova export MAITERM_TAB_ID=${TAB} MAITERM_PORT=28123 MAITERM_AUTH=tok-123; ${ACCT}; cd /srv/app && exec $SHELL -l`,
+    )).toBe('/opt/homebrew/bin/ssh ews@nova');
+    expect(cleanSshCommand(
+      `autossh -M 0 -t -o ControlMaster=no -x ews@nova export MAITERM_TAB_ID=${TAB} MAITERM_AUTH=tok-123; exec $SHELL -l`,
+    )).toBe('autossh -M 0 -x ews@nova');
+    expect(cleanSshCommand('/usr/bin/ssh ews@nova')).toBe('/usr/bin/ssh ews@nova');
+  });
+
+  it('rebuilds with the kept program and round-trips without accumulating', () => {
+    for (const start of ['/usr/bin/ssh -x ews@nova', 'autossh -M 0 ews@nova', '/opt/homebrew/bin/autossh -M 20000 ews@nova']) {
+      const built = buildSshCommand(start, '/srv/app', TAB, bridge, ACCT);
+      expect(built.startsWith(`${start.split(' ')[0]} -t -o ControlMaster=no `)).toBe(true);
+      let stored = start;
+      for (let i = 0; i < 3; i++) stored = cleanSshCommand(buildSshCommand(stored, '/srv/app', TAB, bridge, ACCT));
+      expect(stored).toBe(start);
+      expect(stored).not.toContain('MAITERM_');
+    }
+    expect(buildSshCommand('/usr/bin/ssh ews@nova', null)).toBe('/usr/bin/ssh -o ControlMaster=no ews@nova');
+  });
+
+  it('leaves plain ssh stored bare, as before', () => {
+    expect(cleanSshCommand(buildSshCommand('ews@nova', '/srv/app', TAB, bridge))).toBe('ews@nova');
+    expect(normalizeSshInput('/usr/bin/ssh -t ews@nova')).toBe('/usr/bin/ssh ews@nova');
+    expect(normalizeSshInput('ews@nova')).toBe('ews@nova');
+  });
+
+  it('gives host readers the ssh arguments alone', () => {
+    expect(sshArgsOf('/usr/bin/ssh -p 2222 ews@nova')).toBe('-p 2222 ews@nova');
+    expect(sshArgsOf('autossh -M 0 -f -x ews@nova')).toBe('-x ews@nova');
+    expect(sshArgsOf('ssh ews@nova')).toBe('ews@nova');
+    expect(sshArgsOf('-p 2222 ews@nova')).toBe('-p 2222 ews@nova');
+    expect(sshCommandLine('ews@nova')).toBe('ssh ews@nova');
+    expect(sshCommandLine('autossh -M 0 ews@nova')).toBe('autossh -M 0 ews@nova');
   });
 });

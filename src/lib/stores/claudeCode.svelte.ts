@@ -627,7 +627,7 @@ function createClaudeCodeStore() {
     const fileInfo = {
       file_path: filePath,
       is_remote: isRemote,
-      remote_ssh_command: isRemote ? sshCommand : null,
+      remote_ssh_command: isRemote ? commands.sshArgsOf(sshCommand!) : null,
       remote_path: isRemote ? filePath : null,
       language,
     };

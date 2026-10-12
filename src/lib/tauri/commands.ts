@@ -17,12 +17,63 @@ export interface PtyInfo {
 }
 
 /**
+ * The program a command line starts with, when it is ssh by another name: a full path to ssh
+ * (`/opt/homebrew/bin/ssh`) or autossh, bare or by path. maiTerm itself always types `ssh`, so
+ * one of these on a line maiTerm built means the user's shell ran it through an alias or a
+ * wrapper — and `ps` shows that program, followed by maiTerm's remote command with its
+ * MAITERM_AUTH. Plain `ssh` is not "another name": it is stored without a program, as always.
+ */
+const SSH_PROGRAM = /^(?:\S*\/)?(?:auto)?ssh(?=\s|$)/;
+
+/** The program to keep in a stored ssh command, or null for plain `ssh` / no program. */
+function sshProgramOf(cmd: string): string | null {
+  const m = cmd.match(SSH_PROGRAM);
+  return m && m[0] !== 'ssh' ? m[0] : null;
+}
+
+/**
+ * The ssh ARGUMENTS of a stored (cleaned) command — what `ssh` itself would be given — for
+ * everything that reads a host out of it or hands it to maiTerm's own `ssh` (the MCP bridge's
+ * tunnel, remote files, a share file). A stored command keeps the user's ssh program in front
+ * when it isn't plain `ssh` (`cleanSshCommand`); this drops it, and autossh's own options with
+ * it — ssh reads `-M` as master mode, so `-M 0` would make `0` the host.
+ */
+export function sshArgsOf(cmd: string): string {
+  const program = cmd.match(SSH_PROGRAM)?.[0];
+  if (!program) return cmd.trim();
+  let rest = cmd.slice(program.length).trim();
+  if (/(?:^|\/)autossh$/.test(program)) {
+    rest = rest.replace(/(?:^|\s)-M\s*\S+/g, '').replace(/(?:^|\s)-f(?=\s|$)/g, '').trim();
+  }
+  return rest;
+}
+
+/** A stored (cleaned) ssh command as the human would type it: `ssh ews@nova`, or with the
+ *  program it kept (`autossh -M 0 ews@nova`). For display. */
+export function sshCommandLine(cmd: string): string {
+  return SSH_PROGRAM.test(cmd) ? cmd : `ssh ${cmd}`;
+}
+
+/**
  * Strip previously-injected flags and remote commands from an SSH command
  * retrieved from the process tree, then normalize to just the user@host
  * portion (with any non-standard flags). Strips `ssh` prefix, `-t`,
  * `-o ControlMaster=...`, and `cd ... && exec $SHELL -l` suffixes.
+ *
+ * A program other than plain `ssh` (a full path, autossh) is KEPT in front — `/usr/bin/ssh
+ * ews@nova`, `autossh -M 0 ews@nova` — so a clone or reconnect runs the user's program
+ * (`buildSshCommand` reads it back), while everything after it is cleaned the same way.
+ * Until this recognised only `ssh …`, such a line came back raw, maiTerm's export with
+ * MAITERM_AUTH included, and was retyped into every clone and onto a fork request's card.
+ * Read the host through `sshArgsOf`, never from this directly.
  */
 export function cleanSshCommand(cmd: string): string {
+  const program = sshProgramOf(cmd);
+  if (program) {
+    const rest = cmd.slice(program.length).trim();
+    const cleaned = rest ? cleanSshCommand(`ssh ${rest}`) : '';
+    return cleaned ? `${program} ${cleaned}` : program;
+  }
   if (!cmd.match(/^ssh\s/)) return cmd;
   // Remove our injected remote command. The MAITERM_TAB_ID forms MUST be stripped first:
   // the plain patterns below would match from ` cd …` onwards and leave a dangling
@@ -140,7 +191,10 @@ export function buildSshCommand(
   accountExport?: string | null,
 ): string {
   if (!sshCmd) return '';
-  const fullCmd = sshCmd.match(/^ssh\s/) ? sshCmd : `ssh ${sshCmd}`;
+  // The user's own ssh program when the stored command kept one (cleanSshCommand), else `ssh`.
+  const m = sshCmd.match(SSH_PROGRAM);
+  const program = m?.[0] ?? 'ssh';
+  const rest = (m ? sshCmd.slice(program.length) : sshCmd).trim();
   // Tab ids are UUIDs; anything else is not ours to interpolate into a shell command.
   const exports: string[] = [];
   if (tabId && /^[A-Za-z0-9-]+$/.test(tabId)) exports.push(`MAITERM_TAB_ID=${tabId}`);
@@ -154,22 +208,21 @@ export function buildSshCommand(
   // from a validated tab id and nothing else, so a quote here means something is wrong upstream
   // and the right answer is to send no token, not to send a repaired one.
   if (accountExport && !accountExport.includes("'")) prelude += `${accountExport}; `;
-  const rest = fullCmd.replace(/^ssh\s+/, '');
   if (!remoteCwd) {
     if (!prelude) {
-      return fullCmd.replace(/^ssh\s+/, 'ssh -o ControlMaster=no ');
+      return `${program} -o ControlMaster=no ${rest}`;
     }
-    return `ssh -t -o ControlMaster=no ${rest} '${prelude}exec $SHELL -l'`;
+    return `${program} -t -o ControlMaster=no ${rest} '${prelude}exec $SHELL -l'`;
   }
   const cdPath = shellEscapePath(remoteCwd);
-  return `ssh -t -o ControlMaster=no ${rest} '${prelude}cd ${cdPath} && exec $SHELL -l'`;
+  return `${program} -t -o ControlMaster=no ${rest} '${prelude}cd ${cdPath} && exec $SHELL -l'`;
 }
 
 export function normalizeSshInput(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) return '';
-  // If it starts with "ssh ", run through cleanSshCommand which handles full commands
-  if (trimmed.match(/^ssh\s/)) return cleanSshCommand(trimmed);
+  // A full command (`ssh …`, or ssh by path / autossh) goes through cleanSshCommand
+  if (trimmed.match(SSH_PROGRAM)) return cleanSshCommand(trimmed);
   // Already bare user@host (possibly with flags) — just return as-is
   return trimmed;
 }
