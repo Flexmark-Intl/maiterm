@@ -151,10 +151,20 @@ fn apply_codex(doc: &mut toml_edit::DocumentMut, wanted: &[(String, String, toml
     }
     for (name, id, table) in wanted {
         let item = toml_edit::Item::Table(table.clone());
-        match servers.get(name) {
+        match servers.get_mut(name) {
             Some(existing) if !codex_marker(existing).is_some_and(|m| ours_id(&m).is_some()) => out.collisions.push(id.clone()),
             Some(existing) if codex_shape(existing) == codex_shape(&item) => {}
-            _ => {
+            // Ours but stale (the port changes every launch): update only our keys, so a key the
+            // human added to the table (`disabled_tools`, `tool_timeout_sec`) survives.
+            Some(existing) => {
+                if let Some(t) = existing.as_table_like_mut() {
+                    for (k, v) in table.iter() {
+                        t.insert(k, v.clone());
+                    }
+                    out.changed = true;
+                }
+            }
+            None => {
                 servers.insert(name, item);
                 out.changed = true;
             }
@@ -172,8 +182,12 @@ fn wanted_servers() -> Vec<ProxyServer> {
 /// files are compared before anything is written. Returns the collisions found, by runtime.
 pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
     super::ensure_loaded();
-    let servers = wanted_servers();
     let _g = WRITE.lock();
+    // Read what is wanted only once the lock is held: a pass that waited behind another must not
+    // write a snapshot from before a server was removed or a runtime switched off.
+    let servers = wanted_servers();
+    let live_prefs = super::APP.get().map(|(_, st)| st.app_data.read().preferences.clone());
+    let prefs = live_prefs.as_ref().unwrap_or(prefs);
     let mut found = Collisions::default();
 
     if let Some(path) = crate::claude_code::lockfile::claude_settings_path() {
@@ -212,7 +226,7 @@ pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
                 Ok(mut doc) => {
                     let a = apply_codex(&mut doc, &wanted);
                     if a.changed {
-                        match crate::claude_code::codex::atomic_write(&path, &doc.to_string()) {
+                        match write_toml(&path, &doc.to_string()) {
                             Ok(()) => log::info!("[mcp-proxy] wrote {} entr{} into ~/.codex/config.toml", wanted.len(), if wanted.len() == 1 { "y" } else { "ies" }),
                             Err(e) => log::warn!("[mcp-proxy] ~/.codex/config.toml: {e}"),
                         }
@@ -272,7 +286,7 @@ pub fn remove_all() {
         if path.exists() {
             if let Ok(mut doc) = crate::claude_code::codex::read_document(&path) {
                 if apply_codex(&mut doc, &[]).changed {
-                    let _ = crate::claude_code::codex::atomic_write(&path, &doc.to_string());
+                    let _ = write_toml(&path, &doc.to_string());
                 }
             }
         }
@@ -314,6 +328,18 @@ fn edit_json(path: &Path, f: impl FnOnce(&mut Value) -> Applied) -> Result<Appli
         })?;
     }
     Ok(applied)
+}
+
+/// Atomic write of `config.toml` through a temp file of our own: the Codex registrar writes the
+/// same file through `config.maiterm-tmp`, and two writers sharing one temp name can rename each
+/// other's half-written file into place.
+fn write_toml(path: &Path, contents: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("maiterm-proxy-tmp-{}", std::process::id()));
+    std::fs::write(&tmp, contents).map_err(|e| format!("cannot write: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot write: {e}")
+    })
 }
 
 // ─── Native installs of the same server ───────────────────────────────────
@@ -430,7 +456,7 @@ pub fn adopt_native(id: &str, url: &str) -> Result<Vec<String>, String> {
                 }
             }
             if !gone.is_empty() {
-                crate::claude_code::codex::atomic_write(&path, &doc.to_string())?;
+                write_toml(&path, &doc.to_string())?;
             }
             removed.extend(gone);
         }
@@ -502,6 +528,18 @@ mod tests {
         assert!(apply_codex(&mut doc, &[]).changed);
         assert!(!doc.to_string().contains("notion"));
         assert!(doc.to_string().contains("[mcp_servers.linear]"));
+    }
+
+    #[test]
+    fn codex_keys_the_human_added_to_our_entry_survive_a_new_port() {
+        let mut doc = toml_edit::DocumentMut::new();
+        apply_codex(&mut doc, &[("linear".into(), "linear".into(), codex_table(1, "tok", "linear"))]);
+        doc["mcp_servers"]["linear"]["disabled_tools"] = toml_edit::value(toml_edit::Array::from_iter(["delete_issue"]));
+        let a = apply_codex(&mut doc, &[("linear".into(), "linear".into(), codex_table(2, "tok", "linear"))]);
+        assert!(a.changed);
+        let text = doc.to_string();
+        assert!(text.contains("127.0.0.1:2/mcp/x/linear"), "{text}");
+        assert!(text.contains("disabled_tools"), "{text}");
     }
 
     #[test]

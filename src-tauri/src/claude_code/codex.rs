@@ -617,7 +617,7 @@ fn read_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
 
 /// Atomic write: write to a temp file, then rename over the target.
 #[allow(dead_code)]
-pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     let tmp = path.with_extension("maiterm-tmp");
     fs::write(&tmp, contents).map_err(|e| format!("write tmp {:?}: {}", tmp, e))?;
     fs::rename(&tmp, path).map_err(|e| {
