@@ -402,13 +402,30 @@ async function restartMaiterm(a: { tabId?: string; update?: boolean; reason?: st
 
 // ── MCP servers through maiTerm (docs/mcp-proxy.md §7) ──────────────────────────────────────
 
+/** A path segment that reads as a key rather than a word: long, and letters mixed with digits
+ *  (Zapier's `/api/mcp/s/<secret>/mcp`). Such URLs ARE the credential. */
+const keyLike = (seg: string) =>
+  seg.length >= 32 || (seg.length >= 16 && /^[A-Za-z0-9_-]+$/.test(seg) && /\d/.test(seg) && /[A-Za-z]/.test(seg));
+
+/** A URL as an agent may see it: no query, no fragment, key-like segments masked. A server the
+ *  human added by hand may carry its key in the URL, and this list reaches every agent. */
+function shownUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    const path = u.pathname.split('/').map((s) => (keyLike(s) ? '…' : s)).join('/');
+    return `${u.origin}${path}${u.search ? '?…' : ''}`;
+  } catch {
+    return '(unreadable URL)';
+  }
+}
+
 /** The servers maiTerm manages, as an agent may read them. Never a credential (the view has none). */
 async function listMcpServers(): Promise<ToolResult> {
   const servers = await commands.mcpServersList();
   return {
     servers: servers.map((s) => ({
       name: s.entry_name,
-      url: s.url,
+      url: shownUrl(s.url),
       status: s.status.state,
       ...(s.status.detail ? { detail: s.status.detail } : {}),
       tools: s.tools,
@@ -436,14 +453,28 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
   } catch {
     return { error: 'url must be the server\'s https endpoint, e.g. https://mcp.linear.app/mcp.' };
   }
-  // A key in the URL would go onto a card the phone also gets, and into maiTerm's config.
-  if (url.username || url.password || [...url.searchParams.keys()].some((k) => /key|token|secret|auth|password/i.test(k))) {
-    return { error: 'The URL carries a credential. Propose the plain endpoint; the human signs in in maiTerm after approving.' };
+  // A key in the URL would go onto the card, into the request, into maiTerm's plaintext config
+  // and into listMcpServers for every agent. So any sign of one is refused, and the human adds
+  // such a server themselves.
+  if (
+    url.username || url.password || url.hash
+    || [...url.searchParams.keys()].some((k) => /key|token|secret|auth|password|sig/i.test(k))
+    || url.pathname.split('/').some(keyLike)
+  ) {
+    return { error: 'The URL looks like it carries a key or token. Don’t propose it: tell the human they can add it themselves in maiTerm → Preferences → MCP servers, or install it directly.' };
   }
+  if (url.search) return { error: 'Propose the plain endpoint, without a query string.' };
   const name = (a.name ?? '').trim() || nameFromUrl(url);
   if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(name)) return { error: `"${name}" can't be a server name: 1–40 lowercase letters, digits, - or _.` };
   const existing = await commands.mcpServersList();
   if (existing.some((s) => s.id === name)) return { error: `maiTerm already has an MCP server named ${name}. listMcpServers shows it.` };
+  // A name the human's own entry holds is never written over, so the server would quietly not
+  // reach that runtime: ask for another name instead.
+  const shownName = import.meta.env.DEV ? `${name}-dev` : name;
+  const native = await commands.mcpNativeNames().catch(() => [] as string[]);
+  if (native.includes(shownName)) {
+    return { error: `The human already has an MCP server of their own named “${shownName}”. Pass a different name.` };
+  }
   if (existing.some((s) => s.url.replace(/\/+$/, '') === url.href.replace(/\/+$/, ''))) {
     return { error: 'maiTerm already serves that URL. listMcpServers shows it.' };
   }
@@ -464,7 +495,7 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
     if (probe.issuer) issuerHost = new URL(probe.issuer).host;
   } catch { /* keep the server's host */ }
   // The name agents see: a dev build suffixes it, as maiterm-dev (mcp_proxy::entries::entry_name).
-  const shown = import.meta.env.DEV ? `${name}-dev` : name;
+  const shown = shownName;
   const signIn =
     probe.auth === 'oauth'
       ? `It needs you to sign in with ${issuerHost}. Approving here opens that in your browser; approving from your phone leaves it waiting in Preferences → MCP servers on this Mac.`
@@ -472,11 +503,11 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
         ? 'It needs a token from the service, which you paste in Preferences → MCP servers. Until then its tools fail.'
         : 'It needs no sign-in.';
   const effects = [
-    `Claude and Codex here, and Claude on your ssh hosts, get its tools as an MCP server named “${shown}”, in every workspace. Its tools load into every new agent session.`,
+    `Claude and Codex here, and Claude on the ssh hosts you have bridged, get its tools as an MCP server named “${shown}”, in every workspace. Its tools load into every agent session started after this; one already running doesn't see it until it restarts.`,
     signIn,
     ...(probe.duplicates.length ? [`You also have it installed directly (${probe.duplicates.join('; ')}): agents would get every tool twice until you remove one (“Move to maiTerm” in Preferences).`] : []),
   ];
-  return file(a.tabId, 'mcp_add', { name, url: url.href, auth: probe.auth }, `Add the MCP server “${shown}” (${url.host}) through maiTerm`, effects, a.reason);
+  return file(a.tabId, 'mcp_add', { name, url: url.href, auth: probe.auth }, `Add the MCP server “${shown}” (${url.origin}${url.pathname}) through maiTerm`, effects, a.reason);
 }
 
 // ── Carrying out an approved request ────────────────────────────────────────────────────────
@@ -601,7 +632,7 @@ async function execute(r: AgentRequest): Promise<string> {
         }
       }
       if (auth === 'token') return `${as}; it waits for the human to paste a token in Preferences → MCP servers. Its tools fail until then`;
-      return `${as}. New agent sessions get its tools; a session already running doesn't see a new server until it restarts`;
+      return `${as}. Agent sessions started from now on get its tools, here and on the ssh hosts bridged now; one already running (yours included) doesn't see a new server until it restarts`;
     }
     case 'restart': {
       if (r.args.update) {

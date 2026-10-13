@@ -49,7 +49,7 @@ pub fn entry_name(id: &str) -> String {
 fn claude_entry(port: u16, auth: &str, id: &str) -> Value {
     json!({
         "type": "http",
-        "url": format!("http://127.0.0.1:{port}/mcp/x/{id}"),
+        "url": format!("http://127.0.0.1:{port}/mcp/x/{}", entry_name(id)),
         "headers": {
             "x-claude-code-ide-authorization": auth,
             "x-maiterm-tab": "${MAITERM_TAB_ID}",
@@ -113,7 +113,7 @@ fn codex_marker(entry: &toml_edit::Item) -> Option<String> {
 
 fn codex_table(port: u16, auth: &str, id: &str) -> toml_edit::Table {
     let mut t = toml_edit::Table::new();
-    t.insert("url", toml_edit::value(format!("http://127.0.0.1:{port}/mcp/x/{id}")));
+    t.insert("url", toml_edit::value(format!("http://127.0.0.1:{port}/mcp/x/{}", entry_name(id))));
     let mut headers = toml_edit::InlineTable::new();
     headers.insert("x-maiterm-authorization", auth.into());
     headers.insert(MARKER, marker_value(id).into());
@@ -242,15 +242,16 @@ pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
 }
 
 /// What the ssh-host setup writes into the remote account's `~/.claude.json` (docs/mcp-proxy.md
-/// §6): `set`, entries by name, and `gone`, names to delete if they still carry the marker shown.
+/// §6): `set`, entries by name.
 ///
 /// Every value is a placeholder the remote agent expands from its own shell, exactly as for the
 /// remote `maiterm` entry: the account may be shared by several of this human's tabs, by other
 /// people's maiTerms, and by both flavors, so the bytes must be the same from every writer.
-/// That is also why the remote side only ever ADDS by name and deletes only by tombstone: an
-/// entry this maiTerm doesn't know may be someone else's, and one it no longer serves answers
-/// as an empty server (`not_served`) rather than failing. A native entry under a name is never
-/// overwritten there either (the setup script checks the marker before writing).
+/// That is also why the remote side only ever ADDS, and never deletes: an entry marked by
+/// maiTerm can't say WHICH maiTerm wants it (the marker is the same for all of a flavor), so
+/// deleting the one this maiTerm removed would take it from a teammate still using it. One this
+/// maiTerm no longer serves answers as an empty server (`not_served`) instead. A native entry
+/// under a name is never overwritten there either (the setup script checks the marker).
 pub fn remote() -> Value {
     super::ensure_loaded();
     let servers = super::all();
@@ -260,7 +261,7 @@ pub fn remote() -> Value {
         .map(|s| {
             let entry = json!({
                 "type": "http",
-                "url": format!("http://127.0.0.1:${{MAITERM_PORT}}/mcp/x/{}", s.id),
+                "url": format!("http://127.0.0.1:${{MAITERM_PORT}}/mcp/x/{}", entry_name(&s.id)),
                 "headers": {
                     "x-claude-code-ide-authorization": "${MAITERM_AUTH}",
                     "x-maiterm-tab": "${MAITERM_TAB_ID}",
@@ -270,14 +271,31 @@ pub fn remote() -> Value {
             (entry_name(&s.id), entry)
         })
         .collect();
-    let gone: Vec<Value> = super::removed()
-        .iter()
-        .map(|r| r.id.clone())
-        .chain(servers.iter().filter(|s| !s.enabled).map(|s| s.id.clone()))
-        .filter(|id| !servers.iter().any(|s| s.enabled && &s.id == id))
-        .map(|id| json!({ "name": entry_name(&id), "marker": marker_value(&id) }))
-        .collect();
-    json!({ "set": set, "gone": gone })
+    json!({ "set": set })
+}
+
+/// Names of the human's own (unmarked) entries in Claude's and Codex's configs here: a proxied
+/// server under one of them would not be written there (a collision), so an agent's proposal
+/// must pick another name.
+pub fn native_names() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(path) = crate::claude_code::lockfile::claude_settings_path() {
+        if let Some(root) = std::fs::read_to_string(&path).ok().and_then(|r| serde_json::from_str::<Value>(&r).ok()) {
+            if let Some(m) = root.get("mcpServers").and_then(Value::as_object) {
+                out.extend(m.iter().filter(|(_, e)| claude_ours(e).is_none()).map(|(n, _)| n.clone()));
+            }
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(doc) = crate::claude_code::codex::read_document(&home.join(".codex").join("config.toml")) {
+            if let Some(servers) = doc.get("mcp_servers").and_then(|s| s.as_table_like()) {
+                out.extend(servers.iter().filter(|(_, e)| !codex_marker(e).is_some_and(|m| ours_id(&m).is_some())).map(|(n, _)| n.to_string()));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Does any managed Claude account root lack an entry we wrote, or hold one we removed?

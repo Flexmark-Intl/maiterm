@@ -192,18 +192,24 @@ so that section changes with it.
   So every maiTerm writes identical bytes, and each user's agents reach their own maiTerm.
   - **A remote account can be shared** by several of this human's tabs, by other people's
     maiTerms (a team account such as `ews@nova`), and by both flavors. So the remote side is
-    **additive**: entries are written by name, a name held by an entry without the marker is the
-    human's own and is never overwritten, and nothing is swept for being unknown, because it may
-    be someone else's.
-  - **Removal goes by tombstone.** A removed server is remembered for 30 days
-    (`mcp-servers.json` → `removed`), and a disabled one counts too. The next setup on each host
-    deletes its entry only if the marker matches exactly.
-  - **An entry a maiTerm doesn't serve is inert.** `/mcp/x/<id>` for an unknown name answers as
-    an empty server (`not_served`): `initialize` succeeds, `tools/list` is empty, a call says why.
-    So another person's entry, or one whose tombstone hasn't reached a host yet, costs nothing
-    and shows no failure.
-  - Code: `entries::remote` builds `{set, gone}`; `sshMcpBridge.svelte.ts` merges it with python3,
-    or jq where there is no python3.
+    **additive only**:
+    - entries are written by name;
+    - a name held by an entry without the marker is the human's own and is never overwritten;
+    - **nothing is ever deleted**. The marker is the same for every maiTerm of a flavor, so it
+      can't say which maiTerm wants an entry: deleting the one this maiTerm removed would take it
+      from a teammate still using it (review of e363dc33 — the first version had tombstones).
+  - **An entry a maiTerm doesn't serve is inert.** `/mcp/x/<name>` for an unknown name answers
+    as an empty server (`not_served`): `initialize` succeeds, `tools/list` is empty, a call says
+    why. So another person's entry, or a removed or disabled one, shows no failure. A teammate on
+    a maiTerm older than this feature answers it with 404, and sees it as a failed server.
+  - **The path carries the entry name** (`/mcp/x/linear-dev` from a dev build). Both flavors'
+    entries resolve `${MAITERM_PORT}` to whichever maiTerm launched the shell; with a bare id in
+    both paths, that one maiTerm served the same server twice.
+  - **Changes reach bridged hosts at once.** A change in maiTerm emits
+    `mcp-proxy-entries-changed`, and each window re-runs just the merge on the hosts it has
+    bridged (`refreshProxyEntries`). A host not bridged now gets it at its next connect.
+  - Code: `entries::remote` builds `{set}`; `sshMcpBridge.svelte.ts` merges it with python3, or jq
+    where there is no python3.
 - **When they are written.**
   - At startup, before any tab spawns.
   - Re-asserted by the 30 s drift loop. That loop also checks each managed account root,
@@ -237,16 +243,22 @@ server:
   - **The description** tells the agent: when a human asks to install or add an MCP server, tell
     them maiTerm can manage it, give the trade-off, and let them choose. Do not call this before
     they have chosen.
-  - **The card's words are maiTerm's.** It shows the URL, the name, which runtimes get it, whether
-    a sign-in follows, and that the server's tools load into every session in scope. The agent's
-    `reason` is shown quoted.
+  - **The card's words are maiTerm's.** It shows the URL (origin and path), the name, which
+    runtimes get it, whether a sign-in follows, and that the server's tools load into every
+    session started afterwards. The agent's `reason` is shown quoted.
+  - **Approval re-checks.** `add` refuses a URL maiTerm already serves, however it was added
+    meanwhile.
   - **Approving adds the server.** Approved at the desktop, an OAuth sign-in opens in the browser
     at once. Approved from the phone, it waits as "needs sign-in" for the human at the Mac. A
     token server waits for the human to paste one. Neither the agent nor the approval completes a
     sign-in.
   - **Refused when it is filed:**
-    - a URL carrying a credential (user info, or a `key`/`token`/`secret`/`auth`/`password`
-      query parameter), which would reach the card, the phone and the config;
+    - a URL that may carry a credential: user info, a fragment, any query string, or a path
+      segment that reads as a key (long, letters mixed with digits, as Zapier's `/s/<key>/mcp`).
+      It would reach the card, the request, the plaintext config and every agent's
+      `listMcpServers`. The human can add such a server themselves;
+    - a name the human's own entry holds in Claude's or Codex's config (it would never be written
+      there);
     - a service that doesn't let apps register (GitHub), which needs a client id or token only
       the human has: the agent is told to point them at the add form;
     - a name or URL maiTerm already serves.
@@ -271,8 +283,9 @@ candidate).
 - **No token passthrough.** The upstream token goes only to that upstream. The downstream
   `MAITERM_AUTH` never goes upstream.
 - **What persists where.**
-  - Plaintext in AppData: the catalog, the client registration (client id only), the scope and
-    names.
+  - Plaintext in AppData: the catalog, the client registration (client id only), the scope,
+    names and URLs. A URL the human adds by hand is stored as typed, so one that embeds its key
+    is plaintext there too (agents see it masked in `listMcpServers`, and can't propose one).
   - The keychain: everything else.
   - Never on the phone or in a share file.
 

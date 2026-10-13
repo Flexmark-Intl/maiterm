@@ -1678,9 +1678,8 @@ export interface MaitermSkillScripts {
   statusline_command: string;
   /** The maiterm-tab mod's files: [path inside its folder, contents]. */
   claude_mod: [string, string][];
-  /** Proxied MCP servers' remote entries (docs/mcp-proxy.md §6): written by name, deleted only
-   *  by a matching marker. */
-  mcp_proxy: { set: Record<string, unknown>; gone: { name: string; marker: string }[] };
+  /** Proxied MCP servers' remote entries (docs/mcp-proxy.md §6): written by name, never deleted. */
+  mcp_proxy: { set: Record<string, unknown> };
 }
 
 export async function startSshTunnel(sshArgs: string, hostKey: string, tabId: string, localPort: number): Promise<SshTunnelInfo> {
@@ -2283,6 +2282,11 @@ export async function mcpServerSetWorkspaces(id: string, workspaces: string[]): 
 
 export async function mcpServerRefresh(id: string): Promise<McpServerView> {
   return invoke('mcp_server_refresh', { id });
+}
+
+/** Names held by the human's own MCP entries in Claude's and Codex's configs. */
+export async function mcpNativeNames(): Promise<string[]> {
+  return invoke('mcp_native_names');
 }
 
 /** Start a sign-in: the URL to open in the browser. */

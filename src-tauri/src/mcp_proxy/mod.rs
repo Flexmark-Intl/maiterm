@@ -103,26 +103,18 @@ impl Catalog {
 struct StoreFile {
     #[serde(default)]
     servers: Vec<ProxyServer>,
-    /// Servers removed lately, so the next ssh-host setup deletes their remote entries
-    /// (`entries::remote`). Remote entries are only ever added by name otherwise: an account can
-    /// be shared with other maiTerms, and an entry this one doesn't know may be theirs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    removed: Vec<Removed>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Removed {
-    pub id: String,
-    pub at: u64,
-}
-
-/// How long a removal is carried to ssh hosts: long enough to reach any host bridged now and then.
-const REMOVED_KEEP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
-
-static REMOVED: LazyLock<RwLock<Vec<Removed>>> = LazyLock::new(Default::default);
-
-pub fn removed() -> Vec<Removed> {
-    REMOVED.read().clone()
+/// The server a `/mcp/x/<name>` path names. Paths carry the ENTRY name (`entries::entry_name`),
+/// so a dev build's entries (`linear-dev`) reach only a dev build: on an ssh host both flavors'
+/// entries resolve `${MAITERM_PORT}` to whichever maiTerm launched the shell, and with a bare id
+/// in both paths that one maiTerm served the same server under two names.
+pub fn id_from_path(name: &str) -> Option<&str> {
+    if cfg!(debug_assertions) {
+        name.strip_suffix("-dev")
+    } else {
+        Some(name)
+    }
 }
 
 /// A server's health as maiTerm last saw it. Never persisted.
@@ -182,20 +174,20 @@ static COLLISIONS: LazyLock<Mutex<entries::Collisions>> = LazyLock::new(Default:
 /// Read the configured servers once. The entry writer runs from the MCP server's synchronous
 /// startup, before `start`, and needs them.
 pub fn ensure_loaded() {
-    LOADED.get_or_init(|| {
-        let f = load();
-        *SERVERS.write() = f.servers;
-        *REMOVED.write() = f.removed;
-    });
+    LOADED.get_or_init(|| *SERVERS.write() = load().servers);
 }
 
 /// Rewrite the agents' entries after a change, off the calling thread (file I/O).
 fn sync_entries() {
-    let Some((_, state)) = APP.get() else { return };
+    let Some((app, state)) = APP.get() else { return };
     let (Some(port), Some(auth)) = (*state.mcp_port.read(), state.mcp_auth.read().clone()) else { return };
     let prefs = state.app_data.read().preferences.clone();
+    let app = app.clone();
     let run = move || {
         entries::sync(port, &auth, &prefs);
+        // ssh hosts bridged now merge the new set at once (sshMcpBridge.svelte.ts), rather than
+        // at their next reconnect.
+        let _ = app.emit("mcp-proxy-entries-changed", ());
     };
     match tokio::runtime::Handle::try_current() {
         Ok(_) => {
@@ -219,11 +211,7 @@ fn load() -> StoreFile {
     let Some(path) = store_path() else { return StoreFile::default() };
     let Ok(raw) = std::fs::read_to_string(&path) else { return StoreFile::default() };
     match serde_json::from_str::<StoreFile>(&raw) {
-        Ok(mut f) => {
-            let cutoff = now_ms().saturating_sub(REMOVED_KEEP_MS);
-            f.removed.retain(|r| r.at >= cutoff);
-            f
-        }
+        Ok(f) => f,
         Err(e) => {
             // Keep the unreadable file for a human to look at, rather than overwriting it with
             // an empty list on the next save.
@@ -239,7 +227,7 @@ fn load() -> StoreFile {
 fn save() -> Result<(), String> {
     let _g = SAVE.lock();
     let Some(path) = store_path() else { return Err("no data directory".into()) };
-    let file = StoreFile { servers: SERVERS.read().clone(), removed: REMOVED.read().clone() };
+    let file = StoreFile { servers: SERVERS.read().clone() };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -622,13 +610,15 @@ fn down_session(id: &str, sid: Option<&str>) -> Arc<DownSession> {
     d
 }
 
-pub async fn downstream_post(id: &str, sid: Option<&str>, tab: Option<&str>, body: &str) -> DownReply {
-    let Some(server) = get(id) else {
-        if valid_id(id).is_err() {
+/// `path`: the `/mcp/x/<path>` segment, an entry name (`id_from_path`).
+pub async fn downstream_post(path: &str, sid: Option<&str>, tab: Option<&str>, body: &str) -> DownReply {
+    let Some(server) = id_from_path(path).and_then(get) else {
+        if valid_id(path).is_err() {
             return DownReply::status(404);
         }
-        return not_served(id, body);
+        return not_served(path, body);
     };
+    let id = server.id.as_str();
     let msg: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return DownReply::error(Value::Null, -32700, format!("parse error: {e}"), None),
@@ -806,15 +796,17 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
 }
 
 /// Open a downstream `GET` stream: `None` for an unknown server (404).
-pub fn downstream_stream(id: &str) -> Option<mpsc::UnboundedReceiver<String>> {
-    get(id)?;
+pub fn downstream_stream(path: &str) -> Option<mpsc::UnboundedReceiver<String>> {
+    let id = get(id_from_path(path)?)?.id;
+    let id = id.as_str();
     let (tx, rx) = mpsc::unbounded_channel();
     LIVE.lock().entry(id.to_string()).or_default().streams.push(tx);
     Some(rx)
 }
 
 /// The client ended its session (`DELETE`): give back its upstream session.
-pub fn downstream_end(id: &str, sid: &str) {
+pub fn downstream_end(path: &str, sid: &str) {
+    let Some(id) = id_from_path(path) else { return };
     let removed = LIVE.lock().get_mut(id).and_then(|l| l.down.remove(sid));
     let (Some(d), Some(server)) = (removed, get(id)) else { return };
     tokio::spawn(async move {
@@ -888,7 +880,13 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
     for key in [id.to_string(), format!("{id}#client")] {
         let _ = secrets::delete(&key);
     }
-    REMOVED.write().retain(|r| r.id != id);
+    // One server per URL, however it is asked for: two would put every tool in every session
+    // twice and need two sign-ins. Checked here, at the moment of adding, because a request an
+    // agent filed can be approved after the same URL was added another way.
+    let norm = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
+    if let Some(other) = all().into_iter().find(|s| norm(&s.url) == norm(url)) {
+        return Err(format!("maiTerm already serves {url} as {}", other.id));
+    }
     let mut oauth_plan = None;
     // Without a token (an agent's proposal can't carry one) the server waits as "needs a token"
     // until the human pastes one in Preferences.
@@ -935,11 +933,6 @@ pub fn remove(id: &str) -> Result<(), String> {
     oauth::forget(id);
     let live = LIVE.lock().remove(id);
     SERVERS.write().retain(|s| s.id != id);
-    {
-        let mut gone = REMOVED.write();
-        gone.retain(|r| r.id != id);
-        gone.push(Removed { id: id.to_string(), at: now_ms() });
-    }
     save()?;
     sync_entries();
     for key in [id.to_string(), format!("{id}#client")] {
@@ -1110,6 +1103,13 @@ pub async fn mcp_server_add(
         None => "human".to_string(),
     };
     blocking(move || add(&id, &url, &auth, opts, &by).map(|s| view(&s))).await
+}
+
+/// Names the human's own MCP entries hold in Claude's and Codex's configs (a proxied server under
+/// one isn't written there).
+#[tauri::command]
+pub async fn mcp_native_names() -> Vec<String> {
+    blocking(|| Ok(entries::native_names())).await.unwrap_or_default()
 }
 
 /// Start a sign-in: the URL for the browser. The sign-in finishes at `/oauth/callback`.
