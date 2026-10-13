@@ -47,7 +47,7 @@ A tab running Claude Code or Codex — or one whose auto-resume starts one — i
 
 Paths under your home directory are stored relative to it, so a teammate who keeps their code in the same place as you gets every directory matched without being asked.
 
-The ssh command that goes in the file is the one you typed — maiTerm strips out everything it injects into a live SSH session, including its own connection credentials, before it writes anything.
+The ssh command that goes in the file is the one you typed — maiTerm strips out everything it injects into a live SSH session, including its own connection credentials, before it writes anything. If you connect through `autossh` or an ssh at a path of its own, the file carries the connection without that program, and the receiver connects with plain `ssh`.
 
 ## Opening a shared workspace
 
@@ -79,7 +79,7 @@ The check can't answer a passphrase or a two-factor prompt, so when one of those
 
 A shared file is someone else's, and it opens on a double-click — so nothing in it runs without being shown to you first. Under **Commands it will run**, the import lists every command it would type, exactly as it will be typed, and where: each SSH connection, each agent it would start (and, in a mesh, the role it would be told), and each tab's auto-resume command. Untick anything you don't want run — the tab still opens, it just doesn't run it. An agent or resume on a remote host is only offered while the connection to that host is ticked. Each stack service shows its own **Starts by itself when the workspace opens** box, so you decide whether it auto-starts too.
 
-Some fields in the file are pasted into commands but were never meant to be commands — an SSH host, a remote directory, a session id, a git URL or branch. A file whose fields carry shell syntax or options that would run something locally has those parts left out, and the import tells you which: *Parts of this file would have run something on this computer, so they were left out*. And if the file changes on disk after you've reviewed it, the import refuses to build from it.
+Some fields in the file are pasted into commands but were never meant to be commands — an SSH host, a remote directory, a session id, a git URL or branch. A file whose fields carry shell syntax or options that would run something locally — or an SSH target that names a program to run instead of `ssh` — has those parts left out, and the import tells you which: *Parts of this file would have run something on this computer, so they were left out*. And if the file changes on disk after you've reviewed it, the import refuses to build from it.
 
 ### Cloning
 

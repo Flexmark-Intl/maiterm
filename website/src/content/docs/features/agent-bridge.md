@@ -30,6 +30,12 @@ The picker offers two modes:
 
 There's also an optional **purpose** field. Describe the peer for your own agent — what it's an expert on, how it should be used — and that context is handed to your agent so it knows what the bridge is for instead of firing off questions blindly.
 
+### An agent can ask for one
+
+An agent can ask for a bridge too, with the `bridgeWith` tool — to connect with another agent's tab in the same window, or to fork it into a new tab beside itself — and for its bridge to close, with `disconnectBridge`. Neither happens on the agent's say-so. Like a [mesh](/features/mesh-workspace/) change, each only files a request: a card in the [Loom's Decisions](/features/loom/#decisions) and on your paired phone, in maiTerm's own words, and nothing happens until you click **Approve**. The phone has no bridge picker, so this is also how you set up a bridge while you're away from the desk: tell an agent to bridge itself, and approve its card.
+
+The picker's rules hold: a tab already bridged with a third agent is neither connected to nor forked, and if the asking agent has a bridge already, the card says it closes. When the agent to be forked is over SSH, the copy runs on that host, and the card says so and shows the ssh command it will run through. See [what agents can change, and what they ask](/features/agents/#organising-tabs-meshes-and-maiterm).
+
 ## How the agents talk
 
 Once bridged, each agent reaches the other through the `sendToBridgedAgent` MCP tool. Messaging is **asynchronous**: a message is injected as a real prompt turn in the recipient's pane, the recipient works on it, and its reply comes back later as a new turn in the sender's pane.

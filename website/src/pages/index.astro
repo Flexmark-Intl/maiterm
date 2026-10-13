@@ -207,6 +207,8 @@ const EVERYTHING = [
       and checked against src/lib/stores/agentRequests.svelte.ts + src-tauri/src/agent_requests.rs:
       - getMeshLayout / moveTab / moveWorkspace act at once, EXCEPT a move that changes a
         tab's mesh (or breaks a link), which files a request — "around" is the honest verb.
+      - bridgeWith / disconnectBridge (v3.6.0) are requests too: a 1:1 bridge changes who can
+        message whom. Extends this band rather than taking the release slot.
       - createTab is ALWAYS a request, mesh or not. It can start gemini too; this page names
         no runtimes so it doesn't outrun "Claude Code and Codex" elsewhere.
       - Approval is only the card (Loom Decisions) or a PAIRED phone (authorize_human refuses
@@ -235,8 +237,8 @@ const EVERYTHING = [
         <div class="ln-card">
           <h3>Decisions, by you</h3>
           <p>
-            Making or linking a mesh, a new agent tab, a restart: each waits in the Loom's
-            Decisions and on your paired phone, and lapses if nobody answers.
+            Making or linking a mesh, bridging two agents, a new agent tab, a restart: each
+            waits in the Loom's Decisions and on your paired phone, and lapses if nobody answers.
           </p>
         </div>
         <div class="ln-card">

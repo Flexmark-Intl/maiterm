@@ -139,7 +139,7 @@ Both agents connect to the same MCP server and can call the same tools.
 | `sendToBridgedAgent` | Send a message to the peer agent this tab is bridged with — async, the reply arrives as a new prompt turn |
 | `getBridgedAgent` | Report whether this tab is bridged and, if so, the partner's label and working directory |
 
-See [Agent Bridge](/features/agent-bridge/) for the full feature.
+An agent can also ask for a bridge itself, or for its bridge to close, with `bridgeWith` and `disconnectBridge` — requests you approve, like a mesh change; see [Organising tabs, meshes and maiTerm](#organising-tabs-meshes-and-maiterm). See [Agent Bridge](/features/agent-bridge/) for the full feature.
 
 ### Tasks
 
@@ -195,10 +195,12 @@ An agent's way to pick work back up later without you having to remember it — 
 | `setMesh` | Make a workspace a Mesh Workspace, or stop it being one — **asks you** |
 | `linkMeshes` / `unlinkMesh` | Link two mesh workspaces into one mesh, or take one back out — **asks you** |
 | `createTab` | Open a new Claude Code, Codex or Gemini tab in a workspace and a local folder, optionally named — **asks you** |
+| `bridgeWith` | Bridge this agent 1:1 with another agent's tab in the same window, or fork that agent into a new tab and bridge with the copy — **asks you** |
+| `disconnectBridge` | Close this agent's [Agent Bridge](/features/agent-bridge/) — **asks you** |
 | `restartMaiterm` | Restart maiTerm, optionally installing the available update first — **asks you** |
 | `getRequestStatus` | What became of a request the agent filed: pending, approved, done, failed, denied or expired |
 
-Tidying up is the agent's to do: reading the layout and moving tabs and workspaces around happen straight away. The line is **who can message whom**. Anything that changes it — making or unmaking a mesh, linking or unlinking meshes, a move into, out of or between meshes — and starting a new agent, which could ask for more, or restarting maiTerm, doesn't act. It files a request, and nothing happens until you approve it.
+Tidying up is the agent's to do: reading the layout and moving tabs and workspaces around happen straight away. The line is **who can message whom**. Anything that changes it — making or unmaking a mesh, linking or unlinking meshes, a move into, out of or between meshes, opening or closing a 1:1 [bridge](/features/agent-bridge/) — and starting a new agent, which could ask for more, or restarting maiTerm, doesn't act. It files a request, and nothing happens until you approve it.
 
 - **You answer it on a card**, in the [Loom's Decisions](/features/loom/#decisions) or on your phone with [maiLink](/features/mailink/), and a notification takes you there. The card is in maiTerm's own words, built from what maiTerm knows: what will change, which agents gain or lose whom, how many agents a restart would interrupt mid-turn. The agent's only say is a one-line reason, shown as a quote.
 - **Only that card counts.** An agent asking you in chat, or Claude Code's permission dialog for the tool call, is not an approval — an allowlist or auto mode passes those without you seeing them.
@@ -207,6 +209,8 @@ Tidying up is the agent's to do: reading the layout and moving tabs and workspac
 - **Unanswered requests lapse** after 30 minutes, and the agent is told nothing was done. A tab can have five waiting at once; asking for the same thing twice doesn't add a second card.
 
 A new tab opens in the background in the workspace's active pane, and the agent that asked is told its id. A named tab in a mesh workspace joins that mesh, and its card says so.
+
+A bridge follows the [Agent Bridge picker](/features/agent-bridge/#bridging-two-agents)'s rules: an agent already bridged with a third is neither connected to nor forked, and only Claude Code and Codex can be forked. If the asking agent is bridged with someone else, the card says that bridge closes. A fork's card says where the copy will run: on this machine, or — when the agent being forked is over SSH — on that host, showing the ssh command it will run through. If that has changed by the time you approve, nothing is done. A bridge to a tab that has since closed carries nothing, so `disconnectBridge` closes that one at once.
 
 ### Supervision
 
