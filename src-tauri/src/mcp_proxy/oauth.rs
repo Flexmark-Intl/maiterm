@@ -153,6 +153,21 @@ fn as_metadata_urls(issuer: &str) -> Vec<String> {
     }
 }
 
+/// Is a protected resource metadata `resource` this server? Same origin, and a path that is the
+/// server's or a parent of it: servers publish both `https://host` and `https://host/mcp` for
+/// `https://host/mcp`, with and without a trailing slash, so an exact string match refuses real
+/// servers. Absent: the document is the server's own by where it was found.
+fn resource_matches(resource: Option<&str>, server: &reqwest::Url) -> bool {
+    let Some(r) = resource else { return true };
+    let Ok(ru) = reqwest::Url::parse(r) else { return false };
+    if ru.origin() != server.origin() {
+        return false;
+    }
+    let rp = ru.path().trim_end_matches('/');
+    let sp = server.path().trim_end_matches('/');
+    rp.is_empty() || sp == rp || sp.starts_with(&format!("{rp}/"))
+}
+
 fn strs(v: Option<&Value>) -> Vec<String> {
     v.and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
@@ -192,12 +207,28 @@ pub async fn probe(server_url: &str) -> Result<Probe, String> {
     prm_urls.push(well_known(&url, "oauth-protected-resource", false));
     prm_urls.dedup();
     let mut prm = None;
+    let mut foreign: Option<String> = None;
     for u in &prm_urls {
         if let Some(doc) = get_json(&client, u).await {
-            if !strs(doc.get("authorization_servers")).is_empty() {
-                prm = Some(doc);
-                break;
+            if strs(doc.get("authorization_servers")).is_empty() {
+                continue;
             }
+            // The document must be about THIS server (RFC 9728 §3.3). Otherwise a server could
+            // name another service's resource and sign-in, and maiTerm would send the human's
+            // token for that service here.
+            let resource = doc.get("resource").and_then(Value::as_str);
+            if !resource_matches(resource, &url) {
+                log::warn!("[mcp-proxy] probe {server_url}: metadata at {u} names another resource; ignored");
+                foreign = resource.map(str::to_string);
+                continue;
+            }
+            prm = Some(doc);
+            break;
+        }
+    }
+    if prm.is_none() {
+        if let Some(other) = foreign {
+            return Err(format!("its sign-in details are for a different service ({other}), so maiTerm won't sign in to it"));
         }
     }
     let Some(prm) = prm else {
@@ -275,8 +306,17 @@ struct Pending {
     token_endpoint: String,
     client_id: String,
     client_secret: Option<String>,
+    /// A registration made for this sign-in. Written to the server's config only when the sign-in
+    /// completes: written at once, an abandoned sign-in left the config naming a client the
+    /// stored refresh token wasn't issued to.
+    fresh_registration: bool,
     resource: String,
     created: u64,
+}
+
+/// Forget a server's sign-ins in progress (it was removed).
+pub fn forget(server_id: &str) {
+    PENDING.lock().retain(|_, p| p.server_id != server_id);
 }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
@@ -293,17 +333,20 @@ fn plan_str(server: &ProxyServer, key: &str) -> Option<String> {
     server.oauth.as_ref()?.get(key)?.as_str().map(str::to_string)
 }
 
-/// Register maiTerm with the authorization server for this redirect URI (RFC 7591), unless a
-/// registration for exactly that URI is already stored.
-async fn client_for(server: &ProxyServer, redirect_uri: &str) -> Result<(String, Option<String>), String> {
+/// The client a sign-in uses: the human's, the stored registration when it is for exactly this
+/// redirect URI, else a new registration (RFC 7591). Writes nothing: a new registration rides in
+/// `Pending` until the sign-in completes. Returns `(client_id, client_secret, fresh)`.
+async fn client_for(server: &ProxyServer, redirect_uri: &str) -> Result<(String, Option<String>, bool), String> {
     let plan = server.oauth.clone().unwrap_or(Value::Null);
     // A client id the human supplied is used as is, on any redirect.
     if let Some(id) = plan.get("manual_client_id").and_then(Value::as_str) {
-        return Ok((id.to_string(), client_secret(&server.id).await));
+        return Ok((id.to_string(), manual_client_secret(&server.id).await, false));
     }
     if plan.get("redirect_uri").and_then(Value::as_str) == Some(redirect_uri) {
         if let Some(id) = plan.get("client_id").and_then(Value::as_str) {
-            return Ok((id.to_string(), client_secret(&server.id).await));
+            // Its secret, if any, travels with the tokens issued to it.
+            let secret = super::cached_or_stored_cred(&server.id).await.ok().flatten().filter(|c| c.client_id.as_deref() == Some(id)).and_then(|c| c.client_secret);
+            return Ok((id.to_string(), secret, false));
         }
     }
     let endpoint = plan
@@ -328,37 +371,20 @@ async fn client_for(server: &ProxyServer, redirect_uri: &str) -> Result<(String,
         return Err(format!("registration refused ({status}) {why}").trim().to_string());
     }
     let client_id = doc.get("client_id").and_then(Value::as_str).ok_or("registration returned no client id")?.to_string();
+    // A secret the server issued anyway is still a secret: it is stored with the tokens, in the
+    // keychain, once the sign-in completes.
     let client_secret = doc.get("client_secret").and_then(Value::as_str).map(str::to_string);
-    let sid = server.id.clone();
-    let (cid, ru, secret) = (client_id.clone(), redirect_uri.to_string(), client_secret.clone());
-    // A secret the server issued anyway is still a secret: the keychain, never the config file.
-    let key = client_secret_key(&sid);
-    tokio::task::spawn_blocking(move || match secret {
-        Some(s) => secrets::store(&key, &Cred { access_token: s, ..Default::default() }).map_err(|e| e.to_string()),
-        None => {
-            let _ = secrets::delete(&key);
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    update(&sid, |s| {
-        let o = s.oauth.get_or_insert_with(|| json!({}));
-        o["client_id"] = cid.into();
-        o["redirect_uri"] = ru.into();
-        o["registered_at"] = super::now_ms().into();
-    })?;
     log::info!("[mcp-proxy] {}: registered with {}", server.id, plan.get("issuer").and_then(Value::as_str).unwrap_or("?"));
-    Ok((client_id, client_secret))
+    Ok((client_id, client_secret, true))
 }
 
-/// The keychain item a client secret is kept under, beside the server's tokens.
+/// The keychain item a human-supplied client secret is kept under, beside the server's tokens.
 fn client_secret_key(server_id: &str) -> String {
     format!("{server_id}#client")
 }
 
-/// The client secret, if this registration has one. Read on a blocking thread (keychain).
-async fn client_secret(server_id: &str) -> Option<String> {
+/// The human-supplied client secret, if any. Read on a blocking thread (keychain).
+async fn manual_client_secret(server_id: &str) -> Option<String> {
     let key = client_secret_key(server_id);
     tokio::task::spawn_blocking(move || secrets::read(&key)).await.ok()?.ok()?.map(|c| c.access_token)
 }
@@ -371,7 +397,7 @@ pub async fn begin(server_id: &str) -> Result<String, String> {
     }
     let port = super::APP.get().and_then(|(_, st)| *st.mcp_port.read()).ok_or("maiTerm's server isn't running")?;
     let redirect_uri = format!("http://127.0.0.1:{port}/oauth/callback");
-    let (client_id, client_secret) = client_for(&server, &redirect_uri).await?;
+    let (client_id, client_secret, fresh_registration) = client_for(&server, &redirect_uri).await?;
     let server = get(server_id).ok_or("the server was removed")?;
     let authz = plan_str(&server, "authorization_endpoint").ok_or("no sign-in details stored; remove and add the server again")?;
     let token_endpoint = plan_str(&server, "token_endpoint").ok_or("no sign-in details stored")?;
@@ -401,7 +427,7 @@ pub async fn begin(server_id: &str) -> Result<String, String> {
     let now = super::now_ms();
     let mut pending = PENDING.lock();
     pending.retain(|_, p| now.saturating_sub(p.created) < PENDING_TTL_MS && p.server_id != server_id);
-    pending.insert(state, Pending { server_id: server_id.to_string(), verifier, redirect_uri, token_endpoint, client_id, client_secret, resource, created: now });
+    pending.insert(state, Pending { server_id: server_id.to_string(), verifier, redirect_uri, token_endpoint, client_id, client_secret, fresh_registration, resource, created: now });
     log::info!("[mcp-proxy] {server_id}: sign-in started");
     Ok(url.to_string())
 }
@@ -443,14 +469,29 @@ pub async fn callback(params: HashMap<String, String>) -> (u16, String) {
     if let Some(s) = &p.client_secret {
         form.push(("client_secret", s.clone()));
     }
+    // Under the server's refresh turn: a refresh in flight must not store the old sign-in over
+    // this one.
+    let turn = REFRESHING.lock().entry(p.server_id.clone()).or_default().clone();
+    let _turn = turn.lock().await;
     match token_request(&p.token_endpoint, &form).await {
-        Ok(cred) => {
+        Ok(mut cred) => {
+            cred.client_id = Some(p.client_id.clone());
+            // A human-supplied client's secret stays in its own item; a registered one's goes
+            // with the tokens it was issued.
+            let manual = get(&p.server_id).is_some_and(|s| plan_str(&s, "manual_client_id").is_some());
+            cred.client_secret = if manual { None } else { p.client_secret.clone() };
             if let Err(e) = store_cred(&p.server_id, cred).await {
                 return (500, page("Sign-in failed", &format!("maiTerm could not keep the sign-in: {e}")));
             }
+            let (fresh, cid, ru) = (p.fresh_registration, p.client_id.clone(), p.redirect_uri.clone());
             let _ = update(&p.server_id, |s| {
                 let o = s.oauth.get_or_insert_with(|| json!({}));
                 o["signed_in_at"] = super::now_ms().into();
+                if fresh {
+                    o["client_id"] = cid.into();
+                    o["redirect_uri"] = ru.into();
+                    o["registered_at"] = super::now_ms().into();
+                }
                 if let Some(m) = o.as_object_mut() {
                     m.remove("step_up_scope");
                 }
@@ -495,15 +536,26 @@ async fn token_request(endpoint: &str, form: &[(&str, String)]) -> Result<Cred, 
         let why = doc.get("error_description").or_else(|| doc.get("error")).and_then(Value::as_str).unwrap_or("no token in the answer");
         return Err(format!("{why} ({status})"));
     };
+    let now = super::now_ms();
+    // `expires_in` is a number by the RFC; some servers send it as a string.
+    let expires_in = doc.get("expires_in").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())));
     Ok(Cred {
         access_token: access.to_string(),
         refresh_token: doc.get("refresh_token").and_then(Value::as_str).map(str::to_string),
-        expires_at: doc.get("expires_in").and_then(Value::as_u64).map(|s| super::now_ms() + s * 1000),
+        expires_at: expires_in.map(|s| now + s * 1000),
         scope: doc.get("scope").and_then(Value::as_str).map(str::to_string),
+        obtained_at: Some(now),
+        ..Default::default()
     })
 }
 
+/// Keep a credential: the keychain first, then the cache. Refused for a server that has been
+/// removed meanwhile, so a sign-in or refresh finishing late can't leave a credential behind
+/// for whatever is added next under that name.
 async fn store_cred(server_id: &str, cred: Cred) -> Result<(), String> {
+    if get(server_id).is_none() {
+        return Err("the server was removed".into());
+    }
     let id = server_id.to_string();
     let c = cred.clone();
     tokio::task::spawn_blocking(move || secrets::store(&id, &c)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
@@ -516,14 +568,18 @@ async fn store_cred(server_id: &str, cred: Cred) -> Result<(), String> {
 static REFRESHING: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Default::default);
 
 /// A usable access token for an OAuth server: the stored one, refreshed first when it is about to
-/// expire, or now when `force` (the server just refused it).
-pub async fn access_token(server: &ProxyServer, force: bool) -> Result<String, String> {
+/// expire, or now when the server just `refused` this token.
+pub async fn access_token(server: &ProxyServer, refused: Option<&str>) -> Result<String, String> {
     let turn = REFRESHING.lock().entry(server.id.clone()).or_default().clone();
     let _turn = turn.lock().await;
     // Read under the turn: a refresh that just finished has already stored its token.
     let cred = super::cached_or_stored_cred(&server.id).await?.ok_or("not signed in yet")?;
-    let due = cred.expires_at.is_some_and(|t| super::now_ms() + REFRESH_EARLY_MS >= t);
-    if !force && !due {
+    // Several calls refused together: the first one's refresh serves the rest.
+    let force = refused.is_some_and(|r| r == cred.access_token);
+    if refused.is_some() && !force {
+        return Ok(cred.access_token);
+    }
+    if !force && !refresh_due(&cred, super::now_ms()) {
         return Ok(cred.access_token);
     }
     let Some(refresh) = cred.refresh_token.clone() else {
@@ -534,14 +590,24 @@ pub async fn access_token(server: &ProxyServer, force: bool) -> Result<String, S
         };
     };
     let token_endpoint = plan_str(server, "token_endpoint").ok_or("no sign-in details stored")?;
-    let client_id = plan_str(server, "manual_client_id").or_else(|| plan_str(server, "client_id")).ok_or("no client registration stored")?;
+    // The client the refresh token was issued to, which travels with it.
+    let client_id = cred
+        .client_id
+        .clone()
+        .or_else(|| plan_str(server, "manual_client_id"))
+        .or_else(|| plan_str(server, "client_id"))
+        .ok_or("no client registration stored")?;
     let mut form = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh.clone()),
         ("client_id", client_id),
         ("resource", plan_str(server, "resource").unwrap_or_else(|| server.url.clone())),
     ];
-    if let Some(secret) = client_secret(&server.id).await {
+    let secret = match cred.client_secret.clone() {
+        Some(s) => Some(s),
+        None => manual_client_secret(&server.id).await,
+    };
+    if let Some(secret) = secret {
         form.push(("client_secret", secret));
     }
     match token_request(&token_endpoint, &form).await {
@@ -553,6 +619,8 @@ pub async fn access_token(server: &ProxyServer, force: bool) -> Result<String, S
             if next.scope.is_none() {
                 next.scope = cred.scope.clone();
             }
+            next.client_id = cred.client_id.clone();
+            next.client_secret = cred.client_secret.clone();
             let tok = next.access_token.clone();
             store_cred(&server.id, next).await?;
             log::info!("[mcp-proxy] {}: token refreshed", server.id);
@@ -560,6 +628,18 @@ pub async fn access_token(server: &ProxyServer, force: bool) -> Result<String, S
         }
         Err(e) => Err(format!("the sign-in could not be renewed ({e}); sign in again")),
     }
+}
+
+/// Is it time to refresh? `REFRESH_EARLY_MS` before expiry, but never more than half the
+/// token's life early: a token that lives under a minute would otherwise be refreshed on every
+/// use, queueing every call behind a token request.
+fn refresh_due(cred: &Cred, now: u64) -> bool {
+    let Some(expires) = cred.expires_at else { return false };
+    let early = match cred.obtained_at {
+        Some(got) => REFRESH_EARLY_MS.min(expires.saturating_sub(got) / 2),
+        None => REFRESH_EARLY_MS,
+    };
+    now + early >= expires
 }
 
 /// A 403 asked for more access: remember the scope so the next sign-in asks for it.
@@ -621,6 +701,32 @@ mod tests {
         // BASE64URL(SHA256(verifier)) without padding, computed independently with Python's
         // hashlib + base64.urlsafe_b64encode.
         assert_eq!(s256("dBjftJeZ4CVP-mJ92K9qBZFlC5qfk0Uvk8jFn5jT8wc"), "SL6jy0yV4Zbb4o-F_7dA13V9behyA7J5bLglqVGJRBc");
+    }
+
+    #[test]
+    fn metadata_must_be_about_this_server() {
+        let s = reqwest::Url::parse("https://mcp.linear.app/mcp").unwrap();
+        assert!(resource_matches(Some("https://mcp.linear.app/mcp"), &s));
+        assert!(resource_matches(Some("https://mcp.linear.app/mcp/"), &s));
+        assert!(resource_matches(Some("https://mcp.linear.app"), &s), "a root resource covers its paths (langsys.dev)");
+        assert!(resource_matches(None, &s));
+        assert!(!resource_matches(Some("https://evil.example/mcp"), &s));
+        assert!(!resource_matches(Some("https://mcp.linear.app/other"), &s));
+        assert!(!resource_matches(Some("https://mcp.linear.app/mc"), &s), "a prefix must end at a path segment");
+        assert!(!resource_matches(Some("http://mcp.linear.app/mcp"), &s), "another scheme is another origin");
+    }
+
+    #[test]
+    fn short_tokens_refresh_at_half_life_not_on_every_use() {
+        let c = |got: u64, exp: u64| Cred { access_token: "a".into(), obtained_at: Some(got), expires_at: Some(exp), ..Default::default() };
+        // A 6 s token: due from 3 s on, not at once.
+        assert!(!refresh_due(&c(0, 6_000), 1_000));
+        assert!(refresh_due(&c(0, 6_000), 3_000));
+        // An hour-long token: due a minute before expiry.
+        assert!(!refresh_due(&c(0, 3_600_000), 3_500_000));
+        assert!(refresh_due(&c(0, 3_600_000), 3_540_000));
+        // No expiry: never proactively.
+        assert!(!refresh_due(&Cred { access_token: "a".into(), ..Default::default() }, u64::MAX / 2));
     }
 
     #[test]

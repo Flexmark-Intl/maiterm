@@ -25,6 +25,17 @@ pub struct Cred {
     /// OAuth only: the scope the sign-in was granted, as the token response gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// OAuth only: when the access token was issued, in ms since the epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obtained_at: Option<u64>,
+    /// OAuth only: the client the tokens were issued to. A refresh token is bound to it, so it
+    /// travels with the tokens rather than being read from the server's config, which a later,
+    /// unfinished sign-in may have re-registered under another id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// OAuth only: that client's secret, when the server issued one at registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
 }
 
 impl std::fmt::Debug for Cred {
@@ -33,6 +44,8 @@ impl std::fmt::Debug for Cred {
             .field("access_token", &"<redacted>")
             .field("refresh_token", &self.refresh_token.as_ref().map(|_| "<redacted>"))
             .field("expires_at", &self.expires_at)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &self.client_secret.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -82,12 +95,13 @@ mod tests {
     #[test]
     fn a_cred_never_prints_its_tokens() {
         let c = Cred {
-            access_token: "abc123secret".into(),
-            refresh_token: Some("refresh456secret".into()),
+            access_token: "VALUE-A".into(),
+            refresh_token: Some("VALUE-R".into()),
             expires_at: Some(1),
-            scope: None,
+            client_secret: Some("VALUE-C".into()),
+            ..Default::default()
         };
         let shown = format!("{c:?}");
-        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains("VALUE-"), "{shown}");
     }
 }

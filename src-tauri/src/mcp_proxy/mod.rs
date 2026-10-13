@@ -279,7 +279,7 @@ fn set_status(id: &str, next: Status) {
 async fn bearer(server: &ProxyServer) -> Result<Option<String>, String> {
     match server.auth.as_str() {
         AUTH_NONE => Ok(None),
-        AUTH_OAUTH => oauth::access_token(server, false).await.map(Some),
+        AUTH_OAUTH => oauth::access_token(server, None).await.map(Some),
         _ => cached_or_stored_cred(&server.id).await?.map(|c| Some(c.access_token)).ok_or_else(|| "no token stored".into()),
     }
 }
@@ -360,7 +360,7 @@ pub async fn refresh(id: &str) -> Result<bool, String> {
     let _turn = turn.lock().await;
     // Read after waiting: the comparison below must be against the newest stored list.
     let server = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
-    let auth = match bearer(&server).await {
+    let mut auth = match bearer(&server).await {
         Ok(a) => a,
         Err(why) => {
             set_status(id, needs_sign_in(&server, &why));
@@ -368,13 +368,29 @@ pub async fn refresh(id: &str) -> Result<bool, String> {
         }
     };
     let up = Upstream::new(&server.url);
-    let result = async {
-        let session = up.initialize(auth.as_deref()).await?;
-        let tools = up.list_tools(auth.as_deref(), &session).await;
-        up.end(auth.as_deref(), &session).await;
-        Ok::<_, UpErr>((session, tools?))
+    let read = |auth: Option<String>| {
+        let up = &up;
+        async move {
+            let session = up.initialize(auth.as_deref()).await?;
+            let tools = up.list_tools(auth.as_deref(), &session).await;
+            up.end(auth.as_deref(), &session).await;
+            Ok::<_, UpErr>((session, tools?))
+        }
+    };
+    let mut result = read(auth.clone()).await;
+    // A refused OAuth token is refreshed once and the read tried again, as a call would be.
+    if matches!(result, Err(UpErr::Unauthorized { .. })) && server.auth == AUTH_OAUTH {
+        match oauth::access_token(&server, auth.as_deref()).await {
+            Ok(fresh) => {
+                auth = Some(fresh);
+                result = read(auth.clone()).await;
+            }
+            Err(why) => {
+                set_status(id, needs_sign_in(&server, &why));
+                return Err(why);
+            }
+        }
     }
-    .await;
     let (session, tools) = match result {
         Ok(v) => v,
         Err(e) => {
@@ -460,9 +476,14 @@ async fn watch(id: String) {
             }
         }
         up.end(auth.as_deref(), &session).await;
-        // A stream that dies at once would otherwise reconnect in a tight loop.
+        // A stream that closes at once is a server that offers none in practice (mcp.svelte.dev
+        // answers the GET and ends it): treat it as streamless and re-read hourly. Reconnecting
+        // sooner re-read its whole list every minute. A stream that lived a while and dropped
+        // reconnects after a pause, and the reconnect's read catches what it missed.
         if opened.elapsed() < Duration::from_secs(60) {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(REFRESH_EVERY).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(30)).await;
         }
     }
 }
@@ -651,15 +672,28 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
     // refused an OAuth token that a refresh then replaced (401). Nothing else is retried, since
     // a tool call need not be idempotent.
     for attempt in 0..2 {
-        let session = {
+        let opened = {
             let mut slot = down.upstream.lock().await;
-            if slot.is_none() {
-                match up.initialize(auth.as_deref()).await {
-                    Ok(s) => *slot = Some(s),
-                    Err(e) => return fail(rid, status_for(server, &e)),
-                }
+            match slot.clone() {
+                Some(s) => Ok(s),
+                None => up.initialize(auth.as_deref()).await.inspect(|s| *slot = Some(s.clone())),
             }
-            slot.clone().expect("set above")
+        };
+        let session = match opened {
+            Ok(s) => s,
+            // A server that wants the token on `initialize` refuses an expired one there, before
+            // any call: refresh and open the session again.
+            Err(UpErr::Unauthorized { .. }) if attempt == 0 && server.auth == AUTH_OAUTH => match oauth::access_token(server, auth.as_deref()).await {
+                Ok(fresh) => {
+                    auth = Some(fresh);
+                    continue;
+                }
+                Err(why) => {
+                    set_calls_refused(&server.id, true);
+                    return fail(rid, needs_sign_in(server, &why));
+                }
+            },
+            Err(e) => return fail(rid, status_for(server, &e)),
         };
         match up.call_tool(auth.as_deref(), &session, params.clone()).await {
             Ok((result, list_changed)) => {
@@ -681,7 +715,7 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
                     *slot = None;
                 }
             }
-            Err(UpErr::Unauthorized { .. }) if attempt == 0 && server.auth == AUTH_OAUTH => match oauth::access_token(server, true).await {
+            Err(UpErr::Unauthorized { .. }) if attempt == 0 && server.auth == AUTH_OAUTH => match oauth::access_token(server, auth.as_deref()).await {
                 Ok(fresh) => auth = Some(fresh),
                 Err(why) => {
                     set_calls_refused(&server.id, true);
@@ -787,6 +821,12 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
     if get(id).is_some() {
         return Err(format!("maiTerm already has an MCP server named {id}"));
     }
+    // Nothing of an earlier server under this name may carry over: no cached credential, and
+    // no keychain item a late sign-in or refresh left behind.
+    LIVE.lock().remove(id);
+    for key in [id.to_string(), format!("{id}#client")] {
+        let _ = secrets::delete(&key);
+    }
     let mut oauth_plan = None;
     if auth == AUTH_TOKEN {
         let tok = opts.token.as_deref().map(str::trim).filter(|t| !t.is_empty()).ok_or("a token is required")?;
@@ -827,6 +867,7 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
 pub fn remove(id: &str) -> Result<(), String> {
     let server_url_for_cleanup = get(id).ok_or_else(|| format!("no MCP server named {id}"))?.url;
     stop_watcher(id);
+    oauth::forget(id);
     let live = LIVE.lock().remove(id);
     SERVERS.write().retain(|s| s.id != id);
     save()?;
