@@ -589,7 +589,7 @@ pub fn render_codex_remote_artifacts(remote_port: u16, auth: &str) -> (String, S
 
 /// Read a TOML file into a `DocumentMut`, or return a fresh empty doc if absent.
 #[allow(dead_code)]
-fn read_document(path: &Path) -> Result<DocumentMut, String> {
+pub(crate) fn read_document(path: &Path) -> Result<DocumentMut, String> {
     if !path.exists() {
         return Ok(DocumentMut::new());
     }
@@ -617,7 +617,7 @@ fn read_json(path: &Path) -> Result<Option<serde_json::Value>, String> {
 
 /// Atomic write: write to a temp file, then rename over the target.
 #[allow(dead_code)]
-fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
     let tmp = path.with_extension("maiterm-tmp");
     fs::write(&tmp, contents).map_err(|e| format!("write tmp {:?}: {}", tmp, e))?;
     fs::rename(&tmp, path).map_err(|e| {

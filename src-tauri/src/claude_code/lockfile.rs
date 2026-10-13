@@ -83,7 +83,7 @@ fn ide_lock_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("ide"))
 }
 
-fn claude_settings_path() -> Option<PathBuf> {
+pub(crate) fn claude_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude.json"))
 }
 
@@ -225,7 +225,7 @@ fn write_mcp_settings(port: u16, auth: &str) -> Result<(), String> {
 /// started", and tabs already open pick it up on their next session.
 ///
 /// Cheap when nothing moved: `merge_json` compares the rendered result and skips the write.
-fn propagate_to_account_roots() {
+pub(crate) fn propagate_to_account_roots() {
     let Some(home) = dirs::home_dir() else { return };
     // Off the async executor. One caller is the 30s re-assert, which runs on a tokio task, and
     // this is N × (200KB read + parse + render + write) of blocking I/O — the repo's rule since

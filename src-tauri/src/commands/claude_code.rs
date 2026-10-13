@@ -62,4 +62,6 @@ pub fn refresh_agent_integrations(state: State<'_, Arc<AppState>>) {
             r.unregister(port, &auth);
         }
     }
+    // Proxied servers follow each runtime's integration switch.
+    crate::mcp_proxy::entries::sync(port, &auth, &prefs);
 }

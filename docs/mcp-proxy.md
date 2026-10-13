@@ -68,8 +68,8 @@ This is what keeps discovery identical to a native install:
 - **A failing upstream affects only its own entry.**
 
 Each entry carries `x-claude-code-ide-authorization` (or Codex's equivalent) and `x-maiterm-tab`,
-exactly like the `maiterm` entry. A marker header `x-maiterm-proxy: <id>` is how maiTerm knows the
-entry is its own when it rewrites or removes it.
+exactly like the `maiterm` entry. A marker header `x-maiterm-proxy: <data slug>/<id>` is how
+maiTerm knows the entry is its own when it rewrites or removes it (§6).
 
 **Name collisions.** If a runtime already has a native entry under that name, maiTerm doesn't
 overwrite it. The human picks another name, or chooses **Move to maiTerm**, which removes the
@@ -190,8 +190,19 @@ so that section changes with it.
   - URL `http://127.0.0.1:${MAITERM_PORT}/mcp/x/<id>`;
   - header `${MAITERM_AUTH}`.
   So every maiTerm writes identical bytes, and each user's agents reach their own maiTerm.
-- **Removal.** Entries are removed when the server is removed or disabled. They stay across
-  restarts: like `maiterm` itself, an entry whose maiTerm isn't running just fails to connect.
+- **When they are written.**
+  - At startup, before any tab spawns.
+  - Re-asserted by the 30 s drift loop. That loop also checks each managed account root,
+    because a running `claude` saves its in-memory copy of the file back over the root's.
+  - Rewritten when a server is added, removed, enabled or disabled, or when a runtime's
+    integration is switched.
+  - Removed at exit, like `maiterm` itself: the port changes every launch, and an entry dialling
+    a dead port is a failed server in every session.
+- **Which maiTerm owns an entry.** The marker header's value is `<data slug>/<id>`
+  (`com.aiterm.app/linear`). A dev build names its entries `<id>-dev`. The installed app and a
+  dev build share these files, and each leaves the other's entries alone: an entry marked by
+  another flavor counts as a collision, never as stale.
+- `entries.rs` is the code.
 
 ## 7. Adding a server
 

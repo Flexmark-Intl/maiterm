@@ -18,6 +18,7 @@
 //! frontend never writes it back whole, so nothing can drop a server by saving a stale copy.
 //! Credentials are in the keychain (`secrets`), never in that file.
 
+pub mod entries;
 pub mod secrets;
 pub mod upstream;
 
@@ -136,12 +137,48 @@ struct Live {
     streams: Vec<mpsc::UnboundedSender<String>>,
     /// The credential, read from the keychain once rather than on every call.
     cred: Option<secrets::Cred>,
+    /// The upstream refused a tool call (401/403) and no call has succeeded since. Some servers
+    /// (langsys.dev) list their tools to anyone and refuse only calls, so a good `tools/list`
+    /// must not report the server healthy again while this holds.
+    calls_refused: bool,
+}
+
+/// One list read at a time per server, so an older read can't land after a newer one.
+static REFRESHING: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Default::default);
+
+fn set_calls_refused(id: &str, refused: bool) {
+    LIVE.lock().entry(id.to_string()).or_default().calls_refused = refused;
 }
 
 static SERVERS: LazyLock<RwLock<Vec<ProxyServer>>> = LazyLock::new(Default::default);
 static LIVE: LazyLock<Mutex<HashMap<String, Live>>> = LazyLock::new(Default::default);
 static SAVE: Mutex<()> = Mutex::new(());
 static APP: OnceLock<(AppHandle, Arc<AppState>)> = OnceLock::new();
+static LOADED: OnceLock<()> = OnceLock::new();
+/// What the last `entries::sync` found: names a native entry holds.
+static COLLISIONS: LazyLock<Mutex<entries::Collisions>> = LazyLock::new(Default::default);
+
+/// Read the configured servers once. The entry writer runs from the MCP server's synchronous
+/// startup, before `start`, and needs them.
+pub fn ensure_loaded() {
+    LOADED.get_or_init(|| *SERVERS.write() = load());
+}
+
+/// Rewrite the agents' entries after a change, off the calling thread (file I/O).
+fn sync_entries() {
+    let Some((_, state)) = APP.get() else { return };
+    let (Some(port), Some(auth)) = (*state.mcp_port.read(), state.mcp_auth.read().clone()) else { return };
+    let prefs = state.app_data.read().preferences.clone();
+    let run = move || {
+        entries::sync(port, &auth, &prefs);
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => {
+            tokio::task::spawn_blocking(run);
+        }
+        Err(_) => run(),
+    }
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -306,6 +343,9 @@ fn call_failure_text(server: &ProxyServer, st: &Status) -> String {
 /// Read the server's tool list now. Returns whether it changed. A changed list is persisted and
 /// announced; a failure leaves the stored list as it was.
 pub async fn refresh(id: &str) -> Result<bool, String> {
+    let turn = REFRESHING.lock().entry(id.to_string()).or_default().clone();
+    let _turn = turn.lock().await;
+    // Read after waiting: the comparison below must be against the newest stored list.
     let server = get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
     let auth = match bearer(&server).await {
         Ok(a) => a,
@@ -338,7 +378,9 @@ pub async fn refresh(id: &str) -> Result<bool, String> {
     let changed = !server.catalog.as_ref().is_some_and(|c| c.same_as(&next));
     let count = next.tools.len();
     update(id, |s| s.catalog = Some(next))?;
-    set_status(id, Status::new("connected", format!("{count} tools")));
+    if !LIVE.lock().get(id).is_some_and(|l| l.calls_refused) {
+        set_status(id, Status::new("connected", format!("{count} tools")));
+    }
     if changed {
         log::info!("[mcp-proxy] {id}: tool list {} ({count} tools)", if server.catalog.is_some() { "changed" } else { "read" });
         announce_list_changed(id);
@@ -556,7 +598,11 @@ pub async fn downstream_post(id: &str, sid: Option<&str>, tab: Option<&str>, bod
             let mut catalog = server.catalog.clone();
             if catalog.is_none() {
                 // Never read yet (just added, or the upstream has been down since): try once.
-                let _ = tokio::time::timeout(Duration::from_secs(15), refresh(id)).await;
+                // As its own task, so a read that outlasts the wait still finishes (and ends its
+                // upstream session) rather than being dropped mid-way.
+                let owned = id.to_string();
+                let read = tokio::spawn(async move { refresh(&owned).await });
+                let _ = tokio::time::timeout(Duration::from_secs(15), read).await;
                 catalog = get(id).and_then(|s| s.catalog);
             }
             DownReply::result(rid, json!({ "tools": catalog.map(|c| c.tools).unwrap_or_default() }))
@@ -600,6 +646,7 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
         };
         match up.call_tool(auth.as_deref(), &session, params.clone()).await {
             Ok((result, list_changed)) => {
+                set_calls_refused(&server.id, false);
                 if status(&server.id).state != "connected" {
                     set_status(&server.id, Status::new("connected", ""));
                 }
@@ -610,14 +657,20 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
                 return DownReply::result(rid, result);
             }
             Err(UpErr::SessionExpired) if attempt == 0 => {
-                *down.upstream.lock().await = None;
+                // Only the session that expired: a concurrent call on this downstream session
+                // may already have opened its replacement.
+                let mut slot = down.upstream.lock().await;
+                if slot.as_ref().is_some_and(|s| s.id == session.id) {
+                    *slot = None;
+                }
             }
             // The server's own JSON-RPC error goes back as it was sent: an unknown tool, bad
             // arguments. It says nothing about the server's health.
             Err(UpErr::Rpc { code, message, data }) => return DownReply::error(rid, code, message, data),
             Err(e) => {
-                if matches!(e, UpErr::Unauthorized { .. }) {
+                if matches!(e, UpErr::Unauthorized { .. } | UpErr::Forbidden { .. }) {
                     forget_cached_cred(&server.id);
+                    set_calls_refused(&server.id, true);
                 }
                 return fail(rid, status_for(server, &e));
             }
@@ -651,9 +704,8 @@ pub fn downstream_end(id: &str, sid: &str) {
 /// Load the configured servers and start keeping their lists current. Called once at startup.
 pub fn start(app: AppHandle, state: Arc<AppState>) {
     let _ = APP.set((app, state));
-    let servers = load();
-    let enabled: Vec<String> = servers.iter().filter(|s| s.enabled).map(|s| s.id.clone()).collect();
-    *SERVERS.write() = servers;
+    ensure_loaded();
+    let enabled: Vec<String> = SERVERS.read().iter().filter(|s| s.enabled).map(|s| s.id.clone()).collect();
     for id in enabled {
         start_watcher(&id);
     }
@@ -711,22 +763,38 @@ pub fn add(id: &str, url: &str, auth: &str, token: Option<&str>, added_by: &str)
     save()?;
     log::info!("[mcp-proxy] added {id} ({auth}) by {added_by}");
     start_watcher(id);
+    sync_entries();
     Ok(server)
 }
 
 pub fn remove(id: &str) -> Result<(), String> {
-    get(id).ok_or_else(|| format!("no MCP server named {id}"))?;
+    let server_url_for_cleanup = get(id).ok_or_else(|| format!("no MCP server named {id}"))?.url;
     stop_watcher(id);
     let live = LIVE.lock().remove(id);
     SERVERS.write().retain(|s| s.id != id);
     save()?;
+    sync_entries();
     if let Err(e) = secrets::delete(id) {
         log::warn!("[mcp-proxy] {id}: removed, but its keychain item stays: {e}");
     }
-    // Agents still connected learn the list is gone the same way they learn of any change.
+    // Agents still connected learn the list is gone the same way they learn of any change,
+    // and the upstream sessions they held are ended.
     if let Some(l) = live {
         for tx in l.streams {
             let _ = tx.send(json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }).to_string());
+        }
+        let auth = l.cred.map(|c| c.access_token);
+        let url = server_url_for_cleanup.clone();
+        let downs: Vec<Arc<DownSession>> = l.down.into_values().collect();
+        if !downs.is_empty() && tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let up = Upstream::new(&url);
+                for d in downs {
+                    if let Some(s) = d.upstream.lock().await.take() {
+                        up.end(auth.as_deref(), &s).await;
+                    }
+                }
+            });
         }
     }
     log::info!("[mcp-proxy] removed {id}");
@@ -740,7 +808,11 @@ pub fn set_token(id: &str, token: &str) -> Result<(), String> {
     }
     secrets::store(id, &secrets::Cred { access_token: token.trim().to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
     forget_cached_cred(id);
-    start_watcher(id);
+    set_calls_refused(id, false);
+    // A disabled server stays quiet: its watcher starts when it is switched back on.
+    if server.enabled {
+        start_watcher(id);
+    }
     Ok(())
 }
 
@@ -751,6 +823,7 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<ProxyServer, String> {
     } else {
         stop_watcher(id);
     }
+    sync_entries();
     announce_list_changed(id);
     Ok(s)
 }
@@ -776,9 +849,26 @@ pub struct ServerView {
     pub fetched_at: Option<u64>,
     pub added_at: u64,
     pub added_by: String,
+    /// The entry name agents see (`<id>-dev` from a dev build).
+    pub entry_name: String,
+    /// Runtimes where a native entry already holds that name, so ours isn't written there.
+    pub collisions: Vec<String>,
+    /// Native entries reaching the same URL ("Claude: linear-native"): every tool twice.
+    pub duplicates: Vec<String>,
 }
 
 pub fn view(s: &ProxyServer) -> ServerView {
+    let collisions = {
+        let c = COLLISIONS.lock();
+        let mut v = Vec::new();
+        if c.claude.contains(&s.id) {
+            v.push("Claude".to_string());
+        }
+        if c.codex.contains(&s.id) {
+            v.push("Codex".to_string());
+        }
+        v
+    };
     ServerView {
         id: s.id.clone(),
         url: s.url.clone(),
@@ -794,37 +884,57 @@ pub fn view(s: &ProxyServer) -> ServerView {
         fetched_at: s.catalog.as_ref().map(|c| c.fetched_at),
         added_at: s.added_at,
         added_by: s.added_by.clone(),
+        entry_name: entries::entry_name(&s.id),
+        collisions,
+        duplicates: entries::native_duplicates(&s.url),
     }
 }
 
-#[tauri::command]
-pub fn mcp_servers_list() -> Vec<ServerView> {
-    all().iter().map(view).collect()
+// Async, and the keychain calls on a blocking thread: a keychain access prompt (routine on dev
+// builds, whose signature changes every rebuild) must not hold up the UI or an async worker.
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn mcp_server_add(id: String, url: String, auth: String, token: Option<String>) -> Result<ServerView, String> {
-    add(&id, &url, &auth, token.as_deref(), "human").map(|s| view(&s))
+pub async fn mcp_servers_list() -> Vec<ServerView> {
+    blocking(|| Ok(all().iter().map(view).collect())).await.unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn mcp_server_remove(id: String) -> Result<(), String> {
-    remove(&id)
+pub async fn mcp_server_add(id: String, url: String, auth: String, token: Option<String>) -> Result<ServerView, String> {
+    blocking(move || add(&id, &url, &auth, token.as_deref(), "human").map(|s| view(&s))).await
 }
 
 #[tauri::command]
-pub fn mcp_server_set_token(id: String, token: String) -> Result<(), String> {
-    set_token(&id, &token)
+pub async fn mcp_server_remove(id: String) -> Result<(), String> {
+    blocking(move || remove(&id)).await
 }
 
 #[tauri::command]
-pub fn mcp_server_set_enabled(id: String, enabled: bool) -> Result<ServerView, String> {
+pub async fn mcp_server_set_token(id: String, token: String) -> Result<(), String> {
+    blocking(move || set_token(&id, &token)).await
+}
+
+#[tauri::command]
+pub async fn mcp_server_set_enabled(id: String, enabled: bool) -> Result<ServerView, String> {
     set_enabled(&id, enabled).map(|s| view(&s))
 }
 
 #[tauri::command]
-pub fn mcp_server_set_workspaces(id: String, workspaces: Vec<String>) -> Result<ServerView, String> {
+pub async fn mcp_server_set_workspaces(id: String, workspaces: Vec<String>) -> Result<ServerView, String> {
     set_workspaces(&id, workspaces).map(|s| view(&s))
+}
+
+/// **Move to maiTerm**: remove the human's native entries for this server (same name or same
+/// URL, in Claude and Codex), then write ours. Only ever from the human's click.
+#[tauri::command]
+pub async fn mcp_server_adopt_native(id: String) -> Result<Vec<String>, String> {
+    let server = get(&id).ok_or_else(|| format!("no MCP server named {id}"))?;
+    let removed = blocking(move || entries::adopt_native(&server.id, &server.url)).await?;
+    sync_entries();
+    Ok(removed)
 }
 
 #[tauri::command]

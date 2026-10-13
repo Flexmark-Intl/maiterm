@@ -841,6 +841,7 @@ pub fn run() {
             mcp_proxy::mcp_server_set_enabled,
             mcp_proxy::mcp_server_set_workspaces,
             mcp_proxy::mcp_server_refresh,
+            mcp_proxy::mcp_server_adopt_native,
             commands::window::move_tab_to_window,
             commands::window::set_window_name,
             commands::window::save_window_geometry,

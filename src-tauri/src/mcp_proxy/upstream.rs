@@ -118,7 +118,7 @@ impl Upstream {
                 .body(msg.to_string())
                 .send()
                 .await
-                .map_err(|e| UpErr::Net(net_detail(&e)))?;
+                .map_err(|e| UpErr::Net(net_detail(e)))?;
             let status = resp.status().as_u16();
             let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
             let session_id = header("mcp-session-id");
@@ -139,7 +139,7 @@ impl Upstream {
                 let (response, notifications) = read_stream_until(resp, want.as_ref()).await?;
                 Ok(Answer { response, notifications, session_id })
             } else {
-                let body = resp.text().await.map_err(|e| UpErr::Net(net_detail(&e)))?;
+                let body = resp.text().await.map_err(|e| UpErr::Net(net_detail(e)))?;
                 if body.trim().is_empty() {
                     return Ok(Answer { response: None, notifications: vec![], session_id });
                 }
@@ -223,7 +223,7 @@ impl Upstream {
         let resp = tokio::time::timeout(QUICK, self.request(reqwest::Method::GET, auth, Some(session)).header("accept", "text/event-stream").send())
             .await
             .map_err(|_| UpErr::Net("no answer to the stream request".into()))?
-            .map_err(|e| UpErr::Net(net_detail(&e)))?;
+            .map_err(|e| UpErr::Net(net_detail(e)))?;
         let challenge = resp.headers().get("www-authenticate").and_then(|v| v.to_str().ok()).map(str::to_string);
         match resp.status().as_u16() {
             200 => Ok(Some(resp)),
@@ -249,7 +249,7 @@ pub async fn read_stream(mut resp: reqwest::Response, mut on_message: impl FnMut
                 }
             }
             Ok(None) => return Ok(()),
-            Err(e) => return Err(UpErr::Net(net_detail(&e))),
+            Err(e) => return Err(UpErr::Net(net_detail(e))),
         }
     }
 }
@@ -264,7 +264,7 @@ async fn read_stream_until(mut resp: reqwest::Response, want: Option<&Value>) ->
     let mut parser = SseParser::default();
     let mut notifications = Vec::new();
     loop {
-        let chunk = resp.chunk().await.map_err(|e| UpErr::Net(net_detail(&e)))?;
+        let chunk = resp.chunk().await.map_err(|e| UpErr::Net(net_detail(e)))?;
         let Some(bytes) = chunk else {
             return Err(UpErr::Protocol("the stream ended without a response".into()));
         };
@@ -297,14 +297,16 @@ fn next_id() -> Value {
     json!(N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
-/// reqwest's own message, which never contains a header value.
-fn net_detail(e: &reqwest::Error) -> String {
+/// reqwest's message without the URL. Its `Display` appends the full URL, and a server URL can
+/// carry a key (`…/s/<secret>/mcp`, `?api_key=`); this text reaches the log, the frontend and
+/// the agent's tool result.
+fn net_detail(e: reqwest::Error) -> String {
     if e.is_timeout() {
         "timed out".into()
     } else if e.is_connect() {
         "could not connect".into()
     } else {
-        e.to_string()
+        e.without_url().to_string()
     }
 }
 

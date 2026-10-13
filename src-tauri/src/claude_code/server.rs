@@ -351,6 +351,9 @@ pub fn prepare_server(state: &Arc<AppState>) -> Option<ServerSetup> {
     for r in registrar::enabled_registrars(&prefs) {
         r.install(port, &auth, &workspace_folders, &prefs);
     }
+    // Proxied MCP servers' entries name this port too, so they are written before any tab
+    // spawns as well (docs/mcp-proxy.md §6).
+    crate::mcp_proxy::entries::sync(port, &auth, &prefs);
 
     log::info!("Claude Code IDE server bound on http://127.0.0.1:{}", port);
 
@@ -395,6 +398,8 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
                     for r in registrar::enabled_registrars(&prefs) {
                         r.reassert_if_drifted(reassert_port, &reassert_auth, &prefs);
                     }
+                    let (port, auth) = (reassert_port, reassert_auth.clone());
+                    let _ = tokio::task::spawn_blocking(move || crate::mcp_proxy::entries::sync(port, &auth, &prefs)).await;
                 }
                 res = reassert_shutdown.changed() => {
                     if res.is_err() || *reassert_shutdown.borrow() {

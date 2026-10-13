@@ -91,6 +91,7 @@ pub fn run_shutdown_cleanup(state: &Arc<AppState>) {
         for r in crate::claude_code::registrar::all_registrars() {
             r.unregister(port, &auth);
         }
+        crate::mcp_proxy::entries::remove_all();
     }
 
     // Kill all SSH MCP tunnels
