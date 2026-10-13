@@ -2328,7 +2328,9 @@ async fn proxy_get_handler(State(srv): State<ServerState>, Path(id): Path<String
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Some(rx) = crate::mcp_proxy::downstream_stream(&id) else {
-        return StatusCode::NOT_FOUND.into_response();
+        // A name this maiTerm doesn't serve answers as an empty server (`not_served`), which
+        // has no stream to offer: 405, as the spec allows, rather than a failure.
+        return if crate::mcp_proxy::valid_id(&id).is_ok() { StatusCode::METHOD_NOT_ALLOWED } else { StatusCode::NOT_FOUND }.into_response();
     };
     // Keepalive comments while idle, as on /sse: an ssh tunnel or the client itself would
     // otherwise call a silent stream dead.

@@ -435,6 +435,31 @@ function buildSetupScript(
   // Escape for single-quoted shell string
   const escapedMcpEntry = mcpEntry.replace(/'/g, "'\\''");
 
+  // Proxied MCP servers (docs/mcp-proxy.md §6), placeholders like the entry above. Merged by
+  // name, never swept: the account may be shared with other people's maiTerms, whose entries
+  // this one doesn't know. A name already held by an entry without the marker is the human's
+  // own server and is left alone; a removed server's entry goes only when its marker matches.
+  const escapedProxy = JSON.stringify(scripts.mcp_proxy ?? { set: {}, gone: [] }).replace(/'/g, "'\\''");
+  const pythonProxy =
+    'import json,sys,os\n' +
+    'x=json.load(sys.stdin)\n' +
+    'p=os.path.expanduser("~/.claude.json")\n' +
+    'd=json.load(open(p)) if os.path.exists(p) else {}\n' +
+    'm=d.setdefault("mcpServers",{})\n' +
+    'mk=lambda e:(e.get("headers") or {}).get("x-maiterm-proxy") if isinstance(e,dict) else None\n' +
+    'n0=json.dumps(m,sort_keys=True)\n' +
+    'for n,e in x["set"].items():\n' +
+    ' c=m.get(n)\n' +
+    ' if c is None or mk(c):m[n]=e\n' +
+    'for g in x["gone"]:\n' +
+    ' c=m.get(g["name"])\n' +
+    ' if c is not None and mk(c)==g["marker"]:m.pop(g["name"])\n' +
+    'if json.dumps(m,sort_keys=True)!=n0:open(p,"w").write(json.dumps(d,indent=2))';
+  const jqProxy =
+    '.mcpServers |= (. // {})' +
+    ' | reduce ($x.set|to_entries[]) as $w (.; if (.mcpServers[$w.key] == null) or (.mcpServers[$w.key].headers["x-maiterm-proxy"] != null) then .mcpServers[$w.key] = $w.value else . end)' +
+    ' | reduce $x.gone[] as $g (.; if .mcpServers[$g.name].headers["x-maiterm-proxy"] == $g.marker then del(.mcpServers[$g.name]) else . end)';
+
   // ── Hooks registration ──
   // Build hooks data for ~/.claude/settings.json on the remote. Like the MCP entry above,
   // this file is a per-ACCOUNT singleton, so every hook here is a COMMAND hook reading
@@ -622,6 +647,7 @@ function buildSetupScript(
     // Store JSON in shell variables to avoid nested quote hell
     `__lock='${escapedLockContent}'`,
     `__mcp='${escapedMcpEntry}'`,
+    `__proxy='${escapedProxy}'`,
     `__hooks='${escapedHooksData}'`,
     // Stale lockfile cleanup — uses curl to verify the server responds with HTTP.
     // /dev/tcp is unreliable with ControlMaster: dead tunnels appear alive because
@@ -648,9 +674,11 @@ function buildSetupScript(
     'if command -v python3 >/dev/null 2>&1; then',
     'printf \'%s\' "$__mcp" | python3 -c \'import json,sys,os; e=json.load(sys.stdin); p=os.path.expanduser("~/.claude.json"); d=json.load(open(p)) if os.path.exists(p) else {}; m=d.setdefault("mcpServers",{}); m["maiterm"]=e; m.pop("aiterm",None); open(p,"w").write(json.dumps(d,indent=2))\'',
     "printf '%s' \"$__hooks\" | python3 -c '" + pythonHooks + "'",
+    "printf '%s' \"$__proxy\" | python3 -c '" + pythonProxy + "'",
     'elif command -v jq >/dev/null 2>&1; then',
     '[ -f ~/.claude.json ] || echo \'{}\' > ~/.claude.json',
     'jq --argjson entry "$__mcp" \'.mcpServers.maiterm = $entry | del(.mcpServers.aiterm)\' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json',
+    "jq --argjson x \"$__proxy\" '" + jqProxy + "' ~/.claude.json > ~/.claude.json.tmp && mv ~/.claude.json.tmp ~/.claude.json",
     'else',
     '[ -f ~/.claude.json ] || echo \'{}\' > ~/.claude.json',
     'fi',

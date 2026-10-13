@@ -241,6 +241,45 @@ pub fn sync(port: u16, auth: &str, prefs: &Preferences) -> Collisions {
     found
 }
 
+/// What the ssh-host setup writes into the remote account's `~/.claude.json` (docs/mcp-proxy.md
+/// §6): `set`, entries by name, and `gone`, names to delete if they still carry the marker shown.
+///
+/// Every value is a placeholder the remote agent expands from its own shell, exactly as for the
+/// remote `maiterm` entry: the account may be shared by several of this human's tabs, by other
+/// people's maiTerms, and by both flavors, so the bytes must be the same from every writer.
+/// That is also why the remote side only ever ADDS by name and deletes only by tombstone: an
+/// entry this maiTerm doesn't know may be someone else's, and one it no longer serves answers
+/// as an empty server (`not_served`) rather than failing. A native entry under a name is never
+/// overwritten there either (the setup script checks the marker before writing).
+pub fn remote() -> Value {
+    super::ensure_loaded();
+    let servers = super::all();
+    let set: serde_json::Map<String, Value> = servers
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| {
+            let entry = json!({
+                "type": "http",
+                "url": format!("http://127.0.0.1:${{MAITERM_PORT}}/mcp/x/{}", s.id),
+                "headers": {
+                    "x-claude-code-ide-authorization": "${MAITERM_AUTH}",
+                    "x-maiterm-tab": "${MAITERM_TAB_ID}",
+                    MARKER: marker_value(&s.id),
+                }
+            });
+            (entry_name(&s.id), entry)
+        })
+        .collect();
+    let gone: Vec<Value> = super::removed()
+        .iter()
+        .map(|r| r.id.clone())
+        .chain(servers.iter().filter(|s| !s.enabled).map(|s| s.id.clone()))
+        .filter(|id| !servers.iter().any(|s| s.enabled && &s.id == id))
+        .map(|id| json!({ "name": entry_name(&id), "marker": marker_value(&id) }))
+        .collect();
+    json!({ "set": set, "gone": gone })
+}
+
 /// Does any managed Claude account root lack an entry we wrote, or hold one we removed?
 /// Read-only; the push itself is `propagate_to_account_roots`.
 fn roots_drifted(wanted: &[(String, Value)], collisions: &[String]) -> bool {

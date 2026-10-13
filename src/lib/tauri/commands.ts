@@ -1678,6 +1678,9 @@ export interface MaitermSkillScripts {
   statusline_command: string;
   /** The maiterm-tab mod's files: [path inside its folder, contents]. */
   claude_mod: [string, string][];
+  /** Proxied MCP servers' remote entries (docs/mcp-proxy.md §6): written by name, deleted only
+   *  by a matching marker. */
+  mcp_proxy: { set: Record<string, unknown>; gone: { name: string; marker: string }[] };
 }
 
 export async function startSshTunnel(sshArgs: string, hostKey: string, tabId: string, localPort: number): Promise<SshTunnelInfo> {

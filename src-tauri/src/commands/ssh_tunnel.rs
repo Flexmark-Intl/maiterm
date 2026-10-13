@@ -936,11 +936,15 @@ pub struct MaitermSkillScripts {
     /// The maiterm-tab mod's files, (path inside its folder, contents), for the remote copy
     /// in `~/.maiterm/claude-mod/maiterm-tab` (claude_code/claude_mod.rs).
     pub claude_mod: Vec<(String, String)>,
+    /// Proxied MCP servers' remote entries: `{ set: {name: entry}, gone: [{name, marker}] }`
+    /// (mcp_proxy::entries::remote, docs/mcp-proxy.md §6).
+    pub mcp_proxy: serde_json::Value,
 }
 
 #[tauri::command]
 pub fn get_maiterm_skill_scripts() -> MaitermSkillScripts {
     MaitermSkillScripts {
+        mcp_proxy: crate::mcp_proxy::entries::remote(),
         skill_md: crate::claude_code::lockfile::MAITERM_SKILL_MD.to_string(),
         setup_statusline: crate::claude_code::lockfile::STATUSLINE_SETUP_SCRIPT.to_string(),
         statusline_command: crate::claude_code::lockfile::STATUSLINE_PAYLOAD_SCRIPT.to_string(),

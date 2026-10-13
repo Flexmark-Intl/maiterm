@@ -304,6 +304,8 @@ pub async fn probe(server_url: &str) -> Result<Probe, String> {
 
 struct Pending {
     server_id: String,
+    /// Which server of that name the sign-in is for (`ProxyServer::added_at`).
+    server_added_at: u64,
     verifier: String,
     redirect_uri: String,
     token_endpoint: String,
@@ -430,7 +432,7 @@ pub async fn begin(server_id: &str) -> Result<String, String> {
     let now = super::now_ms();
     let mut pending = PENDING.lock();
     pending.retain(|_, p| now.saturating_sub(p.created) < PENDING_TTL_MS && p.server_id != server_id);
-    pending.insert(state, Pending { server_id: server_id.to_string(), verifier, redirect_uri, token_endpoint, client_id, client_secret, fresh_registration, resource, created: now });
+    pending.insert(state, Pending { server_id: server_id.to_string(), server_added_at: server.added_at, verifier, redirect_uri, token_endpoint, client_id, client_secret, fresh_registration, resource, created: now });
     log::info!("[mcp-proxy] {server_id}: sign-in started");
     Ok(url.to_string())
 }
@@ -483,7 +485,7 @@ pub async fn callback(params: HashMap<String, String>) -> (u16, String) {
             // with the tokens it was issued.
             let manual = get(&p.server_id).is_some_and(|s| plan_str(&s, "manual_client_id").is_some());
             cred.client_secret = if manual { None } else { p.client_secret.clone() };
-            if let Err(e) = store_cred(&p.server_id, cred).await {
+            if let Err(e) = store_cred(&p.server_id, p.server_added_at, cred).await {
                 return (500, page("Sign-in failed", &format!("maiTerm could not keep the sign-in: {e}")));
             }
             let (fresh, cid, ru) = (p.fresh_registration, p.client_id.clone(), p.redirect_uri.clone());
@@ -552,11 +554,12 @@ async fn token_request(endpoint: &str, form: &[(&str, String)]) -> Result<Cred, 
     })
 }
 
-/// Keep a credential: the keychain first, then the cache. Refused for a server that has been
-/// removed meanwhile, so a sign-in or refresh finishing late can't leave a credential behind
-/// for whatever is added next under that name.
-async fn store_cred(server_id: &str, cred: Cred) -> Result<(), String> {
-    if get(server_id).is_none() {
+/// Keep a credential: the keychain first, then the cache. Only for the same server the request
+/// was made for: one removed meanwhile, or removed and added again under the same name (perhaps
+/// another URL), gets nothing — a late answer would otherwise hand one service's token to the
+/// next server called that. A server is told apart by when it was added.
+async fn store_cred(server_id: &str, added_at: u64, cred: Cred) -> Result<(), String> {
+    if !get(server_id).is_some_and(|s| s.added_at == added_at) {
         return Err("the server was removed".into());
     }
     let id = server_id.to_string();
@@ -625,7 +628,7 @@ pub async fn access_token(server: &ProxyServer, refused: Option<&str>) -> Result
             next.client_id = cred.client_id.clone();
             next.client_secret = cred.client_secret.clone();
             let tok = next.access_token.clone();
-            store_cred(&server.id, next).await?;
+            store_cred(&server.id, server.added_at, next).await?;
             log::info!("[mcp-proxy] {}: token refreshed", server.id);
             Ok(tok)
         }

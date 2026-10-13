@@ -73,17 +73,27 @@
     }
   }
 
+  /** Which check is current: a probe can take many seconds, and one that answers after the URL
+   *  was edited (or after a newer check) describes another URL, so it is dropped. Otherwise a
+   *  server could be added with the auth of the URL typed before it, its token sent there. */
+  let probeSeq = 0;
+
   async function check() {
+    if (probing) return;
+    const seq = ++probeSeq;
+    const target = url.trim();
     feedback = null;
     probe = null;
     probing = true;
     try {
-      probe = await commands.mcpServerProbe(url.trim());
-      if (!nameTouched) name = suggestName(url.trim());
+      const p = await commands.mcpServerProbe(target);
+      if (seq !== probeSeq || url.trim() !== target) return;
+      probe = p;
+      if (!nameTouched) name = suggestName(target);
     } catch (e) {
-      feedback = { id: null, text: String(e), error: true };
+      if (seq === probeSeq) feedback = { id: null, text: String(e), error: true };
     } finally {
-      probing = false;
+      if (seq === probeSeq) probing = false;
     }
   }
 
@@ -337,7 +347,7 @@
         <div class="inline">
           <input type="url" placeholder="https://mcp.example.com/mcp" bind:value={url} spellcheck="false"
             onkeydown={(e) => { if (e.key === 'Enter' && url.trim()) void check(); }}
-            oninput={() => (probe = null)} />
+            oninput={() => { probe = null; probeSeq++; probing = false; }} />
           <Button variant="secondary" disabled={!url.trim() || probing} onclick={check}>{probing ? 'Checking…' : 'Check'}</Button>
         </div>
       </label>

@@ -190,6 +190,20 @@ so that section changes with it.
   - URL `http://127.0.0.1:${MAITERM_PORT}/mcp/x/<id>`;
   - header `${MAITERM_AUTH}`.
   So every maiTerm writes identical bytes, and each user's agents reach their own maiTerm.
+  - **A remote account can be shared** by several of this human's tabs, by other people's
+    maiTerms (a team account such as `ews@nova`), and by both flavors. So the remote side is
+    **additive**: entries are written by name, a name held by an entry without the marker is the
+    human's own and is never overwritten, and nothing is swept for being unknown, because it may
+    be someone else's.
+  - **Removal goes by tombstone.** A removed server is remembered for 30 days
+    (`mcp-servers.json` → `removed`), and a disabled one counts too. The next setup on each host
+    deletes its entry only if the marker matches exactly.
+  - **An entry a maiTerm doesn't serve is inert.** `/mcp/x/<id>` for an unknown name answers as
+    an empty server (`not_served`): `initialize` succeeds, `tools/list` is empty, a call says why.
+    So another person's entry, or one whose tombstone hasn't reached a host yet, costs nothing
+    and shows no failure.
+  - Code: `entries::remote` builds `{set, gone}`; `sshMcpBridge.svelte.ts` merges it with python3,
+    or jq where there is no python3.
 - **When they are written.**
   - At startup, before any tab spawns.
   - Re-asserted by the 30 s drift loop. That loop also checks each managed account root,

@@ -103,6 +103,26 @@ impl Catalog {
 struct StoreFile {
     #[serde(default)]
     servers: Vec<ProxyServer>,
+    /// Servers removed lately, so the next ssh-host setup deletes their remote entries
+    /// (`entries::remote`). Remote entries are only ever added by name otherwise: an account can
+    /// be shared with other maiTerms, and an entry this one doesn't know may be theirs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<Removed>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Removed {
+    pub id: String,
+    pub at: u64,
+}
+
+/// How long a removal is carried to ssh hosts: long enough to reach any host bridged now and then.
+const REMOVED_KEEP_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+static REMOVED: LazyLock<RwLock<Vec<Removed>>> = LazyLock::new(Default::default);
+
+pub fn removed() -> Vec<Removed> {
+    REMOVED.read().clone()
 }
 
 /// A server's health as maiTerm last saw it. Never persisted.
@@ -162,7 +182,11 @@ static COLLISIONS: LazyLock<Mutex<entries::Collisions>> = LazyLock::new(Default:
 /// Read the configured servers once. The entry writer runs from the MCP server's synchronous
 /// startup, before `start`, and needs them.
 pub fn ensure_loaded() {
-    LOADED.get_or_init(|| *SERVERS.write() = load());
+    LOADED.get_or_init(|| {
+        let f = load();
+        *SERVERS.write() = f.servers;
+        *REMOVED.write() = f.removed;
+    });
 }
 
 /// Rewrite the agents' entries after a change, off the calling thread (file I/O).
@@ -191,18 +215,22 @@ fn store_path() -> Option<PathBuf> {
     dirs::data_dir().map(|p| p.join(crate::state::persistence::app_data_slug()).join("mcp-servers.json"))
 }
 
-fn load() -> Vec<ProxyServer> {
-    let Some(path) = store_path() else { return vec![] };
-    let Ok(raw) = std::fs::read_to_string(&path) else { return vec![] };
+fn load() -> StoreFile {
+    let Some(path) = store_path() else { return StoreFile::default() };
+    let Ok(raw) = std::fs::read_to_string(&path) else { return StoreFile::default() };
     match serde_json::from_str::<StoreFile>(&raw) {
-        Ok(f) => f.servers,
+        Ok(mut f) => {
+            let cutoff = now_ms().saturating_sub(REMOVED_KEEP_MS);
+            f.removed.retain(|r| r.at >= cutoff);
+            f
+        }
         Err(e) => {
             // Keep the unreadable file for a human to look at, rather than overwriting it with
             // an empty list on the next save.
             let aside = path.with_extension(format!("unreadable-{}.json", now_ms()));
             let _ = std::fs::rename(&path, &aside);
             log::error!("[mcp-proxy] {} is unreadable ({e}); moved aside to {}", path.display(), aside.display());
-            vec![]
+            StoreFile::default()
         }
     }
 }
@@ -211,7 +239,7 @@ fn load() -> Vec<ProxyServer> {
 fn save() -> Result<(), String> {
     let _g = SAVE.lock();
     let Some(path) = store_path() else { return Err("no data directory".into()) };
-    let file = StoreFile { servers: SERVERS.read().clone() };
+    let file = StoreFile { servers: SERVERS.read().clone(), removed: REMOVED.read().clone() };
     let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -479,8 +507,10 @@ async fn watch(id: String) {
         // A stream that closes at once is a server that offers none in practice (mcp.svelte.dev
         // answers the GET and ends it): treat it as streamless and re-read hourly. Reconnecting
         // sooner re-read its whole list every minute. A stream that lived a while and dropped
-        // reconnects after a pause, and the reconnect's read catches what it missed.
-        if opened.elapsed() < Duration::from_secs(60) {
+        // reconnects after a pause, and the reconnect's read catches what it missed. The line is
+        // seconds, not a minute: proxies that cut idle streams at 55-60 s (Heroku, nginx, ALB
+        // defaults) must still count as streams, or their changes would wait an hour.
+        if opened.elapsed() < Duration::from_secs(5) {
             tokio::time::sleep(REFRESH_EVERY).await;
         } else {
             tokio::time::sleep(Duration::from_secs(30)).await;
@@ -593,7 +623,12 @@ fn down_session(id: &str, sid: Option<&str>) -> Arc<DownSession> {
 }
 
 pub async fn downstream_post(id: &str, sid: Option<&str>, tab: Option<&str>, body: &str) -> DownReply {
-    let Some(server) = get(id) else { return DownReply::status(404) };
+    let Some(server) = get(id) else {
+        if valid_id(id).is_err() {
+            return DownReply::status(404);
+        }
+        return not_served(id, body);
+    };
     let msg: Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return DownReply::error(Value::Null, -32700, format!("parse error: {e}"), None),
@@ -652,6 +687,32 @@ pub async fn downstream_post(id: &str, sid: Option<&str>, tab: Option<&str>, bod
             call(&server, sid, rid, params).await
         }
         _ => DownReply::error(rid, -32601, format!("Method not found: {method}"), None),
+    }
+}
+
+/// A server name this maiTerm doesn't serve: an entry for one it removed, or, on an ssh account
+/// shared with other people's maiTerms, one of THEIRS (remote entries name no instance, so each
+/// person's agents reach their own maiTerm with every name on the account). It answers as an
+/// empty server rather than failing, so such an entry costs nothing and alarms no one.
+fn not_served(id: &str, body: &str) -> DownReply {
+    let Ok(msg) = serde_json::from_str::<Value>(body) else { return DownReply::status(400) };
+    let Some(rid) = msg.get("id").cloned() else { return DownReply::status(202) };
+    let text = format!("This maiTerm doesn't serve an MCP server named {id}: it was removed, or another maiTerm on this account added it.");
+    match msg.get("method").and_then(Value::as_str).unwrap_or("") {
+        "initialize" => {
+            let asked = msg.pointer("/params/protocolVersion").and_then(Value::as_str).unwrap_or("");
+            let protocol = if DOWN_PROTOCOLS.contains(&asked) { asked } else { "2025-06-18" };
+            DownReply::result(rid, json!({
+                "protocolVersion": protocol,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": id, "version": "none" },
+                "instructions": text,
+            }))
+        }
+        "ping" => DownReply::result(rid, json!({})),
+        "tools/list" => DownReply::result(rid, json!({ "tools": [] })),
+        "tools/call" => DownReply::result(rid, json!({ "content": [{ "type": "text", "text": text }], "isError": true })),
+        m => DownReply::error(rid, -32601, format!("Method not found: {m}"), None),
     }
 }
 
@@ -827,6 +888,7 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
     for key in [id.to_string(), format!("{id}#client")] {
         let _ = secrets::delete(&key);
     }
+    REMOVED.write().retain(|r| r.id != id);
     let mut oauth_plan = None;
     // Without a token (an agent's proposal can't carry one) the server waits as "needs a token"
     // until the human pastes one in Preferences.
@@ -873,6 +935,11 @@ pub fn remove(id: &str) -> Result<(), String> {
     oauth::forget(id);
     let live = LIVE.lock().remove(id);
     SERVERS.write().retain(|s| s.id != id);
+    {
+        let mut gone = REMOVED.write();
+        gone.retain(|r| r.id != id);
+        gone.push(Removed { id: id.to_string(), at: now_ms() });
+    }
     save()?;
     sync_entries();
     for key in [id.to_string(), format!("{id}#client")] {
@@ -1109,6 +1176,18 @@ mod tests {
         assert!(valid_url("http://localhost/mcp").is_ok());
         assert!(valid_url("http://mcp.example.com/mcp").is_err());
         assert!(valid_url("ftp://x").is_err());
+    }
+
+    #[test]
+    fn a_name_not_served_here_is_an_empty_server_not_a_failure() {
+        let body = |m: &str| json!({ "jsonrpc": "2.0", "id": 1, "method": m, "params": { "protocolVersion": "2025-06-18" } }).to_string();
+        let parse = |r: DownReply| -> Value { serde_json::from_str(&r.body.unwrap()).unwrap() };
+        let init = parse(not_served("theirs", &body("initialize")));
+        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(parse(not_served("theirs", &body("tools/list")))["result"]["tools"], json!([]));
+        assert_eq!(parse(not_served("theirs", &body("tools/call")))["result"]["isError"], true);
+        let note = not_served("theirs", &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string());
+        assert_eq!(note.status, 202);
     }
 
     #[test]
