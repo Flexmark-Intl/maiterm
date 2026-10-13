@@ -1200,7 +1200,7 @@ pub fn tool_list_response(
         },
         {
             "name": "disconnectBridge",
-            "description": format!("Close your 1:1 Agent Bridge; the agent you were bridged with is told. A mesh you share is not affected.{AWAITS}"),
+            "description": format!("Close your 1:1 Agent Bridge; the agent you were bridged with is told, unless it is mid-turn at that moment. A mesh you share is not affected.{AWAITS}"),
             "inputSchema": {
                 "type": "object",
                 "properties": {
