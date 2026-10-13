@@ -19,6 +19,7 @@
 //! Credentials are in the keychain (`secrets`), never in that file.
 
 pub mod entries;
+pub mod oauth;
 pub mod secrets;
 pub mod upstream;
 
@@ -276,27 +277,39 @@ fn set_status(id: &str, next: Status) {
 
 /// The bearer token for a server: `Ok(None)` when it needs none.
 async fn bearer(server: &ProxyServer) -> Result<Option<String>, String> {
-    if server.auth == AUTH_NONE {
-        return Ok(None);
+    match server.auth.as_str() {
+        AUTH_NONE => Ok(None),
+        AUTH_OAUTH => oauth::access_token(server, false).await.map(Some),
+        _ => cached_or_stored_cred(&server.id).await?.map(|c| Some(c.access_token)).ok_or_else(|| "no token stored".into()),
     }
-    if let Some(c) = LIVE.lock().get(&server.id).and_then(|l| l.cred.clone()) {
-        return Ok(Some(c.access_token));
+}
+
+/// The server's credential: the cached copy, else the keychain's (then cached).
+async fn cached_or_stored_cred(id: &str) -> Result<Option<secrets::Cred>, String> {
+    if let Some(c) = LIVE.lock().get(id).and_then(|l| l.cred.clone()) {
+        return Ok(Some(c));
     }
-    let id = server.id.clone();
-    let read = tokio::task::spawn_blocking(move || secrets::read(&id))
+    let key = id.to_string();
+    let read = tokio::task::spawn_blocking(move || secrets::read(&key))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
-    match read {
-        Some(c) => {
-            let tok = c.access_token.clone();
-            LIVE.lock().entry(server.id.clone()).or_default().cred = Some(c);
-            Ok(Some(tok))
-        }
-        None => Err(match server.auth.as_str() {
-            AUTH_OAUTH => "not signed in yet".into(),
-            _ => "no token stored".into(),
-        }),
+    if let Some(c) = &read {
+        cache_cred(id, c.clone());
+    }
+    Ok(read)
+}
+
+fn cache_cred(id: &str, cred: secrets::Cred) {
+    LIVE.lock().entry(id.to_string()).or_default().cred = Some(cred);
+}
+
+/// A sign-in completed: calls may work again, and the list is read now.
+fn signed_in(id: &str) {
+    set_calls_refused(id, false);
+    set_status(id, Status::new("connecting", "signed in"));
+    if get(id).is_some_and(|s| s.enabled) {
+        start_watcher(id);
     }
 }
 
@@ -378,7 +391,10 @@ pub async fn refresh(id: &str) -> Result<bool, String> {
     let changed = !server.catalog.as_ref().is_some_and(|c| c.same_as(&next));
     let count = next.tools.len();
     update(id, |s| s.catalog = Some(next))?;
-    if !LIVE.lock().get(id).is_some_and(|l| l.calls_refused) {
+    if LIVE.lock().get(id).is_some_and(|l| l.calls_refused) {
+        // Listing works, calls don't: the server is reachable, and what it needs is a sign-in.
+        set_status(id, needs_sign_in(&server, "it refuses tool calls"));
+    } else {
         set_status(id, Status::new("connected", format!("{count} tools")));
     }
     if changed {
@@ -625,14 +641,15 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
         set_status(&server.id, st);
         DownReply::result(rid, json!({ "content": [{ "type": "text", "text": text }], "isError": true }))
     };
-    let auth = match bearer(server).await {
+    let mut auth = match bearer(server).await {
         Ok(a) => a,
         Err(why) => return fail(rid, needs_sign_in(server, &why)),
     };
     let up = Upstream::new(&server.url);
     let down = down_session(&server.id, sid);
-    // Two attempts only when the upstream forgot the session: it ran nothing, so a retry on a
-    // fresh one is safe. Nothing else is retried, since a tool call need not be idempotent.
+    // A second attempt only where the upstream ran nothing: it forgot the session (404), or it
+    // refused an OAuth token that a refresh then replaced (401). Nothing else is retried, since
+    // a tool call need not be idempotent.
     for attempt in 0..2 {
         let session = {
             let mut slot = down.upstream.lock().await;
@@ -664,12 +681,26 @@ async fn call(server: &ProxyServer, sid: Option<&str>, rid: Value, params: Value
                     *slot = None;
                 }
             }
+            Err(UpErr::Unauthorized { .. }) if attempt == 0 && server.auth == AUTH_OAUTH => match oauth::access_token(server, true).await {
+                Ok(fresh) => auth = Some(fresh),
+                Err(why) => {
+                    set_calls_refused(&server.id, true);
+                    return fail(rid, needs_sign_in(server, &why));
+                }
+            },
             // The server's own JSON-RPC error goes back as it was sent: an unknown tool, bad
             // arguments. It says nothing about the server's health.
             Err(UpErr::Rpc { code, message, data }) => return DownReply::error(rid, code, message, data),
             Err(e) => {
+                if let UpErr::Forbidden { challenge } = &e {
+                    if server.auth == AUTH_OAUTH {
+                        oauth::note_step_up(&server.id, challenge.as_deref());
+                    }
+                }
                 if matches!(e, UpErr::Unauthorized { .. } | UpErr::Forbidden { .. }) {
-                    forget_cached_cred(&server.id);
+                    if server.auth != AUTH_OAUTH {
+                        forget_cached_cred(&server.id);
+                    }
                     set_calls_refused(&server.id, true);
                 }
                 return fail(rid, status_for(server, &e));
@@ -734,8 +765,20 @@ pub fn valid_url(url: &str) -> Result<(), String> {
     }
 }
 
-/// Add a server. `token` is required for `token` auth and ignored otherwise.
-pub fn add(id: &str, url: &str, auth: &str, token: Option<&str>, added_by: &str) -> Result<ProxyServer, String> {
+/// What `add` is given beyond the URL.
+#[derive(Default)]
+pub struct AddOptions {
+    /// `token` auth: the pasted token.
+    pub token: Option<String>,
+    /// `oauth` auth: what `oauth::probe` found (no secret).
+    pub oauth_plan: Option<Value>,
+    /// `oauth` auth on a server that doesn't let apps register: a client id the human made.
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+}
+
+/// Add a server.
+pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) -> Result<ProxyServer, String> {
     valid_id(id)?;
     valid_url(url)?;
     if ![AUTH_NONE, AUTH_TOKEN, AUTH_OAUTH].contains(&auth) {
@@ -744,9 +787,23 @@ pub fn add(id: &str, url: &str, auth: &str, token: Option<&str>, added_by: &str)
     if get(id).is_some() {
         return Err(format!("maiTerm already has an MCP server named {id}"));
     }
+    let mut oauth_plan = None;
     if auth == AUTH_TOKEN {
-        let tok = token.map(str::trim).filter(|t| !t.is_empty()).ok_or("a token is required")?;
+        let tok = opts.token.as_deref().map(str::trim).filter(|t| !t.is_empty()).ok_or("a token is required")?;
         secrets::store(id, &secrets::Cred { access_token: tok.to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
+    }
+    if auth == AUTH_OAUTH {
+        let mut plan = opts.oauth_plan.ok_or("the server's sign-in details are missing")?;
+        let manual = opts.client_id.as_deref().map(str::trim).filter(|c| !c.is_empty());
+        if let Some(cid) = manual {
+            plan["manual_client_id"] = cid.into();
+            if let Some(secret) = opts.client_secret.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                secrets::store(&format!("{id}#client"), &secrets::Cred { access_token: secret.to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
+            }
+        } else if plan.get("registration_endpoint").and_then(Value::as_str).is_none() {
+            return Err("this server doesn't let apps register themselves: give a client id, or use a token".into());
+        }
+        oauth_plan = Some(plan);
     }
     let server = ProxyServer {
         id: id.to_string(),
@@ -755,7 +812,7 @@ pub fn add(id: &str, url: &str, auth: &str, token: Option<&str>, added_by: &str)
         enabled: true,
         workspaces: vec![],
         catalog: None,
-        oauth: None,
+        oauth: oauth_plan,
         added_at: now_ms(),
         added_by: added_by.to_string(),
     };
@@ -774,8 +831,10 @@ pub fn remove(id: &str) -> Result<(), String> {
     SERVERS.write().retain(|s| s.id != id);
     save()?;
     sync_entries();
-    if let Err(e) = secrets::delete(id) {
-        log::warn!("[mcp-proxy] {id}: removed, but its keychain item stays: {e}");
+    for key in [id.to_string(), format!("{id}#client")] {
+        if let Err(e) = secrets::delete(&key) {
+            log::warn!("[mcp-proxy] {id}: removed, but a keychain item stays: {e}");
+        }
     }
     // Agents still connected learn the list is gone the same way they learn of any change,
     // and the upstream sessions they held are ended.
@@ -902,9 +961,40 @@ pub async fn mcp_servers_list() -> Vec<ServerView> {
     blocking(|| Ok(all().iter().map(view).collect())).await.unwrap_or_default()
 }
 
+/// What a URL needs before it is added: no sign-in, a token, or an OAuth sign-in (§5).
 #[tauri::command]
-pub async fn mcp_server_add(id: String, url: String, auth: String, token: Option<String>) -> Result<ServerView, String> {
-    blocking(move || add(&id, &url, &auth, token.as_deref(), "human").map(|s| view(&s))).await
+pub async fn mcp_server_probe(url: String) -> Result<oauth::Probe, String> {
+    valid_url(&url)?;
+    oauth::probe(&url).await
+}
+
+#[tauri::command]
+pub async fn mcp_server_add(
+    id: String,
+    url: String,
+    auth: String,
+    token: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<ServerView, String> {
+    let oauth_plan = if auth == AUTH_OAUTH {
+        valid_url(&url)?;
+        let p = oauth::probe(&url).await?;
+        if p.auth != AUTH_OAUTH {
+            return Err(format!("{url} doesn't offer a sign-in maiTerm can use: {}", p.detail));
+        }
+        p.plan
+    } else {
+        None
+    };
+    let opts = AddOptions { token, oauth_plan, client_id, client_secret };
+    blocking(move || add(&id, &url, &auth, opts, "human").map(|s| view(&s))).await
+}
+
+/// Start a sign-in: the URL for the browser. The sign-in finishes at `/oauth/callback`.
+#[tauri::command]
+pub async fn mcp_server_sign_in(id: String) -> Result<String, String> {
+    oauth::begin(&id).await
 }
 
 #[tauri::command]

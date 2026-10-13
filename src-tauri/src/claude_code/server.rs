@@ -470,6 +470,9 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         .route("/hooks/appended", get(mod_appended_handler))
         // MCP servers through maiTerm, one entry each (docs/mcp-proxy.md §3)
         .route("/mcp/x/{id}", post(proxy_post_handler).get(proxy_get_handler).delete(proxy_delete_handler))
+        // The browser's return from an MCP server sign-in (docs/mcp-proxy.md §5). No auth header
+        // can ride a browser redirect; the one-time `state` is what it must match.
+        .route("/oauth/callback", get(oauth_callback_handler))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -2341,6 +2344,17 @@ async fn proxy_get_handler(State(srv): State<ServerState>, Path(id): Path<String
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+/// GET /oauth/callback: the browser's return from a sign-in `mcp_proxy::oauth::begin` started.
+async fn oauth_callback_handler(Query(params): Query<HashMap<String, String>>) -> Response {
+    let (status, html) = crate::mcp_proxy::oauth::callback(params).await;
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(html))
         .unwrap()
 }
 
