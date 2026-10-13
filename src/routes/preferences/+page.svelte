@@ -26,6 +26,7 @@
   import { parseCondition } from '$lib/triggers/variableCondition';
   import type { MatchMode } from '$lib/tauri/types';
   import AccountsPane from '$lib/components/accounts/AccountsPane.svelte';
+  import McpServersPane from '$lib/components/mcp/McpServersPane.svelte';
 
   /** Restore a default trigger to its template values (keeps enabled, workspaces, id). */
   function restoreDefault(trigger: Trigger) {
@@ -82,7 +83,7 @@
     if (result) preferencesStore.setTriggers(result);
   }
 
-  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'accounts', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
+  const sectionIds = ['appearance', 'terminal', 'ui', 'tabs', 'workspace', 'notes', 'notifications', 'triggers', 'overlord', 'claude_code', 'accounts', 'mcp', 'deshittify', 'integrations', 'backup', 'updates', 'permissions'] as const;
   type SectionId = typeof sectionIds[number];
   const saved = localStorage.getItem('prefs-section');
   let activeSection = $state<SectionId>(
@@ -422,6 +423,7 @@
     { id: 'overlord' as const, label: 'Overlord' },
     { id: 'claude_code' as const, label: 'AI Agents' },
     { id: 'accounts' as const, label: 'Accounts' },
+    { id: 'mcp' as const, label: 'MCP servers' },
     { id: 'deshittify' as const, label: 'Deshittification' },
     { id: 'integrations' as const, label: 'Integrations' },
     { id: 'backup' as const, label: 'Backup' },
@@ -2462,6 +2464,9 @@
         {/if}
       {:else if activeSection === 'accounts'}
         <AccountsPane />
+
+      {:else if activeSection === 'mcp'}
+        <McpServersPane />
 
       {:else if activeSection === 'deshittify'}
         <h3 class="section-heading">Deshittification</h3>

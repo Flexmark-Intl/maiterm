@@ -2200,3 +2200,91 @@ export async function projectRootOf(path: string): Promise<string> {
 export async function pickFolder(startIn?: string | null): Promise<string | null> {
   return invoke('pick_folder', { startIn: startIn ?? null });
 }
+
+// MCP servers through maiTerm (docs/mcp-proxy.md)
+export interface McpServerStatus {
+  /** `connecting` | `connected` | `needs_sign_in` | `unreachable` | `error` | `disabled` */
+  state: string;
+  detail: string;
+  since: number;
+}
+
+export interface McpServerView {
+  id: string;
+  url: string;
+  /** `none` | `token` | `oauth` */
+  auth: string;
+  enabled: boolean;
+  /** Empty: every workspace. */
+  workspaces: string[];
+  status: McpServerStatus;
+  tools: string[];
+  fetched_at: number | null;
+  added_at: number;
+  added_by: string;
+  /** The name agents see it under (`<id>-dev` from a dev build). */
+  entry_name: string;
+  /** Runtimes where an entry of the human's own already holds that name. */
+  collisions: string[];
+  /** Entries of the human's own reaching the same URL: "Claude: linear-native". */
+  duplicates: string[];
+}
+
+export interface McpProbe {
+  auth: 'none' | 'token' | 'oauth';
+  detail: string;
+  issuer?: string;
+  can_register: boolean;
+}
+
+export async function mcpServersList(): Promise<McpServerView[]> {
+  return invoke('mcp_servers_list');
+}
+
+export async function mcpServerProbe(url: string): Promise<McpProbe> {
+  return invoke('mcp_server_probe', { url });
+}
+
+export async function mcpServerAdd(
+  id: string,
+  url: string,
+  auth: string,
+  opts: { token?: string | null; clientId?: string | null; clientSecret?: string | null } = {},
+): Promise<McpServerView> {
+  return invoke('mcp_server_add', {
+    id, url, auth,
+    token: opts.token ?? null,
+    clientId: opts.clientId ?? null,
+    clientSecret: opts.clientSecret ?? null,
+  });
+}
+
+export async function mcpServerRemove(id: string): Promise<void> {
+  return invoke('mcp_server_remove', { id });
+}
+
+export async function mcpServerSetToken(id: string, token: string): Promise<void> {
+  return invoke('mcp_server_set_token', { id, token });
+}
+
+export async function mcpServerSetEnabled(id: string, enabled: boolean): Promise<McpServerView> {
+  return invoke('mcp_server_set_enabled', { id, enabled });
+}
+
+export async function mcpServerSetWorkspaces(id: string, workspaces: string[]): Promise<McpServerView> {
+  return invoke('mcp_server_set_workspaces', { id, workspaces });
+}
+
+export async function mcpServerRefresh(id: string): Promise<McpServerView> {
+  return invoke('mcp_server_refresh', { id });
+}
+
+/** Start a sign-in: the URL to open in the browser. */
+export async function mcpServerSignIn(id: string): Promise<string> {
+  return invoke('mcp_server_sign_in', { id });
+}
+
+/** Remove the human's own entries for this server (same name or URL). Returns what went. */
+export async function mcpServerAdoptNative(id: string): Promise<string[]> {
+  return invoke('mcp_server_adopt_native', { id });
+}
