@@ -2235,6 +2235,8 @@ export interface McpProbe {
   detail: string;
   issuer?: string;
   can_register: boolean;
+  /** Entries of the human's own reaching the same URL: "Claude: linear". */
+  duplicates: string[];
 }
 
 export async function mcpServersList(): Promise<McpServerView[]> {
@@ -2249,13 +2251,14 @@ export async function mcpServerAdd(
   id: string,
   url: string,
   auth: string,
-  opts: { token?: string | null; clientId?: string | null; clientSecret?: string | null } = {},
+  opts: { token?: string | null; clientId?: string | null; clientSecret?: string | null; requestId?: string | null } = {},
 ): Promise<McpServerView> {
   return invoke('mcp_server_add', {
     id, url, auth,
     token: opts.token ?? null,
     clientId: opts.clientId ?? null,
     clientSecret: opts.clientSecret ?? null,
+    requestId: opts.requestId ?? null,
   });
 }
 

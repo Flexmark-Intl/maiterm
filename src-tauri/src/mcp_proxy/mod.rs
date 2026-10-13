@@ -828,9 +828,12 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
         let _ = secrets::delete(&key);
     }
     let mut oauth_plan = None;
-    if auth == AUTH_TOKEN {
-        let tok = opts.token.as_deref().map(str::trim).filter(|t| !t.is_empty()).ok_or("a token is required")?;
-        secrets::store(id, &secrets::Cred { access_token: tok.to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
+    // Without a token (an agent's proposal can't carry one) the server waits as "needs a token"
+    // until the human pastes one in Preferences.
+    if let Some(tok) = opts.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if auth == AUTH_TOKEN {
+            secrets::store(id, &secrets::Cred { access_token: tok.to_string(), ..Default::default() }).map_err(|e| e.to_string())?;
+        }
     }
     if auth == AUTH_OAUTH {
         let mut plan = opts.oauth_plan.ok_or("the server's sign-in details are missing")?;
@@ -1006,9 +1009,14 @@ pub async fn mcp_servers_list() -> Vec<ServerView> {
 #[tauri::command]
 pub async fn mcp_server_probe(url: String) -> Result<oauth::Probe, String> {
     valid_url(&url)?;
-    oauth::probe(&url).await
+    let mut p = oauth::probe(&url).await?;
+    let u = url.clone();
+    p.duplicates = blocking(move || Ok(entries::native_duplicates(&u))).await.unwrap_or_default();
+    Ok(p)
 }
 
+/// `request_id`: set when this carries out an agent's approved `mcp_add` request, which is then
+/// what the server records as having added it.
 #[tauri::command]
 pub async fn mcp_server_add(
     id: String,
@@ -1017,6 +1025,7 @@ pub async fn mcp_server_add(
     token: Option<String>,
     client_id: Option<String>,
     client_secret: Option<String>,
+    request_id: Option<String>,
 ) -> Result<ServerView, String> {
     let oauth_plan = if auth == AUTH_OAUTH {
         valid_url(&url)?;
@@ -1029,7 +1038,11 @@ pub async fn mcp_server_add(
         None
     };
     let opts = AddOptions { token, oauth_plan, client_id, client_secret };
-    blocking(move || add(&id, &url, &auth, opts, "human").map(|s| view(&s))).await
+    let by = match request_id {
+        Some(r) => format!("agent request {r}"),
+        None => "human".to_string(),
+    };
+    blocking(move || add(&id, &url, &auth, opts, &by).map(|s| view(&s))).await
 }
 
 /// Start a sign-in: the URL for the browser. The sign-in finishes at `/oauth/callback`.

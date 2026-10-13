@@ -226,8 +226,16 @@ server:
   - **The card's words are maiTerm's.** It shows the URL, the name, which runtimes get it, whether
     a sign-in follows, and that the server's tools load into every session in scope. The agent's
     `reason` is shown quoted.
-  - **Approving adds the server.** If it needs a sign-in, the server waits as "needs sign-in" and
-    the human signs in from Preferences. Neither the agent nor the approval can complete a sign-in.
+  - **Approving adds the server.** Approved at the desktop, an OAuth sign-in opens in the browser
+    at once. Approved from the phone, it waits as "needs sign-in" for the human at the Mac. A
+    token server waits for the human to paste one. Neither the agent nor the approval completes a
+    sign-in.
+  - **Refused when it is filed:**
+    - a URL carrying a credential (user info, or a `key`/`token`/`secret`/`auth`/`password`
+      query parameter), which would reach the card, the phone and the config;
+    - a service that doesn't let apps register (GitHub), which needs a client id or token only
+      the human has: the agent is told to point them at the add form;
+    - a name or URL maiTerm already serves.
   - **The trade-off, as the tool and the card put it:**
     - Through maiTerm: one sign-in shared by Claude and Codex here and Claude on your ssh hosts,
       signed in as you on a shared host, and kept fresh by maiTerm.

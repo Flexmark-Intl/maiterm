@@ -1224,8 +1224,32 @@ pub fn tool_list_response(
             }
         },
         {
+            "name": "listMcpServers",
+            "description": "The remote MCP servers maiTerm manages for every agent (the human manages them in maiTerm → Preferences → MCP servers): each one's name (the MCP server name agents see it under), URL, status (connected, needs_sign_in, unreachable, disabled) and tools, plus any copy also installed directly in an agent. Read-only. Use it before proposing one with addMcpServer, and to explain a failing proxied tool to the human.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" }
+                }
+            }
+        },
+        {
+            "name": "addMcpServer",
+            "description": format!("Propose adding a remote MCP server (an https URL) to maiTerm. maiTerm then signs in to it once and serves its tools to every agent: Claude and Codex on this machine, and Claude on the human's ssh hosts, under the human's own sign-in even on a shared host, kept fresh by maiTerm.\n\nWhen the human asks you to install or add an MCP server, tell them this is an option alongside installing it directly in your own runtime, and give them the trade-off before they choose. Through maiTerm: set up once for every agent and runtime, one sign-in maiTerm keeps fresh, managed in Preferences → MCP servers; it works only while maiTerm runs, and its tools load into every agent session in its workspaces. Installed directly: it works without maiTerm, but only in your runtime, and each runtime signs in separately. Call this only once they have chosen maiTerm. Local servers (stdio/npx commands) are not supported here: install those directly.\n\nNever pass a token, key or password, and never put one in the URL: if the server needs a sign-in, the human does it in maiTerm after approving.{AWAITS}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Your own tab (auto-injected)" },
+                    "url": { "type": "string", "description": "The server's Streamable HTTP endpoint, e.g. https://mcp.linear.app/mcp" },
+                    "name": { "type": "string", "description": "Optional: the server name agents will see it under (lowercase letters, digits, - or _). Defaults to one from the URL." },
+                    "reason": { "type": "string", "description": "One line: why, shown to the human" }
+                },
+                "required": ["url", "reason"]
+            }
+        },
+        {
             "name": "getRequestStatus",
-            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, bridgeWith, disconnectBridge, restartMaiterm, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
+            "description": "What became of a request you filed (setMesh, linkMeshes, unlinkMesh, createTab, bridgeWith, disconnectBridge, restartMaiterm, addMcpServer, or a moveTab/moveWorkspace that needed approval): pending, approved (being carried out), done, failed, denied or expired, with the outcome.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

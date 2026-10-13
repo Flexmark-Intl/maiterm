@@ -411,6 +411,12 @@ function createClaudeCodeStore() {
         case 'restartMaiterm':
           result = await agentRequestsStore.restartMaiterm(args as Parameters<typeof agentRequestsStore.restartMaiterm>[0]);
           break;
+        case 'listMcpServers':
+          result = await agentRequestsStore.listMcpServers();
+          break;
+        case 'addMcpServer':
+          result = await agentRequestsStore.addMcpServer(args as Parameters<typeof agentRequestsStore.addMcpServer>[0]);
+          break;
         default:
           result = { error: `Unknown tool: ${tool}` };
       }

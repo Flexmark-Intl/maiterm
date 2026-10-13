@@ -56,6 +56,8 @@ pub struct Probe {
     pub issuer: Option<String>,
     /// Whether maiTerm can register itself there. False means a client id must be supplied.
     pub can_register: bool,
+    /// Entries of the human's own reaching the same URL ("Claude: linear"), filled by the command.
+    pub duplicates: Vec<String>,
     /// What `begin` needs, stored on the server as `ProxyServer::oauth`. No secret.
     #[serde(skip)]
     pub plan: Option<Value>,
@@ -294,6 +296,7 @@ pub async fn probe(server_url: &str) -> Result<Probe, String> {
         issuer: Some(issuer),
         can_register: registration.is_some(),
         plan: Some(plan),
+        ..Default::default()
     })
 }
 

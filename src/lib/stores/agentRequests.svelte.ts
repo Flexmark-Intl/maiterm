@@ -16,6 +16,7 @@
  */
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { error as logError, info as logInfo } from '@tauri-apps/plugin-log';
 import * as commands from '$lib/tauri/commands';
 import type { AgentRequest, MoveTargetWindow, Tab, Workspace } from '$lib/tauri/types';
@@ -399,6 +400,85 @@ async function restartMaiterm(a: { tabId?: string; update?: boolean; reason?: st
   return file(a.tabId, 'restart', { update: true, version }, `Install maiTerm ${version ? `v${version} ` : 'update '}and restart`, effects, a.reason);
 }
 
+// ── MCP servers through maiTerm (docs/mcp-proxy.md §7) ──────────────────────────────────────
+
+/** The servers maiTerm manages, as an agent may read them. Never a credential (the view has none). */
+async function listMcpServers(): Promise<ToolResult> {
+  const servers = await commands.mcpServersList();
+  return {
+    servers: servers.map((s) => ({
+      name: s.entry_name,
+      url: s.url,
+      status: s.status.state,
+      ...(s.status.detail ? { detail: s.status.detail } : {}),
+      tools: s.tools,
+      workspaces: s.workspaces.length === 0 ? 'all' : s.workspaces.map((id) => wsById(id)?.name ?? id),
+      ...(s.duplicates.length ? { also_installed_directly: s.duplicates } : {}),
+    })),
+    note: servers.length
+      ? 'Each appears to agents as its own MCP server under `name`. A server in needs_sign_in or unreachable keeps its tools listed; calls fail with a sentence to pass on to the human.'
+      : 'None yet. addMcpServer proposes one; the human approves it.',
+  };
+}
+
+/** A server name from the URL's host, as the Preferences pane suggests one. */
+function nameFromUrl(u: URL): string {
+  const labels = u.hostname.split('.').filter((l) => !['mcp', 'api', 'www'].includes(l));
+  const pick = labels.length > 1 ? labels[labels.length - 2] : labels[0] ?? '';
+  return pick.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^-+/, '').slice(0, 40);
+}
+
+async function addMcpServer(a: { tabId?: string; url?: string; name?: string; reason?: string }): Promise<ToolResult> {
+  if (!a.tabId) return { error: 'No tab identity: run /maiterm init.' };
+  let url: URL;
+  try {
+    url = new URL((a.url ?? '').trim());
+  } catch {
+    return { error: 'url must be the server\'s https endpoint, e.g. https://mcp.linear.app/mcp.' };
+  }
+  // A key in the URL would go onto a card the phone also gets, and into maiTerm's config.
+  if (url.username || url.password || [...url.searchParams.keys()].some((k) => /key|token|secret|auth|password/i.test(k))) {
+    return { error: 'The URL carries a credential. Propose the plain endpoint; the human signs in in maiTerm after approving.' };
+  }
+  const name = (a.name ?? '').trim() || nameFromUrl(url);
+  if (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(name)) return { error: `"${name}" can't be a server name: 1–40 lowercase letters, digits, - or _.` };
+  const existing = await commands.mcpServersList();
+  if (existing.some((s) => s.id === name)) return { error: `maiTerm already has an MCP server named ${name}. listMcpServers shows it.` };
+  if (existing.some((s) => s.url.replace(/\/+$/, '') === url.href.replace(/\/+$/, ''))) {
+    return { error: 'maiTerm already serves that URL. listMcpServers shows it.' };
+  }
+  let probe: commands.McpProbe;
+  try {
+    probe = await commands.mcpServerProbe(url.href);
+  } catch (e) {
+    return { error: `maiTerm checked ${url.href} and can't add it: ${e}` };
+  }
+  if (probe.auth === 'oauth' && !probe.can_register) {
+    // It takes a client id or a token only the human has: the add form is where that goes.
+    return {
+      error: `${url.host} doesn't let apps register themselves, so it needs a client id or a token that only the human can supply. Tell them they can add it in maiTerm → Preferences → MCP servers (or install it directly).`,
+    };
+  }
+  let issuerHost = url.host;
+  try {
+    if (probe.issuer) issuerHost = new URL(probe.issuer).host;
+  } catch { /* keep the server's host */ }
+  // The name agents see: a dev build suffixes it, as maiterm-dev (mcp_proxy::entries::entry_name).
+  const shown = import.meta.env.DEV ? `${name}-dev` : name;
+  const signIn =
+    probe.auth === 'oauth'
+      ? `It needs you to sign in with ${issuerHost}. Approving here opens that in your browser; approving from your phone leaves it waiting in Preferences → MCP servers on this Mac.`
+      : probe.auth === 'token'
+        ? 'It needs a token from the service, which you paste in Preferences → MCP servers. Until then its tools fail.'
+        : 'It needs no sign-in.';
+  const effects = [
+    `Claude and Codex here, and Claude on your ssh hosts, get its tools as an MCP server named “${shown}”, in every workspace. Its tools load into every new agent session.`,
+    signIn,
+    ...(probe.duplicates.length ? [`You also have it installed directly (${probe.duplicates.join('; ')}): agents would get every tool twice until you remove one (“Move to maiTerm” in Preferences).`] : []),
+  ];
+  return file(a.tabId, 'mcp_add', { name, url: url.href, auth: probe.auth }, `Add the MCP server “${shown}” (${url.host}) through maiTerm`, effects, a.reason);
+}
+
 // ── Carrying out an approved request ────────────────────────────────────────────────────────
 
 /** Re-check that the world still matches what the human approved, then do it. Resolves the
@@ -505,6 +585,24 @@ async function execute(r: AgentRequest): Promise<string> {
       agentBridgeStore.disconnect(me);
       return 'the bridge is closed';
     }
+    case 'mcp_add': {
+      const auth = s('auth');
+      // add() re-checks the name and URL, and probes again for a sign-in.
+      const v = await commands.mcpServerAdd(s('name'), s('url'), auth, { requestId: r.id });
+      const as = `added as the MCP server “${v.entry_name}”`;
+      if (auth === 'oauth') {
+        // From the phone the human isn't at this Mac: a browser opening here would wait unseen.
+        if (r.decided_by === 'phone') return `${as}; it waits for the human to sign in on their Mac (Preferences → MCP servers). Its tools fail until then`;
+        try {
+          await shellOpen(await commands.mcpServerSignIn(v.id));
+          return `${as}; the human is signing in in their browser. Its tools fail until they finish`;
+        } catch (e) {
+          return `${as}, but the sign-in didn't start (${e}); the human can sign in from Preferences → MCP servers`;
+        }
+      }
+      if (auth === 'token') return `${as}; it waits for the human to paste a token in Preferences → MCP servers. Its tools fail until then`;
+      return `${as}. New agent sessions get its tools; a session already running doesn't see a new server until it restarts`;
+    }
     case 'restart': {
       if (r.args.update) {
         if (!updaterStore.installed) {
@@ -602,6 +700,8 @@ function createAgentRequestsStore() {
     bridgeWith,
     disconnectBridge,
     restartMaiterm,
+    listMcpServers,
+    addMcpServer,
     async init() {
       const me = getCurrentWindow().label;
       unlisten = await Promise.all([

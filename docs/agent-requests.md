@@ -18,6 +18,8 @@ and "for organization and read operations it doesn't require the prompt".
 | `bridgeWith` (a 1:1 Agent Bridge with another tab in the caller's window; `fork: true` bridges with a copy of its conversation in a new tab) | never: a request |
 | `disconnectBridge` | never: a request, unless the partner's tab is gone (then at once) |
 | `restartMaiterm` (`update: true` installs the update first) | never: a request |
+| `addMcpServer` (a remote MCP server maiTerm signs in to and serves to every agent, docs/mcp-proxy.md §7) | never: a request |
+| `listMcpServers` | yes: read-only |
 | `getRequestStatus` | yes: read-only, the caller's own requests only |
 
 **The line is "who can message whom".** The mesh is the one place the human decides which agents

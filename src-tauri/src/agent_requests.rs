@@ -32,7 +32,7 @@ const MAX_PENDING_PER_TAB: usize = 5;
 
 /// What a request asks for. A string on the wire (never a serde enum: an unknown variant in
 /// stored state wipes it on a downgrade), checked against this list when filed.
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     "mesh_enable",
     "mesh_disable",
     "mesh_link",
@@ -47,6 +47,9 @@ pub const KINDS: [&str; 11] = [
     "bridge_connect",
     "bridge_fork",
     "bridge_disconnect",
+    // A remote MCP server maiTerm signs in to and serves to every agent (docs/mcp-proxy.md §7).
+    // Asked like a new agent: it changes what every agent session in its workspaces can reach.
+    "mcp_add",
 ];
 
 #[derive(Debug, Clone, Serialize)]

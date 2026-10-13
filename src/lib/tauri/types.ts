@@ -745,7 +745,7 @@ export interface AgentRequest {
   /** The window that filed it and carries it out. */
   window_label: string;
   kind: 'mesh_enable' | 'mesh_disable' | 'mesh_link' | 'mesh_unlink' | 'tab_move' | 'workspace_move' | 'tab_create' | 'restart'
-    | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect';
+    | 'bridge_connect' | 'bridge_fork' | 'bridge_disconnect' | 'mcp_add';
   /** Exactly what runs on approval, built by maiTerm. */
   args: Record<string, unknown>;
   /** What the card says will happen, written by maiTerm. */
