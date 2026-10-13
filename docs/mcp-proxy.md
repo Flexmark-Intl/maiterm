@@ -303,3 +303,19 @@ candidate).
 5. `listMcpServers` / `addMcpServer` + the `mcp_add` request kind and card.
 6. ssh hosts (Claude).
 7. v2: Gemini registrar, stdio upstreams, resources/prompts, CIMD, remote Codex.
+
+**Status 2026-10-13:** steps 1–6 built and reviewed (each step's review found real defects, all
+fixed; last commit 03ff26e6). Not yet deployed. Verified on dev:
+- real Claude and Codex calling proxied tools through the written entries;
+- list changes forwarded, and an outage keeps the tools listed;
+- OAuth against strict mocks (registration, PKCE, `resource` check, rotating refresh with family
+  revocation, no `expires_in`, a foreign `resource` refused);
+- discovery probes against langsys, linear, notion, sentry, higgsfield and github;
+- the agent tools over the real MCP path;
+- the remote merge under nova's Python 3.8, in a scratch HOME.
+
+**Still to verify after deploy:**
+- a real remote Claude reaching a proxied tool through the tunnel. Not done from dev: the
+  released v3.6.0 answers `/mcp/x/<unknown>` with 404, so dev entries on a shared account show as
+  failed servers in sessions started from it;
+- a real OAuth sign-in to a real service.
