@@ -138,7 +138,7 @@ fn entry(account_id: &str) -> Result<keyring::Entry, VaultError> {
 /// routinely, since ad-hoc signing changes the binary hash on every rebuild and invalidates the
 /// item's ACL — would have told the user their machine has no keychain and switched the feature
 /// off, where a retry with Allow would have worked.
-fn map_err(op: &'static str) -> impl Fn(keyring::Error) -> VaultError {
+pub(crate) fn map_err(op: &'static str) -> impl Fn(keyring::Error) -> VaultError {
     move |e| match e {
         keyring::Error::NoEntry => VaultError::NotFound,
         // The store itself never initialized: no Secret Service on a headless Linux box, or no

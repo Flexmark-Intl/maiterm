@@ -7,7 +7,7 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-        Query, State,
+        Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -463,6 +463,8 @@ pub async fn serve_server(app_handle: AppHandle, state: Arc<AppState>, setup: Se
         .route("/hooks/inbox", get(mod_inbox_handler))
         // The maiterm-tab mod on an ssh host: the session's transcript grew (mailink/mirror.rs)
         .route("/hooks/appended", get(mod_appended_handler))
+        // MCP servers through maiTerm, one entry each (docs/mcp-proxy.md §3)
+        .route("/mcp/x/{id}", post(proxy_post_handler).get(proxy_get_handler).delete(proxy_delete_handler))
         .with_state(server_state);
 
     log::info!("Claude Code IDE server listening on http://127.0.0.1:{}", setup.port);
@@ -2285,6 +2287,67 @@ async fn streamable_http_handler(
             StatusCode::ACCEPTED.into_response()
         }
     }
+}
+
+// ─── MCP servers through maiTerm (docs/mcp-proxy.md) ──────────────────────
+
+/// POST /mcp/x/{id}: one JSON-RPC message for a proxied server. Same auth as `/mcp`; the
+/// tab header decides only whether the server is offered to that tab's workspace.
+async fn proxy_post_handler(
+    State(srv): State<ServerState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let sid = headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty());
+    let reply = crate::mcp_proxy::downstream_post(&id, sid, declared_tab_id(&headers).as_deref(), &body).await;
+    let mut builder = Response::builder().status(reply.status);
+    if let Some(sid) = reply.session_id {
+        builder = builder.header("mcp-session-id", sid);
+    }
+    match reply.body {
+        Some(json) => builder.header(header::CONTENT_TYPE, "application/json").body(Body::from(json)).unwrap(),
+        None => builder.body(Body::empty()).unwrap(),
+    }
+}
+
+/// GET /mcp/x/{id}: the stream a proxied server's tool-list changes reach the agent on.
+async fn proxy_get_handler(State(srv): State<ServerState>, Path(id): Path<String>, headers: HeaderMap) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(rx) = crate::mcp_proxy::downstream_stream(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Keepalive comments while idle, as on /sse: an ssh tunnel or the client itself would
+    // otherwise call a silent stream dead.
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        match tokio::time::timeout(SSE_KEEPALIVE_INTERVAL, rx.recv()).await {
+            Ok(Some(json)) => Some((Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(format!("event: message\ndata: {}\n\n", json))), rx)),
+            Ok(None) => None,
+            Err(_) => Some((Ok(axum::body::Bytes::from(": keepalive\n\n")), rx)),
+        }
+    });
+    Response::builder()
+        .status(200)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+/// DELETE /mcp/x/{id}: the agent's session ended.
+async fn proxy_delete_handler(State(srv): State<ServerState>, Path(id): Path<String>, headers: HeaderMap) -> Response {
+    if extract_auth(&headers).as_deref() != Some(srv.expected_auth.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()) {
+        crate::mcp_proxy::downstream_end(&id, sid);
+    }
+    StatusCode::OK.into_response()
 }
 
 /// Derive a stable, UNIQUE connection id for a streamable-HTTP request.

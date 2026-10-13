@@ -4,6 +4,7 @@ mod claude_code;
 mod commands;
 mod comms;
 mod mailink;
+mod mcp_proxy;
 mod pty;
 mod state;
 mod share;
@@ -559,6 +560,10 @@ pub fn run() {
             // watcher: it idles when no script is waiting, and the scripts persist on their tabs.
             tauri::async_runtime::spawn(watch::watch_loop(app_state.clone(), app.handle().clone()));
 
+            // MCP servers through maiTerm (docs/mcp-proxy.md): load them and keep their tool
+            // lists current. Served on the Claude Code server's port under /mcp/x/<id>.
+            mcp_proxy::start(app.handle().clone(), app_state.clone());
+
             // Background tasks owned by Rust (independent of any webview's
             // event loop). See commands/scheduler.rs for the rationale.
             commands::scheduler::spawn_backup_scheduler(app_state.clone());
@@ -829,6 +834,13 @@ pub fn run() {
             agent_requests::list_agent_requests,
             agent_requests::decide_agent_request,
             agent_requests::settle_agent_request,
+            mcp_proxy::mcp_servers_list,
+            mcp_proxy::mcp_server_add,
+            mcp_proxy::mcp_server_remove,
+            mcp_proxy::mcp_server_set_token,
+            mcp_proxy::mcp_server_set_enabled,
+            mcp_proxy::mcp_server_set_workspaces,
+            mcp_proxy::mcp_server_refresh,
             commands::window::move_tab_to_window,
             commands::window::set_window_name,
             commands::window::save_window_geometry,
