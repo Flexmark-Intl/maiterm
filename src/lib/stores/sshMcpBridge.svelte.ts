@@ -420,9 +420,6 @@ function proxyMergeLines(): string[] {
   ];
 }
 
-/** ssh args per host, recorded when a bridge's setup runs: what a proxy-only refresh reuses. */
-const hostSshArgs = new Map<string, string>();
-
 /**
  * Merge the current proxied servers into every host bridged now (`mcp-proxy-entries-changed`),
  * so a server added or switched on in maiTerm reaches ssh hosts at once rather than at their
@@ -436,10 +433,10 @@ export async function refreshProxyEntries(): Promise<void> {
   const scripts = await commands.getMaitermSkillScripts();
   const script = [`__proxy='${escapeProxy(scripts.mcp_proxy)}'`, ...proxyMergeLines()].join('\n');
   await Promise.all([...hosts].map(async (host) => {
-    const args = hostSshArgs.get(host);
-    if (!args) return;
+    // The host key IS the ssh args (`extractHostKey`), so a bridge this window adopted from
+    // another (a tab moved between windows) is reachable as well as one it set up itself.
     try {
-      await commands.sshRunSetup(args, script);
+      await commands.sshRunSetup(host, script);
     } catch (e) {
       logError(`SSH MCP bridge: proxied MCP entries on ${host}: ${e}`);
     }
@@ -995,7 +992,6 @@ async function enableBridgeInner(tabId: string, sshArgs: string, ptyId?: string,
       const setupScript = buildSetupScript(
         tunnelInfo.remote_port, authToken, tabId, skillScripts, isSharedHost(hostKey, tabId));
       setupPromises.push(commands.sshRunSetup(sshArgs, setupScript));
-      hostSshArgs.set(hostKey, sshArgs);
     }
     if (codexOn) {
       // No-ops on a remote without the codex CLI. Reuses the local CodexRegistrar's

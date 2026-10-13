@@ -246,8 +246,10 @@ server:
   - **The card's words are maiTerm's.** It shows the URL (origin and path), the name, which
     runtimes get it, whether a sign-in follows, and that the server's tools load into every
     session started afterwards. The agent's `reason` is shown quoted.
-  - **Approval re-checks.** `add` refuses a URL maiTerm already serves, however it was added
-    meanwhile.
+  - **Approval re-checks.** Carrying out an agent's request, `add` refuses a URL maiTerm already
+    serves, however it was added meanwhile. The human may add one URL twice on purpose (two
+    accounts of one service, scoped to different workspaces), so their own add form isn't held to
+    it. URLs compare with a case-insensitive scheme and host and a case-sensitive path.
   - **Approving adds the server.** Approved at the desktop, an OAuth sign-in opens in the browser
     at once. Approved from the phone, it waits as "needs sign-in" for the human at the Mac. A
     token server waits for the human to paste one. Neither the agent nor the approval completes a

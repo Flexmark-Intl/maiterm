@@ -862,6 +862,23 @@ pub struct AddOptions {
     /// `oauth` auth on a server that doesn't let apps register: a client id the human made.
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
+    /// Carrying out an agent's approved `mcp_add` request (see the URL check in `add`).
+    pub from_agent_request: bool,
+}
+
+/// One URL, as servers compare: scheme and host are case-insensitive, the path is not; a trailing
+/// slash doesn't count.
+fn same_url(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a.trim()), reqwest::Url::parse(b.trim())) {
+        (Ok(x), Ok(y)) => {
+            x.scheme() == y.scheme()
+                && x.host_str() == y.host_str()
+                && x.port_or_known_default() == y.port_or_known_default()
+                && x.path().trim_end_matches('/') == y.path().trim_end_matches('/')
+                && x.query() == y.query()
+        }
+        _ => a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/'),
+    }
 }
 
 /// Add a server.
@@ -880,12 +897,15 @@ pub fn add(id: &str, url: &str, auth: &str, opts: AddOptions, added_by: &str) ->
     for key in [id.to_string(), format!("{id}#client")] {
         let _ = secrets::delete(&key);
     }
-    // One server per URL, however it is asked for: two would put every tool in every session
-    // twice and need two sign-ins. Checked here, at the moment of adding, because a request an
-    // agent filed can be approved after the same URL was added another way.
-    let norm = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
-    if let Some(other) = all().into_iter().find(|s| norm(&s.url) == norm(url)) {
-        return Err(format!("maiTerm already serves {url} as {}", other.id));
+    // An agent's proposal never adds a second server for a URL maiTerm already serves: that would
+    // put every tool in every session twice. Checked here, at the moment of adding, because the
+    // request can be approved after the same URL was added another way. The human may do it on
+    // purpose, though: two accounts of one service (work and personal Linear), each signed in
+    // separately and offered to different workspaces.
+    if opts.from_agent_request {
+        if let Some(other) = all().into_iter().find(|s| same_url(&s.url, url)) {
+            return Err(format!("maiTerm already serves {url} as {}", other.id));
+        }
     }
     let mut oauth_plan = None;
     // Without a token (an agent's proposal can't carry one) the server waits as "needs a token"
@@ -1097,7 +1117,7 @@ pub async fn mcp_server_add(
     } else {
         None
     };
-    let opts = AddOptions { token, oauth_plan, client_id, client_secret };
+    let opts = AddOptions { token, oauth_plan, client_id, client_secret, from_agent_request: request_id.is_some() };
     let by = match request_id {
         Some(r) => format!("agent request {r}"),
         None => "human".to_string(),
@@ -1188,6 +1208,14 @@ mod tests {
         assert_eq!(parse(not_served("theirs", &body("tools/call")))["result"]["isError"], true);
         let note = not_served("theirs", &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string());
         assert_eq!(note.status, 202);
+    }
+
+    #[test]
+    fn urls_compare_with_a_case_sensitive_path() {
+        assert!(same_url("https://MCP.Linear.app/mcp/", "https://mcp.linear.app/mcp"));
+        assert!(same_url("https://mcp.linear.app:443/mcp", "https://mcp.linear.app/mcp"));
+        assert!(!same_url("https://x.example/mcp/A", "https://x.example/mcp/a"));
+        assert!(!same_url("https://x.example/mcp", "http://x.example/mcp"));
     }
 
     #[test]
