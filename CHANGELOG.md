@@ -1,5 +1,21 @@
 # Changelog
 
+## v3.6.0
+
+Agents can ask for a bridge to another agent, and a round of fixes.
+
+### Agent requests
+
+- **Agents can ask to bridge to another agent, or to close their bridge.** A 1:1 bridge (connecting to a tab in the same window, or forking it into a new tab) is a request you approve in the Loom or on your phone, like a mesh change. For an agent running over ssh, the card says the copy runs on that host and shows the exact command.
+- **The Loom's Decisions shows only the requests filed in that window.** Windows stay separate; your phone still sees them all.
+
+### Fixes
+
+- **A tab started for a new conversation now resumes it** after a restart or a project move, instead of starting a fresh one each time.
+- **A question you answer from your phone or the Loom closes properly**, instead of still showing as waiting until the agent's turn ended.
+- **Typing an answer in Loom Focus keeps its focus**; the card no longer redraws under you every few seconds.
+- **ssh through a full path or autossh**: clones and reconnects run your own program and never copy maiTerm's private connection details into a cloned tab or a shared workspace file, and a shared workspace whose ssh command names an unexpected program is refused at import.
+
 ## v3.5.0
 
 Agents can organise your tabs, meshes and maiTerm itself, and ask you first wherever it matters.
