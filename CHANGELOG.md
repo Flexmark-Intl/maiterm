@@ -1,5 +1,28 @@
 # Changelog
 
+## v3.7.0
+
+MCP servers through maiTerm, muting a tab, and what an agent waits on shown on its own terminal.
+
+### MCP servers through maiTerm
+
+- **Sign in to a remote MCP server once, and every agent gets it.** In Preferences → MCP servers, add a server by its URL; Check finds out whether it needs no sign-in, a token, or a browser sign-in. maiTerm keeps the sign-in in your keychain and refreshes it, and Claude (under every managed account) and Codex each see the server as one of their own, with its tools unchanged. Claude on your ssh hosts gets them too, through your own maiTerm, so on a shared host each person's agents use their own sign-in. A server can be limited to some workspaces.
+- **A server that goes down keeps its tools.** A call answers with a sentence the agent can pass on, instead of the tools disappearing mid-session. Claude picks up a server's tool changes at once; Codex at its next session.
+- **Agents can offer it.** Asked to install an MCP server, an agent can present maiTerm as an option, and adding it is a request you approve on its card or on your phone. A URL that could carry a key is refused.
+- **Servers you installed directly are left alone.** If one is also served by maiTerm, Move to maiTerm removes the direct copy when you click it.
+
+### Mute
+
+- **Mute a tab or a whole workspace** (right-click → Mute notifications). It sends no toast, OS notification, sound, bell or phone push, permission and question alerts included, while anything waiting on you still shows in the Loom, on the terminal and on the tab. A struck-through bell marks it. An agent can mute a tab or workspace when you ask it to.
+
+### Decisions on the terminal
+
+- **What an agent is waiting on you for shows on its terminal**, as a pill in the lower right; a click opens the same cards the Loom uses. A tab that isn't on screen shows a coloured count in the tab strip, and the task panel shows each question as a button that opens its card. The card never opens by itself, and hiding it or answering the last one gives the keyboard back to the terminal.
+
+### Tasks
+
+- **A task an agent names by its id is shown by its title** in questions, options and notes, on the desktop and on your phone.
+
 ## v3.6.0
 
 Agents can ask for a bridge to another agent, and a round of fixes.
