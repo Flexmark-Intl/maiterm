@@ -21,6 +21,7 @@ Group your terminals by project. Each workspace has its own pane layout, tabs, a
 - **Workspace stack** — declare the services the project runs (dev server, API, database) and maiTerm runs them in tabs it owns, under a **Stack** section on the workspace row. See [Workspace Stack](/features/stack/)
 - **Move project** — right-click a workspace and choose **Move project…** to move its folder on disk; every tab, service and agent session that pointed at it follows. See [Moving a project folder](#moving-a-project-folder)
 - **Share a workspace** — right-click it and choose **Share workspace…** to save it as a file someone else can open: the same tabs in the same repositories, cloned for them where they don't have them, without your accounts or scrollback. See [Workspace Share](/features/workspace-share/)
+- **Mute** — right-click a workspace or a tab and choose **Mute notifications** to silence it, while anything waiting on you still shows. See [Muting a tab or workspace](#muting-a-tab-or-workspace)
 - **Overlord exemption** — when [Overlord](/features/overlord/#taking-a-tab-off-the-board) is on, an eye-off button on the workspace row takes every tab in it out of supervision; it stays visible while the exemption is set
 - **Suspend & resume** — suspend inactive workspaces to free resources (PTYs are killed, memory released). Resuming brings back exactly the tabs that had a live terminal when you suspended — maiTerm respawns and auto-resumes just those (with a progress modal for larger resumes), so a 20-tab workspace that had 3 agents running comes back with those 3 live, without waking tabs you never started. Auto-suspend after configurable timeout (15/30/60 min). A suspended workspace can also be woken from your phone with **Resume workspace** in [maiLink](/features/mailink/#managing-tabs-and-workspaces-from-the-phone)
 - **Full-session restore on relaunch** — on launch, maiTerm respawns and auto-resumes every tab that was live at last shutdown, across *every* workspace — one at a time, with a cancellable progress modal — so an agent in another workspace is already picking up where it left off when you switch to it. A window *reload* reattaches to terminals that are still running instead of respawning them
@@ -63,6 +64,14 @@ The folder stays on the same disk: to move one to another volume, move it yourse
 #### When a folder has gone missing
 
 If a folder was moved outside maiTerm, a tab whose saved folder is gone opens in your home folder — a tab always opens — but its agent isn't resumed there, where it would find nothing, and the folder it wanted is kept rather than saved over with home. maiTerm asks **Locate moved project**: where the folder is now, suggesting likely matches nearby. Pick one, or browse to it, and **Use this folder** points everything at it and restarts those tabs in the right place. A suggestion is never applied on its own, since a wrong guess would run every agent in the wrong project.
+
+### Muting a tab or workspace
+
+An agent you've left to grind through something long doesn't need to tell you every time it stops. Right-click its tab and choose **Mute notifications**, or right-click a workspace in the sidebar to mute every tab in it. A muted tab sends **nothing**: no toast, no OS notification, no sound, no terminal bell, and no push to your phone through [maiLink](/features/mailink/) — permission prompts and questions included.
+
+What it never hides is what's waiting on you. A muted agent's questions still wait in the [Loom](/features/loom/#decisions), in the corner of its [terminal](/features/loom/#on-the-terminal), and on the tab's own indicators, and its chat still shows on your phone. It just doesn't interrupt anyone to say so.
+
+A muted tab carries a struck-through bell; a muted workspace shows one on its sidebar row, rather than one on each of its tabs. **Unmute notifications** in the same menu undoes it, and a tab inside a muted workspace is unmuted from the workspace. Reloading, duplicating or splitting a tab keeps its mute. An agent can mute or unmute a tab or workspace with `setMuted` when you ask it to. In Claude Code, `/maiterm mute` and `/maiterm unmute` do it for the agent's own tab, and `/maiterm mute workspace` for its workspace.
 
 ## Panes
 

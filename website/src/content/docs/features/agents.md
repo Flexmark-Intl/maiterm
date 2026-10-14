@@ -27,6 +27,8 @@ There's **one** MCP/IDE server, shared by every agent. It starts automatically w
 
 When an agent connects, maiTerm identifies the runtime from the client's own handshake — so a Codex connection never binds to a Claude tab. And **no agent needs a manual registration step**: a tab names itself on the wire, and the session links itself the moment the agent process starts. See [Acting as the right tab](#acting-as-the-right-tab).
 
+The same server can also hand your agents **other** remote MCP servers, under one sign-in maiTerm holds for all of them — see [MCP Servers](/features/mcp-servers/).
+
 ## Choosing your agents
 
 Agent settings live in one runtime-neutral **AI Agents** section in Preferences, with a subsection per agent. Toggling an agent on or off installs or removes its integration immediately — no restart required.
@@ -130,7 +132,8 @@ Both agents connect to the same MCP server and can call the same tools.
 | `getClaudeSessions` | List all active agent sessions across tabs with state, tool, and model info |
 | `listWindows` | List all maiTerm windows with workspace summaries |
 | `createBackup` | Create a state backup on demand |
-| `sendNotification` | Send a toast or OS notification from your agent |
+| `sendNotification` | Send a toast or OS notification from your agent — from a [muted](/features/workspaces/#muting-a-tab-or-workspace) tab it reports that nothing was shown |
+| `setMuted` | Mute or unmute notifications for a tab or a whole workspace — only when you ask it to |
 
 ### Agent Bridge
 
@@ -198,9 +201,11 @@ An agent's way to pick work back up later without you having to remember it — 
 | `bridgeWith` | Bridge this agent 1:1 with another agent's tab in the same window, or fork that agent into a new tab and bridge with the copy — **asks you** |
 | `disconnectBridge` | Close this agent's [Agent Bridge](/features/agent-bridge/) — **asks you** |
 | `restartMaiterm` | Restart maiTerm, optionally installing the available update first — **asks you** |
+| `addMcpServer` | Add a remote MCP server for every agent through [maiTerm](/features/mcp-servers/) — **asks you**; the sign-in is yours to do |
 | `getRequestStatus` | What became of a request the agent filed: pending, approved, done, failed, denied or expired |
+| `listMcpServers` | The MCP servers [maiTerm manages](/features/mcp-servers/) for every agent, with their state and tools. Read-only |
 
-Tidying up is the agent's to do: reading the layout and moving tabs and workspaces around happen straight away. The line is **who can message whom**. Anything that changes it — making or unmaking a mesh, linking or unlinking meshes, a move into, out of or between meshes, opening or closing a 1:1 [bridge](/features/agent-bridge/) — and starting a new agent, which could ask for more, or restarting maiTerm, doesn't act. It files a request, and nothing happens until you approve it.
+Tidying up is the agent's to do: reading the layout and moving tabs and workspaces around happen straight away. The line is **who can message whom**. Anything that changes it — making or unmaking a mesh, linking or unlinking meshes, a move into, out of or between meshes, opening or closing a 1:1 [bridge](/features/agent-bridge/) — and starting a new agent, which could ask for more, restarting maiTerm, or adding an MCP server every agent will load, doesn't act. It files a request, and nothing happens until you approve it.
 
 - **You answer it on a card**, in the [Loom's Decisions](/features/loom/#decisions) or on your phone with [maiLink](/features/mailink/), and a notification takes you there. The card is in maiTerm's own words, built from what maiTerm knows: what will change, which agents gain or lose whom, how many agents a restart would interrupt mid-turn. The agent's only say is a one-line reason, shown as a quote.
 - **Only that card counts.** An agent asking you in chat, or Claude Code's permission dialog for the tool call, is not an approval — an allowlist or auto mode passes those without you seeing them.

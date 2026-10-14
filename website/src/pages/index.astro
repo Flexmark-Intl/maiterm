@@ -42,13 +42,21 @@ const description =
  */
 const KEY_FEATURES = [
   {
+    id: 'mcp',
+    // v3.7.0. Backed by features/mcp-servers.md. Names the runtimes, per the rule above: Claude
+    // Code under every managed account and Codex locally, Claude Code on ssh hosts. NOT Gemini
+    // and NOT Codex over ssh (docs/mcp-proxy.md §2) — don't widen the blurb to "every agent".
+    title: 'One MCP sign-in',
+    blurb: 'Claude Code and Codex, every account and host',
+    new: true,
+  },
+  {
     id: 'requests',
     // v3.5.0. Backed by features/agents.md "Organising tabs, meshes and maiTerm". "Who talks
     // to whom" is the line the app draws (docs/agent-requests.md §1); moves that don't touch
     // a mesh act at once, so don't promise that agents ask before every change.
     title: 'Agents that ask first',
     blurb: 'They tidy up; who talks to whom is yours',
-    new: true,
   },
   {
     id: 'inside',
@@ -198,10 +206,74 @@ const EVERYTHING = [
     </div>
   </section>
 
+  {/* ---------------------------------------------------------- MCP servers */}
+  {/* The release slot (v3.7.0): the hero rail's top entry links here. --raised, right after
+      the --flush hero (which has the plain background); inserting it flipped every band down
+      to the --sunken compat strip, which resets parity.
+
+      Every claim here is backed by features/mcp-servers.md and checked against
+      src-tauri/src/mcp_proxy/ + components/mcp/McpServersPane.svelte:
+      - Entries go to ~/.claude.json + every managed account root, and ~/.codex/config.toml,
+        each only while that runtime's IDE integration is on (entries.rs sync).
+      - SSH hosts: Claude Code only, merged by the bridge setup; remote Codex and Gemini are v2.
+      - A down upstream keeps its catalog; a call answers isError with a sentence.
+      - Claude re-lists on list_changed; Codex 0.157 ignores it until its next session.
+      - addMcpServer files an mcp_add request; it never signs in. Streamable HTTP + tools only. */}
+  <section class="ln-band ln-band--raised" id="mcp">
+    <div class="ln-inner">
+      <p class="ln-eyebrow">MCP servers</p>
+      <h2 class="ln-h2 ln-h2--wide">Sign in to an MCP server once. Every agent gets it.</h2>
+      <p class="ln-lead">
+        One remote MCP server means installing it in Claude Code, again in Codex, again under
+        each Claude account and on each SSH host, and signing in every time. Then the sign-ins
+        fight: most services rotate their refresh tokens, so two copies of one sign-in knock
+        each other out.
+      </p>
+      <p class="ln-lead">
+        Add it in <strong>Preferences → MCP servers</strong> instead. maiTerm signs in once, keeps
+        the sign-in in your system's credential store and keeps it fresh, and hands the server to
+        Claude Code under every account and to Codex. Each sees it as an ordinary MCP server of its
+        own, with the same tool names, so your permission rules still apply. The agents never hold
+        the token.
+      </p>
+
+      <div class="ln-cards">
+        <div class="ln-card">
+          <h3>Your sign-in, even on a shared host</h3>
+          <p>
+            Claude Code on your SSH hosts gets the same servers, through your own tunnel to your
+            own maiTerm. On a machine several people share, each person's agents use their own
+            sign-in.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Down doesn't mean gone</h3>
+          <p>
+            A server that goes down or needs signing in again keeps its tools. A call answers
+            with a sentence the agent can pass on, rather than tools vanishing halfway through a
+            task.
+          </p>
+        </div>
+        <div class="ln-card">
+          <h3>Agents suggest, you add</h3>
+          <p>
+            Ask an agent to install an MCP server and it can offer maiTerm, with the trade-off.
+            Adding it is a request you approve on its card or your phone, and the sign-in is
+            always yours to do.
+          </p>
+        </div>
+      </div>
+      <p class="ln-note band-note">
+        Opt-in, one server at a time; servers you installed directly are left alone. Remote
+        (HTTP) servers and their tools for now, served while maiTerm is running. Codex over SSH and Gemini don't
+        get them yet.
+      </p>
+      <a class="ln-cta-link" href="/features/mcp-servers/">How MCP servers work</a>
+    </div>
+  </section>
+
   {/* ------------------------------------------------------------ Requests */}
-  {/* The release slot (v3.5.0): the hero rail's top entry links here. --raised, right
-      after the --flush hero (which has the plain background); inserting it flipped every
-      band down to the --sunken compat strip, which resets parity.
+  {/* The release slot until v3.7.0 (v3.5.0). Plain since the MCP servers band went in above it.
 
       Every claim here is backed by features/agents.md "Organising tabs, meshes and maiTerm"
       and checked against src/lib/stores/agentRequests.svelte.ts + src-tauri/src/agent_requests.rs:
@@ -214,7 +286,7 @@ const EVERYTHING = [
       - Approval is only the card (Loom Decisions) or a PAIRED phone (authorize_human refuses
         the dev token). AskUserQuestion and Claude's permission dialog are not approval.
       - Pending requests lapse after 30 min (PENDING_TTL_MS). */}
-  <section class="ln-band ln-band--raised" id="requests">
+  <section class="ln-band" id="requests">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agents that ask first</p>
       <h2 class="ln-h2 ln-h2--wide">Your agents can tidy up. Who talks to whom is still your call.</h2>
@@ -255,7 +327,8 @@ const EVERYTHING = [
   </section>
 
   {/* -------------------------------------------------------------- Inside */}
-  {/* The release slot until v3.5.0 (v3.4.0). Plain since the Requests band went in above it.
+  {/* The release slot until v3.5.0 (v3.4.0). --raised since v3.7.0's MCP servers band
+      flipped the page.
 
       Every claim here is backed by features/agents.md "The maiTerm mod (Claude Code)"
       and checked against src-tauri/src/claude_code/{mod_asks,mod_inbox}.rs:
@@ -264,7 +337,7 @@ const EVERYTHING = [
       - Prompts go around a draft only BETWEEN TURNS (mod_inbox::takes_now); mid-turn a
         draft still holds them. "Reach an idle agent" is the honest wording.
       - Cross-session refusal is outbound from maiTerm tabs only. */}
-  <section class="ln-band" id="inside">
+  <section class="ln-band ln-band--raised" id="inside">
     <div class="ln-inner">
       <p class="ln-eyebrow">Inside Claude Code</p>
       <h2 class="ln-h2 ln-h2--wide">It works with Claude Code from the inside, not through its keyboard.</h2>
@@ -313,7 +386,7 @@ const EVERYTHING = [
 
       No screenshot yet: a real Focus view is a list of real tab names and transcripts.
       A staged one belongs here once the screenshot playbook has been run for it. */}
-  <section class="ln-band ln-band--raised" id="loom">
+  <section class="ln-band" id="loom">
     <div class="ln-inner">
       <p class="ln-eyebrow">Workstream Loom</p>
       <h2 class="ln-h2 ln-h2--wide">Every agent in the window. None of their terminals.</h2>
@@ -353,7 +426,8 @@ const EVERYTHING = [
           <p>
             Every question an agent has stopped on, every watch script waiting for your OK,
             and every change an agent has asked you to approve, oldest first. Pick an option or answer in your own words, and the answer goes
-            back to the agent that asked.
+            back to the agent that asked. The same cards wait in the corner of each agent's own
+            terminal, a click away.
           </p>
         </div>
       </div>
@@ -369,7 +443,7 @@ const EVERYTHING = [
       No screenshot on purpose: the Accounts pane is a list of real email
       addresses and organisation names. Every honest shot of it leaks an identity,
       and a staged one would be a fake account list. */}
-  <section class="ln-band" id="accounts">
+  <section class="ln-band ln-band--raised" id="accounts">
     <div class="ln-inner">
       <p class="ln-eyebrow">Agent accounts</p>
       <h2 class="ln-h2 ln-h2--wide">Claude Code has one login slot. Your week does not.</h2>
@@ -433,7 +507,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------- Progression */}
-  <section class="ln-band ln-band--raised">
+  <section class="ln-band">
     <div class="ln-inner">
       <p class="ln-eyebrow">Start with what you know</p>
       <h2 class="ln-h2 ln-h2--wide">It is a terminal first. The rest waits until you want it.</h2>
@@ -475,7 +549,7 @@ const EVERYTHING = [
   {/* --------------------------------------------------------------- Stack */}
   {/* .ln-cards sits OUTSIDE the text block on purpose: `.ln-stack > :first-child`
       caps at 46rem, which drops the three-card grid to two columns. */}
-  <section class="ln-band" id="stack">
+  <section class="ln-band ln-band--raised" id="stack">
     <div class="ln-inner ln-stack">
     <div>
       <p class="ln-eyebrow">Workspace stack</p>
@@ -550,7 +624,7 @@ const EVERYTHING = [
   </section>
 
   {/* --------------------------------------------------------------- Tasks */}
-  <section class="ln-band ln-band--raised" id="board">
+  <section class="ln-band" id="board">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Task board</p>
@@ -612,7 +686,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------ Overlord */}
-  <section class="ln-band" id="overlord">
+  <section class="ln-band ln-band--raised" id="overlord">
     <div class="ln-inner">
       <p class="ln-eyebrow">Overlord</p>
       <h2 class="ln-h2">A supervisor for a window full of agents</h2>
@@ -667,7 +741,7 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------------- Mesh */}
-  <section class="ln-band ln-band--raised" id="mesh">
+  <section class="ln-band" id="mesh">
     <div class="ln-inner ln-stack">
       <div>
         <p class="ln-eyebrow">Mesh workspace</p>
@@ -703,7 +777,7 @@ const EVERYTHING = [
   </section>
 
   {/* ------------------------------------------------------------- maiLink */}
-  <section class="ln-band" id="mailink">
+  <section class="ln-band ln-band--raised" id="mailink">
     <div class="ln-inner ln-split">
       <div>
         <p class="ln-eyebrow">maiLink companion</p>
@@ -730,7 +804,8 @@ const EVERYTHING = [
           channel. The single exception is a content-free push doorbell. It rings for a permission
           prompt, a question on one of an agent's tasks or a watch script waiting for you, and
           wakes the app carrying nothing but a tab name and an event kind — never a transcript. Each phone
-          picks which kinds ring it: keep permission prompts, mute "agent finished".
+          picks which kinds ring it: keep permission prompts, mute "agent finished". Mute a tab on
+          the desktop and it rings nothing at all.
         </p>
         <a class="ln-cta-link" href="/features/mailink/">How maiLink works</a>
       </div>
@@ -759,7 +834,7 @@ const EVERYTHING = [
       No screenshot here on purpose — a real Mattermost thread is a customer bug
       report with real usernames on it, and staging a fake one convincingly is a
       bigger job than this band is worth. */}
-  <section class="ln-band ln-band--raised" id="comms">
+  <section class="ln-band" id="comms">
     <div class="ln-inner">
       <p class="ln-eyebrow">Chat threads</p>
       <h2 class="ln-h2 ln-h2--wide">The bug report never has to leave the thread it landed in.</h2>
@@ -815,12 +890,12 @@ const EVERYTHING = [
   </section>
 
   {/* ---------------------------------------------------------- Follow-ups */}
-  {/* Plain, the last band before the --sunken compat strip: Chat threads above it is
-      --raised (since v3.5.0's Requests band flipped the page), and the sunken strip resets
+  {/* --raised, the last band before the --sunken compat strip: Chat threads above it is
+      plain (since v3.7.0's MCP servers band flipped the page), and the sunken strip resets
       parity below.
       Follow-ups only run while the Overlord is on (Preferences.follow_ups_live()),
       so the note says so rather than letting the band read as always-on. */}
-  <section class="ln-band" id="follow-ups">
+  <section class="ln-band ln-band--raised" id="follow-ups">
     <div class="ln-inner">
       <p class="ln-eyebrow">Follow-ups</p>
       <h2 class="ln-h2 ln-h2--wide">An agent that comes back to it, without you remembering to ask.</h2>

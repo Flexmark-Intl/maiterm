@@ -86,7 +86,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Remote work',
         maiterm:
-          'SSH is first class — remote agents get the same tab identity, task board, notes and MCP tools over a reverse tunnel.',
+          'SSH is first class — remote agents get the same tab identity, task board, notes and MCP tools over a reverse tunnel, and Claude Code there gets the MCP servers you added to maiTerm, under your own sign-in.',
         theirs: 'SSH works, with Warp’s own remote features layered on.',
       },
       {
@@ -188,7 +188,7 @@ export const COMPARISONS: Comparison[] = [
       {
         dimension: 'Remote hosts',
         maiterm:
-          'First class. Remote agents over SSH get the same tab identity, task board, notes and MCP tools through a reverse tunnel.',
+          'First class. Remote agents over SSH get the same tab identity, task board, notes and MCP tools through a reverse tunnel, and Claude Code there gets the MCP servers you added to maiTerm, under your own sign-in.',
         theirs:
           'Not offered — their docs point you at SSH and tmux for work that must live on another machine. WSL is supported on Windows.',
       },

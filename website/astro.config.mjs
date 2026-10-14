@@ -45,6 +45,7 @@ export default defineConfig({
             { label: 'Code Editor', slug: 'features/editor' },
             { label: 'Agent Integration', slug: 'features/agents' },
             { label: 'Agent Accounts', slug: 'features/accounts' },
+            { label: 'MCP Servers', slug: 'features/mcp-servers' },
             { label: 'Deshittification', slug: 'features/deshittification' },
             { label: 'Tasks', slug: 'features/tasks' },
             { label: 'Overlord', slug: 'features/overlord' },

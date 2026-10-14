@@ -49,9 +49,11 @@ Now an agent that stops on something only you can settle puts the question **on 
 | **Needs you** | Only you can do it: a `sudo`, a login, a payment | The exact command, when there is one |
 | **Waiting outside** | Something outside maiTerm: a review, CI, another person | The question says what |
 
-The question appears on the row in the task panel, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them), where a new question rings the phone. Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
+The question appears on the row in the task panel, as a coloured button that opens it on [the tab's terminal](/features/loom/#on-the-terminal), as a pill in the corner of that terminal, in the [Loom](/features/loom/)'s **Decisions** queue and Weave, and on your phone in [maiLink](/features/mailink/) (with a maiLink build that shows them), where a new question rings the phone. Answer it from any of them — pick an option or write your own, **I've done it** for an action, **It arrived** for something external — and maiTerm types your answer to the agent as a message, records it in the task's log, and moves the task back to Active. If the agent changed its question between you reading it and answering, the answer is refused rather than delivered against a question you never saw.
 
 Already dealt with it in the agent's own tab? **Dismiss** on the card — **Already handled** on the phone — closes the question without sending the agent anything: the task goes back to Active, and the log says it was handled in the tab.
+
+Agents are told you'll read their questions, options and notes without having seen their session. When one still names a task by its id, maiTerm shows that task's title in its place, on the desktop and on the phone.
 
 Moving the task out of Blocked by any other route — a drag on the board, the status chip, the agent itself — also clears the question, so nothing is left asking about work that has moved on.
 
