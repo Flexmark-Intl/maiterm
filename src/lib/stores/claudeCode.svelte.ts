@@ -179,6 +179,9 @@ function createClaudeCodeStore() {
         case 'sendNotification':
           result = await handleSendNotification(args as { tabId?: string; title: string; body?: string; type?: string });
           break;
+        case 'setMuted':
+          result = await handleSetMuted(args as { tabId?: string; muted?: boolean; scope?: string; target?: string });
+          break;
         case 'listArchivedTabs':
           result = handleListArchivedTabs(args as { workspaceId?: string });
           break;
@@ -872,6 +875,8 @@ function createClaudeCodeStore() {
         isActive: ws.id === workspacesStore.activeWorkspaceId,
         suspended: ws.suspended ?? false,
         ...(ws.overlord_exempt ? { overlordExempt: true } : {}),
+        // Muted (docs/mute.md): nothing from its tabs notifies the human. setMuted flips it.
+        ...(ws.muted ? { muted: true } : {}),
         noteCount: ws.workspace_notes.length,
         archivedTabCount: ws.archived_tabs?.length ?? 0,
         panes: ws.panes.map(pane => ({
@@ -887,6 +892,7 @@ function createClaudeCodeStore() {
               tabType: tab.tab_type ?? 'terminal',
               isActive: tab.id === pane.active_tab_id,
               hasNotes: !!tab.notes,
+              ...(tab.muted ? { muted: true } : {}),
               // A stack service's tab: real, running, readable with getTabContext — but
               // not in the human's tab strip, so `switchTab` cannot show it and nobody is
               // watching it. Say so, or an agent reads a silent tab as an idle colleague.
@@ -2393,8 +2399,39 @@ function createClaudeCodeStore() {
   async function handleSendNotification(args: { tabId?: string; title: string; body?: string; type?: string }) {
     const type = (['success', 'error', 'info'].includes(args.type ?? '') ? args.type : 'info') as 'success' | 'error' | 'info';
     const source = args.tabId ? { tabId: args.tabId } : undefined;
+    // An agent told "sent" believes the human saw it.
+    if (args.tabId && workspacesStore.isTabMuted(args.tabId)) {
+      return { sent: false, muted: true, detail: 'Your human muted this tab (or its workspace): nothing was shown. Do not look for another way to notify them.' };
+    }
     await dispatchNotification(args.title, args.body ?? '', type, source);
     return { sent: true };
+  }
+
+  /** Mute or unmute a tab or a workspace (docs/mute.md), on the human's say-so. The caller's
+   *  own tab (or its workspace) unless `target` names another in this window. */
+  async function handleSetMuted(args: { tabId?: string; muted?: boolean; scope?: string; target?: string }) {
+    if (typeof args.muted !== 'boolean') return { error: 'muted must be true or false.' };
+    const scope = args.scope ?? 'tab';
+    if (scope !== 'tab' && scope !== 'workspace') return { error: "scope must be 'tab' or 'workspace'." };
+    if (scope === 'workspace') {
+      const ws = args.target
+        ? workspacesStore.workspaces.find(w => w.id === args.target)
+        : (() => { const loc = resolveActiveTab(args.tabId); return 'error' in loc ? undefined : loc.workspace; })();
+      if (!ws) return { error: args.target ? `No workspace ${args.target} in this window. listWorkspaces gives the ids.` : 'Could not tell which workspace you are in.' };
+      await workspacesStore.setWorkspaceMuted(ws.id, args.muted);
+      return { scope, workspace: ws.name, muted: args.muted };
+    }
+    const loc = resolveActiveTab(args.target ?? args.tabId);
+    if ('error' in loc) return loc;
+    await workspacesStore.setTabMuted(loc.workspace.id, loc.pane.id, loc.tab.id, args.muted);
+    return {
+      scope,
+      tab: tabDisplayName(loc.tab),
+      muted: args.muted,
+      // A tab unmuted inside a muted workspace is still silent; say so rather than let the
+      // agent report "unmuted" to a human who will hear nothing.
+      ...(!args.muted && loc.workspace.muted ? { stillMutedBy: `the workspace "${loc.workspace.name}"` } : {}),
+    };
   }
 
   /** Resolve a tab by ID or fall back to the active tab. Returns { workspace, pane, tab } or { error }. */

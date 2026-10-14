@@ -111,6 +111,9 @@ export interface Tab {
   /** Exempt from Overlord (docs/overlord.md §11): no rules, probes, proposals, cards or
    *  agent tools touch this tab. `Workspace.overlord_exempt` covers a whole workspace. */
   overlord_exempt?: boolean;
+  /** Muted (docs/mute.md): nothing from this tab notifies — toast, OS, sound, phone push.
+   *  `Workspace.muted` covers a whole workspace; read `isTabMuted`, not this alone. */
+  muted?: boolean;
   /** Composer dock open state: null/absent = inherit composer_default_open pref. */
   composer_open?: boolean | null;
   /** Persisted in-progress composer draft text. */
@@ -433,6 +436,8 @@ export interface Workspace {
   overlord?: boolean;
   /** Every tab in this workspace is exempt from Overlord (docs/overlord.md §11). */
   overlord_exempt?: boolean;
+  /** Every tab in this workspace is muted (docs/mute.md). */
+  muted?: boolean;
   archived_tabs: Tab[];
   import_highlight?: boolean;
   suspended?: boolean;

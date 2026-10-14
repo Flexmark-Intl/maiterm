@@ -567,6 +567,14 @@ function createWorkspacesStore() {
       await commands.setWorkspaceOverlordExempt(workspaceId, exempt);
     },
 
+    /** Mute every tab in a workspace, or unmute it (docs/mute.md). */
+    async setWorkspaceMuted(workspaceId: string, muted: boolean) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      if (!ws || (ws.muted ?? false) === muted) return;
+      ws.muted = muted;
+      await commands.setWorkspaceMuted(workspaceId, muted);
+    },
+
     async suspendWorkspace(workspaceId: string) {
       const ws = workspaces.find(w => w.id === workspaceId);
       if (!ws || ws.suspended) return;
@@ -963,6 +971,11 @@ function createWorkspacesStore() {
         // came back supervised is the exemption silently failing on the most common fork.
         if (sourceTab.overlord_exempt) {
           await commands.setTabOverlordExempt(workspaceId, newPane.id, newTabId, true);
+        }
+        // So is a mute: a split of a muted agent that started notifying would be the mute
+        // failing on the most common fork.
+        if (sourceTab.muted) {
+          await commands.setTabMuted(workspaceId, newPane.id, newTabId, true);
         }
 
         // Copy notes
@@ -1717,6 +1730,28 @@ function createWorkspacesStore() {
       await commands.setTabOverlordExempt(workspaceId, paneId, tabId, exempt);
     },
 
+    /** Mute one tab, or unmute it (docs/mute.md). */
+    async setTabMuted(workspaceId: string, paneId: string, tabId: string, muted: boolean) {
+      const ws = workspaces.find(w => w.id === workspaceId);
+      const pane = ws?.panes.find(p => p.id === paneId);
+      const tab = pane?.tabs.find(t => t.id === tabId);
+      if (!tab || (tab.muted ?? false) === muted) return;
+      tab.muted = muted;
+      await commands.setTabMuted(workspaceId, paneId, tabId, muted);
+    },
+
+    /** Whether nothing from this tab may notify the human: it is muted, or its workspace is
+     *  (docs/mute.md). Mirrors `AppData::tab_muted`. */
+    isTabMuted(tabId: string): boolean {
+      for (const ws of workspaces) {
+        for (const pane of ws.panes) {
+          const tab = pane.tabs.find(t => t.id === tabId);
+          if (tab) return !!(ws.muted || tab.muted);
+        }
+      }
+      return false;
+    },
+
     /** Bind a tab to a stack service, or clear it (docs/stack.md §3). One tab per service:
      *  Rust clears the same service from any other tab in the workspace in the same write,
      *  and the mirror does the same here so the sidebar never shows two. */
@@ -2397,6 +2432,11 @@ function createWorkspacesStore() {
       if (sourceTab.overlord_exempt) {
         newTab.overlord_exempt = true;
         await commands.setTabOverlordExempt(workspaceId, paneId, newTab.id, true);
+      }
+      // And the mute, for the same reason.
+      if (sourceTab.muted) {
+        newTab.muted = true;
+        await commands.setTabMuted(workspaceId, paneId, newTab.id, true);
       }
 
       // 5. Set scrollback (skip in shallow mode)

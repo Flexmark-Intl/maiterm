@@ -39,6 +39,8 @@ Execute the maiTerm MCP tool for the requested operation. Use whichever maiterm 
 | `prefs <query>` | getPreferences | `{ "query": "<query>" }` |
 | `backup` | createBackup | `{}` |
 | `notify <title> <body>` | sendNotification | `{ "title": "<title>", "body": "<body>" }` |
+| `mute` / `unmute` | setMuted | `{ "muted": true }` / `{ "muted": false }` — this tab |
+| `mute workspace` / `unmute workspace` | setMuted | `{ "muted": true, "scope": "workspace" }` / `{ "muted": false, "scope": "workspace" }` |
 | `logs` | readLogs | `{}` |
 | `logs <search>` | readLogs | `{ "search": "<search>" }` |
 | `sessions` | getClaudeSessions | `{}` |

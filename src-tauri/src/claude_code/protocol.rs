@@ -105,6 +105,20 @@ pub fn tool_list_response(
             }
         },
         {
+            "name": "setMuted",
+            "description": "Mute or unmute notifications for a tab or a whole workspace, when your human asks you to. A muted tab notifies nothing: no toast, desktop notification, sound or phone push (its questions still wait in the Loom and on the tab). Defaults to your own tab, or with scope 'workspace' your own workspace; `target` names another tab or workspace in this window (ids from listWorkspaces, which also shows `muted`). Only on your human's instruction: muting is theirs to decide.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tabId": { "type": "string", "description": "Tab ID (auto-injected after initSession)" },
+                    "muted": { "type": "boolean", "description": "true to mute, false to unmute" },
+                    "scope": { "type": "string", "enum": ["tab", "workspace"], "description": "Default 'tab'" },
+                    "target": { "type": "string", "description": "Another tab id (scope 'tab') or workspace id (scope 'workspace'). Omit for your own." }
+                },
+                "required": ["muted"]
+            }
+        },
+        {
             "name": "readLogs",
             "description": "Read recent log entries from the maiTerm log file. Returns the last N lines, optionally filtered by log level or search string. Use this to investigate errors, warnings, or trace application behavior.",
             "inputSchema": {

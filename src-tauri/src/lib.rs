@@ -818,6 +818,8 @@ pub fn run() {
             commands::overlord::create_overlord_workspace,
             commands::workspace::set_tab_tasks_open,
             commands::workspace::set_tab_overlord_exempt,
+            commands::workspace::set_tab_muted,
+            commands::workspace::set_workspace_muted,
             commands::tasks::set_workspace_tasks,
             commands::tasks::get_window_tasks,
             commands::comms::comms_test_connection,

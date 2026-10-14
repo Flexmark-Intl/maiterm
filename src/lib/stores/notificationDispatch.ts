@@ -131,6 +131,14 @@ export async function dispatch(
   // Tauri events broadcast to all windows, so without this check every window would show the toast.
   if (source?.tabId && !tabBelongsToWindow(source.tabId)) return;
 
+  // A muted tab or workspace notifies nothing: no toast, OS notification or sound, requests
+  // included (docs/mute.md). What waits on the human still shows in the Loom, the tab's corner
+  // card and its indicators, which is why this can be total.
+  if (source?.tabId && workspacesStore.isTabMuted(source.tabId)) {
+    logInfo(`Notification (muted tab ${source.tabId}): ${title}`);
+    return;
+  }
+
   playNotificationSound();
 
   if (mode === 'native') {

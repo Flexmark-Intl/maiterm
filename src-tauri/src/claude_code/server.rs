@@ -2598,7 +2598,9 @@ fn recover_affinity(
 /// channel outside maiTerm. Called on the wrong tab these don't merely return wrong data — they
 /// put this agent's words into a stranger's terminal, or someone else's support thread, under that
 /// tab's identity, with no way to retract.
-const PEER_ADDRESSING_TOOLS: [&str; 45] = [
+const PEER_ADDRESSING_TOOLS: [&str; 46] = [
+    // A mute aimed at a guessed tab silences notifications the human wants (docs/mute.md).
+    "setMuted",
     // Agent requests and the moves (agent_requests.rs, docs/agent-requests.md): a request is
     // filed in the caller's name and a move rearranges the human's windows; neither may run on a
     // guessed identity. getMeshLayout is a read and keeps the reconnect convenience.

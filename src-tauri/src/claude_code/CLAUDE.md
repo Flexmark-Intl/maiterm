@@ -62,7 +62,8 @@ Claude Code CLI ←→ WebSocket/SSE ←→ axum server (Rust) ←→ Tauri even
 | setAutoResume | Enable/disable auto-resume with optional command/cwd/ssh overrides |
 | getAutoResume | Get current auto-resume configuration for a tab |
 | findNotes | Search all tabs and workspaces for notes, returns previews |
-| sendNotification | Send in-app toast notification (title, body, type) |
+| sendNotification | Send in-app toast notification (title, body, type). Answers `sent: false, muted: true` for a muted tab rather than claiming it was shown |
+| setMuted | Mute/unmute a tab or workspace (docs/mute.md) on the human's say-so: own tab by default, `scope: 'workspace'`, `target` for another in this window. On `PEER_ADDRESSING_TOOLS` |
 | readLogs | Read recent maiTerm log entries (filterable by level, search string) |
 | getPreferences | Return current preferences with metadata (filterable by query) |
 | setPreference | Update a single preference by key |

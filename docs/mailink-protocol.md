@@ -1624,6 +1624,11 @@ interface PushPrefs {
 - **A desktop older than 0.11 answers `404`.** A client should say the desktop needs an update to
   choose, rather than show switches that store nothing.
 
+**The desktop's own mute (2026-10-14, no wire change).** The human can mute a tab or a whole
+workspace on the desktop (docs/mute.md). A muted tab is pushed nothing, whatever the kind and
+whatever the device. Like a device mute it filters the push only: the WS frames, `unread` and the
+attention list are unchanged. No field says a chat is muted.
+
 ---
 
 ## 7. Security & threat model

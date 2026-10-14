@@ -6722,6 +6722,12 @@ async fn ring_devices(
     title: &str,
     kind: &str,
 ) {
+    // A muted tab or workspace pushes nothing (docs/mute.md). Like a device's own mutes, only
+    // the push: the phone still sees the wait over the WS and in the chat list.
+    if app.app_data.read().tab_muted(tab_id) {
+        log::debug!("[maiLink] doorbell: tab {tab_id} is muted, no push ({kind})");
+        return;
+    }
     let targets: Vec<(String, String, Option<String>, String)> = app
         .app_data
         .read()

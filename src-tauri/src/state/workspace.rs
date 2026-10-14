@@ -282,6 +282,11 @@ pub struct Tab {
     /// inside a supervised workspace. Rides with the tab record on move/duplicate/reload.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overlord_exempt: bool,
+    /// Muted (docs/mute.md): nothing from this tab notifies — no toast, OS notification,
+    /// sound or maiLink push. What waits on the human still shows (the Loom, the corner card,
+    /// the tab's own indicators). `Workspace::muted` covers every tab in a workspace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
     /// Whether the composer dock is open for this tab.
     /// `None` = inherit `composer_default_open` preference; `Some(x)` = user explicitly toggled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -885,6 +890,9 @@ pub struct Workspace {
     /// `Tab::overlord_exempt` for the per-tab form.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub overlord_exempt: bool,
+    /// Mute every tab in this workspace (docs/mute.md). See `Tab::muted`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
     #[serde(default)]
     pub archived_tabs: Vec<Tab>,
     /// Transient flag set after merge import — cleared on workspace activation.
@@ -1050,6 +1058,17 @@ impl AppData {
 
     pub fn window_mut(&mut self, label: &str) -> Option<&mut WindowData> {
         self.windows.iter_mut().find(|w| w.label == label)
+    }
+
+    /// Whether nothing from this tab may notify the human (docs/mute.md): the tab is muted, or
+    /// its workspace is. A tab this state doesn't know is not muted.
+    pub fn tab_muted(&self, tab_id: &str) -> bool {
+        self.windows.iter().flat_map(|w| &w.workspaces).any(|ws| {
+            ws.panes
+                .iter()
+                .flat_map(|p| &p.tabs)
+                .any(|t| t.id == tab_id && (ws.muted || t.muted))
+        })
     }
 
     /// How many live tabs (any window) claim `session_id` via their OWN runtime's session-id
@@ -2233,6 +2252,7 @@ impl Tab {
             notes_open: false,
             tasks_open: false,
             overlord_exempt: false,
+            muted: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -2283,6 +2303,7 @@ impl Tab {
             notes_open: false,
             tasks_open: false,
             overlord_exempt: false,
+            muted: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -2333,6 +2354,7 @@ impl Tab {
             notes_open: false,
             tasks_open: false,
             overlord_exempt: false,
+            muted: false,
             composer_open: None,
             composer_draft: None,
             mesh_purpose: None,
@@ -2394,11 +2416,40 @@ impl Workspace {
             stack: Vec::new(),
             overlord: false,
             overlord_exempt: false,
+            muted: false,
             archived_tabs: Vec::new(),
             import_highlight: false,
             suspended: false,
             pane_sizes: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+
+    #[test]
+    fn a_tab_is_muted_by_its_own_flag_or_its_workspace() {
+        let tab = |id: &str, muted: bool| {
+            let mut t = Tab::new(id.to_string());
+            t.id = id.to_string();
+            t.muted = muted;
+            t
+        };
+        let mut loud = Workspace::new("loud".to_string());
+        loud.panes[0].tabs = vec![tab("plain", false), tab("own", true)];
+        let mut quiet = Workspace::new("quiet".to_string());
+        quiet.muted = true;
+        quiet.panes[0].tabs = vec![tab("inside", false)];
+        let mut win = WindowData::new("main".to_string());
+        win.workspaces = vec![loud, quiet];
+        let d = AppData { windows: vec![win], ..AppData::default() };
+
+        assert!(!d.tab_muted("plain"));
+        assert!(d.tab_muted("own"));
+        assert!(d.tab_muted("inside"), "a muted workspace covers its tabs");
+        assert!(!d.tab_muted("nowhere"), "an unknown tab is not muted");
     }
 }
 

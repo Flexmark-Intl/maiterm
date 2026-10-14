@@ -1138,6 +1138,13 @@
         label: isPinned ? 'Unpin tab' : 'Pin tab',
         action: () => workspacesStore.setTabPinned(workspaceId, pane.id, tabId, !isPinned),
       },
+      // Mute (docs/mute.md). A muted workspace covers its tabs and is undone from the sidebar.
+      ws?.muted
+        ? { label: 'Muted (whole workspace)', action: () => {}, disabled: true }
+        : {
+            label: tabObj?.muted ? 'Unmute notifications' : 'Mute notifications',
+            action: () => workspacesStore.setTabMuted(workspaceId, pane.id, tabId, !tabObj?.muted),
+          },
       ...(overlordItem ? [overlordItem] : []),
       ...(mailinkItem ? [mailinkItem] : []),
       ...(commsMonitorItem ? [commsMonitorItem] : []),
@@ -1375,6 +1382,12 @@
                 waitingStore.open(tab.id);
               }}
             >{items.length}</button>
+          </Tooltip>
+        {/if}
+        {#if tab.muted}
+          <!-- Only the tab's own mute: a muted workspace says so once, on its sidebar row. -->
+          <Tooltip text="Muted: this tab sends no notifications. Right-click → Unmute notifications">
+            <span class="muted-indicator"><Icon name="bell-off" size={11} /></span>
           </Tooltip>
         {/if}
         <span class="tab-name">{displayName(tab)}</span>
@@ -1726,6 +1739,14 @@
 
   .follow-up-indicator.due {
     color: var(--accent);
+  }
+
+  .muted-indicator {
+    flex-shrink: 0;
+    margin-right: 4px;
+    display: flex;
+    align-items: center;
+    color: var(--fg-dim);
   }
 
   /* Same colours as the corner card it opens (WaitingCorner). */

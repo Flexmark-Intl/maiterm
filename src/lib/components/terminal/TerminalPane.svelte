@@ -837,7 +837,8 @@
       if (!trackActivity || !event.payload) return;
       const oscState = terminalsStore.getOsc(tabId);
       const title = oscState?.title || 'Terminal';
-      dispatch(title, event.payload, 'info');
+      // With its tab: so a muted tab stays quiet (docs/mute.md), and the toast opens the tab.
+      dispatch(title, event.payload, 'info', { tabId });
     });
 
     unlistenClipboard = await listen<string>(`term-clipboard-${ptyId}`, (event) => {
@@ -846,7 +847,8 @@
     });
 
     unlistenBell = await listen(`term-bell-${ptyId}`, () => {
-      if (!trackActivity) return;
+      // A bell is a sound like any notification's: a muted tab rings nothing (docs/mute.md).
+      if (!trackActivity || workspacesStore.isTabMuted(tabId)) return;
       playBellSound().catch(() => {});
     });
 

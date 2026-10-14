@@ -485,7 +485,11 @@
     const services = stackStore.services(workspaceId);
     const anyLive = services.some((s) => { const st = stackStore.status(s.id); return st === 'running' || st === 'ready' || st === 'starting'; });
     const run = (label: string, p: Promise<unknown>) => p.catch((e) => logError(`stack: ${label}: ${e}`));
+    const muted = !!workspacesStore.workspaces.find((w) => w.id === workspaceId)?.muted;
     return [
+      // Mute (docs/mute.md): nothing from any tab in it notifies — toast, OS, sound, phone push.
+      { label: muted ? 'Unmute notifications' : 'Mute notifications', action: () => run(muted ? 'unmute' : 'mute', workspacesStore.setWorkspaceMuted(workspaceId, !muted)) },
+      { label: '', separator: true, action: () => {} },
       { label: 'Start stack', disabled: services.length === 0, action: () => run('start stack', stackStore.startStack(workspaceId)) },
       { label: 'Stop stack', disabled: !anyLive, action: () => run('stop stack', stackStore.stopStack(workspaceId)) },
       { label: 'Restart stack', disabled: !anyLive, action: () => run('restart stack', stackStore.stopStack(workspaceId).then(() => stackStore.startStack(workspaceId))) },
@@ -747,6 +751,11 @@
             <button class="confirm-cancel" onclick={(e) => { e.stopPropagation(); confirmingDeleteId = null; }}>Cancel</button>
           {:else}
             <span class="workspace-name">{workspace.name}</span>
+            {#if workspace.muted}
+              <Tooltip text="Muted: no tab here sends notifications. Right-click → Unmute notifications">
+                <span class="ws-muted"><Icon name="bell-off" size={11} /></span>
+              </Tooltip>
+            {/if}
             {#if stackStore.rollup(workspace.id)}
               {@const roll = stackStore.rollup(workspace.id)}
               <!-- Stack rollup (docs/stack.md §7): batch semantics like the Claude dot —
@@ -1171,6 +1180,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .ws-muted {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    margin-left: 4px;
+    color: var(--fg-dim);
   }
 
   .mesh-badge {

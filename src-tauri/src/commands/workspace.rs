@@ -1096,6 +1096,63 @@ pub fn set_tab_overlord_exempt(
     save_state(&data_clone)
 }
 
+/// Mute one tab, or unmute it (docs/mute.md): nothing from it notifies the human, the phone's
+/// push included (`AppData::tab_muted`).
+#[tauri::command]
+pub fn set_tab_muted(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    pane_id: String,
+    tab_id: String,
+    muted: bool,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let tab = app_data
+        .window_mut(&label)
+        .ok_or("Window not found")?
+        .workspaces
+        .iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?
+        .panes
+        .iter_mut()
+        .find(|p| p.id == pane_id)
+        .ok_or("Pane not found")?
+        .tabs
+        .iter_mut()
+        .find(|t| t.id == tab_id)
+        .ok_or("Tab not found")?;
+    tab.muted = muted;
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
+/// Mute every tab in a workspace, or unmute it (docs/mute.md). See `set_tab_muted`.
+#[tauri::command]
+pub fn set_workspace_muted(
+    window: tauri::Window,
+    state: State<'_, Arc<AppState>>,
+    workspace_id: String,
+    muted: bool,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let mut app_data = state.app_data.write();
+    let workspace = app_data
+        .window_mut(&label)
+        .ok_or("Window not found")?
+        .workspaces
+        .iter_mut()
+        .find(|w| w.id == workspace_id)
+        .ok_or("Workspace not found")?;
+    workspace.muted = muted;
+    let data_clone = app_data.clone();
+    drop(app_data);
+    save_state(&data_clone)
+}
+
 /// The frontend stack store publishes its runtime snapshot here on every change, so the
 /// SessionStart priming can name what is up without asking the webview. Whole-map replace
 /// per window's worth of rows is overkill; rows are keyed by service id, so a publish just
@@ -3626,6 +3683,8 @@ mod reload_carry_tests {
             notes_open: true,
             tasks_open: true,
             overlord_exempt: false,
+            // Set, so the whole-record comparison proves a reload keeps a mute.
+            muted: true,
             composer_open: Some(true),
             composer_draft: Some("half-typed".to_string()),
             mesh_purpose: Some("owns the chat channel".to_string()),

@@ -820,6 +820,14 @@ export async function setTabOverlordExempt(workspaceId: string, paneId: string, 
   return invoke('set_tab_overlord_exempt', { workspaceId, paneId, tabId, exempt });
 }
 
+export async function setTabMuted(workspaceId: string, paneId: string, tabId: string, muted: boolean): Promise<void> {
+  return invoke('set_tab_muted', { workspaceId, paneId, tabId, muted });
+}
+
+export async function setWorkspaceMuted(workspaceId: string, muted: boolean): Promise<void> {
+  return invoke('set_workspace_muted', { workspaceId, muted });
+}
+
 export async function setWorkspaceOverlordExempt(workspaceId: string, exempt: boolean): Promise<void> {
   return invoke('set_workspace_overlord_exempt', { workspaceId, exempt });
 }
