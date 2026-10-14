@@ -33,6 +33,7 @@ import { dispatch as notify } from '$lib/stores/notificationDispatch';
 import { moveTabToWindow, moveWorkspaceToWindow } from '$lib/stores/windowMove';
 import { getDescriptor } from '$lib/agents/descriptor';
 import type { AgentRuntime } from '$lib/agents/types';
+import { preferencesStore } from '$lib/stores/preferences.svelte';
 
 type ToolResult = Record<string, unknown>;
 
@@ -498,12 +499,25 @@ async function addMcpServer(a: { tabId?: string; url?: string; name?: string; re
   const shown = shownName;
   const signIn =
     probe.auth === 'oauth'
-      ? `It needs you to sign in with ${issuerHost}. Approving here opens that in your browser; approving from your phone leaves it waiting in Preferences → MCP servers on this Mac.`
+      ? `It needs you to sign in with ${issuerHost}. Approving here opens that in your browser; approving from your phone leaves it waiting in Preferences → MCP servers on this computer.`
       : probe.auth === 'token'
         ? 'It needs a token from the service, which you paste in Preferences → MCP servers. Until then its tools fail.'
         : 'It needs no sign-in.';
+  // Only the runtimes whose integration is on get an entry (mcp_proxy::entries::sync, and the ssh
+  // bridge's remote merge), so the card names just those: it must be true about who gets it.
+  const p = preferencesStore;
+  const runtimes = [
+    ...(p.claudeCodeIde ? ['Claude'] : []),
+    ...(p.codexIde ? ['Codex'] : []),
+  ];
+  const remote = p.claudeCodeIde && p.claudeCodeIdeSsh;
+  const who = runtimes.length
+    ? `${runtimes.join(' and ')} here${remote ? ', and Claude on the ssh hosts you have bridged,' : ''}`
+    : '';
   const effects = [
-    `Claude and Codex here, and Claude on the ssh hosts you have bridged, get its tools as an MCP server named “${shown}”, in every workspace. Its tools load into every agent session started after this; one already running doesn't see it until it restarts.`,
+    who
+      ? `${who} ${runtimes.length > 1 || remote ? 'get' : 'gets'} its tools as an MCP server named “${shown}”, in every workspace. Its tools load into every agent session started after this; one already running doesn't see it until it restarts.`
+      : `No agent gets its tools until you turn on the Claude Code or Codex integration in Preferences; then they appear as an MCP server named “${shown}”, in every workspace.`,
     signIn,
     ...(probe.duplicates.length ? [`You also have it installed directly (${probe.duplicates.join('; ')}): agents would get every tool twice until you remove one (“Move to maiTerm” in Preferences).`] : []),
   ];
