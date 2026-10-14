@@ -185,9 +185,14 @@ function createFollowUpsStore() {
     const fresh = pendingApprovals().filter(p => !p.archived && !announced.has(p.followUp.id));
     if (fresh.length === 0) return;
     for (const p of fresh) announced.add(p.followUp.id);
+    // The notice is shared but `dispatch` drops one from a muted tab (docs/mute.md), so it goes
+    // out under the newest UNMUTED one. Under the newest of all, a muted tab's script would
+    // silence an unmuted tab's, which are marked announced above and never rung again.
+    const source = fresh.findLast(p => !workspacesStore.isTabMuted(p.tabId));
+    if (!source) return;
     // A new question rings again, worded for everything still waiting.
     const { title, body } = approvalsNotice();
-    void notify(title, body, 'info', { tabId: fresh[fresh.length - 1].tabId }, {
+    void notify(title, body, 'info', { tabId: source.tabId }, {
       key: APPROVALS_KEY,
       action: () => window.dispatchEvent(new CustomEvent('open-loom', { detail: { mode: 'decisions' } })),
     });

@@ -27,7 +27,10 @@ doesn't interrupt anyone to say so.
 Each kind of notification goes through one gate:
 - **Toasts, OS notifications and their sound** go through `dispatch()` in
   `notificationDispatch.ts`, which drops anything whose `source.tabId` is muted. Request toasts
-  are dropped too. Callers must pass the tab: OSC 9 didn't, and was fixed.
+  are dropped too. Callers must pass the tab: OSC 9 didn't, and was fixed. A notice shared by
+  several tabs must name an unmuted one. The watch-script notice named only its newest script's
+  tab, so a muted tab silenced everyone else's scripts, for good (`announceApprovals`, found in
+  review).
 - **The terminal bell** plays its own sound, so it has its own check in `TerminalPane`.
 - **Phone pushes** all go through `ring_devices` (mailink/mod.rs), which returns early for a
   muted tab. The WS and the chat list are untouched (docs/mailink-protocol.md §6.2).
