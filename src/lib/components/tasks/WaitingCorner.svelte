@@ -10,6 +10,7 @@
   corner and changes nothing, Dismiss (on a question) closes the question.
 -->
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte';
   import { waitingStore, waitingTone, type WaitingItem } from '$lib/stores/waiting.svelte';
   import { tasksStore } from '$lib/stores/tasks.svelte';
   import { terminalsStore } from '$lib/stores/terminals.svelte';
@@ -98,6 +99,16 @@
     else terminalsStore.focusTerminal(tabId);
   }
 
+  // Leaving the tab hides its card. An open card that survived would be focused again by the
+  // effect above when the tab is shown again, with no click: the human's next keystrokes, meant
+  // for the terminal, would answer the agent. The same goes for a card closing itself below
+  // when the tab is left inside its delay.
+  //
+  // The id as mounted, not the prop: props are live, and by the time a `{#key}` swap destroys
+  // this instance its `tabId` already reads the NEW tab, which would close that one's card.
+  const mountedTabId = untrack(() => tabId);
+  onDestroy(() => waitingStore.close(mountedTabId));
+
   // Everything answered: show the last receipt for a moment, then go back to nothing.
   $effect(() => {
     if (!opened || items.length) return;
@@ -123,7 +134,6 @@
             <button class="hide" onclick={hide}>Hide</button>
           </Tooltip>
         </header>
-        {#if note}<p class="note">{note}</p>{/if}
         <div class="list">
           {#each items as item (item.key)}
             <article data-key={item.key} class:focused={item.key === opened.focus}>
@@ -140,6 +150,9 @@
             <p class="empty">Nothing else is waiting on you here.</p>
           {/each}
         </div>
+        <!-- Below the list, never above it: a line appearing above would push the cards down
+             under the pointer, and no card guard sees that move. -->
+        {#if note}<p class="note">{note}</p>{/if}
       </div>
     {:else}
       <button class="pill" data-tone={tone} onclick={() => waitingStore.open(tabId)}>
@@ -237,7 +250,7 @@
     padding: 6px 12px;
     font-size: 12px;
     color: var(--fg-dim);
-    border-bottom: 1px solid var(--bg-light);
+    border-top: 1px solid var(--bg-light);
     overflow-wrap: anywhere;
   }
   .list {

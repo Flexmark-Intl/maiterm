@@ -67,7 +67,8 @@ export interface OpenCorner {
 
 function createWaitingStore() {
   /** Open corner cards by tab id. A tab's card shows only while the tab is its pane's active
-   *  tab; it stays open across a tab switch. */
+   *  tab, and leaving the tab closes it (WaitingCorner's onDestroy): reopened on its own, it
+   *  would take the keyboard without a click. */
   let open = $state<Record<string, OpenCorner>>({});
   let seq = 0;
 

@@ -230,6 +230,9 @@ The Loom left the terminal area because a heavy drawer fought a live terminal fo
 for the keyboard. A one-card corner is light, so only the keyboard rules carry over, and they
 are the point of the component:
 - **It never opens by itself.** The terminal under it is usually focused and being typed in.
+  That includes coming back to a tab: leaving it closes its card, because a card still open
+  would be focused again on remount, and the next keystrokes meant for the shell would answer
+  the agent (found in review).
 - **A click moves focus into the card** (its answer field, on a frame).
 - **Hide and Escape give focus back** to where it was, or to the tab's terminal when that was
   nothing (`terminalsStore.focusTerminal`). Answering the last card removes the focused field,
