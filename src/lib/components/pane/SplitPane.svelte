@@ -7,6 +7,7 @@
   import NotesPanel from '$lib/components/terminal/NotesPanel.svelte';
   import TasksPanel from '$lib/components/tasks/TasksPanel.svelte';
   import ComposerDock from '$lib/components/terminal/ComposerDock.svelte';
+  import WaitingCorner from '$lib/components/tasks/WaitingCorner.svelte';
   import { pendingResumePanes, resumePane } from '$lib/stores/resumeGate.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { getSavedScrollbackText } from '$lib/tauri/commands';
@@ -150,6 +151,11 @@
               data-terminal-slot={tab.id}
             ></div>
           {/each}
+          {#if pane.active_tab_id}
+            {#key pane.active_tab_id}
+              <WaitingCorner tabId={pane.active_tab_id} />
+            {/key}
+          {/if}
           {#if pendingResumePanes.has(pane.id)}
             {@const activeTab = pane.tabs.find(t => t.id === pane.active_tab_id)}
             <div class="resume-overlay">

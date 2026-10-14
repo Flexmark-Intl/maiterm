@@ -205,6 +205,39 @@ composer stayed up for the whole tool run.
 **Closing the Board tab doesn't strand the Loom.** `create_overlord_workspace` puts a closed
 board back, and `ensureOverlordWorkspace` asks for it whenever the board is missing.
 
+## On the terminal: the corner card (2026-10-14)
+
+The Decisions queue answers everything, but only once the human goes to the Overlord deck.
+Outside it, a question was easy to miss: the task panel was closed, or so narrow the card
+crowded it. So each item is also shown where the human already is, on the terminal of the
+tab whose agent asked.
+
+- **`waitingStore`** (`stores/waiting.svelte.ts`) indexes everything waiting on the human
+  by its asking tab: decision/action blockers (`decisionsQueue`), watch scripts to allow
+  (not on archived tabs), and agent requests. Tasks with no tab stay Loom-only.
+- **`WaitingCorner`** (`components/tasks/WaitingCorner.svelte`) sits in each pane's terminal
+  area for the active tab. It is a pill in the lower right (orange; red when something is an
+  `action`), and a click opens a card stack. The cards are the same `BlockerCard`,
+  `ScriptApprovalCard` and `AgentRequestCard`, with all their guards.
+  - It sits under the service console drawer (z 40), so an open drawer covers it.
+- **The tab strip** badges a tab that isn't showing (`.waiting-badge`, a count). A click
+  switches to the tab first, then opens the card.
+- **The task panel** shows each question as a coloured button that opens the card on its
+  tab's terminal. An `external` wait or a row another tab carries rides along as
+  `extraTaskId`.
+
+The Loom left the terminal area because a heavy drawer fought a live terminal for paint and
+for the keyboard. A one-card corner is light, so only the keyboard rules carry over, and they
+are the point of the component:
+- **It never opens by itself.** The terminal under it is usually focused and being typed in.
+- **A click moves focus into the card** (its answer field, on a frame).
+- **Hide and Escape give focus back** to where it was, or to the tab's terminal when that was
+  nothing (`terminalsStore.focusTerminal`). Answering the last card removes the focused field,
+  which leaves focus on the body, and that counts as the card's.
+- **Escape is stopped in the card.** In the terminal it would reach the agent and interrupt it.
+- **Hide is not Dismiss.** Hide puts the card back in the corner and changes nothing; Dismiss
+  closes the question.
+
 ## Blocked with no reason recorded
 
 A Blocked task with no blocker record and no unmet dependency has its question only in the

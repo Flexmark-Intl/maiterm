@@ -18,16 +18,15 @@
   import { overlordStore } from '$lib/stores/overlord.svelte';
   import { preferencesStore } from '$lib/stores/preferences.svelte';
   import { workspacesStore } from '$lib/stores/workspaces.svelte';
-  import { effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
+  import { BLOCKER_LABEL, effectiveStatus, explainBlocked, FLOW_STATUSES, hasUnmetDeps, isDropped, isInFlight, isParked, laneName, resolveBlockers, type ParkedLookup } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import type { Task, TaskStatus } from '$lib/tauri/types';
   import Icon from '$lib/components/Icon.svelte';
   import IconButton from '$lib/components/ui/IconButton.svelte';
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskAddModal from './TaskAddModal.svelte';
-  import BlockerCard from './BlockerCard.svelte';
   import TaskText from './TaskText.svelte';
-  import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
+  import { waitingStore } from '$lib/stores/waiting.svelte';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
 
   interface Props {
@@ -320,15 +319,6 @@
   /** This tab's watch scripts waiting to be allowed (docs/follow-ups.md §5.1): a decision this
    *  agent is waiting on, so it sits above its tasks, like a blocked task's question. */
   const approvals = $derived(followUpsStore.pendingApprovals.filter((a) => a.tabId === tabId));
-  /** The outcome of the last one answered here; the card itself leaves once answered. */
-  let approvalNote = $state<string | null>(null);
-  /** When the cards last changed, for their click guard (ScriptApprovalCard). */
-  let approvalsChangedAt = $state(0);
-  const approvalIds = $derived(approvals.map((a) => a.followUp.id).join('|'));
-  $effect(() => {
-    void approvalIds;
-    approvalsChangedAt = Date.now();
-  });
 
   /** One-row receipt, cleared after a few seconds. */
   function note(id: string, text: string) {
@@ -440,12 +430,14 @@
   </div>
 
   <div class="lists">
+    <!-- Each opens its card in the corner of this tab's terminal (WaitingCorner): the card
+         itself was too cramped to answer in here. -->
     {#each approvals as a (a.followUp.id)}
-      <div class="approval-slot">
-        <ScriptApprovalCard variant="inline" {tabId} followUp={a.followUp} listChangedAt={approvalsChangedAt} onnote={(text) => (approvalNote = text)} />
-      </div>
+      <button class="waiting-btn approval-slot" data-kind="decision" onclick={() => waitingStore.open(tabId, a.followUp.id)}>
+        <span class="wk">A watch script to allow · {fmtAge(a.followUp.created_at)}</span>
+        <span class="wq">{a.followUp.due.label ?? 'Watch script'}</span>
+      </button>
     {/each}
-    {#if approvalNote}<p class="approval-note">{approvalNote}</p>{/if}
 
     {#if groups.length === 0 && approvals.length === 0}
       <p class="empty">
@@ -623,9 +615,10 @@
               <!-- What the agent stopped on, when it isn't another task: the question stays
                    here instead of scrolling away in the agent's output. -->
               {#if t.blocker && t.status === 'blocked'}
-                <div class="blocker-slot">
-                  <BlockerCard task={t} onnote={(text) => note(t.id, text)} />
-                </div>
+                <button class="waiting-btn blocker-slot" data-kind={t.blocker.kind} onclick={() => waitingStore.open(tabId, t.id, t.id)}>
+                  <span class="wk">{BLOCKER_LABEL[t.blocker.kind]} · {fmtAge(t.blocker.asked_at)}</span>
+                  <span class="wq"><TaskText text={t.blocker.question} of={t.id} /></span>
+                </button>
               {/if}
 
               {#if detailFor === t.id}
@@ -751,7 +744,39 @@
   }
 
   .approval-slot { margin: 6px 8px 4px; }
-  .approval-note { margin: 4px 10px 6px; font-size: 11px; color: var(--fg-dim); line-height: 1.4; }
+  /* A question in short, coloured by its kind as its card is (BlockerCard); the card opens in
+     the terminal's corner. */
+  .waiting-btn {
+    --kind: var(--orange, #ff9e64);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: calc(100% - 16px);
+    padding: 5px 8px;
+    border: 1px solid color-mix(in srgb, var(--kind) 55%, transparent);
+    border-left: 3px solid var(--kind);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--kind) 12%, transparent);
+    color: var(--fg);
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .waiting-btn[data-kind='action'] { --kind: var(--red, #f7768e); }
+  .waiting-btn[data-kind='external'] { --kind: var(--cyan, #7dcfff); }
+  .waiting-btn:hover,
+  .waiting-btn:focus-visible { background: color-mix(in srgb, var(--kind) 22%, transparent); }
+  .waiting-btn .wk { color: var(--kind); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .waiting-btn .wq {
+    font-weight: 600;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
 
   .group-loose { font-style: italic; opacity: 0.7; text-transform: none; letter-spacing: 0; }
 
@@ -959,7 +984,7 @@
     opacity: 0.85;
   }
 
-  .blocker-slot { margin: 4px 0 2px calc(4px + 3.6em); }
+  .blocker-slot { margin: 4px 0 2px calc(4px + 3.6em); width: calc(100% - 4px - 3.6em - 8px); }
 
   .detail {
     background: var(--bg-dark);

@@ -23,6 +23,7 @@
   import ContextMenu, { type MenuItem } from '$lib/components/ContextMenu.svelte';
   import { tabMoveItem } from '$lib/stores/windowMove';
   import { badgeSummary } from '$lib/followUps/model';
+  import { waitingStore, waitingTone } from '$lib/stores/waiting.svelte';
   import type { MoveTargetWindow } from '$lib/tauri/types';
   import { writeText as clipboardWriteText } from '@tauri-apps/plugin-clipboard-manager';
   import { toastStore } from '$lib/stores/toasts.svelte';
@@ -89,6 +90,9 @@
   // Follow-up badges read relative times ("next in 12m") and flip to "due" as time passes;
   // nothing else re-renders a quiet tab, so tick while this pane has any to show.
   let followUpNow = $state(Date.now());
+  /** What each tab's agent is waiting on the human for. The badge is for tabs not on screen:
+   *  the one showing has its corner card (WaitingCorner). */
+  const waiting = $derived(waitingStore.byTab());
   const paneHasFollowUps = $derived(pane.tabs.some(t => (t.follow_ups?.length ?? 0) > 0));
   $effect(() => {
     if (!paneHasFollowUps) return;
@@ -1355,6 +1359,24 @@
             </Tooltip>
           {/if}
         {/if}
+        {#if tab.id !== pane.active_tab_id && waiting.get(tab.id)?.length}
+          {@const items = waiting.get(tab.id)!}
+          <Tooltip text={`${items.length === 1 ? 'Something is' : `${items.length} things are`} waiting on you here. Click to open ${items.length === 1 ? 'it' : 'them'}`}>
+            <button
+              class="waiting-badge"
+              data-tone={waitingTone(items)}
+              aria-label="Waiting on you"
+              onclick={async (e) => {
+                // Opens the card with the tab: the click is the human asking for it. The tab
+                // first, because a terminal focuses itself when it becomes visible, and the
+                // card has to take focus after that, not before.
+                e.stopPropagation();
+                await handleTabClick(tab.id);
+                waitingStore.open(tab.id);
+              }}
+            >{items.length}</button>
+          </Tooltip>
+        {/if}
         <span class="tab-name">{displayName(tab)}</span>
         {@const hasRunningPty = !isEditor && !isDiff && !!terminalsStore.get(tab.id)}
         <div class="tab-actions" class:always-visible={preferencesStore.tabButtonStyle === 'always'} class:modifier-only={preferencesStore.tabButtonStyle === 'modifier'} class:modifier-active={preferencesStore.tabButtonStyle === 'modifier' && modHeld} class:never-visible={preferencesStore.tabButtonStyle === 'never'} class:triple-action={isEditor || isDiff} class:quadruple-action={!isEditor && !isDiff && !hasRunningPty} class:quintuple-action={hasRunningPty}>
@@ -1705,6 +1727,28 @@
   .follow-up-indicator.due {
     color: var(--accent);
   }
+
+  /* Same colours as the corner card it opens (WaitingCorner). */
+  .waiting-badge {
+    --tone: var(--orange, #ff9e64);
+    flex-shrink: 0;
+    margin-right: 4px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--tone);
+    color: var(--bg-dark);
+    font: inherit;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 15px;
+    cursor: pointer;
+  }
+  .waiting-badge[data-tone='action'] { --tone: var(--red, #f7768e); }
+  .waiting-badge:hover,
+  .waiting-badge:focus-visible { outline: 1px solid var(--fg); outline-offset: 1px; }
 
   /* A button (so the tab's drag skips it and a click reaches it), drawn as the indicator it was. */
   .follow-up-indicator {
