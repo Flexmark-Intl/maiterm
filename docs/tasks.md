@@ -347,7 +347,11 @@ blocker together with another status is refused rather than guessed at.
 
 Set by agents through `createTasks` / `updateTasks` (`blocker`, or `blocker: null` to clear).
 Validation refuses rather than coerces (`parseBlocker`). A wrong kind would put the question
-in the wrong queue, and an agent that isn't told believes it asked. Setting one appends a
+in the wrong queue, and an agent that isn't told believes it asked. **Blocker text that names
+a task of this project by its id (or a 6+ character prefix) is refused too**, with the title
+in the refusal: no surface shows the human a task id, and "retire or repoint action 9? (board
+c8197575)" cost a turn of "what does that mean". The tool description asks the agent to say
+what numbers from its own code or data refer to as well; no check can catch that one. Setting one appends a
 log line ("Waiting on your decision: …") so the history records what was asked. On
 `createTasks` it applies to new rows only: a re-sent list after a compact must not re-ask
 a question the row already carries.

@@ -300,8 +300,17 @@ export type BlockerParse = { ok: true; blocker: TaskBlocker } | { ok: false; det
  *
  * `dependency` is refused with its own message because it is the natural thing to try, and
  * it is derived from `blocked_by`, never stored.
+ *
+ * Text that names one of `tasks` by its id is refused too. No surface shows the human a task
+ * id, so "waits on board c8197575" reads as noise and the human spends a turn asking what it
+ * means. The refusal hands the agent the title to use instead.
  */
-export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Date().toISOString()): BlockerParse {
+export function parseBlocker(
+  raw: BlockerInput,
+  by: TaskNote['by'],
+  now = new Date().toISOString(),
+  tasks: Pick<Task, 'id' | 'title'>[] = [],
+): BlockerParse {
   const kind = raw?.kind as BlockerKind;
   if (raw?.kind === 'dependency') {
     return { ok: false, detail: 'A dependency is not a blocker kind: record it with block_on (task ids), and the task shows as waiting on them by itself.' };
@@ -331,6 +340,13 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
   if (command && kind !== 'action') {
     return { ok: false, detail: 'Only an action blocker takes a command.' };
   }
+  const named = taskIdReference([question, context ?? '', ...options.flatMap((o) => [o.label, o.detail ?? ''])], tasks);
+  if (named) {
+    return {
+      ok: false,
+      detail: `The human never sees task ids, so "${named.token}" means nothing to them. Name that task by what it is (its title is "${named.task.title}"), and say what any number or name from your own code or data refers to.`,
+    };
+  }
   return {
     ok: true,
     blocker: {
@@ -343,6 +359,20 @@ export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Da
       asked_by: by,
     },
   };
+}
+
+/** The first hex token in `texts` that is a task's id or a prefix of one (6+ characters, the
+ *  shortest an agent abbreviates to). A commit hash that happens to prefix a task id would
+ *  match, which at 6+ hex characters against one project's tasks is not worth guarding. */
+function taskIdReference(texts: string[], tasks: Pick<Task, 'id' | 'title'>[]): { token: string; task: Pick<Task, 'id' | 'title'> } | null {
+  if (!tasks.length) return null;
+  for (const text of texts) {
+    for (const [token] of text.toLowerCase().matchAll(/\b[0-9a-f][0-9a-f-]{5,35}\b/g)) {
+      const task = tasks.find((t) => t.id.toLowerCase().startsWith(token));
+      if (task) return { token, task };
+    }
+  }
+  return null;
 }
 
 /** How each kind reads to the human, everywhere it is shown. */

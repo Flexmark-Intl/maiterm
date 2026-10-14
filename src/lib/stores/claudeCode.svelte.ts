@@ -1946,9 +1946,10 @@ function createClaudeCodeStore() {
     // Validated before anything is written, so a bad blocker on the third item doesn't leave
     // the first two created and the agent unsure which of its list landed.
     const blockers = new Map<number, TaskBlocker>();
+    const projectTasks = tasksStore.forWorkspace(loc.workspace.id);
     for (const [i, t] of inputs.entries()) {
       if (!t.blocker) continue;
-      const parsed = parseBlocker(t.blocker, 'agent');
+      const parsed = parseBlocker(t.blocker, 'agent', undefined, projectTasks);
       if (!parsed.ok) return { error: `tasks[${i}] "${t.title!.trim()}": ${parsed.detail} Nothing was created.` };
       blockers.set(i, parsed.blocker);
     }
@@ -2070,7 +2071,7 @@ function createClaudeCodeStore() {
         let blocker: Task['blocker'] | undefined;
         if (u.blocker === null) blocker = null;
         else if (u.blocker !== undefined) {
-          const parsed = parseBlocker(u.blocker, 'agent');
+          const parsed = parseBlocker(u.blocker, 'agent', undefined, list);
           if (!parsed.ok) {
             refused.push({ id: u.id!, reason: 'bad_blocker', detail: `${parsed.detail} Nothing in this update was applied.` });
             continue;

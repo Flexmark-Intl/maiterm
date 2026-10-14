@@ -65,6 +65,16 @@ describe('a blocker says what a Blocked task is waiting for', () => {
     refused({ kind: 'decision', question: 'x', options: Array.from({ length: BLOCKER_OPTION_CAP + 1 }, (_, i) => ({ label: `o${i}` })) });
   });
 
+  it('refuses a task id the human cannot see, and hands back its title', () => {
+    const tasks = [{ id: 'c8197575-b4c8-471a-a79d-b49ca89d6d48', title: 'Retire or repoint action 9' }];
+    const ask = (raw: Parameters<typeof parseBlocker>[0]) => parseBlocker(raw, 'agent', undefined, tasks);
+    const r = ask({ kind: 'decision', question: 'Board c8197575: retire or repoint?' });
+    expect(r.ok ? '' : r.detail).toMatch(/"c8197575".*"Retire or repoint action 9"/);
+    expect(ask({ kind: 'decision', question: 'x', options: [{ label: 'Wait on C8197575-B4C8' }] }).ok).toBe(false);
+    // A hex token that prefixes no task (a commit hash) is fine.
+    expect(ask({ kind: 'decision', question: 'Revert c88d0e3cf?' }).ok).toBe(true);
+  });
+
   it('takes an action with its command', () => {
     expect(ok({ kind: 'action', question: 'Run it', command: 'sudo mdutil -i off /V' }).command).toBe('sudo mdutil -i off /V');
   });
