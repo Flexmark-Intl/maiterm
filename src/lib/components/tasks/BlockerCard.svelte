@@ -8,6 +8,7 @@
   import { BLOCKER_LABEL } from '$lib/tasks/model';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import TaskText from './TaskText.svelte';
   import type { Task } from '$lib/tauri/types';
 
   interface Props {
@@ -112,14 +113,14 @@
         <button class="dismiss" disabled={sending} onclick={dismiss}>Dismiss</button>
       </Tooltip>
     </div>
-    <span class="q">{b.question}</span>
-    {#if b.context}<span class="ctx">{b.context}</span>{/if}
+    <span class="q"><TaskText text={b.question} of={task.id} /></span>
+    {#if b.context}<span class="ctx"><TaskText text={b.context} of={task.id} /></span>{/if}
     {#if b.options?.length}
       <div class="opts">
         {#each b.options as o, i (i)}
           <button class="opt" disabled={sending} onclick={(e) => { if (!secondClick(e)) answer(i); }}>
-            <b>{o.label}{#if o.recommended}<em> recommended</em>{/if}</b>
-            {#if o.detail}<span>{o.detail}</span>{/if}
+            <b><TaskText text={o.label} of={task.id} />{#if o.recommended}<em> recommended</em>{/if}</b>
+            {#if o.detail}<span><TaskText text={o.detail} of={task.id} /></span>{/if}
           </button>
         {/each}
       </div>

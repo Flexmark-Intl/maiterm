@@ -14,6 +14,7 @@
   import { isQuiet, laneOf, loomAgents, type AgentTabInput } from '$lib/loom/model';
   import { fmtAge } from '$lib/overlord/format';
   import BlockerCard from '$lib/components/tasks/BlockerCard.svelte';
+  import TaskText from '$lib/components/tasks/TaskText.svelte';
   import type { Task, TaskStatus, Workspace } from '$lib/tauri/types';
 
   interface Props {
@@ -299,7 +300,7 @@
         <h4>Log</h4>
         <ol class="log">
           {#each [...selected.notes].reverse() as n, i (i)}
-            <li class:human={n.by === 'human'}><time>{fmtAge(n.at)} ago · {n.by}</time>{n.text}</li>
+            <li class:human={n.by === 'human'}><time>{fmtAge(n.at)} ago · {n.by}</time><TaskText text={n.text} of={selected.id} /></li>
           {/each}
         </ol>
       {/if}

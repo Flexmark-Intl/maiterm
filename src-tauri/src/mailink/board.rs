@@ -107,7 +107,11 @@ fn effective_status<'a>(t: &'a Task, ws: &Workspace, parked: &HashSet<&str>) -> 
 /// to on THIS desktop right now — a tab id is not durable across a reload
 /// (docs/tasks.md), so the phone must never key anything on `tabId` alone. `status` is the
 /// STORED lane (what a phone edit writes back); `effectiveStatus` is what to RENDER.
-fn task_view(t: &Task, effective: &str, tab_title: Option<&str>, workstream: Option<&str>) -> Value {
+///
+/// Agent-written text (notes, the blocker) goes out through `name_task_ids`, so a task the agent
+/// named by its id reaches the phone by its title.
+fn task_view(t: &Task, ws: &Workspace, effective: &str, tab_title: Option<&str>, workstream: Option<&str>) -> Value {
+    let named = |s: &str| name_task_ids(s, &ws.tasks);
     json!({
         "id": t.id,
         "title": t.title,
@@ -124,29 +128,63 @@ fn task_view(t: &Task, effective: &str, tab_title: Option<&str>, workstream: Opt
         "workstream": workstream,
         // Progress log, oldest first. `detail` is the spec; this is what happened. Always
         // an array — `[]` rather than absent — per the v0.4 stated-absence rule.
-        "notes": t.notes.iter().map(|n| json!({ "at": n.at, "text": n.text, "by": n.by })).collect::<Vec<_>>(),
+        "notes": t.notes.iter().map(|n| json!({ "at": n.at, "text": named(&n.text), "by": n.by })).collect::<Vec<_>>(),
         // v0.13: what a Blocked task is waiting for (docs/tasks.md §3.1). Explicit `null` when
         // there is none, per the stated-absence rule. Only ever present while `status` is
         // "blocked" (`Task::settle_blocker`). `decision` and `action` are the human's to
         // answer, through `POST /tasks/{id}/answer` with `askedAt` as the stale guard.
-        "blocker": t.blocker.as_ref().map(blocker_view),
+        "blocker": t.blocker.as_ref().map(|b| blocker_view(b, &named)),
     })
 }
 
-fn blocker_view(b: &crate::state::workspace::TaskBlocker) -> Value {
+fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -> String) -> Value {
     json!({
         "kind": b.kind,
-        "question": b.question,
-        "context": b.context,
+        "question": named(&b.question),
+        "context": b.context.as_deref().map(named),
         "options": b.options.iter().map(|o| json!({
-            "label": o.label,
-            "detail": o.detail,
+            "label": named(&o.label),
+            "detail": o.detail.as_deref().map(named),
             "recommended": o.recommended,
         })).collect::<Vec<_>>(),
         "command": b.command,
         "askedAt": b.asked_at,
         "askedBy": b.asked_by,
     })
+}
+
+/// `text` with every task of `tasks` it names by id (or a 6+ character prefix of one) replaced
+/// by the task's title in quotes. The human never sees task ids, yet agents write them
+/// ("actions wait on board c8197575"). Mirrors `taskTextParts` in tasks/model.ts, which does
+/// the same on the desktop.
+fn name_task_ids(text: &str, tasks: &[Task]) -> String {
+    let is_token = |c: char| c.is_ascii_hexdigit() || c == '-';
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| c.is_ascii_hexdigit()) {
+        let (before, from) = rest.split_at(start);
+        out.push_str(before);
+        // A token stands alone: not the tail of a longer word, nor followed by more of one.
+        let len = from.find(|c: char| !is_token(c)).unwrap_or(from.len());
+        let (token, after) = from.split_at(len);
+        let bounded = !out.chars().next_back().is_some_and(is_word) && !after.chars().next().is_some_and(is_word);
+        let lower = token.to_ascii_lowercase();
+        let task = (bounded && (6..=36).contains(&token.len()))
+            .then(|| tasks.iter().find(|t| t.id.to_ascii_lowercase().starts_with(&lower)))
+            .flatten();
+        match task {
+            Some(t) => {
+                out.push('“');
+                out.push_str(&t.title);
+                out.push('”');
+            }
+            None => out.push_str(token),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Whether a task is waiting on the human: a `decision` or `action` blocker. `external` waits
@@ -227,6 +265,7 @@ pub(crate) fn tasks_for_tab(app: &AppState, tab_id: &str) -> Vec<Value> {
             for t in ws.tasks.iter().filter(|t| t.tab_id.as_deref() == Some(tab_id)) {
                 out.push(task_view(
                     t,
+                    ws,
                     effective_status(t, ws, &parked),
                     titles.get(tab_id).copied(),
                     workstream_name(ws, t.workstream_id.as_deref()),
@@ -321,6 +360,7 @@ pub(crate) fn board(app: &AppState) -> Value {
                 "workstreams": ws.workstreams.iter().map(|w| json!({ "id": w.id, "name": w.name })).collect::<Vec<_>>(),
                 "tasks": ws.tasks.iter().filter(visible).map(|t| task_view(
                     t,
+                    ws,
                     effective_status(t, ws, &parked),
                     t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                     workstream_name(ws, t.workstream_id.as_deref()),
@@ -431,6 +471,7 @@ fn views_for(data: &AppData, win: &WindowData, ws: &Workspace, ids: &[String], d
         .map(|t| {
             task_view(
                 t,
+                ws,
                 effective_status(t, ws, &parked),
                 t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                 workstream_name(ws, t.workstream_id.as_deref()),
@@ -603,6 +644,7 @@ pub(crate) fn task_row(app: &AppState, task_id: &str) -> Option<Value> {
             return visible.then(|| {
                 task_view(
                     t,
+                    ws,
                     effective_status(t, ws, &parked),
                     t.tab_id.as_deref().and_then(|id| titles.get(id).copied()),
                     workstream_name(ws, t.workstream_id.as_deref()),
@@ -746,6 +788,18 @@ mod tests {
             asked_at: asked_at.into(),
             asked_by: "agent".into(),
         }
+    }
+
+    #[test]
+    fn a_task_named_by_its_id_reaches_the_phone_by_its_title() {
+        let tasks = [task("c8197575-b4c8-471a-a79d-b49ca89d6d48", "Retire action 9", None, None)];
+        let named = |s: &str| name_task_ids(s, &tasks);
+        assert_eq!(named("Board c8197575: retire?"), "Board “Retire action 9”: retire?");
+        assert_eq!(named("wait on C8197575-B4C8."), "wait on “Retire action 9”.");
+        // Not a task, too short, or part of a longer word: left alone.
+        assert_eq!(named("revert c88d0e3cf, c81975, xc8197575"), "revert c88d0e3cf, “Retire action 9”, xc8197575");
+        assert_eq!(named("c8197"), "c8197");
+        assert_eq!(named("nothing here — ü"), "nothing here — ü");
     }
 
     #[test]

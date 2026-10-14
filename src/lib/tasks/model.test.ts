@@ -27,6 +27,7 @@ import {
   dismissBlocker,
   DISMISSED_NOTE,
   parseBlocker,
+  taskTextParts,
   settleBlocker,
 } from './model';
 import type { Task } from '$lib/tauri/types';
@@ -65,14 +66,15 @@ describe('a blocker says what a Blocked task is waiting for', () => {
     refused({ kind: 'decision', question: 'x', options: Array.from({ length: BLOCKER_OPTION_CAP + 1 }, (_, i) => ({ label: `o${i}` })) });
   });
 
-  it('refuses a task id the human cannot see, and hands back its title', () => {
-    const tasks = [{ id: 'c8197575-b4c8-471a-a79d-b49ca89d6d48', title: 'Retire or repoint action 9' }];
-    const ask = (raw: Parameters<typeof parseBlocker>[0]) => parseBlocker(raw, 'agent', undefined, tasks);
-    const r = ask({ kind: 'decision', question: 'Board c8197575: retire or repoint?' });
-    expect(r.ok ? '' : r.detail).toMatch(/"c8197575".*"Retire or repoint action 9"/);
-    expect(ask({ kind: 'decision', question: 'x', options: [{ label: 'Wait on C8197575-B4C8' }] }).ok).toBe(false);
-    // A hex token that prefixes no task (a commit hash) is fine.
-    expect(ask({ kind: 'decision', question: 'Revert c88d0e3cf?' }).ok).toBe(true);
+  it('shows a task an agent named by its id as that task', () => {
+    const tasks = [{ id: 'c8197575-b4c8-471a-a79d-b49ca89d6d48', title: 'Retire action 9', status: 'todo' as const }];
+    const show = (s: string) => taskTextParts(s, tasks).map((p) => ('task' in p ? `“${p.task.title}”` : p.text)).join('');
+    expect(show('Board c8197575: retire?')).toBe('Board “Retire action 9”: retire?');
+    expect(show('wait on C8197575-B4C8.')).toBe('wait on “Retire action 9”.');
+    // Not a task, too short, or part of a longer word: left alone. Same cases as board.rs.
+    expect(show('revert c88d0e3cf, c81975, xc8197575')).toBe('revert c88d0e3cf, “Retire action 9”, xc8197575');
+    expect(show('c8197')).toBe('c8197');
+    expect(taskTextParts('Board c8197575', [])).toEqual([{ text: 'Board c8197575' }]);
   });
 
   it('takes an action with its command', () => {

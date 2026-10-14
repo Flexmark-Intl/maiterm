@@ -26,6 +26,7 @@
   import Tooltip from '$lib/components/Tooltip.svelte';
   import TaskAddModal from './TaskAddModal.svelte';
   import BlockerCard from './BlockerCard.svelte';
+  import TaskText from './TaskText.svelte';
   import ScriptApprovalCard from '$lib/components/followUps/ScriptApprovalCard.svelte';
   import { followUpsStore } from '$lib/stores/followUps.svelte';
 
@@ -648,7 +649,7 @@
                   {#each t.notes as n, i (`${n.at}-${i}`)}
                     <li class="note" class:by-agent={n.by !== 'human'}>
                       <span class="note-when">{fmtAge(n.at)}</span>
-                      <span class="note-text">{n.text}</span>
+                      <span class="note-text"><TaskText text={n.text} of={t.id} /></span>
                     </li>
                   {/each}
                 </ol>

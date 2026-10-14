@@ -6,6 +6,7 @@
   import type { TaskStatus } from '$lib/tauri/types';
   import { fmtAge } from '$lib/overlord/format';
   import Tooltip from '$lib/components/Tooltip.svelte';
+  import TaskText from '$lib/components/tasks/TaskText.svelte';
 
   /**
    * The board, indexed by WORKSTREAM (docs/tasks.md §4).
@@ -832,7 +833,7 @@
                     {#if t.notes?.length}
                       <ol class="card-notes">
                         {#each t.notes.slice(-4) as n, i (`${n.at}-${i}`)}
-                          <li><span class="ov-mono note-when">{fmtAge(n.at)}</span> {n.text}</li>
+                          <li><span class="ov-mono note-when">{fmtAge(n.at)}</span> <TaskText text={n.text} of={t.id} /></li>
                         {/each}
                       </ol>
                     {/if}

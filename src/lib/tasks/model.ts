@@ -300,17 +300,8 @@ export type BlockerParse = { ok: true; blocker: TaskBlocker } | { ok: false; det
  *
  * `dependency` is refused with its own message because it is the natural thing to try, and
  * it is derived from `blocked_by`, never stored.
- *
- * Text that names one of `tasks` by its id is refused too. No surface shows the human a task
- * id, so "waits on board c8197575" reads as noise and the human spends a turn asking what it
- * means. The refusal hands the agent the title to use instead.
  */
-export function parseBlocker(
-  raw: BlockerInput,
-  by: TaskNote['by'],
-  now = new Date().toISOString(),
-  tasks: Pick<Task, 'id' | 'title'>[] = [],
-): BlockerParse {
+export function parseBlocker(raw: BlockerInput, by: TaskNote['by'], now = new Date().toISOString()): BlockerParse {
   const kind = raw?.kind as BlockerKind;
   if (raw?.kind === 'dependency') {
     return { ok: false, detail: 'A dependency is not a blocker kind: record it with block_on (task ids), and the task shows as waiting on them by itself.' };
@@ -340,13 +331,6 @@ export function parseBlocker(
   if (command && kind !== 'action') {
     return { ok: false, detail: 'Only an action blocker takes a command.' };
   }
-  const named = taskIdReference([question, context ?? '', ...options.flatMap((o) => [o.label, o.detail ?? ''])], tasks);
-  if (named) {
-    return {
-      ok: false,
-      detail: `The human never sees task ids, so "${named.token}" means nothing to them. Name that task by what it is (its title is "${named.task.title}"), and say what any number or name from your own code or data refers to.`,
-    };
-  }
   return {
     ok: true,
     blocker: {
@@ -361,18 +345,33 @@ export function parseBlocker(
   };
 }
 
-/** The first hex token in `texts` that is a task's id or a prefix of one (6+ characters, the
- *  shortest an agent abbreviates to). A commit hash that happens to prefix a task id would
- *  match, which at 6+ hex characters against one project's tasks is not worth guarding. */
-function taskIdReference(texts: string[], tasks: Pick<Task, 'id' | 'title'>[]): { token: string; task: Pick<Task, 'id' | 'title'> } | null {
-  if (!tasks.length) return null;
-  for (const text of texts) {
-    for (const [token] of text.toLowerCase().matchAll(/\b[0-9a-f][0-9a-f-]{5,35}\b/g)) {
-      const task = tasks.find((t) => t.id.toLowerCase().startsWith(token));
-      if (task) return { token, task };
-    }
+/** A run of text, or a task an agent named by its id. */
+export type TaskTextPart = { text: string } | { task: Pick<Task, 'id' | 'title' | 'status'>; token: string };
+
+/**
+ * Split agent-written text so a task named by its id can be shown by its title. No surface
+ * shows the human a task id, yet agents write them ("actions wait on board c8197575"), and the
+ * human then spends a turn asking what it means. A token counts when it is a task's id or a
+ * prefix of one at least 6 characters long, among `tasks` (the same project's). A commit hash
+ * that happens to prefix a task id would be named as that task, which at 6+ hex characters
+ * against one project's list is not worth guarding.
+ *
+ * Mirrors `name_task_ids` in mailink/board.rs, which does the same for the phone.
+ */
+export function taskTextParts(text: string, tasks: Pick<Task, 'id' | 'title' | 'status'>[]): TaskTextPart[] {
+  if (!tasks.length || !text) return [{ text }];
+  const parts: TaskTextPart[] = [];
+  let last = 0;
+  for (const m of text.matchAll(/(?<![\w-])[0-9a-fA-F][0-9a-fA-F-]{5,35}(?![\w-])/g)) {
+    const token = m[0].toLowerCase();
+    const task = tasks.find((t) => t.id.toLowerCase().startsWith(token));
+    if (!task) continue;
+    if (m.index > last) parts.push({ text: text.slice(last, m.index) });
+    parts.push({ task, token: m[0] });
+    last = m.index + m[0].length;
   }
-  return null;
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
 }
 
 /** How each kind reads to the human, everywhere it is shown. */

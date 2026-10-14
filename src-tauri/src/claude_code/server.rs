@@ -624,7 +624,9 @@ fn session_priming_text(state: &Arc<AppState>, tab_id: &str) -> String {
              stay separate. If you ALREADY have a task or todo list for this project, migrate \
              it now: one createTasks call with the outstanding items, carrying their current \
              status across and skipping anything already finished. Then work from the maiTerm \
-             list.",
+             list. Your human reads every title, note and question you write there without \
+             having seen your session: name things by what they are, never by a task id, and \
+             say what any number or name from your own code or data refers to.",
         );
     }
 

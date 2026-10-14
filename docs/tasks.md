@@ -347,14 +347,20 @@ blocker together with another status is refused rather than guessed at.
 
 Set by agents through `createTasks` / `updateTasks` (`blocker`, or `blocker: null` to clear).
 Validation refuses rather than coerces (`parseBlocker`). A wrong kind would put the question
-in the wrong queue, and an agent that isn't told believes it asked. **Blocker text that names
-a task of this project by its id (or a 6+ character prefix) is refused too**, with the title
-in the refusal: no surface shows the human a task id, and "retire or repoint action 9? (board
-c8197575)" cost a turn of "what does that mean". The tool description asks the agent to say
-what numbers from its own code or data refer to as well; no check can catch that one. Setting one appends a
+in the wrong queue, and an agent that isn't told believes it asked. Setting one appends a
 log line ("Waiting on your decision: …") so the history records what was asked. On
 `createTasks` it applies to new rows only: a re-sent list after a compact must not re-ask
 a question the row already carries.
+
+**A task named by its id is shown by its title.** No surface shows the human a task id, yet
+agents write them ("retire or repoint action 9? (board c8197575)" cost a turn of "what does
+that mean"). Blocker text and notes render a token that is a task's id, or a 6+ character
+prefix of one in the same project, as that task's title: `TaskText.svelte` on the desktop
+(via `taskTextParts`), `name_task_ids` in `mailink/board.rs` for the phone. The text is
+stored as written, so the agent still reads its own ids. It is not refused at filing: a
+refusal costs the agent a turn, can't reach notes without throwing away the rest of an update,
+and catches only the id, while the worse half ("action 9", the agent's own vocabulary) only the
+instructions can fix. Those are in the `question`/`note` descriptions and the session priming.
 
 Two consequences of the rule, both found in review. **Anything that rewrites a status
 deletes the question**, so writers must not supply a status nobody asked for: `createTasks`
