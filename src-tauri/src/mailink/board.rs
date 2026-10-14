@@ -159,7 +159,8 @@ fn blocker_view(b: &crate::state::workspace::TaskBlocker, named: &dyn Fn(&str) -
 /// the same on the desktop.
 fn name_task_ids(text: &str, tasks: &[Task]) -> String {
     let is_token = |c: char| c.is_ascii_hexdigit() || c == '-';
-    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-';
+    // ASCII only, as the desktop's `\w` is: "éc8197575" must read the same on both.
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find(|c: char| c.is_ascii_hexdigit()) {
@@ -309,6 +310,21 @@ pub(crate) fn tab_change_keys(app: &AppState) -> HashMap<String, u64> {
                 titles.get(tab).copied().hash(h);
                 // A re-ask stamps a new asked_at; that is what the phone has to hear about.
                 t.blocker.as_ref().map(|b| (&b.kind, &b.asked_at)).hash(h);
+                // The text as sent: it names OTHER tasks by their titles (`name_task_ids`), so
+                // renaming or deleting one changes this row on the phone with nothing of the
+                // row's own touched.
+                let named = |s: &str| name_task_ids(s, &ws.tasks);
+                for n in &t.notes {
+                    named(&n.text).hash(h);
+                }
+                if let Some(b) = &t.blocker {
+                    named(&b.question).hash(h);
+                    b.context.as_deref().map(named).hash(h);
+                    for o in &b.options {
+                        named(&o.label).hash(h);
+                        o.detail.as_deref().map(named).hash(h);
+                    }
+                }
             }
         }
     }
@@ -800,6 +816,24 @@ mod tests {
         assert_eq!(named("revert c88d0e3cf, c81975, xc8197575"), "revert c88d0e3cf, “Retire action 9”, xc8197575");
         assert_eq!(named("c8197"), "c8197");
         assert_eq!(named("nothing here — ü"), "nothing here — ü");
+        assert_eq!(named("éc8197575"), "é“Retire action 9”");
+    }
+
+    #[test]
+    fn renaming_a_task_another_row_names_by_id_reaches_the_phone() {
+        let (app, tab) = fixture();
+        {
+            let mut data = app.app_data.write();
+            let ws = &mut data.windows[0].workspaces[0];
+            let mut other = task("c8197575-b4c8-471a-a79d-b49ca89d6d48", "Retire action 9", None, None);
+            other.tab_id = None;
+            ws.tasks.push(other);
+            let t1 = ws.tasks.iter_mut().find(|t| t.id == "t1").unwrap();
+            t1.notes.push(crate::state::workspace::TaskNote { at: "2026-10-14T00:00:00Z".into(), text: "waits on c8197575".into(), by: "agent".into() });
+        }
+        let before = tab_change_key(&app, &tab);
+        app.app_data.write().windows[0].workspaces[0].tasks.last_mut().unwrap().title = "Retire actions 9 and 10".into();
+        assert_ne!(before, tab_change_key(&app, &tab));
     }
 
     #[test]
