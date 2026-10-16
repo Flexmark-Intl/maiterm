@@ -1,0 +1,19 @@
+---
+// Starlight's own footer (edit link, pagination), plus the owner's legal notice, which every
+// page of the site carries.
+import Default from '@astrojs/starlight/components/Footer.astro';
+import LegalNotice from './LegalNotice.astro';
+---
+
+<Default />
+<LegalNotice class="docs-legal" />
+
+<style>
+  .docs-legal {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--sl-color-hairline);
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+</style>

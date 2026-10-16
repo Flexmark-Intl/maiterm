@@ -19,6 +19,8 @@ export default defineConfig({
         // Duo-tone wordmark in the header — see the component for why an
         // override is needed rather than CSS.
         SiteTitle: './src/components/SiteTitle.astro',
+        // The owner's legal notice under every docs page, as the landing footer has.
+        Footer: './src/components/DocsFooter.astro',
       },
       social: {
         github: 'https://github.com/Flexmark-Intl/maiterm',

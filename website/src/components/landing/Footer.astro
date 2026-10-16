@@ -1,4 +1,6 @@
 ---
+import LegalNotice from '../LegalNotice.astro';
+
 const COLUMNS = [
   {
     heading: 'Product',
@@ -75,7 +77,8 @@ const year = new Date().getFullYear();
   </div>
 
   <div class="foot-base">
-    <p class="ln-note">© {year} Flexmark International. Source available under the <a href="https://github.com/Flexmark-Intl/maiterm/blob/main/LICENSE">aiTerm licence</a>.</p>
+    <p class="ln-note">© {year} Flexmark International Inc. Source available under the <a href="https://github.com/Flexmark-Intl/maiterm/blob/main/LICENSE">aiTerm licence</a>.</p>
+    <LegalNotice class="ln-note foot-legal" />
   </div>
 </footer>
 
@@ -157,5 +160,8 @@ const year = new Date().getFullYear();
     margin-inline: auto;
     padding-block: 1.25rem;
     border-top: 1px solid var(--ln-border);
+  }
+  .foot-base :global(.foot-legal) {
+    margin-top: 0.5rem;
   }
 </style>

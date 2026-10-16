@@ -1,0 +1,14 @@
+---
+// The owner's legal notice, word for word as on maisoft.app, maiserver.com and the maiStarter
+// template. Don't reword, shorten or translate it: the two "Panama"s are province and country.
+// One copy, used by the landing footer and the docs footer (DocsFooter.astro).
+interface Props {
+  class?: string;
+}
+const { class: className } = Astro.props;
+---
+
+<p class={className} translate="no">
+  maiSoft and all its products are owned by Flexmark International Inc.<br />
+  World Trade Center 200-B, Suite 250, Calle 53 Este, 0832-1626 Marbella, Ciudad de Panama, Panama, Panama
+</p>
