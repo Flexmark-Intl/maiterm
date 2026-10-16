@@ -2,7 +2,7 @@
 name = "aiterm"
 version = "3.7.0"
 description = "A Tauri-based terminal organizer"
-authors = ["you"]
+authors = ["Flexmark International Inc."]
 license = "LicenseRef-Proprietary"
 edition = "2021"
 

@@ -450,7 +450,7 @@ pub fn run() {
             let about = AboutMetadata {
                 name: Some("maiTerm".into()),
                 version: Some(APP_VERSION.into()),
-                copyright: Some("© 2025 Flexmark International".into()),
+                copyright: Some("© 2026 Flexmark International Inc.".into()),
                 credits: Some("A modern terminal emulator with workspace organization, split panes, and Claude Code integration.\n\nhttps://maiterm.dev/".into()),
                 ..Default::default()
             };
