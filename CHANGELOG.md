@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.9.0
+
+Claude on Windows: a setup wizard, Git Bash by default, and maiTerm now knows which tab a Claude session is in.
+
+### Windows
+
+- **Set up Claude on Windows.** A wizard checks for Git for Windows, Claude Code, whether `claude` is on your PATH, an older Claude Desktop taking over the `claude` command, and WSL. Each gap has a button: install Git or Claude in a visible tab (Git through winget, Claude with Anthropic's official installer), switch new tabs to Git Bash, or add Claude to your PATH. Fix everything does it all at once. It opens by itself the first time maiTerm finds something missing, and any time from Preferences → Default Shell → Check Claude setup.
+- **Git Bash is the default shell when Git for Windows is installed.** Claude uses Git Bash to run its commands and maiTerm's hooks, so it's the recommended shell. The new Automatic setting picks Git Bash when it's there and PowerShell when it isn't; if you chose a shell before, you keep it. Git Bash is found wherever Git is installed, and it starts as a login shell.
+- **maiTerm now knows which tab a Claude session is in on Windows.** Tabs never got their identity there, so tasks, the Overlord, follow-ups and the phone couldn't reach Claude sessions in them.
+- **New tabs find `claude`** even when its installer left it off your PATH, ahead of an older Claude Desktop's own `claude`, and tell Claude where Git Bash is.
+
 ## v3.8.0
 
 Agents can start agents on your ssh hosts and reload tabs, and a round of fixes.
