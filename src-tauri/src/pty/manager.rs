@@ -166,26 +166,12 @@ pub fn spawn_pty(
 
         let mut cmd = CommandBuilder::new(&shell);
 
-        // Expose tab ID so processes (e.g. Claude Code) can identify their terminal
-        cmd.env("MAITERM_TAB_ID", tab_id);
-
-        // Expose MCP server port so hooks can scope to this maiTerm instance
-        // (prevents dev/prod cross-talk when both are running)
-        if let Some(port) = state.mcp_port.read().as_ref() {
-            cmd.env("MAITERM_PORT", port.to_string());
-        }
-        // And the auth token, so a hook COMMAND can authenticate without the token being
-        // written into its definition. Codex records trust against the exact hook command, so
-        // a token baked there meant a new definition on every launch and a fresh trust prompt
-        // the user never saw — hooks silently stopped running (review C1). SSH tabs already
-        // export all three via buildSshCommand / ~/.aiterm; this is the local equivalent.
-        if let Some(auth) = state.mcp_auth.read().as_ref() {
-            cmd.env("MAITERM_AUTH", auth);
-        }
         // The maiterm-tab mod, for any `claude` started in this shell: it sends the tab's hook
         // events itself (claude_code/claude_mod.rs). Only alongside the settings hooks it
         // replaces — the same preference, and a running server to send to. Set either way, so
         // a copy inherited from another maiTerm is stripped even when this tab gets none.
+        // Unix-only for now: `plugin_dirs_env` joins with ':', which splits a `C:\` path, and the
+        // mod has never run on Windows — there the settings hooks do the whole job.
         {
             let wanted = state.mcp_port.read().is_some() && state.app_data.read().preferences.claude_hooks;
             let ours = crate::claude_code::claude_mod::installed().filter(|_| wanted);
@@ -339,6 +325,25 @@ pub fn spawn_pty(
     };
 
     // --- Cross-platform environment setup ---
+
+    // Who this tab is, for the hooks of any agent started in it. **These lived inside the
+    // `#[cfg(unix)]` builder above until 2026-10-17**, so on Windows every Claude session's
+    // identity hook ran with no tab id and maiTerm never knew which tab a session was in — the
+    // same trap as the accounts block below.
+    cmd.env("MAITERM_TAB_ID", tab_id);
+    // The MCP server port, so hooks scope to this maiTerm instance (prevents dev/prod
+    // cross-talk when both are running).
+    if let Some(port) = state.mcp_port.read().as_ref() {
+        cmd.env("MAITERM_PORT", port.to_string());
+    }
+    // And the auth token, so a hook COMMAND can authenticate without the token being
+    // written into its definition. Codex records trust against the exact hook command, so
+    // a token baked there meant a new definition on every launch and a fresh trust prompt
+    // the user never saw — hooks silently stopped running (review C1). SSH tabs already
+    // export all three via buildSshCommand / ~/.aiterm; this is the local equivalent.
+    if let Some(auth) = state.mcp_auth.read().as_ref() {
+        cmd.env("MAITERM_AUTH", auth);
+    }
 
     // Managed accounts (docs/login.md §5). This is what makes "launch under the active
     // account" true: the runtime's config-dir variable points at that account's root, and
