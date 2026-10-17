@@ -590,7 +590,8 @@ The record is cleared in two ways:
 - **An expiry of 6 h.** Turns run long, so a 10-minute expiry let a later typed prompt overtake one
   still queued (second review).
 
-`offerable` keeps slash commands (they'd reach the model as words) and empty text on the keyboard.
+`offerable` keeps slash commands and `!` bash-mode commands (submitted, both reach the model as
+words and never run) and empty text on the keyboard.
 
 Callers go through one function per side:
 - Rust: `mailink::submit_prompt`. Used by the phone's text send, the draft-hold worker, the Loom

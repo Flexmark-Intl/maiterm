@@ -240,10 +240,12 @@ pub fn takes_now(app: &AppState, tab_id: &str) -> bool {
 
 /// Whether `text` can go to a mod at all. Not a slash command: a submitted prompt is the model's
 /// to read, so `/compact` or `/model` would reach it as words instead of running; those are
-/// typed. Not empty either: typed, an empty prompt is a bare Enter.
+/// typed. Nor a `!` command: bash mode exists only for a `!` typed into the box, and submitted,
+/// the command reaches the model as words and never runs. Not empty either: typed, an empty
+/// prompt is a bare Enter.
 pub fn offerable(text: &str) -> bool {
     let t = text.trim_start();
-    !t.is_empty() && !t.starts_with('/')
+    !t.is_empty() && !t.starts_with('/') && !t.starts_with('!')
 }
 
 fn agent_between_turns(app: &AppState, tab_id: &str) -> bool {
@@ -317,6 +319,16 @@ mod tests {
         // Its replacement polls: mid-turn prompts must not be routed to it on the old one's account.
         let _ = inbox.poll("tab", Duration::from_millis(1)).await;
         assert!(!inbox.has_unstarted("tab"));
+    }
+
+    #[test]
+    fn slash_and_bang_commands_and_empty_text_are_typed() {
+        for typed in ["/compact", "  /model opus", "!ls", " ! cd ~/x && npm run deploy", "", "   "] {
+            assert!(!offerable(typed), "{typed:?} must be typed, never submitted");
+        }
+        for offered in ["train", "what does a/b mean", "great!"] {
+            assert!(offerable(offered), "{offered:?} may go to the mod");
+        }
     }
 
     #[tokio::test]
