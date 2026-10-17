@@ -197,15 +197,17 @@ An agent's way to pick work back up later without you having to remember it — 
 | `moveWorkspace` | Move a whole workspace to another window — at once, unless it's a mesh linked with another in its window, which the move would break |
 | `setMesh` | Make a workspace a Mesh Workspace, or stop it being one — **asks you** |
 | `linkMeshes` / `unlinkMesh` | Link two mesh workspaces into one mesh, or take one back out — **asks you** |
-| `createTab` | Open a new Claude Code, Codex or Gemini tab in a workspace and a local folder, optionally named — **asks you** |
+| `createTab` | Open a new Claude Code, Codex or Gemini tab in a workspace, in a local folder or in a folder on an SSH host, optionally named — **asks you** |
 | `bridgeWith` | Bridge this agent 1:1 with another agent's tab in the same window, or fork that agent into a new tab and bridge with the copy — **asks you** |
 | `disconnectBridge` | Close this agent's [Agent Bridge](/features/agent-bridge/) — **asks you** |
+| `reloadTab` | Reload a terminal tab as `Cmd+Shift+R` does — its own tab at once (only if it will come back), another agent's tab **asks you** |
+| `reloadWindow` | Reload a maiTerm window, as Reload Current Window does — **asks you** |
 | `restartMaiterm` | Restart maiTerm, optionally installing the available update first — **asks you** |
 | `addMcpServer` | Add a remote MCP server for every agent through [maiTerm](/features/mcp-servers/) — **asks you**; the sign-in is yours to do |
 | `getRequestStatus` | What became of a request the agent filed: pending, approved, done, failed, denied or expired |
 | `listMcpServers` | The MCP servers [maiTerm manages](/features/mcp-servers/) for every agent, with their state and tools. Read-only |
 
-Tidying up is the agent's to do: reading the layout and moving tabs and workspaces around happen straight away. The line is **who can message whom**. Anything that changes it — making or unmaking a mesh, linking or unlinking meshes, a move into, out of or between meshes, opening or closing a 1:1 [bridge](/features/agent-bridge/) — and starting a new agent, which could ask for more, restarting maiTerm, or adding an MCP server every agent will load, doesn't act. It files a request, and nothing happens until you approve it.
+Tidying up is the agent's to do: reading the layout and moving tabs and workspaces around happen straight away. The line is **who can message whom**. Anything that changes it — making or unmaking a mesh, linking or unlinking meshes, a move into, out of or between meshes, opening or closing a 1:1 [bridge](/features/agent-bridge/) — and starting a new agent, which could ask for more, reloading another agent's tab or a window, restarting maiTerm, or adding an MCP server every agent will load, doesn't act. It files a request, and nothing happens until you approve it.
 
 - **You answer it on a card**, in the [Loom's Decisions](/features/loom/#decisions) or on your phone with [maiLink](/features/mailink/), and a notification takes you there. The card is in maiTerm's own words, built from what maiTerm knows: what will change, which agents gain or lose whom, how many agents a restart would interrupt mid-turn. The agent's only say is a one-line reason, shown as a quote.
 - **Only that card counts.** An agent asking you in chat, or Claude Code's permission dialog for the tool call, is not an approval — an allowlist or auto mode passes those without you seeing them.
@@ -213,7 +215,9 @@ Tidying up is the agent's to do: reading the layout and moving tabs and workspac
 - **The agent is told how it went** — done, failed or denied — in its own tab. A restart is the exception: the agent is restarted instead.
 - **Unanswered requests lapse** after 30 minutes, and the agent is told nothing was done. A tab can have five waiting at once; asking for the same thing twice doesn't add a second card.
 
-A new tab opens in the background in the workspace's active pane, and the agent that asked is told its id. A named tab in a mesh workspace joins that mesh, and its card says so.
+A new tab opens in the background in the workspace's active pane, and the agent that asked is told its id. A named tab in a mesh workspace joins that mesh, and its card says so. Asked for on an SSH host, the agent runs there, in the folder it named on that host, and the card says so and shows the ssh command it will go through. The host is taken as `[user@]host` or an ssh alias with at most a port, user, key file or jump host — nothing after it — so nothing can run anywhere but the place the card names. The tab comes back after a restart the way any SSH tab does: the connection, then maiTerm's bridge, then the agent.
+
+An agent can reload its own tab straight away — it's the one interrupted — but only when the tab's auto-resume will bring it back, it has no request still waiting on you, and you haven't typed anything into its input box. The tab is replaced under a new id, as `Cmd+Shift+R` does, and the agent comes back in the same conversation. Reloading another agent's tab is a request, and its card says whether that agent will come back. Reloading a window is always a request: its shells and agents keep running and every tab reattaches, but unsaved editor changes in it are lost, and the card counts them for the agent's own window. If what the card said has changed by the time you approve — the tab's auto-resume, or the unsaved editors it counted — nothing is done.
 
 A bridge follows the [Agent Bridge picker](/features/agent-bridge/#bridging-two-agents)'s rules: an agent already bridged with a third is neither connected to nor forked, and only Claude Code and Codex can be forked. If the asking agent is bridged with someone else, the card says that bridge closes. A fork's card says where the copy will run: on this machine, or — when the agent being forked is over SSH — on that host, showing the ssh command it will run through. If that has changed by the time you approve, nothing is done. A bridge to a tab that has since closed carries nothing, so `disconnectBridge` closes that one at once.
 
