@@ -640,7 +640,9 @@
     <!-- Always drawn, empty or not: its heading is where the window is widened. -->
     <section>
       <h4>
-        <button class="window" aria-haspopup="menu" aria-label="How far back to list chats" onclick={openWindowMenu}>{windowLabel} <span aria-hidden="true">▾</span></button>
+        <span class="recent">Recent
+          <button class="window" class:open={!!windowMenu} aria-haspopup="menu" aria-label="How far back to list chats" onclick={openWindowMenu}>{windowLabel} <span aria-hidden="true">▾</span></button>
+        </span>
         <span>{sections.recent.length || ''}</span>
       </h4>
       {@render chatRowsFor(sections.recent)}
@@ -899,9 +901,11 @@
   .list { padding: 12px 10px; display: flex; flex-direction: column; gap: 14px; }
   section { display: flex; flex-direction: column; gap: 2px; }
   h4 { margin: 0 4px 4px; display: flex; justify-content: space-between; font-size: 10.5px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-dim); }
-  .window { background: none; border: 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer; }
+  h4 .recent { display: flex; align-items: center; gap: 6px; }
+  /* A visible pill, not heading text: as plain heading text nobody found the window picker. */
+  .window { background: var(--bg-medium); border: 1px solid var(--bg-light); border-radius: 10px; padding: 1px 7px; color: var(--accent); font: inherit; font-size: 11px; letter-spacing: normal; text-transform: none; cursor: pointer; }
   .window span { font-size: 8px; }
-  .window:hover, .window:focus-visible { color: var(--fg); }
+  .window:hover, .window:focus-visible, .window.open { color: var(--fg); border-color: var(--accent); }
   h4.needs { color: var(--orange, #ff9e64); }
   .row {
     display: grid;
