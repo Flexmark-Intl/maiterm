@@ -2986,9 +2986,11 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    overflow-y: auto;
   }
 
   .sidebar-item {
+    flex-shrink: 0;
     padding: 8px 12px;
     border-radius: 4px;
     font-size: 1rem;
