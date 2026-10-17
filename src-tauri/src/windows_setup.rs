@@ -338,9 +338,30 @@ mod platform {
         std::fs::symlink_metadata(p).is_ok_and(|m| !m.is_dir())
     }
 
-    /// Git Bash for a spawn: the known folders first, the PATH walk only when they have none.
+    /// The last Git Bash a full search (with the PATH walk) found, so a spawn can use one that
+    /// only PATH leads to without walking PATH itself.
+    static SEARCHED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    fn remember(found: &Option<String>) {
+        if let Ok(mut s) = SEARCHED.lock() {
+            s.clone_from(found);
+        }
+    }
+
+    /// The full search, PATH walk included: for the wizard's probe and Preferences' shell list,
+    /// never a spawn.
     pub fn git_bash() -> Option<String> {
-        find_git_bash(&known_places(), &exists).or_else(|| find_git_bash(&places(), &exists))
+        let found = find_git_bash(&places(), &exists);
+        remember(&found);
+        found
+    }
+
+    /// For a spawn, which runs on the main thread: the known folders, then what the last full
+    /// search found. No PATH walk — a file check per PATH folder can stall on an unreachable
+    /// network folder, and this runs for every new tab.
+    pub fn git_bash_for_spawn() -> Option<String> {
+        find_git_bash(&known_places(), &exists)
+            .or_else(|| SEARCHED.lock().ok().and_then(|s| s.clone()).filter(|p| exists(p)))
     }
 
     /// Run a console program without a window, giving up (and killing it) after `limit`.
@@ -390,6 +411,7 @@ mod platform {
     pub fn probe(shell_pref: &str) -> ClaudeSetupReport {
         let places = places();
         let git_bash = find_git_bash(&places, &exists);
+        remember(&git_bash);
         let claude = find_claude(&places, &exists);
         let claude_version = claude.path.as_deref().and_then(claude_version);
         let winget = places
@@ -473,7 +495,7 @@ mod platform {
 }
 
 #[cfg(windows)]
-pub use platform::{add_claude_to_user_path, git_bash, tab_env};
+pub use platform::{add_claude_to_user_path, git_bash, git_bash_for_spawn, tab_env};
 
 #[tauri::command]
 pub async fn detect_claude_setup(state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>) -> Result<ClaudeSetupReport, String> {

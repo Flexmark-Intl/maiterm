@@ -62,7 +62,11 @@ function createClaudeSetupStore() {
     checking = true;
     try {
       const r = await commands.detectClaudeSetup();
-      if (mine === generation) report = r;
+      if (mine === generation) {
+        report = r;
+        // What a fresh look shows replaces what an earlier step said went wrong.
+        error = null;
+      }
       return r;
     } catch (e) {
       if (mine === generation) error = `Couldn't check this computer: ${e}`;
@@ -135,14 +139,16 @@ function createClaudeSetupStore() {
    *  decided from the probe the caller just made, not whatever `report` holds by now. */
   async function applyFixes(r: ClaudeSetupReport) {
     const m = missing(r);
+    let failed: string | null = null;
     try {
       if (m.shell) await preferencesStore.setWindowsShell('auto');
       if (m.path) await commands.claudeSetupAddToPath();
     } catch (e) {
-      error = String(e);
+      failed = String(e);
       logError(`Claude setup fix failed: ${e}`);
     }
     await refresh();
+    if (failed) error = failed; // after the re-check, which clears errors
   }
 
   return {
@@ -209,13 +215,14 @@ function createClaudeSetupStore() {
     },
 
     async addToPath() {
-      error = null;
+      let failed: string | null = null;
       try {
         await commands.claudeSetupAddToPath();
       } catch (e) {
-        error = String(e);
+        failed = String(e);
       }
       await refresh();
+      if (failed) error = failed; // after the re-check, which clears errors
     },
 
     /** The real test: a new tab (with the shell new tabs now get) running `claude`. */

@@ -1823,7 +1823,11 @@ fn get_foreground_command(shell_pid: u32) -> Option<String> {
 /// Falls back to powershell.exe if the configured shell can't be found.
 #[cfg(windows)]
 fn resolve_windows_shell(id: &str) -> (String, Vec<&'static str>) {
-    let git_bash = crate::windows_setup::git_bash();
+    // Only a preference that can mean Git Bash looks for it: this runs on the main thread for
+    // every new tab, and an explicit PowerShell or cmd needs no file checks at all.
+    let git_bash = matches!(id, "auto" | "gitbash")
+        .then(crate::windows_setup::git_bash_for_spawn)
+        .flatten();
     match crate::windows_setup::resolve_shell(id, git_bash.is_some()) {
         // A login, interactive shell, as Git's own Start-menu entry runs it: without --login
         // the profile isn't read and Git's own folders aren't put on PATH.
